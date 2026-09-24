@@ -154,7 +154,7 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("acoustid: HTTP %d: %s", e.StatusCode, e.Body)
 }
 
-// StatusCode exposes the upstream status for callers that want to branch on it
+// Status exposes the upstream status for callers that want to branch on it
 // without re-parsing the message.
 func (e *httpError) Status() int { return e.StatusCode }
 

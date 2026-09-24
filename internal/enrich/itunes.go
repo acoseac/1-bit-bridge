@@ -33,7 +33,6 @@ package enrich
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -260,12 +259,6 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 	drainBody(resp.Body)
 	return err
 }
-
-// errITunesNoMatch is the public sentinel callers can compare against
-// when the search returned zero plausible matches. Reuses the
-// existing `errNotFound` so `IsNotFound(err)` works uniformly across
-// MB / CAA / iTunes call sites.
-var _ = errors.Is // satisfy linters — errNotFound already wraps via package-level errors.Is
 
 // --- JSON shapes ---
 

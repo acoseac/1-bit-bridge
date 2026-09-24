@@ -10,14 +10,15 @@ import (
 	"sync"
 )
 
-// expectedTeamID is the Apple Developer Team ID that signs official
+// appleTeamIDOverride is the Apple Developer Team ID that signs official
 // 1-bit-bridge releases. Build-time-injected via -ldflags -X so a
 // fork or local build doesn't try to hand-roll a Team ID match
 // against the upstream's. Defaults to the empty string in source —
-// when empty, the verifier accepts any cert the codesign tool itself
-// validates as authentic + notarized (i.e. trusts the macOS
-// notarization gate). For an opinionated check, ship release builds
-// with -X .../version.AppleTeamID=<TeamID>.
+// when empty, the verifier accepts any binary the codesign checks in
+// verifyBinary pass, and warns once (warnIfTeamIDUnpinned). Release
+// builds set it with
+// -X github.com/acoseac/1-bit-bridge/internal/updater.appleTeamIDOverride=<TeamID>,
+// which .goreleaser.yaml passes from APPLE_TEAM_ID.
 //
 // We deliberately read the Team ID from build-time injection rather
 // than from the new binary itself — the latter would be circular
@@ -44,10 +45,12 @@ func warnIfTeamIDUnpinned() {
 // notarized executable, and (if appleTeamIDOverride is set) that its
 // signing Team ID matches.
 //
-// Why both: codesign --verify --strict is the cryptographic check
-// (signature is well-formed, hash matches, signing cert chain leads
-// to Apple). spctl --assess + the Team-ID equality check are the
-// trust check (this is OUR binary, not someone else's signed thing).
+// Why both: codesign --verify --strict --check-notarization is the
+// cryptographic check (signature is well-formed, hash matches, signing
+// cert chain leads to Apple, and the binary is notarized wherever
+// codesign accepts --check-notarization). The Team-ID equality check is
+// the trust check (this is OUR binary, not someone else's signed
+// thing). Nothing here runs spctl.
 //
 // On a release downloaded from acoseac/1-bit-bridge GitHub Releases,
 // goreleaser hands it to rcodesign for both signing and notarization
@@ -127,9 +130,11 @@ func notarizationFlagUnsupported(err error) bool {
 }
 
 // runVerifyTool runs a verify command and converts non-zero exit to
-// an error carrying the tool's stderr. Used so codesign / spctl
-// stderr lands in the operator's update-state.json LastError when
-// the install fails verify.
+// an error carrying the tool's stderr, so a failed verify says why:
+// the error reaches the console's Install response, `bridge update`'s
+// "Install failed" line and the "auto-install failed" log. Not
+// update-state.json, which has no error field, and Install returns
+// before it writes the marker.
 func runVerifyTool(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 — args are constants + a path we already control
 	out, err := cmd.CombinedOutput()

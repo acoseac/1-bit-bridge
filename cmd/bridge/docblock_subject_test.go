@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // docVerbs are the words a Go doc comment in this tree puts after the name of
@@ -146,6 +147,31 @@ const docVerbCoverageFloor = 0.85
 // unrecognised ones.
 const testDocVerbCoverageFloor = 0.90
 
+// identifierShaped reports whether a doc comment's opening word can only be
+// an identifier, never the first word of an English sentence. It can if it
+// starts with a lowercase letter or an underscore ("fanout", "jpeg"), or if
+// it has an uppercase letter after its first character and a lowercase letter
+// somewhere ("pickVoted", "StatusCode", "Test_FileHandler_UpstreamOffline_503").
+//
+// An English sentence opens with a capital, so a capitalised word with no
+// other capital ("The", "Snapshot", "Tailscale", "Removal") and an
+// all-capitals one ("DST", "GET", "MP4") are left out: each could be either.
+// On the 2026-09-24 census (#991), every opener of those two shapes that
+// nothing declared and that a recognised verb followed was prose, 10 of 10.
+// Brand names are the known cost: "iOS", "SQLite" and "UPnP" are
+// identifier-shaped. None of them opened a doc with a recognised verb that
+// day.
+func identifierShaped(word string) bool {
+	if word == "" {
+		return false
+	}
+	if first := rune(word[0]); unicode.IsLower(first) || first == '_' {
+		return true
+	}
+	return strings.IndexFunc(word, unicode.IsLower) >= 0 &&
+		strings.IndexFunc(word[1:], unicode.IsUpper) >= 0
+}
+
 // TestNoDocblockNamesAnotherDeclaration.
 //
 // A doc comment for X glued — no blank line — onto the declaration of a
@@ -208,6 +234,24 @@ const testDocVerbCoverageFloor = 0.90
 // production docs and its test's prose is reported. The finding is then
 // half right, since the production declaration really has lost its doc, and
 // the fix is to restore that doc, not to move the test's.
+//
+// A doc comment that opens with a name nothing declares is reported too
+// (#991). That is the other half of the first condition, and `go doc` then
+// documents a declaration under a name no reader can search for. It comes
+// from a rename the doc did not follow (routesToForegroundLane's doc said
+// "routesToOptimizeChannel", the name #863 retired), from a doc written under
+// a name nothing ever had ("recordIngest", "pickVoted"), and from import
+// keepers documented as helpers that never existed ("ensurePathExists"). The
+// census behind this arm found 25 across the tree, and the 20 that open with
+// a verb these lists recognise are what it reads. Two conditions keep it to
+// identifiers. The opening word must be identifierShaped, because "It is …",
+// "Removal is …" and "DST is …" open with words nothing declares either. And
+// no package in the doc's DIRECTORY may declare it, not merely none its file
+// sees, because an external `foo_test` file's prose names `foo`'s
+// declarations (LooksLikeSnapshotDir, in internal/backup). On the unfixed
+// tree those two conditions left 20 findings, and all 20 named nothing that
+// exists. The other five follow the name with a dash or a colon
+// ("Test_FileHandler_UpstreamOffline_503 — …"), which neither arm reads.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)
 	type decl struct {
@@ -223,6 +267,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	}
 	// scope -> ident -> where it is declared
 	declared := map[scope]map[string]decl{}
+	// dir -> every ident any of its packages declares, test files included
+	declaredInDir := map[string]map[string]bool{}
 	var files []string
 	nonTestFiles, testFiles := 0, 0
 
@@ -286,6 +332,10 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		if name == "_" {
 			return
 		}
+		if declaredInDir[sc.dir] == nil {
+			declaredInDir[sc.dir] = map[string]bool{}
+		}
+		declaredInDir[sc.dir][name] = true
 		m := declared[sc]
 		if m == nil {
 			m = map[string]decl{}
@@ -343,6 +393,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		extend                   string // the list a missing verb belongs in
 		floor                    float64
 		checked, found           int
+		undeclared               int // docs opening with a name nothing declares
 		subjectFirst, recognised int
 		unrecognised             map[string]int
 	}
@@ -375,7 +426,20 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			return
 		}
 		other, ok := lookup(sc, m[1])
-		if !ok || other.hasDoc {
+		if !ok {
+			if identifierShaped(m[1]) && !declaredInDir[sc.dir][m[1]] {
+				p.undeclared++
+				dir, _ := filepath.Rel(root, sc.dir)
+				t.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
+					"documents %s under a name that does not exist. Open it with the name of what it "+
+					"documents, or delete it if what it describes is gone. If %s is not a Go name (a "+
+					"tool, a product), open the sentence another way.",
+					path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], filepath.ToSlash(dir), m[1],
+					subject, m[1])
+			}
+			return
+		}
+		if other.hasDoc {
 			return
 		}
 		p.found++
@@ -452,7 +516,52 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 				strings.Join(top, ", "), p.extend)
 		}
 		t.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
-			"%s %d of %d subject-first openers (%.1f%%)",
-			p.name, p.checked, p.files, p.found, p.recognises, p.recognised, p.subjectFirst, 100*coverage)
+			"%d opening with a name nothing declares; %s %d of %d subject-first openers (%.1f%%)",
+			p.name, p.checked, p.files, p.found, p.undeclared, p.recognises, p.recognised,
+			p.subjectFirst, 100*coverage)
+	}
+}
+
+// TestIdentifierShapedTellsNamesFromSentenceWords pins identifierShaped's
+// verdict on the words the census sorted. The two shapes that can open an
+// English sentence stay out: a capitalised word with no other capital, and
+// an all-capitals one. Brand names are identifier-shaped, which is the cost
+// its docblock names.
+func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
+	for _, c := range []struct {
+		word string
+		want bool
+	}{
+		// Stale names the census found, both shapes.
+		{"expectedTeamID", true},
+		{"pickVoted", true},
+		{"StatusCode", true},
+		{"TestStatusJSONFlag", true},
+		{"Test_FileHandler_UpstreamOffline_503", true},
+		{"JobSpecVariantID_OptimizeKind", true},
+		{"fanout", true},
+		{"jpeg", true},
+		{"_leading", true},
+		// Sentence words the census found opening a doc with a recognised
+		// verb, declared by nothing.
+		{"The", false},
+		{"Snapshot", false},
+		{"Tailscale", false},
+		{"Removal", false},
+		{"It", false},
+		{"DST", false},
+		{"GET", false},
+		{"MP4", false},
+		{"A", false},
+		{"", false},
+		// Brand names: identifier-shaped, and no opener of this shape has
+		// been prose yet.
+		{"iOS", true},
+		{"SQLite", true},
+		{"UPnP", true},
+	} {
+		if got := identifierShaped(c.word); got != c.want {
+			t.Errorf("identifierShaped(%q) = %v, want %v", c.word, got, c.want)
+		}
 	}
 }

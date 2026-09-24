@@ -2968,6 +2968,3 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 // DefaultDBPath returns the SQLite path used when the user doesn't
 // override. Lives under dataDir so the same config logic applies.
 func DefaultDBPath(dataDir string) string { return filepath.Join(dataDir, "bridge.db") }
-
-// ensurePathExists is a small test helper (exported so api_test can use).
-var _ = os.Stat

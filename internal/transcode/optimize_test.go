@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// JobSpecVariantID_OptimizeKind locks the prefix-discriminated emit
+// TestJobSpecVariantID_OptimizeKind locks the prefix-discriminated emit
 // + the isolated optimize memo + the load-bearing invariant that
 // the optimize-kind path NEVER consults the upscale memo (which is
 // pre-seeded with `upscaled-v2-*` strings for (44100, 16) etc. —

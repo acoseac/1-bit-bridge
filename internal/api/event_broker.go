@@ -279,8 +279,8 @@ func (b *eventBroker) run() {
 	}
 }
 
-// fanout writes the event to every matching subscriber, applying the
-// drop-oldest policy on full channels. Caller MUST hold b.mu — used
+// fanoutLocked writes the event to every matching subscriber, applying
+// the drop-oldest policy on full channels. Caller MUST hold b.mu — used
 // from `run()` so the record+fanout cycle is atomic with respect to
 // `subscribe()`.
 func (b *eventBroker) fanoutLocked(env eventEnvelope) {

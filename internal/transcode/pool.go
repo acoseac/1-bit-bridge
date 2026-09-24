@@ -487,7 +487,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	}
 }
 
-// routesToOptimizeChannel is the pure routing decision used by Enqueue
+// routesToForegroundLane is the pure routing decision used by Enqueue
 // to pick the destination channel for a given JobKind. Pulled out as a
 // static helper so the test suite can pin the routing contract without
 // the rest of the Pool machinery, mirroring the friendlyErrorMessage /
