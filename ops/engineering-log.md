@@ -11776,3 +11776,30 @@ is the stale-claim-beside-its-code class this log keeps recording, and the
 distinction matters here: `Stat` follows a symlinked `go.mod`, as the go
 tool does. The two remaining mentions of `Lstat` in this entry are the
 first draft's history and are meant.
+
+**Round 3, on `c6cc6b22`.** Gemini's fresh pass had no comments, Sonar
+stayed at 0 open issues, and CI was green. CodeRabbit's pass covered the
+head and raised one Minor finding outside the diff range, on `citedRe`: a
+test whose name continues with a non-ASCII letter such as Δ is valid in go
+test, and the pattern could not see it. Its mechanism was wrong for this
+pattern, which has no trailing `\b` alternative: such a name did not
+truncate to the bare prefix, it matched nothing. Its suggested pattern was
+wrong twice over. The `|\b` branch collects the English word "Test" from
+any sentence. The first class admits `_` with nothing required after it,
+which brings back the bare prefix and the double underscore that the
+fixture excludes (NC2 measured exactly that).
+
+The accurate half was taken. The classes are Unicode now: `\p{Lu}\p{Lt}
+\p{Lm}\p{Lo}\p{Nd}` first, `\p{L}\p{Nd}` after the underscores, and
+`\p{L}\p{Nd}_` for the rest, which are the characters a Go identifier may
+continue with. The bare-prefix exclusion stays. On this tree the Unicode
+form collects exactly the 2,788 citations the ASCII one did. The
+collection fixture gained a non-ASCII ghost and a non-ASCII lowercase
+continuation that must stay uncollected. Red-first, the ghost went
+unreported, a stale citation passing. NC10, the ASCII pattern put back,
+turns exactly that fixture red, and loses only the ghost. The `\b` in front
+is still ASCII, since RE2 has no other. That can only report a word that is
+not a citation, never pass one, and the tree has no instance. Before
+editing, every ASCII-scope statement in the change was grepped: CLAUDE.md's
+statement of the rule and the Consult note were updated, and the census
+table's row now says it measured the ASCII form. The rest are history.
