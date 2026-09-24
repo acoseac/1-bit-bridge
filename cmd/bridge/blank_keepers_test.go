@@ -627,10 +627,12 @@ func blankValues(vs *ast.ValueSpec) []ast.Expr {
 }
 
 // onlyNames reports whether evaluating e can do nothing but name things:
-// identifiers, selectors, literals, composite literals of those, and
-// conversions to a type that cannot be a function. A call whose callee could
-// be a function is refused (`pkg.T(x)` could be either), so `var _ =
-// registry.Register(x)` and a compile-time size assertion are never keepers.
+// identifiers, selectors, literals, operators on those (`&pkg.T{}`,
+// `time.Second * 5`, Gemini on #996), composite literals, and conversions
+// to a type that cannot be a function. A call whose callee could be a
+// function is refused (`pkg.T(x)` could be either), so `var _ =
+// registry.Register(x)` and a compile-time size assertion are never keepers,
+// and so is a receive, which waits: `_ = <-pkg.Done` is not a keeper.
 func onlyNames(e ast.Expr) bool {
 	switch x := e.(type) {
 	case *ast.Ident, *ast.BasicLit:
@@ -641,14 +643,65 @@ func onlyNames(e ast.Expr) bool {
 		return onlyNames(x.X)
 	case *ast.StarExpr:
 		return onlyNames(x.X)
-	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
-		return true
+	case *ast.UnaryExpr:
+		return x.Op != token.ARROW && onlyNames(x.X)
+	case *ast.BinaryExpr:
+		return onlyNames(x.X) && onlyNames(x.Y)
 	case *ast.CompositeLit:
-		return eltsOnlyName(x.Elts)
+		return (x.Type == nil || typeOnlyNames(x.Type)) && eltsOnlyName(x.Elts)
 	case *ast.CallExpr:
-		return len(x.Args) == 1 && isTypeOnly(x.Fun) && onlyNames(x.Args[0])
+		return len(x.Args) == 1 && isTypeOnly(x.Fun) && typeOnlyNames(x.Fun) && onlyNames(x.Args[0])
 	}
 	return false
+}
+
+// typeOnlyNames reports whether a type expression only names things. A type
+// holds an expression only in an array length or a type argument, and the
+// length is where a compile-time assertion computes with a call:
+// `var _ = [unsafe.Sizeof(x) - 8]byte{}` is not a keeper. A type argument
+// makes a generic instantiation, `set.Of[int]{}`, which is one.
+func typeOnlyNames(t ast.Expr) bool {
+	switch x := t.(type) {
+	case *ast.Ident, *ast.SelectorExpr, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
+		return true
+	case *ast.ParenExpr:
+		return typeOnlyNames(x.X)
+	case *ast.StarExpr:
+		return typeOnlyNames(x.X)
+	case *ast.ArrayType:
+		return arrayLenOnlyNames(x.Len) && typeOnlyNames(x.Elt)
+	case *ast.MapType:
+		return typeOnlyNames(x.Key) && typeOnlyNames(x.Value)
+	case *ast.ChanType:
+		return typeOnlyNames(x.Value)
+	case *ast.IndexExpr:
+		return typeOnlyNames(x.X) && typeOnlyNames(x.Index)
+	case *ast.IndexListExpr:
+		return typeOnlyNames(x.X) && allTypesOnlyName(x.Indices)
+	}
+	return false
+}
+
+// arrayLenOnlyNames reports whether an array type's length only names
+// things: absent (a slice), `...`, or a constant expression with no call.
+func arrayLenOnlyNames(n ast.Expr) bool {
+	if n == nil {
+		return true
+	}
+	if _, ok := n.(*ast.Ellipsis); ok {
+		return true
+	}
+	return onlyNames(n)
+}
+
+// allTypesOnlyName reports whether every type in ts only names things.
+func allTypesOnlyName(ts []ast.Expr) bool {
+	for _, t := range ts {
+		if !typeOnlyNames(t) {
+			return false
+		}
+	}
+	return true
 }
 
 // eltsOnlyName reports whether every element of a composite literal, key
@@ -965,6 +1018,19 @@ func early() string {
 	return path
 }
 `,
+	// An operator or a type argument only names things too.
+	"keep/operators.go": `package keep
+
+import (
+	"example.com/set"
+	"sync"
+	"time"
+)
+
+var _ = &sync.Mutex{}
+var _ = time.Second * 5
+var _ = set.Of[int]{}
+`,
 	// Each import's name is its package's: a ".v3" suffix, a "go-" prefix
 	// and a "/v2" element are not part of it.
 	"keep/names.go": `package keep
@@ -983,6 +1049,7 @@ var _ = yaml.Marshal
 
 import (
 	"errors"
+	"example.com/events"
 	"fmt"
 	"net/url"
 	"os"
@@ -1001,8 +1068,10 @@ var _ iface = impl{}
 // A call could do anything, a registration for one.
 var _ = errors.New("registered")
 
-// A compile-time size assertion indexes and calls.
+// A compile-time size assertion indexes and calls, or calls in a
+// literal's array length.
 var _ = [1]struct{}{}[unsafe.Sizeof(int64(0))-8]
+var _ = [unsafe.Sizeof(int64(0)) - 8]byte{}
 
 // A literal, or one of a predeclared type, keeps nothing.
 var _ = 1
@@ -1018,6 +1087,7 @@ func use(cfg struct{ Name string }) {
 	key := "k"
 	_ = map[string]any{key: fmt.Sprint} // the key is a local, too
 	_ = url.URL{Scheme: "https"}        // a field key reads as a name: missed, the safe way
+	_ = <-events.Done                   // a receive waits
 }
 `,
 	// Nothing the go tool ignores is read, nor another module, nor vendored
@@ -1049,6 +1119,9 @@ var keeperFixtureVerdicts = []string{
 	"keep/names.go: tool.Run: " + keeperOnlyUse,
 	"keep/names.go: yaml.Marshal: " + keeperOnlyUse,
 	"keep/only_use_test.go: (*strings.Builder)(nil): " + keeperOnlyUse,
+	"keep/operators.go: &sync.Mutex{}: " + keeperOnlyUse,
+	"keep/operators.go: set.Of[int]{}: " + keeperOnlyUse,
+	"keep/operators.go: time.Second * 5: " + keeperOnlyUse,
 	"keep/only_use_test.go: http.ErrServerClosed: " + keeperOnlyUse,
 	"keep/only_use_test.go: io.Copy: " + keeperOnlyUse,
 	"keep/only_use_test.go: time.Second: " + keeperOnlyUse,
