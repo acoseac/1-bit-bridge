@@ -285,8 +285,8 @@ func TestASACDRetireThatFailsIsStillReported(t *testing.T) {
 
 // TestASubtreeScanStoppedInItsDeletionPassReportsNothing is the deletion-pass
 // test through ScanSubtree. Its restamp gate opens on a failed tracks pass,
-// and a stopped one must not open it: the restamp would only fail on the
-// cancelled context, so nothing about duplicate stamping is logged at all.
+// a stopped one included, so the duplicate-stamping pass then runs on the
+// cancelled context too, and is not reported either.
 func TestASubtreeScanStoppedInItsDeletionPassReportsNothing(t *testing.T) {
 	root := t.TempDir()
 	album := filepath.Join(root, "Album")
