@@ -10932,3 +10932,21 @@ Controls at `e2ad173c`, same harness, `-count=3`, all red:
 - **Declined: the test does not exercise `queueSaturated`.** True, and on
   purpose: the suffix is not a bucket, this change does not touch it, and
   a saturated line's parts deliberately do not add up to the total.
+
+### Review round 3
+
+- **SonarCloud** passed its gate but raised one new `go:S3776` on the node
+  test itself: its body reached cognitive complexity 19 against 15 once
+  round 1's label checks landed. `bcbbfcc7` moves rendering, parsing and
+  the label table's check into three helpers, with every assertion and
+  message unchanged, and S1 to S5 and G1 are all still red against it.
+  #944 did the same to a guard test for the same rule.
+- **The extraction in the fix is expected to close an older `go:S3776`.**
+  `runAnalyzeBatch` has been open at complexity 20 since June. With the
+  producer loop moved into `dispatchAnalysisCandidates` it loses both
+  loops and their branches, and the new function scores about 13. Sonar's
+  Go analyzer evidently does not count `select`: with it,
+  `runAnalyzeBatch` would have scored about 30, not 20. Main's analysis
+  after the merge is where to confirm this.
+- **CodeRabbit** re-reviewed `5c533442`: no findings, and it resolved its
+  round-1 thread.
