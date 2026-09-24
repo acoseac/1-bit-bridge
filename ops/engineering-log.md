@@ -10854,7 +10854,9 @@ passed both shapes on the merits: each treats an unparseable file as absent.
 - **The citation guard's docs ask git BEFORE the read.** The walk opened
   every `.md` and discarded an untracked one afterwards. The main checkout
   holds seven gitignored `ops/*.md` docs that every run opened for nothing,
-  and one that could not be opened failed the run (NC4).
+  and one that could not be opened failed the run (NC4). Nor does it open a
+  doc whose name begins with "." (review round 1): a tree with no `.git`
+  has no tracked set to exclude an editor's lock beside a doc.
 - **No directory rule.** No tracked `.go` or `.md` file's name begins with
   "." or "_", and nothing tracked is a symlink, so the file rule drops
   nothing the guard reads. The go tool's `.`-directory rule would drop
@@ -10911,3 +10913,48 @@ fail only the four toolchain fuzz targets.
   …/data/tls: directory not empty`). `cmd/bridge/tailscale.go` starts the
   startup cert mint with a bare `go a.runStartup(childCtx)`, and it wrote
   into `data/tls` after the test's cleanup began. CI has no tailscaled.
+
+### Review
+
+- **CodeRabbit** raised one finding (Major), and it was correct: the
+  fixture's symlink rows failed rather than skipped on a Windows host
+  without the symlink privilege. They now skip there with the reason. Emacs
+  writes its regular-file lock on such a host, and that row runs on every
+  host; CI's Windows leg creates symlinks, so it still runs all of them.
+- **The Gemini GitHub app was over its daily quota**, as on #989 and #990. A
+  direct consult stood in, and each claim was checked in the tree first:
+  - **Taken:** a tree with no `.git` has no tracked set, so the doc half
+    opened an editor's lock there. That is a fixture's tree, and also a
+    source archive. The doc half now refuses a name beginning with "."
+    before it asks the tracked set. It is "." alone, because a tracked
+    `_name.md` would be a real doc. Red first in `2fb40bf7`, fixed in
+    `f02ac471`.
+  - **Taken:** the Windows symlink privilege, the same finding as
+    CodeRabbit's.
+  - **Declined:** "a real checkout reaches a nil tracked set when git
+    refuses the repository (`safe.directory`)". `trackedMarkdownSet`
+    returns nil only when `.git` is absent, and fails the test on any git
+    error in a checkout.
+  - **Declined:** "a case-only rename on NTFS misses the tracked set". The
+    lookup key is the one `collectMarkdownCitations` used before this
+    change, so the behaviour is unchanged, and a wholesale miss is what the
+    `mdCited` floor catches.
+- **The first consult was sent a two-dot diff after `main` had moved.** #991
+  merged during the review, so `origin/main..HEAD` showed #991 in reverse,
+  and the reviewer reported #991's files as "unrelated regressions caused by
+  a dirty base branch". Send a reviewer the three-dot diff
+  (`origin/main...HEAD`, from the merge base).
+- **A count of my own was wrong.** CLAUDE.md said "six static-JS guards".
+  Six is the number of sweep SITES; eight TESTS failed.
+- **Round-1 controls** on `f02ac471`: without the "." check (NC8), only the
+  outside-a-checkout row is red, and the real guard stays green in a
+  checkout, where the tracked set already excludes a lock. With
+  `os.Symlink` forced to fail (NC9), the four symlink rows skip and the
+  regular-file and parked rows still pass.
+- **The local gate's first run failed one test this PR does not touch**,
+  `TestSendMSearchStreakResetsOnRestart` in `internal/dlna/discovery`: "a
+  restarted client logged 0 first-failure Warns, want 1". It passed 20 of 20
+  re-runs under `-race`, here and at `9365056c`. The likely mechanism, not
+  reproduced on demand, is that the test's real `Start()` sends a live
+  M-SEARCH, and a send the host refuses before `Stop()` leaves the streak at
+  1 when the test drives its single failure.
