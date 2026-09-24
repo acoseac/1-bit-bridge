@@ -195,8 +195,11 @@ const testDocVerbCoverageFloor = 0.90
 // compiler scopes it. A non-test file sees the non-test files of its
 // package. An internal test file (package `foo`) is compiled into that
 // package, so it sees those names as well as the test files'. An external
-// `foo_test` file sees only its own package. Test files are consulted first,
-// since an insertion into a test file displaces a test file's doc.
+// `foo_test` file sees only its own package. A name an internal test file
+// sees in both scopes counts as documented if either declaration is. A test
+// fake's undocumented method, named like the documented production
+// declaration a test's prose describes, would otherwise turn that prose
+// into a finding (Gemini consult on #990).
 //
 // That lookup has a measured cost. 31 test docs open by naming the
 // production declaration they test ("loadCLIConfig is …"), 14 of them with a
@@ -252,7 +255,13 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		// A file the go tool ignores is skipped too: a name beginning with
+		// "." or "_" (`go help packages`). Editors create such files in
+		// place — emacs's `.#name.go` lock is a dangling symlink — and
+		// parsing one failed this guard over a file no build reads
+		// (Gemini consult on #990).
+		if name := d.Name(); !strings.HasSuffix(name, ".go") ||
+			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 			return nil
 		}
 		files = append(files, path)
@@ -290,14 +299,14 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	// docblock above). An external `foo_test` file has its own package
 	// name, so its second lookup finds nothing.
 	lookup := func(sc scope, name string) (decl, bool) {
-		if d, ok := declared[sc][name]; ok {
-			return d, true
-		}
-		if sc.test {
-			d, ok := declared[scope{sc.dir, sc.pkg, false}][name]
+		d, ok := declared[sc][name]
+		if !sc.test {
 			return d, ok
 		}
-		return decl{}, false
+		if nd, nok := declared[scope{sc.dir, sc.pkg, false}][name]; nok && (!ok || nd.hasDoc) {
+			return nd, true
+		}
+		return d, ok
 	}
 	walk(func(path string, sc scope, f *ast.File, fset *token.FileSet) {
 		for _, d := range f.Decls {
