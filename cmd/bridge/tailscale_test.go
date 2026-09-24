@@ -253,19 +253,7 @@ func TestACancelledTailscalePassChangesNothing(t *testing.T) {
 
 			got := a.RefreshNow(ctx)
 
-			if c := servedFor(t, a, "bridge.example.ts.net"); c != le {
-				t.Error("a cancelled pass unloaded the LE cert: a *.ts.net handshake now gets the " +
-					"self-signed one, until a later pass succeeds")
-			}
-			if s := stderr.String(); s != "" {
-				t.Errorf("a cancelled pass reported a failure: %q", s)
-			}
-			if after := a.Snapshot(); !reflect.DeepEqual(after, before) {
-				t.Errorf("a cancelled pass published a snapshot:\n before %+v\n after  %+v", before, after)
-			}
-			if !reflect.DeepEqual(got, before) {
-				t.Errorf("RefreshNow answered a cancelled pass with %+v, want the unchanged %+v", got, before)
-			}
+			assertPassChangedNothing(t, a, le, stderr, before, got)
 		})
 	}
 
@@ -289,6 +277,91 @@ func TestACancelledTailscalePassChangesNothing(t *testing.T) {
 			t.Error("a failed detect left the snapshot claiming a cert is present")
 		}
 	})
+}
+
+// TestACompletedTailscaleCallIsAppliedAfterACancel pins the other edge
+// of passCancelled: only an ERROR the cancel caused is quiet. A call
+// that completed reports a fact about the host, and the pass applies it
+// even when the context has been cancelled by the time the call returns.
+// A detect that found MagicDNS off unloads the LE cert, as it always
+// has. A mint that wrote a fresh pair gets it installed and reported.
+// Checking the context again after a success, proposed in review on
+// #997, would turn a completed "Re-mint now" into a silent no-op, with
+// the fresh pair sitting on disk unused.
+func TestACompletedTailscaleCallIsAppliedAfterACancel(t *testing.T) {
+	t.Run("a detect that completed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		a, le, _, _ := servingAutoPilot(t, scriptedCLI{
+			detect: func(context.Context) (servertailscale.NodeInfo, error) {
+				cancel() // the admin client leaves as the answer arrives
+				return servertailscale.NodeInfo{
+					CLIAvailable: true,
+					BinaryPath:   "/fake/tailscale",
+					NodeName:     "bridge",
+					LastError:    "MagicDNS not enabled in tailnet",
+				}, nil
+			},
+			mint: func(context.Context, string, string) error {
+				t.Error("MagicDNS is off, so there was nothing to mint")
+				return nil
+			},
+		})
+
+		got := a.RefreshNow(ctx)
+
+		if servedFor(t, a, "bridge.example.ts.net") == le {
+			t.Error("the pass ignored a completed detect that found MagicDNS off")
+		}
+		if got.CertPresent || got.LastError == "" {
+			t.Errorf("a completed detect that found MagicDNS off was answered with %+v", got)
+		}
+	})
+
+	t.Run("a mint that completed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		a, le, stdout, _ := servingAutoPilot(t, scriptedCLI{
+			detect: func(context.Context) (servertailscale.NodeInfo, error) { return fakeNodeInfo(), nil },
+			mint: func(_ context.Context, certPath, keyPath string) error {
+				defer cancel() // the admin client leaves as the mint returns
+				return servertls.Generate(certPath, keyPath, "bridge.example.ts.net")
+			},
+		})
+
+		got := a.RefreshNow(ctx)
+
+		if c := servedFor(t, a, "bridge.example.ts.net"); c == le || c == nil {
+			t.Error("a mint that completed was not installed, because the context had been cancelled since")
+		}
+		if !got.CertPresent {
+			t.Errorf("a mint that completed was answered with %+v", got)
+		}
+		if s := stdout.String(); !strings.Contains(s, "minted LE cert for bridge.example.ts.net") {
+			t.Errorf("a mint that completed was not reported: %q", s)
+		}
+	})
+}
+
+// assertPassChangedNothing checks the state a cancelled pass must leave:
+// the LE cert still serving *.ts.net, nothing logged, the snapshot as it
+// was, and RefreshNow answering with that same snapshot. Split out of the
+// test body to keep its nesting shallow (SonarCloud go:S3776).
+func assertPassChangedNothing(t *testing.T, a *tailscaleAutoPilot, le *tls.Certificate, stderr *safeBuffer, before, got tailscaleStatus) {
+	t.Helper()
+	if servedFor(t, a, "bridge.example.ts.net") != le {
+		t.Error("a cancelled pass unloaded the LE cert: a *.ts.net handshake now gets the " +
+			"self-signed one, until a later pass succeeds")
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("a cancelled pass reported a failure: %q", s)
+	}
+	if after := a.Snapshot(); !reflect.DeepEqual(after, before) {
+		t.Errorf("a cancelled pass published a snapshot:\n before %+v\n after  %+v", before, after)
+	}
+	if !reflect.DeepEqual(got, before) {
+		t.Errorf("RefreshNow answered a cancelled pass with %+v, want the unchanged %+v", got, before)
+	}
 }
 
 // TestAMintedTailscaleCertIsReportedOnServesStdout pins the happy path

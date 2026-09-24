@@ -11,4 +11,7 @@ import "os/exec"
 // child already stops the process that writes the cert files. A
 // wrapper there (a .cmd on PATH) would need a job object; nothing ships
 // one.
-func stopTreeOnCancel(*exec.Cmd) {}
+func stopTreeOnCancel(*exec.Cmd) {
+	// Deliberately empty: CommandContext's default kill already reaches
+	// the writer here, for the reason above.
+}

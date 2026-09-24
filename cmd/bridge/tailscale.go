@@ -490,17 +490,26 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	return snap
 }
 
-// passCancelled reports whether a detect+mint pass was CANCELLED, as
-// opposed to failing. Three things cancel it and none is a failure:
-// shutdown, Disable(), and an admin client that went away mid-"Re-mint
-// now" (RefreshNow runs on the request's context). A cancelled pass
-// returns the snapshot it found. It logs no failure, publishes no
-// snapshot, and above all does not unload an LE cert that is still
-// valid. The Detect error branch unloads it, so a cancelled `tailscale
-// status` used to leave every *.ts.net client on the self-signed cert
-// until a later pass succeeded, up to a day later on the renewer. Since
-// serve now waits for this pass, its shutdown-time "mint failed:
-// context canceled" would otherwise reach the journal too.
+// passCancelled reports whether a CLI call's error came from the pass
+// being CANCELLED rather than from the call failing. It is consulted on
+// the two error paths only. Three things cancel a pass and none is a
+// failure: shutdown, Disable(), and an admin client that went away
+// mid-"Re-mint now" (RefreshNow runs on the request's context). A call
+// stopped that way returns the snapshot the pass found. It logs no
+// failure, publishes no snapshot, and above all does not unload an LE
+// cert that is still valid. The Detect error branch unloads it, so a
+// cancelled `tailscale status` used to leave every *.ts.net client on
+// the self-signed cert until a later pass succeeded, up to a day later
+// on the renewer. Since serve now waits for this pass, its shutdown-time
+// "mint failed: context canceled" would otherwise reach the journal too.
+//
+// A call that COMPLETED is not second-guessed. exec reports success only
+// when the process finished on its own (a kill it sent turns the result
+// into ctx.Err()), so the answer, MagicDNS off or a fresh pair on disk,
+// is true whatever the context did afterwards, and the pass applies it.
+// Checking again after a success would discard exactly what "Re-mint
+// now" asked for; TestACompletedTailscaleCallIsAppliedAfterACancel pins
+// that.
 //
 // Cancelled, not merely done: a pass that ran out of time failed, and
 // is reported like any other failure.

@@ -12451,6 +12451,7 @@ Red on `8d9dff4b` (seam and tests, no fix), green on the fix:
 | `TestServeGivesUpOnAWedgedTailscaleMintAfterTheGrace` | a mint that never returns costs the grace and the timeout line, never a hung exit |
 | `TestACancelledTailscalePassChangesNothing` | a cancelled detect or mint keeps the LE cert serving and publishes nothing; a deadline is still reported |
 | `TestAMintedTailscaleCertIsReportedOnServesStdout` | the happy path through the seam, and where its line goes |
+| `TestACompletedTailscaleCallIsAppliedAfterACancel` | a detect or mint that COMPLETED is applied though the context was cancelled as it returned (added in review round 1) |
 
 Controls, each against the committed fix with one mutation, asserted to
 apply exactly once:
@@ -12468,6 +12469,8 @@ apply exactly once:
 | NC9 | bgWriters grace of an hour | the wedged-mint test (at its own 15 s bound) |
 | NC10 | grace expiry prints nothing | the wedged-mint test |
 | NC11 | no `os.Process` check before the group kill | the reaped-leader test only |
+| NC12 | review round 1's re-check after a SUCCESSFUL Detect | the completed-detect case only |
+| NC13 | review round 1's re-check after a SUCCESSFUL MintCert | the completed-mint case only |
 
 NC1 to NC3 were run again after the consult changed `Cancel`, with the
 same result.
@@ -12525,3 +12528,25 @@ before the PR:
 - **The drain sweep sees launches in a Test's own body only.** A first
   draft factored the serve launch into a helper, which that sweep's
   docblock names as its blind spot. The launch is inlined in each test.
+
+### Review
+
+- **Round 1**, on `d9fa815b`. Gemini: no findings. SonarCloud (gate
+  passed): three findings, all taken. The empty Windows
+  `stopTreeOnCancel` says in its body that it is empty on purpose
+  (go:S1186). `TestACancelledTailscalePassChangesNothing`'s assertions
+  moved into `assertPassChangedNothing` (go:S3776, complexity 17 of 15).
+  The served-cert check drops a one-use variable (godre:S8193).
+  **CodeRabbit** raised two findings, both declined with the reasoning
+  recorded in their threads: re-check `passCancelled` after a SUCCESSFUL
+  Detect (Major) and after a SUCCESSFUL MintCert (Minor). A completed call
+  reports a fact. exec answers success only when the process finished on
+  its own: a kill it sent turns the result into `ctx.Err()`. So MagicDNS
+  off, or a fresh pair on disk, is true whatever the context did
+  afterwards. Discarding it would leave the bridge serving what it knows
+  to be stale, and turn a completed "Re-mint now" into a no-op. The
+  accurate half was taken: the docblock and CLAUDE.md read broader than
+  the rule ("a cancelled pass changes nothing"), and now say that only an
+  ERROR the cancel caused is quiet. `TestACompletedTailscaleCallIsAppliedAfterACancel`
+  pins the decision in both directions (NC12, NC13).
+

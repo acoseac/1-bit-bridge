@@ -2270,9 +2270,14 @@ mentions across the four `ops/audit-*.md` files.
   found and logs and publishes nothing, because the Detect error branch
   UNLOADS the LE cert and the MagicDNS suffix: a cancel read as a failure left
   every `*.ts.net` client on the self-signed cert until the next good pass,
-  up to a day later. A DEADLINE is still a failure. Joining a writer makes its
-  cancelled exit path run before shutdown completes, so check what that path
-  reports and what it changes. (#997)
+  up to a day later. A DEADLINE is still a failure. **Only an ERROR the
+  cancel caused is quiet**: a call that COMPLETED reports a fact (exec
+  answers success only when the process finished on its own), and the pass
+  applies it. Re-checking the context after a success was proposed in
+  review and declined, because it would discard a completed "Re-mint now";
+  `TestACompletedTailscaleCallIsAppliedAfterACancel` pins it. Joining a
+  writer makes its cancelled exit path run before shutdown completes, so
+  check what that path reports and what it changes. (#997)
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
