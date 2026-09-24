@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -155,5 +156,37 @@ func TestCancelStopsTheWholeCLIProcessTree(t *testing.T) {
 				t.Fatalf("the CLI process started by %s wrote after the cancel", tc.name)
 			}
 		})
+	}
+}
+
+// TestCancelNeverSignalsTheGroupOfAReapedLeader pins the os.Process check
+// in stopTreeOnCancel. exec can call Cancel after Wait has reaped the
+// leader, and from then on the leader's pid, which is the group id, may
+// belong to another process, so the group must not be signalled. The
+// window is too narrow to hit, so the test drives it directly: run a
+// command to completion, then call its Cancel.
+func TestCancelNeverSignalsTheGroupOfAReapedLeader(t *testing.T) {
+	// Records instead of signalling: a group kill here is the very thing
+	// under test, so even a failing run must not send one.
+	var signalled []int
+	orig := killGroup
+	killGroup = func(pgid int) error {
+		signalled = append(signalled, pgid)
+		return syscall.ESRCH
+	}
+	t.Cleanup(func() { killGroup = orig })
+
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 0")
+	stopTreeOnCancel(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Cancel after the leader was reaped = %v, want os.ErrProcessDone", err)
+	}
+	if len(signalled) != 0 {
+		t.Errorf("Cancel signalled process group %v after its leader had been reaped; "+
+			"that id may belong to another process by now", signalled)
 	}
 }

@@ -58,7 +58,7 @@ func stopTreeOnCancel(cmd *exec.Cmd) {
 			return err
 		}
 		// Setpgid made the group id the child's pid.
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err := killGroup(cmd.Process.Pid)
 		if errors.Is(err, syscall.ESRCH) {
 			// Nothing is left in the group: the call finished before the
 			// cancel reached it. exec reads ErrProcessDone as exactly
@@ -67,4 +67,11 @@ func stopTreeOnCancel(cmd *exec.Cmd) {
 		}
 		return err
 	}
+}
+
+// killGroup sends SIGKILL to every process in group pgid. A variable only
+// so a test can see whether Cancel reached it; production never reassigns
+// it, the same convention as commandContext.
+var killGroup = func(pgid int) error {
+	return syscall.Kill(-pgid, syscall.SIGKILL)
 }
