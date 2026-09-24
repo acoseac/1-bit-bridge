@@ -2968,16 +2968,21 @@ its twin.** The top list is older, shorter, and read first.
   counts a composite literal's identifier key as a name, because in a map
   literal the key is a variable: the first draft skipped keys and reported
   `_ = map[string]int{key: http.StatusOK}`, whose deletion breaks the build
-  (a Gemini consult found it). Two keepers of one package are not each
-  other's use (update.go's pair). **The one allowance stands on its stated
+  (a Gemini consult found it). A selector names an import only where no
+  local of that name is in scope, scoped as Go scopes it, from the end of
+  the declaring statement (a whole-function approximation missed
+  `_ = path.Join` above `path := …`; CodeRabbit). Two keepers of one
+  package are not each other's use (update.go's pair). **The one allowance stands on its stated
   CONDITION, not its path**: `allowedKeepers` holds internal/tsnet's
   `var _ = errors.Is` while its doc says "Don't remove until typed errors
   land.", `typedErrorIn` finds no sentinel and no `Error() string` method
   there, and the file uses `errors` nowhere else. Any of those failing is
   reported, and so is an entry whose keeper is gone. On a clean tree the
   sweep reports nothing, so `TestBlankKeeperScanOnFixtures` pins every
-  shape, skip rule and allowance state: 31 mutations turn it red, and only
-  five of them turn the tree red.
+  shape, scope rule, skip rule and allowance state: 39 of 40 mutations
+  turn it red, and only five turn the tree red. The 40th drops the CRLF
+  normalisation, which the scan survives without; its CRLF case pins the
+  property, not the mechanism.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.

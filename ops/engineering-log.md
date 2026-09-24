@@ -11935,9 +11935,11 @@ keepers, counting #294's keeper once although its test file was renamed
   statements, and a guard reading only the top-level form would have
   passed all five. It is held to an E that names only imports, since
   `_ = cfg` is how Go code marks a local used. A selector counts as naming
-  import `x` only if the enclosing top-level declaration declares no `x`
-  anywhere (`declaredWithin`). That over-approximates scope toward missing
-  a keeper, never toward reporting a local.
+  import `x` only where no local named `x` is in scope, and a local is
+  scoped as Go scopes it (`localScopesIn`): from the end of its declaring
+  statement to the end of its innermost block, and a parameter over its
+  function's body. The first draft took an `x` declared anywhere in the
+  function for a local everywhere in it (see **Review**, round 2).
 - **The local form is included** for tailscale's, and read only at the top
   level.
 - **Existence checks are reported deliberately.** `(*T)(nil)`, and a method
@@ -11979,16 +11981,21 @@ census table, and the tsnet keeper logged as allowed. After the deletions
 the whole-tree run passes in 0.3 s.
 
 `TestBlankKeeperScanOnFixtures` runs `scanBlankKeepers`, with the real
-`allowedKeepers`, over synthetic trees. Each reported shape is there: both
-verdicts, the conversion, the grouped spec, the in-function `var`, the
-local keeper, the two-keeper pair, a use behind a shadowing local, the
-three import-name conventions and a predeclared `nil` beside a package. So
-are the quiet ones (a typed assertion, a call, a compile-time size
-assertion, literals, locals, a map key that is a local, a struct field
-key), every skip rule (a `.#lock` that is not Go, which would fail the
-parse if opened, `_dir`, testdata, vendor, node_modules, a nested module),
-and eight allowance states. Controls on the commit, each `-count=1`, each restored with
-`git checkout` and checked clean:
+`allowedKeepers`, over synthetic trees under a root named `clone[1]`. Each
+reported shape is there: both verdicts, the conversion, the grouped spec,
+the in-function `var`, the local keeper, the two-keeper pair, the three
+import-name conventions and a predeclared `nil` beside a package. The
+scoping cases are there too: a keeper above a later local of its import's
+name, that local's own right-hand side counted as a use, and a local
+shadowing the import in each way one is declared (`:=`, parameter, range
+variable, `var` statement, func-literal parameter). So are the quiet
+shapes (a typed assertion, a call, a compile-time size assertion,
+literals, locals, a map key that is a local, a struct field key) and every
+skip rule (a `.#lock` that is not Go, which would fail the parse if
+opened, `_dir`, testdata, vendor, node_modules, a nested module). There
+are eight allowance states, and one case writes the whole tree with CRLF
+endings. Controls on the round-2 commit (`b67db7d6`), each `-count=1`,
+each restored with `git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
 |---|---|---|---|
@@ -11996,7 +12003,14 @@ and eight allowance states. Controls on the commit, each `-count=1`, each restor
 | NC1 | `onlyNames` accepts any call | red: four `_ = os.Unsetenv(…)` in supervision_unix_test.go | red |
 | NC2 | `isTypeOnly` takes a selector callee as a type | red: the same four | red |
 | NC3 | typed specs read | red: the seven interface assertions | red |
-| NC4 | no scope (`declaredWithin` empty) | green | red |
+| NC4a | a local covers its whole declaration (the first draft) | green | red |
+| NC4b | a local's scope starts at its statement's start | green | red: the right-hand side stops counting |
+| NC4c | no locals declared | green | red |
+| NC4d | parameters not scoped | green | red |
+| NC4e | range variables not scoped | green | red |
+| NC4f | `var` statements not scoped | green | red |
+| NC4g | func-literal parameters not scoped | green | red |
+| NC4h | a block ends where it starts | green | red |
 | NC5 | the `_ = E` statement arm removed | green | red |
 | NC6 | the in-function `var _ = E` arm removed | green | red |
 | NC7 | a keeper's use counts as a use | green | red: the pair reads redundant |
@@ -12024,10 +12038,17 @@ and eight allowance states. Controls on the commit, each `-count=1`, each restor
 | NC22 | the statement form not held to imports only | green | red |
 | NC23 | the local form off | green | red |
 | NC24 | a served allowance still allowed | green | red: that case |
+| NC25 | no CRLF normalisation | green | **green** |
+| NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
 
-Only five of the 31 turn the tree red, and NC13, the one that deletes the
+Only five of the 40 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
-drives the same `scanBlankKeepers` the tree test does. NC15 stays green on
+drives the same `scanBlankKeepers` the tree test does. NC25 is the one
+control the fixture does not catch, and it is not meant to: without the
+normalisation the scan is still CRLF-safe, because `strings.Fields` and
+go/scanner both drop the `\r` (CodeRabbit's own premise). The CRLF case
+pins that property, not the mechanism, and it is the property a later edit
+comparing raw source would break. NC15 stays green on
 the tree although three leftover `.claude/worktrees/` checkouts hold
 pre-fix keepers: each carries its own go.mod, so the nested-module rule
 skips them too.
@@ -12089,3 +12110,27 @@ checked against the code first.
   globs its own directory, and under such a path it fails loudly on its
   floors rather than passing, so it was left. The DSD render test globs a
   `t.TempDir()`.
+- **CodeRabbit** did not start on its own. On #995 its walkthrough came two
+  minutes after the PR opened; here nothing came for eighteen, and
+  `@coderabbitai review` started it at once (not a plan-limit pause: it
+  reported five reviews available).
+- **Round 2** (`b146a0db`): **CodeRabbit** raised two minors, both taken,
+  and **SonarCloud** five go:S3776, all fixed. The first was about scope:
+  a selector counted as naming import `x` only if the enclosing
+  declaration declared no `x` anywhere, so an `_ = path.Join` above a later
+  `path := …` was taken for a local and the keeper missed. That was the
+  documented trade-off (miss rather than misreport), and the finding
+  removed it rather than accepting it: `localScopesIn` scopes each local
+  from the end of its declaring statement to the end of its innermost
+  block, so `path := path.Base(p)` still reads the import on its right.
+  NC4a is the first draft, and NC4b a scope that starts at the statement
+  instead of after it. The tree was re-scanned under the stricter rule and
+  stayed clean, so the approximation had hidden nothing. The second finding
+  was that the scan read Go source without normalising CRLF, which CLAUDE.md
+  requires of anything that does. It was CRLF-safe by accident (see NC25);
+  both readers normalise now. The five complexity findings (20, 81, 39,
+  43, 32 against 15) were resolved by structure: the file scan became a
+  `keeperFile` with one method per step, the allowance verdict became
+  `judgeAllowance`, `typedErrorIn` reads through `typedErrorInFile`,
+  `typedError`, `sentinelIn` and `isErrorMethod`, and the fixture tree and
+  its expected verdicts became package-level values.
