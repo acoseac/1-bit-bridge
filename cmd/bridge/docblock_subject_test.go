@@ -331,7 +331,24 @@ func funcParamNames(fn *ast.FuncDecl) []string {
 // stray word, which neither arm reads:
 // "Test_FileHandler_UpstreamOffline_503 — …".
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
-	root := repoRootForCitations(t)
+	scanDocblockSubjects(t, repoRootForCitations(t), true)
+}
+
+// docScanReporter is the part of *testing.T that scanDocblockSubjects
+// reports through, so a test can run the scan over a fixture tree and read
+// its findings instead of failing on them.
+type docScanReporter interface {
+	Errorf(format string, args ...any)
+	Fatalf(format string, args ...any)
+	Logf(format string, args ...any)
+}
+
+// scanDocblockSubjects is TestNoDocblockNamesAnotherDeclaration's scan of the
+// tree under root, with both arms, reported through r. It returns how many
+// docs each arm reported. wholeTree holds the scan to the floors that prove
+// it reached this repo's whole tree (file and doc counts, the verb coverage
+// floors); a fixture tree has none of those to meet.
+func scanDocblockSubjects(r docScanReporter, root string, wholeTree bool) (misattached, undeclared int) {
 	type decl struct {
 		file   string
 		line   int
@@ -355,7 +372,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			fset := token.NewFileSet()
 			f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 			if err != nil {
-				t.Fatalf("parse %s: %v", p, err)
+				r.Fatalf("parse %s: %v", p, err)
 			}
 			fn(p, scope{filepath.Dir(p), f.Name.Name, strings.HasSuffix(p, "_test.go")}, f, fset)
 		}
@@ -396,13 +413,13 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		r.Fatalf("%v", err)
 	}
-	if nonTestFiles < 100 {
-		t.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", nonTestFiles)
+	if wholeTree && nonTestFiles < 100 {
+		r.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", nonTestFiles)
 	}
-	if testFiles < 100 {
-		t.Fatalf("walked %d _test.go files, want >=100 — the scan is not seeing the tests", testFiles)
+	if wholeTree && testFiles < 100 {
+		r.Fatalf("walked %d _test.go files, want >=100 — the scan is not seeing the tests", testFiles)
 	}
 
 	record := func(sc scope, name, file string, line int, hasDoc bool) {
@@ -509,7 +526,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			if namesNothingDeclared(m[1], docSite{declaredInDir[sc.dir], params, testFunc}) {
 				p.undeclared++
 				dir, _ := filepath.Rel(root, sc.dir)
-				t.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
+				r.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
 					"documents %s under a name that does not exist here. Open it with the name of what "+
 					"it documents, or delete it if what it describes is gone. That holds when %s names "+
 					"something real elsewhere (another package's declaration, a tool, a product): a doc "+
@@ -523,7 +540,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			return
 		}
 		p.found++
-		t.Errorf("%s:%d — this doc comment opens %q but is attached to %s, so it "+
+		r.Errorf("%s:%d — this doc comment opens %q but is attached to %s, so it "+
 			"documents that instead, and %s at %s:%d has no doc of its own. "+
 			"Move the block to its subject, or separate the two with a blank line.",
 			path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], subject,
@@ -567,12 +584,19 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 	})
 	for _, p := range []*population{nonTest, test} {
+		misattached += p.found
+		undeclared += p.undeclared
+		if !wholeTree {
+			r.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
+				"%d opening with a name nothing declares", p.name, p.checked, p.files, p.found, p.undeclared)
+			continue
+		}
 		if p.checked < 500 {
-			t.Fatalf("inspected %d doc comments in %s files, want >=500 — the scan is not reaching them, "+
+			r.Fatalf("inspected %d doc comments in %s files, want >=500 — the scan is not reaching them, "+
 				"so this guard would pass no matter what", p.checked, p.name)
 		}
 		if p.subjectFirst == 0 {
-			t.Fatalf("no doc comment in a %s file opened with its own subject — the coverage floor measured nothing", p.name)
+			r.Fatalf("no doc comment in a %s file opened with its own subject — the coverage floor measured nothing", p.name)
 		}
 		coverage := float64(p.recognised) / float64(p.subjectFirst)
 		if coverage < p.floor {
@@ -590,17 +614,18 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			for _, w := range words[:min(len(words), 15)] {
 				top = append(top, fmt.Sprintf("%s (%d)", w, p.unrecognised[w]))
 			}
-			t.Errorf("%s %d of %d subject-first doc openers in %s files (%.1f%%), below the "+
+			r.Errorf("%s %d of %d subject-first doc openers in %s files (%.1f%%), below the "+
 				"%.0f%% floor: a misattached block opening with any other word passes unseen. "+
 				"Most common unrecognised: %s. Add the verbs among them to %s.",
 				p.recognises, p.recognised, p.subjectFirst, p.name, 100*coverage, 100*p.floor,
 				strings.Join(top, ", "), p.extend)
 		}
-		t.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
+		r.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
 			"%d opening with a name nothing declares; %s %d of %d subject-first openers (%.1f%%)",
 			p.name, p.checked, p.files, p.found, p.undeclared, p.recognises, p.recognised,
 			p.subjectFirst, 100*coverage)
 	}
+	return misattached, undeclared
 }
 
 // TestIdentifierShapedTellsNamesFromSentenceWords pins identifierShaped's
@@ -692,6 +717,105 @@ func TestNamesNothingDeclaredAsksWhereTheDocSits(t *testing.T) {
 	} {
 		if got := namesNothingDeclared(c.word, c.at); got != c.want {
 			t.Errorf("namesNothingDeclared(%q, %+v) = %v, want %v", c.word, c.at, got, c.want)
+		}
+	}
+}
+
+// docScanRecorder collects what scanDocblockSubjects reports as errors, for a
+// test that expects findings. Anything fatal still fails the test.
+type docScanRecorder struct {
+	t      *testing.T
+	errors []string
+}
+
+func (r *docScanRecorder) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+
+func (r *docScanRecorder) Fatalf(format string, args ...any) {
+	r.t.Helper()
+	r.t.Fatalf(format, args...)
+}
+
+func (r *docScanRecorder) Logf(format string, args ...any) { r.t.Logf(format, args...) }
+
+// TestDocblockScanReportsBothArmsOnAFixture runs the scan over a synthetic
+// tree whose findings are known, so the wiring of both arms is pinned. On
+// this repo's own tree a clean scan reports nothing, so a change that lost
+// either arm's report, or passed an arm the wrong context, would pass there
+// unseen (CodeRabbit on #994). Each quiet case in the fixture is one the arm
+// must leave alone and the reason it must.
+func TestDocblockScanReportsBothArmsOnAFixture(t *testing.T) {
+	root := t.TempDir()
+	for rel, src := range map[string]string{
+		"pkg/pkg.go": `package pkg
+
+// pickVoted returns the most-voted value.
+func pick() string { return "" }
+
+func helper() {}
+
+// helper builds the fixture.
+func other() {}
+
+// limit bounds v.
+func clamp(v, limit int) int { return v }
+
+// nil means no limit.
+var capacity = 0
+
+// Removal is what keeps the case clean.
+func remove() {}
+`,
+		"pkg/pkg_test.go": `package pkg
+
+import "testing"
+
+// dhowden does not read the atom.
+func TestPick(t *testing.T) {}
+
+// TestGone pins the clamp.
+func TestClamp(t *testing.T) {}
+
+// jpegBlob is a tiny blob.
+func newFixture() {}
+`,
+		"pkg/ext_test.go": `package pkg_test
+
+// pick returns the value the package elects.
+func useIt() {}
+`,
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := &docScanRecorder{t: t}
+	misattached, undeclared := scanDocblockSubjects(rec, root, false)
+	// Reported: a stale name on a function, another test's name on a test,
+	// and a stale name on a test file's helper; and one misattached doc.
+	// Left alone: the function's own parameter (limit), a predeclared name
+	// (nil), a sentence (Removal), a test's premise (dhowden), and an
+	// external test naming its package's declaration (pick).
+	want := []string{`opens "pickVoted returns"`, `opens "TestGone pins"`, `opens "jpegBlob is"`,
+		`opens "helper builds" but is attached to "other"`}
+	if misattached != 1 || undeclared != 3 || len(rec.errors) != len(want) {
+		t.Errorf("got %d misattached and %d undeclared in %d reports, want 1, 3 and %d:\n%s",
+			misattached, undeclared, len(rec.errors), len(want), strings.Join(rec.errors, "\n"))
+	}
+	for _, w := range want {
+		n := 0
+		for _, e := range rec.errors {
+			if strings.Contains(e, w) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%d reports contain %s, want exactly one:\n%s", n, w, strings.Join(rec.errors, "\n"))
 		}
 	}
 }
