@@ -75,74 +75,32 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 		t.Fatalf("only %d buckets found on AnalysisSweepCounts: the reflection walk "+
 			"is broken, so this test proves nothing", len(buckets))
 	}
-	// The label table and the type agree in both directions. A bucket with no
-	// label would be checked against "", and a label a rename left behind
-	// describes a bucket that no longer exists.
-	isBucket := map[string]bool{}
-	isValue := map[int]bool{}
-	for _, b := range buckets {
-		isBucket[b.name] = true
-		isValue[b.value] = true
-		if _, ok := analysisSweepLabels[b.name]; !ok {
-			t.Errorf("bucket %q has no label in analysisSweepLabels: decide what "+
-				"describeAnalysisSweep calls it, and add it there", b.name)
-		}
+	checkAnalysisSweepLabelTable(t, buckets)
+	line := renderAnalysisSweepLine(t, node, counts)
+	total, parts := analysisSweepLineParts(t, line)
+	if total != counts.Total {
+		t.Errorf("the line opens with %d tracks, want %d: %q", total, counts.Total, line)
 	}
-	for name := range analysisSweepLabels {
-		if !isBucket[name] {
-			t.Errorf("analysisSweepLabels has a label for %q, which is not a bucket "+
-				"of AnalysisSweepCounts", name)
-		}
-	}
-	if t.Failed() {
-		t.FailNow()
-	}
-	payload, err := json.Marshal(counts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fn := extractJSFunction(t, readFile(t, "static/app.js"), "describeAnalysisSweep")
-	script := fn + "\nconsole.log(describeAnalysisSweep(" + string(payload) + "));\n"
-	path := filepath.Join(t.TempDir(), "sweep.mjs")
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	line := strings.TrimSpace(string(out))
 
-	m := analysisSweepLineRe.FindStringSubmatch(line)
-	if m == nil {
-		t.Fatalf("describeAnalysisSweep rendered %q, not \"<total> tracks — <parts>\"", line)
-	}
-	if m[1] != strconv.Itoa(counts.Total) {
-		t.Errorf("the line opens with %s tracks, want %d: %q", m[1], counts.Total, line)
-	}
 	// Every value is a distinct power of two, so a count identifies the
 	// bucket it came from and the label beside it can be checked against
 	// that bucket's.
+	isValue := map[int]bool{}
+	for _, b := range buckets {
+		isValue[b.value] = true
+	}
 	labelOf := map[int]string{}
 	sum := 0
-	for _, part := range strings.Split(m[2], " · ") {
-		pm := analysisSweepPartRe.FindStringSubmatch(part)
-		if pm == nil {
-			t.Fatalf("part %q of %q is not \"<count> <label>\"", part, line)
-		}
-		n, err := strconv.Atoi(pm[1])
-		if err != nil {
-			t.Fatalf("part %q of %q: %v", part, line, err)
-		}
+	for _, p := range parts {
 		// Every part is a bucket, as well as every bucket a part. A part the
 		// DTO does not carry renders as "0 <label>" when its read falls back to
 		// zero, which the sum cannot see (Gemini, standing in on #992).
-		if !isValue[n] {
-			t.Errorf("part %q of %q is no bucket of AnalysisSweepCounts: the line "+
-				"renders a count the server does not send", part, line)
+		if !isValue[p.count] {
+			t.Errorf("part \"%d %s\" of %q is no bucket of AnalysisSweepCounts: the line "+
+				"renders a count the server does not send", p.count, p.label, line)
 		}
-		labelOf[n] = pm[2]
-		sum += n
+		labelOf[p.count] = p.label
+		sum += p.count
 	}
 	for _, b := range buckets {
 		got, ok := labelOf[b.value]
@@ -159,6 +117,88 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 	if sum != counts.Total {
 		t.Errorf("the line's parts add up to %d of %d tracks: %q", sum, counts.Total, line)
 	}
+}
+
+// checkAnalysisSweepLabelTable stops the test unless analysisSweepLabels and
+// the buckets agree in both directions. A bucket with no label would be
+// checked against "", and a label a rename left behind describes a bucket
+// that no longer exists. Stopping here keeps either case from being reported
+// as a mislabelled line.
+func checkAnalysisSweepLabelTable(t *testing.T, buckets []sweepBucket) {
+	t.Helper()
+	isBucket := map[string]bool{}
+	for _, b := range buckets {
+		isBucket[b.name] = true
+		if _, ok := analysisSweepLabels[b.name]; !ok {
+			t.Errorf("bucket %q has no label in analysisSweepLabels: decide what "+
+				"describeAnalysisSweep calls it, and add it there", b.name)
+		}
+	}
+	for name := range analysisSweepLabels {
+		if !isBucket[name] {
+			t.Errorf("analysisSweepLabels has a label for %q, which is not a bucket "+
+				"of AnalysisSweepCounts", name)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+}
+
+// renderAnalysisSweepLine runs the shipped describeAnalysisSweep under node on
+// counts, sent through json.Marshal of the real type, and returns the line it
+// prints.
+func renderAnalysisSweepLine(t *testing.T, node string, counts AnalysisSweepCounts) string {
+	t.Helper()
+	payload, err := json.Marshal(counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := extractJSFunction(t, readFile(t, "static/app.js"), "describeAnalysisSweep")
+	script := fn + "\nconsole.log(describeAnalysisSweep(" + string(payload) + "));\n"
+	path := filepath.Join(t.TempDir(), "sweep.mjs")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// sweepPart is one part of the rendered line: a count and its label.
+type sweepPart struct {
+	count int
+	label string
+}
+
+// analysisSweepLineParts splits a rendered line into the total it opens with
+// and its parts. Anything not shaped "<total> tracks — <count> <label> · …"
+// stops the test.
+func analysisSweepLineParts(t *testing.T, line string) (int, []sweepPart) {
+	t.Helper()
+	m := analysisSweepLineRe.FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("describeAnalysisSweep rendered %q, not \"<total> tracks — <parts>\"", line)
+	}
+	total, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("total %q of %q: %v", m[1], line, err)
+	}
+	var parts []sweepPart
+	for _, part := range strings.Split(m[2], " · ") {
+		pm := analysisSweepPartRe.FindStringSubmatch(part)
+		if pm == nil {
+			t.Fatalf("part %q of %q is not \"<count> <label>\"", part, line)
+		}
+		n, err := strconv.Atoi(pm[1])
+		if err != nil {
+			t.Fatalf("part %q of %q: %v", part, line, err)
+		}
+		parts = append(parts, sweepPart{n, pm[2]})
+	}
+	return total, parts
 }
 
 // analysisSweepWithDistinctBuckets returns an AnalysisSweepCounts whose int
