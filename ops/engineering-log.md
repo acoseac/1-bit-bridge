@@ -12133,4 +12133,8 @@ checked against the code first.
   `keeperFile` with one method per step, the allowance verdict became
   `judgeAllowance`, `typedErrorIn` reads through `typedErrorInFile`,
   `typedError`, `sentinelIn` and `isErrorMethod`, and the fixture tree and
-  its expected verdicts became package-level values.
+  its expected verdicts became package-level values. SonarCloud then
+  reported no open issue on the PR.
+- **Round 3** (`cdeb23fe`): **Gemini** raised one medium, taken. The
+  only-use message said "the import" when a keeper names two packages
+  nothing else uses, and it says "the imports are" now.

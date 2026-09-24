@@ -226,7 +226,11 @@ func (k blankKeeper) ordinaryVerdict() (why, msg string) {
 		}
 	}
 	if len(alone) > 0 {
-		return keeperOnlyUse, fmt.Sprintf("`%s`: nothing in this file but a keeper uses %s, so the import is kept for nothing (imports are per file). Delete it, and the import", shape, strings.Join(alone, " and "))
+		noun, verb := "the import", "is"
+		if len(alone) > 1 {
+			noun, verb = "the imports", "are"
+		}
+		return keeperOnlyUse, fmt.Sprintf("`%s`: nothing in this file but a keeper uses %s, so %s %s kept for nothing (imports are per file). Delete it, and %s", shape, strings.Join(alone, " and "), noun, verb, noun)
 	}
 	return keeperRedundant, fmt.Sprintf("`%s` does nothing, since this file uses %s elsewhere. Delete it", shape, strings.Join(used, " and "))
 }
