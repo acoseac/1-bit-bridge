@@ -202,6 +202,20 @@ func TestAnIngestWhoseServerFailsStillReportsIt(t *testing.T) {
 	}
 }
 
+// TestAnIngestWhoseOrphanSweepFailsStillReportsIt is the orphan sweep's twin:
+// its listing fails on a live context, against a store that is closed.
+func TestAnIngestWhoseOrphanSweepFailsStillReportsIt(t *testing.T) {
+	store := openServeCancelStore(t)
+	ing := newCancelTestIngester(t, store, &cancellingSOAP{fail: errors.New("connection refused")})
+	_ = store.Close()
+
+	rec := loggingtest.Record(t)
+	l := &upnpUpstreamLifecycle{log: slog.Default(), adminState: newUPnPAdminState()}
+	l.runOneIngest(context.Background(), ing)
+
+	mustReportOnceServe(t, rec, msgOrphanSweep)
+}
+
 // TestARescanStoppedByShutdownKeepsTheServersLastResult is the ingest-stopped
 // test through the console's "Rescan now", which runs on the lifecycle's
 // context and records its own result.
