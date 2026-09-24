@@ -2851,6 +2851,37 @@ its twin.** The top list is older, shorter, and read first.
   emacs `.#name.go` lock is a dangling symlink, and one failed the guard
   with a parse error over a file no build reads. Still unseen: a title-line
   doc (`// Name.`, 29 in test files, none misattached).
+- **A test that sweeps this repo's own files decides from the NAME what it
+  opens, before it opens anything** (#993). Emacs locks a file it is
+  editing with `.#<name>` beside it. Where it can, the lock is a DANGLING
+  symlink. Where it cannot, which is always on Windows (its `filelock.c`),
+  it is a REGULAR file holding `user@host.pid:boot`. The symlink fails
+  `os.ReadFile`, and the regular file fails `parser.ParseFile` or `node`,
+  so a file-type check or tolerating ENOENT each misses one shape. A census
+  planted both shapes for eleven extensions in every tracked directory and
+  ran the suite. The symlink shape failed **19 tests in four packages** and
+  the regular-file shape 6. All were sweeps that picked files by suffix
+  alone, among them `TestEveryCitedTestNameExists` and six static-JS guards.
+  `TestNoProductionCodeLowersTheHashCost` reported a lock as a production
+  caller of `SetTestHashCost`. Each population takes its own rule. A Go
+  sweep skips a name the go tool ignores, `.` or `_` (`goToolIgnores`):
+  that file is never compiled, so a test defined in it never runs and must
+  not satisfy a citation. `internal/admin`'s static sweeps skip
+  `isEditorDetritus` (`.` or `~`) but NOT `_`, because `static/*` embeds a
+  top-level `_x.js` and it ships. The citation guard asks git whether a doc
+  is tracked BEFORE opening it; it used to discard an untracked doc only
+  after reading it, so an unreadable gitignored doc failed the run.
+  **No directory rule was widened**: the guard reads a tracked doc and a
+  tracked Go file under `.github/`, and the go tool's `.`-directory rule
+  would drop both. **Plant the census, not one probe.** A grep for
+  `filepath.WalkDir` reached 3 of the 14 files; the rest used `os.ReadDir`,
+  `filepath.Walk` or `filepath.Glob`, whose `*` matches a leading dot. A
+  probe lock named `…_test.go` passed the hash-cost guard for the wrong
+  reason, since that guard reads only non-test files. Two failures are out
+  of reach of test code. A lock at the top of an embedded directory
+  (`static/*`, `templates/*.html`, `*.tmpl`) breaks the BUILD with `cannot
+  embed irregular file`. And Go's fuzz seed-corpus reader fails on one
+  inside `testdata/fuzz/<Name>/`.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
