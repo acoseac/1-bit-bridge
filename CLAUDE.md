@@ -452,7 +452,9 @@ lost my library."
   `runServe` — the first tracked goroutine starts ~1200 lines before the end, so
   an early return leaves it nil and lets a live writer race `Store.Close()`.
   Both this wait and the watcher's are grace-BOUNDED; a wedged writer degrades
-  to a log line, never a hung exit.
+  to a log line, never a hung exit. A writer includes a goroutine whose CHILD
+  PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
+  unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
 - **Anything walking FLAC metadata blocks SEEKS past a validated PICTURE payload,
   never drains it.** The single-open FLAC path exists because a 5–25 MiB embedded
   cover crossing the wire twice per track halved scanner throughput on NAS-mounted
@@ -2242,6 +2244,35 @@ mentions across the four `ops/audit-*.md` files.
   wait to mean anything**: the adapters passed `context.Background()`, so the
   wait would have delayed `Store.Close()` behind work that was never going to
   stop.
+- **A cancel has to reach the process that WRITES, and `exec.CommandContext`
+  reaches only its direct child.** The standalone macOS Tailscale app's CLI
+  helper at `/usr/local/bin/tailscale` is a shell script that runs the app
+  WITHOUT `exec`, so the kill landed on `/bin/sh` and the app, an orphan now,
+  wrote `<dataDir>/tls` after `runServe` had returned. On a Mac running
+  tailscaled, `TestServeWiresResolvedConfigPathIntoAdminAndBackups` failed 6
+  of 116 runs in one afternoon (`TempDir RemoveAll cleanup: unlinkat
+  …/data/tls: directory not empty`). CI has no tailscaled and never saw it.
+  Every CLI call in `internal/tailscale` runs in its own process group now,
+  and `stopTreeOnCancel` kills the group. **Neither the group kill nor the
+  join is enough alone.** A child forked while the signal is delivered can
+  miss it (1 of 42 measured cancels), and it holds the output pipes, so
+  `Wait` returns only once it has exited, and the auto-pilot joined on
+  `bgWriters` with it. **Never set `Cmd.WaitDelay` there**: it unblocks
+  `Wait` by closing those pipes, which abandons exactly the process the join
+  exists to outlast. `TestServeLeavesNoTailscaleCLIRunning` drives a
+  wrapper-shaped fake through the real exec path and pins the kill;
+  `TestServeWaitsForAnInFlightTailscaleMint` holds a mint that ignores its
+  context and pins the join. Neither sees the other's defect. (#997)
+- **A cancelled pass is not a failed one, and a join makes the difference
+  visible.** `detectAndMint`'s context is cancelled by shutdown, by
+  `Disable()` and by an admin client leaving mid-"Re-mint now" (RefreshNow
+  runs on the request's context). `passCancelled` returns the snapshot it
+  found and logs and publishes nothing, because the Detect error branch
+  UNLOADS the LE cert and the MagicDNS suffix: a cancel read as a failure left
+  every `*.ts.net` client on the self-signed cert until the next good pass,
+  up to a day later. A DEADLINE is still a failure. Joining a writer makes its
+  cancelled exit path run before shutdown completes, so check what that path
+  reports and what it changes. (#997)
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
@@ -3037,6 +3068,15 @@ its twin.** The top list is older, shorter, and read first.
   `TestEveryCitedTestNameExists` lives in `cmd/bridge` and caught it on
   CI's macOS leg after a local `go test ./internal/manifest/` had passed.
   After a rename, run the package that holds the sweeps.
+- **Time an event where it HAPPENS, and match interleaved runs by an id.**
+  Both errors were made measuring #997. A "serve has returned" marker printed
+  from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the
+  drain (LIFO), so it marked the start of teardown. It put a figure into a
+  commit message and a docblock that the right marker, printed where `run()`
+  returns, then contradicted. And under `-count=N` a late line from one run
+  prints during the next, so reading lines by position mixed runs up. Tag
+  each line with something unique to its run (its data dir) and match on
+  that.
 - **A window between two statements is reproduced by PARKING a goroutine in
   it, not by stress.** The analysis pool's count-before-release window passed
   900 idle runs on the dev Mac, failed 9 in 720 under 3× CPU

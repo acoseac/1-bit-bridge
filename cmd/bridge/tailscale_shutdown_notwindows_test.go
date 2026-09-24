@@ -86,24 +86,7 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 	// released rather than left waiting past the test.
 	t.Cleanup(let)
 
-	pid := 0
-	for deadline := time.Now().Add(30 * time.Second); pid == 0; {
-		if b, err := os.ReadFile(pidFile); err == nil {
-			if pid, err = strconv.Atoi(strings.TrimSpace(string(b))); err != nil {
-				t.Fatalf("pid file %q: %v", b, err)
-			}
-			break
-		}
-		select {
-		case code := <-done:
-			t.Fatalf("serve exited with code %d before its auto-pilot started `tailscale cert`; stderr=%s",
-				code, stderr.String())
-		case <-time.After(20 * time.Millisecond):
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the auto-pilot never started `tailscale cert` within 30s; stderr=%s", stderr.String())
-		}
-	}
+	pid := waitForCLIPid(t, pidFile, done, stderr)
 
 	cancel()
 	select {
@@ -130,5 +113,31 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(certPath); err == nil {
 		t.Fatal("the `tailscale cert` serve had cancelled wrote its cert after serve returned")
+	}
+}
+
+// waitForCLIPid waits for the fake `tailscale cert` to record its pid. A
+// serve that exits first is reported with its exit code, not as a
+// timeout.
+func waitForCLIPid(t *testing.T, pidFile string, done <-chan int, stderr *safeBuffer) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+			if err != nil {
+				t.Fatalf("pid file %q: %v", b, err)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the auto-pilot never started `tailscale cert` within 30s; stderr=%s", stderr.String())
+		}
+		select {
+		case code := <-done:
+			t.Fatalf("serve exited with code %d before its auto-pilot started `tailscale cert`; stderr=%s",
+				code, stderr.String())
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 }
