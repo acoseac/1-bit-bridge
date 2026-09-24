@@ -16,9 +16,27 @@ import (
 // its parts: "12 tracks — 3 enqueued · 9 up to date".
 var analysisSweepLineRe = regexp.MustCompile(`^(\d+) tracks — (.+)$`)
 
-// analysisSweepPartRe matches one part of the line, which opens with the count
-// it contributes to the total.
-var analysisSweepPartRe = regexp.MustCompile(`^(\d+) \S`)
+// analysisSweepPartRe matches one part of the line: the count it contributes
+// to the total, then the label that says what the count is.
+var analysisSweepPartRe = regexp.MustCompile(`^(\d+) (.+)$`)
+
+// analysisSweepLabels is the label the line gives each bucket, keyed by the
+// bucket's JSON name.
+//
+// A count is only as true as its label. The defect behind this test was a
+// count under the wrong one, paths the pool already held reported as
+// "enqueued", so a line that swaps two labels has to fail even though every
+// number and the total survive the swap (CodeRabbit on #992: with numbers
+// alone it passed).
+var analysisSweepLabels = map[string]string{
+	"enqueued":      "enqueued",
+	"alreadyQueued": "already queued",
+	"upToDate":      "up to date",
+	"dsdExcluded":   "DSD",
+	"zeroByte":      "zero-byte",
+	"missing":       "unresolvable",
+	"unreadable":    "unreadable",
+}
 
 // sweepBucket is one bucket of AnalysisSweepCounts: its JSON name and the
 // value the fixture gave it.
@@ -29,8 +47,8 @@ type sweepBucket struct {
 
 // TestDescribeAnalysisSweepAccountsForEveryTrack runs the shipped
 // describeAnalysisSweep under node and requires its line to account for every
-// track: each bucket of AnalysisSweepCounts named, and the parts adding back
-// up to Total.
+// track: each bucket of AnalysisSweepCounts named, under its own label, and
+// the parts adding back up to Total.
 //
 // That is the line's own promise ("the numbers visibly account for total"),
 // and nothing pinned it. TestEveryJobsFieldIsRenderedSomewhere cannot: its
@@ -40,8 +58,10 @@ type sweepBucket struct {
 // until this test nothing tied a new field to the line that has to name it.
 //
 // Every int field but Total is filled by reflection with a distinct power of
-// two, so a bucket the line leaves out is named by its missing value, and a
-// field is covered the day it is declared. The fixture travels through
+// two, so a count identifies its bucket: one the line leaves out is named by
+// its missing value, one under another bucket's label is caught by
+// analysisSweepLabels, and a field is covered the day it is declared (it has
+// no label until someone decides it). The fixture travels through
 // json.Marshal of the real type, so a Go tag and a JS read that disagree
 // about a name fail here as well.
 func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
@@ -54,6 +74,26 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 	if len(buckets) < 7 {
 		t.Fatalf("only %d buckets found on AnalysisSweepCounts: the reflection walk "+
 			"is broken, so this test proves nothing", len(buckets))
+	}
+	// The label table and the type agree in both directions. A bucket with no
+	// label would be checked against "", and a label a rename left behind
+	// describes a bucket that no longer exists.
+	isBucket := map[string]bool{}
+	for _, b := range buckets {
+		isBucket[b.name] = true
+		if _, ok := analysisSweepLabels[b.name]; !ok {
+			t.Errorf("bucket %q has no label in analysisSweepLabels: decide what "+
+				"describeAnalysisSweep calls it, and add it there", b.name)
+		}
+	}
+	for name := range analysisSweepLabels {
+		if !isBucket[name] {
+			t.Errorf("analysisSweepLabels has a label for %q, which is not a bucket "+
+				"of AnalysisSweepCounts", name)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 	payload, err := json.Marshal(counts)
 	if err != nil {
@@ -78,25 +118,33 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 	if m[1] != strconv.Itoa(counts.Total) {
 		t.Errorf("the line opens with %s tracks, want %d: %q", m[1], counts.Total, line)
 	}
-	rendered := map[int]bool{}
+	// Every value is a distinct power of two, so a count identifies the
+	// bucket it came from and the label beside it can be checked against
+	// that bucket's.
+	labelOf := map[int]string{}
 	sum := 0
 	for _, part := range strings.Split(m[2], " · ") {
 		pm := analysisSweepPartRe.FindStringSubmatch(part)
 		if pm == nil {
-			t.Fatalf("part %q of %q does not open with a count", part, line)
+			t.Fatalf("part %q of %q is not \"<count> <label>\"", part, line)
 		}
 		n, err := strconv.Atoi(pm[1])
 		if err != nil {
 			t.Fatalf("part %q of %q: %v", part, line, err)
 		}
-		rendered[n] = true
+		labelOf[n] = pm[2]
 		sum += n
 	}
 	for _, b := range buckets {
-		if !rendered[b.value] {
+		got, ok := labelOf[b.value]
+		switch {
+		case !ok:
 			t.Errorf("%q (%d) is not in the line %q.\n"+
 				"Every bucket is a part of total: one the line does not name is tracks "+
 				"that silently stop adding up.", b.name, b.value, line)
+		case got != analysisSweepLabels[b.name]:
+			t.Errorf("%q (%d) is labelled %q in the line, want %q: %q",
+				b.name, b.value, got, analysisSweepLabels[b.name], line)
 		}
 	}
 	if sum != counts.Total {
