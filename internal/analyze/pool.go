@@ -27,6 +27,20 @@ var ErrQueueFull = errors.New("analyze pool queue is full")
 // ErrPoolClosed is returned by Enqueue after Stop.
 var ErrPoolClosed = errors.New("analyze pool is closed")
 
+// ErrDuplicateInflight is returned by Enqueue when the same source path is
+// already queued or running. The caller should treat it as accepted, with no
+// new work: the job the pool already holds produces the waveform. It is
+// distinct from nil because a caller that counts what it enqueued must not
+// count this. The serve-side sweeper re-offers every track that has no fresh
+// analysis row yet, which is every track still queued, so during a long first
+// analysis each sweep re-offers the whole backlog.
+//
+// A job stops being queued or running in the same critical section that
+// counts it (finishJob), so a caller that acts on the count never meets this
+// from the job it is reacting to. Same name and meaning as
+// transcode.ErrDuplicateInflight.
+var ErrDuplicateInflight = errors.New("analyze pool: job already queued or running")
+
 // Pool is the long-lived single-FIFO worker pool that runs offline
 // audio analysis. Unlike internal/transcode's two-channel priority
 // pool, analysis is purely background work, so a plain FIFO is the

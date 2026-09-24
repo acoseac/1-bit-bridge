@@ -988,8 +988,12 @@ type AnalysisSweepCounts struct {
 	// never folded into it: one is a path the bridge could not address, the
 	// other a file it addressed and could not read, and they have different
 	// remedies.
-	Unreadable     int  `json:"unreadable"`
-	Enqueued       int  `json:"enqueued"`
+	Unreadable int `json:"unreadable"`
+	Enqueued   int `json:"enqueued"`
+	// AlreadyQueued is how many candidates THIS sweep found already queued
+	// or running (analyze.ErrDuplicateInflight). Kept apart from Enqueued,
+	// which is only the work this sweep added.
+	AlreadyQueued  int  `json:"alreadyQueued"`
 	QueueSaturated bool `json:"queueSaturated,omitempty"`
 }
 

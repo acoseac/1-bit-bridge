@@ -214,34 +214,7 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 
 	pool := analyze.NewPool(store, p.workers, p.queueCap)
 	total := len(candidates)
-	interrupted := false
-producer:
-	for _, c := range candidates {
-		for {
-			select {
-			case <-ctx.Done():
-				interrupted = true
-				break producer
-			default:
-			}
-			err := pool.Enqueue(c)
-			if err == nil {
-				break
-			}
-			if errors.Is(err, analyze.ErrQueueFull) {
-				// Queue is draining — back off briefly and retry.
-				select {
-				case <-ctx.Done():
-					interrupted = true
-					break producer
-				case <-time.After(100 * time.Millisecond):
-				}
-				continue
-			}
-			// ErrPoolClosed shouldn't happen here; stop dispatching.
-			break producer
-		}
-	}
+	interrupted := dispatchAnalysisCandidates(ctx, pool.Enqueue, candidates)
 
 	// Drain: wait until queued + inflight reach zero (or interrupted).
 	for !interrupted {
@@ -267,6 +240,35 @@ producer:
 		return 1
 	}
 	return 0
+}
+
+// dispatchAnalysisCandidates is `bridge analyze`'s producer loop: it offers
+// each candidate to enqueue in order, backing off while the queue is full, and
+// reports whether ctx ended the dispatch. Any error it does not recognise
+// stops the dispatch.
+func dispatchAnalysisCandidates(ctx context.Context, enqueue func(analyze.AnalyzeSpec) error, candidates []analyze.AnalyzeSpec) (interrupted bool) {
+	for _, c := range candidates {
+		for {
+			if ctx.Err() != nil {
+				return true
+			}
+			err := enqueue(c)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, analyze.ErrQueueFull) {
+				// ErrPoolClosed shouldn't happen here; stop dispatching.
+				return false
+			}
+			// Queue is draining — back off briefly and retry.
+			select {
+			case <-ctx.Done():
+				return true
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	return false
 }
 
 // runAnalyzeGC removes orphan waveform sidecars — files under the
