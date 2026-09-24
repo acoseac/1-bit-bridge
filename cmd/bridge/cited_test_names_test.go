@@ -488,7 +488,11 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 //     used to open every `.md` and discard an untracked one AFTER reading
 //     it, so a gitignored local doc that could not be opened failed the
 //     run over a file it was never going to scan, and so did emacs's
-//     `.#CLAUDE.md` while CLAUDE.md was open.
+//     `.#CLAUDE.md` while CLAUDE.md was open. Nor is a doc opened whose
+//     name begins with ".", an editor's or the OS's: a tree with no `.git`
+//     (a fixture, or a source archive) has no tracked set, and a lock
+//     there is still not a doc. Not "_" as well, as the go tool would: a
+//     tracked `_name.md` is a real doc.
 //   - A Go file is opened unless the go tool ignores it (goToolIgnores): an
 //     editor's lock beside it, or a file no build compiles.
 //
@@ -498,6 +502,9 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 	switch {
 	case strings.HasSuffix(name, ".md"):
+		if strings.HasPrefix(name, ".") {
+			return false
+		}
 		return trackedMD == nil || trackedMD[filepath.ToSlash(rel)]
 	case strings.HasSuffix(name, ".go"):
 		return !goToolIgnores(name)
