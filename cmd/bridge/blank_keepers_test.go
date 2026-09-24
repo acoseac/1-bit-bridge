@@ -457,16 +457,27 @@ func (kf *keeperFile) text(n ast.Node) string {
 // `_ = url.URL{Scheme: "https"}` instead, which is the safe direction.
 func (kf *keeperFile) namesIn(e ast.Expr, scope localScopes) (pkgs map[string]int, others bool) {
 	pkgs = map[string]int{}
-	ast.Inspect(e, func(n ast.Node) bool {
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
 		if name, ok := kf.importAt(n, scope); ok {
 			pkgs[name]++
 			return false
 		}
-		if id, ok := n.(*ast.Ident); ok && types.Universe.Lookup(id.Name) == nil {
-			others = true
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			// Sel names a field or method, never a declaration in scope, so
+			// `(*bytes.Buffer).Len` and `http.DefaultClient.Do` name only
+			// their import (CodeRabbit on #996).
+			ast.Inspect(x.X, visit)
+			return false
+		case *ast.Ident:
+			if types.Universe.Lookup(x.Name) == nil {
+				others = true
+			}
 		}
 		return true
-	})
+	}
+	ast.Inspect(e, visit)
 	return pkgs, others
 }
 
@@ -962,13 +973,21 @@ func a() { _ = strconv.IntSize }
 
 func b() { _ = strconv.IntSize }
 `,
-	// A predeclared name (nil) is not a local, so a statement naming one
-	// beside a package is still a keeper.
+	// A predeclared name (nil) is not a local, and a selector's field or
+	// method name names no declaration at all, so each statement below
+	// names only an import and is a keeper.
 	"keep/statements.go": `package keep
 
-import "bytes"
+import (
+	"bytes"
+	"net/http"
+)
 
-func c() { _ = (*bytes.Buffer)(nil) }
+func c() {
+	_ = (*bytes.Buffer)(nil)
+	_ = (*bytes.Buffer).Len
+	_ = http.DefaultClient.Do
+}
 `,
 	"keep/local.go": `package keep
 
@@ -1129,6 +1148,8 @@ var keeperFixtureVerdicts = []string{
 	"keep/scope.go: path.Join: " + keeperRedundant,
 	"keep/shadow.go: path.Join: " + keeperOnlyUse,
 	"keep/statements.go: (*bytes.Buffer)(nil): " + keeperOnlyUse,
+	"keep/statements.go: (*bytes.Buffer).Len: " + keeperOnlyUse,
+	"keep/statements.go: http.DefaultClient.Do: " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 }
