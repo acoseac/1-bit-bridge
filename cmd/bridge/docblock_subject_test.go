@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -158,9 +159,9 @@ const testDocVerbCoverageFloor = 0.90
 // all-capitals one ("DST", "GET", "MP4") are left out: each could be either.
 // On the 2026-09-24 census (#991), every opener of those two shapes that
 // nothing declared and that a recognised verb followed was prose, 10 of 10.
-// Brand names are the known cost: "iOS", "SQLite" and "UPnP" are
-// identifier-shaped. None of them opened a doc with a recognised verb that
-// day.
+// Brand names, tool names and units are the known cost: "iOS", "SQLite",
+// "sox" and "dBFS" are identifier-shaped. None of them opened a doc with a
+// recognised verb that day.
 func identifierShaped(word string) bool {
 	if word == "" {
 		return false
@@ -170,6 +171,16 @@ func identifierShaped(word string) bool {
 	}
 	return strings.IndexFunc(word, unicode.IsLower) >= 0 &&
 		strings.IndexFunc(word[1:], unicode.IsUpper) >= 0
+}
+
+// namesNothingDeclared reports whether a doc comment's opening word names
+// something nothing declares. The word must be identifierShaped, no package
+// in the doc's directory may declare it (declaredHere), and it must not be
+// one of Go's predeclared identifiers, which the language itself declares:
+// "nil means …" and "error is …" name something real. No doc in this tree
+// opens with a predeclared name and a recognised verb today.
+func namesNothingDeclared(word string, declaredHere map[string]bool) bool {
+	return identifierShaped(word) && !declaredHere[word] && types.Universe.Lookup(word) == nil
 }
 
 // TestNoDocblockNamesAnotherDeclaration.
@@ -243,14 +254,17 @@ func identifierShaped(word string) bool {
 // a name nothing ever had ("recordIngest", "pickVoted"), and from import
 // keepers documented as helpers that never existed ("ensurePathExists"). The
 // census behind this arm found 25 across the tree. It reads the same opener
-// as the first arm, and two conditions keep it to identifiers. The opening
-// word must be identifierShaped, because "It is …", "Removal is …" and
-// "DST is …" open with words nothing declares either. And no package in the
+// as the first arm, and namesNothingDeclared keeps it to identifiers. The
+// opening word must be identifierShaped, because "It is …", "Removal is …"
+// and "DST is …" open with words nothing declares either. No package in the
 // doc's DIRECTORY may declare it, not merely none its file sees, because an
 // external `foo_test` file's prose names `foo`'s declarations
-// (LooksLikeSnapshotDir, in internal/backup). On the unfixed tree that left
-// 20 findings, and all 20 named nothing that exists. The other five follow
-// the name with a dash, a colon or a stray word
+// (LooksLikeSnapshotDir, in internal/backup). And it must not be one of Go's
+// predeclared names ("nil means …"). A name only ANOTHER directory declares
+// is still reported: a doc opens with its own subject, and one doc in the
+// tree opens with such a name, by coincidence and without a verb. On the
+// unfixed tree that left 20 findings, and all 20 named nothing that exists.
+// The other five follow the name with a dash, a colon or a stray word
 // ("Test_FileHandler_UpstreamOffline_503 — …"), which neither arm reads.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)
@@ -427,7 +441,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 		other, ok := lookup(sc, m[1])
 		if !ok {
-			if identifierShaped(m[1]) && !declaredInDir[sc.dir][m[1]] {
+			if namesNothingDeclared(m[1], declaredInDir[sc.dir]) {
 				p.undeclared++
 				dir, _ := filepath.Rel(root, sc.dir)
 				t.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
@@ -525,8 +539,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 // TestIdentifierShapedTellsNamesFromSentenceWords pins identifierShaped's
 // verdict on the words the census sorted. The two shapes that can open an
 // English sentence stay out: a capitalised word with no other capital, and
-// an all-capitals one. Brand names are identifier-shaped, which is the cost
-// its docblock names.
+// an all-capitals one. Brand names, tool names and units are
+// identifier-shaped, which is the cost its docblock names.
 func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
 	for _, c := range []struct {
 		word string
@@ -554,14 +568,47 @@ func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
 		{"MP4", false},
 		{"A", false},
 		{"", false},
-		// Brand names: identifier-shaped, and no opener of this shape has
-		// been prose yet.
+		// Brand names, tool names and units: identifier-shaped, and no opener
+		// of this shape has been prose yet.
 		{"iOS", true},
 		{"SQLite", true},
 		{"UPnP", true},
+		{"sox", true},
+		{"dBFS", true},
 	} {
 		if got := identifierShaped(c.word); got != c.want {
 			t.Errorf("identifierShaped(%q) = %v, want %v", c.word, got, c.want)
+		}
+	}
+}
+
+// TestNamesNothingDeclaredAsksTheDirectoryAndTheLanguage pins the two
+// conditions namesNothingDeclared adds to identifierShaped, against a
+// synthetic directory. The tree cannot pin them: on a clean tree the arm has
+// nothing to report, and the one directory-declared opener it holds today
+// (LooksLikeSnapshotDir) lasts only as long as that doc's wording.
+func TestNamesNothingDeclaredAsksTheDirectoryAndTheLanguage(t *testing.T) {
+	here := map[string]bool{"pick": true, "LooksLikeSnapshotDir": true}
+	for _, c := range []struct {
+		word string
+		want bool
+	}{
+		{"pickVoted", true},
+		{"fanout", true},
+		// Declared by a package in the directory.
+		{"pick", false},
+		{"LooksLikeSnapshotDir", false},
+		// Declared by the language.
+		{"nil", false},
+		{"iota", false},
+		{"error", false},
+		{"len", false},
+		{"any", false},
+		// Not identifier-shaped, whatever declares it.
+		{"It", false},
+	} {
+		if got := namesNothingDeclared(c.word, here); got != c.want {
+			t.Errorf("namesNothingDeclared(%q) = %v, want %v", c.word, got, c.want)
 		}
 	}
 }
