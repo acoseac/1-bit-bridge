@@ -12403,10 +12403,11 @@ in `tailscaleAutoPilot.Start`. That was half of it.
   `os.Process` orders its signals against the reap and answers
   `ErrProcessDone`; a bare `kill(-pid)` is not. `Signal(0)` through
   `os.Process` first closes all but the gap between two adjacent calls.
-  **Not pinned by a test**: it differs from the bare kill only when a
-  reaped pid is reused in that gap. The fallback to `Process.Kill` after a
-  failed group kill was dropped: a group whose members cannot be signalled
-  has a leader that cannot be either.
+  The window cannot be hit by timing, so the test drives it: run a
+  command to completion, then call its Cancel, and see through the
+  `killGroup` variable that no group kill is sent. The fallback to
+  `Process.Kill` after a failed group kill was dropped: a group whose
+  members cannot be signalled has a leader that cannot be either.
 - **Windows keeps the default kill.** `resolveBinary` finds
   `tailscale.exe`, the CLI itself, so killing the direct child stops the
   writer. A `.cmd` wrapper on PATH would need a job object; nothing ships
@@ -12444,6 +12445,7 @@ Red on `8d9dff4b` (seam and tests, no fix), green on the fix:
 | test | pins |
 |---|---|
 | `TestCancelStopsTheWholeCLIProcessTree` (internal/tailscale, `!windows`) | Detect and MintCert against a wrapper-shaped fake return within 5 s of the cancel, and the inner pid is gone |
+| `TestCancelNeverSignalsTheGroupOfAReapedLeader` (internal/tailscale, `!windows`) | a Cancel after the leader was reaped answers `ErrProcessDone` and sends no group kill (added with the consult) |
 | `TestServeLeavesNoTailscaleCLIRunning` (`!windows`) | the same shape on PATH, driven by runServe with no seam: after runServe returns, the `tailscale cert` it started is dead and writes nothing |
 | `TestServeWaitsForAnInFlightTailscaleMint` | runServe does not return while a mint that ignores its context runs, and the mint's write lands before it returns |
 | `TestServeGivesUpOnAWedgedTailscaleMintAfterTheGrace` | a mint that never returns costs the grace and the timeout line, never a hung exit |
@@ -12465,6 +12467,10 @@ apply exactly once:
 | NC8 | the minted line to `io.Discard` | the stdout test |
 | NC9 | bgWriters grace of an hour | the wedged-mint test (at its own 15 s bound) |
 | NC10 | grace expiry prints nothing | the wedged-mint test |
+| NC11 | no `os.Process` check before the group kill | the reaped-leader test only |
+
+NC1 to NC3 were run again after the consult changed `Cancel`, with the
+same result.
 
 Not separately pinned: the renewer's join. Its mint runs on a 24 h tick,
 and `Start` joins both goroutines the same way.
