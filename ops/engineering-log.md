@@ -11803,3 +11803,519 @@ not a citation, never pass one, and the tree has no instance. Before
 editing, every ASCII-scope statement in the change was grepped: CLAUDE.md's
 statement of the rule and the Consult note were updated, and the census
 table's row now says it measured the ASCII form. The rest are history.
+
+## 2026-09-24 — every blank keeper goes, and a sweep test keeps them gone (#996)
+
+#994 recorded the rule ("An import keeper is dead code, never
+documentation") and deleted the five keepers whose docs named helpers that
+never existed. It left seven top-level `var _ = pkg.X` whose docs are
+imperative ("silence unused-import warning …") or absent, and the task that
+opened this PR listed them with their per-file counts. The task counted the
+`var _ = pkg.X` shape only. A census of every blank reference found seven
+more, and history showed the class had already come back once after a
+cleanup.
+
+### What the census measured
+
+A scratch AST tool listed every blank reference whose value only names
+things: a top-level `var _ = E` with no declared type, and `_ = E` or
+`var _ = E` in a function, where E is identifiers, selectors, literals,
+composite literals of those, or a conversion to a type that cannot be a
+function. For each import E names it counted the file's other selector
+uses of that import. On main at `2135cbf2`:
+
+| site | keeper | other uses in the file | verdict | doc |
+|---|---|---|---|---|
+| cmd/bridge/update.go:193 | `_ = version.ServerVersion` | 0 outside keepers | only use | none |
+| cmd/bridge/update.go:200 | `_ = version.ServerVersion` | 0 outside keepers | only use | "silence unused-import warning if version isn't referenced elsewhere" |
+| internal/admin/handlers_api.go:3484 | `var _ = (*manifest.Store)(nil)` | 1 | redundant | "Statically assert the Manifest store has the helpers we need. A missing method here will fail the build" |
+| internal/admin/handlers_settings_network_test.go:280 | `_ = config.TailscaleModeDisabled`, inside a never-called `var _ = func() {…}` | 0 | only use | "Silence "declared but not used" via no-op consume." |
+| internal/admin/shutdown_test.go:131 | `_ = http.ErrServerClosed` | 0 | only use | "Avoid hijacking the `http` import being unused." |
+| internal/api/files_test.go:615 | `var _ = fmt.Sprintf` | 1 | redundant | "quiet unused-import warning — keeps fmt alive for future assertion helpers." |
+| internal/api/gzip_test.go:350 | `_ = httptest.NewRequest` | 0 | only use | "silence unused import if test changes" |
+| internal/api/upnp_proxy_test.go:255 | `var _ = io.Copy` | 0 | only use | "silence "imported but unused" if a future test goes through a different path." |
+| internal/dlna/content_directory.go:1378 | `var _ = strings.Builder{}` | 13 | redundant | "Quiet "imported but unused" if a future test removes the only call site …" |
+| internal/dlna/file_handler.go:364 | `var _ = path.Base` | 0 | only use | "Avoid `path` import being flagged if a future refactor uses `filepath` exclusively …" |
+| internal/manifest/extractors_test.go:1283 | `var _ = atomic.Bool{}` | 0 | only use | "Suppresses unused-import warning when running individual tests …" |
+| internal/manifest/extractors_test.go:1284 | `var _ = time.Now` | 24 | redundant | the same doc |
+| internal/tailscale/tailscale.go:422 | `var _ = logger` | (a local name) | keeps nothing | "silence unused-import warning if `logger` ends up being reorg'd later." |
+| internal/tls/manager_test.go:48 | `var _ = time.Hour` | 1 | redundant | "silence unused-import warning; time is referenced in tests below …" |
+| internal/tsnet/tsnet_test.go:379 | `var _ = errors.Is` | 0 | allowed | "… Don't remove until typed errors land." |
+
+The task's seven counts all held (fmt 1, io 0, strings 13, path 0, atomic
+0, time 24, time 1). The seven it did not list:
+
+- **Four statement keepers**, which no census before this one had counted:
+  update.go's pair, shutdown_test.go's and gzip_test.go's. The pair in
+  update.go kept `internal/version` imported between them. Nothing else in
+  the file used it, so each was the other's only other "use".
+- **A statement keeper inside a compile-time type pin**:
+  handlers_settings_network_test.go's `var _ = func() {…}` assigns
+  `func(bool) {}` and `func() {}` to the two Deps fields, then consumed
+  `config.TailscaleModeDisabled`, the only use of `config` in the file.
+- **A conversion**, `var _ = (*manifest.Store)(nil)`. Its doc claims a
+  method check, and a nil conversion checks only that the type exists.
+  Every method the admin handlers call is checked at its call site. The
+  keeper was `manifest`'s only use in the file when it was written (the
+  admin console's first commit, 3b56bb7e) and is redundant now that
+  `buildComposition` takes `[]manifest.FormatGroup`.
+- **`var _ = logger`** keeps a package-level var, not an import. Go never
+  reports an unused package-level declaration, so it silenced nothing in
+  any build. The logger itself had never logged a line: #102 created it and
+  its keeper in the same commit, and `git log -G` finds no log call on it
+  since.
+
+### History
+
+The same tool ran over 37 trees sampled every 30 commits along main's
+first-parent history (`git archive <sha> | tar -x`, 2026-04-23 to
+2026-09-24), and so did the final guard's `findBlankKeepers`, through a
+throwaway probe test. They agree tree by tree: 699 sightings, 24 distinct
+keepers, counting #294's keeper once although its test file was renamed
+(`handlers_settings_pr4_test.go` became
+`handlers_settings_network_test.go`).
+
+- **Introduced**: 13 in April, 8 in May, 2 in June, none in July or
+  August, and one in September, #825's `var _ = io.Discard` in
+  internal/admin/console_smoke_test.go (2026-09-02). The per-tree count
+  peaked at 23.
+- **Removed by hand before this PR, three times, each time within its own
+  scope**: c062ac95 (2026-07-21) removed #204's `var _ = context.TODO`
+  from internal/transcode/batch.go. #855 (2026-09-06, a LOUPE of
+  cmd/bridge) removed three there: `os.Stdin` and `json.Marshal` in
+  doctor.go, `time.Time{}` in upnp_upstream_admin.go. It wrote no rule and
+  no guard, and it missed #825's, which had landed in internal/admin four
+  days earlier. #994 removed five. This PR removes the other fourteen and
+  leaves the tsnet one.
+- **A keeper's premise decays without anything noticing.** At introduction
+  21 of the 24 were their import's only use. Two of those, `strings` in
+  content_directory.go and `manifest` in handlers_api.go, became redundant
+  as their files grew, and from then on they kept nothing even by their
+  own reasoning. Three were redundant from the day they were written
+  (`time.Now`, `time.Hour`, `context.TODO`).
+- **Precision**: every one of the 24 was a keeper. Its doc says silence,
+  quiet, keep or keepalive, names a helper that never existed, or claims a
+  check it does not make, and the undocumented ones are statement keepers
+  or sit beside a documented one.
+- **The other blank forms never held one.** Across the 37 trees there is
+  no `var _ T` without a value, no `const _`, no `type _`, no `func _`, no
+  multi-name blank spec and no top-level `var _ = f(x)`. There are 7
+  distinct typed `var _ I = impl` specs, all interface assertions. So the
+  sweep reads the two keeper forms and nothing else.
+
+### Decisions
+
+- **Every keeper goes except tsnet's, and each import goes when nothing
+  else in its file uses it**: io (upnp_proxy_test.go), path
+  (file_handler.go), sync/atomic (extractors_test.go), internal/version
+  (update.go), net/http (shutdown_test.go), net/http/httptest
+  (gzip_test.go), internal/config (handlers_settings_network_test.go) and
+  internal/logging (tailscale.go). `go vet` of the seven touched packages
+  is clean on all six `make build-all` targets. vet compiles the test files,
+  so each deleted import was unused.
+- **internal/tailscale loses the logger too.** Keeping `var logger`
+  without its keeper would leave a declaration nothing uses and no tool
+  here reports. A package that needs to log adds the one line back.
+- **handlers_settings_network_test.go keeps its `var _ = func() {…}`.**
+  Only the keeper statement inside it and the `config` import went. The
+  func literal is a compile-time type pin, redundant with the six
+  assignments to the same fields in the same file's tests. It is a
+  legitimate idiom and not a keeper, and the sweep never reads a func
+  literal.
+- **extractors_test.go's doc rested on a false premise**: "Suppresses
+  unused-import warning when running individual tests". `-run` selects
+  tests after the whole package has compiled, and imports are per file.
+- **A sweep test, because the class regrows and cleanups stay scoped.**
+  `TestNoBlankKeepers` walks the tree the go tool reads (vendor, testdata,
+  node_modules, nested modules and `goToolIgnores` names skipped, as the
+  other sweeps do). It reports both keeper forms, saying for each import
+  whether the file uses it outside its keepers. Two keepers of one package
+  are not each other's use.
+- **The sweep reads four shapes, the ones keepers took, and nothing
+  else** (`keeperName`): `N`, `N{}`, `&N{}` and `(*N)(nil)`. N is an
+  import selector `pkg.X` on an unshadowed import or, in the top-level form
+  only, a bare identifier of the file's own package. All 24 historical
+  keepers took `N`, `N{}` or `(*N)(nil)`, and `&N{}` is the natural fourth
+  spelling. A general "E only names things" classifier came first. Each
+  review round found a construct it misread: an operator that panics, a
+  compile-time assertion in an array length (through a call, a named
+  constant, a nested field), a call through a function pointer spelled like
+  a conversion (see **Review**). Without the type checker the syntax cannot
+  tell those apart, and the history says keepers do not take those forms,
+  so none is read. A keeper spelled any other way goes unseen, which is the
+  safe direction.
+- **`(*N)(nil)` carries the one ambiguity**: it is also a call through a
+  pointer-to-function variable with a nil argument. Measured 2026-09-24,
+  no exported variable of that type is declared in this module, the Go
+  standard library or any module dependency. The second consult suggested
+  dropping the shape. It stays on that measurement, because it is the shape
+  whose doc claimed a static assertion.
+- **The statement form is included, for imports only.** Five of the
+  fourteen were statements, and a guard reading only the top-level form
+  would have passed all five. A statement naming a local (`_ = cfg`) is how
+  Go code marks it used, and the tree has 23 of them (NW8). A selector names
+  import `x` only where no local named `x` is in scope, and a local is
+  scoped as Go scopes it (`localScopesIn`): from the end of its declaring
+  statement to the end of its innermost block, and a parameter over its
+  function's body. The first draft took an `x` declared anywhere in the
+  function for a local everywhere in it (round 2).
+- **The local form reads a bare identifier, at the top level only**
+  (tailscale's `logger`). `var _ = cfg.Name` selects through a
+  package-level variable, which can be a nil pointer. It is not read at all
+  in a file with a dot import, where a bare name may be the import's.
+  cgo's pseudo-package `C` is never read as an import, because that import
+  carries the preamble's `#cgo` directives and deleting it is never the
+  right advice. The tree has no dot import and no cgo (round 8).
+- **Existence checks are reported deliberately.** `(*T)(nil)` can check at
+  most that a name exists, and every real use of the name makes that
+  check. A name nothing uses needs none. Go states a compile-time assertion
+  in the typed form (`var _ I = (*T)(nil)`), and the sweep never reads it.
+- **Import names follow the package-name convention**: the explicit name,
+  else the last path element without a "/vN" element or ".vN" suffix, a
+  "go-" prefix or a "-go" suffix. Checked against `go list` on darwin, linux
+  and windows: it matches the package name for 161 of the 162 paths the
+  tree imports. The one it misses, `github.com/prometheus/client_model/go`
+  (package `io_prometheus_client`), is imported under an explicit name
+  everywhere.
+- **The allowance stands on its stated condition, not its path.**
+  `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while four
+  things hold: the keeper still exists, its doc still says "Don't remove
+  until typed errors land.", `typedErrorIn` finds no typed error in
+  internal/tsnet's non-test files, and the file uses `errors` nowhere
+  else. `typedErrorIn` looks for a sentinel (a var or const named ErrX or
+  errX, or initialised by errors.New, errors.Join, fmt.Errorf or another
+  package's sentinel), an `Error() string` method, and an error interface
+  (one embedding `error` or declaring `Error() string`, as `net.Error`
+  does), which `errors.As` matches. The fourth check
+  covers typed errors arriving by another route: once the `errors.Is` check
+  is written, the keeper keeps nothing. The premise was re-checked first:
+  internal/tsnet still returns `errors.New` strings from Status and
+  ListenTLS, and tsnet_test.go matches them by substring at five sites. Each
+  failed check is reported, and so is an entry whose keeper is gone. An
+  allowed keeper is logged on every run.
+
+### Tests and controls
+
+Red-first, with the final guard file in a throwaway worktree of
+`2135cbf2`: exactly the fourteen above, each with the verdict in the
+census table, and the tsnet keeper logged as allowed. After the deletions
+the whole-tree run passes in 0.3 s.
+
+`TestBlankKeeperScanOnFixtures` runs `scanBlankKeepers`, with the real
+`allowedKeepers`, over synthetic trees under a root named `clone[1]`. Each
+of the four shapes is there in both forms. So are both verdicts, the
+grouped spec, the in-function `var`, the local keeper, the two-keeper pair
+and the three import-name conventions. The scoping cases are there too: a
+keeper above a later local of its import's name, that local's own
+right-hand side counted as a use, and a local shadowing the import in each
+way one is declared (`:=`, parameter, range variable, `var` statement,
+func-literal parameter). So is every shape the whitelist refuses that a
+round of review raised: operators, a type argument, literals of an
+unnamed type or with elements, a conversion to an unnamed type, a method
+expression, a selector chain, a star call with a non-nil argument, a named
+array length, compile-time size assertions, four statements that can
+panic, a receive, calls, literals, a predeclared name, locals and a
+selector through a package variable. Every skip rule is there (a `.#lock`
+that is not Go, which would fail the parse if opened, `_dir`, testdata,
+vendor, node_modules, a nested module). So are a dot-importing file, two
+cgo files (a quoted and a raw-string import), ten allowance states, and a
+case that writes the whole tree with CRLF endings. Controls on the round-9
+commit (`9f49ab2f`), each `-count=1`, each restored with `git checkout` and
+checked clean:
+
+| control | mutation | tree | fixture |
+|---|---|---|---|
+| NC0 | none | green | green |
+| NC3 | typed specs read | red: the seven interface assertions | red |
+| NC4a | a local covers its whole declaration (the first draft) | green | red |
+| NC4b | a local's scope starts at its statement's start | green | red: the right-hand side stops counting |
+| NC4c | no locals declared | green | red |
+| NC4d | parameters not scoped | green | red |
+| NC4e | range variables not scoped | green | red |
+| NC4f | `var` statements not scoped | green | red |
+| NC4g | func-literal parameters not scoped | green | red |
+| NC4h | a block ends where it starts | green | red |
+| NC5 | the `_ = E` statement arm removed | green | red |
+| NC6 | the in-function `var _ = E` arm removed | green | red |
+| NC7 | a keeper's use counts as a use | green | red: the pair reads redundant |
+| NC8 | the condition never consulted | green | red: the six met cases |
+| NC9 | the doc condition not checked | green | red: that case |
+| NC10 | a stale allowance not reported | green | red: that case |
+| NC11 | the `Error() string` arm off | green | red: that case |
+| NC11b | an interface embedding `error` not a typed error | green | red: that case |
+| NC11c | an interface declaring `Error() string` not a typed error | green | red: that case |
+| NC12a | the sentinel-name arm off | green | red: that case |
+| NC12b | the sentinel-initialiser arm off | green | red: its two cases |
+| NC12c | another package's sentinel not read | green | red: that case |
+| NC13 | `scanBlankKeepers` reports nothing | **green** | red |
+| NC14 | nested modules walked | green | red |
+| NC14b | vendor walked | green | red |
+| NC14c | node_modules walked | green | red |
+| NC14d | testdata walked | green | red |
+| NC15 | `.`/`_` directories walked | green | red |
+| NC16 | `.`/`_` files opened | green | red: the lock fails the parse |
+| NC17a | ".v3" kept in an import name | green | red |
+| NC17b | "go-" kept | green | red |
+| NC17c | "/v2" taken as the name | green | red |
+| NC18 | the real entry's condition text drifts | red: condition-dropped | red |
+| NC19 | the walk reads no file | red: the file floor | red |
+| NC24 | a served allowance still allowed | green | red: that case |
+| NW1 | `N{}` not read | green | red |
+| NW2 | `&N{}` not read | green | red |
+| NW3 | `(*N)(nil)` not read | green | red |
+| NW4 | a literal with elements read | green | red |
+| NW5 | `(*N)(x)` read for any x (the round-6 guard) | green | red: `(*settings.Hook)(0)` reported |
+| NW6 | a selector on anything read | green | **green** |
+| NW7 | a predeclared identifier read as a name | green | red |
+| NW8 | the statement form reads a bare local | red: 23 statements like `_ = cfg` | red |
+| NW9 | the local form reads a selector | green | red: `cfgVar.Field` reported |
+| NW10 | the local form off | green | red |
+| NW11 | any call read, its callee taken for N | red: 141 calls like `_ = os.Remove(path)` | red |
+| NW12 | the local form read in a dot-importing file | green | red: `Mutex{}` reported |
+| NW13 | cgo's `"C"` read as an import | green | red: both cgo files reported |
+| NW13b | `"C"` compared quoted (the round-8 check) | green | red: the raw-string import reported |
+| NW14 | the statement form skips `N{}` | green | red: `bytes.Buffer{}` missed |
+| NC25 | no CRLF normalisation | green | **green** |
+| NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the six met cases |
+
+Five of the 51 turn the tree red, and NC13, the one that deletes the
+report, is not among them. That is #994's lesson again, and why the fixture
+drives the same `scanBlankKeepers` the tree test does. NW11's 141 tree
+findings are the measure of what the call refusal is worth on real code.
+Two controls leave the fixture green, and neither is a gap. NW6 widens
+`isName` to a selector on any expression, and `keep` still refuses the
+chain, because `importAt` only names an import through a bare identifier:
+the check is stated twice on purpose, once as keeperName's contract. NC25
+drops the CRLF normalisation, and the scan is CRLF-safe without it
+(`strings.Fields` and go/scanner both drop the `\r`, CodeRabbit's own
+premise). The CRLF case pins that property, not the mechanism. NC15 stays
+green on the tree although three leftover `.claude/worktrees/` checkouts
+hold pre-fix keepers: each carries its own go.mod, so the nested-module
+rule skips them too. Rounds 1 to 6 ran controls against the classifier
+that round 7 removed (up to 55 of them). The shapes those controls pinned
+are now quiet fixture cases.
+
+### Consult
+
+A direct consult (`consult.py`, gemini-3.8-flash, the guard file as
+context) was asked to break the sweep: legitimate idioms it would report,
+locals its scope rule would report, gaps in `typedErrorIn`. Each answer was
+checked against the code first.
+
+- **Taken: a map key that is a local.** The first draft skipped every
+  identifier key in a composite literal as a struct field name. In a map
+  literal the key is a variable, so
+  `_ = map[string]int{key: http.StatusOK}` was reported, and deleting it
+  leaves `key` unused, which fails the build. Without types a field key and
+  a variable key look alike, so keys now count as names. The statement form
+  misses `_ = url.URL{Scheme: "https"}` instead, which is the safe
+  direction. The fixture has both, and NC21 is the first draft.
+- **Taken in part: sentinels by alias.** `var closed = net.ErrClosed` and an
+  `errors.Join` initialiser now count. A custom constructor was already
+  caught by the name (`var ErrNotStarted = newError(…)` is the name arm's
+  fixture). An unconventionally named sentinel from a custom constructor is
+  still unseen, and the fourth check covers the moment the test that needs
+  it is written.
+- **Declined: a method-existence pin**, `var _ = (*http.Request).Context`.
+  It is reported on purpose, like `(*T)(nil)`: every real use of the
+  method checks that it exists, and the typed form states a signature
+  assertion.
+- **Declined: a generic instantiation**, `var _ = pkg.Set[int]{}`, on the
+  same ground. Every real use of the instantiation checks the constraint.
+- **Declined: a deliberate racy read** of another package's global in a
+  test (`_ = worker.ActiveCount`). No such read appears in the 37 trees. If
+  one is ever deliberate, `allowedKeepers` can carry it with its condition.
+
+- **A second consult, at round 7, on the design.** It was asked whether a
+  whitelist of the measured shapes should replace the classifier, and to
+  break the four shapes. It agreed that syntax cannot resolve Go's
+  call-or-conversion and index-or-instantiation ambiguities without the
+  type checker, and that a missed keeper is benign while a false positive
+  breaks CI. It said to keep `N`, `N{}` and `&N{}` and to add no operator,
+  method expression or instantiation. It suggested dropping `(*N)(nil)` as
+  the one shape that can match a real call, and gave the falsification
+  test: look for pointer-to-function variables. The measurement found none
+  in the module, the standard library or any dependency, so the shape
+  stays.
+
+### Process notes
+
+- **The first draft counted a keeper as a use.** Each of update.go's pair
+  saw the other and read "redundant", although deleting both leaves
+  `internal/version` unused. The red-first output showed it; no test did.
+  The pair is now a fixture, and NC7 reproduces the draft.
+- `writeFixtureFile` already exists in cmd/bridge (gc_mass_orphan_test.go,
+  a different signature). vet caught the collision, and the fixture helper
+  is `writeKeeperFixture`.
+- **Every PR read was unpaginated until round 9.** `gh api` returns 30 a
+  page. By round 7 this PR had more reviews than that, so from then on the
+  newest reviews and comments were never fetched. The two findings it hid
+  were small. The false "Gemini is out of quota" it produced went further:
+  into the report, this log, the PR body and a PR comment. The GraphQL
+  `reviewThreads` query that found it is the check to run before any
+  merge, and it is a connection too: complete only once
+  `pageInfo.hasNextPage` is false. Its first draft here said it "returns
+  every thread", in the note about pagination (CodeRabbit, round 10).
+- Three controls failed to build before they ran (NC20, NW3, NW5): each
+  mutation left a variable or import unused. Each was rebuilt and then went
+  red. A control that does not build is invalid, never a pass.
+
+### Review
+
+Rounds 1 to 6 describe the classifier that round 7 replaced. The
+functions they name (`onlyNames`, `namesIn`, `typeOnlyNames`, `panicFree`,
+`convertsToArray`, `declaredWithin`) no longer exist, and their "now" is
+that round's.
+
+- **Round 1** (`2115be9a`): **Gemini** raised two mediums, both taken.
+  `typedErrorIn` globbed `filepath.Join(root, dir, "*.go")`, which puts the
+  checkout's own path into the pattern. Under a clone at `…/my[repo]/` it
+  matches nothing and the tsnet condition reads "unmet" for ever: a silent
+  fail-open. Red-first: with the fixture root moved under `clone[1]` and the
+  `Glob` still in place, exactly the four cases that must see a typed error
+  failed. It lists the directory with `os.ReadDir` now, and the fixture
+  root keeps the brackets. The second finding was that the use-count pass
+  ranged over the keepers by value and relied on the map field being a
+  reference; it indexes now. The repo's two other `filepath.Glob` calls
+  were checked for the same shape. `TestEveryBackgroundGoroutineDrainsOnCleanup`
+  globs its own directory, and under such a path it fails loudly on its
+  floors rather than passing, so it was left. The DSD render test globs a
+  `t.TempDir()`.
+- **CodeRabbit** did not start on its own. On #995 its walkthrough came two
+  minutes after the PR opened; here nothing came for eighteen, and
+  `@coderabbitai review` started it at once (not a plan-limit pause: it
+  reported five reviews available).
+- **Round 2** (`b146a0db`): **CodeRabbit** raised two minors, both taken,
+  and **SonarCloud** five go:S3776, all fixed. The first was about scope:
+  a selector counted as naming import `x` only if the enclosing
+  declaration declared no `x` anywhere, so an `_ = path.Join` above a later
+  `path := …` was taken for a local and the keeper missed. That was the
+  documented trade-off (miss rather than misreport), and the finding
+  removed it rather than accepting it: `localScopesIn` scopes each local
+  from the end of its declaring statement to the end of its innermost
+  block, so `path := path.Base(p)` still reads the import on its right.
+  NC4a is the first draft, and NC4b a scope that starts at the statement
+  instead of after it. The tree was re-scanned under the stricter rule and
+  stayed clean, so the approximation had hidden nothing. The second finding
+  was that the scan read Go source without normalising CRLF, which CLAUDE.md
+  requires of anything that does. It was CRLF-safe by accident (see NC25);
+  both readers normalise now. The five complexity findings (20, 81, 39,
+  43, 32 against 15) were resolved by structure: the file scan became a
+  `keeperFile` with one method per step, the allowance verdict became
+  `judgeAllowance`, `typedErrorIn` reads through `typedErrorInFile`,
+  `typedError`, `sentinelIn` and `isErrorMethod`, and the fixture tree and
+  its expected verdicts became package-level values. SonarCloud then
+  reported no open issue on the PR.
+- **Round 3** (`cdeb23fe`): **Gemini** raised one medium, taken. The
+  only-use message said "the import" when a keeper names two packages
+  nothing else uses, and it says "the imports are" now.
+- **Round 4** (`afc3adfb`): **Gemini** raised one medium, taken with a
+  correction. `onlyNames` refused every unary and binary expression, so
+  `var _ = &sync.Mutex{}` and `var _ = time.Second * 5` went unseen. The
+  suggestion read every unary operator, and that includes a receive:
+  `_ = <-pkg.Done` waits, and deleting it changes what the program does.
+  So a receive stays refused (NC27b is the suggestion as given). Reading
+  the operators turned up a false positive the guard had had since round
+  1: `onlyNames` never looked at a composite literal's type, so the
+  compile-time assertion `var _ = [unsafe.Sizeof(x) - 8]byte{}` would have
+  been reported as a keeper. `typeOnlyNames` reads a literal's type and a
+  conversion's the same way, refusing an array length computed by a call
+  and still reading a generic instantiation (`set.Of[int]{}`), as the
+  consult decided. The round-4 guard over the 37 history trees finds the
+  same 699 sightings as the round-1 guard, so neither this widening nor
+  round 2's scoping changed a historical finding.
+- **Round 5** (`c90c1adc`): **Gemini** had no comments. **CodeRabbit**, in
+  its pass over `afc3adfb`, raised one minor, taken in `f1937619`:
+  `namesIn` counted the `Sel` of a selector whose `X` is not a bare import
+  as a name of its own, so `_ = (*bytes.Buffer).Len` and
+  `_ = http.DefaultClient.Do` were missed in a function body while their
+  top-level twins were reported. A field or method name names no
+  declaration in scope, and `namesIn` reads only a selector's `X` now.
+  Red-first with the two statements in the fixture: both missed, and the
+  missed `(*bytes.Buffer).Len` counted as a real use of `bytes`, so its
+  neighbour `(*bytes.Buffer)(nil)` read redundant. The history re-run gave
+  the same 699 sightings with the same verdicts. Its footer said the
+  finding was "addressed in commits d492f28 to c90c1ad"; it was not until
+  `f1937619`. The first NC20 of this run did not build: the mutation
+  removed `go/types`' only use. It was rebuilt to keep the import and then
+  went red, and a control that does not build is recorded as invalid,
+  never as a pass.
+- **Round 6** (`4a8b6a41`): **Gemini** had no comments. **CodeRabbit**
+  raised a minor and a major, both false positives and both taken in
+  `41b37e85`. The minor was `_ = 1 / settings.Divisor`: it reads only
+  names, but it can panic, and deleting it changes what the program does.
+  The finding named `/` and `%`, and the fix admits only the operators
+  that cannot panic (`panicFree`). A shift can panic on a negative count,
+  and `==` or `!=` on two interfaces holding one uncomparable type, so an
+  enumeration of the two named operators would have been the defect over
+  again. A slice-to-array conversion panics on a short slice
+  (`convertsToArray`). The major was that `typeOnlyNames` accepted struct,
+  interface and function types unread, so
+  `struct{ _ [unsafe.Sizeof(x) - 8]byte }{}` hid its assertion in a field.
+  It now reads every field, parameter, result and method, with `...T`.
+  Red-first with the fixtures in place and the round-5 guard: all seven
+  quiet shapes were reported. The history re-run again gave the same 699
+  sightings with the same verdicts.
+- **Round 7** (`4227b7ad`): **Gemini** had no comments. **CodeRabbit**
+  found two more false positives: `_ = (*pkg.F)(0)`, a call through a
+  pointer-to-function variable spelled exactly like the conversion
+  `(*pkg.T)(0)` (major), and `struct{ _ [pkg.MinSize - 8]byte }{}`, an
+  assertion made with a named constant (minor). That made six rounds in
+  which review found a construct the general classifier misread, and the
+  finding was about the design, not the construct. So `46a2be63` replaced
+  the classifier with `keeperName`'s four shapes, after the second consult
+  above. It reverses three earlier acceptances, each now a quiet fixture
+  case with a reason: operators (round 4), selector chains and method
+  expressions (round 5), generic instantiations (the first consult). Both
+  findings are refused by construction. Red-first: the round-6 guard, run
+  against the round-7 fixture, reported nine of its quiet shapes, among
+  them both findings and `var _ = cfgVar.Field`, a selector through a
+  package variable that it took for a local keeper. The whitelist over the
+  37 history trees finds the same 699 sightings with the same verdicts, so
+  the narrowing lost no keeper this repo ever had.
+- **Round 8** (`a1f526ed`): **Gemini** reviewed the head at 12:14 with no
+  comments, and **CodeRabbit** posted one finding at 12:17 (round 9's
+  `N{}` fixture). Neither was seen, because every check read `gh api`
+  without `--paginate` and both sat past the first 30 reviews. The finding
+  went unanswered, and "Gemini is silent, probably out of quota" was
+  concluded from the missing review (see round 9). A consult was run to
+  stand in for it. It found three holes, none with an instance in the
+  tree, all taken in `0a07a124`. First, a bare name in a file with
+  a dot import may be the import's, so `var _ = Mutex{}` under
+  `import . "sync"` read as a local keeper. Second, `var _ = (*C.char)(nil)`
+  read "delete it, and the import", but cgo's `import "C"` carries the
+  preamble. Third, `typedErrorIn` missed an exported error interface, so
+  the allowance would have stood after typed errors landed. Red-first,
+  with the fixtures in place and the round-7 guard: `dot.go` read "local",
+  `cgo.go` read "only-use", and both interface cases read "allowed".
+  On `5922bf0d` Gemini again had no comments (12:44), and CodeRabbit
+  posted one more finding (12:58, round 9's raw-string `C`). Both went
+  unseen for the same reason, and the walkthrough's coverage and merge risk
+  ("reviewed", Low) were read as a clean pass. A last consult read the
+  finished file and found no remaining defect. Its reasons checked out
+  against the code: external test packages, two aliases of one import,
+  mixed keeper forms of one package, method values, type parameters,
+  build-tagged files and closures.
+- **Round 9** (`725813b2`): asked whether the PR was ready to merge, a
+  check of unresolved threads through GraphQL `reviewThreads`
+  (`first:50`, against this PR's 15 threads) found the two CodeRabbit
+  findings. A paginated
+  re-read then found the two Gemini passes as well. The report, this log,
+  the PR body and a PR comment had all said "CodeRabbit clean, Gemini
+  silent", so each was corrected, and CLAUDE.md gained the pagination rule.
+  Both findings were taken in `9f49ab2f`. First, a raw-string import path,
+  `` import `C` ``, was read as an ordinary import, so `(*C.char)(nil)` got
+  "delete the import"; `importNames` now compares the path unquoted. Red-first
+  with the round-8 guard: `keep/cgo_raw.go` read "only-use". Second, the
+  statement form had no `N{}` fixture, so no test could see it stop reading
+  an empty literal, and the claim above that every shape is there "in both
+  forms" was false. `_ = bytes.Buffer{}` is in the fixture now. The control
+  that makes the statement form skip `N{}` (NW14) passes every test against
+  the round-8 fixture and fails against this one.
+- **Round 10** (`1820e221`): **Gemini** raised one medium, declined on a
+  measurement. It said `isErrorInterface` would panic on `interface{}`,
+  whose `Methods` it took for nil. `go/parser` sets `Methods` for every
+  interface type, empty or not (go1.26.6, three spellings), and the
+  function only ever sees parser output. **CodeRabbit** raised one minor,
+  taken: this entry and CLAUDE.md said the `reviewThreads` query "returns
+  every thread", and it is a paginated connection too.

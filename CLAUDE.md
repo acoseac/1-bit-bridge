@@ -2928,14 +2928,8 @@ its twin.** The top list is older, shorter, and read first.
   scan is `scanDocblockSubjects(r, root, wholeTree)`, and
   `TestDocblockScanReportsBothArmsOnAFixture` runs it over a synthetic tree
   with exact findings for both arms. Table tests pin `identifierShaped` and
-  `namesNothingDeclared` beside it. **An import keeper is dead code,
-  never documentation.** A `var _ = pkg.X` in a file that uses `pkg`
-  elsewhere does nothing, and one that is its import's only use keeps an
-  import nothing needs, because imports are per FILE (one kept `io` in a
-  test file because a helper in another file uses `io.EOF`). Delete it, and
-  the import too when nothing else in the file uses it, unless its doc names
-  a condition not yet met (`internal/tsnet`'s waits for typed errors, which
-  have not landed).
+  `namesNothingDeclared` beside it. (The import-keeper rule this bullet
+  carried until #996 has its own bullet now, after the next one.)
 - **Measure a new detector over sampled HISTORY, not only the tree it was
   written against** (#994). The undeclared-name arm read 20 of 20 on its
   census tree and then met four false positives in the first test file
@@ -2950,6 +2944,54 @@ its twin.** The top list is older, shorter, and read first.
   shape it has never seen turns up. And merge main before pushing a
   tree-wide guard: its verdict depends on code the branch did not write,
   and here that code merged while the census ran.
+- **An import keeper is dead code, never documentation, and
+  `TestNoBlankKeepers` fails on one** (#996). A keeper is a blank reference
+  that only names something: a top-level `var _ = pkg.X`, or `_ = pkg.X` /
+  `var _ = pkg.X` in a function. Imports are per FILE, so it does nothing
+  when the file uses `pkg` elsewhere and keeps an import nothing needs when
+  it does not (one kept `io` in a test file because a helper in another
+  file uses `io.EOF`). A top-level `var _ = logger` keeps a package-level
+  name Go never reports unused anyway. Delete it, and the import too when
+  nothing else in the file uses it. **Three hand sweeps each fixed only
+  their own scope** (c062ac95 one, #855 three in cmd/bridge, #994 five);
+  #825 added one between two of them, and #996 found fourteen more. Five of
+  those were in the statement form no census had counted, and one,
+  `var _ = (*manifest.Store)(nil)`, sat under "Statically assert the
+  Manifest store has the helpers we need. A missing method here will fail
+  the build". A nil conversion checks only that a type exists, and every
+  real use makes that check. A keeper's premise decays unseen, too: two
+  began as their import's only use and turned redundant as their files
+  grew. **The sweep reads the four shapes keepers took, and nothing else**
+  (`keeperName`): `N`, `N{}`, `&N{}` and `(*N)(nil)`, where N is an
+  unshadowed import selector or, at the top level only, a bare identifier.
+  All 24 keepers in 37 sampled history trees took one of them. A general
+  "has no effect" classifier came first, and six review rounds each found
+  a construct it misread: an operator that can panic, a compile-time
+  assertion hidden in an array length, a call through a function pointer
+  spelled like a conversion. Syntax cannot tell those apart without the
+  type checker, so a keeper spelled any other way goes unseen, which is the
+  safe direction; the rule above still applies to it. `(*N)(nil)` keeps one
+  ambiguity (a call through a pointer-to-function variable with a nil
+  argument), and no such exported variable exists in this module, the
+  standard library or any dependency. The statement form reads imports
+  only (`_ = cfg` marks a local used; the tree has 23), and a selector
+  names an import only where no local of that name is in scope, scoped as
+  Go scopes it, from the end of the declaring statement (a whole-function
+  approximation missed `_ = path.Join` above `path := …`; CodeRabbit). The
+  local form is not read in a file with a dot import, and cgo's `C` is
+  never read as an import (its import carries the preamble). Two keepers of
+  one package are not each other's use (update.go's pair).
+  **The one allowance stands on its stated CONDITION, not its path**:
+  `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
+  says "Don't remove until typed errors land.", `typedErrorIn` finds no
+  sentinel, `Error() string` method or error interface there, and the file
+  uses `errors` nowhere else. Any of those failing is reported, and so is
+  an entry whose keeper is gone. On a clean tree the sweep reports nothing, so
+  `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
+  rule, skip rule and allowance state: 49 of 51 mutations turn it red, and
+  five turn the tree red. Of the two that stay green, one drops the CRLF
+  normalisation (the scan is CRLF-safe without it) and one widens a check
+  that `keep` makes again.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.
@@ -3225,9 +3267,9 @@ its twin.** The top list is older, shorter, and read first.
   so it binds hardest on a multi-PR day, which is already the day this file says
   review gets skipped.
   **While you are blocked**, the marker is greppable and that is when it
-  matters: `gh api repos/acoseac/1-bit-bridge/issues/<pr>/comments --jq
-  '.[].body' | grep -c "rate limited by coderabbit"`. **Afterwards it is not**:
-  CodeRabbit EDITS the marker out of the walkthrough when the review finally
+  matters: `gh api --paginate repos/acoseac/1-bit-bridge/issues/<pr>/comments
+  --jq '.[].body' | grep -c "rate limited by coderabbit"`. **Afterwards it is
+  not**: CodeRabbit EDITS the marker out of the walkthrough when the review finally
   runs, so a later 0 is not evidence a review happened. Auditing after the fact
   asks a different question — whether the bot left any review or inline comment
   at all. Ask for the pass rather than waiting it out — but **`@coderabbitai
@@ -3254,6 +3296,22 @@ its twin.** The top list is older, shorter, and read first.
   is grepping that comment for the verdict string and comparing its
   `headCommitId` to the PR head. Absence of new findings is not a pass, and
   saying so out loud without checking is how this was learned twice. (#967–#972)
+- **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
+  a page, and a long PR's newest round is on the page it drops.** On #996
+  (40 reviews, 38 review comments) every check read page one only. Two
+  CodeRabbit findings (12:17, 12:58) and two clean Gemini passes were never
+  fetched. The report that went out said "CodeRabbit clean, Gemini silent,
+  probably quota", and that story reached the engineering log, the PR body
+  and a PR comment before an unresolved-thread query (GraphQL
+  `reviewThreads`) showed otherwise. This is the
+  complement of the walkthrough rule above, not a correction of it: the
+  walkthrough's coverage and merge risk say a review RAN on a head, while a
+  review that FOUND something posts a review ("Actionable comments posted:
+  N") and inline comments. "Covered, and nothing seen" is clean only when
+  every read was paginated. Before a merge, list the unresolved threads, and
+  page that query too: `reviewThreads` is a connection, complete only once
+  `pageInfo.hasNextPage` is false (CodeRabbit, on the first draft of this
+  very rule, which said the query "returned them all").
 - **A fix round needs a FRESH pass from every bot, not just the one that
   found something.** Gemini does not re-review each push: after four rounds
   on one PR its last review still predated every fix commit on five of six

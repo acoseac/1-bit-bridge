@@ -23,11 +23,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
-
-var logger = logging.Component("tailscale")
 
 // commandContext is the test seam — production-default exec.CommandContext.
 // Tests assign a fake that records args + returns canned output. Same
@@ -417,9 +413,6 @@ func EnsureCertDir(dataDir string) error {
 	}
 	return os.Chmod(dir, 0o700)
 }
-
-// silence unused-import warning if `logger` ends up being reorg'd later.
-var _ = logger
 
 // FreshnessThreshold is how long before notAfter the renewer treats the
 // cert as "due for re-mint". Tailscale's LE certs are 90-day; 14 days

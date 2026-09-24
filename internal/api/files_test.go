@@ -611,9 +611,6 @@ func TestChildPathBuilding(t *testing.T) {
 	}
 }
 
-// quiet unused-import warning — keeps fmt alive for future assertion helpers.
-var _ = fmt.Sprintf
-
 // TestSortEntriesByNameMatchesLessCaseFold pins that the new
 // decorate-sort-undecorate helper produces the same ordering as the
 // previous per-comparison `sort.Slice + lessCaseFold` shape — same

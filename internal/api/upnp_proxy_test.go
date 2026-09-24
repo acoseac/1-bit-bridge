@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -250,6 +249,3 @@ func TestUpnpProxyEnabled(t *testing.T) {
 		})
 	}
 }
-
-// silence "imported but unused" if a future test goes through a different path.
-var _ = io.Copy

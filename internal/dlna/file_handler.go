@@ -3,7 +3,6 @@ package dlna
 import (
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -356,9 +355,3 @@ func extractVariantID(urlPath string) string {
 	}
 	return seg
 }
-
-// Avoid `path` import being flagged if a future refactor uses
-// `filepath` exclusively. `path.Clean` is the right tool for
-// URL-path manipulation (vs filepath which uses OS-specific
-// separators), so keep the import live via a token reference.
-var _ = path.Base

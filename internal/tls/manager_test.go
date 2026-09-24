@@ -43,10 +43,6 @@ func mintTestCert(t *testing.T, dnsNames []string) *cryptotls.Certificate {
 	return cert
 }
 
-// silence unused-import warning; time is referenced in tests below
-// even after the lifetime helper was removed.
-var _ = time.Hour
-
 // --- CertNotAfter ---
 
 func TestCertNotAfter_ParsedFromLeafSafely(t *testing.T) {

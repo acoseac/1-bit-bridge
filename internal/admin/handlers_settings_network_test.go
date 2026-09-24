@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // patchSettingsExpect issues a JSON PATCH to /api/settings and asserts the
@@ -276,6 +274,4 @@ var _ = func() {
 	// MDNSToggle take int), this stops compiling.
 	deps.MDNSToggle = func(bool) {}
 	deps.TailscaleDisable = func() {}
-	// Silence "declared but not used" via no-op consume.
-	_ = config.TailscaleModeDisabled
 }
