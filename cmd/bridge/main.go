@@ -5166,10 +5166,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}()
 
 		go func() {
-			startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			if err := tsnetServer.Start(startCtx); err != nil {
-				fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
+			if !bringTsnetUp(ctx, tsnetServer, stderr) {
 				return
 			}
 			// Wire the metrics tsnet collector so /metrics +
@@ -5218,13 +5215,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// successful listeners and continue. Total bind failure
 			// degrades to HTTP/2 over tailnet via tsnetHTTPSrv below.
 			if !cfg.DisableHTTP3 {
-				statusCtx, statusCancel := context.WithTimeout(ctx, 5*time.Second)
-				status, statusErr := tsnetServer.Status(statusCtx)
-				statusCancel()
+				status, statusOK := tsnetH3Status(ctx, tsnetServer)
 				_, h3Port, splitErr := net.SplitHostPort(cfg.ListenAddress)
 				switch {
-				case statusErr != nil:
-					logger.Warn("Failed to query tsnet status for h3 bind, running HTTP/2 only on tailnet", "err", statusErr)
+				case !statusOK:
+					// tsnetH3Status has said why.
 				case status == nil || status.Self == nil || len(status.Self.TailscaleIPs) == 0:
 					logger.Warn("tsnet status returned no tailnet IPs for h3 bind, running HTTP/2 only on tailnet")
 				case splitErr != nil || h3Port == "":
