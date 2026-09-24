@@ -10876,6 +10876,22 @@ module. Every hit was then read in the code.
   file's prose about `foo` is not reported. The misattachment arm keeps the
   scope lookup #990 set, because there the question is what the FILE can
   name.
+- **The directory, not the module.** A name only another directory declares
+  is still reported. One doc in the tree opens with such a name, in any
+  shape: "keep <= 0 must be a no-op", where `keep` is the parameter the
+  test is about and coincides with a method in internal/admin, with no
+  listed verb after it. A doc should open with its own subject, so the
+  remedy for a report there is the remedy anyway. A module-wide lookup
+  would silence a stale name that some other package happens to declare,
+  and common short names are declared somewhere in 1,117 files.
+- **Go's predeclared names are declared** (`types.Universe`). A doc opening
+  "nil means …" or "error is …" names something real. The one doc in the
+  tree that opens with a predeclared name is "byte-identical to …", not
+  verb-shaped, so this changes nothing today; it is the other half of
+  "declared nowhere". `namesNothingDeclared` gathers the three conditions
+  and has its own table test on a synthetic directory, so the directory
+  condition is pinned without depending on `LooksLikeSnapshotDir`'s
+  wording.
 - **Keepers.** A keeper is deleted when its file uses the package
   elsewhere (the keeper does nothing) and when it is the import's only use
   (the import does nothing), and the import goes with it. `itunes.go`'s
@@ -10930,29 +10946,63 @@ red-first (unfixed):  non-test 4806 / 401 / 0 misattached / 9 undeclared / 4084 
                       test     4041 / 716 / 0 / 11 / 2722 of 2868 (94.9%)
 fixed (b4e8b208):     non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
                       test     4039 / 716 / 0 / 0 / 2730 of 2876 (94.9%)
+final (9f01c005):     non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
+                      test     4041 / 716 / 0 / 0 / 2732 of 2878 (94.9%)
 ```
 
 The red-first run reported exactly the census's 20 verb-shaped findings.
-Test-file comments rose by two for the new function's and test's docs.
+Test-file comments rose by two for the new function's and test's docs, and
+by two more in 9f01c005 for `namesNothingDeclared` and its test.
 After the fixes the census's broad rule leaves 32 hits, all of them the
 prose listed above.
 
-Controls on b4e8b208, `-count=1`, each restored with `git checkout` and
-checked clean:
+Controls, `-count=1`, each restored with `git checkout` and checked clean.
+NC1–NC3 first ran on b4e8b208 with the same tree verdicts; all were re-run
+on 9f01c005, where the table tests below also answer:
 
 | control | mutation | result |
 |---|---|---|
+| NC0 | none | green |
 | NC1 | `pick`'s doc back to "pickVoted returns", and `ct`'s back to "container builds" | red: those two, one per population |
-| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | red: `render_cli_test.go:181 "DST is"`; the table test red on fanout, jpeg, _leading, DST, GET, MP4 |
-| NC2b | `identifierShaped` = any non-empty word | red: the ten prose openers above; the table test red on every sentence word |
-| NC2c | `identifierShaped` without its lowercase-first arm | tree green; the table test red on fanout, jpeg, _leading |
-| NC3 | the directory lookup dropped | red: `backup_test.go:784 "LooksLikeSnapshotDir is"` |
+| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | red: `render_cli_test.go:181 "DST is"`; both tables red (fanout, jpeg, _leading, sox; DST, GET, MP4) |
+| NC2b | `identifierShaped` = any non-empty word | red: the ten prose openers above; both tables red on every sentence word |
+| NC2c | `identifierShaped` without its lowercase-first arm | tree green; both tables red (fanout, jpeg, _leading, sox) |
+| NC3 | the directory condition dropped | red: `backup_test.go:784 "LooksLikeSnapshotDir is"`; the table red on pick and LooksLikeSnapshotDir |
+| NC4 | the predeclared clause dropped | tree green; the table red on nil, iota, error, len, any |
 
-NC2c is why the table test exists. On a clean tree the arm has nothing to
-count, so it cannot floor itself, and the tree scan alone cannot see its
-lowercase half go. NC2b's first run did not build (`unicode` left unused),
+NC2c and NC4 are why the table tests exist. On a clean tree the arm has
+nothing to count, so it cannot floor itself, and the tree scan alone
+cannot see its lowercase half or its predeclared clause go. NC2b's first run did not build (`unicode` left unused),
 which is "control invalid", never a pass; it was rebuilt with the import
 kept and re-run.
+
+### Consult
+
+A direct consult (`consult.py`, gemini-3.8-flash, with the guard file as
+context) was asked which legitimate doc shapes the arm would misreport that
+one tree's census might not contain. It named six. Each was checked
+against the SDK or the tree:
+
+- **Taken as a documented cost: units and tool names** ("dBFS", "stdout").
+  They are identifier-shaped, like brands, and none opens a doc with a
+  listed verb here. The docblock names them beside brands, and the table
+  pins "sox" and "dBFS".
+- **Measured, kept reportable: a name only another directory declares**
+  (an integration test's doc naming the code it exercises, an interface
+  assertion's doc naming an imported interface). One doc in any shape; see
+  **Decisions**.
+- **Not applicable: cgo symbols and `//go:linkname` targets.** The tree has
+  no `import "C"` and no linkname.
+- **Declined: "`CommentGroup.Text()` keeps `//go:` directives."** It removes
+  them. `go/ast/ast.go:98` says so, and a probe printed `"Foo does work.\n"`
+  for a doc opening `//go:noinline`. #990 declined the same claim with the
+  same evidence.
+- **Confirmed excluded, as the consult itself said:** doc links (`[Name]`),
+  `Deprecated:` and `BUG(x):`, generic `Set[T]` openers and build-tagged
+  declarations (the walk parses every file whatever its tags).
+
+The predeclared-name exclusion was not among the six. It came from asking
+what else "declared nowhere" leaves out.
 
 ### Process notes
 

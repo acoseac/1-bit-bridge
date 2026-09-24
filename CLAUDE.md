@@ -2867,14 +2867,19 @@ its twin.** The top list is older, shorter, and read first.
   ones were 20 of 20 real. Followed by anything else, 26 of 31 were prose
   (JS and CSS names, config keys, brands, "silence …" notes), so the arm
   reads the verb shape only and the other five were fixed by hand. **The
-  lookup is the DIRECTORY, not the file's scope**: an external `foo_test`
-  file's prose names `foo`'s declarations (`LooksLikeSnapshotDir`, the one
-  exclusion today). Brand names are the known cost ("iOS", "SQLite" and
-  "UPnP" are identifier-shaped). None has opened a doc with a listed verb,
-  and when one does, reword the sentence rather than exempt the word. **On a
-  clean tree the arm counts zero, so it cannot floor itself**: a table test
-  pins `identifierShaped`, and dropping its lowercase arm turns only that
-  test red. **An import keeper is dead code, never documentation.** A
+  lookup is the DIRECTORY, not the file's scope and not the module**: an
+  external `foo_test` file's prose names `foo`'s declarations
+  (`LooksLikeSnapshotDir`, the one exclusion today), while a name only
+  another package declares is still reported. A doc opens with its own
+  subject, and a module-wide lookup would silence a stale name that some
+  other package happens to declare. Go's predeclared names (`nil`, `error`)
+  count as declared (`namesNothingDeclared`). Brand names, tool names and
+  units are the known cost ("iOS", "sox" and "dBFS" are identifier-shaped).
+  None has opened a doc with a listed verb, and when one does, reword the
+  sentence rather than exempt the word. **On a clean tree the arm counts
+  zero, so it cannot floor itself**: table tests pin `identifierShaped` and
+  `namesNothingDeclared`, and dropping the lowercase arm or the predeclared
+  clause turns only those red. **An import keeper is dead code, never documentation.** A
   `var _ = pkg.X` in a file that uses `pkg` elsewhere does nothing, and one
   that is its import's only use keeps an import nothing needs, because
   imports are per FILE (one kept `io` in a test file because a helper in
