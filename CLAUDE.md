@@ -2363,7 +2363,10 @@ mentions across the four `ops/audit-*.md` files.
   exists to outlast. `TestServeLeavesNoTailscaleCLIRunning` drives a
   wrapper-shaped fake through the real exec path and pins the kill;
   `TestServeWaitsForAnInFlightTailscaleMint` holds a mint that ignores its
-  context and pins the join. Neither sees the other's defect. (#997)
+  context and pins the join. Neither sees the other's defect. (#997) The
+  first, like `TestCancelStopsTheWholeCLIProcessTree`, asks whether the CLI
+  has EXITED (`proctest.Exited`), not whether kill(pid, 0) still finds it,
+  which a zombie is (#1024, under Build, CI, and test discipline).
 - **A cancelled pass is not a failed one, and a join makes the difference
   visible.** `detectAndMint`'s context is cancelled by shutdown, by
   `Disable()` and by an admin client leaving mid-"Re-mint now" (RefreshNow
@@ -3434,6 +3437,32 @@ its twin.** The top list is older, shorter, and read first.
   forced `portProbeAvailable` true "so the verdict doesn't depend on
   whether lsof happens to be installed", and a sibling forced it false
   and pinned the warn: one set of facts, two verdicts, both asserted.
+- **kill(pid, 0) finds a ZOMBIE, so it cannot tell a test whether a
+  process it did not reap has exited: who reaps that one is up to init.**
+  `TestServeLeavesNoTailscaleCLIRunning` and
+  `TestCancelStopsTheWholeCLIProcessTree` kill a grandchild, the fake CLI
+  behind a wrapper shell, and polled kill(pid, 0) for ESRCH. The orphan
+  goes to the pid namespace's init, and systemd, launchd and the tini of
+  `docker run --init` each reap it within milliseconds, so every host CI
+  has passed. In a container run WITHOUT `--init`, PID 1 is the
+  container's command, `go test` in the stock golang image, which collects
+  only its own children: both tests failed there on dido, as root and as
+  uid 1000, with the fake at `State: Z (zombie)`, `PPid: 1`. The previous
+  bullet's question came out the other way here: serve had killed the
+  CLI, and a zombie runs nothing and holds no files, so it writes nothing,
+  which is all the tests guard. Both now ask `internal/proctest.Exited`:
+  kill(pid, 0)'s ESRCH, and on Linux a process it still finds reads as
+  exited when EVERY task in `/proc/<pid>/task` is Z or X. **Not
+  `/proc/<pid>/stat` alone**: a process whose leader thread exited while
+  another runs reads Z there and in `status` (measured: `Threads: 2`, the
+  other task S). Whatever /proc cannot answer reads as running, so a
+  missing /proc delays an exit and never invents one. **A control asked
+  once, straight after `Start`, sees the child still being exec'd** (state
+  R, 8 of 8) and passed a mutation that took every state but R for
+  exited, so `TestARunningProcessHasNotExited` asks over 500 ms, as the
+  callers poll, and on Linux requires /proc's S. Probe a child you DO reap
+  by reaping it (`cmd.Wait`, then ESRCH), as doctor's `pidAlive` tests do.
+  (#1024)
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the

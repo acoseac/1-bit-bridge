@@ -14750,6 +14750,7 @@ and three judgment calls:
   103) is still running (kill(pid, 0) = <nil>)"), and passes as root with
   `--init`. That is consistent with an unreaped zombie under `go` as PID 1,
   and not confirmed. Pre-existing on main, unrelated, flagged separately.
+  (Confirmed and fixed in #1024, the next entry.)
 - `TestEveryCitedTestNameExists` fails as root on a checkout another user
   owns or whose `.git` pointer is outside the container (git exits 128):
   environmental.
@@ -14799,3 +14800,186 @@ and three judgment calls:
   green.
 - Every read was paginated, and the `reviewThreads` connection was read to
   `hasNextPage: false`: two threads, both Gemini's, both resolved.
+
+## 2026-09-25 — the tailscale shutdown tests read a killed CLI's zombie as exited (#1024)
+
+#1023's entry left this under Out of scope: `TestServeLeavesNoTailscaleCLIRunning`
+failed in the stock `golang:1.26.6` image run without `--init`, which it
+called consistent with an unreaped zombie under `go` as PID 1, and not
+confirmed. It is confirmed, and a second test has the same probe and the same
+failure.
+
+### What was measured
+
+- **The zombie.** On dido (Ubuntu 26.04, kernel 7.0, the stock
+  `golang:1.26.6`), main `bf2f2a21` with the failure message instrumented to
+  read /proc when the check fires. Every failure read the same (only the pids
+  differ): `/proc/158/stat = 158 (tailscale-app) Z 1 157 1 …`, `status`
+  `State: Z (zombie); PPid: 1; Threads: 1`, and PID 1's cmdline
+  `go test -count=1 ./cmd/bridge/ -run TestServeLeavesNoTailscaleCLIRunning -v`:
+
+  | | `TestServeLeavesNoTailscaleCLIRunning` | `TestCancelStopsTheWholeCLIProcessTree` |
+  |---|---|---|
+  | no `--init`, uid 1000 | FAIL at the 5 s deadline, pid 158 Z, PPid 1 | FAIL, Detect and MintCert, pids 122 and 126 Z, PPid 1 |
+  | no `--init`, root | FAIL, pid 104 Z | FAIL, both subtests |
+  | `--init`, uid 1000 | PASS, 0.17 s | PASS, 0.23 s |
+
+- **The mechanism.** The CLI stand-in is a grandchild: test binary, wrapper
+  `sh`, app `sh`. `stopTreeOnCancel`'s group SIGKILL kills both shells, and
+  exec's `Wait` reaps the wrapper, the test's own child. The app, orphaned,
+  goes to the pid namespace's init. `go test` as PID 1 reaps only the test
+  binaries it started, so the app stays Z until the container exits, and
+  kill(pid, 0) succeeds on a zombie. `--init` makes tini PID 1, and tini
+  reaps any orphan. systemd and launchd do the same, which is why no CI host
+  and no Mac run ever saw it.
+- **The census.** A grep of the tree for signal-0 probes
+  (`syscall.Kill(pid, 0)`, `Signal(syscall.Signal(0))`) found five sites:
+  - `cmd/bridge/tailscale_shutdown_notwindows_test.go`, the reported test.
+  - `internal/tailscale/proctree_notwindows_test.go`,
+    `TestCancelStopsTheWholeCLIProcessTree`: the same shape (a killed
+    grandchild nothing reaps), and the same failure above. The report had
+    not run it.
+  - `internal/doctor/pidalive_notwindows_test.go` and `portowner_test.go`:
+    `TestPIDAliveReapedChildReadsDead` reaps its child with `cmd.Wait` before
+    asking, and `TestPIDAlive_SelfAndBounds` asks about itself and pid 1.
+    Neither can meet a zombie.
+  - `internal/tailscale/proctree_notwindows.go`: `stopTreeOnCancel`'s Cancel
+    asks `os.Process` about its own direct child before the group kill. A
+    zombie leader can still head a group with a live member, so "alive" is
+    the right answer there.
+  - `internal/doctor/doctor_notwindows.go`, `pidAlive`: production (Out of
+    scope below).
+- **With the fix**, on the same host: the two tests and the new package's
+  five, `-count=3`, pass in all four configurations (no `--init` or
+  `--init`, uid 1000 or root), 21 of 21 each. Logging the answer each pass
+  rested on: without `--init` all 9 (3 serve runs, 6 subtest runs) read
+  `kill(pid, 0) = <nil>, but every task in /proc/N/task has exited (N Z)`,
+  and with `--init` all 9 read `kill(pid, 0) = ESRCH`. So the no-init pass
+  is the new arm, not a timing change.
+- **A leader thread that exits while another runs.** A C program that
+  starts a thread and then calls `pthread_exit` in `main`, same container:
+  `/proc/73/stat` state Z, `status` `State: Z (zombie)` with `Threads: 2`,
+  `task/73` Z, `task/75` S, `kill -0` rc 0. `proctest.Exited(73)` = false
+  (`/proc/73/task/75/stat: state S`). A reading of the leader alone calls
+  that running process exited: NC3 below measured `Exited(72) = true` on
+  the same program. A sleeping control read false, and after `kill -9` and
+  a wait both read ESRCH.
+- **A zombie is its leader alone.** A C child that starts two threads and
+  then calls `exit` (every thread exits), under a parent that does not reap
+  it: while running, `task/69`, `70` and `71` read S; once exited, the task
+  directory lists `69` alone, Z, and `status` reads `Threads: 1`.
+  `proctest.Exited(69)` = true (`every task in /proc/69/task has exited (69
+  Z)`).
+- **The first ask after `Start`.** `sleep 60`, asked straight after
+  `cmd.Start()`, read `state R` 8 times in 8 (still being exec'd), and
+  `state S` 500 ms later.
+
+### Decisions
+
+- **Exited, not reaped, is the question.** Both tests guard a CLI writing
+  after its caller returned. A zombie has closed its files and runs no code,
+  so it cannot write. Whether it has been reaped depends on what PID 1 is,
+  not on serve.
+- **kill(pid, 0) first, /proc only to downgrade.** ESRCH stays the answer
+  wherever it comes. /proc is read only for a process kill(pid, 0) finds, and
+  only a positive reading of every task as Z or X turns that into "exited".
+  Every read or parse failure answers running, so a /proc that is not
+  mounted, or that hides the process, delays the answer and never invents
+  one. The two errors are not symmetric: the callers poll to a deadline, so
+  a wrong "running" costs a retry and at worst a false failure, while a
+  wrong "exited" passes the defect.
+- **Every task, not the leader** (measured above). A leader that exited
+  beside a live thread reads Z as a zombie's does, and a zombie is its
+  leader alone, so the question that tells them apart is whether any task
+  is still live.
+- **Linux only.** macOS has launchd as init, which reaped every killed CLI
+  in the Mac runs (both tests pass there through ESRCH), and CI runs no
+  other unix. Other platforms keep kill(pid, 0) exactly as it was.
+- **One package, not two copies.** Two test packages need the answer, so
+  `internal/proctest` holds it, imported only by tests, like `sweeptest`
+  and `loggingtest`. All its files are `!windows`, and a `./...` pattern
+  skips a package whose files are all excluded (checked with a scratch
+  module under `GOOS=windows`: vet, build, list and test all exit 0), so
+  the Windows leg needs nothing.
+- **The pid bound.** A pid <= 0 or past pid_t is refused before kill:
+  kill(0, 0) and kill(-1, 0) ask about process groups and succeed. Without
+  it, on darwin, `Exited(2147483648)` answered true (ESRCH), a wrong
+  "exited" (NC8).
+- **Not a subreaper, and not "run with `--init`".** Making the test binary a
+  child subreaper would make it the zombie's parent, and it would then have
+  to reap, where a `wait4(-1)` races os/exec's own waits. Requiring `--init`
+  leaves the suite's verdict depending on how it is run, which is the
+  defect.
+
+### Tests and controls
+
+- `internal/proctest`: `TestARunningProcessHasNotExited` (50 asks over
+  500 ms; on Linux the last must rest on /proc's S), `TestAReapedProcessHasExited`,
+  `TestExitedAsksNothingAboutAValueThatIsNotAPID`, `TestZombieReadsEveryTask`
+  (a planted /proc, 15 rows: a zombie, a zombie beside an X and beside an
+  x, S, R, T, a Z leader beside an S thread, a name that spells a state
+  each way, no task directory, an empty one, three unparseable stats, and a
+  task whose stat has gone), and on Linux `TestAZombieHasExited`: a real
+  zombie made with `waitid(P_PID, WEXITED|WNOWAIT)`, which asserts the
+  premise (kill(pid, 0) still finds it), then Exited's Z, then ESRCH once
+  reaped. The zombie is the test's own child, so it needs no container and
+  runs on CI's Linux runners.
+- The two tests ask `proctest.Exited`, and their failure messages say what
+  the answer rested on.
+- **Red first**: main's probe on dido without `--init` (the table above).
+- Negative controls, each applied to the committed tree (`c04c6e7a`),
+  restored from HEAD, and the tree hash checked before the next. The Mac
+  column is macOS on this laptop, the other two are dido as uid 1000:
+
+  | | mutation | Mac | dido, no `--init` | dido, `--init` |
+  |---|---|---|---|---|
+  | NC1 | Linux `zombie` answers false: kill(pid, 0) alone | n/a (stub) | both shutdown tests red (`kill(pid, 0) = <nil>`), `TestAZombieHasExited` and `TestARunningProcessHasNotExited` red | `TestAZombieHasExited` and `TestARunningProcessHasNotExited` red alone |
+  | NC2 | a live CLI left behind: `stopTreeOnCancel` sets `WaitDelay` and returns before the group kill | both shutdown tests red, `(kill(pid, 0) = <nil>)` | both red, `(…; /proc/N/task/N/stat: state S)` | the same |
+  | NC3 | `zombieUnder` reads the first task only | the Z-leader-beside-S row red alone | the same row; the C program read `Exited(72) = true` | |
+  | NC4 | the name ends at the FIRST `)` | the two spelled-state rows red | | |
+  | NC5 | no task directory answers exited | that row red | | |
+  | NC6 | an unreadable task stat answers exited | "a task whose stat has gone" red | | |
+  | NC7 | every state but R counts as exited | the S, T, Z-beside-S and spelled-name rows red | the same rows and `TestARunningProcessHasNotExited` red | the same |
+  | NC8 | the pid bound removed | `TestExitedAsksNothingAboutAValueThatIsNotAPID` red | | |
+  | NC9 | ESRCH answers running | `TestAReapedProcessHasExited` red | | |
+  | NC10 | an empty task directory answers exited | that row red | | |
+  | NC11 | an unparseable stat answers exited | the three unparseable rows red | | |
+
+  NC2 is the control the fix must not weaken: a live process left behind
+  still fails both tests, on every host, and /proc says why. NC7 first ran
+  against `ba398401`, whose running-process test asked once: every Linux
+  test stayed green, because that one ask saw R. `c04c6e7a` made it poll.
+
+### Out of scope
+
+- **doctor's `pidAlive` has the same probe, in production.** A zombie
+  bridge pid in `server.pid` reads as alive, and `checkPort` then softens a
+  conflict to a warn ("our bridge (pid N) is still running …"). Reaching it
+  takes a bridge that CRASHED (a graceful exit removes the pid file) under a
+  parent that does not reap, with another process then holding the port.
+  The image runs the bridge itself as PID 1 (`ENTRYPOINT`), so a crash ends
+  the container there. Noted, not changed.
+- **The image's PID 1 reaps nothing either.** The bridge is PID 1 there,
+  and Go reaps only the processes it waits for, so anything orphaned inside
+  that container (a grandchild of a `docker exec` session, or a child of a
+  program the bridge kills mid-run) stays a zombie until the container
+  exits. A zombie holds only its process-table slot. Noted, not changed.
+- **A failed run leaves the fake CLI looping forever.** NC2 left three on
+  the Mac (PPid 1), killed by pid. On a failure, cleanup creates the
+  release file inside a `t.TempDir` whose own cleanup deletes it right
+  after, so the fake, polling every 20 ms, usually never sees it. Flagged
+  separately (chip task_c5a6f49d).
+
+### Process notes
+
+- **A census of the probe found what the report of the symptom could not.**
+  The report named one test because only one had been run in the container.
+  Grepping for the probe found the second, and it failed the same way.
+- **A control that samples once can miss the state it exists to test.** The
+  running-process control asked straight after `Start`, when the child is R,
+  so a reading that took S for exited passed it on Linux. Only the fixture
+  table caught NC7, and only on the Mac run that included it.
+- **The instrumented run settled it.** #1023 recorded the zombie as a
+  hypothesis. Reading /proc at the moment the check fires turned it into a
+  fact in one run, and logging each pass's answer showed the fix works
+  through the new arm rather than by luck.
