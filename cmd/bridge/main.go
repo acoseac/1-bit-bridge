@@ -5071,8 +5071,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// "Start now" fail net.ListenUDP with "address already in use" and
 	// silently fall back to HTTP/2-only. Mirrors the tsnet side's stop below.
 	// Idempotent against the ctx.Done branch's explicit graceful drain:
-	// http3.Server.Shutdown + udpConn.Close both tolerate a second call
-	// (the tsnet-H3 listeners are double-shut-down the same way).
+	// http3.Server.Shutdown + udpConn.Close both tolerate a second call.
 	// Nil-guarded — either bind may have failed or HTTP/3 may be disabled.
 	defer func() {
 		if lanH3Srv != nil {
@@ -5176,33 +5175,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}()
 		}
-		// The tsnet HTTP/3 listeners published so far drain here beside
-		// the LAN ones; there are none if the node's start never
-		// completed or every per-IP bind failed. Each per-IP listener
-		// gets its own goroutine so the WaitGroup releases as soon as
-		// the slowest listener's Shutdown returns. Idempotent against
-		// the tsnet side's stop, which drains what was published again
-		// (a second Shutdown on a server already shut down is harmless)
-		// and catches anything published after this snapshot.
-		tsnetH3 := tsFront.http3Listeners()
-		for _, l := range tsnetH3 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := l.srv.Shutdown(shutdownCtx); err != nil {
-					fmt.Fprintf(stderr, "tsnet h3 shutdown: %v\n", err)
-				}
-			}()
-		}
+		// The tailnet servers are not drained here: tsFront.stop, deferred,
+		// is their only drainer, and its drain is bounded. An HTTP/3
+		// Shutdown past its deadline waits for every handler, so an
+		// unbounded wait on one here would hold the exit before stop ran.
 
 		wg.Wait()
 		cancel() // Explicitly release context resources immediately
 
 		if udpConn != nil {
 			_ = udpConn.Close()
-		}
-		for _, l := range tsnetH3 {
-			_ = l.conn.Close()
 		}
 	}
 	return 0

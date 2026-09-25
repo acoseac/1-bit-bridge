@@ -856,8 +856,11 @@ func TestATailnetHTTP3BindCutShortByTheShutdownServesNothing(t *testing.T) {
 	f := stoppableFront(t, node)
 	f.addr = "127.0.0.1:0"
 	f.serveHTTP3(ctx)
-	if got := f.http3Listeners(); len(got) != 0 {
-		t.Errorf("%d HTTP/3 server(s) published after the shutdown began", len(got))
+	f.mu.Lock()
+	published := len(f.h3Servers)
+	f.mu.Unlock()
+	if published != 0 {
+		t.Errorf("%d HTTP/3 server(s) published after the shutdown began", published)
 	}
 	if n := node.bindCount(); n != 2 {
 		t.Errorf("the node took %d HTTP/3 bind(s), want 2: none after the shutdown began", n)

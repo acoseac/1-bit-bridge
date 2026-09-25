@@ -362,18 +362,6 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 	return true
 }
 
-// http3Listeners returns the HTTP/3 listeners published so far, for the
-// shutdown branch's early drain; stop takes them again. Nil-safe, since
-// serve has no tailnet side outside tsnet mode.
-func (f *tsnetFront) http3Listeners() []tsnetH3Listener {
-	if f == nil {
-		return nil
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.h3Servers
-}
-
 // stop is serve's teardown of its tailnet side, deferred so it runs on
 // EVERY exit path, and in this order: cancel the goroutine; refuse any
 // later publication and take what was published; drain that, every server
@@ -389,12 +377,19 @@ func (f *tsnetFront) http3Listeners() []tsnetH3Listener {
 // and a Serve returns as soon as its Shutdown begins, so a long drain
 // leaves a goroutine that has returned, and a goroutine still bringing
 // the node up has at most its HTTP/3 servers published. A grace each
-// would double shutdown's worst case for that overlap. A goroutine still
-// running when the grace is out (a start stuck in the part of upstream's
-// start that takes no context, or a listen) costs a line, never a hung
-// exit; the node is then closed under it, and the wrapper stops a start
-// that Close lands on, while tsnetListen closes a listener that lands
-// after it.
+// would double shutdown's worst case for that overlap.
+//
+// Both waits are BOUNDED by it, the drains included. quic-go runs
+// ServeHTTP inside the WaitGroup of the connection's handling goroutine,
+// and http3.Server.Shutdown past its deadline calls Close, which waits for
+// every connection's handling to finish, so an HTTP/3 handler that ignores
+// its context (a read from a hung mount) would hold an unbounded drain for
+// as long as it blocks (CodeRabbit, #1009). That is also why stop is the
+// only drainer of the tailnet side. A drain or a goroutine still running
+// when the grace is out (a start stuck in the part of upstream's start
+// that takes no context, or a listen) costs a line, never a hung exit; the
+// node is then closed under it, and the wrapper stops a start that Close
+// lands on, while tsnetListen closes a listener that lands after it.
 func (f *tsnetFront) stop(grace time.Duration) {
 	f.cancel()
 	f.mu.Lock()
@@ -420,18 +415,36 @@ func (f *tsnetFront) stop(grace time.Duration) {
 			_ = https.Shutdown(shutdownCtx)
 		}()
 	}
-	drains.Wait()
-
-	select {
-	case <-f.done:
-	case <-shutdownCtx.Done():
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		drains.Wait()
+	}()
+	if !closedWithin(shutdownCtx, drained) {
+		fmt.Fprintln(f.stderr, "shutdown: the tailnet servers did not drain within grace; closing the node under them")
 	}
-	select {
-	case <-f.done: // it returned, if only as the grace ran out
-	default:
+	if !closedWithin(shutdownCtx, f.done) {
 		fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
 	}
 	if err := f.node.Close(); err != nil {
 		fmt.Fprintf(f.stderr, "tsnet close: %v\n", err)
+	}
+}
+
+// closedWithin waits until ch is closed or ctx is done, and reports whether
+// ch was closed. One closed just as ctx ends counts: select picks at random
+// between two ready cases, and a wait that finished must not be reported as
+// one that ran out.
+func closedWithin(ctx context.Context, ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
