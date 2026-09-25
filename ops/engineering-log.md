@@ -13025,3 +13025,12 @@ build proves nothing. Both are red on the same floors.
   (`a6681caf`): a leading dot in any embedded element is now reported
   before the disk side is consulted, tested on `"/"+p`, so it holds for
   a root of `.` too.
+- **Round 2**, on `e43d2561`. CI: 20 of 20 pass. CodeRabbit did not
+  review it: its walkthrough still covers `ff505acf` ("0 reviews are
+  currently available", allowance one an hour), and this time there was
+  no pause notice at all. SonarCloud: the probe's issue is gone, but the
+  same rule, `go:S3776`, now flagged `embedDiskProblems` at 18 of 15,
+  which round 1 had grown. It was taken: the helper was split into
+  `filesOnDisk`, `filesEmbedded` and `embeddedProblem` (`3b10f00d`), and
+  NC6, NC7 and NC17–NC21 were run again against the split. All were red
+  as before, NC21 included, where `static/.env` goes unreported.
