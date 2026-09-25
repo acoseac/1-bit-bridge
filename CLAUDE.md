@@ -50,6 +50,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.
+- **On a host whose Go is newer than `go.mod`'s, `make fmt` rewrites files CI calls clean.** CI's gofmt check runs `go.mod`'s toolchain (`go-version-file: go.mod`, 1.26.6 as of 2026-09-25), and gofmt 1.27 indents a composite literal in a multi-value `return` differently: on a 1.27.1 host `make fmt` re-indents `internal/manifest/favorites_test.go` and `internal/atlasharvest/lyrics_test.go`, and 1.26.6's `gofmt -l` reports both rewrites. Never commit such a rewrite. Restore those files, and check your own with the pinned gofmt: `$(GOTOOLCHAIN=go1.26.6 go env GOROOT)/bin/gofmt -l <files>`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
 
 ## Architecture at a glance
@@ -87,7 +88,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what `bridge.ars.md` actually runs; this bullet omitted that until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
-- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with a 5s window to protect active media streams.
+- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with a 5s window to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullet).
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
@@ -2348,14 +2349,44 @@ mentions across the four `ops/audit-*.md` files.
   blocked (CodeRabbit on #1009). `stop` is therefore the ONLY drainer of
   the tailnet side: the shutdown branch's early drain of the tailnet
   HTTP/3 servers was the same wait, ahead of stop's. The LAN HTTP/3 drains
-  (that branch, and the LAN defer) have the same shape and are NOT bounded
-  yet. **Hold the window, not its aftermath**: a first
-  draft of the listener test released the listen after runServe had
-  returned, and PASSED on the unfixed code, because runServe's final
-  cancel had run by then and #1005's post-check caught it. The window is
-  between the node's close and that cancel, and the test holds serve
-  there on its `tsnet close:` print. The publication gate has no seam a
-  boot test can hold, so it is driven directly.
+  had the same shape (next bullet). **Hold the window, not its
+  aftermath**: a first draft of the listener test released the listen
+  after runServe had returned, and PASSED on the unfixed code, because
+  runServe's final cancel had run by then and #1005's post-check caught
+  it. The window is between the node's close and that cancel, and the
+  test holds serve there on its `tsnet close:` print. The publication
+  gate has no seam a boot test can hold, so it is driven directly.
+- **An HTTP/3 drain is bounded, drained ONCE, and its socket closed a
+  moment AFTER the grace, never at it** (#1010). Both LAN HTTP/3 drains,
+  the shutdown branch's (beside HTTPS) and the defer every other exit
+  takes, waited for `http3.Server.Shutdown` with no bound, so a LAN
+  HTTP/3 handler that ignored its context held serve's exit for as long
+  as it blocked: the previous bullet's defect, on the LAN. `lanHTTP3`
+  (lan_http3.go) owns the server, its socket and its one drain: `stop`
+  waits out the grace and `http3ForceCloseAllowance` (1 s) past it,
+  prints a line if the drain is still running, and closes the socket
+  under it. **Once, because a second drain is a second wait**: the
+  `Close` that `Shutdown` calls past its deadline holds the server's
+  mutex while it waits for the handlers, so the defer's second
+  `Shutdown`, after a bounded branch, blocked on that mutex for as long
+  as the first. The comment it replaced called the two calls idempotent,
+  which held only for a drain that finished. **The allowance, because
+  `Close` writes each connection's CONNECTION_CLOSE BEFORE it waits for
+  the handlers**: a socket closed the moment the grace ran out lost the
+  client's close 20 of 20 times on macOS and on Linux, whether the
+  connection was idle, streaming or held, and the client learned of it
+  only from its idle timeout (quic-go's default is 30 s). The writes land
+  within 4 ms of the deadline. #1009's `stop` closed the tailnet node at
+  exactly that moment, so it takes the same allowance (`drainedWithin`).
+  **Bound a wait by what the thing you close is still doing, not by the
+  deadline alone.** `stop` closes the socket itself, not the drain's
+  goroutine when it returns: a held handler would keep the port bound,
+  and the launcher menu's next start would fall back to HTTP/2.
+  `Shutdown`'s error is printed only once it has returned, so nothing
+  reaches stderr after runServe has. The boot tests hold a LAN request
+  through `serveOpts.wrapAPIHandler`, and pre-pick a port free on TCP
+  and UDP both (`freeLoopbackTCPAndUDPAddr`), because serve prints no
+  UDP address.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows

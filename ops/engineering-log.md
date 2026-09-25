@@ -13784,3 +13784,167 @@ wrapper, the wiring and the upstream excerpts attached:
   bites. **Out of scope, and filed as a follow-up:**
   the LAN HTTP/3 drains, in the shutdown branch and in the LAN defer,
   wait the same way.
+
+## 2026-09-25 — serve bounds its LAN HTTP/3 drains, and lets quic-go's force-close reach the client (#1010)
+
+#1009's round 3 bounded the tailnet side's HTTP/3 drain and filed its twin
+as out of scope: "the LAN HTTP/3 drains, in the shutdown branch and in the
+LAN defer, wait the same way." The shutdown branch ran
+`lanH3Srv.Shutdown(shutdownCtx)` in a WaitGroup beside
+`httpSrv.Shutdown(shutdownCtx)` and then called an unbounded `wg.Wait()`.
+The deferred teardown that every other exit takes called
+`lanH3Srv.Shutdown` synchronously.
+
+### What was measured
+
+- **quic-go v0.62's http3.Server, read before anything else.**
+  `handleConn` "blocks until all HTTP handlers for all streams have
+  returned" (a `wg.Wait()` over `HandleRequestStream`, which calls
+  `ServeHTTP` synchronously). Past its deadline `Shutdown` calls `Close`,
+  and `Close` waits on `connHandlingDone` **while holding `s.mutex`**,
+  which `Shutdown` and `Close` both take first. So a handler that ignores
+  its context holds the first drain, and a SECOND drain of the same server
+  blocks on that mutex for as long. The defer's comment called the two
+  calls "Idempotent ... both tolerate a second call"; that held only for a
+  drain that had finished.
+- **Red on the unfixed wiring** (`d9ada514`: seam and tests, no fix).
+  Held in the shutdown branch: `runServe was still draining 15s later`,
+  stderr empty. Held on the admin console's bind error: the same, from
+  the defer. On the tailnet, `stop` with a held request: `the held request
+  was never told the server closed its connection`.
+- **The force-close's CONNECTION_CLOSE, probed.** A throwaway program
+  (200 ms grace, 20 trials a cell), run on this Mac (arm64) and on dido
+  (Linux amd64, the golang:1.26.6 image), with the same result on both:
+
+  | connection at the deadline | socket closed once Shutdown returned (the old LAN code) | closed the moment the grace runs out | closed after a 1 s allowance |
+  |---|---|---|---|
+  | idle, client ignores GOAWAY | 20 clean closes | 20 lost | 20 clean |
+  | request streaming, handler honours its context | 20 clean | 20 lost | 20 clean |
+  | handler ignores its context | hangs | 20 lost | 20 clean |
+
+  "Lost" means the client (a raw quic connection, or quic-go's http3
+  client) learned only from its idle timeout. `Close` finished at most
+  1.47 ms past the deadline over 40 drains on the Mac, 2.20 ms on Linux,
+  and 3.43 ms over 20 under `-race` at `GOMAXPROCS=2` with twelve CPU
+  hogs. **So the obvious fix, #1009's own shape (wait until the grace ends,
+  then close), would have been a regression on the LAN**: the old code,
+  though unbounded, delivered the close. And #1009's `stop` closes the node
+  at exactly that moment, which takes down the conn the writes go to.
+- **What the client sees.** `RoundTrip` returns `*http3.Error{Remote:
+  true, ErrorCode: H3_NO_ERROR}`. `errors.As` to `*quic.ApplicationError`
+  is false: http3's `maybeReplaceError` converts it. The tests assert on
+  the `http3.Error`.
+- **Stress.** The four HTTP/3 shutdown tests 8 times each under `-race`
+  here (133 s) and 10 times each under `-race` on Linux (dido, 168 s): no
+  failure. The whole
+  `cmd/bridge` package under `-race` on Linux passed except two
+  init-preflight tests, `TestInitRefusesToSaveAPortItNeverGraded` and
+  `TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID`, which fail the
+  same way on main in that container: the golang:1.26.6 image has no
+  `lsof`, `ss`, `netstat` or `fuser`. Filed as a follow-up.
+
+### Decisions
+
+- **One owner, one drain.** `lanHTTP3` (lan_http3.go) holds the server,
+  its socket and a `sync.Once` around `stop`. The shutdown branch drains
+  it beside the HTTPS server, under one grace as before; the deferred call
+  is then a no-op. Without the Once the defer's second `Shutdown` either
+  hangs on the mutex (NC2) or, bounded, costs a second grace and a second
+  line (NC3).
+- **A fixed allowance past the grace, not a shorter grace.** Taking the
+  allowance out of the grace would cut the graceful window every
+  well-behaved request gets. Gemini confirmed there is no public signal
+  that the force-close has written its packets. A `quic.Config.Tracer`
+  counting `ClosedConnection` events could provide one, which is
+  machinery to save one second on a hung mount. One second is nearly 300
+  times the slowest force-close measured (3.43 ms), and costs nothing
+  unless a handler is actually stuck.
+- **`stop` closes the socket itself.** Leaving it to the drain's
+  goroutine, after `Shutdown` returns, keeps the port bound behind a held
+  handler, and the launcher menu's next start then falls back to HTTP/2
+  (NC5).
+- **`Shutdown`'s error is printed only once it has returned**, so a drain
+  given up on writes nothing after runServe has returned. The error exits
+  now print `lan h3 shutdown: <err>` too, where the defer used to discard
+  it: the same drain, reported the same way on every path.
+- **The tailnet takes the same allowance** (`drainedWithin` in `stop`).
+  Same helper, measured defect, in a change that was not yet deployed.
+- **The seam wraps every listener's handler** (`serveOpts.wrapAPIHandler`):
+  one definition of "the API handler". Each listener still gets its own
+  `apiSrv.Handler()`, as before.
+- **The UDP port is picked before serve binds it** (`freeLoopbackTCPAndUDPAddr`),
+  with freeLoopbackPort's trade-off, because serve prints no UDP address.
+  Rejected: an Info line so a test can read the address (operator output
+  for a test's sake), and binding UDP on the TCP-chosen port under `:0` (a
+  production change to the documented ephemeral mode).
+
+### Tests and controls
+
+| test | pins |
+|---|---|
+| `TestServeShutdownIsBoundedByALANHTTP3HandlerThatIgnoresItsContext` | the shutdown branch: bounded, the full grace first, one line, the client told, the port free |
+| `TestServeErrorExitIsBoundedByALANHTTP3HandlerThatIgnoresItsContext` | the same through the defer, on the admin console's bind error |
+| `TestStopClosesTheNodeOnlyOnceTheForceCloseHasToldTheClient` | the tailnet's node is closed only after the allowance |
+
+Controls, each against the committed fix (`67598780`), one mutation
+asserted to apply exactly once, restored from git after each:
+
+| # | mutation | red |
+|---|---|---|
+| NC1 | the branch drains with the old unbounded `Shutdown` | branch test (still draining at 15 s) |
+| NC2 | the defer drains with the old unbounded `Shutdown` | both LAN tests: the branch one too, on the mutex its own bounded drain left held |
+| NC3 | no Once | branch test (the line twice) |
+| NC4a | the LAN wait is `closedWithin`, no allowance | both LAN tests (never told) |
+| NC4b | the tailnet wait is `closedWithin` | the tailnet test (never told) |
+| NC5 | the socket closed only once the drain returns | both LAN tests (UDP port still bound) |
+| NC6 | no line | both LAN tests |
+| NC7 | `stop` gives up at once | both LAN tests (returned in 35 ms; never told) |
+| NC8 | the LAN HTTP/3 server bypasses the seam | both LAN tests (the held route never reached): the tests drive serve's own HTTP/3 server |
+
+`TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext` stayed green
+throughout, as it should: its bound is #1009's D1.
+
+### Consult
+
+A direct Gemini consult (`consult.py`) on the design, with the diff and
+the quic-go excerpts attached:
+
+- **Agreed:** after the allowance, closing the socket quic-go does not own
+  ends the Transport's listen loop with `net.ErrClosed`, with no spin and
+  no log loop. The `Serve` goroutine returned when `graceCtx` was
+  cancelled, and its `removeListener` took the mutex before `Close` did,
+  so it does not leak. What stays behind is the held handler's own chain
+  (handler, stream, `handleConn`, the `Shutdown` goroutine in `Close`),
+  and all of it unblocks when the handler returns. The read of `err` is
+  race-free.
+- **Agreed, and not measurable here:** on the tailnet the allowance also
+  gives the netstack time to send what was written; the fake node's conn
+  is a kernel socket.
+- **Declined, filed as a follow-up:** drain the tailnet in the shutdown
+  branch too. On SIGINT the tailnet's `stop` runs after the LAN branch, so
+  held handlers on both sides cost two graces and two allowances. That
+  ordering predates this change (#1009's entry: the teardown it replaced
+  drained tailnet HTTPS after that branch anyway), and `stop` would first
+  need to be safe to call twice.
+- **Accepted as before:** a handler left running outlives the run, as
+  `http.Server.Shutdown` leaves an HTTPS one past its deadline.
+
+### Out of scope
+
+- The error exits still drain HTTPS, the tailnet and the LAN HTTP/3 server
+  one after another, each bounded.
+- The LAN HTTP/3 `Serve` goroutine is not joined. It returns as soon as
+  `Shutdown` begins, and #1009's probe showed `Serve` on a server already
+  shut down returns `http: Server closed`, which the log site filters.
+
+### Process notes
+
+- **A consult attached a file the controls were mutating.** The live
+  lan_http3.go went to Gemini while NC3 had taken its Once out. The edit
+  notice showed it; the consult was re-run on `git show HEAD:` copies. While
+  controls run, attach from the commit, never the working tree.
+- **One control first produced no result at all.** NC5's first mutation
+  shadowed the receiver with a struct whose stderr was nil, so the test
+  binary panicked. The script reported an empty line rather than a pass,
+  and the rewritten mutation bites. A control that crashes has measured
+  nothing.
