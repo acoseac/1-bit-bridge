@@ -2189,6 +2189,45 @@ what it claimed**, and none of it had a failing test.
   config**: with nothing named or found, doctor runs before `bridge init`
   and the defaults ARE the ports init writes, so they are graded, and a
   held one still FAILs.
+- **…and config-dir does not probe as a user who cannot read the config**
+  (#1023). config-dir vouches that the BRIDGE can create and write the
+  directory beside its config, and its two probes, a MkdirAll and a write
+  of `.doctor-probe`, answer for whoever runs doctor. A user config-file
+  reports as unable to read the config is not the one the bridge runs
+  as, since the bridge reads it at every start. Yet beside #1022's "not
+  checked" port lines, config-dir FAILed "not writable" against the 0700
+  dir `bridge init` makes, so that run exited 1 and advised `bridge init
+  --skip-doctor`, and `--fix` printed "created … but chmod 0700 failed"
+  about a directory it had not created. Where that user may write,
+  config-dir vouched ok for a directory the bridge may not. On
+  `configUnreadable`, `checkConfigDir` now answers ok "not checked: the
+  config in it is not readable by this user", **before the create as
+  well as the write** (a config below an untraversable parent fails the
+  create), and **whatever either probe would answer**. **Only that
+  error**: a config that does not load was read by this user, who can be
+  the bridge's, and it names its directory as well as one that loads (the
+  directory comes from the PATH). A run that found nothing is by the user
+  about to run `bridge init` there. Both keep the probe and its FAIL, as
+  does init's own preflight (a nil lookup). **Ask which half is wrong
+  before copying a decline**: the port lines decline for all three load
+  errors because their INPUT is the guess, and config-dir declines for
+  the one where the PROBER is. **The launcher's doctor row is the
+  exception to both declines** (`ConfigFile.PreSetup`, read through
+  `ungraded`; config-file keeps `problem()` and still warns). The menu
+  reads any stat error as "not installed", so over another user's
+  install, the root-owned dir a `sudo bridge init` leaves, it offers
+  Setup, and this row exists to preview Setup's preflight. That preflight
+  looks nothing up and FAILs the directory and the held default ports as
+  this user. This fix's first draft declined config-dir there too, so
+  beside #1022's "not checked" ports the row read "all clear." while Setup
+  refused (measured on dido); a Gemini consult caught it.
+  `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead`
+  drives both and requires the same lines. A wrong-user `bridge doctor
+  --config` run now ends "all clear." (13 ok, 4 warn, 0 fail), as the
+  footer does whenever nothing FAILs, below config-file's warn saying the
+  install was not graded. The same consult proposed rewording the footer
+  for every run with warns, which changes every report. That was not taken
+  here.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -2537,10 +2576,13 @@ mentions across the four `ops/audit-*.md` files.
   for a named path, so doctor re-stats a named path to learn why. One this
   user cannot reach or READ only WARNS, because that is a fact about the
   doctor run (the public-mode layout, as with the cert key), and the port
-  checks then say "not checked" rather than grade the defaults (#1022).
+  checks then say "not checked" rather than grade the defaults (#1022), as
+  config-dir does rather than probe as this user (#1023).
   The launcher's pre-setup row names the platform path through
   `buildDoctorDepsFor(path, true)`, never `--config`, so its absence stays
-  "none found", ok. `bridge init`'s preflight leaves the lookup nil, so
+  "none found", ok, and a config there this user cannot read still leaves
+  config-dir and the ports graded, as Setup's preflight grades them
+  (#1023). `bridge init`'s preflight leaves the lookup nil, so
   config-file reports itself skipped and does not block the re-init that
   replaces a broken config. **The port checks still can**: this bullet said
   a broken existing config "cannot block" that re-init until 2026-09-25.
@@ -4150,7 +4192,7 @@ The same "verify before acting" rule the DeepSeek triage runs on applies to the 
 
 - **`windows.Errno` vs `syscall.Errno`.** Gemini has flagged `errors.Is(err, windows.WSAEADDRINUSE)` as HIGH — "cross-package type mismatch, can never match" — and suggested `syscall.WSAEADDRINUSE`. Both halves are wrong: `x/sys/windows/aliases.go` declares `type Errno = syscall.Errno` (an **alias**, no distinct type) and `zerrors_windows.go` declares the constant AS `syscall.Errno`, so `errors.Is` compares the stdlib type with itself; and stdlib `syscall` on Windows has no `WSAEADDRINUSE`, so the suggested fix **would not compile**. The rationale now lives in `isAddrInUse`'s comment ([doctor_windows.go](internal/doctor/doctor_windows.go)) — read it before re-raising.
 - **"URL parser differential" via a backslash in the authority.** Go's `net/url` REFUSES `\` in a host (`invalid character "\\" in host name`), so guards proposed "after `url.Parse`" against a backslash host are unreachable dead code. A regression TEST asserting refusal is still worth taking (it survives a future Go relaxing the parse); the guard is not.
-- **A "compilation failure" claim that is really a test failure.** `os.Geteuid` IS defined on Windows (returns -1). Fixing the *stated* cause (a `//go:build !windows` tag) would have hidden a test from the platform where its other branch still works; the real fix was a runtime skip.
+- **A "compilation failure" claim that is really a test failure.** `os.Geteuid` IS defined on Windows (returns -1). Fixing the *stated* cause (a `//go:build !windows` tag) would have hidden a test from the platform where its other branch still works; the real fix was a runtime skip. The claim recurred on #1023, twice in one Gemini review, about root skips in files with no build tag. `GOOS=windows go test -c -o /dev/null <pkg>` settles it in seconds, and the PR's own `test (windows-latest)` leg is the evidence to cite.
 
 Take the accurate half of a wrong finding when there is one — the backslash and Windows-fixture cases both yielded a useful test even though the proposed code change was rejected. And **reply on the thread with the evidence when declining**, so the same claim doesn't cost a fresh investigation next quarter.
 

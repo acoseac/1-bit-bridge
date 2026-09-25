@@ -14542,3 +14542,260 @@ diff and the two judgment calls:
   `final_review_risk_coverage`'s `"coveredCommitId"` said `5ff22781`, and
   it is the one marker that moves when a review finishes. CLAUDE.md's
   CodeRabbit bullet now says to compare that instead.
+
+## 2026-09-25 — config-dir is not checked for a user who cannot read the config (#1023)
+
+#1022's entry left this under Out of scope: `bridge doctor` run by a user
+who cannot read the service's config reported config-file as a warn and the
+port lines as "not checked", and still exited 1, because config-dir's write
+probe FAILed as that user.
+
+### What was measured
+
+- **The mechanism.** `checkConfigDir` MkdirAll's the directory of the config
+  the run resolved (`doctorConfigDir`) and writes `.doctor-probe` into it,
+  both as whoever ran doctor. A config that config-file calls not readable
+  by this user (`configUnreadable`: a stat or open refused with a permission
+  error) sits, in the layout `bridge init` makes, in a 0700 directory that
+  user cannot write either, so the write FAILs. Below an untraversable
+  parent the create fails first ("can't create: mkdir …: permission
+  denied").
+- **End to end**, on dido (Ubuntu 26.04, the stock `golang:1.26.6`, no
+  lsof). `bridge init` then `bridge serve` as uid 1000 on init's defaults
+  (config dir 0700, file 0600); doctor as uid 1000 or 1001 through
+  `setpriv`, from a 0777 working directory, HOME per uid. Three trees:
+  `071850ad` (main), `82fc51fb` (this PR's first draft, which declined on
+  the launcher's row too) and `41dc31bb` (the fix). dido ran each as a `git
+  am` of the same tree, checked by tree hash. The CLI rows:
+
+  | | scenario | main | fix (the draft agrees) |
+  |---|---|---|---|
+  | A | the bridge's user, its config | config-dir ok `/tmp/live`; 14 ok / 3 warn / 0 fail; exit 0 | unchanged |
+  | B | uid 1001, `--config` in the 0700 dir (stat EACCES) | config-file warn, config-dir FAIL "not writable: open /tmp/live/.doctor-probe: permission denied", ports "not checked"; 12 / 4 / 1; exit 1, "fix the fail(s) above … or `bridge init --skip-doctor`" | config-dir ok "not checked: the config in it is not readable by this user"; 13 / 4 / 0; exit 0, "all clear." |
+  | B+ | B with `--fix` | "⚠ config-dir: created /tmp/live but chmod 0700 failed: chmod /tmp/live: operation not permitted", then as B | no remediation attempted, then as B |
+  | C | uid 1001, dir 0711, file 0600 (open EACCES) | as B | as B |
+  | W | uid 1001, dir 0777, file 0600 | config-dir ok `/tmp/live`, vouched for by the wrong user; 13 / 4 / 0 | config-dir "not checked"; 13 / 4 / 0 |
+  | D | the bridge's user validates a copy with `libraryNmae: typo` | config-file FAIL, config-dir ok `/tmp/cwd`; 13 / 3 / 1 | unchanged |
+  | E | the bridge's user, `--config …/bridge.yml` (not there) | config-dir "not checked: the named config does not exist"; 13 / 3 / 1 | unchanged |
+  | F | uid 1001, nothing named or found (pre-setup) | config-dir ok, creating `/tmp/home1001/.config/1-bit-bridge`; both ports FAIL; 12 / 3 / 2 | unchanged |
+  | G | the bridge's user, its config dir chmod 0500 | config-dir FAIL "not writable: … permission denied"; 13 / 3 / 1 | unchanged |
+  | H | uid 1001, pre-setup, `$HOME/.config` 0555 | config-dir FAIL "can't create: mkdir …: permission denied"; 11 / 3 / 3 | unchanged |
+
+  D, F, G and H are the controls: the probe keeps answering for a user who
+  read the config (D, G) and for the user about to run `bridge init` into
+  the directory (F, H), and keeps its FAIL where there is one.
+- **The launcher's row**, on the same host plus a root-owned platform
+  install for uid 1001 (what `sudo bridge init` leaves: `/tmp/lhome/.config/
+  1-bit-bridge`, root 0700), the live bridge still on 7788 / 7789. The
+  menu's `packaging.IsInitialized` reads the stat EACCES as "not
+  installed" and offers Setup and the doctor row. L is that row, driven
+  under `script` ("2", Enter, "q"); S is Setup's preflight, `bridge init
+  --yes --no-service` into the same dir:
+
+  | | main | first draft | fix |
+  |---|---|---|---|
+  | L | config-file warn, config-dir FAIL, ports "not checked"; 12 / 4 / 1 | config-file warn, config-dir and ports "not checked"; 13 / 4 / 0, "all clear." | config-file warn, config-dir FAIL "not writable", port-api FAIL ":7788 in use", port-admin FAIL; 10 / 4 / 3 |
+  | S | config-file "no config lookup — check skipped", config-dir FAIL "not writable", both ports FAIL; 11 / 3 / 3; exit 1, refused | the same | the same |
+
+  The row exists to preview S. On main its ports already disagreed with S
+  (#1022); the first draft made it an "all clear." over a Setup that
+  refuses; the fix makes its config-dir and port lines S's, line for line.
+- **As root**, same image: the new unit tests pass (they need no permission
+  bit), the two end-to-end tests skip with their reasons, and
+  `TestConfigDirCheck_ReadOnlyFails` FAILed, on main as well: root writes
+  into a mode-0500 directory, so the probe passes. It skips as root now.
+
+### Decisions
+
+- **The trigger is `configUnreadable`, and only that.** The port lines
+  decline for all three load errors because what they grade, the port,
+  comes from the config's contents and is a guess without them. config-dir's
+  subject, the directory, comes from the config's PATH and is known in
+  every case. In the unreadable case what is wrong is who is asking: the
+  bridge reads its config at every start, so a user who cannot is not the
+  one it runs as. A config that does not load was read by this user (row
+  D), who can be the bridge's, so its probe stands. A run that found
+  nothing is the pre-setup state, whose user is about to run `bridge init`
+  there (F, H), so its probe stands too. NC4 and NC5.
+- **Before the create, not only the write.** A named config below a
+  directory this user cannot traverse fails MkdirAll ("can't create")
+  before the write is reached. NC2.
+- **Whatever the probes would answer.** Where the other user may write (row
+  W), the old check vouched ok for a directory the bridge may not, which is
+  as much a fact about the run as the FAIL. The line must not depend on it,
+  the rule #1022 applied to a guessed port. NC3.
+- **ok, not warn**, for #1022's reasons: config-file gives the one verdict,
+  at #985's severity, and a check that declines for a reason another line
+  reports is ok in this package (the port lines, config-dir's own not-there
+  line, tls-cert-sans). NC6.
+- **The launcher's row declines nothing, and that covers #1022's port lines
+  too.** Its user is the one about to run `bridge init` there, by the
+  menu's construction, whatever the row finds; that is why the row passes
+  `absentIsPreSetup`. A config there this user cannot read is another
+  user's install in Setup's way, not a sign that the run is by the wrong
+  user. So `buildDoctorDepsFor` marks the lookup `ConfigFile.PreSetup`, and
+  config-dir and the port checks decline through `ConfigFile.ungraded`,
+  which is `problem()` except on that lookup. config-file keeps
+  `problem()`: its warn is what tells this user an install is there. The
+  first draft declined config-dir on this row too (row L, first draft); the
+  consult below argued otherwise, and the measurement settled it. The port
+  lines' gap on this row predates this PR (L, main). One predicate for
+  both, so they cannot drift apart again. NC8–NC11.
+- **One classifier.** Both declines read it; the not-there one tested
+  `errors.Is(LoadErr, fs.ErrNotExist)` itself. On a single `*PathError` the
+  two sentinels are exclusive, so no verdict moved, and
+  `TestConfigDirCheckDoesNotCreateTheDirectoryOfANamedConfigThatIsNotThere`
+  stays green through every control but NC5.
+- **`--fix` follows the verdict.** `runFixes` acts on a config-dir that is
+  not ok, so the wrong user's chmod of the bridge's directory (row B+) is no
+  longer attempted.
+- **The footer is unchanged.** Rows B, C and W now end "13 ok, 4 warn, 0
+  fail" and "all clear.", as every run with no FAIL does, row A included,
+  below config-file's warn saying the install was not graded. Rewording it
+  for every run with a warn (the consult's third point) changes every
+  report, and is its own decision.
+
+### Tests and controls
+
+- `internal/doctor/unreadable_config_dir_test.go`:
+  `TestConfigDirIsNotCheckedForAUserWhoCannotReadTheConfig` over three
+  directories whose probe answers need no permission bit: a regular file
+  where the directory should be fails the create, a directory named
+  `.doctor-probe` inside it fails the write, and a plain temp dir passes
+  both. So it runs as root and on Windows.
+  `TestConfigDirStillProbesForAUserWhoCanReadTheConfigOrIsAboutToWriteIt`
+  is its control: a config that loaded, one that does not load, nothing
+  named or found, no lookup, and the launcher's lookup over a config this
+  user cannot read each get the probes' verdict on the same three.
+  `TestPortChecksStillGradeTheDefaultsWhenNoConfigFailedToLoad` gains the
+  launcher's row.
+- `cmd/bridge/doctor_config_dir_test.go`:
+  `TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig` goes through
+  `buildDoctorDepsFor` and `doctor.Run` as a user the mode bits deny. Five
+  decline rows: a found config in the working directory and in the platform
+  dir, a named config in and below an untraversable directory, and a found
+  config in a directory this user CAN write. Six controls: a readable
+  config, and a readable one that does not load, in a directory this user
+  cannot write; nothing named or found with the platform dir unwritable,
+  and uncreatable; the launcher's row before setup, and over a platform
+  config this user cannot reach. A control's FAIL must say "permission
+  denied", so a fixture that denied nothing cannot pass it.
+  `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead` drives the
+  real `actDoctor` and `initCmd` over one host (the platform install
+  unreachable, the default ports held) and requires the same config-dir,
+  port-api and port-admin lines from both, each a FAIL, and config-file's
+  warn on the row. Both skip on Windows, and as root with the reason.
+- `skipUnlessModeBitsDeny` now takes each caller's reason for skipping as
+  root; #1022's rows pass theirs.
+- `TestConfigDirCheck_ReadOnlyFails` skips as root (`0cb98465`).
+- **Red first on the Mac** (uid 501): the three unit and five end-to-end
+  decline rows against main's code, the controls green; and against the
+  first draft, the launcher rows (NC12).
+- Negative controls against `41dc31bb`, each restored from HEAD and the
+  tree checked clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | main's `doctor.go` (0 occurrences of the new line) | the 3 unit and 5 end-to-end decline rows red, and the ports' launcher row and `TestMenuDoctorPreviewsSetup…` (main declines those ports); the rest green |
+  | NC2 | the decline moved after the create, before the write | the "create fails" unit row and "below a directory this user cannot traverse" red, alone |
+  | NC3 | decline only when a probe fails | the "both pass" unit row and "in a directory it can write" red, alone |
+  | NC4 | decline for a config that does not load too | the three does-not-load unit rows and that end-to-end control red, alone |
+  | NC5 | decline for the pre-setup lookup too | the three nothing-found unit rows, the three pre-setup end-to-end controls, `TestConfigDirCheckDoesNotCreateTheDirectoryOfANamedConfigThatIsNotThere` and `TestMenuDoctorGradesTheMenusOwnConfig` red |
+  | NC6 | warn instead of ok | every decline row red, unit and end to end |
+  | NC7 | `buildDoctorDepsFor` takes any stat error on the launcher's row as pre-setup | the end-to-end launcher row and `TestMenuDoctorPreviewsSetup…` red (config-file reads "none found"), alone |
+  | NC8 | `ungraded` without its PreSetup exception | every launcher row red: three unit config-dir rows, the unit port row, the end-to-end row, `TestMenuDoctorPreviewsSetup…` |
+  | NC9 | `buildDoctorDepsFor` does not mark the lookup PreSetup | the end-to-end launcher row and `TestMenuDoctorPreviewsSetup…` red, alone |
+  | NC10 | the port checks read `problem()` | the unit port launcher row and `TestMenuDoctorPreviewsSetup…` red, alone |
+  | NC11 | config-file reads `ungraded()` | the end-to-end launcher row and `TestMenuDoctorPreviewsSetup…` red (no warn), alone |
+  | NC12 | the first draft's production code (`82fc51fb`), `cmd/bridge` only | the end-to-end launcher row and `TestMenuDoctorPreviewsSetup…` red |
+  | NC13 | main's production code, `cmd/bridge` only | the five end-to-end decline rows and `TestMenuDoctorPreviewsSetup…` red |
+
+  NC12 and NC13 run `cmd/bridge` alone because the unit tests name
+  `ConfigFile.PreSetup`, which those trees lack. Their first run vetted
+  `internal/doctor` anyway and failed to build, which is a control
+  invalid, not a pass. So did NC7's first form (it removed the file's only
+  uses of `errors` and `fs`). NC2's first form was refused by the harness:
+  its anchor `case configUnreadable:` occurs twice in doctor.go
+  (`ungradedConfigPortCheck` has one), the wrong-occurrence trap, so the
+  mutations were re-anchored on checkConfigDir's comment.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the first draft
+and three judgment calls:
+
+- **Agreed** that the trigger is `configUnreadable` alone, not every load
+  error, since the directory comes from the path.
+- **Disagreed on the launcher's row**, and was right: its user is the one
+  about to run Setup, so declining there prints "all clear." right before
+  Setup's preflight refuses the same directory. Measured (row L), and taken,
+  for the port lines too, which had the same gap since #1022.
+- **Proposed rewording the footer** ("no failures (warnings above).")
+  whenever a warn is present. Not taken here: it changes the last line of
+  every run with a warn, row A's healthy install included, and its own
+  falsification test (a consumer reading the footer) would have to be run
+  across the other repos first.
+
+### Out of scope
+
+- **A config another user CAN read.** Group- or world-readable, it loads,
+  config-file is ok, and config-dir probes as that user, so a FAIL there
+  ("not writable") is a fact about the run that nothing in the report can
+  tell apart. `bridge init` makes the file 0600 in a 0700 directory, so it
+  takes an operator loosening both. The runbook's validate-before-restart
+  note now says which line carries the config's verdict.
+- **The footer** (Decisions and Consult).
+- **`TestServeLeavesNoTailscaleCLIRunning` FAILs in the stock image without
+  `--init`**, as root and as uid 1000 ("the `tailscale cert` it started (pid
+  103) is still running (kill(pid, 0) = <nil>)"), and passes as root with
+  `--init`. That is consistent with an unreaped zombie under `go` as PID 1,
+  and not confirmed. Pre-existing on main, unrelated, flagged separately.
+- `TestEveryCitedTestNameExists` fails as root on a checkout another user
+  owns or whose `.git` pointer is outside the container (git exits 128):
+  environmental.
+
+### Process notes
+
+- **A decline is a claim about whom a check answers for, so check every
+  caller's user.** The rule held for `bridge doctor --config`, and the
+  first draft applied it to the launcher's row as well, whose user the menu
+  fixes as the Setup user. A consult found it in one question, and the
+  three-tree measurement showed #1022 had shipped the same gap for the
+  ports.
+- **The root run found the same shape in a test.** Run as root to check the
+  new skip, the suite failed `TestConfigDirCheck_ReadOnlyFails`, on main too:
+  a test that assumed the mode bits deny its runner, which is the probe's
+  assumption about doctor's runner, one layer over.
+- **`pkill -f` on a pattern matches every process that QUOTES it.**
+  Cleaning up after a stopped gate with `pkill -f "go test -race"` killed
+  the local ssh session driving dido's race run, whose command line carried
+  that string, and left its container running on dido. It is the pgrep
+  self-match trap one step on. Kill by PID, or by a pattern only the
+  target's argv can hold.
+
+### Review
+
+- **Round 1**, on `327e96a1`. Gemini: "No review comments were provided
+  for this pull request." SonarCloud: gate passed with 1 new issue,
+  go:S3776 on `TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig`
+  (cognitive complexity 16 against 15), taken in `dcc994a3`: the
+  assertions moved to `assertConfigDirVerdict`, as #1022's did for the same
+  rule, and NC1, NC12 and NC13 re-run against the refactor turned the same
+  rows red. CodeRabbit posted nothing at all, no walkthrough and no commit
+  status, for 22 minutes.
+- **Round 2**, on `dcc994a3`. SonarCloud: 0 new issues (the S3776 closed
+  as fixed). Gemini (`/gemini review`): two medium findings, both "os.Geteuid
+  is not defined on Windows, so this test file will not compile there",
+  about the root skips in `doctor_test.go` and `doctor_ungraded_ports_test.go`.
+  That is the false positive CLAUDE.md records under Bot-review
+  discipline, declined on measurement: `GOOS=windows go test -c` compiles
+  both packages for amd64 and arm64, `GOOS=windows go vet` passes, and the
+  PR's own `test (windows-latest)` leg had passed on `327e96a1` with both
+  lines in it. Both threads answered with that evidence and resolved.
+  CodeRabbit, asked with `@coderabbitai review` at 21:07: its first
+  walkthrough, at 21:17, covered `071850ad..dcc994a3` whole, "No actionable
+  comments were generated", `coveredCommitId` the head, merge risk minimal,
+  and it answered the command "Already reviewed the last commit". CodeQL
+  green.
+- Every read was paginated, and the `reviewThreads` connection was read to
+  `hasNextPage: false`: two threads, both Gemini's, both resolved.

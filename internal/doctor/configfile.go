@@ -23,17 +23,31 @@ type ConfigFile struct {
 	// there, one this user cannot reach or read, or one that does not
 	// load. Nil when it loaded, and when there was no Path.
 	//
-	// The port checks read it too. A config that did not load set no
-	// ports and no pid file, so they report that they were not checked
-	// rather than grade the defaults the caller seeded in its place (see
-	// ungradedConfigPortCheck).
+	// The port checks read it too, through ungraded. A config that did
+	// not load set no ports and no pid file, so they report that they
+	// were not checked rather than grade the defaults the caller seeded in
+	// its place (see ungradedConfigPortCheck). So does config-dir, for two
+	// of the three: a named config that is not there leaves it nothing to
+	// vouch for, and one this user cannot read says this run is not by
+	// the user the bridge runs as, whom its probes would have to answer
+	// for (see checkConfigDir).
 	LoadErr error
+	// PreSetup marks the launcher's lookup, for its doctor row. The menu
+	// offers that row only while it sees no install, beside the Setup
+	// wizard that writes one, so the row's user is the one about to run
+	// `bridge init` into the directory Path names. What the lookup finds
+	// there does not change that. A config this user cannot read is
+	// another user's install in Setup's way, not a sign that this run is
+	// by the wrong user, so config-file still reports it while config-dir
+	// and the port checks grade what Setup's own preflight will (see
+	// ungraded).
+	PreSetup bool
 }
 
 // configProblem is why a config that was named or found could not be
-// graded. checkConfigFile turns it into that line's verdict and the port
-// checks into their "not checked" reason, so the lines cannot disagree
-// about what went wrong.
+// graded. checkConfigFile turns it into that line's verdict, and the port
+// checks and config-dir into their "not checked" reasons, so the lines
+// cannot disagree about what went wrong.
 type configProblem int
 
 const (
@@ -64,6 +78,20 @@ func (c *ConfigFile) problem() configProblem {
 	}
 }
 
+// ungraded is the problem config-dir and the port checks decline to grade
+// for: problem(), except on a PreSetup lookup. That one is the launcher's,
+// made for the user about to run `bridge init`, whose preflight looks
+// nothing up and grades the directory and the default ports whatever is
+// there. Those checks grade the same on the row that previews it, or the
+// row reads "all clear." over a directory and ports that Setup then
+// refuses. config-file keeps problem(), so it still says what was found.
+func (c *ConfigFile) ungraded() configProblem {
+	if c != nil && c.PreSetup {
+		return noConfigProblem
+	}
+	return c.problem()
+}
+
 // ranWithoutIt ends the hint on a config that could not be graded. The
 // checks after config-file ran without it: the ones with a default on the
 // default, and the port checks not at all, since a default port is a
@@ -88,7 +116,8 @@ const ranWithoutIt = "the checks below ran without it, on defaults or not at all
 // A permission failure is a WARN, not a fail. It is a fact about the
 // doctor run rather than the file: on the public-mode layout the operator
 // is not the service user, which is also why the cert checks do not grade
-// a key they cannot read.
+// a key they cannot read, and why config-dir does not probe a directory
+// for a user who is not the bridge's.
 func checkConfigFile(_ context.Context, d Deps) Check {
 	c := d.ConfigFile
 	switch c.problem() {
