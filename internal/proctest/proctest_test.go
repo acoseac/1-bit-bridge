@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,8 @@ func TestExitedAsksNothingAboutAValueThatIsNotAPID(t *testing.T) {
 // TestZombieReadsEveryTask drives the /proc reading over a planted tree, so
 // the shapes a real process cannot be made to hold on demand (a leader
 // thread that exited while another runs, a name that spells a state, a
-// /proc that answers nothing) are pinned on every platform.
+// /proc that answers nothing or numbers another pid namespace) are pinned
+// on every platform.
 func TestZombieReadsEveryTask(t *testing.T) {
 	stat := func(tid int, name, state string) string {
 		return fmt.Sprintf("%d (%s) %s 1 %d 1 0 -1 4228364 66 92 0 0 0 0 0 0 20 0 1 0 21464915 0 0\n",
@@ -115,7 +117,7 @@ func TestZombieReadsEveryTask(t *testing.T) {
 			map[string]string{"158": "158 (tailscale-app) ZZ 1\n"}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			proc := t.TempDir()
+			proc := plantSelf(t, strconv.Itoa(os.Getpid()))
 			if c.tasks != nil {
 				taskDir := filepath.Join(proc, fmt.Sprint(pid), "task")
 				if err := os.MkdirAll(taskDir, 0o755); err != nil {
@@ -139,7 +141,7 @@ func TestZombieReadsEveryTask(t *testing.T) {
 	// A task listed but gone by the time its stat is read: a thread
 	// released mid-walk, or the whole process reaped. Not a zombie YET.
 	t.Run("a task whose stat has gone", func(t *testing.T) {
-		proc := t.TempDir()
+		proc := plantSelf(t, strconv.Itoa(os.Getpid()))
 		if err := os.MkdirAll(filepath.Join(proc, fmt.Sprint(pid), "task", "158"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -147,4 +149,42 @@ func TestZombieReadsEveryTask(t *testing.T) {
 			t.Errorf("zombieUnder = true (%s) for a task whose stat could not be read", read)
 		}
 	})
+
+	// A /proc that does not number this process as the caller does: its
+	// <pid> is some other process, so even a zombie there says nothing.
+	zombieTask := func(proc string) {
+		t.Helper()
+		dir := filepath.Join(proc, fmt.Sprint(pid), "task", "158")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat(158, "tailscale-app", "Z")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("a /proc mounted for another pid namespace: its self is not this process", func(t *testing.T) {
+		proc := plantSelf(t, "480456")
+		zombieTask(proc)
+		if got, read := zombieUnder(proc, pid); got {
+			t.Errorf("zombieUnder = true (%s) from a /proc whose self is not this process", read)
+		}
+	})
+	t.Run("a /proc with no self", func(t *testing.T) {
+		proc := t.TempDir()
+		zombieTask(proc)
+		if got, read := zombieUnder(proc, pid); got {
+			t.Errorf("zombieUnder = true (%s) from a /proc with no self to check", read)
+		}
+	})
+}
+
+// plantSelf returns a planted /proc whose self link names target, as the
+// kernel's names the reading process.
+func plantSelf(t *testing.T, target string) string {
+	t.Helper()
+	proc := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(proc, "self")); err != nil {
+		t.Fatal(err)
+	}
+	return proc
 }

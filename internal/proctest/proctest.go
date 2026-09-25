@@ -83,8 +83,20 @@ func Exited(pid int) (bool, string) {
 //
 // Whatever it cannot read or parse answers "not a zombie", so Exited keeps
 // kill(pid, 0)'s "running". A /proc that is not mounted, or that hides the
-// process, can then delay an "exited" but never invent one.
+// process, can then delay an "exited" but never invent one. So can a /proc
+// mounted for another pid namespace, which numbers every process
+// differently, so that its <pid> is some unrelated process: its self is not
+// this process. Measured on Linux 7.0: under `unshare --pid --fork` without
+// --mount-proc, a process whose own pid is 1 reads /proc/self as 480456.
 func zombieUnder(proc string, pid int) (bool, string) {
+	self, err := os.Readlink(filepath.Join(proc, "self"))
+	if err != nil {
+		return false, err.Error()
+	}
+	if self != strconv.Itoa(os.Getpid()) {
+		return false, fmt.Sprintf("%s/self is %s, not this process (%d): another pid namespace's /proc",
+			proc, self, os.Getpid())
+	}
 	dir := filepath.Join(proc, strconv.Itoa(pid), "task")
 	tasks, err := os.ReadDir(dir)
 	if err != nil {
