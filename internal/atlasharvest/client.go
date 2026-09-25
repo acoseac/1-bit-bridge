@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
 // ArtistMeta is the harvested bio the client hands to the sink. Found=false is a
@@ -275,33 +277,55 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
+// tick runs one pass over the legs, in order. A leg starts only while ctx is
+// live: a shutdown that cancels the tick part-way ends it there, rather than
+// starting each later leg only for it to fail on the same cancelled context
+// and report a line of its own (TestATickStoppedByShutdownReportsNothingAndStopsThere).
 func (c *Client) tick(ctx context.Context) {
 	st := c.State.Snapshot()
 	if !credentialUsable(st, c.now()) {
 		return
 	}
-	if submitDue(st, c.now(), c.submitInterval()) {
-		if err := c.submitAll(ctx, st); err != nil {
-			c.handleErr(ctx, "submit", err)
-		} else if err := c.State.SetLastSubmit(c.now()); err != nil {
-			c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "submit", "error", err)
+	legs := []func(){
+		func() {
+			if !submitDue(st, c.now(), c.submitInterval()) {
+				return
+			}
+			if err := c.submitAll(ctx, st); err != nil {
+				c.handleErr(ctx, "submit", err)
+			} else if err := c.State.SetLastSubmit(c.now()); err != nil {
+				c.log().WarnContext(ctx, "atlasharvest.state.persist_failed", "phase", "submit", "error", err)
+			}
+		},
+		func() {
+			if err := c.pollResults(ctx); err != nil {
+				c.handleErr(ctx, "poll", err)
+			}
+		},
+		func() { c.refreshCovers(ctx) },
+		func() {
+			if c.Booklets != nil {
+				c.tickBooklets(ctx, st)
+			}
+		},
+		// Routed through handleErr like every other leg, so an Atlas token
+		// rejection on this path wipes the credential rather than being
+		// swallowed — the defect the booklet FETCH leg had until it was given
+		// the same treatment.
+		func() {
+			if c.Lyrics == nil {
+				return
+			}
+			if err := c.tickLyrics(ctx, st); err != nil {
+				c.handleErr(ctx, "lyrics", err)
+			}
+		},
+	}
+	for _, leg := range legs {
+		if ctx.Err() != nil {
+			return
 		}
-	}
-	if err := c.pollResults(ctx); err != nil {
-		c.handleErr(ctx, "poll", err)
-	}
-	c.refreshCovers(ctx)
-	if c.Booklets != nil {
-		c.tickBooklets(ctx, st)
-	}
-	// Routed through handleErr like every other leg, so an Atlas token
-	// rejection on this path wipes the credential rather than being swallowed
-	// — the defect the booklet FETCH leg had until it was given the same
-	// treatment.
-	if c.Lyrics != nil {
-		if err := c.tickLyrics(ctx, st); err != nil {
-			c.handleErr(ctx, "lyrics", err)
-		}
+		leg()
 	}
 }
 
@@ -375,7 +399,11 @@ func (c *Client) refreshCovers(ctx context.Context) {
 			if errors.Is(err, ErrNoCredential) {
 				break
 			}
-			c.log().WarnContext(ctx, "atlasharvest.cover_refetch_failed", "mbid", mbid, "error", err.Error())
+			// A refetch the shutdown stopped is not reported; the loop
+			// ends at its next check, and the cover stays pending.
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				c.log().WarnContext(ctx, "atlasharvest.cover_refetch_failed", "mbid", mbid, "error", failure.Error())
+			}
 			continue
 		}
 		if got {
@@ -408,6 +436,11 @@ func submitDue(st State, now time.Time, interval time.Duration) bool {
 
 // handleErr wipes the credential on an auth rejection (so the app re-provisions)
 // and otherwise just logs — transient failures retry on the next tick.
+//
+// ctx is the LOOP's context, and that is what makes it the right one to ask:
+// every request runs on a per-request timeout derived from it, so a request
+// that ran out of time fails with a deadline while the loop is live, and is
+// reported. Only the loop's own cancellation, a shutdown, is quiet.
 func (c *Client) handleErr(ctx context.Context, phase string, err error) {
 	if errors.Is(err, errUnauthorized) {
 		c.log().WarnContext(ctx, "atlasharvest.token_rejected", "phase", phase)
@@ -416,7 +449,9 @@ func (c *Client) handleErr(ctx context.Context, phase string, err error) {
 		}
 		return
 	}
-	c.log().WarnContext(ctx, "atlasharvest.tick_error", "phase", phase, "error", err)
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		c.log().WarnContext(ctx, "atlasharvest.tick_error", "phase", phase, "error", failure)
+	}
 }
 
 type submitRequest struct {
