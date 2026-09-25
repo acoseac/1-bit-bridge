@@ -13042,3 +13042,175 @@ build proves nothing. Both are red on the same floors.
   found nothing: it walked every case of the classification and called
   the split behaviour-identical. **The Gemini app reviewed no commit of
   this PR** (daily quota, all session). Three direct consults stood in.
+
+## 2026-09-25 — a checkout nested in this one is not this tree (#NNN)
+
+#993's entry recorded that three root walks read `.claude/worktrees/`,
+where Claude Code keeps whole checkouts of other branches, each with a
+`.git` FILE. #995 then made one of them, the citation walk, skip a
+directory holding its own go.mod. The main checkout still held the three
+worktrees #992, #993 and #994 left (`88ff5636`, `b11c1ea5`, `990d7556`).
+Five tests sweep the tree from the module root: the citation, docblock
+and blank-keeper guards in cmd/bridge, `TestNoProductionCodeLowersTheHashCost`
+and `TestNoLeakyFlacConstructors`.
+
+### What was measured
+
+- **The geometry, mirrored.** A local clone of main (`5e48cac8`) in a
+  scratch directory, with `git worktree add --detach` of the same three
+  commits under its `.claude/worktrees/`. The main checkout was never
+  written. `find` in the main checkout gave the same counts: 1,208
+  non-test and 3,366 `.go` files in all under `.claude/`.
+- **A census of what each walk opens**, taken by instrumenting the three
+  walks in the clone to append every path they opened to a file (an
+  env-var guard, never committed):
+
+  | walk | opened | inside the nested checkouts | outside them |
+  |---|---|---|---|
+  | hash-cost | 1,617 | 1,208 | 409, every tracked non-test `.go` |
+  | flac | 4,513 | 3,366 | 1,147, every tracked `.go` |
+  | citations | 1,170 | 0 (#995's go.mod rule) | 1,147 `.go` and the 23 tracked `.md` |
+
+  None of the files the `.git` rule drops is tracked. After the fix the
+  same instrumentation lists the old set outside `.claude/` exactly, plus
+  the new package's files: 410, 1,149 and 1,172.
+- **The three failures the report named, reproduced before any fix.** In
+  one of the nested worktrees unless noted:
+
+  | planted | hash-cost | flac | citations |
+  |---|---|---|---|
+  | a non-test call of `SetTestHashCost`, and a half-written file | red, the second as "could not parse" | | green: go.mod skips it |
+  | a `flac.ParseFile` probe | | red | |
+  | a stale citation in the ROOT, of a test only the worktree defines | | | red, correctly: #995 skips the worktree |
+  | the same, in a nested checkout caught before its go.mod is written (`git worktree add --no-checkout`, then `git checkout HEAD -- .github cmd`) | | | **green: a false pass** |
+  | emacs locks of both shapes, beside `.go` files, a test file and a doc | green | green | green |
+  | a directory with mode 000 | red, `permission denied` | red | green |
+
+  Of the three, the work-in-progress failure reproduced as filed, the
+  false pass only for a checkout with no go.mod, and the locks not at
+  all: #993 made each walk decide from a file's name before opening it.
+  The last row was not in the report and is the same class.
+- **The guards the report called immune.** The docblock guard's `.` rule
+  keeps `.claude/` out, but a worktree at a plain path (`worktrees/plain`)
+  put 818 non-test files in its count instead of 409, and a doc in
+  progress there failed it. The blank-keeper guard skipped that worktree
+  by the go.mod rule, and reads a checkout without one.
+- **What git does**, in a scratch repository: `git add` of a file inside a
+  nested repository adds nothing (`?? valid/`); a file beside an empty
+  `.git` directory, or beside a `gitdir:` file that points nowhere, is
+  added; and a `git init` inside a tracked directory leaves its files
+  tracked.
+- **Cost and gain.** At most one `os.Lstat` per directory walked, about
+  85 outside `.claude/` and `.git`. In the mirrored geometry, warm, the
+  hash-cost test went from 0.27–0.29 s to 0.07 s and the flac test from
+  0.62 s to 0.16 s.
+
+### Decisions
+
+- **The rule is a `.git` entry, found with `os.Lstat`**: a directory, a
+  `gitdir:` file or a symlink, dangling or not. A dangling `.git` is still
+  a statement that the directory is somebody's checkout. Any `Lstat` error
+  reads the directory, so one that cannot be searched fails the walk that
+  lists it rather than disappearing. #995's go.mod check uses `os.Stat` on
+  purpose, because it copies the go tool's; this one answers a different
+  question and copies nothing.
+- **Not the go tool's `.`-directory rule**: the citation guard reads the
+  tracked doc and the tracked Go file under `.github/`, #993's reason.
+- **Not go.mod alone.** A checkout git is still writing has none yet, and
+  that is where the false pass was. The citation and blank-keeper guards
+  keep go.mod as well: a nested module need not be a checkout, and the go
+  tool never runs one. The two rules answer different questions.
+- **Not git's own answer.** Asking `git ls-files` would limit a sweep to
+  tracked files, and an untracked new file in THIS checkout is exactly
+  what a guard must see before it is committed. The three shapes where
+  git and `os.Lstat` disagree exist only in a local checkout, and CI's
+  clone has none of them, so the gate still reads what git tracks.
+- **All five sweeps, one definition.** The report named three, but the
+  docblock guard was not immune, and the blank-keeper guard read a
+  checkout with no go.mod. `internal/sweeptest` is a package only tests
+  import, like `internal/sqlitetest` and `loggingtest`, so the rule is
+  written once. The root never counts: every real root holds a `.git`,
+  and a rule that forgot it would skip the whole tree.
+- **Floors, re-derived because a directory skip can drop a subtree.**
+
+  | guard | floor before | floor now | measured on the fix |
+  |---|---|---|---|
+  | hash-cost | `visited == 0` | `visited < 100` | 410 files, 355 under `internal/` |
+  | flac | none | `>= 100` non-test and `>= 100` test files parsed, and `>= 1` file importing the package | 410, 739 and 1 (`internal/manifest/testdata_test.go`, the fixture writer) |
+  | citations | `defined >= 200`, `cited >= 5`, `mdCited >= 50`, 50 underscore names | unchanged | about 4,794 defined, 2,892 cited, 408 from docs, 106 underscore names |
+  | docblock, blank keepers | `>= 100` of each kind | unchanged | 409 and 739 |
+
+  The flac importer floor is the one that proves a call was judged: the
+  walk parses every Go file and judges only those that import the
+  package. With `internal/manifest` skipped it parsed plenty and judged
+  nothing, and only the importer floor saw it (M14 below).
+- **The flac walk no longer tests the root's own name.** A checkout in a
+  directory whose name began with "_" skipped the whole tree, the class
+  #995 fixed for the citation walk. The new floors would have made that a
+  loud failure instead of a silent pass, but reading the tree is the right
+  answer.
+- **No structural pin that every root sweep applies the rule.** A root is
+  spelled four ways (`repoRootForCitations`, `moduleRoot`, `"../.."`, and
+  `go list` for the embed probe, which does not walk), so no syntax says
+  which walks start there. Each sweep's fixture pins its own wiring, and
+  CLAUDE.md tells the next sweep to apply the rule.
+
+### Tests and controls
+
+Red on `5e8318a1` (the tests alone), green on `197d6485`:
+
+| test | pins |
+|---|---|
+| `TestIsOtherCheckout` (internal/sweeptest) | the root, however spelled, never counts; a worktree's `gitdir:` file, a clone's `.git` directory and a dangling symlink do; a plain directory, one holding `.github`, `.gitignore` and `.gitattributes`, and the parent of a checkout do not; a directory `os.Lstat` cannot search does not |
+| `TestHashCostSweepSkipsOtherCheckouts` (internal/adminauth) | a root holding `.git`, a caller below it that is found, and a worktree with a call and a half-written file, plus a checkout at a plain path with no go.mod, neither read. Red before: both nested calls and the parse failure reported |
+| `TestFlacSweepSkipsOtherCheckouts` (internal/manifest) | the same shapes, with the root named `_checkout`. Red before, first on the root's name (nothing parsed), then on both nested probes |
+| `TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks` (cmd/bridge), new row | a checkout with no go.mod below a root holding `.git`: its test must not satisfy the root's citation, and its own stale citation must not be collected. Red before |
+| `TestDocblockScanReportsBothArmsOnAFixture`, `TestBlankKeeperScanOnFixtures` (cmd/bridge) | a checkout at a plain path with no go.mod, whose doc in progress and keeper are not reported. Red before |
+
+Controls, each against the fix commit with one mutation asserted to
+apply exactly once, and the files restored after. The first run was on
+the pre-amend commit (`63909dbd`); the amend changed two comments, and
+every control was run again on `197d6485` with the same results:
+
+| # | mutation | red |
+|---|---|---|
+| M1 | the predicate's root exemption removed | `TestIsOtherCheckout`; the hash-cost and docblock fixtures and whole-tree tests. The flac, citation and keeper walks exempt the root themselves |
+| M2 | `os.Lstat` of the root's `.git` instead of the directory's | ten of the eleven tests. Not the citation fixture, whose tree has files only at its root |
+| M3 | `os.Stat` for `os.Lstat` | `TestIsOtherCheckout`, the dangling symlink |
+| M4 | any error but ENOENT counts as a checkout | `TestIsOtherCheckout`, the unsearchable directory |
+| M5 | never a checkout | `TestIsOtherCheckout` and all five fixtures |
+| M6–M11 | the call removed from each walk in turn, or the flac root exemption | exactly that walk's fixture |
+| M12 | the hash-cost walk skips `internal/` | `TestNoProductionCodeLowersTheHashCost`, on the new floor |
+| M13 | M12 under the old floor (`visited == 0`) | **nothing**: 55 files read, and it passed |
+| M14 | the flac walk skips `internal/manifest` | `TestNoLeakyFlacConstructors`, on the importer floor alone |
+| M15 | the flac walk skips `internal/` | `TestNoLeakyFlacConstructors`, on the count floor: 55 non-test and 82 test files |
+
+The fixed code was also run in the mirrored geometry, with every row of
+the reproduction table planted again, the no-go.mod checkout and the
+plain-path worktree included. All five guards passed, and the stale
+citation was reported in both checkout shapes.
+
+### Out of scope
+
+- **A `_` directory**, which the go tool ignores, is still read by the
+  hash-cost and citation walks. CLAUDE.md's `## Local test fixture`
+  section tells an operator to put a throwaway helper in one. Measured on
+  the fix: a half-written `_reextract/main.go` failed the hash-cost guard,
+  and a test in `_reextract/x_test.go` satisfied a stale citation. A
+  different rule from this one, so a separate change.
+- **`gofmt -l .`** in `.github/workflows/gofmt.yml` descends into
+  `.claude/` too. It is not a test, CI has no nested checkout, and `make
+  fmt` runs `go fmt ./...`, which the go tool scopes.
+- **The three leftover worktrees** in the main checkout were left where
+  they are. Removing them is the owner's call, and the guards no longer
+  care.
+
+### Process notes
+
+- zsh does not split an unquoted variable, which #1006 recorded. `set --
+  $p` over "name sha" pairs created the first three mirrored worktrees at
+  HEAD under names with a space in them. `git worktree list` showed it
+  before anything was measured on them.
+- The report's own description of the citation walk predated #995. Read
+  against the code, the walk already skipped the worktrees, and that is
+  what the measurement then showed.
