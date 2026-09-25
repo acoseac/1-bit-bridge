@@ -26,14 +26,18 @@ type ConfigFile struct {
 	// The port checks read it too. A config that did not load set no
 	// ports and no pid file, so they report that they were not checked
 	// rather than grade the defaults the caller seeded in its place (see
-	// ungradedConfigPortCheck).
+	// ungradedConfigPortCheck). So does config-dir, for two of the three:
+	// a named config that is not there leaves it nothing to vouch for,
+	// and one this user cannot read says this run is not by the user the
+	// bridge runs as, whom its probes would have to answer for (see
+	// checkConfigDir).
 	LoadErr error
 }
 
 // configProblem is why a config that was named or found could not be
-// graded. checkConfigFile turns it into that line's verdict and the port
-// checks into their "not checked" reason, so the lines cannot disagree
-// about what went wrong.
+// graded. checkConfigFile turns it into that line's verdict, and the port
+// checks and config-dir into their "not checked" reasons, so the lines
+// cannot disagree about what went wrong.
 type configProblem int
 
 const (
@@ -88,7 +92,8 @@ const ranWithoutIt = "the checks below ran without it, on defaults or not at all
 // A permission failure is a WARN, not a fail. It is a fact about the
 // doctor run rather than the file: on the public-mode layout the operator
 // is not the service user, which is also why the cert checks do not grade
-// a key they cannot read.
+// a key they cannot read, and why config-dir does not probe a directory
+// for a user who is not the bridge's.
 func checkConfigFile(_ context.Context, d Deps) Check {
 	c := d.ConfigFile
 	switch c.problem() {

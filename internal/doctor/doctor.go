@@ -105,7 +105,9 @@ type Deps struct {
 	//
 	// When it records a config that did not load, the port checks are
 	// not run: APIPort and AdminPort are then the caller's defaults, not
-	// the config's (ungradedConfigPortCheck).
+	// the config's (ungradedConfigPortCheck). When it records one this
+	// user cannot read, or a named one that is not there, config-dir is
+	// not run either (checkConfigDir).
 	ConfigFile *ConfigFile
 	// APIPort is the main HTTPS port the server binds, typically 7788.
 	APIPort int
@@ -331,20 +333,48 @@ func checkPlatform(_ context.Context, d Deps) Check {
 		"bridge ships binaries for darwin/linux/windows on amd64 or arm64; other combos must build from source")
 }
 
+// checkConfigDir vouches that the bridge can create and write the directory
+// its config lives in, where `bridge init`, config.Save and a relative
+// dataDir all write. Its two probes, a MkdirAll and a write, answer for
+// whoever runs doctor, so they run only for a user who can be the bridge's
+// or is about to run `bridge init` there. A config this user cannot read
+// says it is neither, and a named config that is not there leaves nothing
+// to vouch for, so both get "not checked" instead.
 func checkConfigDir(_ context.Context, d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
 		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
 	}
-	// A config the caller NAMED that is not there (config-file FAILs it)
-	// leaves this check nothing to vouch for, and the create below would
-	// make the named file's directory: a typo'd `--config /x/bridge.yml`
-	// left /x behind, 0700, and reported it ok beside "does not exist". A
-	// diagnostic must not have that side effect. The pre-setup lookups
-	// (no --config, or the launcher's row) record no error for a config
-	// that is not there yet, so they still create the dir init will use.
-	if c := d.ConfigFile; c != nil && c.LoadErr != nil && errors.Is(c.LoadErr, fs.ErrNotExist) {
+	switch d.ConfigFile.problem() {
+	case configNotThere:
+		// A config the caller NAMED that is not there (config-file FAILs
+		// it) leaves this check nothing to vouch for, and the create below
+		// would make the named file's directory: a typo'd `--config
+		// /x/bridge.yml` left /x behind, 0700, and reported it ok beside
+		// "does not exist". A diagnostic must not have that side effect.
+		// The pre-setup lookups (no --config, or the launcher's row)
+		// record no error for a config that is not there yet, so they
+		// still create the dir init will use.
 		return ok(checkNameConfigDir, "not checked: the named config does not exist")
+	case configUnreadable:
+		// A config this user may not read (config-file WARNs it) means
+		// this user is not the one the bridge runs as, since the bridge
+		// reads it at every start. The probes below would answer for this
+		// user: measured with the 0700 config dir `bridge init` makes and
+		// doctor run by another user, the write FAILed "not writable", so
+		// the run exited 1 and advised `bridge init --skip-doctor`. Where
+		// this user may write, they vouch for a directory the bridge may
+		// not. Both are facts about the run, which config-file reports
+		// once, at the severity #985 chose, so the verdict must not depend
+		// on either probe. That is why this comes before the create as
+		// well, which fails on its own when the config's parent cannot be
+		// traversed. ok, not checked, and why, as the port checks answer
+		// (ungradedConfigPortCheck).
+		//
+		// Only this error. A config that does not load was read by this
+		// user, who can be the bridge's, and it names its directory as
+		// well as one that loads: the directory comes from the path.
+		return ok(checkNameConfigDir, "not checked: the config in it is not readable by this user")
 	}
 	// Ensure it exists (create if missing — init() does this anyway,
 	// but doctor running standalone should report the same outcome

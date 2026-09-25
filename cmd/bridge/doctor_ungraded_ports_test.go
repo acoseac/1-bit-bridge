@@ -51,7 +51,8 @@ func TestDoctorDoesNotGradeTheDefaultPortsOfAConfigItCannotLoad(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.denied {
-				skipUnlessModeBitsDeny(t)
+				skipUnlessModeBitsDeny(t, "root reads a mode-0000 file and traverses a mode-0000 directory, "+
+					"so the config loads and doctor grades its own ports; this row needs a user the mode bits deny")
 			}
 			cwd, _ := isolateConfigEnv(t)
 			assertDefaultPortsNotGraded(t, buildDoctorDeps(tc.install(t, cwd)), tc.want, tc.reason)
@@ -94,16 +95,17 @@ func installConfigThatDoesNotLoad(t *testing.T, cwd string) string {
 	return ""
 }
 
-// skipUnlessModeBitsDeny skips a row whose config must be kept from this
-// user by mode bits, where they keep nothing from it.
-func skipUnlessModeBitsDeny(t *testing.T) {
+// skipUnlessModeBitsDeny skips a row whose config or directory must be kept
+// from this user by mode bits, where they keep nothing from it. asRoot is
+// the skip's reason as root: what root does despite the mode bits, and what
+// the row would then see instead.
+func skipUnlessModeBitsDeny(t *testing.T, asRoot string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("mode bits do not deny a read or a traversal on Windows")
+		t.Skip("mode bits do not deny a read, a traversal or a directory write on Windows")
 	}
 	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-0000 file and traverses a mode-0000 directory, so the config " +
-			"loads and doctor grades its own ports; this row needs a user the mode bits deny")
+		t.Skip(asRoot)
 	}
 }
 
