@@ -160,9 +160,35 @@ func statLine(tid int, name, state string) string {
 		tid, name, state, tid)
 }
 
+// TestZombieSeesATaskThatStartsWhileItReads: a task still running when the
+// list is taken can start another and exit before its own stat is read, so
+// the stats alone read every listed task exited while the new one runs. The
+// second listing is what sees it. Nothing started in the window is the
+// control.
+func TestZombieSeesATaskThatStartsWhileItReads(t *testing.T) {
+	const pid = 158
+	for _, c := range []struct {
+		name  string
+		start map[string]string // tasks planted between the reads
+		want  bool
+	}{
+		{"a task started while the stats were read", map[string]string{"161": statLine(161, "worker", "S")}, false},
+		{"the control: nothing started", nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			proc := plantProc(t, strconv.Itoa(os.Getpid()), pid, map[string]string{"158": statLine(158, "worker", "Z")})
+			relisting = func() { plantTasks(t, filepath.Join(proc, strconv.Itoa(pid), "task"), c.start) }
+			t.Cleanup(func() { relisting = nil })
+			if got, read := zombieUnder(proc, pid); got != c.want {
+				t.Errorf("zombieUnder = %v (%s), want %v", got, read, c.want)
+			}
+		})
+	}
+}
+
 // plantProc returns a planted /proc: a self link naming self (none when self
-// is ""), and under pid the tasks given, each holding its stat. A task whose
-// stat is "" is planted with none, and nil tasks plants no task directory.
+// is ""), and under pid the tasks given, planted by plantTasks. Nil tasks
+// plants no task directory.
 func plantProc(t *testing.T, self string, pid int, tasks map[string]string) string {
 	t.Helper()
 	proc := t.TempDir()
@@ -171,10 +197,16 @@ func plantProc(t *testing.T, self string, pid int, tasks map[string]string) stri
 			t.Fatal(err)
 		}
 	}
-	if tasks == nil {
-		return proc
+	if tasks != nil {
+		plantTasks(t, filepath.Join(proc, strconv.Itoa(pid), "task"), tasks)
 	}
-	dir := filepath.Join(proc, strconv.Itoa(pid), "task")
+	return proc
+}
+
+// plantTasks plants each task in dir, a /proc task directory, holding its
+// stat. A task whose stat is "" is planted with none.
+func plantTasks(t *testing.T, dir string, tasks map[string]string) {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -189,5 +221,4 @@ func plantProc(t *testing.T, self string, pid int, tasks map[string]string) stri
 			t.Fatal(err)
 		}
 	}
-	return proc
 }

@@ -88,6 +88,14 @@ func Exited(pid int) (bool, string) {
 // differently, so that its <pid> is some unrelated process: its self is not
 // this process. Measured on Linux 7.0: under `unshare --pid --fork` without
 // --mount-proc, a process whose own pid is 1 reads /proc/self as 480456.
+//
+// And it lists the tasks again once it has read them. A task still running
+// when the list was taken can start another and exit before its own stat is
+// read, so the stats alone can show every listed task exited while the new
+// one runs. A task read as exited never runs again, and every task alive at
+// the second listing is on it, so a second listing that has gained nothing
+// leaves none alive. Neither caller can meet this, since each asks only
+// after killing the whole group; a consult on the review raised it.
 func zombieUnder(proc string, pid int) (bool, string) {
 	self, err := os.Readlink(filepath.Join(proc, "self"))
 	if err != nil {
@@ -106,6 +114,7 @@ func zombieUnder(proc string, pid int) (bool, string) {
 		return false, dir + " lists no tasks"
 	}
 	read := make([]string, 0, len(tasks))
+	seen := make(map[string]bool, len(tasks))
 	for _, task := range tasks {
 		path := filepath.Join(dir, task.Name(), "stat")
 		b, err := os.ReadFile(path)
@@ -120,8 +129,36 @@ func zombieUnder(proc string, pid int) (bool, string) {
 			return false, fmt.Sprintf("%s: state %s", path, state)
 		}
 		read = append(read, task.Name()+" "+state)
+		seen[task.Name()] = true
+	}
+	if relisting != nil {
+		relisting()
+	}
+	if gained := newTask(dir, seen); gained != "" {
+		return false, gained
 	}
 	return true, fmt.Sprintf("every task in %s has exited (%s)", dir, strings.Join(read, ", "))
+}
+
+// relisting runs between zombieUnder's reads of the task stats and its
+// second listing of the tasks, so a test can start a task in that window.
+// Production never sets it.
+var relisting func()
+
+// newTask lists dir again and describes a task on it that seen does not
+// hold, or returns "" when there is none. A listing that fails is described
+// too: without it, the answer cannot stand.
+func newTask(dir string, seen map[string]bool) string {
+	tasks, err := os.ReadDir(dir)
+	if err != nil {
+		return err.Error()
+	}
+	for _, task := range tasks {
+		if !seen[task.Name()] {
+			return fmt.Sprintf("%s gained task %s while its tasks were read", dir, task.Name())
+		}
+	}
+	return ""
 }
 
 // statState returns the state field of a /proc stat file, the field after
