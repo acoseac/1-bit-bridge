@@ -131,11 +131,12 @@ type tsnetH3Listener struct {
 
 // tsnetFront is serve's tailnet side. One goroutine (run) brings the
 // embedded node up, then serves the API on it over HTTP/3 and HTTPS, and
-// stop, which runServe defers, stops that goroutine and waits for it
-// BEFORE it closes the node. The goroutine writes the node's state dir
-// while it brings the node up, and upstream's Close "must not be called
-// before or concurrently with Start", so it is joined like every other
-// background writer runServe starts.
+// stop stops that goroutine and waits for it BEFORE it closes the node.
+// runServe's shutdown branch calls stop beside the LAN drains, and
+// runServe defers it for every other exit. The goroutine writes the
+// node's state dir while it brings the node up, and upstream's Close
+// "must not be called before or concurrently with Start", so it is joined
+// like every other background writer runServe starts.
 //
 // The goroutine runs on a context of its own, which stop cancels on EVERY
 // exit path. serve's context does not do that: on an error exit it is
@@ -161,9 +162,10 @@ type tsnetFront struct {
 	// selecting.
 	serveErr chan error
 
-	cancel context.CancelFunc
-	done   chan struct{}  // closed once run, and every HTTP/3 Serve it started, have returned
-	h3     sync.WaitGroup // the HTTP/3 Serve goroutines run starts
+	cancel   context.CancelFunc
+	done     chan struct{}  // closed once run, and every HTTP/3 Serve it started, have returned
+	h3       sync.WaitGroup // the HTTP/3 Serve goroutines run starts
+	stopOnce sync.Once      // only the first stop stops
 
 	mu        sync.Mutex
 	stopping  bool // stop has begun; nothing is published after it
@@ -362,15 +364,24 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 	return true
 }
 
-// stop is serve's teardown of its tailnet side, deferred so it runs on
-// EVERY exit path, and in this order: cancel the goroutine; refuse any
-// later publication and take what was published; drain that, every server
-// at once, so in-flight requests on any of them get a clean
-// http.ErrServerClosed instead of a mid-flight socket / QUIC reset, and
-// none goes on accepting while another drains (Gemini, #1009: drained one
-// after another, HTTPS accepted new requests for as long as HTTP/3 took);
-// wait for the goroutine and every HTTP/3 Serve it started; and only then
-// close the node, which drains magicsock / netcheck / the control plane.
+// stop is serve's teardown of its tailnet side. runServe's shutdown branch
+// calls it beside the LAN drains, on the context it hands them, and
+// runServe defers it, so it runs on EVERY exit path, in this order: cancel
+// the goroutine; refuse any later publication and take what was
+// published; drain that, every server at once, so in-flight requests on
+// any of them get a clean http.ErrServerClosed instead of a mid-flight
+// socket / QUIC reset, and none goes on accepting while another drains
+// (Gemini, #1009: drained one after another, HTTPS accepted new requests
+// for as long as HTTP/3 took); wait for the goroutine and every HTTP/3
+// Serve it started; and only then close the node, which drains magicsock
+// / netcheck / the control plane.
+//
+// Only the first call stops; a later one does nothing, as lanHTTP3.stop's.
+// On a shutdown the deferred call follows the shutdown branch's, and a
+// second drain would be a second wait: a second Shutdown of an HTTP/3
+// server whose first is still in Close waits on the server's mutex, which
+// Close holds while it waits for the handlers. It would close the node a
+// second time, too.
 //
 // ctx is the drain's, and the drains and the wait share it: ONE grace,
 // because they are rarely long together. The goroutine serves only once
@@ -399,42 +410,44 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 // out, it cost every client still connected its close, and a client with
 // a request in flight then waited out its idle timeout.
 func (f *tsnetFront) stop(ctx context.Context) {
-	f.cancel()
-	f.mu.Lock()
-	f.stopping = true
-	h3, https := f.h3Servers, f.https
-	f.mu.Unlock()
+	f.stopOnce.Do(func() {
+		f.cancel()
+		f.mu.Lock()
+		f.stopping = true
+		h3, https := f.h3Servers, f.https
+		f.mu.Unlock()
 
-	var drains sync.WaitGroup
-	for _, l := range h3 {
-		drains.Add(1)
+		var drains sync.WaitGroup
+		for _, l := range h3 {
+			drains.Add(1)
+			go func() {
+				defer drains.Done()
+				_ = l.srv.Shutdown(ctx)
+				_ = l.conn.Close()
+			}()
+		}
+		if https != nil {
+			drains.Add(1)
+			go func() {
+				defer drains.Done()
+				_ = https.Shutdown(ctx)
+			}()
+		}
+		drained := make(chan struct{})
 		go func() {
-			defer drains.Done()
-			_ = l.srv.Shutdown(ctx)
-			_ = l.conn.Close()
+			defer close(drained)
+			drains.Wait()
 		}()
-	}
-	if https != nil {
-		drains.Add(1)
-		go func() {
-			defer drains.Done()
-			_ = https.Shutdown(ctx)
-		}()
-	}
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		drains.Wait()
-	}()
-	if !drainedWithin(ctx, drained) {
-		fmt.Fprintln(f.stderr, "shutdown: the tailnet servers did not drain within grace; closing the node under them")
-	}
-	if !closedWithin(ctx, f.done) {
-		fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
-	}
-	if err := f.node.Close(); err != nil {
-		fmt.Fprintf(f.stderr, "tsnet close: %v\n", err)
-	}
+		if !drainedWithin(ctx, drained) {
+			fmt.Fprintln(f.stderr, "shutdown: the tailnet servers did not drain within grace; closing the node under them")
+		}
+		if !closedWithin(ctx, f.done) {
+			fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
+		}
+		if err := f.node.Close(); err != nil {
+			fmt.Fprintf(f.stderr, "tsnet close: %v\n", err)
+		}
+	})
 }
 
 // closedWithin waits until ch is closed or ctx is done, and reports whether

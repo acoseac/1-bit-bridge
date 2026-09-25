@@ -5085,8 +5085,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// stop is bounded, like the tsnet side's: a handler that ignores its
 	// context once held this drain, and the exit, for as long as it
 	// blocked. It drains once, so after the ctx.Done branch, which drains
-	// the server beside the HTTPS one, this call does nothing (see
-	// lanHTTP3.stop for why a second drain would be a second wait).
+	// the server beside the HTTPS one and the tailnet side, this call
+	// does nothing (see lanHTTP3.stop for why a second drain would be a
+	// second wait).
 	// Nil-guarded — either bind may have failed or HTTP/3 may be disabled.
 	defer func() {
 		if lanH3 != nil {
@@ -5112,8 +5113,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//
 	// tsnetFront runs it all on one goroutine, and stop tears it down,
 	// cancelling that goroutine and joining it BEFORE the node is
-	// closed. stop is a `defer` so EVERY exit path (serveErr, adminErr,
-	// tsnetServeErr, ctx.Done) runs it. The teardown this replaced shut
+	// closed. The ctx.Done branch below calls stop beside the LAN
+	// drains; the defer is for every other exit path (serveErr,
+	// adminErr, tsnetServeErr), and does nothing after that branch,
+	// since only the first stop stops. The teardown this replaced shut
 	// down what it found published and closed the node without either,
 	// so an error exit closed the node under a goroutine still in
 	// Start, a bind or a listen, on a context still live (runServe's own
@@ -5193,10 +5196,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				lanH3.stop(shutdownCtx)
 			}()
 		}
-		// The tailnet servers are not drained here: tsFront.stop, deferred,
-		// is their only drainer, and its drain is bounded. An HTTP/3
-		// Shutdown past its deadline waits for every handler, so an
-		// unbounded wait on one here would hold the exit before stop ran.
+		if tsFront != nil {
+			// The tailnet side too, on the same context, so it drains
+			// beside the LAN servers, under their grace. Left to the
+			// deferred stop, its drain began only once theirs had
+			// ended: an HTTP/3 request held on each side cost two
+			// graces and two force-close allowances (12 s, measured,
+			// against 6), and the tailnet went on accepting new
+			// requests for as long as the LAN drained. stop is the
+			// tailnet's only drainer, and it is bounded; it closes the
+			// node once its drains and its goroutine are done, and the
+			// deferred call then does nothing.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tsFront.stop(shutdownCtx)
+			}()
+		}
 
 		wg.Wait()
 		cancel() // Explicitly release context resources immediately
