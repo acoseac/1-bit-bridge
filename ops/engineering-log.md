@@ -11097,6 +11097,9 @@ fail only the four toolchain fuzz targets.
   static/*: cannot embed irregular file static/.#app.js`, and `go build
   ./cmd/bridge` fails the same way for `.#systemd.service.tmpl`. Emacs's
   Windows lock is a regular file, so there it would be EMBEDDED instead.
+  (Fixed in #1006, below. It was not out of reach after all: the patterns
+  were the defect, and `go list -overlay` puts a lock beside every
+  embedded file without writing the tree.)
 - **Go's fuzz seed-corpus reader** reads every file in
   `testdata/fuzz/<Name>/`. A lock there fails the four targets with a
   tracked corpus: "failed to read corpus file" for the symlink, "unmarshal:
@@ -12795,3 +12798,247 @@ apply exactly once:
   context field, was taken. Marking it through the SonarCloud MCP tool
   failed (the tool's schema asks for `issue_key`, and the server answers
   "The 'issue' parameter is missing"), so it is left for the SonarCloud UI.
+
+## 2026-09-25 — an editor's lock beside an embedded file breaks no build and ships in no binary (#1006)
+
+#993's entry filed this as out of reach of test code. Three `//go:embed`
+patterns matched a leading-dot name at their top level: `static/*` and
+`templates/*.html` in internal/admin, `*.tmpl` in internal/packaging. They
+are the tree's only embed directives, test files included. Emacs's lock is
+such a name: `.#<name>` beside the file it is editing.
+
+### What was measured
+
+- **What each FS embedded before the change**, from `go list`'s
+  `EmbedFiles`. internal/admin: 31 files, 16 under `static/` (seven at the
+  top, nine modules in `player/`) and 15 pages under `templates/`.
+  internal/packaging: `launchd.plist.tmpl`, `startup.cmd.tmpl`,
+  `systemd.service.tmpl`. Both lists equal `git ls-files` for those
+  directories exactly, and no tracked name there begins with "." or "_".
+- **The reproduction.** Plants went in one at a time before the fix, with a
+  trap removing each. After it, the three symlinks went in together, and so
+  did the regular files, the `.DS_Store` and two backups.
+
+  | plant | `static/*`, `templates/*.html`, `*.tmpl` | the `[^.]` patterns |
+  |---|---|---|
+  | `static/.#app.js`, dangling symlink | `go vet ./internal/admin/` and `go build ./cmd/bridge` fail: `pattern static/*: cannot embed irregular file static/.#app.js` | both pass |
+  | `templates/.#settings.html`, dangling symlink | both fail on `pattern templates/*.html` | both pass |
+  | `internal/packaging/.#systemd.service.tmpl`, dangling symlink | `go vet ./internal/packaging/` and the cmd/bridge build fail on `pattern *.tmpl` | both pass |
+  | the same three as regular files (the Windows shape) | the build passes, and each is EMBEDDED | none embedded |
+  | `static/.DS_Store`, a regular file | embedded | not embedded |
+
+- **What an embedded lock did.** `TestEmbeddedStaticTreeMatchesDisk`
+  failed with `static/.#app.js is embedded but missing from disk (stale
+  build cache?)` about a file sitting on disk: #993 had made its disk walk
+  skip the name while the embed kept it. The console answered `GET
+  /static/.%23app.js` with 200 and the lock's `someone@host.1234:1695000000`.
+  After the fix it answers 404, and so does `/static/.DS_Store`.
+- **`go list -overlay` reaches embed resolution, faithfully.** Virtual
+  regular files at the three top-level lock names appeared in `EmbedFiles`
+  under the old patterns. One at `static/player/.#boot.js` did not,
+  because the directory walk skips it, as it does on disk. `go list` over
+  the two packages takes 0.05 to 0.15 s.
+- **Plain `go list` does not resolve test-file embeds.** In a scratch
+  module, a lock matched only by a `_test.go` file's pattern produced no
+  error and no embedded files for the test: `go list` reported the
+  patterns alone, and `go vet` on the same module failed. With `-test`, the
+  base package lists the files for both kinds of test file, and the error
+  lands on the test variants.
+- **Old against new, eleven names planted through an overlay.** The old
+  patterns came from an overlay copy of `admin.go`, so nothing on disk
+  changed.
+
+  | planted | old | new |
+  |---|---|---|
+  | `static/.#app.js`, `static/.DS_Store`, `templates/.#settings.html` | embedded | refused |
+  | `static/_probe.js`, `templates/_partial.html` | embedded | embedded |
+  | `static/app.js~`, `static/player/boot.js~`, `static/#app.js#` | embedded | embedded |
+  | `static/player/_util.js`, `static/player/.#boot.js`, `templates/settings.html~` | not embedded | not embedded |
+
+  Old minus new is exactly the three top-level dot names, and new minus
+  old is empty. After the fix `go list` reports the same 31 + 3 files as
+  before, still equal to the git-tracked set.
+- **A backup is embedded at every level.** Real `static/app.js~` and
+  `static/player/boot.js~` were both in `EmbedFiles`, and
+  `TestEmbeddedStaticTreeMatchesDisk` failed on both with the same "stale
+  build cache?" diagnosis. Emacs writes `name~` beside a file on its first
+  save, by default. No pattern reaches the one below the top level: the go
+  tool's walk skips "." and "_" names and nothing else.
+
+### Decisions
+
+- **`[^.]`, and nothing more.** The bare `static` also refuses the lock,
+  but it drops a top-level `_name`. `static/*` shipped one, and #993's
+  static sweeps read it because it ships. The characterization shows
+  `[^.]` keeps it. `all:static` embeds dot names below the top level (NC4).
+  `static/[^.]*[^~]` would refuse a top-level backup and leave every one
+  below it, which is half a rule, and it stops matching a one-character
+  name.
+- **A backup is tolerated on the embedded side of the comparison, not
+  refused.** `isEditorDetritus` already skipped it on disk, under a comment
+  calling it "legitimately absent from the embed". That was false at every
+  level for a backup, and at the top level for a dot name. The comparison
+  now works from what each side's rule can and cannot refuse. The embed
+  cannot refuse a backup inside a directory a pattern WALKS; a glob bound to
+  an extension (`[^.]*.html`) never matches one, so for templateFS and
+  tmplFS the tolerance never fires.
+- **The disk side skips a dot-directory, and walks a `_` one** (review
+  round 1). A tool's `static/.cache/` is refused by the embed at every
+  level, but the disk walk descended into it and reported its files as
+  "NOT embedded". Measured: under `static/*` a top-level
+  `static/.cache/dummy.js` WAS embedded, so this change made that report
+  false. `static/player/.cache/deep.js` was embedded by neither pattern, so
+  that report was false before this PR too. A `_` directory stays walked:
+  the embed hides it as well, but its files are the 404 the comparison
+  exists to report. The consult's proposed fix skipped both, and a pinned
+  row rejects that (NC19).
+- **An embedded file that is on disk but outside what the FS holds is a
+  pattern too wide** (review round 1), never "missing from disk (stale
+  build cache?)". Measured with `templates/notes.txt` beside a `.html`-only
+  FS.
+- **The probe plants through an overlay, never on disk.** A lock on disk
+  breaks the build of every package importing the one it sits in, this
+  test's own among them. So a test planting real symlinks would fail before
+  it ran, and a crash would leave the lock behind. A mirror of the tree in
+  a temp module would test a model of the tree instead of the tree.
+- **The regular shape stands in for the symlink.** The go command globs,
+  then `Lstat`s each match and fails on an irregular one, and its directory
+  walk skips irregular files without a word. So a symlink can fail a build
+  only through a glob match, and a regular file of the same name shows that
+  match by being embedded. The reproduction ran both real shapes.
+- **The go command must be seen to read the overlay.** An overlay it
+  ignored would leave the planted listing equal to the plain one, and the
+  probe green over nothing (NC16). So a source file goes in beside the
+  plants, and must appear among the package's `GoFiles`.
+- **Discovery by `go list`, not by parsing directives**: it answers per
+  platform with build tags applied, and each of the three CI platforms runs
+  it.
+- **The set pins compare with DISK, not git.** On a CI checkout they are
+  the same set. On a dev box, an untracked new asset is embedded and on
+  disk, and a git comparison would fail every run until `git add`. The
+  census above compared with git, once. Not a golden list either: that
+  fails on every legitimate new asset.
+
+### Tests and controls
+
+Red on `d595b115` (the tests alone), green on `0217830d` (the fix). The
+probe's overlay floor came after, in `c0e0b679`:
+
+| test | pins |
+|---|---|
+| `TestEveryEmbedPatternRefusesALeadingDot` (cmd/bridge) | for every package `go list` shows with an embed pattern, a lock beside every file plus a `.DS_Store` in every directory (252 plants) changes no embedded set and causes no error. Every embedded file has its lock planted beside it, and a source file planted the same way appears in the package's `GoFiles`, which proves the go command read the overlay there. Red before, on both packages |
+| `TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse` (internal/admin) | the comparison. A backup on either side is no disagreement; an embedded dot name is reported as the pattern's fault; `player/_util.js` and `player/_lib/util.js` as not embedded; a vanished file as missing; files in a dot-directory not at all; a non-`.html` file in a `.html` FS as a pattern too wide. Red before on the two backups and the lock's diagnosis; the dot-directory and too-wide rows red in `6b646996`, green in `7f0f0a7e` |
+| `TestEmbeddedTemplatesMatchDisk` (internal/admin), `TestEmbeddedUnitTemplatesMatchDisk` (internal/packaging) | templateFS and tmplFS against the files on disk, as `TestEmbeddedStaticTreeMatchesDisk` pins staticFS. Green before: they hold the sets |
+
+Controls, each against `0217830d` with one mutation asserted to apply
+exactly once, and the file restored after:
+
+| # | mutation | result |
+|---|---|---|
+| NC1 | `static/[^.]*` → `static/*` | red: seven top-level locks and `static/.DS_Store` |
+| NC2 | `templates/[^.]*.html` → `templates/*.html` | red: fifteen locks |
+| NC3 | `[^.]*.tmpl` → `*.tmpl` | red: three locks |
+| NC4 | `static/[^.]*` → `all:static` | red, below the top level too: `static/player/.#*.js` and `static/player/.DS_Store` |
+| NC5 | `static/[^.]*` → `static` | green, by design: lock-safe, and different only in the top-level `_` the characterization pins |
+| NC6 | the embedded side's backup tolerance removed | red on both backups |
+| NC7 | the dot-name diagnosis removed | red: "stale build cache?" for the lock |
+| NC8 | the plant walk enters no subdirectory | red: "nothing was planted beside" each file under `static/` and `templates/` |
+| NC9 | no lock planted beside a file | red, the same floor |
+| NC10 | discovery keeps no package | red: "found no package using //go:embed" |
+| NC11 | no base listing counted | red: "nothing was compared" |
+| NC12 | `templates/[^.l]*.html` | `TestEmbeddedTemplatesMatchDisk` red: `layout`, `library`, `login` and `login_ticket` not embedded |
+| NC13 | `[^.s]*.tmpl` | `TestEmbeddedUnitTemplatesMatchDisk` red |
+| NC14 | `static/[^.p]*` | `TestEmbeddedStaticTreeMatchesDisk` red: `player.css` and the nine modules |
+| NC15a | real `_test.go` files, internal and external, each with `//go:embed *.tmpl` | red on the in-package test file's embedded files |
+| NC15b | the same, with `-test` removed from the probe | **green**: without it the probe cannot see a test file's embed |
+| NC15c | the external test file alone | red on the external test file's embedded files |
+| NC16 | the planted listing run without `-overlay` (against `c0e0b679`) | red, and ONLY the overlay floor: "the go command did not read the overlay" for both packages. The embed comparison alone was green |
+| NC17 | the disk side's dot-directory skip removed (against `7f0f0a7e`) | red: both `.cache` files reported as not embedded |
+| NC18 | the too-wide diagnosis removed | red: "stale build cache?" for `templates/notes.txt` |
+| NC19 | `_` directories skipped too, the consult's proposed shape | red: no problem for `static/player/_lib/util.js` |
+| NC20 | `isEditorDetritus` narrowed to `.#` and `~` (against `a6681caf`) | red: `.DS_Store` and `.gitkeep` on disk reported as not embedded. The embedded `.env` is still reported, because a leading dot is now judged first |
+| NC21 | NC20, plus the old case order (`wanted` first) | red as NC20, and also "no problem reported for static/.env": the reorder is what catches a dot file the disk side failed to skip |
+
+After the probe was split for SonarCloud (`2ddb40e1`), the controls were
+run again against it. NC1–NC4, NC8–NC10 and NC15a were red again, and
+NC15b green again, exactly as before. Two controls were reshaped because
+the code moved. NC11 now zeroes the counter (`c.embedded += 0`). NC16 now
+writes an overlay with an empty `Replace`: dropping `-overlay` from the
+call would leave the overlay path unused, and a control that does not
+build proves nothing. Both are red on the same floors.
+
+### Out of scope
+
+- **Emacs's auto-save, `#app.js#`**, is embedded under the old pattern and
+  the new. Neither side of the comparison skips it, so no test fails over
+  it, and it ships only in a dev build made while a buffer is unsaved.
+- **The fuzz seed-corpus reader** still fails on a lock in
+  `testdata/fuzz/<Name>/`, as #993 recorded.
+- **Windows Explorer's `Thumbs.db`** (written beside images on a network
+  share) has no leading dot, so `static/[^.]*` embeds it, as `static/*`
+  did. Neither side of the comparison skips it, so the two agree.
+
+### Process notes
+
+- A shell probe run through zsh passed an unsplit `$plants` as one name,
+  and printed an empty list for both the old patterns and the new, which
+  reads as a result. zsh does not split an unquoted variable. Anything
+  that iterates over a list went through bash after that.
+- NC18's first form deleted the `case here:` arm, which left `here`
+  unused, and the package did not build. A control that fails to build
+  is invalid, not red. The recorded form keeps the variable
+  (`case here && false:`).
+
+### Review
+
+- **Round 1**, on `ff505acf`. CI: 20 of 20 checks pass, `test
+  (windows-latest)` included, so the overlay floor held on the one
+  platform where the lock is a regular file. CodeRabbit: "No actionable
+  comments were generated". Its walkthrough covers `16bbfcc9..ff505acf`
+  and rates the merge risk minimal. It also reported its allowance at one
+  review per hour, with none left. The Gemini app was over its daily
+  quota and reviewed nothing, so a direct consult stood in. It made five
+  findings:
+  - **Taken**: the dot-directory false report (measured, above).
+  - **Taken**: the too-wide misdiagnosis.
+  - **Taken**: two overstatements, the backup claim ("no pattern can
+    refuse", which is true only inside a directory a pattern walks) and
+    the rule's headline (the directory element of `static/[^.]*` does not
+    start with `[^.]`; the wildcard element does).
+  - **Declined**, three of them. Tolerating a backup in templateFS "masks"
+    nothing: an extension-bound glob never embeds one. Platform-tagged
+    embed files are unseen on the host GOOS, but each CI platform runs
+    the probe. Windows overlay paths could spell differently, but the keys
+    are built from `go list`'s own `Dir`, the Windows leg passed, and
+    the seen-file floor fails rather than passes on a mismatch.
+  - SonarCloud (gate passed) raised one issue, `go:S3776`: cognitive
+    complexity 41 of 15 on the probe. Taken; the probe is split, and its
+    controls were re-run. CodeQL: no alerts.
+- **A fresh consult on round 1's changes**, standing in for the Gemini
+  app's second pass. It agreed with all three declines. It made two
+  findings, and both assumed `isEditorDetritus` takes only `.#name`,
+  `.DS_Store` and swap files. It takes every leading "." (the function
+  body was not in the round's diff, because it did not change), so
+  `.env` and `.gitkeep` were already skipped on disk. The rows it
+  proposed to falsify them pass as they stand. They are kept as pins,
+  which NC20 shows will catch a narrower rule. Its hardening was taken
+  (`a6681caf`): a leading dot in any embedded element is now reported
+  before the disk side is consulted, tested on `"/"+p`, so it holds for
+  a root of `.` too.
+- **Round 2**, on `e43d2561`. CI: 20 of 20 pass. CodeRabbit did not
+  review it: its walkthrough still covers `ff505acf` ("0 reviews are
+  currently available", allowance one an hour), and this time there was
+  no pause notice at all. SonarCloud: the probe's issue is gone, but the
+  same rule, `go:S3776`, now flagged `embedDiskProblems` at 18 of 15,
+  which round 1 had grown. It was taken: the helper was split into
+  `filesOnDisk`, `filesEmbedded` and `embeddedProblem` (`3b10f00d`), and
+  NC6, NC7 and NC17–NC21 were run again against the split. All were red
+  as before, NC21 included, where `static/.env` goes unreported.
+- **Round 3**, on `1598f7c8`. CI: 20 of 20 pass, and the merge state is
+  clean. CodeRabbit, once its allowance came back, covered
+  `ff505acf..1598f7c8`, so rounds 1 and 2 were reviewed in one pass:
+  "No actionable comments were generated". SonarCloud: gate passed, no
+  open issues. CodeQL: no alerts. A third consult on the round-2 split
+  found nothing: it walked every case of the classification and called
+  the split behaviour-identical. **The Gemini app reviewed no commit of
+  this PR** (daily quota, all session). Three direct consults stood in.

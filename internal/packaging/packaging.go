@@ -19,7 +19,13 @@ import (
 	"text/template"
 )
 
-//go:embed *.tmpl
+// tmplFS holds the service-unit templates. The glob is [^.]*.tmpl, never
+// *.tmpl: a * matches a leading dot, so emacs's lock beside a template
+// (.#systemd.service.tmpl) failed the build as a dangling symlink, and was
+// embedded as the regular file it is on Windows. See internal/admin's
+// staticFS.
+//
+//go:embed [^.]*.tmpl
 var tmplFS embed.FS
 
 // ServiceLabel is the launchd Label / systemd unit name. Chosen to match

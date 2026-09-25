@@ -2699,9 +2699,11 @@ its twin.** The top list is older, shorter, and read first.
   hardware renderers and unplayable in browsers). Playability reports FACTS
   (`universal` / `engine-dependent` / `none`), never a verdict — `canPlayType`
   answers `""` for codecs an engine can actually decode.
-- **`//go:embed static/*` skips `.`/`_`-prefixed names inside matched
+- **`//go:embed static/[^.]*` skips `.`/`_`-prefixed names inside matched
   subdirectories** — a `_util.js` compiles, embeds nothing, and 404s only in a
-  release build. Don't "fix" it with `all:static` (that ships `.DS_Store`).
+  release build. Don't "fix" it with `all:static` (that ships `.DS_Store`), and
+  don't take the glob back to `static/*`, whose `*` matched a top-level dot
+  name (the embed bullet under **Build, CI, and test discipline**, #1006).
   `/static/` must force Content-Type + `nosniff` (module scripts are MIME-checked
   and hard-fail; Windows serves `.js` as `text/plain` from the registry) and
   `no-cache` (a `?v=` busts only the entry module — relative import specifiers
@@ -3078,7 +3080,7 @@ its twin.** The top list is older, shorter, and read first.
   (`goToolIgnores`): that file is never compiled, so a test defined in it
   never runs and must not satisfy a citation. `internal/admin`'s static
   sweeps skip `isEditorDetritus` (`.` or `~`) but NOT `_`, because
-  `static/*` embeds a top-level `_x.js` and it ships. The citation guard
+  `static/[^.]*` embeds a top-level `_x.js` and it ships. The citation guard
   asks git whether a doc is tracked BEFORE opening it; it used to discard an
   untracked doc only after reading it, so an unreadable gitignored doc
   failed the run. It also never opens a doc whose name begins with ".",
@@ -3090,11 +3092,53 @@ its twin.** The top list is older, shorter, and read first.
   the 14 files; the rest used `os.ReadDir`, `filepath.Walk` or
   `filepath.Glob`, whose `*` matches a leading dot. A probe lock named
   `…_test.go` passed the hash-cost guard for the wrong reason, since that
-  guard reads only non-test files. Two failures are out of reach of test
-  code. A lock at the top of an embedded directory (`static/*`,
-  `templates/*.html`, `*.tmpl`) breaks the BUILD with `cannot embed
-  irregular file`. And Go's fuzz seed-corpus reader fails on one inside
-  `testdata/fuzz/<Name>/`.
+  guard reads only non-test files. One failure is out of reach of test
+  code: Go's fuzz seed-corpus reader fails on a lock inside
+  `testdata/fuzz/<Name>/`. (This bullet listed a second until #1006: a
+  lock at the top of an embedded directory breaking the BUILD. The
+  patterns were the defect, and the next bullet is the rule.)
+- **Every wildcard element of a `//go:embed` glob starts with `[^.]`,
+  never `*`** (#1006). A
+  glob's `*` matches a leading dot (`go doc embed`: "image/*" embeds
+  "image/.tempfile"), so `static/*`, `templates/*.html` and `*.tmpl`
+  matched an emacs lock beside the file it locks. As a DANGLING symlink
+  (macOS, Linux) the lock broke the build of the package and of
+  `./cmd/bridge`: `cannot embed irregular file static/.#app.js`. As the
+  REGULAR file it is on Windows it was EMBEDDED, and the console served
+  its `user@host.pid:boot` at `/static/.%23app.js` with a 200. A Finder
+  `.DS_Store` at the top of `static/` shipped the same way.
+  `static/[^.]*`, `templates/[^.]*.html` and `[^.]*.tmpl` embed the same
+  files as before and refuse the leading dot and nothing else. Two
+  tempting alternatives are wrong. The bare `static` is lock-safe too, but
+  it drops a top-level `_name`, which ships and which the static sweeps
+  above read for that reason. `all:static` embeds the dot files below the
+  top level. `TestEveryEmbedPatternRefusesALeadingDot` plants a lock
+  beside every file and a `.DS_Store` in every directory of every
+  embedding package, through `go list -overlay`, and requires the embedded
+  sets to be unchanged. A source file planted the same way must show up in
+  the package's `GoFiles`, because an overlay the go command did not read
+  leaves the two listings equal and the test green over nothing. It never
+  writes the tree, since a real lock would
+  break the build of the test itself. An overlay file is always regular,
+  and that shape answers for both: the go command asks a file's type only
+  after a glob has matched its name. **It lists with `-test`**: plain `go
+  list` resolves a test file's embed patterns but neither their files nor
+  their errors, and without the flag the probe passed over an unsafe
+  test-file embed. **A backup (`app.js~`) is the one kind of detritus
+  `isEditorDetritus` names that the embed cannot refuse inside a directory
+  a pattern WALKS** (`static/[^.]*` walks `static/player`), because the go
+  tool's walk skips only `.` and `_` names. A glob bound to an extension,
+  `[^.]*.html`, never matches one. An auto-save, `#app.js#`, is embedded
+  too, but neither side of the comparison skips it, so the two agree. So
+  `embedDiskProblems` tolerates a backup on the embedded side. Its disk
+  side skips a dot-directory, which the embed refuses at every level, and
+  walks a `_` one, whose files are the 404 the comparison exists to
+  report. An embedded file that is on disk but outside what the FS holds
+  is reported as a pattern too wide, never as a stale cache. Until #1006
+  `TestEmbeddedStaticTreeMatchesDisk` reported one as "embedded but
+  missing from disk (stale build cache?)" while it sat on disk, every time
+  emacs saved an asset. `TestEmbeddedTemplatesMatchDisk` and
+  `TestEmbeddedUnitTemplatesMatchDisk` pin the other two FSes the same way.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`

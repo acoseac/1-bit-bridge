@@ -1,14 +1,19 @@
 package admin
 
 import (
+	"fmt"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // TestEmbeddedStaticTreeMatchesDisk guards a failure mode that is not a
@@ -16,84 +21,292 @@ import (
 // test.
 //
 // The rule, stated precisely because the imprecise version misleads:
-// `//go:embed static/*` embeds each entry directly inside static/,
-// and a matched DIRECTORY is embedded recursively. At the top level
-// the explicit `*` matches everything, INCLUDING "_"-prefixed names —
-// so static/_probe.js would embed fine. But the recursive descent into
-// a matched subdirectory silently SKIPS any entry whose name begins
-// with "." or "_". So static/player/_util.js embeds NOTHING: it
-// compiles, it works on a dev machine serving from disk, and it 404s
-// in a release binary. Verified both ways when this test was written.
+// `//go:embed static/[^.]*` embeds each entry directly inside static/
+// whose name does not begin with ".", and a matched DIRECTORY is embedded
+// recursively. At the top level the pattern admits "_"-prefixed names, so
+// static/_probe.js would embed fine. But the recursive descent into a
+// matched subdirectory silently SKIPS any entry whose name begins with
+// "." or "_". So static/player/_util.js embeds NOTHING: it compiles, it
+// works on a dev machine serving from disk, and it 404s in a release
+// binary. Verified both ways when this test was written, and again for
+// the [^.] pattern.
 //
 // Subdirectories are exactly where the player modules live, which is
 // what makes this worth a test rather than a comment.
 //
 // The fix is NOT to switch the directive to `all:static`: that would
 // suck a macOS .DS_Store (and any editor swap file) into every release
-// binary. The fix is to notice, which is what this does.
+// binary. The fix is to notice, which is what this does. Until
+// 2026-09-25 the pattern was `static/*`, which did the same at the top
+// level. Its `*` matches a leading dot, so it embedded a top-level
+// .DS_Store, and an editor's lock broke the build
+// (TestEveryEmbedPatternRefusesALeadingDot).
 func TestEmbeddedStaticTreeMatchesDisk(t *testing.T) {
+	checkEmbeddedMatchesDisk(t, staticFS, "static", func(string) bool { return true })
+}
+
+// TestEmbeddedTemplatesMatchDisk is the same pin for templateFS: every .html
+// file under templates/ is embedded, and nothing else is. New parses the
+// templates at startup, so one that is missing from the embed fails the
+// console's construction outright.
+func TestEmbeddedTemplatesMatchDisk(t *testing.T) {
+	checkEmbeddedMatchesDisk(t, templateFS, "templates", func(name string) bool {
+		return path.Ext(name) == ".html"
+	})
+}
+
+// checkEmbeddedMatchesDisk fails t for every disagreement embedDiskProblems
+// finds between embedded and the package directory, and when nothing under
+// root is embedded at all.
+func checkEmbeddedMatchesDisk(t *testing.T, embedded fs.FS, root string, want func(name string) bool) {
+	t.Helper()
+	problems, n, err := embedDiskProblems(embedded, os.DirFS("."), root, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+	if n == 0 {
+		t.Fatalf("nothing is embedded under %s/: the embed directive is broken", root)
+	}
+}
+
+// embedDiskProblems compares the files embedded under root with the files on
+// disk under root whose names want admits, and describes each disagreement.
+// The disk side skips what the embed refuses: isEditorDetritus names, and
+// any dot-directory. The embedded side skips a backup, which the embed cannot
+// refuse inside a directory it walks. n is how many embedded files it
+// compared.
+func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string) bool) (problems []string, n int, err error) {
+	onDisk, err := filesOnDisk(disk, root, want)
+	if err != nil {
+		return nil, 0, err
+	}
+	inEmbed, err := filesEmbedded(embedded, root)
+	if err != nil {
+		return nil, 0, err
+	}
+	for p, wanted := range onDisk {
+		if wanted && !inEmbed[p] {
+			problems = append(problems, p+" exists on disk but is NOT embedded, so a release "+
+				"build lacks it while a dev checkout serving from disk does not: the pattern "+
+				"does not reach it, or a leading '.' or '_' in a directory below the top level "+
+				"hides it from the walk")
+		}
+	}
+	for p := range inEmbed {
+		wanted, here := onDisk[p]
+		if problem := embeddedProblem(p, wanted, here); problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	sort.Strings(problems)
+	return problems, len(inEmbed), nil
+}
+
+// filesOnDisk maps every file on disk under root to whether want admits it,
+// skipping what the embed refuses.
+func filesOnDisk(disk fs.FS, root string, want func(name string) bool) (map[string]bool, error) {
 	onDisk := map[string]bool{}
-	err := filepath.WalkDir("static", func(p string, d os.DirEntry, err error) error {
+	err := fs.WalkDir(disk, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		// A dot-directory is a tool's (.cache, .vscode), and the embed
+		// refuses one at every level: [^.] at the top, the walk below it.
+		// A "_" directory is not skipped: the walk hides it too, so its
+		// files are the 404 this comparison exists to report.
 		if d.IsDir() {
+			if p != root && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		if isEditorDetritus(d.Name()) {
-			return nil
+		if !isEditorDetritus(d.Name()) {
+			onDisk[p] = want(d.Name())
 		}
-		onDisk[filepath.ToSlash(p)] = true
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk disk static/: %v", err)
+		return nil, fmt.Errorf("walk %s/ on disk: %w", root, err)
 	}
+	return onDisk, nil
+}
 
-	embedded := map[string]bool{}
-	err = fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+// filesEmbedded lists the files embedded under root, except a backup: that is
+// embedded wherever a pattern walks its directory (see isEditorDetritus), so
+// on this side it is no disagreement either.
+func filesEmbedded(embedded fs.FS, root string) (map[string]bool, error) {
+	inEmbed := map[string]bool{}
+	err := fs.WalkDir(embedded, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			embedded[p] = true
+		if !d.IsDir() && !strings.HasSuffix(d.Name(), "~") {
+			inEmbed[p] = true
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk embedded static/: %v", err)
+		return nil, fmt.Errorf("walk embedded %s/: %w", root, err)
 	}
+	return inEmbed, nil
+}
 
-	for p := range onDisk {
-		if !embedded[p] {
-			t.Errorf("%s exists on disk but is NOT embedded — a leading '.' or '_' in a "+
-				"path segment excludes it from //go:embed static/*, so it will 404 in a "+
-				"release build while working from a dev checkout", p)
-		}
+// embeddedProblem describes what is wrong with embedding p, given whether the
+// disk side has p (here) and wants it (wanted), or returns "" when nothing is.
+func embeddedProblem(p string, wanted, here bool) string {
+	switch {
+	// First, whatever the disk side made of the name: a leading "." in any
+	// element is the pattern's doing. "/"+p reaches the first element too,
+	// which is the whole path when root is ".".
+	case strings.Contains("/"+p, "/."):
+		return p + ` is embedded, and a leading "." names an editor's lock, a .DS_Store or ` +
+			`a swap file: the pattern lets it through. Start every glob element with [^.], ` +
+			`never * (TestEveryEmbedPatternRefusesALeadingDot)`
+	case wanted:
+		return ""
+	case here:
+		return p + " is embedded, but it is not a file this FS holds: the pattern is wider " +
+			"than the FS it fills"
+	default:
+		return p + " is embedded but missing from disk (stale build cache?)"
 	}
-	for p := range embedded {
-		if !onDisk[p] {
-			t.Errorf("%s is embedded but missing from disk (stale build cache?)", p)
-		}
-	}
-	if len(embedded) == 0 {
-		t.Fatal("no embedded static assets — the embed directive is broken")
+}
+
+// TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse drives
+// embedDiskProblems with what an editor and the OS leave beside the console's
+// files, on both sides of the comparison.
+//
+// The embedded side holds what a pattern cannot refuse. A backup (`app.js~`)
+// is embedded by any pattern that walks its directory, because the go tool's
+// walk below a matched directory skips only "." and "_" names; static/[^.]*
+// walks static/player. So a backup is no disagreement, whichever side it is
+// on: it was reported as "embedded but missing from disk (stale build
+// cache?)" about a file sitting on disk, every time emacs saved an asset. A
+// leading "." IS refused, so one on the embedded side is a pattern letting
+// it through, and the report says that rather than blaming a cache. The disk
+// side skips a dot-directory, which the embed refuses at every level, and
+// not a "_" one, whose files are the 404 the comparison exists to report. A
+// file that is on disk but outside what the FS holds is a pattern wider than
+// its FS, not a stale cache.
+func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		root     string
+		want     func(name string) bool
+		disk     fstest.MapFS
+		embedded fstest.MapFS
+		problems map[string]string // file -> a phrase its problem must contain
+	}{
+		{
+			name: "static",
+			root: "static",
+			want: func(string) bool { return true },
+			disk: fstest.MapFS{
+				"static/app.js":           {},
+				"static/app.js~":          {},
+				"static/.#app.js":         {},
+				"static/.DS_Store":        {},
+				"static/player/boot.js":   {},
+				"static/player/boot.js~":  {},
+				"static/player/.#boot.js": {},
+				"static/player/_util.js":  {},
+				// A tool's dot-directory. The embed refuses it at every level
+				// ([^.] at the top, the walk below), so it is not the console's.
+				"static/.cache/tool.js":        {},
+				"static/player/.cache/deep.js": {},
+				// A "_" directory is hidden from the walk too, but it is not a
+				// tool's: its files are the 404 this comparison reports.
+				"static/player/_lib/util.js": {},
+				// Dot files an editor did not leave. isEditorDetritus takes
+				// every leading ".", so neither reads as a console file.
+				"static/.env":            {},
+				"static/player/.gitkeep": {},
+			},
+			embedded: fstest.MapFS{
+				"static/app.js":          {},
+				"static/app.js~":         {},
+				"static/player/boot.js":  {},
+				"static/player/boot.js~": {},
+				"static/.#app.js":        {}, // what static/* embedded from a Windows-shape lock
+				"static/.env":            {}, // ...and from any other top-level dot file
+				"static/gone.js":         {},
+			},
+			problems: map[string]string{
+				"static/.#app.js":            `a leading "."`,
+				"static/.env":                `a leading "."`,
+				"static/gone.js":             "missing from disk",
+				"static/player/_util.js":     "is NOT embedded",
+				"static/player/_lib/util.js": "is NOT embedded",
+			},
+		},
+		{
+			// A file this FS should not hold, embedded by a pattern wider than
+			// its own: it is on disk, so "missing from disk" would be false.
+			name: "templates",
+			root: "templates",
+			want: func(name string) bool { return path.Ext(name) == ".html" },
+			disk: fstest.MapFS{
+				"templates/page.html": {},
+				"templates/notes.txt": {},
+			},
+			embedded: fstest.MapFS{
+				"templates/page.html": {},
+				"templates/notes.txt": {},
+			},
+			problems: map[string]string{
+				"templates/notes.txt": "wider than",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems, _, err := embedDiskProblems(tc.embedded, tc.disk, tc.root, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := maps.Clone(tc.problems)
+			for _, p := range problems {
+				file, _, _ := strings.Cut(p, " ")
+				phrase, ok := want[file]
+				switch {
+				case !ok:
+					t.Errorf("unexpected problem: %s", p)
+				case !strings.Contains(p, phrase):
+					t.Errorf("the problem for %s should say %q: %s", file, phrase, p)
+				}
+				delete(want, file)
+			}
+			for file := range want {
+				t.Errorf("no problem reported for %s", file)
+			}
+		})
 	}
 }
 
 // isEditorDetritus reports whether a name under static/ belongs to an editor
 // or the OS rather than to the console: a leading "." (a .DS_Store, emacs's
 // `.#name` lock, a `._name` AppleDouble file) or a trailing "~" (a backup).
-// It is legitimately absent from the embed and must not be in the repo
-// either, so every test that reads static/ from disk skips it rather than
-// fail an unrelated run over it.
+// None of it is the console's and none of it may be in the repo, so every
+// test that reads static/ from disk skips it rather than fail an unrelated
+// run over it.
+//
+// The embed refuses the first kind and cannot refuse the second. A leading
+// "." is refused at the top level by the [^.] the pattern starts with, and
+// below it by the go tool's walk. A backup is embedded wherever a pattern
+// walks its directory, because that walk skips only "." and "_" names. (A
+// glob bound to an extension, like templates/[^.]*.html, never matches one.)
+// So embedDiskProblems tolerates a backup on the embedded side as well. (This
+// comment called all of it "legitimately absent from the embed" until
+// 2026-09-25, when neither half was true at the top level of static/.)
 //
 // Skipping is also the only safe way to handle one. Emacs's lock is a
 // DANGLING symlink where it can make one, and a REGULAR file holding
 // `user@host.pid:boot` where it cannot (always on Windows), so the file
 // either cannot be opened or opens as something that is not JavaScript.
 // Deliberately NOT the go tool's "_" rule as well: a top-level `_name.js`
-// is embedded by `static/*` and ships, so the parity guards must read it.
+// is embedded by `static/[^.]*` and ships, so the parity guards must read it.
 func isEditorDetritus(name string) bool {
 	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~")
 }
