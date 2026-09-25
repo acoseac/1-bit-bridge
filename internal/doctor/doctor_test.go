@@ -41,6 +41,13 @@ func TestConfigDirCheck_ReadOnlyFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits don't gate writes on Windows")
 	}
+	// Root writes into a mode-0500 directory, so the probe passes. The
+	// write's FAIL is pinned without a permission bit, as root too, by
+	// TestConfigDirStillProbesForAUserWhoCanReadTheConfigOrIsAboutToWriteIt.
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a mode-0500 directory, so config-dir's write probe passes; " +
+			"this test needs a user the mode bits deny")
+	}
 	dir := t.TempDir()
 	ro := filepath.Join(dir, "readonly")
 	if err := os.MkdirAll(ro, 0o500); err != nil {
