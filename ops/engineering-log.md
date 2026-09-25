@@ -14495,3 +14495,50 @@ diff and the two judgment calls:
 - The init twin was found by running the re-init the #985 bullet described,
   not by reading it: the bullet said a broken existing config "cannot
   block" that re-init, and config-file is what it had checked.
+
+### Review
+
+- **Round 1**, on `5ff22781`. Gemini: "There are no review comments to
+  address". CodeRabbit (`9b707ebc..5ff22781`): "No actionable comments were
+  generated". SonarCloud: gate passed with 3 new issues, all taken in
+  `410f73fd`: go:S1192 for `"port-api"` / `"port-admin"`, which the new
+  branch made three uses each (they join the package's `checkName…`
+  constants, the rule's existing answer here), and go:S3776 for the
+  end-to-end test's cognitive complexity, 24 against 15 (its rows, skip
+  and assertions moved to named helpers; NC1 re-run against the refactored
+  test: all four rows red).
+- **Round 2**, on `410f73fd`. SonarCloud: 0 open issues. Gemini
+  (`/gemini review`): one medium finding, that `checkAPIPort` and
+  `checkAdminPort` were now the same three steps. Taken in `4eb5ff6f` as
+  `checkListenPort(ctx, d, name, port)`, which takes the port explicitly
+  for `ownedPortCheck`'s recorded reason; a control dropping the decline
+  from the shared ladder turned both tests red. CodeRabbit: "Review paused
+  — included plan limit reached … wait 47 minutes".
+- **Round 3**, on `4eb5ff6f`. Gemini (`/gemini review`): "no review
+  comments to evaluate". SonarCloud: gate OK, 0 open issues.
+  CodeRabbit: still paused. At the user's request its "Run this review
+  for free" checkbox was ticked by editing the walkthrough, and the
+  on-demand pass (`5ff22781..4eb5ff6f`, three files) reported "No
+  actionable comments were generated in the recent review", merge risk
+  minimal up to `4eb5f`. Getting there took a detour: an edit to the PR
+  body re-rendered the walkthrough without the pause notice and its
+  checkbox, and `@coderabbitai review` answered "Review rate limited" and
+  put both back for the current head.
+- Every read was paginated. The `reviewThreads` connection was read to
+  `hasNextPage: false`: one thread (Gemini's round-2 finding), answered and
+  resolved.
+- A full `go test -race ./...` in the stock `golang:1.26.6` image on dido
+  (no lsof, uid 1000, so the permission rows run): 49 packages ok.
+
+### Process notes (review)
+
+- **The documented way to read CodeRabbit's verdict passed a head it had
+  not reviewed.** My first wait for the on-demand pass returned in two
+  seconds on a match that the paused comment already held. That comment
+  carried round 1's "No actionable comments were generated", and a
+  `"headCommitId":"4eb5ff6f"` inside the pause notice's checkbox, equal to
+  the PR head. CLAUDE.md's check (the verdict string, and `headCommitId`
+  against the head) would have called it a pass. Only
+  `final_review_risk_coverage`'s `"coveredCommitId"` said `5ff22781`, and
+  it is the one marker that moves when a review finishes. CLAUDE.md's
+  CodeRabbit bullet now says to compare that instead.

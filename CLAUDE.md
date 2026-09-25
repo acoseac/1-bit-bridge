@@ -3690,10 +3690,19 @@ its twin.** The top list is older, shorter, and read first.
   Querying the reviews API showed CodeRabbit's last review sitting on an
   older commit for five of six PRs while every one of them had in fact
   passed on its current head — the pass is an EDIT to the walkthrough issue
-  comment, which carries the `headCommitId` it covers. The check that works
-  is grepping that comment for the verdict string and comparing its
-  `headCommitId` to the PR head. Absence of new findings is not a pass, and
-  saying so out loud without checking is how this was learned twice. (#967–#972)
+  comment. **Compare `coveredCommitId` to the PR head, never
+  `headCommitId`**: the marker is `final_review_risk_coverage`'s
+  `"coveredCommitId"`, and it moves only when a review finishes. This
+  bullet said `headCommitId` until #1022, and a paused walkthrough defeats
+  that check: its "Run this review for free" checkbox carries the head's
+  `headCommitId` while the last round's verdict string stays in the
+  comment, so on #1022 grep said "No actionable comments" and head
+  `4eb5ff6f` while `coveredCommitId` said `5ff22781`. Absence of new
+  findings is not a pass, and saying so out loud without checking is how
+  this was learned twice. (#967–#972) **Editing the PR body re-renders the
+  walkthrough and drops a pause notice's checkbox**; `@coderabbitai review`
+  then answers "Review rate limited" and puts the notice, checkbox and all,
+  back for the current head (#1022).
 - **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
   a page, and a long PR's newest round is on the page it drops.** On #996
   (40 reviews, 38 review comments) every check read page one only. Two
