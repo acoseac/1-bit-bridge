@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
@@ -4971,7 +4972,11 @@ func listWaveformSidecarsQ(ctx context.Context, q rowQueryer, where string, args
 	rows, err := q.QueryContext(ctx,
 		`SELECT waveform_path FROM track_analysis WHERE waveform_path != '' AND (`+where+`)`, args...)
 	if err != nil {
-		logger.Warn("list waveform sidecars", "err", err)
+		// A listing the shutdown stopped is not reported: the delete it
+		// serves fails on the same cancelled context.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("list waveform sidecars", "err", failure)
+		}
 		return nil
 	}
 	defer rows.Close()
@@ -4985,7 +4990,9 @@ func listWaveformSidecarsQ(ctx context.Context, q rowQueryer, where string, args
 		out = append(out, wp)
 	}
 	if iterErr := rows.Err(); iterErr != nil {
-		logger.Warn("iter waveform sidecars", "err", iterErr)
+		if failure := ctxerr.WithoutCancellation(ctx, iterErr); failure != nil {
+			logger.Warn("iter waveform sidecars", "err", failure)
+		}
 	}
 	return out
 }

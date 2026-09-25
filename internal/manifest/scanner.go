@@ -22,6 +22,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
@@ -642,25 +643,8 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		if observed == 0 && !hasAllowEmptySentinel(root) {
-			n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
-			if countErr != nil {
-				// Fail closed: we can't audit, so sentinel the root
-				// rather than letting the deletion pass run on
-				// untrusted state. CodeRabbit Major + Gemini medium
-				// on PR #289 — pre-fix the .warn+continue silently
-				// disabled the safety gate.
-				scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
-					"root", root, "err", countErr)
-				errorSubtrees[rootSentinel] = struct{}{}
-				continue
-			}
-			if n > 0 {
-				scanLogger.Error("suspected clean-empty mount failure",
-					"root", root, "rows_in_db", n,
-					"hint", "place .bridge-allow-empty at the root to confirm intent")
-				errorSubtrees[rootSentinel] = struct{}{}
-			}
+		if observed == 0 && !hasAllowEmptySentinel(root) && s.emptyRootMustBeSpared(ctx, root, multiRoot) {
+			errorSubtrees[rootSentinel] = struct{}{}
 		}
 	}
 
@@ -753,13 +737,17 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
+	// A pass the shutdown stopped rolled back, so it is not reported, and
+	// the scan returns at the ctx check below without reconciling.
 	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
-	if err != nil {
-		scanLogger.Error("missing-count tracks pass", "err", err, "missing", len(missingTracks))
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		scanLogger.Error("missing-count tracks pass", "err", failure, "missing", len(missingTracks))
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
-			scanLogger.Error("case-only rename reap", "err", err, "renamed", len(renamed))
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				scanLogger.Error("case-only rename reap", "err", failure, "renamed", len(renamed))
+			}
 		} else {
 			scanLogger.Info("reaped stale rows from case-only rename", "renamed", len(renamed))
 		}
@@ -795,8 +783,8 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		missingFolders = append(missingFolders, p)
 	}
 	deletedFolders, err := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
-	if err != nil {
-		scanLogger.Error("missing-count folders pass", "err", err, "missing", len(missingFolders))
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		scanLogger.Error("missing-count folders pass", "err", failure, "missing", len(missingFolders))
 	}
 	if sparedFolders > 0 {
 		scanLogger.Warn("spared folders from deletion pass (parent walk error)",
@@ -858,7 +846,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// below then groups the now-unified folder. DB-only, enriched_at-untouched.
 	// Non-fatal.
 	if n, rErr := s.runAlbumTitleReconciliation(ctx, routedSet); rErr != nil {
-		scanLogger.Error("album-title reconciliation", "err", rErr)
+		reportReconciliation(ctx, "album-title reconciliation", rErr)
 	} else if n > 0 {
 		scanLogger.Info("album-title reconciliation fixed folder-name album tags", "tracks", n)
 	}
@@ -868,7 +856,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// enriched_at untouched. Non-fatal: a reconciliation error must not
 	// fail an otherwise-successful scan.
 	if n, rErr := s.runAlbumArtistReconciliation(ctx, routedSet); rErr != nil {
-		scanLogger.Error("album-artist reconciliation", "err", rErr)
+		reportReconciliation(ctx, "album-artist reconciliation", rErr)
 	} else if n > 0 {
 		scanLogger.Info("album-artist reconciliation unified split albums", "tracks", n)
 	}
@@ -877,7 +865,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// own album row on iOS. Same DB-only, enriched_at-untouched contract as
 	// the AlbumArtist pass. Non-fatal.
 	if n, rErr := s.runYearReconciliation(ctx, routedSet); rErr != nil {
-		scanLogger.Error("year reconciliation", "err", rErr)
+		reportReconciliation(ctx, "year reconciliation", rErr)
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation filled missing album years", "tracks", n)
 	}
@@ -887,7 +875,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// Complements the within-folder pass above. Same DB-only,
 	// enriched_at-untouched contract. Non-fatal.
 	if n, rErr := s.runYearReconciliationByMBID(ctx, routedSet); rErr != nil {
-		scanLogger.Error("year reconciliation (mbid)", "err", rErr)
+		reportReconciliation(ctx, "year reconciliation (mbid)", rErr)
 	} else if n > 0 {
 		scanLogger.Info("year reconciliation (mbid) filled stray years", "tracks", n)
 	}
@@ -897,7 +885,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// order correctly on iOS. Same DB-only, enriched_at-untouched contract;
 	// routed UPnP rows excluded. Non-fatal.
 	if n, rErr := s.runTrackNumberReconciliation(ctx, routedSet); rErr != nil {
-		scanLogger.Error("track-number reconciliation", "err", rErr)
+		reportReconciliation(ctx, "track-number reconciliation", rErr)
 	} else if n > 0 {
 		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
 	}
@@ -910,6 +898,45 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// routedSet: its ref stream anti-joins UPnP-routed rows in SQL.
 	scanOK = true
 	return count, nil
+}
+
+// emptyRootMustBeSpared audits a root whose walk observed nothing and
+// reports whether the deletion pass must spare it: when the DB carries rows
+// for it (a suspected clean-empty mount), and when the count fails.
+//
+// Fail closed on a failed count: we can't audit, so the root is spared
+// rather than letting the deletion pass run on untrusted state. CodeRabbit
+// Major + Gemini medium on PR #289 — pre-fix the .warn+continue silently
+// disabled the safety gate.
+func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiRoot bool) bool {
+	n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
+	if countErr != nil {
+		// Spared either way. A count the shutdown stopped is not reported:
+		// the scan stops before its deletion pass regardless.
+		if failure := ctxerr.WithoutCancellation(ctx, countErr); failure != nil {
+			scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
+				"root", root, "err", failure)
+		}
+		return true
+	}
+	if n > 0 {
+		scanLogger.Error("suspected clean-empty mount failure",
+			"root", root, "rows_in_db", n,
+			"hint", "place .bridge-allow-empty at the root to confirm intent")
+		return true
+	}
+	return false
+}
+
+// reportReconciliation logs a reconciliation pass that failed. One the
+// shutdown stopped is not reported: its transaction rolled back, and the
+// passes after it fail the same way on the same cancelled context, so a
+// shutdown during the tail would otherwise put up to five failures in the
+// journal for passes that failed at nothing. The next scan reconciles.
+func reportReconciliation(ctx context.Context, pass string, err error) {
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		scanLogger.Error(pass, "err", failure)
+	}
 }
 
 // routedExclusionSet returns the set of UPnP-routed source paths that the
@@ -1253,7 +1280,9 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					// optimization defeats the resilience contract.
 					// Cheap PRIMARY-KEY UPDATE, no-op when already 0.
 					if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
-						scanLogger.Warn("reset missing_count on skip", "path", pi.rel, "err", err)
+						if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+							scanLogger.Warn("reset missing_count on skip", "path", pi.rel, "err", failure)
+						}
 					}
 					return
 				}
@@ -1523,7 +1552,9 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 		}
 		if len(stale) > 0 {
 			if n, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, stale, 1); derr != nil {
-				scanLogger.Warn("sacd stale-row retire", "path", pi.rel, "err", derr)
+				if failure := ctxerr.WithoutCancellation(ctx, derr); failure != nil {
+					scanLogger.Warn("sacd stale-row retire", "path", pi.rel, "err", failure)
+				}
 			} else if n > 0 {
 				scanLogger.Info("sacd retired stale virtual rows", "path", pi.rel, "count", n)
 			}
@@ -1549,6 +1580,16 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 // but the scan continues. The legacy walker had the same behaviour
 // (bare `log.Printf` on UpsertTrack failure); per-batch failure is
 // rarer because a single transaction wraps many rows.
+//
+// A flush the shutdown stopped drops its batch too, deliberately, and
+// says nothing. It is the same decision the drain below makes for every
+// batch after a cancel, and nothing is lost that the next scan cannot redo:
+// the skip gate compares each file against its STORED row, which the
+// dropped write never touched, so the next scan re-extracts exactly what
+// was dropped. Writing it on a context detached from the cancel instead
+// would hold shutdown for a batch of up to scanBatchSize rows, for rows
+// the next scan writes anyway.
+// TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo pins it.
 func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 	batch := make([]*Track, 0, scanBatchSize)
@@ -1579,14 +1620,18 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		committedRows := 0
 		if len(full) > 0 {
 			if err := s.store.UpsertTrackBatch(ctx, full); err != nil {
-				scanLogger.Error("upsert batch", "rows", len(full), "err", err)
+				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+					scanLogger.Error("upsert batch", "rows", len(full), "err", failure)
+				}
 			} else {
 				committedRows += len(full)
 			}
 		}
 		if len(stampRows) > 0 {
 			if err := s.store.StampExtractorVersionBatch(ctx, stampRows); err != nil {
-				scanLogger.Error("stamp extractor-version batch", "rows", len(stampRows), "err", err)
+				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+					scanLogger.Error("stamp extractor-version batch", "rows", len(stampRows), "err", failure)
+				}
 			} else {
 				committedRows += len(stampRows)
 			}
@@ -1799,13 +1844,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// fs.ErrNotExist on the subtree is a legitimate operator
 			// delete and the bounded deletion pass runs as before.
 			if errors.Is(err, fs.ErrNotExist) {
-				if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
-					scanLogger.Error("subtree absent but owning root audit failed",
-						"path", abs, "root", owningRoot, "err", auditErr)
-					return auditErr
-				}
-				scanLogger.Info("subtree removed", "path", abs)
-				return nil
+				return s.auditSubtreeMiss(ctx, abs, owningRoot, multiRoot)
 			}
 			// Genuine transient failures (permission flap, EACCES, NAS
 			// drop) still record the subtree so the spare kicks in.
@@ -1851,7 +1890,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 				// unmarked and the deletion pass would reap a still-
 				// valid row (CodeRabbit Major review on PR #160's
 				// second round).
-				scanLogger.Error("subtree upsert folder", "path", rel, "err", err)
+				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+					scanLogger.Error("subtree upsert folder", "path", rel, "err", failure)
+				}
 				errorSubtrees[rel] = struct{}{}
 				return nil
 			}
@@ -1961,12 +2002,14 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// pass failed while the folders pass succeeded. Separate names make
 	// that class of clobber impossible rather than merely fixed.
 	deletedTracks, tracksDelErr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
-	if tracksDelErr != nil {
-		scanLogger.Error("subtree missing-count tracks pass", "err", tracksDelErr, "missing", len(missingTracks))
+	if failure := ctxerr.WithoutCancellation(ctx, tracksDelErr); failure != nil {
+		scanLogger.Error("subtree missing-count tracks pass", "err", failure, "missing", len(missingTracks))
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
-			scanLogger.Error("subtree case-only rename reap", "err", err, "renamed", len(renamed))
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				scanLogger.Error("subtree case-only rename reap", "err", failure, "renamed", len(renamed))
+			}
 		} else {
 			scanLogger.Info("reaped stale rows from case-only rename", "renamed", len(renamed))
 		}
@@ -1984,8 +2027,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		missingFolders = append(missingFolders, p)
 	}
 	deletedFolders, foldersDelErr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
-	if foldersDelErr != nil {
-		scanLogger.Error("subtree missing-count folders pass", "err", foldersDelErr, "missing", len(missingFolders))
+	if failure := ctxerr.WithoutCancellation(ctx, foldersDelErr); failure != nil {
+		scanLogger.Error("subtree missing-count folders pass", "err", failure, "missing", len(missingFolders))
 	}
 	if sparedTracks > 0 || sparedFolders > 0 {
 		scanLogger.Warn("subtree scan spared rows from deletion pass (parent walk error)",
@@ -2028,12 +2071,32 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// rolls back whole, but the gate must not depend on the store keeping
 	// that shape, and the cost of being wrong in this direction is one
 	// DB-only pass against leaving a group with no served member.
-	// Non-fatal.
+	// Non-fatal. A tracks pass the shutdown stopped opens the gate too; the
+	// pass then fails at its first read on the same cancelled context, and
+	// restampDuplicatesNonFatal does not report that.
 	if committed.Load() > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil {
 		s.restampDuplicatesNonFatal(ctx)
 	}
 
 	return int(committed.Load()), nil
+}
+
+// auditSubtreeMiss is ScanSubtree's answer to a subtree that is not there:
+// nil, so the bounded deletion pass reaps its rows, once the owning root
+// passes auditOwningRootOnSubtreeMiss, and the audit's error otherwise,
+// which aborts the walk so the deletion pass never runs on untrusted state.
+func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, multiRoot bool) error {
+	if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
+		// Returned either way, so the walk aborts. An audit the shutdown
+		// stopped is not reported.
+		if failure := ctxerr.WithoutCancellation(ctx, auditErr); failure != nil {
+			scanLogger.Error("subtree absent but owning root audit failed",
+				"path", abs, "root", owningRoot, "err", failure)
+		}
+		return auditErr
+	}
+	scanLogger.Info("subtree removed", "path", abs)
+	return nil
 }
 
 // walkRoot drives `filepath.WalkDir` for one root, recording folder
@@ -2143,7 +2206,9 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 				// unmarked and the deletion pass would reap a still-
 				// valid row (CodeRabbit Major review on PR #160's
 				// second round).
-				scanLogger.Error("upsert folder", "path", rel, "err", err)
+				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+					scanLogger.Error("upsert folder", "path", rel, "err", failure)
+				}
 				errorSubtrees[rel] = struct{}{}
 				return nil
 			}

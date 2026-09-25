@@ -11,6 +11,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 )
 
@@ -75,7 +76,12 @@ func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
 	start := time.Now()
 	n, err := s.restampDuplicates(ctx, true)
 	if err != nil {
-		scanLogger.Error("duplicate stamping", "err", err, "took", time.Since(start))
+		// A pass the shutdown stopped is not a failed one: its stamps
+		// commit in one transaction, which rolled back, and the next
+		// scan stamps from fresh state.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Error("duplicate stamping", "err", failure, "took", time.Since(start))
+		}
 		return
 	}
 	scanLogger.Info("duplicate stamping", "tracks", n, "took", time.Since(start))
@@ -244,8 +250,11 @@ func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, 
 	}
 	if serr := s.store.SaveDupeSummary(ctx, sum); serr != nil {
 		// The stamps committed; a summary-write failure must not undo
-		// that verdict. Log and carry on — the next pass rewrites it.
-		scanLogger.Error("save dupe summary", "err", serr)
+		// that verdict. Log and carry on — the next pass rewrites it. A
+		// write the shutdown stopped is not reported.
+		if failure := ctxerr.WithoutCancellation(ctx, serr); failure != nil {
+			scanLogger.Error("save dupe summary", "err", failure)
+		}
 	}
 	return n, nil
 }
