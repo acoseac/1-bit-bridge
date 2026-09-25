@@ -3097,7 +3097,8 @@ its twin.** The top list is older, shorter, and read first.
   `testdata/fuzz/<Name>/`. (This bullet listed a second until #1006: a
   lock at the top of an embedded directory breaking the BUILD. The
   patterns were the defect, and the next bullet is the rule.)
-- **Every `//go:embed` glob starts with `[^.]`, never `*`** (#1006). A
+- **Every wildcard element of a `//go:embed` glob starts with `[^.]`,
+  never `*`** (#1006). A
   glob's `*` matches a leading dot (`go doc embed`: "image/*" embeds
   "image/.tempfile"), so `static/*`, `templates/*.html` and `*.tmpl`
   matched an emacs lock beside the file it locks. As a DANGLING symlink
@@ -3124,11 +3125,16 @@ its twin.** The top list is older, shorter, and read first.
   list` resolves a test file's embed patterns but neither their files nor
   their errors, and without the flag the probe passed over an unsafe
   test-file embed. **A backup (`app.js~`) is the one kind of detritus
-  `isEditorDetritus` names that no pattern can refuse**, because the go
-  tool's walk below a matched directory skips only `.` and `_` names (an
-  auto-save, `#app.js#`, is embedded too, but neither side of the
-  comparison skips it, so the two agree). So `embedDiskProblems`
-  tolerates a backup on the embedded side too. Until #1006
+  `isEditorDetritus` names that the embed cannot refuse inside a directory
+  a pattern WALKS** (`static/[^.]*` walks `static/player`), because the go
+  tool's walk skips only `.` and `_` names. A glob bound to an extension,
+  `[^.]*.html`, never matches one. An auto-save, `#app.js#`, is embedded
+  too, but neither side of the comparison skips it, so the two agree. So
+  `embedDiskProblems` tolerates a backup on the embedded side. Its disk
+  side skips a dot-directory, which the embed refuses at every level, and
+  walks a `_` one, whose files are the 404 the comparison exists to
+  report. An embedded file that is on disk but outside what the FS holds
+  is reported as a pattern too wide, never as a stale cache. Until #1006
   `TestEmbeddedStaticTreeMatchesDisk` reported one as "embedded but
   missing from disk (stale build cache?)" while it sat on disk, every time
   emacs saved an asset. `TestEmbeddedTemplatesMatchDisk` and
