@@ -97,6 +97,13 @@ func hashCostSetterCallers(root string) (offenders []string, visited int, err er
 // for one that holds none of this checkout's production code, nil to
 // descend.
 func hashCostDirRule(root, path, name string) error {
+	// The rules are for the directories below the root. The whole-tree
+	// test's root is "../..", which no rule names, but a caller's root may
+	// be called anything, and one called dist skipped the whole tree.
+	// (Gemini on #1007.)
+	if path == root {
+		return nil
+	}
 	switch name {
 	case ".git", "dist", "bin", "node_modules", "testdata":
 		return filepath.SkipDir
@@ -163,8 +170,11 @@ func calledName(call *ast.CallExpr) string {
 // must not be. One is Claude Code's worktree of another branch, with a call
 // and a half-written file; the other sits at a plain path and has no go.mod
 // of its own. Before the sweep skipped them, each failed this checkout's run.
+//
+// The root's own name is one the walk skips below it, dist. The walk tests
+// the names of the directories under the root, never the root's.
 func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "dist")
 	for rel, body := range map[string]string{
 		".git/HEAD":                  "ref: refs/heads/main\n",
 		"cmd/tool/main.go":           "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n",

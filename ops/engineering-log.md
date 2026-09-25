@@ -13148,7 +13148,10 @@ and `TestNoLeakyFlacConstructors`.
   directory whose name began with "_" skipped the whole tree, the class
   #995 fixed for the citation walk. The new floors would have made that a
   loud failure instead of a silent pass, but reading the tree is the right
-  answer.
+  answer. The hash-cost walk got the same exemption in review round 1
+  (Gemini): its whole-tree root is spelled `../..`, whose name no rule
+  matches, but the helper takes any root, and a fixture's root called
+  `dist` skipped everything.
 - **No structural pin that every root sweep applies the rule.** A root is
   spelled four ways (`repoRootForCitations`, `moduleRoot`, `"../.."`, and
   `go list` for the embed probe, which does not walk), so no syntax says
@@ -13189,6 +13192,28 @@ The fixed code was also run in the mirrored geometry, with every row of
 the reproduction table planted again, the no-go.mod checkout and the
 plain-path worktree included. All five guards passed, and the stale
 citation was reported in both checkout shapes.
+
+**Replayed on Linux** (dido: kernel 7.0, `golang:1.26.6`, run as uid
+1000 so permission bits bind), from a fresh clone of the pushed branch,
+with a nested worktree under `.claude/worktrees/`, one at a plain path, a
+no-go.mod checkout, and in them a setter call, a half-written file, a
+flac probe, both lock shapes and a mode-000 directory, plus a stale
+citation in the root:
+
+| | main (`5e48cac8`) | the branch (`a87cddde`) |
+|---|---|---|
+| hash-cost | red: `permission denied` in the nested worktree | green |
+| flac | red: `permission denied` in the nested worktree | green |
+| citations | **green: the false pass** | red, correctly: the stale citation reported |
+| docblock | red: the plain-path checkout's doc in progress | green |
+| blank keepers | green | green |
+
+A walk stops at its first error, so on main the unreadable directory
+reported first and hid the work-in-progress failures, which macOS showed
+one at a time. On the clean branch, `TestIsOtherCheckout` ran its
+unsearchable-directory and dangling-symlink rows as a non-root user (the
+unsearchable one skips as root), and every fixture and whole-tree guard
+passed.
 
 ### SonarCloud, before it was asked
 
@@ -13254,3 +13279,14 @@ been over its daily quota for recent PRs):
 - The report's own description of the citation walk predated #995. Read
   against the code, the walk already skipped the worktrees, and that is
   what the measurement then showed.
+
+### Review
+
+- **Round 1**, on `a87cddde`. SonarCloud: gate passed, 0 issues and 0
+  hotspots on the PR, so splitting the walks before review held. Gemini
+  made one finding, labelled high: `hashCostDirRule` tested the root's own
+  name against its skip list. Not reachable from the whole-tree test,
+  whose root is `../..`, but the helper now takes any root and every other
+  walk here exempts it. Taken, and pinned by naming the hash-cost
+  fixture's root `dist`: with the exemption removed, the fixture reads
+  nothing (NC R1 below).
