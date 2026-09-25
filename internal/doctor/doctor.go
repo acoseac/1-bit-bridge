@@ -107,7 +107,8 @@ type Deps struct {
 	// not run: APIPort and AdminPort are then the caller's defaults, not
 	// the config's (ungradedConfigPortCheck). When it records one this
 	// user cannot read, or a named one that is not there, config-dir is
-	// not run either (checkConfigDir).
+	// not run either (checkConfigDir). Neither decline applies to the
+	// launcher's lookup (ConfigFile.PreSetup).
 	ConfigFile *ConfigFile
 	// APIPort is the main HTTPS port the server binds, typically 7788.
 	APIPort int
@@ -339,13 +340,14 @@ func checkPlatform(_ context.Context, d Deps) Check {
 // whoever runs doctor, so they run only for a user who can be the bridge's
 // or is about to run `bridge init` there. A config this user cannot read
 // says it is neither, and a named config that is not there leaves nothing
-// to vouch for, so both get "not checked" instead.
+// to vouch for, so both get "not checked" instead. The launcher's
+// pre-setup row is the exception to the first (ConfigFile.ungraded).
 func checkConfigDir(_ context.Context, d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
 		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
 	}
-	switch d.ConfigFile.problem() {
+	switch d.ConfigFile.ungraded() {
 	case configNotThere:
 		// A config the caller NAMED that is not there (config-file FAILs
 		// it) leaves this check nothing to vouch for, and the create below
@@ -373,7 +375,10 @@ func checkConfigDir(_ context.Context, d Deps) Check {
 		//
 		// Only this error. A config that does not load was read by this
 		// user, who can be the bridge's, and it names its directory as
-		// well as one that loads: the directory comes from the path.
+		// well as one that loads: the directory comes from the path. And
+		// not on the launcher's row, whose user is the one about to run
+		// `bridge init` here whatever the row found: Setup's preflight
+		// probes this directory as that user, so the row does too.
 		return ok(checkNameConfigDir, "not checked: the config in it is not readable by this user")
 	}
 	// Ensure it exists (create if missing — init() does this anyway,
@@ -637,10 +642,13 @@ func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
 // That is doctor run before `bridge init`, and the defaults are then the
 // ports init will write, so they are graded. Nor is a nil lookup: `bridge
 // init`'s preflight and its second port pass grade the ports they were
-// handed.
+// handed. Nor is the launcher's row (a PreSetup lookup), which previews
+// that preflight for the user about to run it: the defaults are the ports
+// Setup will write, and its preflight grades them whatever it finds at the
+// target, a config this user cannot read included (ConfigFile.ungraded).
 func ungradedConfigPortCheck(name string, c *ConfigFile) *Check {
 	var why string
-	switch c.problem() {
+	switch c.ungraded() {
 	case configUnreadable:
 		why = "the config that sets this port is not readable by this user"
 	case configNotThere:

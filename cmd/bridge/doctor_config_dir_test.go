@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -27,10 +28,9 @@ import (
 // cannot read the config is not the user the bridge runs as, since the
 // bridge reads it at every start, so that verdict was about the run.
 // config-dir now says it was not checked, and why, for every shape of that
-// state: a config found in the working directory or the platform dir, one
-// named under a directory this user cannot traverse (where the write
-// fails) or below one (where the create does), and the launcher's row over
-// a platform config this user cannot reach. The last decline row is a
+// state: a config found in the working directory or the platform dir, and
+// one named under a directory this user cannot traverse (where the write
+// fails) or below one (where the create does). The last decline row is a
 // directory this user CAN write, which the old check vouched for, ok,
 // which was no more the bridge's answer.
 //
@@ -39,7 +39,9 @@ import (
 // as, whether the config loads or not (a config that does not load still
 // names its directory, which comes from its path). A run that finds no
 // config, from the CLI or the launcher's row, is by the user about to run
-// `bridge init` into the directory.
+// `bridge init` into the directory. So is the launcher's row when it finds
+// a platform config this user cannot reach: the menu offers Setup there,
+// and Setup's preflight probes the directory as this user.
 func TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig(t *testing.T) {
 	skipUnlessModeBitsDeny(t, "root reads a mode-0000 config, traverses a mode-0000 directory and "+
 		"creates files in a mode-0500 one, so the configs below that this user must not read load, "+
@@ -64,8 +66,6 @@ func TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig(t *testing.T) {
 			namedConfigInUntraversableDir, doctor.Warn, doctor.OK, notChecked},
 		{"a named config below a directory this user cannot traverse",
 			namedConfigBelowUntraversableDir, doctor.Warn, doctor.OK, notChecked},
-		{"the launcher's row over a platform config this user cannot reach",
-			launcherRowOverUnreachablePlatformConfig, doctor.Warn, doctor.OK, notChecked},
 		{"a found config this user cannot read, in a directory it can write",
 			unreadableConfigInWritableWorkingDir, doctor.Warn, doctor.OK, notChecked},
 
@@ -79,6 +79,8 @@ func TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig(t *testing.T) {
 			uncreatablePlatformDirBeforeSetup, doctor.OK, doctor.Fail, "can't create: "},
 		{"the launcher's row before setup, and a platform dir this user cannot write",
 			launcherRowOverReadOnlyPlatformDirBeforeSetup, doctor.OK, doctor.Fail, "not writable: "},
+		{"the launcher's row over a platform config this user cannot reach",
+			launcherRowOverUnreachablePlatformConfig, doctor.Warn, doctor.Fail, "not writable: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cwd, platform := isolateConfigEnv(t)
@@ -103,6 +105,64 @@ func TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead drives the
+// launcher's doctor row (actDoctor) and Setup's preflight (initCmd) over one
+// host: a platform install this user may not reach, another user's, whose
+// bridge holds the default ports. The menu cannot see that install, so it
+// offers Setup and this row, whose job is to preview Setup's preflight
+// ("debug a 'doctor failed' before committing to a setup wizard").
+//
+// The row's user is the one about to run Setup there, whatever the row
+// finds, and the preflight looks nothing up: it probes the directory and
+// grades the default ports as this user, and refuses. The row answers the
+// same, line for line, with config-file's warn about the install on top.
+// Declining config-dir and the ports here, as a `bridge doctor --config`
+// run by another user does, printed "all clear." over a directory and
+// ports that Setup then refused.
+func TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root traverses and writes a mode-0000 directory, so the platform config "+
+		"loads (the menu would see the install and not offer this row) and config-dir's probe passes; "+
+		"this test needs a user the mode bits deny")
+	_, platform := isolateConfigEnv(t)
+	writeInstallAt(t, platform, "platform-track.flac")
+	denyDirForTest(t, platform, 0)
+	holdLoopbackPort(t, 7788)
+	holdLoopbackPort(t, 7789)
+
+	var row, rowErr bytes.Buffer
+	actDoctor(context.Background(), nil, &row, &rowErr, menuState{cfgPath: filepath.Join(platform, defaultConfigPath)})
+	var setup, setupErr bytes.Buffer
+	args := []string{"--yes", "--no-service", "--dir", platform, "--library", t.TempDir(), "--name", "Setup"}
+	if code := initCmd(args, strings.NewReader(""), &setup, &setupErr); code != 1 {
+		t.Fatalf("Setup exited %d, want 1, its preflight refusing; stdout:\n%s\nstderr:\n%s",
+			code, setup.String(), setupErr.String())
+	}
+
+	if l := reportLine(row.String(), "config-file"); !strings.Contains(l, "[warn]") ||
+		!strings.Contains(l, "not readable by this user") {
+		t.Errorf("the row's config-file line is %q, want a warn that the install is not readable by "+
+			"this user; report:\n%s", l, row.String())
+	}
+	for _, check := range []string{"config-dir", "port-api", "port-admin"} {
+		r, s := reportLine(row.String(), check), reportLine(setup.String(), check)
+		if !strings.Contains(r, "[FAIL]") || r != s {
+			t.Errorf("%s: the row says %q and Setup's preflight %q; want the same FAIL.\nrow:\n%s\nSetup:\n%s",
+				check, r, s, row.String(), setup.String())
+		}
+	}
+}
+
+// reportLine is the line of a printed doctor report that grades check, or
+// "" when there is none.
+func reportLine(report, check string) string {
+	for _, l := range strings.Split(report, "\n") {
+		if strings.Contains(l, " "+check+" ") {
+			return strings.TrimSpace(l)
+		}
+	}
+	return ""
 }
 
 // unreadableConfigInReadOnlyWorkingDir writes an install in cwd whose
@@ -145,10 +205,10 @@ func namedConfigBelowUntraversableDir(t *testing.T, _, _ string) (string, bool) 
 
 // launcherRowOverUnreachablePlatformConfig is the launcher's doctor row
 // (actDoctor) over a platform install this user may not reach: another
-// user's, say a root-owned one `sudo bridge init` wrote. The launcher
-// offers the row because it cannot see the install. absentIsPreSetup makes
-// only an ABSENT config the pre-setup state, so this one is reported as not
-// readable, like a --config naming it.
+// user's, say a root-owned one `sudo bridge init` wrote. The menu offers
+// Setup and this row because it cannot see the install. absentIsPreSetup
+// makes only an ABSENT config "none found", so config-file reports this one
+// as not readable, and config-dir probes as the user about to run Setup.
 func launcherRowOverUnreachablePlatformConfig(t *testing.T, _, platform string) (string, bool) {
 	named := writeInstallAt(t, platform, "platform-track.flac")
 	denyDirForTest(t, platform, 0)

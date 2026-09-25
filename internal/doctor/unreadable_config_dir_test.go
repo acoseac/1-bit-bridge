@@ -93,6 +93,12 @@ func TestConfigDirIsNotCheckedForAUserWhoCannotReadTheConfig(t *testing.T) {
 // lookup) for the same reason. The directory comes from the config's PATH,
 // never its contents, so a config that does not load names it as well as
 // one that does.
+//
+// The launcher's row is the last case: its user is the one about to run
+// `bridge init` here even when the row finds a config this user cannot
+// read, and Setup's preflight then probes this directory as that user. A
+// row that declined would read "all clear." over the directory Setup then
+// refuses.
 func TestConfigDirStillProbesForAUserWhoCanReadTheConfigOrIsAboutToWriteIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -102,6 +108,8 @@ func TestConfigDirStillProbesForAUserWhoCanReadTheConfigOrIsAboutToWriteIt(t *te
 		{"a config that does not load", &ConfigFile{Path: ungradedConfigPath, LoadErr: brokenConfig.err}},
 		{"nothing named, nothing found", &ConfigFile{Tried: []string{ungradedConfigPath}}},
 		{"no lookup", nil},
+		{"the launcher's row over a config this user cannot read",
+			&ConfigFile{Path: ungradedConfigPath, LoadErr: unreadableConfig.err, PreSetup: true}},
 	} {
 		for _, shape := range configDirShapes {
 			t.Run(tc.name+", "+shape.name, func(t *testing.T) {

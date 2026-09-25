@@ -23,15 +23,25 @@ type ConfigFile struct {
 	// there, one this user cannot reach or read, or one that does not
 	// load. Nil when it loaded, and when there was no Path.
 	//
-	// The port checks read it too. A config that did not load set no
-	// ports and no pid file, so they report that they were not checked
-	// rather than grade the defaults the caller seeded in its place (see
-	// ungradedConfigPortCheck). So does config-dir, for two of the three:
-	// a named config that is not there leaves it nothing to vouch for,
-	// and one this user cannot read says this run is not by the user the
-	// bridge runs as, whom its probes would have to answer for (see
-	// checkConfigDir).
+	// The port checks read it too, through ungraded. A config that did
+	// not load set no ports and no pid file, so they report that they
+	// were not checked rather than grade the defaults the caller seeded in
+	// its place (see ungradedConfigPortCheck). So does config-dir, for two
+	// of the three: a named config that is not there leaves it nothing to
+	// vouch for, and one this user cannot read says this run is not by
+	// the user the bridge runs as, whom its probes would have to answer
+	// for (see checkConfigDir).
 	LoadErr error
+	// PreSetup marks the launcher's lookup, for its doctor row. The menu
+	// offers that row only while it sees no install, beside the Setup
+	// wizard that writes one, so the row's user is the one about to run
+	// `bridge init` into the directory Path names. What the lookup finds
+	// there does not change that. A config this user cannot read is
+	// another user's install in Setup's way, not a sign that this run is
+	// by the wrong user, so config-file still reports it while config-dir
+	// and the port checks grade what Setup's own preflight will (see
+	// ungraded).
+	PreSetup bool
 }
 
 // configProblem is why a config that was named or found could not be
@@ -66,6 +76,20 @@ func (c *ConfigFile) problem() configProblem {
 	default:
 		return configDoesNotLoad
 	}
+}
+
+// ungraded is the problem config-dir and the port checks decline to grade
+// for: problem(), except on a PreSetup lookup. That one is the launcher's,
+// made for the user about to run `bridge init`, whose preflight looks
+// nothing up and grades the directory and the default ports whatever is
+// there. Those checks grade the same on the row that previews it, or the
+// row reads "all clear." over a directory and ports that Setup then
+// refuses. config-file keeps problem(), so it still says what was found.
+func (c *ConfigFile) ungraded() configProblem {
+	if c != nil && c.PreSetup {
+		return noConfigProblem
+	}
+	return c.problem()
 }
 
 // ranWithoutIt ends the hint on a config that could not be graded. The

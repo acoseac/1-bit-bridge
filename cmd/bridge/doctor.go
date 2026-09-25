@@ -235,6 +235,12 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 // instead ("none found", ok) for the one caller that names a path BEFORE
 // it is meant to exist: the launcher's doctor row (actDoctor), offered
 // only until `bridge init` writes the platform config.
+//
+// absentIsPreSetup also marks the lookup PreSetup, because that row's user
+// is the one about to run `bridge init` there whatever the lookup finds. A
+// config there this user cannot read (another user's install, which the
+// menu cannot see, so it offers Setup) still gets config-file's warn, and
+// config-dir and the port checks grade what Setup's preflight will.
 func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	d := doctor.Deps{
 		// The ports `bridge init` writes, which a run that finds no config
@@ -264,7 +270,7 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	}
 	d.ConfigDir = doctorConfigDir(cfgPath, path, found)
 	// The report names the config it graded, or where it looked for one.
-	d.ConfigFile = &doctor.ConfigFile{}
+	d.ConfigFile = &doctor.ConfigFile{PreSetup: absentIsPreSetup}
 	if !found {
 		if lookupErr != nil && !(absentIsPreSetup && errors.Is(lookupErr, fs.ErrNotExist)) {
 			d.ConfigFile.Path = absOrAsGiven(path)

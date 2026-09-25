@@ -127,6 +127,10 @@ func assertNotChecked(t *testing.T, c Check, reason string, guessed int) {
 // lookup) and grade the ports they were handed. A config that loaded
 // names its own ports, and a held one with no pid of ours behind it
 // FAILs as before.
+//
+// The launcher's row (a PreSetup lookup) grades them too, even over a
+// config this user cannot read: it previews that preflight for the user
+// about to run it, and the defaults are the ports Setup will write.
 func TestPortChecksStillGradeTheDefaultsWhenNoConfigFailedToLoad(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -135,6 +139,8 @@ func TestPortChecksStillGradeTheDefaultsWhenNoConfigFailedToLoad(t *testing.T) {
 		{"nothing named, nothing found", &ConfigFile{Tried: []string{"/home/b/.config/1-bit-bridge/bridge.yaml"}}},
 		{"no lookup", nil},
 		{"a config that loaded", &ConfigFile{Path: ungradedConfigPath}},
+		{"the launcher's row over a config this user cannot read",
+			&ConfigFile{Path: ungradedConfigPath, LoadErr: unreadableConfig.err, PreSetup: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := bindPort(t)
