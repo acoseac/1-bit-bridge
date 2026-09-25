@@ -2128,6 +2128,27 @@ what it claimed**, and none of it had a failing test.
   level in from the defect the pass exists for. Clear `OwnPIDFile` for a
   changed port. `RunPortChecks` takes WHICH ports to grade, because port 0
   is a legal value with its own verdict and cannot double as "skip this one".
+- **…and clearing it did nothing on a host without lsof, because the
+  verdict read which tools the host HAS** (#1021). `checkPort` ended in
+  `if !portProbeAvailable() { return warn(…) }`, goreview F9's fix (#429)
+  for a LIVE bridge that a host without lsof could not attribute. #640's
+  liveness arm answers that case first, so all the fallback still saw was
+  a port with no live pid of ours behind it: no pid file given, none
+  readable, or a dead one. lsof cannot change that answer. With no pid it
+  is never even asked (a logging shim counted zero calls), and a dead pid
+  holds nothing for it to find. Yet its absence turned the Fail into a
+  warn. In the stock `golang:1.26.6` image `bridge init` therefore
+  saved an admin port another process held, on a first install, on
+  #970's second pass, and on a re-init with the bridge stopped, and
+  `bridge serve` then could not bind. Gating the fallback on an empty pid
+  file would have fixed the reported tests and left the stopped-bridge
+  re-init open. The fallback is gone, and `portProbeAvailable` with it:
+  **a missing tool may explain a verdict; it never decides one.** lsof is
+  Priority `standard` on Debian 13 and Ubuntu 26.04, so their minimal
+  installs and container images lack it, while CI's Linux and macOS
+  runners have it. `withoutLsof` sets `lsofPath = ""`, the state
+  `resolveLsof` leaves on such a host, so the no-lsof leg runs on every
+  runner.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -3310,6 +3331,21 @@ its twin.** The top list is older, shorter, and read first.
   `TestEveryCitedTestNameExists` lives in `cmd/bridge` and caught it on
   CI's macOS leg after a local `go test ./internal/manifest/` had passed.
   After a rename, run the package that holds the sweeps.
+- **A test that fails only where a tool is missing is a finding about the
+  product on such hosts, until the code says otherwise.** #1010 saw
+  `TestInitRefusesToSaveAPortItNeverGraded` and
+  `TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID` fail in the stock
+  `golang` image, on main too, and put it down to the container, which
+  has no lsof. The tests were right: `bridge init` saved a port another
+  process held on every host without lsof (#1021). Before calling a
+  failure environmental, read what the missing tool changes in the code.
+  A failure message that names a cause is a claim too: "…excused because
+  our own recorded pid is alive" was false there, since that pass had
+  cleared the pid file. **And a seam forced both ways by two tests pins
+  the dependence it controls.** `TestPortCheck_BusyFailsWithoutOwnPID`
+  forced `portProbeAvailable` true "so the verdict doesn't depend on
+  whether lsof happens to be installed", and a sibling forced it false
+  and pinned the warn: one set of facts, two verdicts, both asserted.
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the
