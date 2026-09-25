@@ -13486,3 +13486,239 @@ One direct Gemini consult, on the diff, before the first push:
   clear a plan-limit pause. It held on 2026-09-18, when no included review
   was available. Once the notice's wait has passed, the command runs the
   pass, and the paid checkbox is not needed.
+
+## 2026-09-25 — serve stops its tailnet goroutine, and waits for it, before closing the node (#1009)
+
+#997's entry read every `go` statement in runServe and left one: "tsnet
+mode's startup goroutine, which was not examined beyond that". It ran the
+embedded node's bring-up (`bringTsnetUp`: the wrapper's Start, upstream
+Start plus Up, up to `tsnetStartTimeout` = 5 min, interactive auth
+included), the status query and one ListenPacket per tailnet address for
+HTTP/3, then `tsnetListen` (ListenTLS) and Serve. Nothing joined it. The
+deferred teardown shut down whatever the goroutine had published by then
+and closed the node, and upstream tailscale.com/tsnet v1.102.3 says Close
+"must not be called before or concurrently with Start" (tsnet.go:602).
+CodeRabbit had named one consequence on #1005 (thread r4099093280): a
+listen in flight as the node closes can register after close()'s listener
+scan (tsnet.go:615-625; registerListener refuses nothing), and #1005's
+`tsnetListen` closed such a listener only when the context was cancelled.
+
+### What was measured
+
+- **serve's context is live during an error exit's teardown, and dead
+  after it.** runServe opens with `ctx, cancel :=
+  context.WithCancel(ctx); defer cancel()` (#262), so that cancel is its
+  first defer and runs last: after the tsnet teardown, the LAN drains, the
+  `bgWriters` join and `Store.Close`. On the adminErr/serveErr/
+  tsnetServeErr exits the goroutine's context was live the whole time the
+  node was being closed, and was cancelled only as runServe returned. The
+  brief for this PR said "live on an error exit"; that holds for the
+  teardown and not after it, and the difference decided what a test had
+  to hold (below).
+- **Red on the unfixed wiring** (`2ad166b9`: seam and tests, no fix),
+  booting serve in tsnet mode with a fake node:
+  - the admin console cannot bind while the start waits for auth: `serve
+    closed the tsnet node while [Start] was still running on it`. That
+    the start had not returned when runServe did was also seen, but it
+    races runServe's final cancel, so the close is the deterministic red;
+  - a cancel while the start unwinds (a tail that takes no context):
+    runServe returned inside 1 s, the node closed under the start;
+  - a start that never returns: runServe returned 10 to 50 ms after the
+    cancel, with no line;
+  - a listen that lands between the node's close and runServe's final
+    cancel: `the tailnet listener … was served (1 Accept calls)`, still
+    open when runServe returned;
+  - a shutdown mid-bind: `WARN Failed to bind tsnet UDP socket for h3 …
+    err=tsnet: ListenPacket called before Start` and `ERROR h3 serve
+    tsnet err=quic: transport closed: read udp 127.0.0.1:…: use of closed
+    network connection`, the latter from the server started on the first
+    address before anything could see it.
+  The twin (a bind that fails on a live context) was green there and is
+  green now.
+- **Red on the unfixed wrapper** (`0e38fe17`): a Close during Start's Up
+  left the start running 5 s later (nothing cancelled it); a Close as the
+  node came up let Start publish it (`MetricsState = 2`, node closed 0
+  times); a Start after Close, and one on a cancelled context, each built
+  a node.
+- **quic-go v0.62's http3.Server, probed.** Serve on a server already
+  Shutdown returns `http: Server closed` whether or not its conn was
+  closed first (`setupListenerForConn` checks `s.closed`, and Shutdown
+  sets it before anything else). A conn closed under a RUNNING server
+  surfaces as `quic: transport closed: …: use of closed network
+  connection`, which the log site's `"server closed"` filter does not
+  match. So the Error was never about a shutdown's Shutdown; it was about
+  a server serving on a node closing under it.
+- **A cancel that lands mid-bind but before stop begins** (serve held in
+  its shutdown branch on the `Shutting down` print): the goroutine
+  published what it had bound, logged `tsnet HTTP/3 listeners bound
+  count=1` and started serving, in 5 of 5 runs, only for stop to shut it
+  down. Harmless, and wrong-looking in a journal; now refused (d638f0aa).
+- **Stress.** The five non-wedged boot tests 20 times each under `-race`
+  (100 runs, 127 s), the wedged one 3 times, the HTTP/3 ones 15 times,
+  the Serve-join one 10 times, the five wrapper tests 200 times, and
+  every tsnet test twice more after the shared grace: no failure.
+
+### Decisions
+
+- **A context of the goroutine's own, cancelled by the teardown.**
+  `startTsnetFront` derives it from serve's, so SIGINT reaches it early;
+  `stop` cancels it first on every exit path. Relying on serve's context
+  was the defect, since the teardown runs before runServe's own cancel.
+- **Join, then close; drain before the join.** The goroutine sits in
+  `http.Server.Serve` until Shutdown, so the published servers are
+  drained first; the wait comes next; the node is closed last. The wait
+  covers the HTTP/3 Serve goroutines too (`f.h3`), so nothing the
+  tailnet side started outlives runServe.
+- **One critical section begins stop and takes the snapshot**, and a
+  publication after it is refused (the caller closes what it would have
+  served). That is what makes "everything serving is something stop can
+  see" true, and HTTP/3 servers now start only after publication.
+- **Nothing is published once the shutdown has begun**, for HTTP/3 as
+  `tsnetListen` already did for HTTPS; the gate decides for a shutdown
+  that begins after that check.
+- **Drains and wait share one grace** (Gemini, below). They run long in
+  exclusive situations (the goroutine serves only once it has brought the
+  node up, and a Serve returns as soon as its Shutdown begins), so the
+  wait takes what the drains left. A throwaway probe, a published server
+  with a request in flight and a goroutine that never returns, with a 1 s
+  grace: 2.0 s with a grace each, 3 of 3; 1.0 s shared, 3 of 3. Not
+  separately pinned: a committed test would assert a duration.
+- **The wrapper's Close cancels a start in flight and does NOT wait for
+  it.** Upstream's Start (doInit) takes no context, and can do auth-key
+  resolution on its own shutdown context, which only its Close cancels; a
+  Close that waited could hang a shutdown behind it. The start closes
+  the node it built once upstream returns, under the lifecycle lock as
+  its error path already did, so a retry cannot build a second node on
+  the same state dir while the first closes. Upstream's Close is
+  therefore never concurrent with its Start. runServe's join is what
+  makes the node's close wait; the wrapper's contract is only that
+  nothing races.
+- **Start builds nothing after Close, or on a context already done.** A
+  start that begins after the teardown's cancel would build a node, write
+  the state dir and close it again.
+- **No `ErrClosed` sentinel.** No caller branches on it (`bridge tsnet
+  auth` prints the message), and a typed error in internal/tsnet meets
+  `allowedKeepers`' condition, which is a change to that guard's own
+  fixtures, for nothing a caller needs.
+- **`apiSrv.Handler()` is built once for the tailnet servers.** It
+  builds a fresh mux over shared server state on every call (the rate
+  limiters are the server's), so one handler shared by the servers
+  behaves as one per server did.
+- **The seam is per invocation, `serveOpts.tsnetNode`**, for
+  `tailscaleCLI`'s reason; internal/tsnet's is per Server
+  (`Server.newNode`). The admin tile reads the node through the two
+  methods it uses.
+- **An orphaned doc paragraph went with the moved types.** Above
+  `tsnetH3Listener` in main.go sat `variantStoreAdapter`'s first doc,
+  left behind when the tsnet types were inserted between it and its
+  subject; its claim that internal/api cannot import internal/manifest
+  is false now. `variantStoreAdapter` has its own doc, which is the
+  shape the docblock guard records as unseen ("a subject that has since
+  grown a second doc of its own").
+
+### Tests and controls
+
+Wrapper (internal/tsnet, fake upstream node through `newNode`), red on
+`0e38fe17`, green on the fix:
+
+| test | pins |
+|---|---|
+| `TestCloseStopsAStartInFlight` | Close stops a start waiting for auth, and the start closes its node after upstream returned |
+| `TestCloseThatLandsAsTheNodeComesUpClosesIt` | a Close as the node comes up: closed, not published |
+| `TestStartAfterCloseBuildsNoNode` | nothing is built after Close |
+| `TestStartOnACancelledContextBuildsNoNode` | nothing is built on a context already done |
+| `TestStartThenCloseClosesTheNodeOnce` | twin: an ordinary start and close |
+
+Serve (cmd/bridge, `serveOpts.tsnetNode`), red on `2ad166b9` except the
+twins:
+
+| test | pins |
+|---|---|
+| `TestServeStopsItsTsnetStartOnAnErrorExit` | an error exit cancels a start waiting for auth and waits for it before closing the node |
+| `TestServeWaitsForItsTsnetStartBeforeClosingTheNode` | the join on the shutdown path, and the start's state-dir write lands before runServe returns |
+| `TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace` | the join is bounded: the grace and a line, never a hung exit |
+| `TestServeClosesATailnetListenerThatOpensAfterAnErrorExit` | a listen landing between the node's close and runServe's final cancel is closed, never served |
+| `TestServeReportsNoTailnetHTTP3BindTheShutdownCutShort` | a shutdown mid-bind: no Warn, no `h3 serve tsnet`, no bind after it, every conn closed |
+| `TestServeStillReportsATailnetHTTP3BindThatFails` | twin: a bind failing on a live context is reported once, the next served, an ordinary shutdown quiet |
+| `TestServeWaitsForATailnetHTTP3ServeReportingAFailure` | twin of the Error site, and the join on the HTTP/3 Serve goroutines |
+| `TestATailnetHTTP3BindCutShortByTheShutdownServesNothing` | nothing published or served once the shutdown began (unit) |
+| `TestAServerPublishedAfterStopBeganIsRefused` | the publication gate (unit: no seam holds that window) |
+| `TestAServerPublishedBeforeStopIsShutDownByIt` | twin of the gate |
+
+Controls, each against the committed fix with one mutation asserted to
+apply exactly once, restored from git after each:
+
+| # | mutation | red |
+|---|---|---|
+| W1 | Close does not cancel the start in flight | `TestCloseStopsAStartInFlight` |
+| W2 | phase 3 publishes a node Close landed on | `TestCloseThatLandsAsTheNodeComesUpClosesIt` |
+| W3 | Start after Close allowed | `TestStartAfterCloseBuildsNoNode` |
+| W4 | Start on a done context allowed | `TestStartOnACancelledContextBuildsNoNode` |
+| S1 | stop does not cancel the goroutine | the error-exit test (after the grace, the node closed under Start) |
+| S2 | stop does not wait | the four join tests |
+| S4 | publication gate removed | the gate test |
+| S5 | HTTP/3 served as it binds, before publication | the mid-bind test (`h3 serve tsnet`) |
+| S6 | no check before each bind | the mid-bind test and the unit (3 binds) |
+| S7 | a bind failure reported after the shutdown began | the mid-bind test (Warn) |
+| S8 | HTTP/3 published after the shutdown began | the unit (published, conns open, "bound") |
+| S9 | the HTTP/3 Serve goroutines not waited for | the Serve-join test |
+| S10 | stop drains after the wait | the twin (the grace ran out on a Serve nobody had shut down) |
+| M1 | runServe does not defer stop | the error-exit and join tests |
+
+S1, S2, S9 and S10 were run again after the drains and the wait came to
+share one grace, with the same result (S2's mutation rewritten for the new
+wait, which the script's apply-exactly-once assertion had refused).
+
+### Consult
+
+A direct Gemini consult (`consult.py`) on the design, with the front, the
+wrapper, the wiring and the upstream excerpts attached:
+
+- **Taken:** drains and wait each had a grace of their own, so the
+  tailnet teardown could cost two. They share one now.
+- **Declined, measured:** "a server published and then shut down by stop
+  before its `go Serve` runs logs the transport error". Serve on a server
+  already Shutdown returns `http: Server closed` (probe above), which the
+  log site filters.
+- **Declined, read:** "upstream ListenTLS can dereference a nil
+  `CurrentTailnet` if Close races Up". LocalBackend fills `CurrentTailnet`
+  whenever the netmap exists, in the same locked section that supplies
+  the addresses Up requires before returning a status (ipnlocal
+  local.go:1479). And it is reachable only past the grace, which is
+  upstream's own race.
+- **Declined:** drop the shutdown branch's early HTTP/3 drain and make
+  stop the only drainer. stop's second Shutdown is silent (its error is
+  discarded), and the early drain is what keeps tailnet HTTP/3 draining
+  beside the LAN servers on SIGINT; the asymmetry with tailnet HTTPS,
+  drained only in stop, predates this change.
+- **Agreed with the design:** no interleaving closes the node before the
+  goroutine returns within the grace; no deadlock from phase 3 closing
+  under the lifecycle lock (upstream calls back only into the log
+  adapters, which take authMu or nothing); Close must not wait.
+
+### Out of scope
+
+- **`bridge tsnet auth` on Ctrl-C** defers the wrapper's Close while its
+  Start goroutine may still be unwinding, and the process exits right
+  after. The wrapper now stops that start instead of racing it; the CLI
+  does not wait for it, and exits.
+- **`metrics.RegisterTsnetProvider` stays registered after runServe
+  returns**, so a launcher re-entry in another mode reports the closed
+  node as down (0) rather than disabled (3). Predates this change.
+- **Upstream ListenTLS waits in `Up(context.Background())`**, which is
+  why a listen cannot be cancelled and the wait needs its grace.
+
+### Process notes
+
+- **The first listener test measured the aftermath, not the window.** It
+  released the listen after runServe had returned and passed on the
+  unfixed code: by then runServe's final cancel had run, and #1005's
+  post-check closed the listener. The rewrite holds serve between the
+  node's close and that cancel, on the `tsnet close:` print a failing
+  fake Close produces, and turns red there.
+- **An assertion I added was timing-dependent, and was caught before it
+  was pushed.** "No `listeners bound` line" in the mid-bind test holds
+  only when stop has begun before the goroutine publishes. A throwaway run
+  with serve held in its shutdown branch showed the other ordering (the
+  5-of-5 above); the assertion went, and the rule it wanted became its
+  own deterministic unit test with the check behind it.

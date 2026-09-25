@@ -2303,14 +2303,50 @@ mentions across the four `ops/audit-*.md` files.
   (`TestSnapshotStoppedMidVacuumLeavesNothing` cancels INSIDE the running
   VACUUM), so the backups directory is as the pass found it. The run state
   keeps `sweepFinished(nil)`, the recorder's "no new counts" for a failed
-  pass and a stopped one alike, because `running` must clear. **This does
+  pass and a stopped one alike, because `running` must clear. **This did
   not close the class**: a survey the same day found about 33 more log sites
   that report a shutdown cancel as a failure (scanner batch writes,
   enricher, updater poll, harvest `tick_error`, fingerprint and smart-mix
-  sweeps, integrity watchers, UPnP ingest, tsnet). They are being closed
-  subsystem by subsystem, and until a subsystem's change lands this rule
-  does not cover it: the fingerprint sweep's candidate listing and the
-  smart-mix regeneration were the first two.
+  sweeps, integrity watchers, UPnP ingest, tsnet). Each subsystem it named
+  has had its change since: the fingerprint and smart-mix sweeps (#999),
+  the scanner's writes (#1000), the enricher (#1001), the updater (#1002),
+  the harvest tick (#1003), the integrity watchers (#1004), tsnet's start
+  and status query, UPnP ingest and the premium-cover record (#1005), and
+  the tsnet goroutine's binds and HTTP/3 serves (#1009, next bullet). A
+  site is covered only once its own change has landed, so check the code
+  before assuming one outside those is. (Until #1009 this still named
+  only #999's two, through the six changes that followed it.)
+- **A goroutine serve starts is stopped by a context the TEARDOWN
+  cancels, and joined before anything it uses is closed** (#1009).
+  runServe ran the embedded tsnet node's start (up to five minutes,
+  interactive auth included), its HTTP/3 binds and its HTTPS listen on
+  one goroutine it never joined, on serve's context, and its deferred
+  teardown closed the node, which upstream forbids "before or
+  concurrently with Start". **serve's context is not the teardown's**:
+  runServe's own cancel is its FIRST defer, so it runs LAST, and on an
+  error exit (the admin console cannot bind, say) the whole teardown runs
+  with serve's context live. A start waiting for auth went on waiting,
+  and a listen that landed after the close was published and served on a
+  node that was gone (CodeRabbit on #1005). `tsnetFront`
+  (tsnet_bringup.go) runs the goroutine on a context of its own, and its
+  deferred `stop` cancels it, refuses publication and takes what was
+  published in ONE critical section, drains that, waits for the goroutine
+  and every HTTP/3 Serve it started (drains and wait share one grace;
+  running out costs a line), and only then closes the node. **A server is
+  served only once it is published**: starting each HTTP/3 server as it
+  bound let a shutdown mid-bind close the node under one nothing could
+  see, which then reported `h3 serve tsnet` with quic's `transport
+  closed`. The wrapper's half: a `Close` that lands during `Start` marks
+  the server closed and cancels that start WITHOUT waiting (upstream's
+  own start takes no context), and the start closes the node it built
+  instead of publishing it; after Close, or on a context already done,
+  Start builds nothing. **Hold the window, not its aftermath**: a first
+  draft of the listener test released the listen after runServe had
+  returned, and PASSED on the unfixed code, because runServe's final
+  cancel had run by then and #1005's post-check caught it. The window is
+  between the node's close and that cancel, and the test holds serve
+  there on its `tsnet close:` print. The publication gate has no seam a
+  boot test can hold, so it is driven directly.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
@@ -3233,9 +3269,13 @@ its twin.** The top list is older, shorter, and read first.
   whatever it did on the way, and something it stores lock-free just before
   (the transcode pool's worker slot) says when it has arrived. That reaches
   an exit with no log line in it, the transcode pool's success path (#988).
-  With neither, oversubscription is the fallback: build with `go test -c
-  -race`, then run about three processes per core. Idle stress passing is not
-  evidence the window is absent. (#987)
+  **A window that ends in a PRINT to serve's own writer is parked by that
+  writer**: runServe takes stdout and stderr as `io.Writer`s, so a test's
+  writer that holds the first line containing a marker stops serve right
+  there (`holdingWriter`, #1009: serve's exit reason, `tsnet close:`,
+  `Shutting down`). With none of these, oversubscription is the fallback:
+  build with `go test -c -race`, then run about three processes per core.
+  Idle stress passing is not evidence the window is absent. (#987)
 - **A running SQLite statement is parked from INSIDE it, by a Go collation**
   (#998). `VACUUM` copies an index with an append fast path that compares
   no keys, except an index with a non-BINARY collation, which it rebuilds by
