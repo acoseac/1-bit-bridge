@@ -25,6 +25,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/tsnet"
+	"tailscale.com/ipn/ipnstate"
 )
 
 // loadConfigForCmd parses a `--config` flag from args and loads the
@@ -110,7 +111,7 @@ func newTsnetServer(cfg *config.Config, stderr io.Writer) (*tsnet.Server, error)
 // short string the operator can read.
 type tailscaleAdminSource struct {
 	cli   *tailscaleAutoPilot   // nil unless mode=cli
-	tsnet *tsnet.Server         // nil unless mode=tsnet
+	tsnet tsnetStatusSource     // nil unless mode=tsnet
 	cfg   *config.RuntimeConfig // live config — source of Mode + PublicMode
 	// stamped onto every snapshot so the admin tile can distinguish
 	// "operator set mode=disabled" from "mode=cli but tailscale CLI
@@ -135,7 +136,7 @@ type tailscaleAdminSource struct {
 // sentinel — the canonical form admin.Cfg already uses, so the
 // message points operators at the same file the bridge is
 // operating on regardless of CWD changes post-boot.
-func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts *tsnet.Server, configPath string, cfg *config.RuntimeConfig) tailscaleAdminSource {
+func newTailscaleAdminSource(cli *tailscaleAutoPilot, ts tsnetStatusSource, configPath string, cfg *config.RuntimeConfig) tailscaleAdminSource {
 	return tailscaleAdminSource{cli: cli, tsnet: ts, configPath: configPath, cfg: cfg}
 }
 
@@ -247,7 +248,14 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 // fields onto the admin tile shape — keeping the tile rendering
 // code path-agnostic. Honours `ctx` so admin handlers can bound
 // the live LocalClient call.
-func tsnetAdminStatus(ctx context.Context, s *tsnet.Server) admin.TailscaleStatus {
+// tsnetStatusSource is what the admin tile reads from the embedded node:
+// a tsnetNode, narrowed to the two reads.
+type tsnetStatusSource interface {
+	Status(context.Context) (*ipnstate.Status, error)
+	CertDomains() []string
+}
+
+func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleStatus {
 	out := admin.TailscaleStatus{
 		// CLIAvailable lights the "I can talk to tailscale" indicator
 		// in the admin UI. Under tsnet mode it's effectively always

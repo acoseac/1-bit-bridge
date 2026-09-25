@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
@@ -60,35 +61,54 @@ func (s *Server) HTTP3TLSConfig() *tls.Config {
 // guard, idempotent Start/Close). Construct with NewServer; call
 // Start once to bring the node up; call Close on shutdown.
 //
-// Concurrency model: Start and Close are caller-serialized in
-// production (cmd/bridge/main.go single-threaded). Read paths
-// (Status, ListenTLS, CertDomains, AuthURL) AND the userLogf
-// callback (invoked from tsnet's internal goroutines during the
-// Up() phase) need cheap, non-blocking access — so the lock
-// surface is split:
+// Concurrency model: read paths (Status, ListenTLS, CertDomains,
+// AuthURL) AND the userLogf callback (invoked from tsnet's internal
+// goroutines during the Up() phase) need cheap, non-blocking access
+// — so the lock surface is split:
 //
-//   - lifecycleMu protects started + server. Start releases this
-//     lock during the long Up() I/O so userLogf can take authMu
-//     without deadlocking. Close holds it through the upstream
-//     Close() call (~ms).
+//   - lifecycleMu protects the start/close state and server. Start
+//     releases this lock during the long Up() I/O so userLogf can
+//     take authMu without deadlocking. Close releases it before the
+//     upstream Close() call, which can take seconds; Start closes a
+//     node it will not publish under it, so a retry cannot build a
+//     second node on the same state dir while the first is closing.
 //   - authMu protects authURL only. userLogf takes it for ~µs
 //     per write; AuthURL() takes it for one read. Doesn't block
 //     on Up() I/O.
 //
-// Caller-side: Start and Close are NOT safe to call concurrently.
-// The wrapper detects double-Start (second caller sees the
-// in-progress flag and returns an error) but doesn't try to be
-// fully reentrant — cmd/bridge/main.go is the sole caller and
-// runs them serially.
+// Close may land while Start is still bringing the node up:
+// runServe's teardown does when a start outlives the grace it waits
+// for it, and `bridge tsnet auth` does on Ctrl-C. Upstream's Close
+// "must not be called before or concurrently with Start", so Close
+// never touches a node a Start is still building. It marks the
+// server closed and cancels that start, and the start, once
+// upstream's start has returned, closes the node it built instead of
+// publishing it. Close does not wait for that: upstream's own start
+// takes no context and cannot be interrupted, and a shutdown must
+// not hang on it. A caller that must know the node is gone waits for
+// its own Start to return, as runServe does. After Close, Start
+// builds nothing. A second Start while one is in flight still
+// returns an error rather than racing (a programmer-error guard).
 type Server struct {
 	cfg Config
 	log *slog.Logger
 
-	// lifecycleMu protects started + server.
+	// newNode turns the upstream server startUnlocked configures into the
+	// node Start drives. It returns its argument everywhere but this
+	// package's tests, which substitute a node whose start they can hold
+	// open.
+	newNode func(*tsnet.Server) node
+
+	// lifecycleMu protects everything from here to authMu.
 	lifecycleMu sync.Mutex
-	server      *tsnet.Server
+	server      node
 	started     bool
 	starting    bool // detect double-Start
+	closed      bool // Close has run; no Start publishes, or builds, after it
+	// cancelStart cancels the in-flight Start's context, so a Close
+	// stops the start instead of waiting it out. Nil when no Start is
+	// in flight.
+	cancelStart context.CancelFunc
 
 	// authMu protects authURL ONLY. Held briefly by userLogf
 	// (background goroutine, write) and AuthURL() (caller, read).
@@ -96,6 +116,18 @@ type Server struct {
 	// long-running tsnet.Up() call.
 	authMu  sync.Mutex
 	authURL string
+}
+
+// node is the upstream tailscale.com/tsnet.Server as this wrapper drives
+// it. *tsnet.Server is the only one in production (Server.newNode).
+type node interface {
+	Start() error
+	Up(context.Context) (*ipnstate.Status, error)
+	Close() error
+	ListenTLS(network, addr string) (net.Listener, error)
+	ListenPacket(network, addr string) (net.PacketConn, error)
+	LocalClient() (*local.Client, error)
+	CertDomains() []string
 }
 
 // Config carries everything NewServer needs. Mode is unused here —
@@ -147,7 +179,11 @@ func NewServer(cfg Config) (*Server, error) {
 		// Refuse loudly here.
 		return nil, errors.New("tsnet: Config.StateDir is required (empty triggers ephemeral mode)")
 	}
-	return &Server{cfg: cfg, log: cfg.Logger}, nil
+	return &Server{
+		cfg:     cfg,
+		log:     cfg.Logger,
+		newNode: func(ts *tsnet.Server) node { return ts },
+	}, nil
 }
 
 // Start brings the tailnet node up. Idempotent: a second Start on
@@ -162,18 +198,34 @@ func NewServer(cfg Config) (*Server, error) {
 //
 // Subsequent runs (state persisted) re-authenticate from the state
 // store and return as soon as the tailnet is reachable.
+//
+// Start builds nothing on a context that is already done (it returns
+// the context's error) or after Close, and a Close that lands while
+// it runs stops it: see Server.
 func (s *Server) Start(ctx context.Context) error {
 	// Phase 1: short critical section to claim the start slot.
 	s.lifecycleMu.Lock()
-	if s.started {
+	switch {
+	case s.started:
 		s.lifecycleMu.Unlock()
 		return nil
-	}
-	if s.starting {
+	case s.starting:
 		s.lifecycleMu.Unlock()
 		return errors.New("tsnet: Start already in progress")
+	case ctx.Err() != nil:
+		// The caller has given up (a shutdown landed first): a node
+		// built now would only be closed again, and it writes the
+		// state dir while it is up.
+		s.lifecycleMu.Unlock()
+		return ctx.Err()
+	case s.closed:
+		s.lifecycleMu.Unlock()
+		return errors.New("tsnet: Start called after Close")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	s.starting = true
+	s.cancelStart = cancel
 	s.lifecycleMu.Unlock()
 
 	// Phase 2: do the actual work without holding the mutex —
@@ -183,30 +235,39 @@ func (s *Server) Start(ctx context.Context) error {
 	// Up would deadlock against any concurrent AuthURL() read.
 	server, err := s.startUnlocked(ctx)
 
-	// Phase 3: short critical section to publish the result.
+	// Phase 3: short critical section to publish the result, unless
+	// the start failed or Close ran while the node was being built.
+	// Close found nothing published then, so it closed nothing, and
+	// this start is the only holder of the node: publishing it would
+	// leave a live node on the tailnet, writing the state dir, with
+	// nothing left to close it.
 	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.starting = false
+	s.cancelStart = nil
+	if err == nil && s.closed {
+		err = errors.New("tsnet: Close was called while the node was starting")
+	}
 	if err != nil {
 		// Close any half-built tsnet.Server BEFORE returning so
 		// retries don't leak goroutines. Pre-fix, only the Up()
 		// error path closed; the Start() error path leaked. Qodo
-		// bug #4 + CodeRabbit on PR #138.
+		// bug #4 + CodeRabbit on PR #138. Upstream's start has
+		// returned by now, so this is never concurrent with it.
 		if server != nil {
 			_ = server.Close()
 		}
-		s.lifecycleMu.Unlock()
 		return err
 	}
 	s.server = server
 	s.started = true
-	s.lifecycleMu.Unlock()
 	return nil
 }
 
 // startUnlocked does the I/O-heavy parts of Start without holding
-// lifecycleMu. Returns the constructed tsnet.Server (or nil on
+// lifecycleMu. Returns the constructed node (or nil on
 // pre-construction error) so Start can clean up under the lock.
-func (s *Server) startUnlocked(ctx context.Context) (*tsnet.Server, error) {
+func (s *Server) startUnlocked(ctx context.Context) (node, error) {
 	// MkdirAll doesn't tighten perms on an existing dir (Qodo bug #1).
 	// Always Chmod after to ensure 0700 even if the dir pre-existed
 	// with looser perms — assertSecureDir would otherwise refuse
@@ -237,14 +298,14 @@ func (s *Server) startUnlocked(ctx context.Context) (*tsnet.Server, error) {
 			slog.String("stateDir", s.cfg.StateDir))
 	}
 
-	server := &tsnet.Server{
+	server := s.newNode(&tsnet.Server{
 		Dir:       s.cfg.StateDir,
 		Hostname:  s.cfg.Hostname,
 		AuthKey:   authKey,
 		Ephemeral: false,
 		UserLogf:  s.userLogf(),
 		Logf:      noisyLogfFromSlog(s.log),
-	}
+	})
 
 	if err := server.Start(); err != nil {
 		return server, fmt.Errorf("tsnet: server start: %w", err)
@@ -379,8 +440,16 @@ func (s *Server) AuthURL() string {
 // bridge shutdown to drain magicsock / netcheck / control-plane
 // goroutines — without it, every Start/Close cycle (e.g. integration
 // tests) leaks goroutines until process exit.
+//
+// A Start still in flight is stopped, not raced: Close cancels it
+// and returns without waiting, and that start closes the node it was
+// building (see Server). After Close, Start builds nothing.
 func (s *Server) Close() error {
 	s.lifecycleMu.Lock()
+	s.closed = true
+	if s.cancelStart != nil {
+		s.cancelStart()
+	}
 	server := s.server
 	s.server = nil
 	s.started = false
