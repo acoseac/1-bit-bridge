@@ -14900,6 +14900,14 @@ failure.
   beside a live thread reads Z as a zombie's does, and a zombie is its
   leader alone, so the question that tells them apart is whether any task
   is still live.
+- **And the list again, after the stats** (`ca4ce758`, round 2 below). A
+  task still running when the list is taken can start another and exit
+  before its own stat is read, so the stats alone can read every listed
+  task exited while the new one runs. A task read as exited never runs
+  again, and every task alive at a second listing is on it, so "exited"
+  needs a second listing that gained nothing. Neither caller can meet it,
+  since each asks only after killing the whole group. It is closed anyway,
+  because never inventing an exit is the helper's one promise.
 - **Linux only.** macOS has launchd as init, which reaped every killed CLI
   in the Mac runs (both tests pass there through ESRCH), and CI runs no
   other unix. Other platforms keep kill(pid, 0) exactly as it was.
@@ -14929,8 +14937,10 @@ failure.
   each way, no task directory, an empty one, a task whose stat has gone,
   and three unparseable stats), `TestZombieIgnoresAProcOfAnotherPIDNamespace`
   (the same zombie under a /proc whose `self` is another pid or missing,
-  and under this process's as the control), and on Linux
-  `TestAZombieHasExited`: a real
+  and under this process's as the control),
+  `TestZombieSeesATaskThatStartsWhileItReads` (a task started between the
+  stat reads and the second listing, through the `relisting` seam, with an
+  empty window as the control), and on Linux `TestAZombieHasExited`: a real
   zombie made with `waitid(P_PID, WEXITED|WNOWAIT)`, which asserts the
   premise (kill(pid, 0) still finds it), then Exited's Z, then ESRCH once
   reaped. The zombie is the test's own child, so it needs no container and
@@ -14944,14 +14954,16 @@ failure.
   and dido's NC1, NC2 and NC7 ran again on `39a00bcf`, with the same
   results. NC12 and NC14 ran on `39a00bcf`, and after round 1's refactor
   (Review below) every Mac cell from NC3 to NC14 ran again on `a2cc9940`,
-  where NC15 ran too. The Mac column is macOS on this laptop, the other two
-  are dido as uid 1000:
+  where NC15 ran too. After round 2's re-list, NC3 in its current form and
+  NC16 ran on `ca4ce758`, both columns, as did every other Mac cell from NC4
+  to NC15 and dido's NC1, NC2 and NC12, with the same results. The Mac
+  column is macOS on this laptop, the other two are dido as uid 1000:
 
   | | mutation | Mac | dido, no `--init` | dido, `--init` |
   |---|---|---|---|---|
   | NC1 | Linux `zombie` answers false: kill(pid, 0) alone | n/a (stub) | both shutdown tests red (`kill(pid, 0) = <nil>`), `TestAZombieHasExited` and `TestARunningProcessHasNotExited` red | `TestAZombieHasExited` and `TestARunningProcessHasNotExited` red alone |
   | NC2 | a live CLI left behind: `stopTreeOnCancel` sets `WaitDelay` and returns before the group kill | both shutdown tests red, `(kill(pid, 0) = <nil>)` | both red, `(…; /proc/N/task/N/stat: state S)` | the same |
-  | NC3 | `zombieUnder` reads the first task only | the Z-leader-beside-S row red alone | the same row; the C program read `Exited(72) = true` | |
+  | NC3 | a task other than the leader is marked read without its stat being read | the Z-leader-beside-S row red alone | the same row red | |
   | NC4 | the name ends at the FIRST `)` | the two spelled-state rows red | | |
   | NC5 | no task directory answers exited | that row red | | |
   | NC6 | an unreadable task stat answers exited | "a task whose stat has gone" red | | |
@@ -14963,6 +14975,7 @@ failure.
   | NC12 | both `self` checks dropped | the other-namespace and no-self rows red | the same two rows red | |
   | NC14 | the `self` mismatch check dropped | the other-namespace row red alone | | |
   | NC15 | the `self` check refuses every /proc | the control row and every zombie row red | | |
+  | NC16 | the second listing's answer ignored | the started-task row red alone | the same row red | |
 
   NC2 is the control the fix must not weaken: a live process left behind
   still fails both tests, on every host, and /proc says why. NC7 first ran
@@ -14970,7 +14983,14 @@ failure.
   test stayed green, because that one ask saw R. `c04c6e7a` made it poll.
   Dropping only the unreadable-`self` branch changes no verdict, since an
   unreadable `self` also fails the mismatch check. It changes the message,
-  so it has no control.
+  so it has no control (it would have been NC13, which is why the numbers
+  skip it). NC3 changed form with the re-list. Its first form,
+  reading the first task only, measured `Exited(72) = true` for the C
+  program's live process on `c04c6e7a`. On `ca4ce758` the second listing
+  sees the unread task instead, which turns the two zombie-beside-X rows red
+  in the other direction, a false "running". Reading the leader alone now
+  amounts to marking the other tasks read without reading them, which is
+  NC3's current form.
 
 ### Out of scope
 
@@ -15007,6 +15027,12 @@ failure.
   running-process control asked straight after `Start`, when the child is R,
   so a reading that took S for exited passed it on Linux. Only the fixture
   table caught NC7, and only on the Mac run that included it.
+- **A control whose target test is not selected passes vacuously.** The
+  dido runner's `-run` list predated
+  `TestZombieSeesATaskThatStartsWhileItReads`, so NC16 first came back
+  green there with that test never run. A control's green means something
+  only once the output names the test it targets; the re-run was checked
+  for it.
 - **The instrumented run settled it.** #1023 recorded the zombie as a
   hypothesis. Reading /proc at the moment the check fires turned it into a
   fact in one run, and logging each pass's answer showed the fix works
@@ -15029,3 +15055,16 @@ failure.
   `a2cc9940`: int64 variables converted at run time, which on 32-bit wrap
   to values that are refused anyway. proctest then passed as a real
   linux/386 binary on dido, `TestAZombieHasExited` included.
+- **Round 2**, on `6da49abd`. Gemini's app answered `/gemini review` with
+  its daily quota warning ("wait up to 24 hours"). CodeRabbit paused on its
+  plan limit ("Review paused — included plan limit reached", 48 minutes to
+  the next included review, or an on-demand one). SonarCloud analysed
+  `6da49abd`: gate OK, 0 open issues, the S3776 closed. Standing in for
+  Gemini, a direct consult (`consult.py`, gemini-3.8-flash) over the whole
+  code diff answered "No findings" to five questions (a live process read
+  as exited, the `self` guard in ordinary setups, the stat parse, the
+  32-bit values, vacuous tests). It named one window, a task started
+  between the listing and the stat reads, as unreachable for both callers.
+  Closed in `ca4ce758` (Decisions, NC16). dido then passed 27 of 27 in all
+  four configurations, and without `--init` all 9 passes still answered
+  through the zombie arm.

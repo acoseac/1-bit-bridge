@@ -3452,7 +3452,8 @@ its twin.** The top list is older, shorter, and read first.
   CLI, and a zombie runs nothing and holds no files, so it writes nothing,
   which is all the tests guard. Both now ask `internal/proctest.Exited`:
   kill(pid, 0)'s ESRCH, and on Linux a process it still finds reads as
-  exited when EVERY task in `/proc/<pid>/task` is Z or X. **Not
+  exited when EVERY task in `/proc/<pid>/task` is Z or X and a second
+  listing, taken after those reads, shows no task it did not read. **Not
   `/proc/<pid>/stat` alone**: a process whose leader thread exited while
   another runs reads Z there and in `status` (measured: `Threads: 2`, the
   other task S). Whatever /proc cannot answer reads as running, including
