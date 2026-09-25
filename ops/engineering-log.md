@@ -13190,6 +13190,45 @@ the reproduction table planted again, the no-go.mod checkout and the
 plain-path worktree included. All five guards passed, and the stale
 citation was reported in both checkout shapes.
 
+### SonarCloud, before it was asked
+
+Both whole-tree tests already carried an open `go:S3776` on main: the
+hash-cost test at cognitive complexity 29 and the flac test at 26, against
+the 15 allowed. Moving each walk into a function a fixture can call makes
+it new code, which is where a Sonar issue becomes a PR's finding, so the
+two walks were split before review rather than after it:
+`hashCostDirRule`, `hashCostReads`, `hashCostSetterCallsIn` and
+`calledName` for the one, `flacDirRule`, `flacSweep.judge` and
+`leakyFlacCall` for the other, each well under the limit. The hash-cost
+fixture gained a caller from inside the package, so both call shapes the
+split separates (an identifier and a selector) are found. The controls
+were run again against the split, with M6–M8 retargeted, and every result
+matched but one, as it should: M12 and M13 now also turn the hash-cost
+fixture red, because its new caller sits under `internal/`. M13's point
+stands, since the whole-tree test still passes under the old floor.
+
+### Consult
+
+One direct Gemini consult, on the diff and the split (the Gemini app has
+been over its daily quota for recent PRs):
+
+- **Taken**: a submodule is skipped too. That is the intended reading
+  (git tracks it only as a commit id, and its files are another
+  repository's), and `IsOtherCheckout`'s doc now says so.
+- **Taken**: `TestIsOtherCheckout`'s row for the root's own `.git`
+  directory passed only because `.git/.git` does not exist, which pins
+  nothing a sweep relies on (every sweep skips `.git` by name first). It is
+  gone.
+- **Covered already**: a `.GIT` on a case-insensitive filesystem makes
+  `os.Lstat` find `.git`. Git's own nested-repository check looks up the
+  same name the same way, so this is the local-only class the doc names.
+- **Declined, with evidence**: a tracked fixture holding a `.git`. Git
+  refuses any path with a `.git` component, and `git ls-files` shows none.
+- **Agreed**: the root comparison holds for both calling shapes (the walk
+  hands its first callback the root exactly as passed), failing open on an
+  `os.Lstat` error is the right direction for a guard, and the split is
+  behaviour-identical.
+
 ### Out of scope
 
 - **A `_` directory**, which the go tool ignores, is still read by the

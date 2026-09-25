@@ -35,9 +35,11 @@ import (
 // that needs both applies both.
 //
 // Any `.git` entry counts, and os.Lstat finds it: a directory, a worktree's
-// or a submodule's `gitdir:` file, or a symlink, dangling or not. Any error
-// from os.Lstat reads the directory, so one that cannot be searched fails
-// the walk that lists it, which is the honest failure.
+// or a submodule's `gitdir:` file, or a symlink, dangling or not. So a
+// submodule is skipped too, as it should be: git tracks it here only as a
+// commit id, and its files are another repository's. Any error from
+// os.Lstat reads the directory, so one that cannot be searched fails the
+// walk that lists it, which is the honest failure.
 //
 // Git will not add a file inside another repository, so in a clone this
 // drops no tracked file. Git disagrees about three shapes only a local

@@ -42,13 +42,12 @@ func TestIsOtherCheckout(t *testing.T) {
 	}{
 		{"the root, which holds a .git directory", root, false},
 		{"the root, spelled with a trailing separator and a dot", root + string(filepath.Separator) + ".", false},
-		{"a worktree, whose .git is a gitdir file", filepath.Join(root, "worktree"), true},
+		{"a worktree or a submodule, whose .git is a gitdir file", filepath.Join(root, "worktree"), true},
 		{"a clone, whose .git is a directory", filepath.Join(root, "clone"), true},
 		{"a plain directory", filepath.Join(root, "plain"), false},
 		{"a directory holding .github, .gitignore and .gitattributes", filepath.Join(root, "alike"), false},
 		{"a directory whose child is a checkout", filepath.Join(root, "parent"), false},
 		{"the child that is", filepath.Join(root, "parent", "child"), true},
-		{"the root's own .git directory", filepath.Join(root, ".git"), false},
 	} {
 		if got := IsOtherCheckout(root, c.dir); got != c.want {
 			t.Errorf("%s: IsOtherCheckout(root, %q) = %v, want %v", c.name, c.dir, got, c.want)
