@@ -2189,6 +2189,32 @@ what it claimed**, and none of it had a failing test.
   config**: with nothing named or found, doctor runs before `bridge init`
   and the defaults ARE the ports init writes, so they are graded, and a
   held one still FAILs.
+- **…and config-dir does not probe as a user who cannot read the config**
+  (#1023). config-dir vouches that the BRIDGE can create and write the
+  directory beside its config, and its two probes, a MkdirAll and a write
+  of `.doctor-probe`, answer for whoever runs doctor. A user config-file
+  reports as unable to read the config is not the one the bridge runs
+  as, since the bridge reads it at every start. Yet beside #1022's "not
+  checked" port lines, config-dir FAILed "not writable" against the 0700
+  dir `bridge init` makes, so that run exited 1 and advised `bridge init
+  --skip-doctor`, and `--fix` printed "created … but chmod 0700 failed"
+  about a directory it had not created. Where that user may write,
+  config-dir vouched ok for a directory the bridge may not. On
+  `ConfigFile.problem() == configUnreadable`, `checkConfigDir` now
+  answers ok "not checked: the config in it is not readable by this
+  user", **before the create as well as the write** (a config below an
+  untraversable parent fails the create), and **whatever either probe
+  would answer**. **Only that error**: a config that does not load was
+  read by this user, who can be the bridge's, and it names its directory
+  as well as one that loads (the directory comes from the PATH). A run
+  that found nothing is by the user about to run `bridge init` there.
+  Both keep the probe and its FAIL, as does init's own preflight (a nil
+  lookup). **Ask which half is wrong before copying a decline**: the port
+  lines decline for all three load errors because their INPUT is the
+  guess, and config-dir declines for the one where the PROBER is. Such a
+  run now ends "all clear." (13 ok, 4 warn, 0 fail), as the footer does
+  whenever nothing FAILs, below config-file's warn saying the install was
+  not graded.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -2537,7 +2563,8 @@ mentions across the four `ops/audit-*.md` files.
   for a named path, so doctor re-stats a named path to learn why. One this
   user cannot reach or READ only WARNS, because that is a fact about the
   doctor run (the public-mode layout, as with the cert key), and the port
-  checks then say "not checked" rather than grade the defaults (#1022).
+  checks then say "not checked" rather than grade the defaults (#1022), as
+  config-dir does rather than probe as this user (#1023).
   The launcher's pre-setup row names the platform path through
   `buildDoctorDepsFor(path, true)`, never `--config`, so its absence stays
   "none found", ok. `bridge init`'s preflight leaves the lookup nil, so
