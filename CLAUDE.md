@@ -88,7 +88,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what `bridge.ars.md` actually runs; this bullet omitted that until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
-- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with a 5s window to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullet).
+- **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets).
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
@@ -2330,7 +2330,8 @@ mentions across the four `ops/audit-*.md` files.
   and a listen that landed after the close was published and served on a
   node that was gone (CodeRabbit on #1005). `tsnetFront`
   (tsnet_bringup.go) runs the goroutine on a context of its own, and its
-  deferred `stop` cancels it, refuses publication and takes what was
+  `stop` (the shutdown branch's since #1019, deferred for every other
+  exit) cancels it, refuses publication and takes what was
   published in ONE critical section, drains that, waits for the goroutine
   and every HTTP/3 Serve it started (drains and wait share one grace;
   running out costs a line), and only then closes the node. **A server is
@@ -2387,6 +2388,28 @@ mentions across the four `ops/audit-*.md` files.
   through `serveOpts.wrapAPIHandler`, and pre-pick a port free on TCP
   and UDP both (`freeLoopbackTCPAndUDPAddr`), because serve prints no
   UDP address.
+- **On a shutdown the LAN and the tailnet drain TOGETHER, under one
+  grace** (#1019). The shutdown branch drained the LAN servers and
+  returned, and only then did the deferred `tsnetFront.stop` begin on
+  the tailnet's. With an HTTP/3 request held on each side, SIGINT to
+  exit measured 12.0 s. With a client on each side keeping its
+  connection open past GOAWAY it measured 10.0 s, and the tailnet served
+  a new request one second after SIGINT. **`docker stop` sends SIGKILL
+  after 10 s**, and tsnet is how the image joins a tailnet, so both cases
+  were killed mid-drain, before the node's close, the writer join and
+  `Store.Close`. The branch now starts `stop` beside the LAN drains on
+  the SAME context: 6.0 s and 5.0 s. **A teardown called from two places
+  stops once.** The defer stays for the error exits, so `stop` runs under
+  a `sync.Once`, as `lanHTTP3.stop` does. Without it the deferred call
+  drained again, on the mutex of an HTTP/3 server still in Close (a
+  second grace and a second line), and closed the node a second time.
+  `stop` takes the drain's context, and the defer builds one when it
+  RUNS, never when it is registered. quic-go's own client closes an idle
+  connection on GOAWAY, so the 10 s case needs a client that does not.
+  `TestServeShutdownDrainsTheTailnetBesideTheLAN` pins the ORDER, not a
+  duration: it holds the LAN drain's give-up line and requires the
+  tailnet's HTTPS listener to be closed already, which the old order
+  cannot do on any host. The error exits still drain one after another.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows

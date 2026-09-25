@@ -13976,3 +13976,154 @@ the quic-go excerpts attached:
   touched functions was 77.78% against its 80% threshold. The four
   without one were test helpers (`newHeldRoute`, `wrap`,
   `newLANHTTP3Client`, `newHTTP3Client`); they have docs now.
+
+## 2026-09-25 — On a shutdown serve drains its tailnet side beside its LAN side, under one grace (#1019)
+
+#1010's consult proposed it and #1010 filed it as a follow-up: "drain the
+tailnet in the shutdown branch too. On SIGINT the tailnet's `stop` runs
+after the LAN branch, so held handlers on both sides cost two graces and
+two allowances. That ordering predates this change (#1009's entry: the
+teardown it replaced drained tailnet HTTPS after that branch anyway), and
+`stop` would first need to be safe to call twice."
+
+### What was measured
+
+- **The two orderings, booted.** A throwaway boot test timed SIGINT to
+  exit in three cases, on `2d37bd72` and on the fix. It ran serve in
+  tsnet mode with the fake node handing out a real loopback UDP conn, a
+  certificate the client trusts and a plain TCP listener, with LAN HTTP/3
+  on a pre-picked port and `serveOpts.wrapAPIHandler` adding one held
+  route per side:
+
+  | each side holds | before | after |
+  |---|---|---|
+  | an HTTP/3 request in a handler that ignores its context | 12.0 s: the LAN drain gave up at 6.002 s, the tailnet's at 12.004 s | 6.0 s: both at 6.003 s |
+  | a raw QUIC connection (h3 ALPN) left open past GOAWAY | 10.0 s: `lan h3 shutdown: context deadline exceeded` at 5.001 s, the tailnet's drain done at 10.0 s | 5.0 s |
+  | an idle connection from quic-go's own http3 client | 28 ms | 28 ms |
+
+  In every case before the fix, a NEW request to the tailnet's HTTPS
+  listener one second after SIGINT was served (200). After it, the
+  request was refused.
+- **quic-go's client closes an idle connection on GOAWAY.**
+  `ClientConn.handleControlStream` closes the connection at once "if there
+  are currently no active requests", and `onStreamsEmpty` closes it when
+  the last stream ends after a GOAWAY (http3/client.go, v0.62.0). So the
+  second case needs a client that keeps its connection open, which RFC
+  9114 permits. Nothing established here says which kind the iOS client
+  is.
+- **Where the extra grace bites: Docker.** `docker stop` and `docker
+  compose down` wait 10 s before a SIGKILL, the shipped compose.yaml sets
+  no `stop_grace_period`, and docs/docker.md makes `tailscale.mode: tsnet`
+  the way the image joins a tailnet. Both unfixed worst cases run past
+  10 s, so the kill landed during the tailnet drain, before the node's
+  Close, the `bgWriters` join and `Store.Close`. That breaks the "graceful
+  shutdown triggers full cleanup" invariant on the one platform with a
+  stop timeout that tight. The units `bridge init` installs keep their
+  managers' defaults, and neither was reached: launchd's ExitTimeOut is
+  20 s and systemd's TimeoutStopSec 90 s.
+- **Red on the unfixed code** (`4425c0eb`, with the tests of
+  `f1e552f3`). The boot test found the tailnet's HTTPS listener still open
+  when the LAN drain gave up, and no tailnet give-up line within a grace
+  of the LAN's. The unit test found a second stop's give-up line and a
+  second close of the node.
+- **Stress.** The two new tests 8 times each under `-race` (67 s): no
+  failure.
+
+### Decisions
+
+- **The shutdown branch calls stop itself**, on the context it hands the
+  LAN drains. stop took a duration and built its own context; it now
+  takes the drain's (`4425c0eb`, no behaviour change on its own), so the
+  two sides share one deadline rather than two equal ones. The deferred
+  call builds its context when it RUNS, as the LAN defer does. One built
+  when the `defer` is registered would have spent its grace before a late
+  exit reached it.
+- **stop stops once** (a `sync.Once`, `lanHTTP3.stop`'s shape), because
+  the defer stays: the error exits need it. The select makes them
+  exclusive with the shutdown branch, so the deferred call is either the
+  only call or a no-op once the branch's call has returned. Without the
+  guard, the deferred call drained again. The second Shutdown of an
+  HTTP/3 server whose first gave up waits on the server's mutex, which
+  Close holds while it waits for the handler, so it cost a second grace
+  and allowance, printed a second line and closed the node a second time.
+- **The node now closes while the LAN may still be draining.** A LAN
+  request still draining reads it through the wrapper, which checks for a
+  nil server under its lifecycle lock and answers "called before Start" or
+  0. The admin console already got those answers, since it was still
+  serving during the old deferred close.
+- **The boot test pins the ORDER, not a duration.** serve's LAN give-up
+  line is held until the test has looked. At that moment the tailnet's
+  HTTPS listener must already be closed, and the tailnet's own give-up
+  line must follow within a grace. The unfixed code cannot close that
+  listener before the LAN drain gives up, on any host, so the red is
+  deterministic. An upper bound on the exit time would measure the host.
+
+### Tests and controls
+
+| test | pins |
+|---|---|
+| `TestServeShutdownDrainsTheTailnetBesideTheLAN` | boot, tsnet mode, an HTTP/3 request held on each side: when the LAN drain gives up the tailnet's HTTPS listener is closed and the tailnet's drain gives up within a grace; each line once, both clients told, the UDP port free, the node closed once after use, no goroutine line |
+| `TestASecondStopNeitherDrainsNorClosesTheNodeAgain` | a second stop with an HTTP/3 handler held: no second line, no second close |
+
+Controls against the committed fix (`40357e02`), each a mutation asserted
+to apply exactly once and restored from git afterwards:
+
+| # | mutation | red |
+|---|---|---|
+| NC1 | the branch does not stop the tailnet (the old code) | the boot test (both ordering checks) |
+| NC2 | no Once | the boot test (the line twice, the node closed twice) and the unit test |
+| NC3 | the branch stops the tailnet only after `wg.Wait` | the boot test (both ordering checks) |
+| NC4 | the branch hands stop `context.Background()` | the boot test (still draining at 15 s) |
+| NC5 | no deferred stop | the two error-exit tests only (`TestServeStopsItsTsnetStartOnAnErrorExit`, `TestServeClosesATailnetListenerThatOpensAfterAnErrorExit`) |
+| NC6 | the Once guards only the node's Close | the boot test and the unit test (the line twice) |
+| S2 | stop does not wait for the goroutine (#1009's control, re-run) | the four join tests, the two on the shutdown path now through the branch's call |
+| D1 | stop's drains unbounded (#1009's control, re-run) | the bounded-drain unit test and the boot test |
+
+NC5's green half matters as much as its red one:
+`TestServeWaitsForItsTsnetStartBeforeClosingTheNode` and
+`TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace` pass without the defer,
+because the branch now stops the tailnet on the shutdown path. The defer
+is load-bearing for the error exits alone.
+
+### Consult
+
+A direct Gemini consult (`consult.py`) on the committed diff, with the
+front, the LAN drain, the teardown, the wrapper's accessors and quic-go's
+Shutdown and Close attached:
+
+- **Agreed:** no second call can run concurrently with the first (the
+  branch waits for its stop, and the error branches are exclusive with
+  it); the node is closed once; every drain is bounded. Closing the node
+  beside the LAN drains adds no hazard the admin console had not already
+  met.
+- **Declined, read:** give stop's goroutine wait an allowance of its own,
+  because the drains can spend the whole grace. The goroutine returns as
+  soon as its servers' Shutdowns begin: the HTTPS Serve returns
+  `http.ErrServerClosed` at once, and an HTTP/3 Serve's Accept fails on
+  the grace context, after which its `removeListener` takes the server's
+  mutex long before Close does at the deadline. So a wait with nothing
+  left finds the goroutine done, and a goroutine still running then is a
+  wedged start, which is what the line is for. Pinned anyway: the boot
+  test finds no such line.
+- **Declined, read:** close the tailnet's HTTP/3 conns in stop when a
+  drain gives up, as `lanHTTP3.stop` closes its socket. The node's Close
+  does that: it takes down every conn it handed out, and the fake node
+  does the same (#1009).
+
+### Out of scope
+
+- **The error exits still drain one after another:** HTTPS in the branch,
+  then the deferred tailnet stop, then the deferred LAN HTTP/3 stop, each
+  bounded. They are mostly startup failures (the admin console cannot
+  bind) with nothing in flight; `tsnetServeErr` mid-run is the exception.
+- **The tailnet drain discards its Shutdown error**, while
+  `lanHTTP3.stop` prints its own (`lan h3 shutdown: context deadline
+  exceeded`), so only the LAN side shows a client left open past GOAWAY.
+
+### Process notes
+
+- **The measurement narrowed the claim.** The brief said a client that
+  keeps its connection open past GOAWAY costs two graces, and it does. But
+  quic-go's own client does not keep it open, so the case needed a raw
+  QUIC connection, as #1010's probe did. Timed with the ordinary client it
+  took 28 ms, before the fix and after.
