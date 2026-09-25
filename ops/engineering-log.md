@@ -13301,3 +13301,171 @@ been over its daily quota for recent PRs):
   passed, 0 issues. CodeQL: 0 alerts. The one review thread is resolved.
   This record is a docs-only commit after that round, so no bot reviewed
   it.
+
+## 2026-09-25 — a directory the go tool ignores is not this tree (#1008)
+
+#1007's entry recorded, out of scope, that two of the five sweeps from the
+module root still read a directory whose name begins with "_":
+`TestNoProductionCodeLowersTheHashCost` and `TestEveryCitedTestNameExists`.
+The go tool ignores such a directory, and CLAUDE.md's `## Local test
+fixture` section tells an operator to put a throwaway Go helper in one
+("ignored by `go ./...`/`build-all`"). The flac, docblock and blank-keeper
+walks already skipped one.
+
+### What was measured
+
+- **The go tool**, in a scratch worktree: `go list ./...` and `go vet ./...`
+  see nothing in `_scratch/` or in `internal/_old/`, so the rule holds at
+  any depth. `go run ./_scratch` runs, and `go test ./_scratch` runs its
+  test, only when the directory is named.
+- **What git tracks** (`git ls-files`, 1,261 files): nothing below a `_`
+  directory and no `_` file name. Under `.github/` there are 13 files,
+  among them the doc and the Go program the citation walk reads
+  (`pull_request_template.md`, `scripts/printtmpdir/main.go`). The main
+  checkout holds no `_` directory outside `.git` and `.claude`.
+- **The report, reproduced on main (`59f44d1b`)** in a scratch worktree,
+  with `_reextract/` planted:
+
+  | planted in `_reextract/` | hash-cost | citations |
+  |---|---|---|
+  | `main.go` in mid-edit (`func main() { db := open(`) | red, "could not parse" | green: a non-test file is read as text |
+  | `x_test.go` defining a test that a new comment in cmd/bridge cites | | **green: a false pass**, red once the file is gone |
+  | `half_test.go` in mid-edit | | red, a parse error |
+  | `main.go` whose comment names a test nothing defines | | red, reported as missing |
+  | the directory itself with mode 000 | red, "permission denied" | red, "permission denied" |
+
+  The report named the first two rows. The other three are the same class,
+  and the last one decided the design.
+- **Why a name rule was not enough for the hash-cost walk.** It used
+  `filepath.Walk`, which calls `readDirNames` on a directory before calling
+  the callback for it (`path/filepath/path.go`). So the listing error
+  arrives first, and the callback returned it before any rule ran.
+  `filepath.WalkDir` asks the callback first. The hash-cost walk was the
+  only one of the five on `Walk`.
+- **What each walk opens, before and after.** As in #1007, a recorder at
+  each walk's open site, behind an env var and never committed, was added
+  to throwaway detached worktrees of main and of the fix. Both swept the
+  same pristine worktree of main:
+
+  | tree swept | hash-cost, main → fix | citations, main → fix |
+  |---|---|---|
+  | clean | 410 → 410, identical | 1,172 → 1,172, identical |
+  | plus `_reextract/{main.go,x_test.go,NOTES.md}` and `internal/manifest/_reextract/main.go` | 412 → 410 | 1,175 → 1,172 |
+  | the main checkout, its three `.claude/worktrees/` in place, read only | 410 → 410, identical | 1,172 → 1,172, identical |
+
+  Over the clean tree each list is exactly what `git ls-files` predicts:
+  every tracked non-test `.go` outside testdata, dist, bin and
+  node_modules; and every tracked `.go` outside dist, bin and vendor
+  (1,149) plus the 23 tracked docs. Both keep the `.github/` files. The
+  untracked `NOTES.md` is opened by neither, since the citation walk opens
+  only a doc git tracks.
+
+### Decisions
+
+- **A rule on the directory's name, answered before it is listed.** A
+  per-file rule (descend into a `_` directory and open no Go file below
+  it) would keep a doc there readable, and it handles four of the five
+  shapes. It fails on a directory it cannot list, which is control C8
+  below: only the unlistable row catches it.
+- **The hash-cost walk moves to `filepath.WalkDir`**, the API the other
+  four root sweeps use. Otherwise it behaves the same, as the clean census
+  shows: the same 410 files. The consult below named one more difference.
+  `Walk` `lstat`s every entry of a directory it reads and aborts on a
+  failure, while `WalkDir` takes the type from readdir. So an entry whose
+  `lstat` fails, in a directory that can be listed but not searched, no
+  longer aborts the walk. A Go file there still fails the guard, as "could
+  not parse", and a clean checkout cannot reach this case.
+- **Only the `_` rule, not the `.` one**: the go tool's `.` rule would drop
+  the two `.github/` files, #993's reason, which #1007 kept.
+- **The root is exempt**, because each walk checks `path == root` before
+  any name rule. A checkout cloned into `_x` is still read, and C3 and C6
+  pin that.
+- **Inline, not in `internal/sweeptest`.** That package holds a rule whose
+  definition is subtle (`IsOtherCheckout`: `os.Lstat`, any entry type, a
+  cleaned root). This one is the go tool's one-line name test, which the
+  flac, docblock and blank-keeper walks already spell inline below their
+  own root exemption. A `sweeptest` helper for it alone would be a sixth
+  spelling beside those three, unless they moved too, which this fix does
+  not need.
+- **A doc below a `_` directory goes unread, accepted on the census.** For
+  #1007's rule, "drops no tracked file" holds by construction, since git
+  will not add a file inside another repository. Here git would track
+  `_notes/x.md`, and the citation walk would skip it. Nothing is tracked
+  below a `_` directory, and the repo's own instruction makes such a
+  directory throwaway. A Go file there is one the go tool never builds, so
+  dropping it follows the go tool's rule.
+- **No new floor.** The rule can drop only a subtree whose top directory's
+  name begins with "_", and none is tracked. Without the root exemption a
+  root with such a name would lose the whole tree, and the existing floors
+  (hash-cost `visited >= 100`, citations `defined >= 200`) would fail
+  loudly. The fixtures also pin the exemption directly.
+
+### Tests and controls
+
+Red on `c2e1cba9` (the tests alone), green on `2a22772d`:
+
+| test | pins |
+|---|---|
+| `TestHashCostSweepSkipsUnderscoreDirectories` (internal/adminauth) | a root named `_checkout`, which is read, holding `_scratch/` with a helper in mid-edit and a call, and `internal/manifest/_reextract/` with a call, neither read: one offender after one file. Red before: four offenders, the first "could not parse". Its subtest: a mode-000 `_sealed/` fails nothing. Red before: "permission denied" |
+| `TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks` (cmd/bridge), four rows | `_scratch/` and `internal/manifest/_reextract/`, each holding a test of the name prod.go cites and a comment citing a test nothing defines; a test file in mid-edit; a mode-000 `_sealed/`. Red before, each for its own reason |
+| `TestScanTestCitationsReadsARootNamedLikeASkippedDirectory`, root `_checkout` added | the root exemption. Green before, when nothing skipped a `_` name |
+
+The unlistable rows skip on Windows and as root, where permission bits do
+not stop a listing. On macOS they ran as the login user.
+
+Controls, each against `2a22772d` with one mutation asserted to apply
+exactly once, and the files restored after:
+
+| # | mutation | red |
+|---|---|---|
+| C1 | the hash-cost `_` rule removed | `TestHashCostSweepSkipsUnderscoreDirectories`: four offenders, and the subtest's "permission denied" |
+| C2 | `filepath.Walk` kept, with the `_` rule | the subtest alone, "permission denied". The parent's own assertion passes |
+| C3 | the hash-cost `_` rule checked before the root exemption | `TestHashCostSweepSkipsUnderscoreDirectories`, its root skipped. `TestHashCostSweepSkipsOtherCheckouts`, whose root is `dist`, stays green |
+| C4 | the hash-cost `_` rule for the root's own children only | the parent: the call in `internal/manifest/_reextract/` is reported |
+| C5 | the citation `_` rule removed | all four rows |
+| C6 | the citation `_` rule checked before the root exemption | `TestScanTestCitationsReadsARootNamedLikeASkippedDirectory`: "a root named "_checkout" was not read" |
+| C7 | the citation `_` rule for the root's own children only | the `internal/manifest/_reextract/` row |
+| C8 | a per-file rule instead: no directory skip, and no Go file opened below a `_` directory | the unlistable row alone |
+
+Every whole-tree guard stayed green under every control, as it should: the
+tree holds no `_` directory.
+
+### Consult
+
+One direct Gemini consult, on the diff, before the first push:
+
+- **Agreed**: the root exemption holds for both roots, `../..` and the
+  absolute path. A walk hands its first callback the root exactly as
+  passed, and every child is a `filepath.Join` below it, so no child
+  equals it.
+- **Agreed, with one difference named**: the move from `Walk` to `WalkDir`
+  keeps the visit order (both sort by name), the root `../..`, and the
+  handling of symlinks, dangling or not, and of an entry readdir types as
+  unknown (the os package falls back to `lstat`). It differs only on a
+  failed per-entry `lstat`, recorded under Decisions.
+- **Agreed**: the mode-000 rows hold on macOS and Linux as a non-root
+  user, since the owner can always chmod the directory back. They skip on
+  Windows and as root, and the mode is restored before `t.TempDir`'s
+  removal, because cleanups run last-in first-out.
+- No other finding.
+
+### Out of scope
+
+- **A check that the citation walk opened every doc git tracks** would
+  turn the doc this rule can drop into a failure. The same goes for every
+  other skip (dist, bin, vendor, a nested module), and for the local-only
+  shape #1007 accepted, a `git init` inside a tracked directory, where it
+  would turn a silent skip into a failure. That is a separate decision.
+- **`gofmt -l .`** in `.github/workflows/gofmt.yml` descends into a `_`
+  directory as it does into `.claude/` (#1007's note). CI has neither, and
+  `make fmt` runs `go fmt ./...`, which the go tool scopes.
+
+### Process notes
+
+- zsh again. `set -- $p` did not split a variable (#1006 and #1007 noted
+  that), and a bare `echo =====` is an `=`-expansion error in zsh, which
+  ended the command list before its last command ran. Loops that split
+  arguments ran under `bash -c`.
+- Measured before being fixed, as #1007's note asks. The report's two
+  shapes reproduced as filed. Looking for others found three, and the
+  unreadable directory is what ruled out the per-file design.
