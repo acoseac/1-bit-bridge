@@ -74,6 +74,27 @@ func TestExtractMP3SampleRate_SkipsID3v2Tag(t *testing.T) {
 	}
 }
 
+// TestExtractMP3SampleRate_SkipsAStackOfID3v2Tags — two prepended tags,
+// the second carrying a spurious frame sync in its body (APIC bytes can hold
+// one). The frame search must start after the WHOLE stack; skipping one tag
+// started it inside the second and read the spurious 44.1 kHz header.
+func TestExtractMP3SampleRate_SkipsAStackOfID3v2Tags(t *testing.T) {
+	first := buildID3v2_3(map[string]string{"title": "Older tag"})
+	spurious := padFrame(mp3FrameHeader(3, 1, 9, 0)) // MPEG1 / 44100, inside the second tag
+	n := len(spurious)
+	second := append([]byte{'I', 'D', '3', 3, 0, 0,
+		byte(n >> 21 & 0x7f), byte(n >> 14 & 0x7f), byte(n >> 7 & 0x7f), byte(n & 0x7f)}, spurious...)
+	frame := padFrame(mp3FrameHeader(3, 1, 9, 1)) // MPEG1 / 48000, the real first frame
+	stream := append(append(append([]byte{}, first...), second...), frame...)
+	got, err := extractMP3SampleRate(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("extractMP3SampleRate: %v", err)
+	}
+	if got != 48000 {
+		t.Errorf("got %v, want 48000 (the first frame after BOTH tags)", got)
+	}
+}
+
 // TestExtractMP3SampleRate_NoFrameReturnsZero — data with no valid frame
 // sync returns (0, nil) so the track is still indexed, just with a nil
 // SampleRate.

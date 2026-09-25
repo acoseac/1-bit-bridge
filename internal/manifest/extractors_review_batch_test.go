@@ -42,6 +42,13 @@ func TestSkipID3v2(t *testing.T) {
 		{"v2.3 footer-bit-set is ignored", append(tag(3, 0x10), marker...), 10 + payloadSize},
 		{"v2.4 footer skips extra 10", append(tag(4, 0x10), marker...), 10 + payloadSize + 10},
 		{"too short rewinds to start", []byte("ID3"), 0},
+		// A tagger that prepends a new tag without removing the old leaves a
+		// stack, which Core Audio skips in turn (measured 2026-09-25).
+		{"a stack of v2.3 then v2.4 skips both", append(append(tag(3, 0x00), tag(4, 0x00)...), marker...), 2 * (10 + payloadSize)},
+		{"a stack at the cap skips every tag", append(bytes.Repeat(tag(3, 0x00), maxStackedID3v2Tags), marker...),
+			maxStackedID3v2Tags * (10 + payloadSize)},
+		{"a stack past the cap stops at the cap", append(bytes.Repeat(tag(3, 0x00), maxStackedID3v2Tags+1), marker...),
+			maxStackedID3v2Tags * (10 + payloadSize)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,8 +103,27 @@ func TestExtCoversDispatcher(t *testing.T) {
 // We assert only the fields those two passes own — dhowden's own read of
 // an ID3-prefixed FLAC (Title/Album) is out of scope here.
 func TestExtractFLAC_ID3v2PrefixStillReadsFormatAndMultiValue(t *testing.T) {
-	dir := t.TempDir()
+	// Prepend a non-trivial ID3v2 tag, as a broken tagger would.
+	tr := extractFLACBehind(t, buildID3v2_3(map[string]string{"title": "ID3-Prefix-Title"}))
+	assertFLACFormatAndArtists(t, tr, "the ID3v2 prefix")
+}
 
+// TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue is F4 behind a
+// STACK of prepended tags — a tagger that adds a new tag without removing the
+// old. Core Audio plays such a file; skipping one tag left the cursor on the
+// second, so the fLaC check failed and both passes bailed.
+func TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue(t *testing.T) {
+	stack := append(buildID3v2_3(map[string]string{"title": "Older tag"}),
+		buildID3v2_3(map[string]string{"title": "Newer tag"})...)
+	assertFLACFormatAndArtists(t, extractFLACBehind(t, stack), "the whole stack")
+}
+
+// extractFLACBehind writes a minimal 96 kHz / 24-bit FLAC whose Vorbis
+// comment carries two ARTIST values, puts prefix in front of it, and runs
+// Extract on the result — the shape every ID3v2-prefix case shares.
+func extractFLACBehind(t *testing.T, prefix []byte) *Track {
+	t.Helper()
+	dir := t.TempDir()
 	base := filepath.Join(dir, "base.flac")
 	writeMinimalFLACPairs(t, base, 96000, 24, [][2]string{
 		{"TITLE", "Reflections"},
@@ -109,29 +135,30 @@ func TestExtractFLAC_ID3v2PrefixStillReadsFormatAndMultiValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read base flac: %v", err)
 	}
-
-	// Prepend a non-trivial ID3v2 tag, as a broken tagger would.
-	id3 := buildID3v2_3(map[string]string{"title": "ID3-Prefix-Title"})
 	p := filepath.Join(dir, "prefixed.flac")
-	if err := os.WriteFile(p, append(id3, flacBytes...), 0o644); err != nil {
+	if err := os.WriteFile(p, append(append([]byte{}, prefix...), flacBytes...), 0o644); err != nil {
 		t.Fatalf("write prefixed flac: %v", err)
 	}
-
 	tr := &Track{Path: "prefixed.flac", Size: 1, ModTime: time.Now()}
 	if err := Extract(p, tr); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
+	return tr
+}
 
-	// Format fields recovered past the ID3v2 prefix (extractFLACFormatFromReader).
+// assertFLACFormatAndArtists checks the fields extractFLACBehind's two passes
+// own — the format parse (rate, depth) and the multi-value ARTIST join — and
+// names what they had to skip.
+func assertFLACFormatAndArtists(t *testing.T, tr *Track, skipped string) {
+	t.Helper()
 	if tr.SampleRate == nil || *tr.SampleRate != 96000 {
-		t.Errorf("SampleRate = %v, want 96000 (format parse must skip the ID3v2 prefix)", tr.SampleRate)
+		t.Errorf("SampleRate = %v, want 96000 (the format parse must skip %s)", tr.SampleRate, skipped)
 	}
 	if tr.BitsPerSample == nil || *tr.BitsPerSample != 24 {
-		t.Errorf("BitsPerSample = %v, want 24 (format parse must skip the ID3v2 prefix)", tr.BitsPerSample)
+		t.Errorf("BitsPerSample = %v, want 24 (the format parse must skip %s)", tr.BitsPerSample, skipped)
 	}
-	// Multi-value ARTIST recovered past the prefix (applyFLACMultiValueArtists).
 	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
-		t.Errorf("Artist = %q, want %q (multi-value join must skip the ID3v2 prefix)", tr.Artist, "Abdullah Ibrahim; Ekaya")
+		t.Errorf("Artist = %q, want %q (the multi-value join must skip %s)", tr.Artist, "Abdullah Ibrahim; Ekaya", skipped)
 	}
 }
 
