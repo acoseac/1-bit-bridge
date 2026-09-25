@@ -74,17 +74,31 @@ func checkEmbeddedMatchesDisk(t *testing.T, embedded fs.FS, root string, want fu
 
 // embedDiskProblems compares the files embedded under root with the files on
 // disk under root whose names want admits, and describes each disagreement.
-// n is how many embedded files it compared.
+// The disk side skips what the embed refuses: isEditorDetritus names, and
+// any dot-directory. The embedded side skips a backup, which the embed cannot
+// refuse inside a directory it walks. n is how many embedded files it
+// compared.
 func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string) bool) (problems []string, n int, err error) {
+	// Every file on disk under root, mapped to whether this FS should hold it.
 	onDisk := map[string]bool{}
 	err = fs.WalkDir(disk, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || isEditorDetritus(d.Name()) || !want(d.Name()) {
+		// A dot-directory is a tool's (.cache, .vscode), and the embed
+		// refuses one at every level: [^.] at the top, the walk below it.
+		// A "_" directory is not skipped: the walk hides it too, so its
+		// files are the 404 this comparison exists to report.
+		if d.IsDir() {
+			if p != root && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		onDisk[p] = true
+		if isEditorDetritus(d.Name()) {
+			return nil
+		}
+		onDisk[p] = want(d.Name())
 		return nil
 	})
 	if err != nil {
@@ -96,7 +110,7 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 		if err != nil {
 			return err
 		}
-		// A backup is embedded wherever a pattern reaches its directory (see
+		// A backup is embedded wherever a pattern walks its directory (see
 		// isEditorDetritus), so on this side it is no disagreement either.
 		if !d.IsDir() && !strings.HasSuffix(d.Name(), "~") {
 			inEmbed[p] = true
@@ -107,8 +121,8 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 		return nil, 0, fmt.Errorf("walk embedded %s/: %w", root, err)
 	}
 
-	for p := range onDisk {
-		if !inEmbed[p] {
+	for p, wanted := range onDisk {
+		if wanted && !inEmbed[p] {
 			problems = append(problems, p+" exists on disk but is NOT embedded, so a release "+
 				"build lacks it while a dev checkout serving from disk does not: the pattern "+
 				"does not reach it, or a leading '.' or '_' in a directory below the top level "+
@@ -116,12 +130,16 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 		}
 	}
 	for p := range inEmbed {
+		wanted, here := onDisk[p]
 		switch {
-		case onDisk[p]:
+		case wanted:
 		case strings.Contains(p, "/."):
 			problems = append(problems, p+` is embedded, and a leading "." names an editor's `+
 				`lock, a .DS_Store or a swap file: the pattern lets it through. Start every glob `+
 				`element with [^.], never * (TestEveryEmbedPatternRefusesALeadingDot)`)
+		case here:
+			problems = append(problems, p+" is embedded, but it is not a file this FS holds: "+
+				"the pattern is wider than the FS it fills")
 		default:
 			problems = append(problems, p+" is embedded but missing from disk (stale build cache?)")
 		}
@@ -135,13 +153,17 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 // files, on both sides of the comparison.
 //
 // The embedded side holds what a pattern cannot refuse. A backup (`app.js~`)
-// is embedded by any pattern that reaches its directory, because the go
-// tool's walk below a matched directory skips only "." and "_" names. So a
-// backup is no disagreement, whichever side it is on: it was reported as
-// "embedded but missing from disk (stale build cache?)" about a file sitting
-// on disk, every time emacs saved an asset. A leading "." IS refused, so one
-// on the embedded side is a pattern letting it through, and the report says
-// that rather than blaming a cache.
+// is embedded by any pattern that walks its directory, because the go tool's
+// walk below a matched directory skips only "." and "_" names; static/[^.]*
+// walks static/player. So a backup is no disagreement, whichever side it is
+// on: it was reported as "embedded but missing from disk (stale build
+// cache?)" about a file sitting on disk, every time emacs saved an asset. A
+// leading "." IS refused, so one on the embedded side is a pattern letting
+// it through, and the report says that rather than blaming a cache. The disk
+// side skips a dot-directory, which the embed refuses at every level, and
+// not a "_" one, whose files are the 404 the comparison exists to report. A
+// file that is on disk but outside what the FS holds is a pattern wider than
+// its FS, not a stale cache.
 func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -168,6 +190,9 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 				// ([^.] at the top, the walk below), so it is not the console's.
 				"static/.cache/tool.js":        {},
 				"static/player/.cache/deep.js": {},
+				// A "_" directory is hidden from the walk too, but it is not a
+				// tool's: its files are the 404 this comparison reports.
+				"static/player/_lib/util.js": {},
 			},
 			embedded: fstest.MapFS{
 				"static/app.js":          {},
@@ -178,9 +203,10 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 				"static/gone.js":         {},
 			},
 			problems: map[string]string{
-				"static/.#app.js":        `a leading "."`,
-				"static/gone.js":         "missing from disk",
-				"static/player/_util.js": "is NOT embedded",
+				"static/.#app.js":            `a leading "."`,
+				"static/gone.js":             "missing from disk",
+				"static/player/_util.js":     "is NOT embedded",
+				"static/player/_lib/util.js": "is NOT embedded",
 			},
 		},
 		{
@@ -236,8 +262,9 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 // The embed refuses the first kind and cannot refuse the second. A leading
 // "." is refused at the top level by the [^.] the pattern starts with, and
 // below it by the go tool's walk. A backup is embedded wherever a pattern
-// reaches its directory, because that walk skips only "." and "_" names. So
-// embedDiskProblems tolerates a backup on the embedded side as well. (This
+// walks its directory, because that walk skips only "." and "_" names. (A
+// glob bound to an extension, like templates/[^.]*.html, never matches one.)
+// So embedDiskProblems tolerates a backup on the embedded side as well. (This
 // comment called all of it "legitimately absent from the embed" until
 // 2026-09-25, when neither half was true at the top level of static/.)
 //
