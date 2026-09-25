@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // TestEveryCitedTestNameExists is the mechanical version of a class this tree
@@ -686,11 +688,11 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
-// whose conventions are not ours to police; and any directory that holds a
-// go.mod of its own. The root itself is never skipped. filepath.WalkDir hands
-// the first callback the root's own base name, so with the name list checked
-// first, a checkout cloned into a directory called bin, dist or vendor
-// skipped itself. (Gemini on #995.)
+// whose conventions are not ours to police; another checkout; and any
+// directory that holds a go.mod of its own. The root itself is never
+// skipped. filepath.WalkDir hands the first callback the root's own base
+// name, so with the name list checked first, a checkout cloned into a
+// directory called bin, dist or vendor skipped itself. (Gemini on #995.)
 //
 // A directory with its own go.mod is another module. `go test ./...` from
 // the root never runs it, so a test declared there satisfies no citation
@@ -708,11 +710,19 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // directory. So a symlink to one counts, and a dangling link or a directory
 // of that name does not. If the stat fails for any other reason the walk
 // reads the directory, and its own ReadDir reports what is wrong.
+//
+// That rule does not see every checkout, so the walk also stops at one
+// holding a `.git` entry (sweeptest.IsOtherCheckout). A checkout git is
+// still writing has no go.mod yet, since cmd/ comes before go.mod in index
+// order, and while it had none its tests satisfied this tree's citations.
 func skipsForCitations(root, path, name string) bool {
 	if path == root {
 		return false
 	}
 	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
+		return true
+	}
+	if sweeptest.IsOtherCheckout(root, path) {
 		return true
 	}
 	fi, err := os.Stat(filepath.Join(path, "go.mod"))

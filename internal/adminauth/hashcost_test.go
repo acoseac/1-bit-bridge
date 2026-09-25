@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // TestMain lowers the work factor for this package's suite. Everything here
@@ -55,9 +57,12 @@ func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 	}
 	// Files actually visited, so a walk that silently matches nothing — a wrong
 	// root, a skip rule that swallowed the tree — fails instead of passing
-	// vacuously.
-	if visited == 0 {
-		t.Fatalf("walked %s and found no non-test Go files — the guard proved nothing", root)
+	// vacuously. Not just none: the walk skips whole directories that are
+	// other checkouts, so the floor has to catch a rule that swallowed the
+	// largest subtree, internal/ (355 of the 410 files the tree held when it
+	// was set), and not only one that swallowed all of it.
+	if visited < 100 {
+		t.Fatalf("walked %s and read %d non-test Go files, want >=100 — the walk is not seeing the tree", root, visited)
 	}
 	if len(offenders) > 0 {
 		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", hashCostSetter, offenders)
@@ -78,6 +83,14 @@ func hashCostSetterCallers(root string) (offenders []string, visited int, err er
 		if info.IsDir() {
 			switch info.Name() {
 			case ".git", "dist", "bin", "node_modules", "testdata":
+				return filepath.SkipDir
+			}
+			// Nor another checkout inside this one
+			// (sweeptest.IsOtherCheckout), such as Claude Code's worktrees
+			// of other branches: none of it is this checkout's production
+			// code, and a half-written file there failed this checkout's
+			// run.
+			if sweeptest.IsOtherCheckout(root, path) {
 				return filepath.SkipDir
 			}
 			return nil

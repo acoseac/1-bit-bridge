@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // mewkizFlacPkg is the top-level mewkiz package. The `/meta` subpackage
@@ -66,6 +68,22 @@ func TestNoLeakyFlacConstructors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
+	// A walk that reads nothing reports nothing, and until these floors the
+	// test had none. The tree held 410 non-test and 739 test files when they
+	// were set, and one file importing the package: internal/manifest's
+	// fixture writer, the kind of file this guard was written about. Files
+	// that do not import it are parsed and never judged, so the count alone
+	// cannot show that the walk reached a single call it guards.
+	if sweep.nonTest < 100 || sweep.test < 100 {
+		t.Fatalf("parsed %d non-test and %d test .go files under %s, want >=100 of each — "+
+			"the walk is not seeing the tree", sweep.nonTest, sweep.test, root)
+	}
+	if sweep.importers == 0 {
+		t.Fatalf("no file under %s imports %s, so no call was judged — the walk is not "+
+			"reaching the fixture writer, or nothing imports the package any more and "+
+			"this guard has nothing left to guard", root, mewkizFlacPkg)
+	}
+
 	if len(sweep.calls) > 0 {
 		t.Errorf("mewkiz/flac path-taking constructors leak the file handle "+
 			"(Stream.Close cannot close a *bufio.Reader), which blocks "+
@@ -91,11 +109,22 @@ func leakyFlacCalls(root string) (sweep flacSweep, err error) {
 			return err
 		}
 		if d.IsDir() {
+			// The rules below are for the directories under the root. A
+			// checkout's own directory may be called anything, and one
+			// whose name began with "_" skipped the whole tree.
+			if path == root {
+				return nil
+			}
 			// Skip VCS metadata, vendored trees, and the `_`-prefixed
 			// scratch dirs the repo uses for throwaway helpers (both
-			// are already invisible to `go ./...`).
+			// are already invisible to `go ./...`). And another checkout
+			// inside this one (sweeptest.IsOtherCheckout), such as Claude
+			// Code's worktrees of other branches: none of it is this
+			// checkout's code, and a call in progress there failed this
+			// checkout's run.
 			name := d.Name()
-			if name == ".git" || name == "vendor" || strings.HasPrefix(name, "_") {
+			if name == ".git" || name == "vendor" || strings.HasPrefix(name, "_") ||
+				sweeptest.IsOtherCheckout(root, path) {
 				return filepath.SkipDir
 			}
 			return nil

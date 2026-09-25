@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // blankKeeper is a blank reference whose only effect is to keep a name
@@ -261,12 +263,16 @@ func findBlankKeepers(root string) (keepers []blankKeeper, nonTest, test int, er
 // keeperWalkDir is findBlankKeepers' answer for a directory: nil to descend,
 // SkipDir for one no build of this module compiles, which is vendor,
 // testdata and node_modules, a nested module, and a name the go tool ignores
-// (goToolIgnores), decided before anything under it is opened.
+// (goToolIgnores), or for another checkout (sweeptest.IsOtherCheckout),
+// decided before anything under it is opened.
 func keeperWalkDir(root, path, name string) error {
 	if path == root {
 		return nil
 	}
 	if goToolIgnores(name) || name == "vendor" || name == "testdata" || name == "node_modules" {
+		return filepath.SkipDir
+	}
+	if sweeptest.IsOtherCheckout(root, path) {
 		return filepath.SkipDir
 	}
 	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {

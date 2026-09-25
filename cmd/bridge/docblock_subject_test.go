@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // docVerbs are the words a Go doc comment in this tree puts after the name of
@@ -396,6 +398,13 @@ func scanDocblockSubjects(r docScanReporter, root string, wholeTree bool) (misat
 			if name := d.Name(); path != root && (strings.HasPrefix(name, ".") ||
 				strings.HasPrefix(name, "_") || name == "node_modules" ||
 				name == "vendor" || name == "testdata") {
+				return filepath.SkipDir
+			}
+			// Nor another checkout (sweeptest.IsOtherCheckout). The "."
+			// rule keeps out Claude Code's .claude/worktrees/, but a
+			// checkout at a plain path doubled the files read here and
+			// failed the scan on its own work in progress.
+			if sweeptest.IsOtherCheckout(root, path) {
 				return filepath.SkipDir
 			}
 			return nil
