@@ -382,11 +382,16 @@ func (f *tsnetFront) http3Listeners() []tsnetH3Listener {
 // for the goroutine and every HTTP/3 Serve it started; and only then close
 // the node, which drains magicsock / netcheck / the control plane.
 //
-// The wait is BOUNDED by grace. A goroutine still running after it (a
-// start stuck in the part of upstream's start that takes no context, or a
-// listen) costs the grace and a line, never a hung exit; the node is then
-// closed under it, and the wrapper stops a start that Close lands on,
-// while tsnetListen closes a listener that lands after it.
+// The drains and the wait share ONE grace. They run long in exclusive
+// situations: the goroutine serves only once it has brought the node up,
+// and a Serve returns as soon as its Shutdown begins, so after a long drain
+// the goroutine has returned, and a goroutine still bringing the node up
+// has nothing to drain. A grace each would double the worst case for
+// nothing. A goroutine still running when the grace is out (a start stuck
+// in the part of upstream's start that takes no context, or a listen)
+// costs a line, never a hung exit; the node is then closed under it, and
+// the wrapper stops a start that Close lands on, while tsnetListen closes a
+// listener that lands after it.
 func (f *tsnetFront) stop(grace time.Duration) {
 	f.cancel()
 	f.mu.Lock()
@@ -404,13 +409,13 @@ func (f *tsnetFront) stop(grace time.Duration) {
 		_ = https.Shutdown(shutdownCtx)
 	}
 
-	// NewTimer + defer Stop, NOT time.After, for the reason the bgWriters
-	// join gives: runServe is re-entered by the launcher menu.
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
 	select {
 	case <-f.done:
-	case <-timer.C:
+	case <-shutdownCtx.Done():
+	}
+	select {
+	case <-f.done: // it returned, if only as the grace ran out
+	default:
 		fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
 	}
 	if err := f.node.Close(); err != nil {
