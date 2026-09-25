@@ -13748,3 +13748,14 @@ wrapper, the wiring and the upstream excerpts attached:
   it would cancel the start at once. It takes `t.Context()` now, which
   the framework cancels just before the cleanups run. W1 was re-run on
   the new helper and still bites.
+- **Round 2**, on `9bde7445`. SonarCloud: gate passed, 0 new issues.
+  Gemini: one finding marked high, declined with the evidence in its
+  thread: "`tsnetServer` leaks if runServe returns between creating the
+  node and starting the front". `tsnet.NewServer` validates the config and
+  allocates the wrapper, and nothing else: no goroutine, socket or state
+  dir. The upstream node is built only in `Start`, which only the front's
+  goroutine calls, so an early return leaves an unstarted struct, and the
+  teardown this PR replaced was registered at the same point. CodeRabbit:
+  `@coderabbitai review` answered "Review rate limited", and the
+  walkthrough said "wait 40 minutes for your next included review", its
+  coverage still at `71674a8c`.
