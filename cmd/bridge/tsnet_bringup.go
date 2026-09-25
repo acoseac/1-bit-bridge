@@ -288,7 +288,10 @@ func (f *tsnetFront) serveHTTP3(ctx context.Context) {
 		}
 		return
 	}
-	if !f.publishHTTP3(listeners) {
+	// None is served once the shutdown has begun, tsnetListen's rule: they
+	// would only be shut down again. The gate still decides for a shutdown
+	// that begins after this check.
+	if ctx.Err() != nil || !f.publishHTTP3(listeners) {
 		for _, l := range listeners {
 			_ = l.conn.Close()
 		}
@@ -313,8 +316,7 @@ func (f *tsnetFront) serveHTTP3(ctx context.Context) {
 // bind that fails after that is not reported: it is the node closing under
 // it, and the wrapper's "called before Start" carries no cancellation for
 // ctxerr to find, so the context is what tells it apart (tsnetListen's
-// rule). What it did bind goes to publishHTTP3, which refuses it once
-// stop has begun.
+// rule).
 func (f *tsnetFront) bindHTTP3(ctx context.Context, ips []netip.Addr, port string) []tsnetH3Listener {
 	listeners := make([]tsnetH3Listener, 0, len(ips))
 	for _, ip := range ips {

@@ -776,6 +776,46 @@ func TestAServerPublishedBeforeStopIsShutDownByIt(t *testing.T) {
 	}
 }
 
+// TestATailnetHTTP3BindCutShortByTheShutdownServesNothing: the shutdown
+// begins while the second address binds, before stop has run, and that
+// bind succeeds anyway (ListenPacket takes no context). Neither server is
+// published or started, both conns are closed, and nothing is reported:
+// tsnetListen's rule for the HTTPS listener, on the HTTP/3 side.
+func TestATailnetHTTP3BindCutShortByTheShutdownServesNothing(t *testing.T) {
+	rec := loggingtest.Record(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node := newFakeTsnetNode()
+	node.ips = append(twoTailnetAddrs(), netip.MustParseAddr("100.64.0.2"))
+	node.bind = func(n int) (net.PacketConn, error) {
+		if n == 2 {
+			cancel()
+		}
+		return net.ListenPacket("udp", "127.0.0.1:0")
+	}
+	t.Cleanup(node.closeHandedOut)
+	f := stoppableFront(t, node)
+	f.addr = "127.0.0.1:0"
+	f.serveHTTP3(ctx)
+	if got := f.http3Listeners(); len(got) != 0 {
+		t.Errorf("%d HTTP/3 server(s) published after the shutdown began", len(got))
+	}
+	if n := node.bindCount(); n != 2 {
+		t.Errorf("the node took %d HTTP/3 bind(s), want 2: none after the shutdown began", n)
+	}
+	for i, c := range node.handedOutConns() {
+		select {
+		case <-c.closed:
+		default:
+			t.Errorf("HTTP/3 conn %d was left open", i+1)
+		}
+	}
+	if got := rec.Lines(msgH3Bound); len(got) != 0 {
+		t.Errorf("a bind the shutdown cut short reported HTTP/3 as bound:\n%s", strings.Join(got, "\n"))
+	}
+	mustNotReportServe(t, rec, msgH3BindFailed, msgH3NoneBound, msgH3ServeFailed)
+}
+
 // stoppableFront is a tsnetFront with no goroutine behind it (its done is
 // closed already), so stop runs straight through to closing node.
 func stoppableFront(t *testing.T, node *fakeTsnetNode) *tsnetFront {
