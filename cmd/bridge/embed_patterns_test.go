@@ -47,55 +47,8 @@ import (
 // written).
 func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 	root := goModuleRoot(t)
-
-	var dirs, paths []string
-	patterns := map[string][]string{}
-	names := map[string]string{}
-	for _, p := range goListPackages(t, root, "-json=ImportPath,Name,Dir,EmbedPatterns,TestEmbedPatterns,XTestEmbedPatterns", "./...") {
-		all := slices.Concat(p.EmbedPatterns, p.TestEmbedPatterns, p.XTestEmbedPatterns)
-		if len(all) == 0 {
-			continue
-		}
-		dirs = append(dirs, p.Dir)
-		paths = append(paths, p.ImportPath)
-		patterns[p.ImportPath] = all
-		names[p.Dir] = p.Name
-	}
-	if len(paths) == 0 {
-		t.Fatal("go list found no package using //go:embed, so this test checks nothing")
-	}
-
-	// One backing file for every plant, holding what emacs writes into the
-	// Windows-shape lock. Its content is never read: only the name matters.
-	tmp := t.TempDir()
-	backing := filepath.Join(tmp, "lock")
-	if err := os.WriteFile(backing, []byte("someone@host.1234:1695000000"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	plants := map[string]string{}
-	for i, dir := range dirs {
-		if err := plantEditorDetritus(dir, backing, plants); err != nil {
-			t.Fatalf("plant beside %s: %v", dir, err)
-		}
-		// And one ordinary source file, which must show up in the package's
-		// GoFiles: proof the go command read the overlay for this directory.
-		// Without it, an overlay the go command ignored (a path it spells
-		// differently, say) would leave both listings equal and this test
-		// green over nothing.
-		src := filepath.Join(tmp, fmt.Sprintf("seen%d.go", i))
-		if err := os.WriteFile(src, []byte("package "+names[dir]+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		plants[filepath.Join(dir, overlaySeenFile)] = src
-	}
-	overlay := filepath.Join(t.TempDir(), "overlay.json")
-	replace, err := json.Marshal(map[string]map[string]string{"Replace": plants})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(overlay, replace, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	paths, pkgs := embeddingPackages(t, root)
+	overlay, plants := writeDetritusOverlay(t, paths, pkgs)
 
 	const fields = "-json=ImportPath,Dir,ForTest,GoFiles,EmbedFiles,TestEmbedFiles,XTestEmbedFiles,Error"
 	before := goListPackages(t, root, append([]string{"-test", fields}, paths...)...)
@@ -104,91 +57,182 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 		after[p.ImportPath] = p
 	}
 
-	// A test variant embeds its package's files as well as its own, so a file
-	// is reported once, against the first listing that shows it.
-	reported := map[string]bool{}
-	firstReport := func(base string, files []string) []string {
-		var out []string
-		for _, f := range files {
-			if k := base + "\x00" + f; !reported[k] {
-				reported[k] = true
-				out = append(out, f)
-			}
-		}
-		return out
-	}
-
-	embedded := 0
+	c := embedComparison{pkgs: pkgs, plants: plants, after: after, reported: map[string]bool{}}
 	for _, b := range before {
-		// The package whose patterns these are: a test variant names it in
-		// ForTest, and the generated test main is "<path>.test".
-		base := b.ForTest
-		if base == "" {
-			base = strings.TrimSuffix(b.ImportPath, ".test")
-		}
-		if b.Error != nil {
-			t.Errorf("%s does not build even without a plant: %s", b.ImportPath, b.Error.Err)
-			continue
-		}
-		// The package itself, as opposed to a test variant of it or its
-		// generated test main.
-		isPackage := slices.Contains(paths, b.ImportPath)
-		// Every embedded file must have its lock planted beside it, or the
-		// comparison below says nothing about the directory it sits in.
-		if isPackage {
-			for _, f := range slices.Concat(b.EmbedFiles, b.TestEmbedFiles, b.XTestEmbedFiles) {
-				embedded++
-				lock := filepath.Join(b.Dir, filepath.FromSlash(path.Dir(f)), ".#"+path.Base(f))
-				if _, ok := plants[lock]; !ok {
-					t.Errorf("%s embeds %s but nothing was planted beside it (%s), so a pattern "+
-						"reaching that directory goes unchecked", b.ImportPath, f, lock)
-				}
-			}
-		}
-		a, ok := after[b.ImportPath]
-		if !ok {
-			t.Errorf("%s: missing from the planted listing", b.ImportPath)
-			continue
-		}
-		if isPackage && !slices.Contains(a.GoFiles, overlaySeenFile) {
-			t.Errorf("%s: the go command did not read the overlay in %s (no %s among its "+
-				"GoFiles), so nothing planted there was checked", b.ImportPath, b.Dir, overlaySeenFile)
-		}
-		if a.Error != nil {
-			// Not the lock's build failure: every plant here is a regular
-			// file, which embed accepts. Report what go list said.
-			t.Errorf("%s: with the plants in place, go list reports %s (patterns: %s)",
-				b.ImportPath, a.Error.Err, strings.Join(patterns[base], " "))
-			continue
-		}
-		for _, l := range []struct {
-			field         string
-			before, after []string
-		}{
-			{"EmbedFiles", b.EmbedFiles, a.EmbedFiles},
-			{"TestEmbedFiles", b.TestEmbedFiles, a.TestEmbedFiles},
-			{"XTestEmbedFiles", b.XTestEmbedFiles, a.XTestEmbedFiles},
-		} {
-			grew := slices.DeleteFunc(without(l.after, l.before), func(f string) bool {
-				return path.Base(f) == overlaySeenFile // the probe's own instrument
-			})
-			if extra := firstReport(base, grew); len(extra) > 0 {
-				t.Errorf("%s %s: with an editor's lock beside every file and a .DS_Store in every "+
-					"directory, it also embeds %s. On Windows emacs's lock is a regular file, so "+
-					"it ships; on macOS and Linux it is a dangling symlink, and the build fails. "+
-					"Start every glob element with [^.], never * (patterns: %s)",
-					b.ImportPath, l.field, strings.Join(extra, " "), strings.Join(patterns[base], " "))
-			}
-			if missing := without(l.before, l.after); len(missing) > 0 {
-				t.Errorf("%s %s: the plants REMOVED %s from the embedded set",
-					b.ImportPath, l.field, strings.Join(missing, " "))
-			}
-		}
+		c.compare(t, b)
 	}
-	if embedded == 0 {
+	if c.embedded == 0 {
 		t.Fatal("no embedded file was listed, so nothing was compared")
 	}
-	t.Logf("%d packages, %d embedded files, %d plants", len(paths), embedded, len(plants))
+	t.Logf("%d packages, %d embedded files, %d plants", len(paths), c.embedded, len(plants))
+}
+
+// embeddingPackage is a package whose files carry at least one //go:embed
+// pattern.
+type embeddingPackage struct {
+	name     string   // its package clause
+	dir      string   // its directory, as the go command spells it
+	patterns []string // its patterns, test files' included
+}
+
+// embeddingPackages lists, in go list's order, the packages under root with
+// an embed pattern in any of their files.
+func embeddingPackages(t *testing.T, root string) (paths []string, pkgs map[string]embeddingPackage) {
+	t.Helper()
+	pkgs = map[string]embeddingPackage{}
+	for _, p := range goListPackages(t, root, "-json=ImportPath,Name,Dir,EmbedPatterns,TestEmbedPatterns,XTestEmbedPatterns", "./...") {
+		all := slices.Concat(p.EmbedPatterns, p.TestEmbedPatterns, p.XTestEmbedPatterns)
+		if len(all) == 0 {
+			continue
+		}
+		paths = append(paths, p.ImportPath)
+		pkgs[p.ImportPath] = embeddingPackage{name: p.Name, dir: p.Dir, patterns: all}
+	}
+	if len(paths) == 0 {
+		t.Fatal("go list found no package using //go:embed, so this test checks nothing")
+	}
+	return paths, pkgs
+}
+
+// writeDetritusOverlay writes a `go list -overlay` file planting editor
+// detritus in every package's directory tree (plantEditorDetritus), and
+// returns its path with the plants. Each package also gets one ordinary
+// source file, overlaySeenFile, which must show up in its GoFiles: proof the
+// go command read the overlay there. Without it, an overlay the go command
+// ignored (a path it spells differently, say) would leave both listings equal
+// and the test green over nothing.
+func writeDetritusOverlay(t *testing.T, paths []string, pkgs map[string]embeddingPackage) (string, map[string]string) {
+	t.Helper()
+	tmp := t.TempDir()
+	// One backing file for every plant, holding what emacs writes into the
+	// Windows-shape lock. Its content is never read: only the name matters.
+	backing := filepath.Join(tmp, "lock")
+	if err := os.WriteFile(backing, []byte("someone@host.1234:1695000000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plants := map[string]string{}
+	for i, ip := range paths {
+		p := pkgs[ip]
+		if err := plantEditorDetritus(p.dir, backing, plants); err != nil {
+			t.Fatalf("plant beside %s: %v", p.dir, err)
+		}
+		src := filepath.Join(tmp, fmt.Sprintf("seen%d.go", i))
+		if err := os.WriteFile(src, []byte("package "+p.name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		plants[filepath.Join(p.dir, overlaySeenFile)] = src
+	}
+	overlay := filepath.Join(tmp, "overlay.json")
+	replace, err := json.Marshal(map[string]map[string]string{"Replace": plants})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overlay, replace, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return overlay, plants
+}
+
+// embedComparison holds the two listings the probe compares, and what it has
+// counted and reported so far.
+type embedComparison struct {
+	pkgs     map[string]embeddingPackage
+	plants   map[string]string
+	after    map[string]goListPackage // the planted listing, by import path
+	reported map[string]bool          // package + "\x00" + file, reported once
+	embedded int                      // embedded files checked for a plant
+}
+
+// compare checks one entry of the plain listing against the planted one.
+func (c *embedComparison) compare(t *testing.T, b goListPackage) {
+	t.Helper()
+	if b.Error != nil {
+		t.Errorf("%s does not build even without a plant: %s", b.ImportPath, b.Error.Err)
+		return
+	}
+	// The package itself, as opposed to a test variant of it or its
+	// generated test main.
+	_, isPackage := c.pkgs[b.ImportPath]
+	if isPackage {
+		c.checkPlantedBeside(t, b)
+	}
+	a, ok := c.after[b.ImportPath]
+	if !ok {
+		t.Errorf("%s: missing from the planted listing", b.ImportPath)
+		return
+	}
+	if isPackage && !slices.Contains(a.GoFiles, overlaySeenFile) {
+		t.Errorf("%s: the go command did not read the overlay in %s (no %s among its "+
+			"GoFiles), so nothing planted there was checked", b.ImportPath, b.Dir, overlaySeenFile)
+	}
+	if a.Error != nil {
+		// Not the lock's build failure: every plant here is a regular file,
+		// which embed accepts. Report what go list said.
+		t.Errorf("%s: with the plants in place, go list reports %s (patterns: %s)",
+			b.ImportPath, a.Error.Err, c.patternsOf(b))
+		return
+	}
+	c.compareFiles(t, b, "EmbedFiles", b.EmbedFiles, a.EmbedFiles)
+	c.compareFiles(t, b, "TestEmbedFiles", b.TestEmbedFiles, a.TestEmbedFiles)
+	c.compareFiles(t, b, "XTestEmbedFiles", b.XTestEmbedFiles, a.XTestEmbedFiles)
+}
+
+// checkPlantedBeside counts b's embedded files and requires a lock planted
+// beside each, or the comparison says nothing about the directory it sits in.
+func (c *embedComparison) checkPlantedBeside(t *testing.T, b goListPackage) {
+	t.Helper()
+	for _, f := range slices.Concat(b.EmbedFiles, b.TestEmbedFiles, b.XTestEmbedFiles) {
+		c.embedded++
+		lock := filepath.Join(b.Dir, filepath.FromSlash(path.Dir(f)), ".#"+path.Base(f))
+		if _, ok := c.plants[lock]; !ok {
+			t.Errorf("%s embeds %s but nothing was planted beside it (%s), so a pattern "+
+				"reaching that directory goes unchecked", b.ImportPath, f, lock)
+		}
+	}
+}
+
+// compareFiles reports what one of b's embedded-file lists gained or lost
+// under the plants. A test variant embeds its package's files as well as its
+// own, so a gained file is reported once, against the first listing that
+// shows it.
+func (c *embedComparison) compareFiles(t *testing.T, b goListPackage, field string, before, after []string) {
+	t.Helper()
+	base := c.baseOf(b)
+	var extra []string
+	for _, f := range without(after, before) {
+		if path.Base(f) == overlaySeenFile { // the probe's own instrument
+			continue
+		}
+		if k := base + "\x00" + f; !c.reported[k] {
+			c.reported[k] = true
+			extra = append(extra, f)
+		}
+	}
+	if len(extra) > 0 {
+		t.Errorf("%s %s: with an editor's lock beside every file and a .DS_Store in every "+
+			"directory, it also embeds %s. On Windows emacs's lock is a regular file, so "+
+			"it ships; on macOS and Linux it is a dangling symlink, and the build fails. "+
+			"Start every glob element with [^.], never * (patterns: %s)",
+			b.ImportPath, field, strings.Join(extra, " "), c.patternsOf(b))
+	}
+	if missing := without(before, after); len(missing) > 0 {
+		t.Errorf("%s %s: the plants REMOVED %s from the embedded set",
+			b.ImportPath, field, strings.Join(missing, " "))
+	}
+}
+
+// baseOf names the package whose patterns b's files come from: a test
+// variant names it in ForTest, and the generated test main is "<path>.test".
+func (c *embedComparison) baseOf(b goListPackage) string {
+	if b.ForTest != "" {
+		return b.ForTest
+	}
+	return strings.TrimSuffix(b.ImportPath, ".test")
+}
+
+// patternsOf lists the embed patterns behind b, for a report.
+func (c *embedComparison) patternsOf(b goListPackage) string {
+	return strings.Join(c.pkgs[c.baseOf(b)].patterns, " ")
 }
 
 // overlaySeenFile is the source file the probe adds to each package through
