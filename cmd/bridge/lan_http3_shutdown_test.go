@@ -264,7 +264,7 @@ func waitBoundedServeExit(t *testing.T, exited <-chan struct{}, done <-chan int,
 	select {
 	case <-exited:
 	case <-time.After(bound):
-		t.Fatalf("runServe was still draining %v later, on a LAN HTTP/3 handler that ignores its "+
+		t.Fatalf("runServe was still draining %v later, on an HTTP/3 handler that ignores its "+
 			"context: the drain is not bounded; stderr=%s", bound, stderr.String())
 	}
 	return <-done
