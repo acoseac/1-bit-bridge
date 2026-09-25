@@ -13900,6 +13900,7 @@ asserted to apply exactly once, restored from git after each:
 | NC6 | no line | both LAN tests |
 | NC7 | `stop` gives up at once | both LAN tests (returned in 35 ms; never told) |
 | NC8 | the LAN HTTP/3 server bypasses the seam | both LAN tests (the held route never reached): the tests drive serve's own HTTP/3 server |
+| NC9 | the allowance derived from ctx itself (SonarCloud's suggestion, review round 1; run on `97007a87`) | all three "told" tests |
 
 `TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext` stayed green
 throughout, as it should: its bound is #1009's D1.
