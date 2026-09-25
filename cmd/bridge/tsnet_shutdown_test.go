@@ -3,8 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -32,15 +38,16 @@ import (
 // goroutine at each of those points across the exit.
 
 const (
-	msgAdminServer    = "admin server:"
-	msgTsnetClose     = "tsnet close:"
-	msgTsnetGaveUp    = "shutdown: the tsnet goroutine did not stop within grace"
-	msgH3BindFailed   = "Failed to bind tsnet UDP socket for h3, continuing with remaining IPs"
-	msgH3NoneBound    = "No tsnet HTTP/3 listeners bound on any tailnet IP, running HTTP/2 only on tailnet"
-	msgH3Bound        = "tsnet HTTP/3 listeners bound"
-	msgH3ServeFailed  = "h3 serve tsnet"
-	errWrapperClosed  = "tsnet: ListenPacket called before Start"
-	tsnetStateFileRel = "data/tailscale/tailscaled.state"
+	msgAdminServer      = "admin server:"
+	msgTsnetClose       = "tsnet close:"
+	msgTsnetGaveUp      = "shutdown: the tsnet goroutine did not stop within grace"
+	msgTsnetDrainGaveUp = "shutdown: the tailnet servers did not drain within grace"
+	msgH3BindFailed     = "Failed to bind tsnet UDP socket for h3, continuing with remaining IPs"
+	msgH3NoneBound      = "No tsnet HTTP/3 listeners bound on any tailnet IP, running HTTP/2 only on tailnet"
+	msgH3Bound          = "tsnet HTTP/3 listeners bound"
+	msgH3ServeFailed    = "h3 serve tsnet"
+	errWrapperClosed    = "tsnet: ListenPacket called before Start"
+	tsnetStateFileRel   = "data/tailscale/tailscaled.state"
 )
 
 // TestServeStopsItsTsnetStartOnAnErrorExit: serve exits on an error (the
@@ -866,6 +873,109 @@ func TestATailnetHTTP3BindCutShortByTheShutdownServesNothing(t *testing.T) {
 		t.Errorf("a bind the shutdown cut short reported HTTP/3 as bound:\n%s", strings.Join(got, "\n"))
 	}
 	mustNotReportServe(t, rec, msgH3BindFailed, msgH3NoneBound, msgH3ServeFailed)
+}
+
+// TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext: quic-go runs
+// ServeHTTP inside the WaitGroup of the connection's handling goroutine,
+// and http3.Server.Shutdown past its deadline calls Close, which waits for
+// every connection's handling to finish. A handler that ignores its
+// context (a read from a hung NAS mount, say) therefore held stop, and the
+// exit with it, for as long as it blocked. stop gives the drains the grace,
+// says so, and closes the node under them (CodeRabbit, #1009).
+func TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
+	release := newGate()
+	t.Cleanup(release.open)
+	entered := make(chan struct{})
+	var once sync.Once
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		once.Do(func() { close(entered) })
+		release.wait() // never asks the request's context
+	})
+	serverTLS, clientTLS := loopbackTLSPair(t)
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	srv := &http3.Server{Handler: handler, TLSConfig: serverTLS}
+	f := stoppableFront(t, newFakeTsnetNode())
+	if !f.publishHTTP3([]tsnetH3Listener{{srv: srv, conn: conn}}) {
+		t.Fatal("precondition: an HTTP/3 server published before stop was refused")
+	}
+	go func() { _ = srv.Serve(conn) }()
+	client := &http3.Transport{TLSClientConfig: clientTLS}
+	t.Cleanup(func() { _ = client.Close() })
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, "https://"+conn.LocalAddr().String()+"/", nil)
+		if err != nil {
+			return
+		}
+		if resp, err := client.RoundTrip(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("precondition: the HTTP/3 request never reached the handler")
+	}
+
+	const grace = 500 * time.Millisecond
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		f.stop(grace)
+	}()
+	drainLoopOnCleanup(t, release.open, stopped, "stop, once the handler was let go")
+	select {
+	case <-stopped:
+	case <-time.After(10 * grace):
+		t.Fatalf("stop was still draining %v after it began, past its %v grace, on an HTTP/3 "+
+			"handler that ignores its context: the drain is not bounded", 10*grace, grace)
+	}
+	if s := f.stderr.(*safeBuffer).String(); !strings.Contains(s, msgTsnetDrainGaveUp) {
+		t.Errorf("stop gave up on a drain without saying so; stderr=%q", s)
+	}
+	if n := f.node.(*fakeTsnetNode).closeCount(); n != 1 {
+		t.Errorf("the node was closed %d time(s), want once: a drain that runs out of grace must not keep it open", n)
+	}
+}
+
+// loopbackTLSPair is a server TLS config with a fresh self-signed
+// certificate for 127.0.0.1, and a client config that trusts exactly it.
+func loopbackTLSPair(t *testing.T) (server, client *tls.Config) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+	server = &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	}
+	client = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, NextProtos: []string{http3.NextProtoH3}}
+	return server, client
 }
 
 // stoppableFront is a tsnetFront with no goroutine behind it (its done is
