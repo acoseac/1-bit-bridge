@@ -14382,11 +14382,11 @@ a fact about the run, and the port lines did not follow it.
   validate-before-restart step, on any edit that does not load. The narrow
   form is NC2.
 - **"not checked", before OwnedPorts and before the bind probe.**
-  `ungradedConfigPortCheck` is the first thing `checkAPIPort` and
-  `checkAdminPort` ask, because the port is the guess: a verdict that waits
-  for the probe depends on whether a port the install may not use is bound,
-  or by whom. NC3 is the probe-first form (decline only what would FAIL),
-  NC4 the OwnedPorts-first one.
+  `ungradedConfigPortCheck` is the first thing `checkListenPort` (the
+  ladder both port checks share) asks, because the port is the guess: a
+  verdict that waits for the probe depends on whether a port the install
+  may not use is bound, or by whom. NC3 is the probe-first form (decline
+  only what would FAIL), NC4 the OwnedPorts-first one.
 - **ok, not warn.** config-file gives the one verdict about the config, at
   the severity #985 chose, and the port lines add nothing to count: in no
   row does ok against warn change the exit code. A check that declines for

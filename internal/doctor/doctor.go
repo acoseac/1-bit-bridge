@@ -555,23 +555,26 @@ func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
 }
 
 func checkAPIPort(ctx context.Context, d Deps) Check {
-	if c := ungradedConfigPortCheck(checkNamePortAPI, d.ConfigFile); c != nil {
-		return *c
-	}
-	if owned := ownedPortCheck(checkNamePortAPI, d.APIPort, d.OwnedPorts); owned != nil {
-		return *owned
-	}
-	return checkPort(ctx, checkNamePortAPI, d.APIPort, d.OwnPIDFile)
+	return checkListenPort(ctx, d, checkNamePortAPI, d.APIPort)
 }
 
 func checkAdminPort(ctx context.Context, d Deps) Check {
-	if c := ungradedConfigPortCheck(checkNamePortAdmin, d.ConfigFile); c != nil {
+	return checkListenPort(ctx, d, checkNamePortAdmin, d.AdminPort)
+}
+
+// checkListenPort is the ladder both port checks climb, for the port it is
+// handed with the name it is handed: a config that did not load declines
+// (ungradedConfigPortCheck), then a port the caller bound answers
+// (ownedPortCheck), then the bind probe (checkPort). The port is passed,
+// never derived from the name, for the reason ownedPortCheck gives.
+func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
+	if c := ungradedConfigPortCheck(name, d.ConfigFile); c != nil {
 		return *c
 	}
-	if owned := ownedPortCheck(checkNamePortAdmin, d.AdminPort, d.OwnedPorts); owned != nil {
+	if owned := ownedPortCheck(name, port, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort(ctx, checkNamePortAdmin, d.AdminPort, d.OwnPIDFile)
+	return checkPort(ctx, name, port, d.OwnPIDFile)
 }
 
 // ungradedConfigPortCheck answers a port check whose port no config set:
