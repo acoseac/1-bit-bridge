@@ -726,10 +726,11 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 	// This used to end in `if !portProbeAvailable() { return warn(…) }`,
 	// goreview F9's answer to a LIVE bridge that a host without lsof could
 	// not attribute. The liveness arm above has answered that case since
-	// #640, so all the fallback still saw was this one, where lsof has no
-	// pid to look for and is never run. Its absence alone turned the Fail
-	// into a warn, and `bridge init` on such a host saved a port another
-	// process held.
+	// #640, so all the fallback still saw was this one, where lsof cannot
+	// change the answer: with no pid there is nothing to ask it, and a pid
+	// that is not running holds nothing for it to find. Its absence alone
+	// turned the Fail into a warn, and `bridge init` on such a host saved a
+	// port another process held.
 	return fail(name, fmt.Sprintf(":%d in use", port),
 		"another process owns this port; stop it or pick a different address in bridge.yaml")
 }

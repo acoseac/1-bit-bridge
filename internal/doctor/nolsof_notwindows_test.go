@@ -28,11 +28,12 @@ func withoutLsof(t *testing.T) {
 // (#429). #640's liveness arm has answered that case since: a recorded pid
 // that is alive gets ok or warn before anything falls through. So what
 // still reached the fallback was a bound port with no live pid of ours to
-// attribute it to. lsof could not change that answer and was never run for
-// it, yet its absence turned the Fail into a warn, and `bridge init` on
-// such a host saved a port another process held. Its second port pass
-// clears OwnPIDFile and a first install has none: #970's defect, back on
-// every host without lsof.
+// attribute it to. lsof could not change that answer (with no pid it is
+// never asked, and a dead pid holds nothing for it to find), yet its
+// absence turned the Fail into a warn, and `bridge init` on such a host
+// saved a port another process held. Its second port pass clears
+// OwnPIDFile and a first install has none: #970's defect, back on every
+// host without lsof.
 func TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
