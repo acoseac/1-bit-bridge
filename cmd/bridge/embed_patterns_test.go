@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -49,7 +50,8 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 
 	var dirs, paths []string
 	patterns := map[string][]string{}
-	for _, p := range goListPackages(t, root, "-json=ImportPath,Dir,EmbedPatterns,TestEmbedPatterns,XTestEmbedPatterns", "./...") {
+	names := map[string]string{}
+	for _, p := range goListPackages(t, root, "-json=ImportPath,Name,Dir,EmbedPatterns,TestEmbedPatterns,XTestEmbedPatterns", "./...") {
 		all := slices.Concat(p.EmbedPatterns, p.TestEmbedPatterns, p.XTestEmbedPatterns)
 		if len(all) == 0 {
 			continue
@@ -57,6 +59,7 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 		dirs = append(dirs, p.Dir)
 		paths = append(paths, p.ImportPath)
 		patterns[p.ImportPath] = all
+		names[p.Dir] = p.Name
 	}
 	if len(paths) == 0 {
 		t.Fatal("go list found no package using //go:embed, so this test checks nothing")
@@ -64,15 +67,26 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 
 	// One backing file for every plant, holding what emacs writes into the
 	// Windows-shape lock. Its content is never read: only the name matters.
-	backing := filepath.Join(t.TempDir(), "lock")
+	tmp := t.TempDir()
+	backing := filepath.Join(tmp, "lock")
 	if err := os.WriteFile(backing, []byte("someone@host.1234:1695000000"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	plants := map[string]string{}
-	for _, dir := range dirs {
+	for i, dir := range dirs {
 		if err := plantEditorDetritus(dir, backing, plants); err != nil {
 			t.Fatalf("plant beside %s: %v", dir, err)
 		}
+		// And one ordinary source file, which must show up in the package's
+		// GoFiles: proof the go command read the overlay for this directory.
+		// Without it, an overlay the go command ignored (a path it spells
+		// differently, say) would leave both listings equal and this test
+		// green over nothing.
+		src := filepath.Join(tmp, fmt.Sprintf("seen%d.go", i))
+		if err := os.WriteFile(src, []byte("package "+names[dir]+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		plants[filepath.Join(dir, overlaySeenFile)] = src
 	}
 	overlay := filepath.Join(t.TempDir(), "overlay.json")
 	b, err := json.Marshal(map[string]map[string]string{"Replace": plants})
@@ -83,7 +97,7 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const fields = "-json=ImportPath,Dir,ForTest,EmbedFiles,TestEmbedFiles,XTestEmbedFiles,Error"
+	const fields = "-json=ImportPath,Dir,ForTest,GoFiles,EmbedFiles,TestEmbedFiles,XTestEmbedFiles,Error"
 	before := goListPackages(t, root, append([]string{"-test", fields}, paths...)...)
 	after := map[string]goListPackage{}
 	for _, p := range goListPackages(t, root, append([]string{"-test", "-overlay", overlay, fields}, paths...)...) {
@@ -116,9 +130,12 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 			t.Errorf("%s does not build even without a plant: %s", b.ImportPath, b.Error.Err)
 			continue
 		}
+		// The package itself, as opposed to a test variant of it or its
+		// generated test main.
+		isPackage := slices.Contains(paths, b.ImportPath)
 		// Every embedded file must have its lock planted beside it, or the
 		// comparison below says nothing about the directory it sits in.
-		if b.ForTest == "" {
+		if isPackage {
 			for _, f := range slices.Concat(b.EmbedFiles, b.TestEmbedFiles, b.XTestEmbedFiles) {
 				embedded++
 				lock := filepath.Join(b.Dir, filepath.FromSlash(path.Dir(f)), ".#"+path.Base(f))
@@ -132,6 +149,10 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 		if !ok {
 			t.Errorf("%s: missing from the planted listing", b.ImportPath)
 			continue
+		}
+		if isPackage && !slices.Contains(a.GoFiles, overlaySeenFile) {
+			t.Errorf("%s: the go command did not read the overlay in %s (no %s among its "+
+				"GoFiles), so nothing planted there was checked", b.ImportPath, b.Dir, overlaySeenFile)
 		}
 		if a.Error != nil {
 			t.Errorf("%s: an editor's lock breaks the build: %s. A glob whose element can begin "+
@@ -148,7 +169,10 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 			{"TestEmbedFiles", b.TestEmbedFiles, a.TestEmbedFiles},
 			{"XTestEmbedFiles", b.XTestEmbedFiles, a.XTestEmbedFiles},
 		} {
-			if extra := firstReport(base, without(l.after, l.before)); len(extra) > 0 {
+			extra := slices.DeleteFunc(without(l.after, l.before), func(f string) bool {
+				return path.Base(f) == overlaySeenFile // the probe's own instrument
+			})
+			if extra := firstReport(base, extra); len(extra) > 0 {
 				t.Errorf("%s %s: with an editor's lock beside every file and a .DS_Store in every "+
 					"directory, it also embeds %s. On Windows emacs's lock is a regular file, so "+
 					"it ships; on macOS and Linux it is a dangling symlink, and the build fails. "+
@@ -167,11 +191,17 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 	t.Logf("%d packages, %d embedded files, %d plants", len(paths), embedded, len(plants))
 }
 
+// overlaySeenFile is the source file the probe adds to each package through
+// the overlay, to learn whether the go command read it there.
+const overlaySeenFile = "zz_overlay_seen.go"
+
 // goListPackage is the subset of `go list -json` this file reads.
 type goListPackage struct {
 	ImportPath         string
+	Name               string
 	Dir                string
 	ForTest            string
+	GoFiles            []string
 	EmbedPatterns      []string
 	TestEmbedPatterns  []string
 	XTestEmbedPatterns []string
