@@ -89,11 +89,11 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 		plants[filepath.Join(dir, overlaySeenFile)] = src
 	}
 	overlay := filepath.Join(t.TempDir(), "overlay.json")
-	b, err := json.Marshal(map[string]map[string]string{"Replace": plants})
+	replace, err := json.Marshal(map[string]map[string]string{"Replace": plants})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(overlay, b, 0o600); err != nil {
+	if err := os.WriteFile(overlay, replace, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,9 +155,9 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 				"GoFiles), so nothing planted there was checked", b.ImportPath, b.Dir, overlaySeenFile)
 		}
 		if a.Error != nil {
-			t.Errorf("%s: an editor's lock breaks the build: %s. A glob whose element can begin "+
-				"with \".\" (*, ?, or a class that admits it) matches the lock, which is a "+
-				"dangling symlink on macOS and Linux; start the element with [^.] (patterns: %s)",
+			// Not the lock's build failure: every plant here is a regular
+			// file, which embed accepts. Report what go list said.
+			t.Errorf("%s: with the plants in place, go list reports %s (patterns: %s)",
 				b.ImportPath, a.Error.Err, strings.Join(patterns[base], " "))
 			continue
 		}
@@ -169,10 +169,10 @@ func TestEveryEmbedPatternRefusesALeadingDot(t *testing.T) {
 			{"TestEmbedFiles", b.TestEmbedFiles, a.TestEmbedFiles},
 			{"XTestEmbedFiles", b.XTestEmbedFiles, a.XTestEmbedFiles},
 		} {
-			extra := slices.DeleteFunc(without(l.after, l.before), func(f string) bool {
+			grew := slices.DeleteFunc(without(l.after, l.before), func(f string) bool {
 				return path.Base(f) == overlaySeenFile // the probe's own instrument
 			})
-			if extra := firstReport(base, extra); len(extra) > 0 {
+			if extra := firstReport(base, grew); len(extra) > 0 {
 				t.Errorf("%s %s: with an editor's lock beside every file and a .DS_Store in every "+
 					"directory, it also embeds %s. On Windows emacs's lock is a regular file, so "+
 					"it ships; on macOS and Linux it is a dangling symlink, and the build fails. "+
