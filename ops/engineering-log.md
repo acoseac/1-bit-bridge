@@ -12956,6 +12956,8 @@ exactly once, and the file restored after:
 | NC17 | the disk side's dot-directory skip removed (against `7f0f0a7e`) | red: both `.cache` files reported as not embedded |
 | NC18 | the too-wide diagnosis removed | red: "stale build cache?" for `templates/notes.txt` |
 | NC19 | `_` directories skipped too, the consult's proposed shape | red: no problem for `static/player/_lib/util.js` |
+| NC20 | `isEditorDetritus` narrowed to `.#` and `~` (against `a6681caf`) | red: `.DS_Store` and `.gitkeep` on disk reported as not embedded. The embedded `.env` is still reported, because a leading dot is now judged first |
+| NC21 | NC20, plus the old case order (`wanted` first) | red as NC20, and also "no problem reported for static/.env": the reorder is what catches a dot file the disk side failed to skip |
 
 After the probe was split for SonarCloud (`2ddb40e1`), the controls were
 run again against it. NC1–NC4, NC8–NC10 and NC15a were red again, and
@@ -13012,3 +13014,14 @@ build proves nothing. Both are red on the same floors.
   - SonarCloud (gate passed) raised one issue, `go:S3776`: cognitive
     complexity 41 of 15 on the probe. Taken; the probe is split, and its
     controls were re-run. CodeQL: no alerts.
+- **A fresh consult on round 1's changes**, standing in for the Gemini
+  app's second pass. It agreed with all three declines. It made two
+  findings, and both assumed `isEditorDetritus` takes only `.#name`,
+  `.DS_Store` and swap files. It takes every leading "." (the function
+  body was not in the round's diff, because it did not change), so
+  `.env` and `.gitkeep` were already skipped on disk. The rows it
+  proposed to falsify them pass as they stand. They are kept as pins,
+  which NC20 shows will catch a narrower rule. Its hardening was taken
+  (`a6681caf`): a leading dot in any embedded element is now reported
+  before the disk side is consulted, tested on `"/"+p`, so it holds for
+  a root of `.` too.
