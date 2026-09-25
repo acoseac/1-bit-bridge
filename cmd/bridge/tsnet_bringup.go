@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,24 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"tailscale.com/ipn/ipnstate"
 )
+
+// tsnetNode is the embedded tailnet node as serve drives it. The
+// production one is internal/tsnet's *Server; the boot tests pass a fake
+// (serveOpts.tsnetNode) to hold a start or a listen open across a
+// shutdown.
+type tsnetNode interface {
+	Start(context.Context) error
+	Close() error
+	Status(context.Context) (*ipnstate.Status, error)
+	CertDomains() []string
+	ListenTLS(addr string) (net.Listener, error)
+	ListenPacket(network, addr string) (net.PacketConn, error)
+	HTTP3TLSConfig() *tls.Config
+	// The metrics collector's provider (metrics.RegisterTsnetProvider).
+	MetricsState() int
+	MetricsPeersOnline() int
+	MetricsDERPLatencies() map[string]float64
+}
 
 // tsnetStartTimeout bounds how long the embedded node may take to come up,
 // interactive auth included. The LAN listener serves regardless.

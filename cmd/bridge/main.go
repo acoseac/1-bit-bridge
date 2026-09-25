@@ -69,7 +69,6 @@ import (
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 	"github.com/acoseac/1-bit-bridge/internal/trash"
-	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/upload"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -2295,6 +2294,11 @@ type serveOpts struct {
 	// var: a leaked auto-pilot from an earlier test could otherwise read
 	// a later test's fake.
 	tailscaleCLI tailscaleCLI
+	// tsnetNode stands in for the embedded tailnet node in tsnet mode.
+	// Nil (a node built from the config) everywhere but the boot tests,
+	// which pass a fake so a start or a listen can be held open across a
+	// shutdown, with no tailnet. Per invocation for tailscaleCLI's reason.
+	tsnetNode tsnetNode
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -2866,7 +2870,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 
 	var tailscaleAuto *tailscaleAutoPilot
-	var tsnetServer *tsnet.Server
+	var tsnetServer tsnetNode
 	switch tsMode {
 	case config.TailscaleModeCLI:
 		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, opts.tailscaleCLI, stdout, stderr)
@@ -2879,8 +2883,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// run, and we want the LAN listener up immediately.
 		// Up() runs in a goroutine; the second http.Server gated
 		// on its success is started later in this function.
-		ts, err := newTsnetServer(cfg, stderr)
-		if err != nil {
+		if opts.tsnetNode != nil {
+			tsnetServer = opts.tsnetNode
+		} else if ts, err := newTsnetServer(cfg, stderr); err != nil {
 			fmt.Fprintf(stderr, "tsnet: %v (LAN listener still active)\n", err)
 		} else {
 			tsnetServer = ts
