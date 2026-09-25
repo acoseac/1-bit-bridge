@@ -13034,3 +13034,11 @@ build proves nothing. Both are red on the same floors.
   `filesOnDisk`, `filesEmbedded` and `embeddedProblem` (`3b10f00d`), and
   NC6, NC7 and NC17–NC21 were run again against the split. All were red
   as before, NC21 included, where `static/.env` goes unreported.
+- **Round 3**, on `1598f7c8`. CI: 20 of 20 pass, and the merge state is
+  clean. CodeRabbit, once its allowance came back, covered
+  `ff505acf..1598f7c8`, so rounds 1 and 2 were reviewed in one pass:
+  "No actionable comments were generated". SonarCloud: gate passed, no
+  open issues. CodeQL: no alerts. A third consult on the round-2 split
+  found nothing: it walked every case of the classification and called
+  the split behaviour-identical. **The Gemini app reviewed no commit of
+  this PR** (daily quota, all session). Three direct consults stood in.
