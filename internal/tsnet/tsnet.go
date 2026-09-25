@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
@@ -84,9 +85,15 @@ type Server struct {
 	cfg Config
 	log *slog.Logger
 
+	// newNode turns the upstream server startUnlocked configures into the
+	// node Start drives. It returns its argument everywhere but this
+	// package's tests, which substitute a node whose start they can hold
+	// open.
+	newNode func(*tsnet.Server) node
+
 	// lifecycleMu protects started + server.
 	lifecycleMu sync.Mutex
-	server      *tsnet.Server
+	server      node
 	started     bool
 	starting    bool // detect double-Start
 
@@ -96,6 +103,18 @@ type Server struct {
 	// long-running tsnet.Up() call.
 	authMu  sync.Mutex
 	authURL string
+}
+
+// node is the upstream tailscale.com/tsnet.Server as this wrapper drives
+// it. *tsnet.Server is the only one in production (Server.newNode).
+type node interface {
+	Start() error
+	Up(context.Context) (*ipnstate.Status, error)
+	Close() error
+	ListenTLS(network, addr string) (net.Listener, error)
+	ListenPacket(network, addr string) (net.PacketConn, error)
+	LocalClient() (*local.Client, error)
+	CertDomains() []string
 }
 
 // Config carries everything NewServer needs. Mode is unused here —
@@ -147,7 +166,11 @@ func NewServer(cfg Config) (*Server, error) {
 		// Refuse loudly here.
 		return nil, errors.New("tsnet: Config.StateDir is required (empty triggers ephemeral mode)")
 	}
-	return &Server{cfg: cfg, log: cfg.Logger}, nil
+	return &Server{
+		cfg:     cfg,
+		log:     cfg.Logger,
+		newNode: func(ts *tsnet.Server) node { return ts },
+	}, nil
 }
 
 // Start brings the tailnet node up. Idempotent: a second Start on
@@ -204,9 +227,9 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // startUnlocked does the I/O-heavy parts of Start without holding
-// lifecycleMu. Returns the constructed tsnet.Server (or nil on
+// lifecycleMu. Returns the constructed node (or nil on
 // pre-construction error) so Start can clean up under the lock.
-func (s *Server) startUnlocked(ctx context.Context) (*tsnet.Server, error) {
+func (s *Server) startUnlocked(ctx context.Context) (node, error) {
 	// MkdirAll doesn't tighten perms on an existing dir (Qodo bug #1).
 	// Always Chmod after to ensure 0700 even if the dir pre-existed
 	// with looser perms — assertSecureDir would otherwise refuse
@@ -237,14 +260,14 @@ func (s *Server) startUnlocked(ctx context.Context) (*tsnet.Server, error) {
 			slog.String("stateDir", s.cfg.StateDir))
 	}
 
-	server := &tsnet.Server{
+	server := s.newNode(&tsnet.Server{
 		Dir:       s.cfg.StateDir,
 		Hostname:  s.cfg.Hostname,
 		AuthKey:   authKey,
 		Ephemeral: false,
 		UserLogf:  s.userLogf(),
 		Logf:      noisyLogfFromSlog(s.log),
-	}
+	})
 
 	if err := server.Start(); err != nil {
 		return server, fmt.Errorf("tsnet: server start: %w", err)
