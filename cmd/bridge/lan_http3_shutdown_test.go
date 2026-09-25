@@ -141,10 +141,14 @@ type heldRoute struct {
 	once    sync.Once
 }
 
+// newHeldRoute is a heldRoute nothing has entered, and whose release is
+// still shut.
 func newHeldRoute() *heldRoute {
 	return &heldRoute{entered: make(chan struct{}), release: newGate()}
 }
 
+// wrap is the serveOpts.wrapAPIHandler that adds the route in front of
+// next.
 func (h *heldRoute) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != heldPath {
@@ -162,6 +166,8 @@ type lanHTTP3Client struct {
 	tr *http3.Transport
 }
 
+// newLANHTTP3Client is a client for the serve whose data dir is dataDir,
+// once that serve has minted its certificate.
 func newLANHTTP3Client(t *testing.T, dataDir string) *lanHTTP3Client {
 	t.Helper()
 	certPath := filepath.Join(dataDir, "server.crt")
@@ -176,6 +182,7 @@ func newLANHTTP3Client(t *testing.T, dataDir string) *lanHTTP3Client {
 	return newHTTP3Client(t, &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, NextProtos: []string{http3.NextProtoH3}})
 }
 
+// newHTTP3Client is a client with tlsConf, closed when the test ends.
 func newHTTP3Client(t *testing.T, tlsConf *tls.Config) *lanHTTP3Client {
 	t.Helper()
 	tr := &http3.Transport{TLSClientConfig: tlsConf}

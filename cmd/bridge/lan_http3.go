@@ -36,7 +36,9 @@ func drainedWithin(ctx context.Context, drained <-chan struct{}) bool {
 	if closedWithin(ctx, drained) {
 		return true
 	}
-	allowance, cancel := context.WithTimeout(context.Background(), http3ForceCloseAllowance)
+	// ctx has ended by now, so the allowance must not inherit its
+	// cancellation: derived from ctx itself, it would be over at once.
+	allowance, cancel := context.WithTimeout(context.WithoutCancel(ctx), http3ForceCloseAllowance)
 	defer cancel()
 	return closedWithin(allowance, drained)
 }
