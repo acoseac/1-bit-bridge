@@ -13202,10 +13202,11 @@ two walks were split before review rather than after it:
 `leakyFlacCall` for the other, each well under the limit. The hash-cost
 fixture gained a caller from inside the package, so both call shapes the
 split separates (an identifier and a selector) are found. The controls
-were run again against the split, with M6–M8 retargeted, and every result
-matched but one, as it should: M12 and M13 now also turn the hash-cost
-fixture red, because its new caller sits under `internal/`. M13's point
-stands, since the whole-tree test still passes under the old floor.
+were run again against the split (`a60c78e8`), with M6–M8 retargeted,
+and every result matched but one, as it should: M12 and M13 now also
+turn the hash-cost fixture red, because its new caller sits under
+`internal/`. M13's point stands, since the whole-tree test still passes
+under the old floor.
 
 ### Consult
 
