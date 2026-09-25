@@ -30,9 +30,10 @@ var lsofCommand = exec.CommandContext
 // cut short) so checkPort can degrade to Warn rather than a hard Fail — a
 // broken probe must never break a healthy install.
 //
-// Returns (false, nil) when the probe is simply unavailable (no usable
-// lsof on this host): portProbeAvailable() already gates that case in
-// checkPort, so the bound-port verdict there is Warn, not Fail.
+// Returns (false, nil) when no usable lsof resolved on this host: the port
+// cannot be attributed, so checkPort asks next whether the recorded pid is
+// alive at all. That arm, not this function, is what keeps a live bridge
+// from reading as a conflict on such a host.
 //
 // Implementation: `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints one PID
 // per line. We check membership across ALL of them (not just the first)
@@ -101,9 +102,9 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error
 
 // lsofPath is the absolute path to lsof, resolved ONCE at package init.
 // "" means lsof is unavailable on this host: not installed, or — defending
-// against PATH injection — the PATH lookup returned a relative path. Both
-// portProbeAvailable and isPIDListeningOnPort key off it, so the bridge
-// never execs an attacker-staged lsof off a writable CWD / PATH entry.
+// against PATH injection — the PATH lookup returned a relative path.
+// isPIDListeningOnPort keys off it, so the bridge never execs an
+// attacker-staged lsof off a writable CWD / PATH entry.
 // Mirrors the exec.LookPath + filepath.IsAbs hardening used for the
 // Tailscale CLI (PR #95). (CodeRabbit MAJOR on PR #429.)
 var lsofPath = resolveLsof()
@@ -188,10 +189,3 @@ func signal0Alive(err error) bool {
 	}
 	return errors.Is(err, syscall.EPERM)
 }
-
-// portProbeAvailable reports whether isPIDListeningOnPort can identify the
-// owner of a bound port on THIS host — i.e. lsof resolved to a usable
-// absolute path. When false, checkPort can't tell a port bound by our own
-// bridge apart from a real conflict, so it degrades to Warn rather than a
-// hard Fail. Package var so tests can stub it.
-var portProbeAvailable = func() bool { return lsofPath != "" }

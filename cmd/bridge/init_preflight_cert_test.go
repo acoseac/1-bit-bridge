@@ -517,8 +517,15 @@ func TestConfiguredPortReadsAnEphemeralPortAsItself(t *testing.T) {
 // #970.)
 //
 // The fixture is this test process: its own pid in the pid file is
-// alive by construction, and it holds the port on a listener the port
-// prober will not attribute to a bridge.
+// alive by construction, and it holds the port itself. So a pid file
+// left in place would excuse the port through every arm of the ladder:
+// lsof finds the recorded pid listening, and on a host without lsof the
+// recorded pid is alive and, on Linux, the listener carries this uid.
+//
+// On a host without lsof this test also failed with the pid file
+// CLEARED, because checkPort then warned about any port with no live pid
+// of ours behind it. That fallback is gone (see
+// internal/doctor/nolsof_notwindows_test.go).
 func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "Music")
@@ -576,8 +583,9 @@ func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
 	}, strings.NewReader(""), &out, &errOut)
 
 	if code == 0 {
-		t.Fatalf("init exited 0: a changed port held by another process was excused because our own "+
-			"recorded pid is alive\n--- stdout ---\n%s\n--- stderr ---\n%s", out.String(), errOut.String())
+		t.Fatalf("init exited 0 while saving a changed port another process holds (our recorded pid "+
+			"is alive, so a pid file left in place would excuse it)\n--- stdout ---\n%s\n--- stderr ---\n%s",
+			out.String(), errOut.String())
 	}
 	// WHICH check refused, not merely that something did. The released
 	// api port cannot fail here — the live recorded pid downgrades any

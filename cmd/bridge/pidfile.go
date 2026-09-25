@@ -47,11 +47,12 @@ func writeServerPIDFile(dataDir string) (path string, err error) {
 
 // removeServerPIDFile clears the pidfile on graceful shutdown.
 //
-// A leftover file is not dangerous — doctor does not trust it, and
-// checkPort asks the OS whether that PID actually holds the port
-// (isPIDListeningOnPort), so a stale or recycled PID simply fails
-// attribution and falls through to the existing "couldn't identify the
-// owner" branch. Removing it just keeps the common case clean.
+// A leftover file is not dangerous — doctor does not trust it. checkPort
+// asks the OS whether that PID actually holds the port
+// (isPIDListeningOnPort); a PID that is no longer running excuses nothing,
+// so a stale file leaves a bound port graded as a conflict, and a recycled
+// one that is alive gets no further than the liveness arm's warn or
+// same-uid ok. Removing it just keeps the common case clean.
 func removeServerPIDFile(path string) {
 	if path == "" {
 		return

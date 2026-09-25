@@ -62,7 +62,6 @@ func bindPort(t *testing.T) int {
 // "another process owns this port" against the operator's own healthy
 // bridge.
 func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
-	withPortProbe(t, true)
 	withPIDAlive(t, true)
 	withPortOwner(t, false, nil) // can't tell who owns it
 	port := bindPort(t)
@@ -80,7 +79,6 @@ func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 // A stale pidfile left by a crashed bridge names a dead PID, and a genuine
 // conflict on that port has to stay a Fail.
 func TestPortCheck_DeadPIDStillFails(t *testing.T) {
-	withPortProbe(t, true)
 	withPIDAlive(t, false)
 	withPortOwner(t, false, nil)
 	port := bindPort(t)
@@ -97,7 +95,6 @@ func TestPortCheck_DeadPIDStillFails(t *testing.T) {
 // last-resort probe CAN say the listener belongs to our uid, that is a
 // better answer than the Warn and doctor reports ok.
 func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
-	withPortProbe(t, true)
 	withPIDAlive(t, true)
 	withPortOwner(t, true, nil)
 	port := bindPort(t)
@@ -112,7 +109,6 @@ func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 // last-resort probe must not be read as a positive match. It lands on the
 // same Warn as "asked and got no match".
 func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
-	withPortProbe(t, true)
 	withPIDAlive(t, true)
 	withPortOwner(t, true, os.ErrPermission) // owned=true but errored
 	port := bindPort(t)

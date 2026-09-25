@@ -23,7 +23,6 @@ func TestOwnedPortsShortCircuitsTheProbe(t *testing.T) {
 	defer lis.Close()
 	port := lis.Addr().(*net.TCPAddr).Port
 
-	withPortProbe(t, true)
 	d := Deps{APIPort: port, AdminPort: port + 1, OwnedPorts: []int{port}}
 	if c := checkAPIPort(t.Context(), d); c.Status != OK {
 		t.Errorf("api port claimed as ours: got %v (%s / %s), want ok", c.Status, c.Summary, c.Hint)
@@ -42,7 +41,6 @@ func TestOwnedPortsDoesNotLeakAcrossChecks(t *testing.T) {
 	defer lis.Close()
 	port := lis.Addr().(*net.TCPAddr).Port
 
-	withPortProbe(t, true)
 	// Admin port is the bound one; only the API port is claimed.
 	d := Deps{APIPort: port + 1, AdminPort: port, OwnedPorts: []int{port + 1}}
 	if c := checkAdminPort(t.Context(), d); c.Status == OK {
@@ -60,7 +58,6 @@ func TestOwnedPortsEmptyKeepsExistingBehaviour(t *testing.T) {
 	defer lis.Close()
 	port := lis.Addr().(*net.TCPAddr).Port
 
-	withPortProbe(t, true)
 	withPIDAlive(t, false)
 	withPortOwner(t, false, nil)
 	if c := checkAPIPort(t.Context(), Deps{APIPort: port}); c.Status != Fail {

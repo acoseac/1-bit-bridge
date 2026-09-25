@@ -141,7 +141,6 @@ func TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly(t *testing.T) {
 // own live PID so checkPort actually asks "is it us?".
 func TestCheckPortPropagatesCancellationToOwnerProbe(t *testing.T) {
 	stubLsofWithSleep(t, "10")
-	withPortProbe(t, true)
 
 	origListen := listenFunc
 	t.Cleanup(func() { listenFunc = origListen })

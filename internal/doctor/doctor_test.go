@@ -90,10 +90,16 @@ func TestPortCheck_FreePasses(t *testing.T) {
 
 func TestPortCheck_BusyFailsWithoutOwnPID(t *testing.T) {
 	// Bind the port from the test, then ask doctor about it. With no
-	// OwnPIDFile the binder is "someone else" and — when the owner probe
-	// IS available (forced here so the verdict doesn't depend on whether
-	// lsof happens to be installed on this host) — doctor fails.
-	withPortProbe(t, true)
+	// OwnPIDFile the binder is "someone else" and doctor fails, on every
+	// host: nothing is forced here, so this runs with whatever owner probe
+	// the host has, and nolsof_notwindows_test.go runs the same facts on a
+	// unix host without one.
+	//
+	// It used to force a portProbeAvailable seam to true "so the verdict
+	// doesn't depend on whether lsof happens to be installed", beside a
+	// sibling forcing it false and pinning a Warn. Together the two pinned
+	// that dependence as intended behaviour: one set of facts, two
+	// verdicts, chosen by a tool this branch never runs.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -102,35 +108,8 @@ func TestPortCheck_BusyFailsWithoutOwnPID(t *testing.T) {
 	addr := lis.Addr().(*net.TCPAddr)
 	c := checkPort(t.Context(), "port-test", addr.Port, "")
 	if c.Status != Fail {
-		t.Errorf("bound port %d without own-pidfile (probe available): got %v, want fail", addr.Port, c.Status)
-	}
-}
-
-// withPortProbe forces portProbeAvailable for the duration of a test so
-// checkPort's probe-available vs probe-unavailable branches can be
-// asserted deterministically regardless of whether lsof is installed.
-func withPortProbe(t *testing.T, available bool) {
-	t.Helper()
-	orig := portProbeAvailable
-	t.Cleanup(func() { portProbeAvailable = orig })
-	portProbeAvailable = func() bool { return available }
-}
-
-// TestPortCheck_BusyProbeUnavailableWarns pins F9: a bound port the owner
-// probe can't attribute (no lsof / Windows) degrades to Warn rather than a
-// hard Fail, so `bridge doctor` on a live install doesn't cry wolf about
-// the bridge's own port.
-func TestPortCheck_BusyProbeUnavailableWarns(t *testing.T) {
-	withPortProbe(t, false)
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close()
-	addr := lis.Addr().(*net.TCPAddr)
-	c := checkPort(t.Context(), "port-test", addr.Port, "")
-	if c.Status != Warn {
-		t.Errorf("bound port %d with probe unavailable: got %v, want warn", addr.Port, c.Status)
+		t.Errorf("bound port %d without own-pidfile: got %v (%s / %s), want fail",
+			addr.Port, c.Status, c.Summary, c.Hint)
 	}
 }
 
@@ -189,11 +168,9 @@ func TestIsAddrInUseMatchesRealBindConflict(t *testing.T) {
 }
 
 // B51 branch: an EADDRINUSE bind error is still classified as "port in use"
-// and routed through the owner-probe path — with the probe forced available
-// and no OwnPIDFile, that stays the pre-existing Fail (not the new
-// not-bindable Warn).
+// and routed through the owner-probe path — with no OwnPIDFile, that stays
+// the pre-existing Fail (not the new not-bindable Warn).
 func TestPortCheck_AddrInUseStillReachesOwnerProbe(t *testing.T) {
-	withPortProbe(t, true)
 	orig := listenFunc
 	t.Cleanup(func() { listenFunc = orig })
 	listenFunc = func(network, address string) (net.Listener, error) {
@@ -201,7 +178,7 @@ func TestPortCheck_AddrInUseStillReachesOwnerProbe(t *testing.T) {
 	}
 	c := checkPort(t.Context(), "port-test", 7788, "")
 	if c.Status != Fail {
-		t.Errorf("EADDRINUSE (probe available, no ownPID): got %q (%s), want fail", c.Status, c.Summary)
+		t.Errorf("EADDRINUSE (no ownPID): got %q (%s), want fail", c.Status, c.Summary)
 	}
 }
 
@@ -212,11 +189,12 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("isPIDListeningOnPort uses lsof here — Windows has its own native probe + doctor_windows_test.go")
 	}
-	// isPIDListeningOnPort shells out to lsof; on a minimal CI host without
-	// it, the predicate returns (false, nil), checkPort falls to Fail, and
-	// this test would fail deterministically. Skip rather than flake.
+	// isPIDListeningOnPort shells out to lsof, and the pid match is the
+	// subject. Without lsof the predicate returns (false, nil) and the ok
+	// comes, if at all, from the liveness arm (on Linux the listener's uid
+	// is ours), so the test would pass without exercising the match.
 	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("pidListening requires lsof, which isn't on PATH here")
+		t.Skip("the pid match needs lsof, which isn't on PATH here")
 	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
