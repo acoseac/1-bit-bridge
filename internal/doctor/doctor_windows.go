@@ -46,14 +46,6 @@ func isAddrInUse(err error) bool {
 	return errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, syscall.EADDRINUSE)
 }
 
-// portProbeAvailable is always true on Windows — the native
-// GetExtendedTcpTable probe needs no external binary (unlike lsof on
-// unix). A per-call mechanism failure (e.g. an antivirus blocking the
-// iphlpapi.dll load) is reported through isPIDListeningOnPort's error
-// return, which checkPort turns into a Warn rather than a hard Fail.
-// Package var so tests can stub it.
-var portProbeAvailable = func() bool { return true }
-
 // pidAlive reports whether a process with this PID currently exists.
 //
 // Unlike unix, os.FindProcess DOES return an error for a dead PID here —

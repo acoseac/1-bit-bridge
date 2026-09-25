@@ -590,7 +590,7 @@ func ownedPortCheck(name string, port int, ownedPorts []int) *Check {
 // listenFunc is the TCP bind probe used by checkPort. A package var so
 // tests can inject a synthetic bind failure (e.g. a non-EADDRINUSE error
 // like EACCES) deterministically — the same test-seam convention as
-// portProbeAvailable. Production code MUST NOT mutate it.
+// pidAliveFunc and portOwnerFunc. Production code MUST NOT mutate it.
 var listenFunc = net.Listen
 
 // probeBind attempts a bind and immediately releases it, returning the
@@ -718,17 +718,19 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 			}
 		}
 	}
-	// Couldn't attribute the bound port to our own bridge. If the owner
-	// probe isn't available on this host at all, we genuinely can't tell
-	// "our running bridge" apart from a real conflict — Warn instead of a
-	// hard Fail that cries wolf on every `bridge doctor` run on a live
-	// install (a host with no lsof and no native probe). (goreview F9)
-	if !portProbeAvailable() {
-		return warn(name, fmt.Sprintf(":%d in use", port),
-			"port is bound but the owner couldn't be identified on this host; "+
-				"if it's your running bridge this is expected, otherwise stop the "+
-				"other process or change the address in bridge.yaml")
-	}
+	// No live pid of ours to attribute the port to: none was given (the
+	// caller saying no bridge of ours can hold it, which init's second
+	// port pass and a first install both say), none could be read, or the
+	// one recorded is not running. That is a conflict on every host.
+	//
+	// This used to end in `if !portProbeAvailable() { return warn(…) }`,
+	// goreview F9's answer to a LIVE bridge that a host without lsof could
+	// not attribute. The liveness arm above has answered that case since
+	// #640, so all the fallback still saw was this one, where lsof cannot
+	// change the answer: with no pid there is nothing to ask it, and a pid
+	// that is not running holds nothing for it to find. Its absence alone
+	// turned the Fail into a warn, and `bridge init` on such a host saved a
+	// port another process held.
 	return fail(name, fmt.Sprintf(":%d in use", port),
 		"another process owns this port; stop it or pick a different address in bridge.yaml")
 }
@@ -1134,11 +1136,10 @@ func windowsStartupDir() string {
 	return filepath.Join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 }
 
-// isPIDListeningOnPort and portProbeAvailable are platform-provided —
-// the lsof-backed unix implementation lives in doctor_notwindows.go and
-// the native iphlpapi.dll implementation in doctor_windows.go. The "is it
-// us?" branch of checkPort calls them; see their per-platform docs for the
-// (found, error) contract.
+// isPIDListeningOnPort is platform-provided — the lsof-backed unix
+// implementation lives in doctor_notwindows.go and the native iphlpapi.dll
+// implementation in doctor_windows.go. The "is it us?" branch of checkPort
+// calls it; see the per-platform docs for the (found, error) contract.
 //
 // isPIDListeningOnPort takes the context on BOTH platforms even though only
 // the unix one spawns a subprocess to bound. One signature keeps the caller
@@ -1152,8 +1153,8 @@ func windowsStartupDir() string {
 // portably on demand, and asserting them against whatever the host happens
 // to look like is how a test ends up passing for the wrong reason.
 //
-// Same seam convention as listenFunc and portProbeAvailable above.
-// Production code MUST NOT mutate them.
+// Same seam convention as listenFunc above. Production code MUST NOT
+// mutate them.
 var (
 	pidAliveFunc  = pidAlive
 	portOwnerFunc = portOwnedByThisUser

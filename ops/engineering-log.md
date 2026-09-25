@@ -14137,3 +14137,183 @@ Shutdown and Close attached:
   GraphQL `reviewThreads` connection read to `hasNextPage: false`).
   SonarCloud: gate passed, 0 new issues. CodeQL passed. No fix round was
   needed, so nothing was left for a second pass to confirm.
+
+## 2026-09-25 — A port no live bridge of ours holds FAILs on a host without lsof too (#1021)
+
+#1010 ran `go test -race ./cmd/bridge/` in the stock `golang:1.26.6` image
+on dido and saw `TestInitRefusesToSaveAPortItNeverGraded` and
+`TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID` fail, on main too.
+The image has no `lsof`, `ss`, `netstat` or `fuser`, and nothing at the
+absolute paths `resolveLsof` falls back to. It was filed as a follow-up
+and put down to the container. The hypothesis handed to this change:
+without lsof `checkPort` cannot attribute the holder, degrades to a
+non-blocking verdict, and init saves anyway.
+
+### What was measured
+
+- **The mechanism, and where the hypothesis was off.** Both tests fail on
+  #970's second port pass, which clears `OwnPIDFile`, so `checkPort` skips
+  the "is it us?" ladder and nothing tries to attribute the port. It
+  reached `if !portProbeAvailable() { return warn(…) }`
+  (`portProbeAvailable` was `lsofPath != ""`), and the warn both tests
+  printed is that line's text verbatim. The verdict read whether lsof is
+  INSTALLED. Holding the port from a child process, the first test-side
+  option, would have changed nothing.
+- **History.** #429 (goreview F9) added the fallback for a LIVE bridge on
+  a host with no probe: a readable pid then fell straight through to Fail
+  whenever the probe could not run. #432 gave Windows a native probe, with
+  `portProbeAvailable` hard-coded true there. #640 added the liveness arm:
+  a recorded pid that is alive gets ok (on Linux, a LISTEN row with our
+  uid) or warn before anything falls through. From #640 on, the fallback
+  saw only a bound port with no live pid of ours behind it: no pid file
+  given, none readable, or a dead pid. lsof has nothing to look for in any
+  of them, and on the paths with no pid it is not even called.
+- **Three statements that held only where lsof was installed.**
+  `Deps.OwnPIDFile`'s doc since #24: "Empty skips the own-PID check — any
+  bind is fail." `buildDoctorDepsFor`: the pid file "is absent when the
+  bridge is stopped, which is the correct time for a bound port to read as
+  someone else's". And #640's `TestPortCheck_DeadPIDStillFails`: "a
+  genuine conflict on that port has to stay a Fail", asserted with the
+  probe forced available.
+- **Two tests pinned the dependence.** `TestPortCheck_BusyFailsWithoutOwnPID`
+  forced the seam true and asserted Fail, "so the verdict doesn't depend
+  on whether lsof happens to be installed on this host".
+  `…BusyProbeUnavailableWarns` forced it false and asserted Warn. So one
+  set of facts had two verdicts, and both were pinned.
+- **End to end**, on dido (Ubuntu 26.04, Docker 29.1.3). The stock
+  `golang:1.26.6` image (Debian 13, no lsof) and the same image with
+  `apt-get install lsof`, the binary built from each tree, the "taken"
+  port held by a separate holder process:
+
+  | scenario | main, no lsof | main, lsof | fix, no lsof | fix, lsof |
+  |---|---|---|---|---|
+  | first install, 127.0.0.1:7789 held | init exit 0, `[warn] port-admin`, config saved with `adminAddress: 127.0.0.1:7789`; `bridge serve` exit 1, `bind: address already in use` | exit 1, `[FAIL] port-admin`, no config | exit 1, FAIL, no config | exit 1, FAIL, no config |
+  | re-init `--force`, bridge stopped (no pid file), 7789 held | exit 0, warn, config rewritten | exit 1, FAIL, config untouched | exit 1, FAIL, config untouched | exit 1, FAIL, config untouched |
+  | live bridge, `bridge doctor` as its own uid | ok, ok (uid arm) | ok, ok (`bound by our own bridge`) | ok, ok (uid arm) | ok, ok (`bound by our own bridge`) |
+  | live bridge, re-init keeping the config | exit 0 | exit 0 | exit 0 | exit 0 |
+  | live bridge, `bridge doctor` as another uid (0700 config dir) | warn, warn; exit 1 (`config-dir` FAILs) | FAIL, FAIL; exit 1 | FAIL, FAIL; exit 1 | FAIL, FAIL; exit 1 |
+
+- **lsof is never run on the first-install path.** With lsof resolved
+  through a logging shim, init FAILs port-admin and the shim logs nothing;
+  a direct call through the same PATH logs one line.
+- **Where lsof is missing.** It is Priority `standard` on Debian 13
+  (4.99.4+dfsg-2, read in the golang image) and on Ubuntu 26.04 (Task
+  `standard`), so a minimal install or a container image built from either
+  lacks it. CI's Linux and macOS legs have it: on main these two tests
+  pass only where lsof resolves, and they pass there.
+
+### Decisions
+
+- **Production, not the tests.** Holding the port from a child process
+  was the first option offered, and the code refutes it: with the pid
+  file cleared the branch attributes nothing, so who holds the port does
+  not matter. Skipping when lsof is absent was the second, and it would
+  have hidden a product defect on exactly the hosts that have it. Both
+  tests pass unmodified on the fix, in the container and on the Mac.
+- **Wide, not narrow.** Gating the fallback on an empty pid file fixes
+  both reported tests, and leaves the stopped-bridge re-init saving a held
+  port (NC2) and a dead recorded pid warning where #640 pinned a Fail. The
+  fallback is removed.
+- **`portProbeAvailable` goes with it.** Nothing else read it. Windows had
+  it hard-coded true and macOS always has lsof, so neither platform
+  changes. Keeping it to choose the liveness arm's wording belongs to that
+  wording's own change (Out of scope).
+- **The one visible change beyond the defect.** `bridge doctor` run by a
+  user who cannot read the config grades the default ports with no pid
+  file. On a host without lsof that was a warn; it is now the FAIL every
+  lsof host already gives (the table's last row). The exit code was
+  already 1 there, since `config-dir` FAILs for that user, and the runbook
+  says to run doctor as the service's user.
+
+### Tests and controls
+
+- `internal/doctor/nolsof_notwindows_test.go` (`!windows`, beside
+  `lsofPath`): `withoutLsof` sets `lsofPath = ""`, the state `resolveLsof`
+  leaves on such a host, rather than forcing a predicate about it. No pid
+  file, a pid file that is absent and a dead recorded pid FAIL. A live
+  recorded pid still gets the liveness arm's ok (a listener with our uid)
+  or warn. `TestPortCheck_BusyFailsWithoutOwnPID` now runs unforced on
+  every platform. **Red first on the Mac, which HAS lsof**: the three
+  no-live-pid cases got the fallback's warn and the live-pid control
+  passed.
+- Negative controls against the committed fix (`fcf8e1ac`), each restored
+  from HEAD and the tree checked clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | main's `doctor.go`, `doctor_notwindows.go` and `doctor_windows.go` under the new tests | Mac: the three no-live-pid cases red, the controls green. Container: both init tests red, and `TestPortCheck_BusyFailsWithoutOwnPID` too |
+  | NC2 | the narrow form, `if ownPIDFile != "" && lsofPath == "" { return warn }` | "no pid file given" green; "pid file absent" and "recorded pid not running" red. End to end in the container, the stopped-bridge re-init saves the held port |
+  | NC3 | the liveness arm disabled (`case false && pidAliveFunc(ownPID):`) | both live-pid control cases red, and `TestPortCheck_LivePIDUnattributableWarns` |
+  | NC4 | main's production files AND `withoutLsof` neutered, on the Mac | everything green: without the seam a host with lsof cannot see the defect |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the committed
+diff, both versions of `checkPort` and init's second pass:
+
+- **Agreed:** deleting `portProbeAvailable` loses nothing, and the new
+  test's package-var mutation is safe with no `t.Parallel` in the package.
+- **Two more shapes where a host without lsof now FAILs a live bridge's
+  own port**, both already a FAIL on a host with it: a bridge started by a
+  binary older than `writeServerPIDFile` (#639) and still running after an
+  update, so no pid file exists; and doctor in a sidecar that shares the
+  bridge's network and data but not its pid namespace, where the recorded
+  pid does not exist. Both taken as the answer lsof hosts already give;
+  neither is a documented way to run doctor.
+
+### Out of scope
+
+- **An unreadable config makes doctor grade DEFAULT ports with no pid
+  file**, and every host FAILs a live bridge's own ports there. #985's
+  rule is that a config doctor cannot READ is a fact about the run, and
+  the port lines do not follow it.
+- **The liveness arm's wording** gives a capability-bound binary as the
+  reason attribution failed ("pid attribution blocked — capability-bound
+  binary"), on a host without lsof as well, where the reason is the
+  missing lsof. #984 recorded it in the image.
+- **`bridge serve` prints the admin URL before the bind that fails**:
+  "Admin console: http://127.0.0.1:7789/ …", then "admin listen …: bind:
+  address already in use".
+
+### Process notes
+
+- #1010 put the failure on the container, and the failure message pointed
+  away from the cause: "…excused because our own recorded pid is alive",
+  printed by a pass that had cleared the pid file. The message now says
+  what happened and what the test guards.
+- The two reported tests were a symptom of a wider defect. The case that
+  decided wide over narrow was the stopped-bridge re-init, which no test
+  covered and which the narrow form passes.
+
+### Review
+
+- **Round 1**, on `9e49a040`. Gemini: "There are no review comments, so I
+  have no feedback to provide." CodeRabbit was paused at its plan limit
+  ("wait 9 minutes"). `@coderabbitai review`, sent once that wait had
+  passed, answered "Review triggered", and the pass (`9094ccf2..9e49a040`)
+  reported "Actionable comments posted: 1". `removeServerPIDFile`'s
+  rewritten comment said a recycled PID that is alive "gets no further
+  than the liveness arm". But `checkPort` asks the pid match first
+  (`case found:` precedes `case pidAliveFunc(ownPID):`), so a process that
+  inherited the PID and holds the port is reported as our own bridge.
+  Taken in `30e195ba`, in its own wording: the committable suggestion,
+  applied to the lines it named, would have repeated "a recycled".
+  SonarCloud: gate passed, 0 new issues. CodeQL passed.
+- **Round 2**, on `30e195ba`. Gemini (`/gemini review`): no comments.
+  CodeRabbit confirmed the fix on its thread and resolved it ("the updated
+  comment covers both recycled-PID outcomes"), but its pass on the commit
+  was paused again ("wait 45 minutes").
+- Every read was paginated. The `reviewThreads` connection was read to
+  `hasNextPage: false`: one thread, resolved.
+
+### Process notes (review)
+
+- **This PR overstated what a probe reaches twice, both times in comments
+  it had just written.** The first said lsof "is never run" on every path
+  the fallback saw. That holds only where there is no pid: a readable dead
+  pid is still handed to lsof, which finds nothing. I caught it on a
+  re-read before the PR opened. The second said a recycled pid gets no
+  further than the liveness arm, which forgets the pid match ahead of it,
+  and CodeRabbit caught it. Both were reasoned from the shape of the ladder
+  rather than read off it, and the fix both times was to read the order of
+  the arms in `checkPort`.
