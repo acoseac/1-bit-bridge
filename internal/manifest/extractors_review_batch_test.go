@@ -103,8 +103,27 @@ func TestExtCoversDispatcher(t *testing.T) {
 // We assert only the fields those two passes own — dhowden's own read of
 // an ID3-prefixed FLAC (Title/Album) is out of scope here.
 func TestExtractFLAC_ID3v2PrefixStillReadsFormatAndMultiValue(t *testing.T) {
-	dir := t.TempDir()
+	// Prepend a non-trivial ID3v2 tag, as a broken tagger would.
+	tr := extractFLACBehind(t, buildID3v2_3(map[string]string{"title": "ID3-Prefix-Title"}))
+	assertFLACFormatAndArtists(t, tr, "the ID3v2 prefix")
+}
 
+// TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue is F4 behind a
+// STACK of prepended tags — a tagger that adds a new tag without removing the
+// old. Core Audio plays such a file; skipping one tag left the cursor on the
+// second, so the fLaC check failed and both passes bailed.
+func TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue(t *testing.T) {
+	stack := append(buildID3v2_3(map[string]string{"title": "Older tag"}),
+		buildID3v2_3(map[string]string{"title": "Newer tag"})...)
+	assertFLACFormatAndArtists(t, extractFLACBehind(t, stack), "the whole stack")
+}
+
+// extractFLACBehind writes a minimal 96 kHz / 24-bit FLAC whose Vorbis
+// comment carries two ARTIST values, puts prefix in front of it, and runs
+// Extract on the result — the shape every ID3v2-prefix case shares.
+func extractFLACBehind(t *testing.T, prefix []byte) *Track {
+	t.Helper()
+	dir := t.TempDir()
 	base := filepath.Join(dir, "base.flac")
 	writeMinimalFLACPairs(t, base, 96000, 24, [][2]string{
 		{"TITLE", "Reflections"},
@@ -116,67 +135,30 @@ func TestExtractFLAC_ID3v2PrefixStillReadsFormatAndMultiValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read base flac: %v", err)
 	}
-
-	// Prepend a non-trivial ID3v2 tag, as a broken tagger would.
-	id3 := buildID3v2_3(map[string]string{"title": "ID3-Prefix-Title"})
 	p := filepath.Join(dir, "prefixed.flac")
-	if err := os.WriteFile(p, append(id3, flacBytes...), 0o644); err != nil {
+	if err := os.WriteFile(p, append(append([]byte{}, prefix...), flacBytes...), 0o644); err != nil {
 		t.Fatalf("write prefixed flac: %v", err)
 	}
-
 	tr := &Track{Path: "prefixed.flac", Size: 1, ModTime: time.Now()}
 	if err := Extract(p, tr); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-
-	// Format fields recovered past the ID3v2 prefix (extractFLACFormatFromReader).
-	if tr.SampleRate == nil || *tr.SampleRate != 96000 {
-		t.Errorf("SampleRate = %v, want 96000 (format parse must skip the ID3v2 prefix)", tr.SampleRate)
-	}
-	if tr.BitsPerSample == nil || *tr.BitsPerSample != 24 {
-		t.Errorf("BitsPerSample = %v, want 24 (format parse must skip the ID3v2 prefix)", tr.BitsPerSample)
-	}
-	// Multi-value ARTIST recovered past the prefix (applyFLACMultiValueArtists).
-	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
-		t.Errorf("Artist = %q, want %q (multi-value join must skip the ID3v2 prefix)", tr.Artist, "Abdullah Ibrahim; Ekaya")
-	}
+	return tr
 }
 
-// TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue is F4 behind a
-// STACK of prepended tags — a tagger that adds a new tag without removing the
-// old. Core Audio plays such a file; skipping one tag left the cursor on the
-// second, so the fLaC check failed and both passes bailed.
-func TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue(t *testing.T) {
-	dir := t.TempDir()
-	base := filepath.Join(dir, "base.flac")
-	writeMinimalFLACPairs(t, base, 96000, 24, [][2]string{
-		{"TITLE", "Reflections"},
-		{"ARTIST", "Abdullah Ibrahim"},
-		{"ARTIST", "Ekaya"},
-	})
-	flacBytes, err := os.ReadFile(base)
-	if err != nil {
-		t.Fatalf("read base flac: %v", err)
-	}
-	stack := append(buildID3v2_3(map[string]string{"title": "Older tag"}),
-		buildID3v2_3(map[string]string{"title": "Newer tag"})...)
-	p := filepath.Join(dir, "stacked.flac")
-	if err := os.WriteFile(p, append(stack, flacBytes...), 0o644); err != nil {
-		t.Fatalf("write stacked flac: %v", err)
-	}
-
-	tr := &Track{Path: "stacked.flac", Size: 1, ModTime: time.Now()}
-	if err := Extract(p, tr); err != nil {
-		t.Fatalf("Extract: %v", err)
-	}
+// assertFLACFormatAndArtists checks the fields extractFLACBehind's two passes
+// own — the format parse (rate, depth) and the multi-value ARTIST join — and
+// names what they had to skip.
+func assertFLACFormatAndArtists(t *testing.T, tr *Track, skipped string) {
+	t.Helper()
 	if tr.SampleRate == nil || *tr.SampleRate != 96000 {
-		t.Errorf("SampleRate = %v, want 96000 (the format parse must skip the whole stack)", tr.SampleRate)
+		t.Errorf("SampleRate = %v, want 96000 (the format parse must skip %s)", tr.SampleRate, skipped)
 	}
 	if tr.BitsPerSample == nil || *tr.BitsPerSample != 24 {
-		t.Errorf("BitsPerSample = %v, want 24 (the format parse must skip the whole stack)", tr.BitsPerSample)
+		t.Errorf("BitsPerSample = %v, want 24 (the format parse must skip %s)", tr.BitsPerSample, skipped)
 	}
 	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
-		t.Errorf("Artist = %q, want %q (the multi-value join must skip the whole stack)", tr.Artist, "Abdullah Ibrahim; Ekaya")
+		t.Errorf("Artist = %q, want %q (the multi-value join must skip %s)", tr.Artist, "Abdullah Ibrahim; Ekaya", skipped)
 	}
 }
 
