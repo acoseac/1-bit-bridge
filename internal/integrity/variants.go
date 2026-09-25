@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -371,10 +372,7 @@ func (w *VariantWatcher) currentVariantsDir() string {
 func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
-		logger.Error("integrity variant sweep: AllVariants failed",
-			slog.Any("err", err),
-		)
-		return SweepReport{Skipped: true}
+		return listingFailed(ctx, err)
 	}
 	if len(rows) == 0 {
 		return SweepReport{}
@@ -430,26 +428,13 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		case SidecarPresent:
 			report.Present++
 		case SidecarRelocated:
-			if err := w.reconciler.AdoptVariantSidecar(r.SourcePath, r.VariantID, loc.Canonical); err != nil {
-				// The file is there and the row still points at the old
-				// path; nothing is lost and the next tick asks again. Not
-				// a deletion candidate under any reading.
-				report.Failed++
-				sample.log(slog.LevelWarn, "integrity variant sweep: adopt failed",
-					slog.String("source_path", r.SourcePath),
-					slog.String("variant_id", r.VariantID),
-					slog.String("canonical", loc.Canonical),
-					slog.Any("err", err),
-				)
-				continue
+			if w.adoptRelocated(ctx, r, loc, &report, &sample) {
+				// An adoption the shutdown stopped ends the tick, as the
+				// check at the top of this loop would.
+				report.Cancelled = true
+				w.logSummary(dir, report)
+				return report
 			}
-			report.Adopted++
-			sample.log(slog.LevelInfo, "integrity variant sweep: adopted relocated sidecar",
-				slog.String("source_path", r.SourcePath),
-				slog.String("variant_id", r.VariantID),
-				slog.String("from", r.SidecarPath),
-				slog.String("to", loc.Canonical),
-			)
 		case SidecarMismatched:
 			report.Mismatched++
 			sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
@@ -487,55 +472,132 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		return report
 	}
 
-	// Pass two: delete. `paths` is the deduplicated set of affected
-	// source paths; `variantIDs` is the (potentially repeating) set
-	// of deleted variantIDs. Per the upscale.deleted contract
-	// documented in internal/api/upscale_deleted_event.go: `Paths`
-	// and `VariantIDs` are NOT zipped 1:1, just the union of what
-	// disappeared. Dedup paths so a track with multiple missing
-	// variants (rare but legitimate — e.g. 96k + 192k variants for
-	// the same source both wiped by an external rm) doesn't emit the
-	// same path twice in the SSE payload. CodeRabbit Minor on PR #209.
-	var (
-		paths      []string
-		variantIDs []string
-		pathsSeen  = make(map[string]struct{})
-	)
+	// Pass two: delete, gathering what went for the one upscale.deleted
+	// event the tick publishes.
+	var gone deletions
 	for _, r := range missing {
 		select {
 		case <-ctx.Done():
 			// Same as pass one: the rows deleted before the
 			// cancellation are real and the count is what says so.
 			report.Cancelled = true
-			w.publishDeleted(paths, variantIDs)
+			w.publishDeleted(gone.paths, gone.variantIDs)
 			w.logSummary(dir, report)
 			return report
 		default:
 		}
-		if delErr := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID); delErr != nil {
-			report.Failed++
-			sample.log(slog.LevelWarn, "integrity variant sweep: DB delete failed",
-				slog.String("source_path", r.SourcePath),
-				slog.String("variant_id", r.VariantID),
-				slog.Any("err", delErr),
-			)
-			continue
+		if w.deleteMissing(ctx, r, &report, &sample, &gone) {
+			// A delete the shutdown stopped ends the tick, as above.
+			report.Cancelled = true
+			w.publishDeleted(gone.paths, gone.variantIDs)
+			w.logSummary(dir, report)
+			return report
 		}
+	}
+	w.publishDeleted(gone.paths, gone.variantIDs)
+	w.logSummary(dir, report)
+	return report
+}
+
+// deletions is what a sweep's pass two deleted. `paths` is the deduplicated
+// set of affected source paths; `variantIDs` is the (potentially repeating)
+// set of deleted variantIDs. Per the upscale.deleted contract documented in
+// internal/api/upscale_deleted_event.go: `Paths` and `VariantIDs` are NOT
+// zipped 1:1, just the union of what disappeared. Dedup paths so a track
+// with multiple missing variants (rare but legitimate — e.g. 96k + 192k
+// variants for the same source both wiped by an external rm) doesn't emit
+// the same path twice in the SSE payload. CodeRabbit Minor on PR #209.
+type deletions struct {
+	paths      []string
+	variantIDs []string
+	seen       map[string]struct{}
+}
+
+// add records r's row as deleted.
+func (d *deletions) add(r VariantSnapshot) {
+	d.variantIDs = append(d.variantIDs, r.VariantID)
+	if _, dup := d.seen[r.SourcePath]; dup {
+		return
+	}
+	if d.seen == nil {
+		d.seen = make(map[string]struct{})
+	}
+	d.seen[r.SourcePath] = struct{}{}
+	d.paths = append(d.paths, r.SourcePath)
+}
+
+// adoptRelocated points r's row at its canonical sidecar, counting and
+// logging the outcome in report. It reports whether the shutdown stopped
+// the adoption, which ends the tick rather than counting as a failure.
+func (w *VariantWatcher) adoptRelocated(ctx context.Context, r VariantSnapshot, loc SidecarLocation, report *SweepReport, sample *logSampler) (stopped bool) {
+	err := w.reconciler.AdoptVariantSidecar(r.SourcePath, r.VariantID, loc.Canonical)
+	switch {
+	case err == nil:
+		report.Adopted++
+		sample.log(slog.LevelInfo, "integrity variant sweep: adopted relocated sidecar",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("from", r.SidecarPath),
+			slog.String("to", loc.Canonical),
+		)
+	case ctxerr.WithoutCancellation(ctx, err) == nil:
+		return true
+	default:
+		// The file is there and the row still points at the old path;
+		// nothing is lost and the next tick asks again. Not a deletion
+		// candidate under any reading.
+		report.Failed++
+		sample.log(slog.LevelWarn, "integrity variant sweep: adopt failed",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("canonical", loc.Canonical),
+			slog.Any("err", err),
+		)
+	}
+	return false
+}
+
+// deleteMissing deletes r's row, whose sidecar is at neither location,
+// counting and logging the outcome in report and recording a deletion in
+// gone. It reports whether the shutdown stopped the delete, which ends the
+// tick rather than counting as a failure.
+func (w *VariantWatcher) deleteMissing(ctx context.Context, r VariantSnapshot, report *SweepReport, sample *logSampler, gone *deletions) (stopped bool) {
+	err := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID)
+	switch {
+	case err == nil:
 		report.Deleted++
 		sample.log(slog.LevelInfo, "integrity variant sweep: deleted row whose sidecar is missing at both locations",
 			slog.String("source_path", r.SourcePath),
 			slog.String("variant_id", r.VariantID),
 			slog.String("recorded", r.SidecarPath),
 		)
-		variantIDs = append(variantIDs, r.VariantID)
-		if _, seen := pathsSeen[r.SourcePath]; !seen {
-			pathsSeen[r.SourcePath] = struct{}{}
-			paths = append(paths, r.SourcePath)
-		}
+		gone.add(r)
+	case ctxerr.WithoutCancellation(ctx, err) == nil:
+		return true
+	default:
+		report.Failed++
+		sample.log(slog.LevelWarn, "integrity variant sweep: DB delete failed",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.Any("err", err),
+		)
 	}
-	w.publishDeleted(paths, variantIDs)
-	w.logSummary(dir, report)
-	return report
+	return false
+}
+
+// listingFailed reports a catalog listing that failed, and returns the
+// report of a tick that could not sweep. A listing the shutdown stopped is
+// not a failed sweep: the lister's adapter runs on the same scanCtx the tick
+// does, and the report says the tick was cancelled, as every other stop in
+// it does (Gemini API review, #1004).
+func listingFailed(ctx context.Context, err error) SweepReport {
+	failure := ctxerr.WithoutCancellation(ctx, err)
+	if failure != nil {
+		logger.Error("integrity variant sweep: AllVariants failed",
+			slog.Any("err", failure),
+		)
+	}
+	return SweepReport{Skipped: true, Cancelled: failure == nil}
 }
 
 // publishDeleted fires the single batched callback per sweep that

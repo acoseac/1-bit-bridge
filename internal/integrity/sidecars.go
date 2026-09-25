@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
 // gcChunkSize bounds the number of filesystem entries the orphan
@@ -376,9 +378,12 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	}
 	rows, err := s.lister.AllVariants(ctx)
 	if err != nil {
-		logger.Error("orphan sidecar sweep: AllVariants failed",
-			slog.Any("err", err),
-		)
+		// A listing the shutdown stopped is not a failed sweep.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("orphan sidecar sweep: AllVariants failed",
+				slog.Any("err", failure),
+			)
+		}
 		return 0
 	}
 	// Case-fold + clean the known-set keys so a casing delta between the
@@ -582,14 +587,20 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return nil
 	})
 
+	stopped := false
 	if err != nil {
-		// Walk-level error (root missing, ctx cancellation that
-		// propagated up). Log at WARN — the sweeper can resume
-		// on the next tick.
-		logger.Warn("orphan sidecar sweep: walk aborted",
-			slog.String("outputDir", root),
-			slog.Any("err", err),
-		)
+		// Walk-level error: the callback returns one only for its
+		// context. A shutdown's cancellation is not reported; a deadline
+		// is a failure, logged at WARN — the sweeper can resume on the
+		// next tick.
+		failure := ctxerr.WithoutCancellation(ctx, err)
+		stopped = failure == nil
+		if failure != nil {
+			logger.Warn("orphan sidecar sweep: walk aborted",
+				slog.String("outputDir", root),
+				slog.Any("err", failure),
+			)
+		}
 	}
 
 	// Cursor update: if we hit the chunk cap, the next tick
@@ -602,14 +613,30 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		s.lastProcessedPath = ""
 	}
 
-	logger.Info("orphan sidecar sweep: tick complete",
+	// A walk that did not finish does not call its tick complete. Its
+	// summary still carries what the tick examined and unlinked before
+	// it ended, as the variant sweep's does, and says whether the
+	// shutdown stopped it (Gemini API review, #1004).
+	msg := msgOrphanTickComplete
+	if err != nil {
+		msg = msgOrphanTickCutShort
+	}
+	logger.Info(msg,
 		slog.Int("examined", examined),
 		slog.Int("unlinked", unlinked),
 		slog.Bool("hit_chunk_cap", hitChunkCap),
+		slog.Bool("cancelled", stopped),
 		slog.String("next_cursor", s.lastProcessedPath),
 	)
 	return unlinked
 }
+
+// The orphan sweep's summary line, one per tick: complete when its walk
+// finished, cut short when a shutdown or a failure ended the walk first.
+const (
+	msgOrphanTickComplete = "orphan sidecar sweep: tick complete"
+	msgOrphanTickCutShort = "orphan sidecar sweep: tick cut short"
+)
 
 // KnownSidecarSet is the forward sweeps' "this file has a row" set:
 // every row's recorded `sidecar_path` AND its canonical path under
