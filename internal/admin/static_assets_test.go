@@ -132,11 +132,14 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 	for p := range inEmbed {
 		wanted, here := onDisk[p]
 		switch {
-		case wanted:
-		case strings.Contains(p, "/."):
+		// First, whatever the disk side made of the name: a leading "." in
+		// any element is the pattern's doing. "/"+p reaches the first
+		// element too, which is the whole path when root is ".".
+		case strings.Contains("/"+p, "/."):
 			problems = append(problems, p+` is embedded, and a leading "." names an editor's `+
 				`lock, a .DS_Store or a swap file: the pattern lets it through. Start every glob `+
 				`element with [^.], never * (TestEveryEmbedPatternRefusesALeadingDot)`)
+		case wanted:
 		case here:
 			problems = append(problems, p+" is embedded, but it is not a file this FS holds: "+
 				"the pattern is wider than the FS it fills")
@@ -193,6 +196,10 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 				// A "_" directory is hidden from the walk too, but it is not a
 				// tool's: its files are the 404 this comparison reports.
 				"static/player/_lib/util.js": {},
+				// Dot files an editor did not leave. isEditorDetritus takes
+				// every leading ".", so neither reads as a console file.
+				"static/.env":            {},
+				"static/player/.gitkeep": {},
 			},
 			embedded: fstest.MapFS{
 				"static/app.js":          {},
@@ -200,10 +207,12 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 				"static/player/boot.js":  {},
 				"static/player/boot.js~": {},
 				"static/.#app.js":        {}, // what static/* embedded from a Windows-shape lock
+				"static/.env":            {}, // ...and from any other top-level dot file
 				"static/gone.js":         {},
 			},
 			problems: map[string]string{
 				"static/.#app.js":            `a leading "."`,
+				"static/.env":                `a leading "."`,
 				"static/gone.js":             "missing from disk",
 				"static/player/_util.js":     "is NOT embedded",
 				"static/player/_lib/util.js": "is NOT embedded",
