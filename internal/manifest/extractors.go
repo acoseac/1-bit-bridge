@@ -363,7 +363,20 @@ var Ext = map[string]bool{
 // leg. The corrected MusicBrainz ids also make those albums eligible for
 // the Cover Art Archive for the first time, so expect one artwork
 // enrichment wave after the re-extract.
-const ExtractorVersion = 15
+//
+// v16 — skipID3v2 walks a STACK of prepended ID3v2 tags (at most
+// maxStackedID3v2Tags), not only the first. A tagger that prepends a new
+// tag without removing the old leaves two; Core Audio skips them in turn
+// and plays the file (measured 2026-09-25, from the iOS app's FLAC
+// follow-up to #1935, where the engine's STREAMINFO read and the scanner's
+// streamStart now walk the same way). One skipped tag left the cursor on
+// the second: a FLAC's fLaC check failed, dropping its sample rate, bit
+// depth, duration and multi-value artists, and an MP3's frame search began
+// inside a tag, where a sync in its body could pass for the first frame.
+//
+// Only files behind a tag stack change; the version-stale diff-guard keeps
+// the client delta to exactly those rows.
+const ExtractorVersion = 16
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1133,40 +1146,61 @@ func trimNonEmpty(in []string) []string {
 	return out
 }
 
-// skipID3v2 advances r past a leading ID3v2 tag if present, leaving the
-// cursor at the real payload start (the fLaC magic for our FLAC callers).
-// Some taggers prepend an ID3v2 tag to FLAC — out of spec but common
-// enough that dhowden/tag tolerates it; our STREAMINFO + Vorbis passes
-// read the magic at the current offset and would otherwise bail,
-// silently dropping hi-res format fields and multi-value artists.
+// maxStackedID3v2Tags bounds skipID3v2's walk over a STACK of tags. A real
+// stack is two or three (a tagger prepending a new tag without removing the
+// old); the bound stops a crafted file from keeping the walk reading. The
+// iOS app's twin, FLACStreamInfo.maxStackedID3Tags, is the same 8.
+const maxStackedID3v2Tags = 8
+
+// skipID3v2 advances r past the ID3v2 tags a tagger prepended, leaving the
+// cursor at the real payload start (the fLaC magic for our FLAC callers, the
+// first frame for MP3). Some taggers prepend an ID3v2 tag to FLAC — out of
+// spec but common enough that dhowden/tag tolerates it; our STREAMINFO +
+// Vorbis passes read the magic at the current offset and would otherwise
+// bail, silently dropping hi-res format fields and multi-value artists.
+//
+// Consecutive tags are skipped in turn, up to maxStackedID3v2Tags: Core
+// Audio plays a FLAC behind a stack (measured 2026-09-25), and skipping only
+// the first left the cursor on the second, so the magic check failed and an
+// MP3's frame search began inside a tag. The iOS app's
+// FLACStreamInfo.magicOffset(reading:) walks the same way — the same cap,
+// the same v2.4-only footer — and additionally refuses a size byte that
+// isn't synchsafe (Core Audio refuses such a file), where this masks it,
+// as it always has.
+//
 // No-op (rewinds to the original offset) when no ID3v2 tag is present or
-// the stream is too short to hold a header.
+// the stream is too short to hold a header; otherwise the cursor is left
+// where the last tag skipped ends.
 func skipID3v2(r io.ReadSeeker) error {
-	start, err := r.Seek(0, io.SeekCurrent)
+	pos, err := r.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
-	var h [10]byte
-	if _, err := io.ReadFull(r, h[:]); err != nil || string(h[0:3]) != "ID3" {
-		// Not an ID3 tag, or the stream is too short to hold a header.
-		// Rewind and let the caller's fLaC-magic read produce the real
-		// verdict; only a failed rewind is worth surfacing.
-		if _, serr := r.Seek(start, io.SeekStart); serr != nil {
-			return serr
+	for range maxStackedID3v2Tags {
+		var h [10]byte
+		if _, err := io.ReadFull(r, h[:]); err != nil || string(h[0:3]) != "ID3" {
+			// No (further) tag, or too short to hold a header. Rewind to
+			// where the last tag ended and let the caller's fLaC-magic read
+			// produce the real verdict; only a failed rewind is worth
+			// surfacing.
+			if _, serr := r.Seek(pos, io.SeekStart); serr != nil {
+				return serr
+			}
+			return nil
 		}
-		return nil
+		// 28-bit synchsafe size (7 bits/byte), excludes the 10-byte header.
+		pos += 10 + int64(unsyncsafe(h[6:10]))
+		// The footer flag (bit 4) is only defined in ID3v2.4 — in v2.2/v2.3
+		// that bit is unused, so a non-conforming tagger setting it must not
+		// make us over-skip into the payload. Gate on the major version.
+		if h[3] >= 4 && h[5]&0x10 != 0 {
+			pos += 10 // optional ID3v2.4 footer
+		}
+		if _, err := r.Seek(pos, io.SeekStart); err != nil {
+			return err
+		}
 	}
-	// 28-bit synchsafe size (7 bits/byte), excludes the 10-byte header.
-	size := int64(unsyncsafe(h[6:10]))
-	skip := start + 10 + size
-	// The footer flag (bit 4) is only defined in ID3v2.4 — in v2.2/v2.3
-	// that bit is unused, so a non-conforming tagger setting it must not
-	// make us over-skip into the payload. Gate on the major version.
-	if h[3] >= 4 && h[5]&0x10 != 0 {
-		skip += 10 // optional ID3v2.4 footer
-	}
-	_, err = r.Seek(skip, io.SeekStart)
-	return err
+	return nil
 }
 
 // applyFLACMultiValueArtists scans the FLAC's Vorbis Comment block for

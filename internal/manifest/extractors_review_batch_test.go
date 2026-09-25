@@ -45,10 +45,10 @@ func TestSkipID3v2(t *testing.T) {
 		// A tagger that prepends a new tag without removing the old leaves a
 		// stack, which Core Audio skips in turn (measured 2026-09-25).
 		{"a stack of v2.3 then v2.4 skips both", append(append(tag(3, 0x00), tag(4, 0x00)...), marker...), 2 * (10 + payloadSize)},
-		{"a stack at the cap skips every tag", append(bytes.Repeat(tag(3, 0x00), 8), marker...),
-			8 * (10 + payloadSize)},
-		{"a stack past the cap stops at the cap", append(bytes.Repeat(tag(3, 0x00), 8+1), marker...),
-			8 * (10 + payloadSize)},
+		{"a stack at the cap skips every tag", append(bytes.Repeat(tag(3, 0x00), maxStackedID3v2Tags), marker...),
+			maxStackedID3v2Tags * (10 + payloadSize)},
+		{"a stack past the cap stops at the cap", append(bytes.Repeat(tag(3, 0x00), maxStackedID3v2Tags+1), marker...),
+			maxStackedID3v2Tags * (10 + payloadSize)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
