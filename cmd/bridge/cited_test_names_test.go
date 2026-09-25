@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -199,8 +200,8 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 }
 
 // TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks plants, one per row,
-// a file an editor or a checkout leaves beside the ones this guard scans, and
-// requires the scan to finish as if it were not there.
+// a file an editor, an operator or a checkout leaves beside the ones this
+// guard scans, and requires the scan to finish as if it were not there.
 //
 // Each row failed while the walk selected files by suffix alone. Emacs locks
 // a file it is editing with `.#<name>` beside it, as a DANGLING symlink where
@@ -212,6 +213,15 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // a doc. And a test in a file whose name begins with "_" was counted as
 // defined, although the go tool never compiles it, so a docblock citing it
 // passed.
+//
+// Four rows plant a directory whose name begins with "_", where CLAUDE.md
+// tells an operator to put a throwaway helper. The go tool ignores such a
+// directory at any depth, so go test ./... runs no test in it, and the walk
+// read it until it skipped it by name: a test there satisfied a citation
+// this tree does not back, a comment there was collected as this tree's
+// citation, and a test file in mid-edit failed the guard. The name decides
+// before the directory is listed, so one the walk cannot list fails nothing
+// either.
 //
 // The last two rows are other checkouts. Claude Code keeps its worktrees of
 // other branches inside the tree, under .claude/worktrees/, and each is a
@@ -237,6 +247,12 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			t.Skipf("cannot create a symlink on this host (%v); emacs writes its "+
 				"regular-file lock here, which the regular-file row covers", err)
 		}
+	}
+	// A throwaway helper, as an operator leaves one: a test of the parked
+	// name, and a comment citing a test that nothing defines.
+	scratch := map[string]string{
+		"x_test.go": "package main\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
+		"main.go":   "package main\n\n// Mirrors TestOnlyAScratchHelperCites.\nfunc main() {}\n",
 	}
 	rows := []struct {
 		name string
@@ -267,6 +283,22 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 		}},
 		{"an emacs lock beside a doc, outside a git checkout", true, func(t *testing.T, root string) {
 			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
+		}},
+		{"a directory the go tool ignores, at the top of the tree", false, func(t *testing.T, root string) {
+			writeTree(t, filepath.Join(root, "_scratch"), scratch)
+		}},
+		{"a directory the go tool ignores, below one the walk reads", false, func(t *testing.T, root string) {
+			writeTree(t, filepath.Join(root, "internal", "manifest", "_reextract"), scratch)
+		}},
+		{"a test file in mid-edit, in a directory the go tool ignores", false, func(t *testing.T, root string) {
+			writeTree(t, filepath.Join(root, "_scratch"), map[string]string{
+				"half_test.go": "package main\n\nimport \"testing\"\n\nfunc TestHalf(t *testing.T) {\n",
+			})
+		}},
+		{"a directory the go tool ignores, which the walk cannot list", false, func(t *testing.T, root string) {
+			dir := filepath.Join(root, "_sealed")
+			writeTree(t, dir, scratch)
+			sealDir(t, dir)
 		}},
 		{"a worktree of another branch, with its own go.mod", false, func(t *testing.T, root string) {
 			// Its copy still defines the parked test, which would satisfy the
@@ -335,9 +367,10 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 // filepath.WalkDir hands its first callback the root's own base name, so a
 // checkout cloned into a directory called bin, dist or vendor matched the
 // list, and the walk skipped the whole tree. The floors then failed on a
-// tree the guard had never read. (Gemini on #995.)
+// tree the guard had never read. (Gemini on #995.) The walk skips a name
+// beginning with "_" as well, so a checkout cloned into one must be read too.
 func TestScanTestCitationsReadsARootNamedLikeASkippedDirectory(t *testing.T) {
-	for _, name := range []string{"bin", "dist", "vendor"} {
+	for _, name := range []string{"bin", "dist", "vendor", "_checkout"} {
 		root := filepath.Join(t.TempDir(), name)
 		writeTree(t, root, map[string]string{
 			"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n",
@@ -362,6 +395,21 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// sealDir takes every permission bit off dir until the test ends, so that
+// listing it fails, or skips the test where permission bits do not stop
+// this process listing a directory: on Windows, or as root. It sits outside
+// the row that uses it for SonarCloud go:S3776, as writeTree does.
+func sealDir(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permission bits do not stop this process listing a directory here")
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 }
 
 // TestScanTestCitationsCollectsEveryNameGoTestRuns pins the citation pattern
@@ -688,11 +736,23 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
-// whose conventions are not ours to police; another checkout; and any
-// directory that holds a go.mod of its own. The root itself is never
-// skipped. filepath.WalkDir hands the first callback the root's own base
-// name, so with the name list checked first, a checkout cloned into a
-// directory called bin, dist or vendor skipped itself. (Gemini on #995.)
+// whose conventions are not ours to police; a directory whose name begins
+// with "_"; another checkout; and any directory that holds a go.mod of its
+// own. The root itself is never skipped. filepath.WalkDir hands the first
+// callback the root's own base name, so with the name list checked first, a
+// checkout cloned into a directory called bin, dist or vendor skipped
+// itself. (Gemini on #995.)
+//
+// A directory whose name begins with "_" is ignored by the go tool at any
+// depth (`go help packages`), so `go test ./...` runs no test in it, and a
+// test declared there satisfies no citation here. CLAUDE.md tells an
+// operator to put a throwaway helper in one, and the walk read it: a test
+// there satisfied a citation this tree does not back, which passes, and a
+// comment there, or a test file in mid-edit, failed the guard. The name
+// decides before the directory is listed, as filepath.WalkDir asks first,
+// so one the walk cannot list fails nothing either. A doc in one goes unread
+// with it. Git would track such a doc, unlike a file inside another
+// checkout, and on 2026-09-25 it tracked no file below a "_" directory.
 //
 // A directory with its own go.mod is another module. `go test ./...` from
 // the root never runs it, so a test declared there satisfies no citation
@@ -722,6 +782,9 @@ func skipsForCitations(root, path, name string) bool {
 	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
 		return true
 	}
+	if strings.HasPrefix(name, "_") {
+		return true
+	}
 	if sweeptest.IsOtherCheckout(root, path) {
 		return true
 	}
@@ -747,7 +810,8 @@ func skipsForCitations(root, path, name string) bool {
 //
 // The go tool's `.`-directory rule is not borrowed. `.github/` holds a
 // tracked doc and a tracked Go file this guard reads, and that rule would
-// drop both. Its nested-module rule is borrowed, in skipsForCitations.
+// drop both. Its `_`-directory and nested-module rules are borrowed, in
+// skipsForCitations.
 func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 	switch {
 	case strings.HasSuffix(name, ".md"):

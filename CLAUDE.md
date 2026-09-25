@@ -156,7 +156,7 @@ sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
   rm -f /tmp/bridge-live/data/bridge.db*
   ./bin/bridge serve --config /tmp/bridge-live/bridge.yaml &            # RunPeriodic's startup scan re-extracts every file
   ```
-- **Selective / pairing-preserving / production** — use a throwaway Go helper that blank-imports `internal/manifest` (its `init` registers `unicode_lower`) + `modernc.org/sqlite`, opens the DB with `file:<path>?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)`, and runs `DELETE FROM tracks WHERE <predicate>` (e.g. `json_extract(tags_json,'$.sampleRate') IS NULL` — only the rows a new extractor now fills, so only those re-enrich; a full `DELETE FROM tracks` resets `enriched_at` on every row → the MB/CAA/Deezer treadmill). Put it in a `_`-prefixed dir (ignored by `go ./...`/`build-all`), run with the bridge stopped, then restart to trigger the scan. On a loopback bridge `curl -s -X POST http://127.0.0.1:7789/api/scan` also triggers a scan; public bridges (admin auth-walled) need a restart.
+- **Selective / pairing-preserving / production** — use a throwaway Go helper that blank-imports `internal/manifest` (its `init` registers `unicode_lower`) + `modernc.org/sqlite`, opens the DB with `file:<path>?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)`, and runs `DELETE FROM tracks WHERE <predicate>` (e.g. `json_extract(tags_json,'$.sampleRate') IS NULL` — only the rows a new extractor now fills, so only those re-enrich; a full `DELETE FROM tracks` resets `enriched_at` on every row → the MB/CAA/Deezer treadmill). Put it in a `_`-prefixed dir (ignored by `go ./...`/`build-all`, and by the tests that sweep the tree from its root), run with the bridge stopped, then restart to trigger the scan. On a loopback bridge `curl -s -X POST http://127.0.0.1:7789/api/scan` also triggers a scan; public bridges (admin auth-walled) need a restart.
 
 **WAL read trap**: an external `sqlite3` `SELECT COUNT(*)` against a LIVE bridge DB can read stale main-DB state for minutes — it won't see the bridge's un-checkpointed WAL writes. Verify a backfill landed AFTER a restart/checkpoint (or via the bridge), not by polling the CLI mid-scan. Full procedure + verified helper shape in the `bridge-track-reextract-gotchas` memory. The wipe still survives the TLS fingerprint + tokens (different tables); iOS pairing stays valid.
 
@@ -3174,10 +3174,32 @@ its twin.** The top list is older, shorter, and read first.
   had closed the false pass for a checkout with a go.mod and #993 the
   locks. A scratch clone holding the same three worktrees at the same
   commits measured all of it, and the main checkout was never written.
-  Still read, and a separate defect: a `_` directory, which the go tool
-  ignores, by the hash-cost and citation walks. A half-written helper in
-  `_reextract/` fails the first, and a test there satisfies a citation in
-  the second.
+  Two of the five still read a `_` directory until #1008, the next bullet.
+- **A sweep from the root also skips a directory below the root whose name
+  begins with `_`, and decides it from the NAME before listing it**
+  (#1008). The go tool ignores one at any depth, so no build compiles it
+  and `go test ./...` runs no test in it, and `## Local test fixture`
+  tells an operator to put a throwaway helper in exactly one. The
+  hash-cost and citation walks read it, and on main a `_reextract/` beat
+  them five ways: a helper in mid-edit ("could not parse"), a test there
+  satisfying a stale citation (a FALSE PASS), a comment there naming a
+  test nothing defines, a test file in mid-edit, and a mode-000 directory
+  ("permission denied", both walks). **The last is why the rule answers
+  before the listing**: `filepath.Walk` lists a directory before its
+  callback can skip it, so the hash-cost walk, the one root sweep still on
+  it, moved to `filepath.WalkDir`; and a per-file rule (descend, open no
+  Go file below a `_` directory) handles four of the five, which is what
+  the unlistable fixture rows pin. **Only the `_` rule is borrowed**: the
+  go tool's `.` rule would drop the doc and the Go program git tracks
+  under `.github/`. The root stays exempt, so a checkout cloned into `_x`
+  is read. It is spelled inline, as the other three root sweeps spell it,
+  not in `sweeptest`: a one-line name test below each walk's one root
+  exemption. **It drops no tracked file, and here that is a census, not a
+  construction**: unlike a file inside another checkout, git would track
+  one below a `_` directory, and a doc there would go unread by the
+  citation guard. None is tracked, and the files each walk opened, listed
+  before and after over a clean tree and over the main checkout, are the
+  same 410 and 1,172.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
@@ -3464,7 +3486,13 @@ its twin.** The top list is older, shorter, and read first.
   works is the **"Run this review for free" checkbox inside the walkthrough
   comment** — tick it by PATCHing the comment body (`- [ ]` → `- [x]` on the
   `checkboxId` line; the repo owner may edit the bot's comment), and the
-  review runs within minutes. `/gemini review` still works as written.
+  review runs within minutes. **Unless the notice's own wait has passed**:
+  on #1008 (2026-09-25) it said "wait 1 minute for your next included
+  review", nothing had resumed two minutes later, and `@coderabbitai
+  review` then answered "Review triggered" and ran a full pass. Once the
+  wait is up, the command is the included route; the checkbox is an
+  on-demand review, which the notice prices per reviewed file.
+  `/gemini review` still works as written.
   CodeRabbit's real pass says "No actionable comments were generated" or
   "Actionable comments posted: N"; Gemini's says it has no comments to
   address. Anything less than one of those is not a round.

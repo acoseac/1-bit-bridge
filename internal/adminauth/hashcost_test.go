@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -75,15 +76,19 @@ const hashCostSetter = "SetTestHashCost"
 
 // hashCostSetterCallers returns the non-test Go files under root that call
 // hashCostSetter, or that it cannot parse, with how many files it read.
+//
+// It walks with filepath.WalkDir, which asks hashCostDirRule about a
+// directory before listing it. filepath.Walk lists it first, so a directory
+// the rule skips still failed the run when it could not be listed.
 func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return hashCostDirRule(root, path, info.Name())
+		if d.IsDir() {
+			return hashCostDirRule(root, path, d.Name())
 		}
-		if !hashCostReads(path, info.Name()) {
+		if !hashCostReads(path, d.Name()) {
 			return nil
 		}
 		visited++
@@ -106,6 +111,15 @@ func hashCostDirRule(root, path, name string) error {
 	}
 	switch name {
 	case ".git", "dist", "bin", "node_modules", "testdata":
+		return filepath.SkipDir
+	}
+	// Nor a directory whose name begins with "_", which the go tool ignores
+	// at any depth (`go help packages`), so no build compiles what is in it.
+	// CLAUDE.md tells an operator to put a throwaway helper in one, and a
+	// helper in mid-edit there failed this guard as "could not parse". The
+	// go tool's "." rule is not borrowed with it: this walk reads the Go
+	// program tracked under .github/, and that rule would drop it.
+	if strings.HasPrefix(name, "_") {
 		return filepath.SkipDir
 	}
 	// Nor another checkout inside this one (sweeptest.IsOtherCheckout), such
@@ -175,7 +189,7 @@ func calledName(call *ast.CallExpr) string {
 // the names of the directories under the root, never the root's.
 func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "dist")
-	for rel, body := range map[string]string{
+	writeSweepTree(t, root, map[string]string{
 		".git/HEAD":                  "ref: refs/heads/main\n",
 		"cmd/tool/main.go":           "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n",
 		"internal/adminauth/cost.go": "package adminauth\n\nfunc init() { SetTestHashCost(4) }\n",
@@ -187,15 +201,7 @@ func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
 
 		"worktrees/plain/.git": "gitdir: /elsewhere/.git/worktrees/plain\n",
 		"worktrees/plain/x.go": "package x\n\nfunc init() { SetTestHashCost(4) }\n",
-	} {
-		path := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	})
 	offenders, visited, err := hashCostSetterCallers(root)
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +212,72 @@ func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
 	if !slices.Equal(offenders, want) || visited != 2 {
 		t.Errorf("offenders = %q after reading %d files, want %q after reading 2 — "+
 			"the sweep read another checkout, or stopped reading this one", offenders, visited, want)
+	}
+}
+
+// TestHashCostSweepSkipsUnderscoreDirectories runs the sweep over a tree
+// holding the directories CLAUDE.md tells an operator to put a throwaway
+// helper in: a directory whose name begins with "_", which the go tool
+// ignores at any depth, so no build compiles what is in it. One sits at the
+// top of the tree, with a helper in mid-edit and a call of the setter, and
+// one below a directory the sweep reads, with a call. Before the sweep
+// skipped them, the helper in mid-edit failed this checkout's run as "could
+// not parse", and each call was reported as production code.
+//
+// The root's own name begins with "_" too. The rule is for the directories
+// below it, so a checkout cloned into such a directory is still read.
+func TestHashCostSweepSkipsUnderscoreDirectories(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "_checkout")
+	const call = "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n"
+	writeSweepTree(t, root, map[string]string{
+		"cmd/tool/main.go": call,
+
+		"_scratch/main.go":                     "package main\n\nfunc main() { db := open(\n",
+		"_scratch/seed.go":                     call,
+		"internal/manifest/_reextract/main.go": call,
+	})
+	offenders, visited, err := hashCostSetterCallers(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(root, "cmd", "tool", "main.go")}
+	if !slices.Equal(offenders, want) || visited != 1 {
+		t.Errorf("offenders = %q after reading %d files, want %q after reading 1 — "+
+			"the sweep read a directory the go tool ignores, or stopped reading this tree", offenders, visited, want)
+	}
+
+	// Skipped by its name before it is listed, so the sweep never asks what
+	// is in one it cannot list. Before, this failed the run with "permission
+	// denied": filepath.Walk lists a directory before its callback can skip
+	// it, and filepath.WalkDir does not.
+	t.Run("one the sweep cannot list", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("permission bits do not stop this process listing a directory here")
+		}
+		sealed := filepath.Join(root, "_sealed")
+		writeSweepTree(t, sealed, map[string]string{"main.go": call})
+		if err := os.Chmod(sealed, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sealed, 0o755) })
+		if _, _, err := hashCostSetterCallers(root); err != nil {
+			t.Errorf("the sweep failed on a directory the go tool ignores, which it should not have listed: %v", err)
+		}
+	})
+}
+
+// writeSweepTree writes each file in files, named by its slash path below
+// root, creating the directories it needs.
+func writeSweepTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, body := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
