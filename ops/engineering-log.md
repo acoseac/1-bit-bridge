@@ -14127,3 +14127,13 @@ Shutdown and Close attached:
   quic-go's own client does not keep it open, so the case needed a raw
   QUIC connection, as #1010's probe did. Timed with the ordinary client it
   took 28 ms, before the fix and after.
+
+### Review
+
+- **Round 1**, on `db1c83d6`. Gemini: "no review comments", its review
+  on that head. CodeRabbit: "No actionable comments were generated", its
+  walkthrough covering `2d37bd72..db1c83d6`, with no nitpick or
+  outside-diff section and zero review threads (paginated reads, and the
+  GraphQL `reviewThreads` connection read to `hasNextPage: false`).
+  SonarCloud: gate passed, 0 new issues. CodeQL passed. No fix round was
+  needed, so nothing was left for a second pass to confirm.
