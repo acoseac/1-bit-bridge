@@ -68,10 +68,24 @@ var logger = logging.Component("admin")
 // shouldn't be able to OOM the server with a large request body.
 const adminMaxBodyBytes = 1 << 20
 
-//go:embed templates/*.html
+// templateFS holds the console's page templates. Its glob starts with [^.]
+// for the reason staticFS gives.
+//
+//go:embed templates/[^.]*.html
 var templateFS embed.FS
 
-//go:embed static/*
+// staticFS holds the console's assets, served under /static/. The pattern is
+// static/[^.]*, never static/*. A glob's * matches a leading dot (`go doc
+// embed`: "image/*" embeds "image/.tempfile"), and an editor leaves such a
+// name beside the file it edits. Emacs's lock, `.#app.js`, is a dangling
+// symlink on macOS and Linux, which failed the build ("cannot embed irregular
+// file"). On Windows it is a regular file holding user@host.pid:boot, which
+// was embedded and served, as was a Finder .DS_Store. [^.] refuses the leading
+// dot and nothing else: a top-level `_name.js` still ships, and the walk
+// below static/ still skips "." and "_" names.
+// TestEveryEmbedPatternRefusesALeadingDot (cmd/bridge) pins it.
+//
+//go:embed static/[^.]*
 var staticFS embed.FS
 
 // Deps bundles the runtime state the admin console reads and mutates. All

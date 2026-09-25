@@ -20,21 +20,26 @@ import (
 // test.
 //
 // The rule, stated precisely because the imprecise version misleads:
-// `//go:embed static/*` embeds each entry directly inside static/,
-// and a matched DIRECTORY is embedded recursively. At the top level
-// the explicit `*` matches everything, INCLUDING "_"-prefixed names —
-// so static/_probe.js would embed fine. But the recursive descent into
-// a matched subdirectory silently SKIPS any entry whose name begins
-// with "." or "_". So static/player/_util.js embeds NOTHING: it
-// compiles, it works on a dev machine serving from disk, and it 404s
-// in a release binary. Verified both ways when this test was written.
+// `//go:embed static/[^.]*` embeds each entry directly inside static/
+// whose name does not begin with ".", and a matched DIRECTORY is embedded
+// recursively. At the top level the pattern admits "_"-prefixed names, so
+// static/_probe.js would embed fine. But the recursive descent into a
+// matched subdirectory silently SKIPS any entry whose name begins with
+// "." or "_". So static/player/_util.js embeds NOTHING: it compiles, it
+// works on a dev machine serving from disk, and it 404s in a release
+// binary. Verified both ways when this test was written, and again for
+// the [^.] pattern.
 //
 // Subdirectories are exactly where the player modules live, which is
 // what makes this worth a test rather than a comment.
 //
 // The fix is NOT to switch the directive to `all:static`: that would
 // suck a macOS .DS_Store (and any editor swap file) into every release
-// binary. The fix is to notice, which is what this does.
+// binary. The fix is to notice, which is what this does. Until
+// 2026-09-25 the pattern was `static/*`, which did the same at the top
+// level. Its `*` matches a leading dot, so it embedded a top-level
+// .DS_Store, and an editor's lock broke the build
+// (TestEveryEmbedPatternRefusesALeadingDot).
 func TestEmbeddedStaticTreeMatchesDisk(t *testing.T) {
 	checkEmbeddedMatchesDisk(t, staticFS, "static", func(string) bool { return true })
 }
@@ -90,7 +95,9 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
+		// A backup is embedded wherever a pattern reaches its directory (see
+		// isEditorDetritus), so on this side it is no disagreement either.
+		if !d.IsDir() && !strings.HasSuffix(d.Name(), "~") {
 			inEmbed[p] = true
 		}
 		return nil
@@ -108,7 +115,13 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 		}
 	}
 	for p := range inEmbed {
-		if !onDisk[p] {
+		switch {
+		case onDisk[p]:
+		case strings.Contains(p, "/."):
+			problems = append(problems, p+` is embedded, and a leading "." names an editor's `+
+				`lock, a .DS_Store or a swap file: the pattern lets it through. Start every glob `+
+				`element with [^.], never * (TestEveryEmbedPatternRefusesALeadingDot)`)
+		default:
 			problems = append(problems, p+" is embedded but missing from disk (stale build cache?)")
 		}
 	}
@@ -176,16 +189,24 @@ func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
 // isEditorDetritus reports whether a name under static/ belongs to an editor
 // or the OS rather than to the console: a leading "." (a .DS_Store, emacs's
 // `.#name` lock, a `._name` AppleDouble file) or a trailing "~" (a backup).
-// It is legitimately absent from the embed and must not be in the repo
-// either, so every test that reads static/ from disk skips it rather than
-// fail an unrelated run over it.
+// None of it is the console's and none of it may be in the repo, so every
+// test that reads static/ from disk skips it rather than fail an unrelated
+// run over it.
+//
+// The embed refuses the first kind and cannot refuse the second. A leading
+// "." is refused at the top level by the [^.] the pattern starts with, and
+// below it by the go tool's walk. A backup is embedded wherever a pattern
+// reaches its directory, because that walk skips only "." and "_" names. So
+// embedDiskProblems tolerates a backup on the embedded side as well. (This
+// comment called all of it "legitimately absent from the embed" until
+// 2026-09-25, when neither half was true at the top level of static/.)
 //
 // Skipping is also the only safe way to handle one. Emacs's lock is a
 // DANGLING symlink where it can make one, and a REGULAR file holding
 // `user@host.pid:boot` where it cannot (always on Windows), so the file
 // either cannot be opened or opens as something that is not JavaScript.
 // Deliberately NOT the go tool's "_" rule as well: a top-level `_name.js`
-// is embedded by `static/*` and ships, so the parity guards must read it.
+// is embedded by `static/[^.]*` and ships, so the parity guards must read it.
 func isEditorDetritus(name string) bool {
 	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~")
 }
