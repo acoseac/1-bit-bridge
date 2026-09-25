@@ -13469,3 +13469,20 @@ One direct Gemini consult, on the diff, before the first push:
 - Measured before being fixed, as #1007's note asks. The report's two
   shapes reproduced as filed. Looking for others found three, and the
   unreadable directory is what ruled out the per-file design.
+
+### Review
+
+- **Round 1**, on `8eaeaa1c`. CI: 20 of 20 pass, `test (windows-latest)`
+  and `test (macos-latest)` included. SonarCloud: gate passed, with 0
+  issues, 0 hotspots and 0.0% duplication on new code. CodeQL: 0 open
+  alerts on the PR ref. Gemini: "There are no review comments". CodeRabbit
+  opened paused: "included plan limit reached", with "wait 1 minute for
+  your next included review", and its allowance at one review an hour.
+  Nothing had resumed two minutes later. `@coderabbitai review` then
+  answered "Review triggered", and the walkthrough, covering
+  `59f44d1b..8eaeaa1c` (4 files), says "No actionable comments were
+  generated". No review threads.
+- **That corrects CLAUDE.md**, which said `@coderabbitai review` does not
+  clear a plan-limit pause. It held on 2026-09-18, when no included review
+  was available. Once the notice's wait has passed, the command runs the
+  pass, and the paid checkbox is not needed.

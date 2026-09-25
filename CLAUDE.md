@@ -3486,7 +3486,13 @@ its twin.** The top list is older, shorter, and read first.
   works is the **"Run this review for free" checkbox inside the walkthrough
   comment** — tick it by PATCHing the comment body (`- [ ]` → `- [x]` on the
   `checkboxId` line; the repo owner may edit the bot's comment), and the
-  review runs within minutes. `/gemini review` still works as written.
+  review runs within minutes. **Unless the notice's own wait has passed**:
+  on #1008 (2026-09-25) it said "wait 1 minute for your next included
+  review", nothing had resumed two minutes later, and `@coderabbitai
+  review` then answered "Review triggered" and ran a full pass. Once the
+  wait is up, the command is the included route; the checkbox is an
+  on-demand review, which the notice prices per reviewed file.
+  `/gemini review` still works as written.
   CodeRabbit's real pass says "No actionable comments were generated" or
   "Actionable comments posted: N"; Gemini's says it has no comments to
   address. Anything less than one of those is not a round.
