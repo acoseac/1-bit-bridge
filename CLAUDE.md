@@ -3455,14 +3455,16 @@ its twin.** The top list is older, shorter, and read first.
   exited when EVERY task in `/proc/<pid>/task` is Z or X. **Not
   `/proc/<pid>/stat` alone**: a process whose leader thread exited while
   another runs reads Z there and in `status` (measured: `Threads: 2`, the
-  other task S). Whatever /proc cannot answer reads as running, so a
-  missing /proc delays an exit and never invents one. **A control asked
-  once, straight after `Start`, sees the child still being exec'd** (state
-  R, 8 of 8) and passed a mutation that took every state but R for
-  exited, so `TestARunningProcessHasNotExited` asks over 500 ms, as the
-  callers poll, and on Linux requires /proc's S. Probe a child you DO reap
-  by reaping it (`cmd.Wait`, then ESRCH), as doctor's `pidAlive` tests do.
-  (#1024)
+  other task S). Whatever /proc cannot answer reads as running, including
+  a /proc numbered for another pid namespace, whose `self` is not this
+  process (under `unshare --pid` without `--mount-proc`, pid 1 read
+  `/proc/self` as 480456), so /proc can delay an exit and never invent
+  one. **A control asked once, straight after `Start`, sees the child
+  still being exec'd** (state R, 8 of 8) and passed a mutation that took
+  every state but R for exited, so `TestARunningProcessHasNotExited` asks
+  over 500 ms, as the callers poll, and on Linux requires /proc's S. Probe
+  a child you DO reap by reaping it (`cmd.Wait`, then ESRCH), as doctor's
+  `pidAlive` tests do. (#1024)
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the

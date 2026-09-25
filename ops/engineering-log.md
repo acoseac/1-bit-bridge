@@ -14873,6 +14873,11 @@ failure.
 - **The first ask after `Start`.** `sleep 60`, asked straight after
   `cmd.Start()`, read `state R` 8 times in 8 (still being exec'd), and
   `state S` 500 ms later.
+- **A /proc for another pid namespace.** On the dido host, `unshare --pid
+  --fork sh -c 'echo $$; exec readlink /proc/self'` printed 1 and 480456:
+  the process's own pid is 1, and the /proc it reads numbers processes as
+  the host does. With `--mount-proc` both read 1. So under the first form
+  `/proc/<pid>` names an unrelated process.
 
 ### Decisions
 
@@ -14885,9 +14890,12 @@ failure.
   only a positive reading of every task as Z or X turns that into "exited".
   Every read or parse failure answers running, so a /proc that is not
   mounted, or that hides the process, delays the answer and never invents
-  one. The two errors are not symmetric: the callers poll to a deadline, so
-  a wrong "running" costs a retry and at worst a false failure, while a
-  wrong "exited" passes the defect.
+  one. So does a /proc numbered for another pid namespace, whose `<pid>`
+  is some unrelated process that could be a zombie: a /proc whose `self`
+  is not this process, or that has none, answers nothing (`39a00bcf`,
+  after the measurement above). The two errors are not symmetric: the
+  callers poll to a deadline, so a wrong "running" costs a retry and at
+  worst a false failure, while a wrong "exited" passes the defect.
 - **Every task, not the leader** (measured above). A leader that exited
   beside a live thread reads Z as a zombie's does, and a zombie is its
   leader alone, so the question that tells them apart is whether any task
@@ -14916,10 +14924,11 @@ failure.
 - `internal/proctest`: `TestARunningProcessHasNotExited` (50 asks over
   500 ms; on Linux the last must rest on /proc's S), `TestAReapedProcessHasExited`,
   `TestExitedAsksNothingAboutAValueThatIsNotAPID`, `TestZombieReadsEveryTask`
-  (a planted /proc, 15 rows: a zombie, a zombie beside an X and beside an
+  (a planted /proc, 17 rows: a zombie, a zombie beside an X and beside an
   x, S, R, T, a Z leader beside an S thread, a name that spells a state
-  each way, no task directory, an empty one, three unparseable stats, and a
-  task whose stat has gone), and on Linux `TestAZombieHasExited`: a real
+  each way, no task directory, an empty one, three unparseable stats, a
+  task whose stat has gone, and a zombie under a /proc whose `self` is
+  another pid or missing), and on Linux `TestAZombieHasExited`: a real
   zombie made with `waitid(P_PID, WEXITED|WNOWAIT)`, which asserts the
   premise (kill(pid, 0) still finds it), then Exited's Z, then ESRCH once
   reaped. The zombie is the test's own child, so it needs no container and
@@ -14927,9 +14936,12 @@ failure.
 - The two tests ask `proctest.Exited`, and their failure messages say what
   the answer rested on.
 - **Red first**: main's probe on dido without `--init` (the table above).
-- Negative controls, each applied to the committed tree (`c04c6e7a`),
-  restored from HEAD, and the tree hash checked before the next. The Mac
-  column is macOS on this laptop, the other two are dido as uid 1000:
+- Negative controls, each applied to a committed tree, restored from HEAD,
+  and the tree hash checked before the next. The Mac's NC2 ran on
+  `ba398401`. Every other cell ran on `c04c6e7a`, and the Mac's NC3 to NC11
+  and dido's NC1, NC2 and NC7 ran again on `39a00bcf`, with the same
+  results. NC12 and NC14 ran on `39a00bcf`. The Mac column is macOS on this
+  laptop, the other two are dido as uid 1000:
 
   | | mutation | Mac | dido, no `--init` | dido, `--init` |
   |---|---|---|---|---|
@@ -14944,11 +14956,16 @@ failure.
   | NC9 | ESRCH answers running | `TestAReapedProcessHasExited` red | | |
   | NC10 | an empty task directory answers exited | that row red | | |
   | NC11 | an unparseable stat answers exited | the three unparseable rows red | | |
+  | NC12 | both `self` checks dropped | the other-namespace and no-self rows red | the same two rows red | |
+  | NC14 | the `self` mismatch check dropped | the other-namespace row red alone | | |
 
   NC2 is the control the fix must not weaken: a live process left behind
   still fails both tests, on every host, and /proc says why. NC7 first ran
   against `ba398401`, whose running-process test asked once: every Linux
   test stayed green, because that one ask saw R. `c04c6e7a` made it poll.
+  Dropping only the unreadable-`self` branch changes no verdict, since an
+  unreadable `self` also fails the mismatch check. It changes the message,
+  so it has no control.
 
 ### Out of scope
 
