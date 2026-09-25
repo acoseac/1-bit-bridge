@@ -44,63 +44,93 @@ func TestDoctorDoesNotGradeTheDefaultPortsOfAConfigItCannotLoad(t *testing.T) {
 		want    doctor.Status // config-file's verdict
 		reason  string        // the port lines' reason
 	}{
-		{"a found config this user cannot read", true, func(t *testing.T, cwd string) string {
-			chmodForTest(t, writeInstallAt(t, cwd, "local-track.flac"), 0)
-			return ""
-		}, doctor.Warn, "not readable by this user"},
-		{"a named config under a directory this user cannot traverse", true, func(t *testing.T, _ string) string {
-			locked := filepath.Join(t.TempDir(), "locked")
-			named := writeInstallAt(t, locked, "local-track.flac")
-			chmodForTest(t, locked, 0)
-			// Registered after t.TempDir, so it runs first: RemoveAll
-			// cannot descend into a directory with no permissions.
-			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-			return named
-		}, doctor.Warn, "not readable by this user"},
-		{"a named config that is not there", false, func(t *testing.T, _ string) string {
-			return filepath.Join(t.TempDir(), "typo", "bridge.yml")
-		}, doctor.Fail, "does not exist"},
-		{"a found config that does not load", false, func(t *testing.T, cwd string) string {
-			// config.Load decodes with KnownFields, so one misspelt key is a
-			// load failure: the typo a hand edit makes.
-			if err := os.WriteFile(filepath.Join(cwd, defaultConfigPath), []byte("libraryNmae: typo\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return ""
-		}, doctor.Fail, "does not load"},
+		{"a found config this user cannot read", true, installUnreadableConfig, doctor.Warn, "not readable by this user"},
+		{"a named config under a directory this user cannot traverse", true, installUntraversableConfig, doctor.Warn, "not readable by this user"},
+		{"a named config that is not there", false, nameMissingConfig, doctor.Fail, "does not exist"},
+		{"a found config that does not load", false, installConfigThatDoesNotLoad, doctor.Fail, "does not load"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.denied && runtime.GOOS == "windows" {
-				t.Skip("mode bits do not deny a read or a traversal on Windows")
-			}
-			if tc.denied && os.Geteuid() == 0 {
-				t.Skip("root reads a mode-0000 file and traverses a mode-0000 directory, so the config " +
-					"loads and doctor grades its own ports; this row needs a user the mode bits deny")
+			if tc.denied {
+				skipUnlessModeBitsDeny(t)
 			}
 			cwd, _ := isolateConfigEnv(t)
-			d := buildDoctorDeps(tc.install(t, cwd))
-			// The reported shape: the defaults, and no pid file to recognise
-			// the bridge's own listeners by.
-			if d.APIPort != 7788 || d.AdminPort != 7789 || d.OwnPIDFile != "" {
-				t.Fatalf("Deps carry ports %d / %d and pid file %q; want the defaults 7788 / 7789 and none, "+
-					"the state a config that did not load leaves doctor in", d.APIPort, d.AdminPort, d.OwnPIDFile)
-			}
-			holdLoopbackPort(t, d.APIPort)
-			holdLoopbackPort(t, d.AdminPort)
-
-			rep := doctor.Run(context.Background(), d)
-			if c := findCheck(t, rep, "config-file"); c.Status != tc.want {
-				t.Errorf("config-file = %s %q, want %s", c.Status, c.Summary, tc.want)
-			}
-			for _, name := range []string{"port-api", "port-admin"} {
-				c := findCheck(t, rep, name)
-				if c.Status != doctor.OK || !strings.HasPrefix(c.Summary, "not checked: ") ||
-					!strings.Contains(c.Summary, tc.reason) {
-					t.Errorf("%s = %s %q (hint %q) with the default port held; want ok \"not checked: …%s…\", "+
-						"since the port the config sets is unknown", name, c.Status, c.Summary, c.Hint, tc.reason)
-				}
-			}
+			assertDefaultPortsNotGraded(t, buildDoctorDeps(tc.install(t, cwd)), tc.want, tc.reason)
 		})
+	}
+}
+
+// installUnreadableConfig writes an install in cwd, whose bridge.yaml this
+// user may not read, and names none: the working directory's is found.
+func installUnreadableConfig(t *testing.T, cwd string) string {
+	chmodForTest(t, writeInstallAt(t, cwd, "local-track.flac"), 0)
+	return ""
+}
+
+// installUntraversableConfig writes an install under a directory this user
+// may not traverse and names its bridge.yaml.
+func installUntraversableConfig(t *testing.T, _ string) string {
+	locked := filepath.Join(t.TempDir(), "locked")
+	named := writeInstallAt(t, locked, "local-track.flac")
+	chmodForTest(t, locked, 0)
+	// Registered after t.TempDir, so it runs first: RemoveAll cannot
+	// descend into a directory with no permissions.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	return named
+}
+
+// nameMissingConfig names a bridge.yml in a directory that is not there
+// either: the shape of a typo'd --config.
+func nameMissingConfig(t *testing.T, _ string) string {
+	return filepath.Join(t.TempDir(), "typo", "bridge.yml")
+}
+
+// installConfigThatDoesNotLoad writes a bridge.yaml in cwd that config.Load
+// refuses. It decodes with KnownFields, so one misspelt key is enough: the
+// typo a hand edit makes.
+func installConfigThatDoesNotLoad(t *testing.T, cwd string) string {
+	if err := os.WriteFile(filepath.Join(cwd, defaultConfigPath), []byte("libraryNmae: typo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return ""
+}
+
+// skipUnlessModeBitsDeny skips a row whose config must be kept from this
+// user by mode bits, where they keep nothing from it.
+func skipUnlessModeBitsDeny(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not deny a read or a traversal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-0000 file and traverses a mode-0000 directory, so the config " +
+			"loads and doctor grades its own ports; this row needs a user the mode bits deny")
+	}
+}
+
+// assertDefaultPortsNotGraded holds the default ports d carries and runs
+// the report: config-file must give wantConfigFile, and both port lines
+// ok "not checked", giving reason.
+func assertDefaultPortsNotGraded(t *testing.T, d doctor.Deps, wantConfigFile doctor.Status, reason string) {
+	t.Helper()
+	// The reported shape: the defaults, and no pid file to recognise the
+	// bridge's own listeners by.
+	if d.APIPort != 7788 || d.AdminPort != 7789 || d.OwnPIDFile != "" {
+		t.Fatalf("Deps carry ports %d / %d and pid file %q; want the defaults 7788 / 7789 and none, "+
+			"the state a config that did not load leaves doctor in", d.APIPort, d.AdminPort, d.OwnPIDFile)
+	}
+	holdLoopbackPort(t, d.APIPort)
+	holdLoopbackPort(t, d.AdminPort)
+
+	rep := doctor.Run(context.Background(), d)
+	if c := findCheck(t, rep, "config-file"); c.Status != wantConfigFile {
+		t.Errorf("config-file = %s %q, want %s", c.Status, c.Summary, wantConfigFile)
+	}
+	for _, name := range []string{"port-api", "port-admin"} {
+		c := findCheck(t, rep, name)
+		if c.Status != doctor.OK || !strings.HasPrefix(c.Summary, "not checked: ") || !strings.Contains(c.Summary, reason) {
+			t.Errorf("%s = %s %q (hint %q) with the default port held; want ok \"not checked: …%s…\", "+
+				"since the port the config sets is unknown", name, c.Status, c.Summary, c.Hint, reason)
+		}
 	}
 }
 

@@ -55,8 +55,11 @@ const (
 // assertions, admin-UI mapping, or CI dashboards. Extracted because
 // SonarCloud go:S1192 flagged the repeated literals across the doctor
 // per-check builders (warn/fail/ok branches in checkConfigDir,
-// checkTLSCert, checkLibraryRoots, checkServiceManager).
+// checkTLSCert, checkLibraryRoots, checkServiceManager), and again at the
+// port checks' third use (#1022).
 const (
+	checkNamePortAPI        = "port-api"
+	checkNamePortAdmin      = "port-admin"
 	checkNameConfigDir      = "config-dir"
 	checkNameTLSCert        = "tls-cert"
 	checkNameLibraryRoots   = "library-roots"
@@ -552,23 +555,23 @@ func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
 }
 
 func checkAPIPort(ctx context.Context, d Deps) Check {
-	if c := ungradedConfigPortCheck("port-api", d.ConfigFile); c != nil {
+	if c := ungradedConfigPortCheck(checkNamePortAPI, d.ConfigFile); c != nil {
 		return *c
 	}
-	if owned := ownedPortCheck("port-api", d.APIPort, d.OwnedPorts); owned != nil {
+	if owned := ownedPortCheck(checkNamePortAPI, d.APIPort, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort(ctx, "port-api", d.APIPort, d.OwnPIDFile)
+	return checkPort(ctx, checkNamePortAPI, d.APIPort, d.OwnPIDFile)
 }
 
 func checkAdminPort(ctx context.Context, d Deps) Check {
-	if c := ungradedConfigPortCheck("port-admin", d.ConfigFile); c != nil {
+	if c := ungradedConfigPortCheck(checkNamePortAdmin, d.ConfigFile); c != nil {
 		return *c
 	}
-	if owned := ownedPortCheck("port-admin", d.AdminPort, d.OwnedPorts); owned != nil {
+	if owned := ownedPortCheck(checkNamePortAdmin, d.AdminPort, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort(ctx, "port-admin", d.AdminPort, d.OwnPIDFile)
+	return checkPort(ctx, checkNamePortAdmin, d.AdminPort, d.OwnPIDFile)
 }
 
 // ungradedConfigPortCheck answers a port check whose port no config set:
