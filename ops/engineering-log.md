@@ -13904,6 +13904,12 @@ asserted to apply exactly once, restored from git after each:
 `TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext` stayed green
 throughout, as it should: its bound is #1009's D1.
 
+One more control, run once and not committed: the same held route
+reached over HTTPS instead. serve exited 0 after 5.01 s with `http
+shutdown: context deadline exceeded` and no HTTP/3 line, so
+`http.Server`'s drain still returns at its deadline, and the new line is
+about HTTP/3 alone.
+
 ### Consult
 
 A direct Gemini consult (`consult.py`) on the design, with the diff and
@@ -13948,3 +13954,24 @@ the quic-go excerpts attached:
   binary panicked. The script reported an empty line rather than a pass,
   and the rewritten mutation bites. A control that crashes has measured
   nothing.
+
+### Review
+
+- **Round 1**, on `1e95e062`. CI: 20 of 20 pass, `test (windows-latest)`,
+  `test (macos-latest)` and all nine `-race` legs included. CodeQL passed.
+  Gemini: no comments. CodeRabbit: "No actionable comments were
+  generated", its walkthrough covering `2f0af41c..1e95e062`, merge risk
+  minimal, with 0 reviews left in its hourly allowance afterwards.
+- **SonarCloud, taken in spirit:** the gate passed with one issue,
+  godre:S8239 on `drainedWithin`: "Use the available context parameter
+  'ctx' instead of creating a new background context". Taken literally it
+  is the regression this PR prevents. ctx has ended by then, so a child of
+  it ends at once and the allowance is zero. NC9 applied exactly that and
+  turned all three "told" tests red (the client waits out its idle
+  timeout). `context.WithTimeout(context.WithoutCancel(ctx), …)` keeps
+  ctx's lineage without its cancellation, which is what the allowance
+  means, and is green.
+- **CodeRabbit's pre-merge check, taken:** docstring coverage of the
+  touched functions was 77.78% against its 80% threshold. The four
+  without one were test helpers (`newHeldRoute`, `wrap`,
+  `newLANHTTP3Client`, `newHTTP3Client`); they have docs now.
