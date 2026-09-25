@@ -285,6 +285,12 @@ func (i *Ingester) Run(ctx context.Context, opts Options) (IngestResult, error) 
 	// routed state) and never aborts the per-server ingest on failure.
 	i.reapOrphanServers(ctx, &out)
 	for idx := range i.cfg.Servers {
+		// A cancelled run starts no further server: each would only fail
+		// on the same cancelled context, one error apiece. The servers
+		// already walked keep their results.
+		if ctx.Err() != nil {
+			break
+		}
 		srv := i.cfg.Servers[idx]
 		res := ServerIngestResult{Name: srv.Name, StableKey: StableServerKey(srv)}
 		i.ingestOne(ctx, srv, opts.ForceWalk, backstop, opts.MaxItems, now, &res)

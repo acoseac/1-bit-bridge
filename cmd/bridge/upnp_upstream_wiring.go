@@ -13,6 +13,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -308,6 +309,7 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 		}
 		return
 	}
+	res = withoutStoppedServers(ctx, res)
 	// Stash the result on the admin state (no-op when no admin adapter
 	// has been installed yet — happens during the very-first warm-up
 	// tick before cmd/bridge wires the admin Deps).
@@ -336,6 +338,27 @@ func (l *upnpUpstreamLifecycle) runOneIngest(ctx context.Context, ingester *upnp
 				slog.Int("reaped", pr.Reaped))
 		}
 	}
+}
+
+// withoutStoppedServers takes out of an ingest result what ctx's
+// cancellation stopped rather than failed: every server whose error is only
+// the cancellation, and the cancellation within the orphan sweep's joined
+// error. Shutdown and the lifecycle's Stop both cancel ctx part-way through
+// a run. A stopped server is neither reported nor recorded, so the console
+// keeps the last result that server really had.
+func withoutStoppedServers(ctx context.Context, res upnpingest.IngestResult) upnpingest.IngestResult {
+	res.OrphanSweepErr = ctxerr.WithoutCancellation(ctx, res.OrphanSweepErr)
+	kept := make([]upnpingest.ServerIngestResult, 0, len(res.PerServer))
+	for _, pr := range res.PerServer {
+		if pr.Err != nil {
+			if pr.Err = ctxerr.WithoutCancellation(ctx, pr.Err); pr.Err == nil {
+				continue
+			}
+		}
+		kept = append(kept, pr)
+	}
+	res.PerServer = kept
+	return res
 }
 
 // discoveryServerResolver implements upnpingest.ServerResolver against

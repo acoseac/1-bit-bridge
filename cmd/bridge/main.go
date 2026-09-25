@@ -46,6 +46,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -471,6 +472,15 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 			logging.Component("atlasharvest").Warn("artwork version: hash cover", "mbid", releaseMBID, "err", herr)
 		} else if ver != "" {
 			if _, serr := a.store.SetArtworkVersionAndBumpIndex(ctx, releaseMBID, ver); serr != nil {
+				// A record the shutdown stopped is not settled. Answering
+				// with the cancellation keeps the cover pending in the
+				// harvest sweep, whose next pass fetches the same premium
+				// bytes and records their version then; settling it here
+				// would leave clients keyed to the old cover until a manual
+				// clear or a full sync.
+				if ctxerr.WithoutCancellation(ctx, serr) == nil {
+					return false, serr
+				}
 				logging.Component("atlasharvest").Warn("artwork version: record", "mbid", releaseMBID, "err", serr)
 			}
 		}
@@ -3870,6 +3880,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				rate := cfg.Upscale.EffectiveBootstrapTargetRate()
 				bits := cfg.Upscale.EffectiveBootstrapTargetBits()
 				if seedErr := manifestStore.SetUpscaleTarget(ctx, rate, bits); seedErr != nil {
+					// A shutdown that lands in the seed stops serve before
+					// it served anything. That is a requested stop, not a
+					// failed start, so it exits as a shutdown does. Only
+					// the seed can: it is the one startup step that runs
+					// on ctx and returns 1.
+					if ctxerr.WithoutCancellation(ctx, seedErr) == nil {
+						return 0
+					}
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
 					return 1
 				}
@@ -5166,10 +5184,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}()
 
 		go func() {
-			startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			if err := tsnetServer.Start(startCtx); err != nil {
-				fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
+			if !bringTsnetUp(ctx, tsnetServer, stderr) {
 				return
 			}
 			// Wire the metrics tsnet collector so /metrics +
@@ -5218,13 +5233,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// successful listeners and continue. Total bind failure
 			// degrades to HTTP/2 over tailnet via tsnetHTTPSrv below.
 			if !cfg.DisableHTTP3 {
-				statusCtx, statusCancel := context.WithTimeout(ctx, 5*time.Second)
-				status, statusErr := tsnetServer.Status(statusCtx)
-				statusCancel()
+				status, statusOK := tsnetH3Status(ctx, tsnetServer)
 				_, h3Port, splitErr := net.SplitHostPort(cfg.ListenAddress)
 				switch {
-				case statusErr != nil:
-					logger.Warn("Failed to query tsnet status for h3 bind, running HTTP/2 only on tailnet", "err", statusErr)
+				case !statusOK:
+					// tsnetH3Status has said why.
 				case status == nil || status.Self == nil || len(status.Self.TailscaleIPs) == 0:
 					logger.Warn("tsnet status returned no tailnet IPs for h3 bind, running HTTP/2 only on tailnet")
 				case splitErr != nil || h3Port == "":
@@ -5266,9 +5279,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 
-			lis, err := tsnetServer.ListenTLS(cfg.ListenAddress)
-			if err != nil {
-				fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+			lis, ok := tsnetListen(ctx, tsnetServer, cfg.ListenAddress, stderr)
+			if !ok {
 				return
 			}
 			// Build a sibling http.Server pointing at the same handler
