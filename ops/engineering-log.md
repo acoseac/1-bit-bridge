@@ -14284,3 +14284,36 @@ diff, both versions of `checkPort` and init's second pass:
 - The two reported tests were a symptom of a wider defect. The case that
   decided wide over narrow was the stopped-bridge re-init, which no test
   covered and which the narrow form passes.
+
+### Review
+
+- **Round 1**, on `9e49a040`. Gemini: "There are no review comments, so I
+  have no feedback to provide." CodeRabbit was paused at its plan limit
+  ("wait 9 minutes"). `@coderabbitai review`, sent once that wait had
+  passed, answered "Review triggered", and the pass (`9094ccf2..9e49a040`)
+  reported "Actionable comments posted: 1". `removeServerPIDFile`'s
+  rewritten comment said a recycled PID that is alive "gets no further
+  than the liveness arm". But `checkPort` asks the pid match first
+  (`case found:` precedes `case pidAliveFunc(ownPID):`), so a process that
+  inherited the PID and holds the port is reported as our own bridge.
+  Taken in `30e195ba`, in its own wording: the committable suggestion,
+  applied to the lines it named, would have repeated "a recycled".
+  SonarCloud: gate passed, 0 new issues. CodeQL passed.
+- **Round 2**, on `30e195ba`. Gemini (`/gemini review`): no comments.
+  CodeRabbit confirmed the fix on its thread and resolved it ("the updated
+  comment covers both recycled-PID outcomes"), but its pass on the commit
+  was paused again ("wait 45 minutes").
+- Every read was paginated. The `reviewThreads` connection was read to
+  `hasNextPage: false`: one thread, resolved.
+
+### Process notes (review)
+
+- **This PR overstated what a probe reaches twice, both times in comments
+  it had just written.** The first said lsof "is never run" on every path
+  the fallback saw. That holds only where there is no pid: a readable dead
+  pid is still handed to lsof, which finds nothing. I caught it on a
+  re-read before the PR opened. The second said a recycled pid gets no
+  further than the liveness arm, which forgets the pid match ahead of it,
+  and CodeRabbit caught it. Both were reasoned from the shape of the ladder
+  rather than read off it, and the fix both times was to read the order of
+  the arms in `checkPort`.
