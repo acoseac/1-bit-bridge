@@ -390,6 +390,13 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 // that takes no context, or a listen) costs a line, never a hung exit; the
 // node is then closed under it, and the wrapper stops a start that Close
 // lands on, while tsnetListen closes a listener that lands after it.
+//
+// The drains get http3ForceCloseAllowance past the grace (drainedWithin).
+// The Close that Shutdown calls at the deadline writes each connection's
+// CONNECTION_CLOSE before it waits for the handlers, and closing the node
+// takes down the conn those writes go to: closed the moment the grace ran
+// out, it cost every client still connected its close, and a client with
+// a request in flight then waited out its idle timeout.
 func (f *tsnetFront) stop(grace time.Duration) {
 	f.cancel()
 	f.mu.Lock()
@@ -420,7 +427,7 @@ func (f *tsnetFront) stop(grace time.Duration) {
 		defer close(drained)
 		drains.Wait()
 	}()
-	if !closedWithin(shutdownCtx, drained) {
+	if !drainedWithin(shutdownCtx, drained) {
 		fmt.Fprintln(f.stderr, "shutdown: the tailnet servers did not drain within grace; closing the node under them")
 	}
 	if !closedWithin(shutdownCtx, f.done) {
