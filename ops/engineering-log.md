@@ -14924,11 +14924,13 @@ failure.
 - `internal/proctest`: `TestARunningProcessHasNotExited` (50 asks over
   500 ms; on Linux the last must rest on /proc's S), `TestAReapedProcessHasExited`,
   `TestExitedAsksNothingAboutAValueThatIsNotAPID`, `TestZombieReadsEveryTask`
-  (a planted /proc, 17 rows: a zombie, a zombie beside an X and beside an
+  (a planted /proc, 15 rows: a zombie, a zombie beside an X and beside an
   x, S, R, T, a Z leader beside an S thread, a name that spells a state
-  each way, no task directory, an empty one, three unparseable stats, a
-  task whose stat has gone, and a zombie under a /proc whose `self` is
-  another pid or missing), and on Linux `TestAZombieHasExited`: a real
+  each way, no task directory, an empty one, a task whose stat has gone,
+  and three unparseable stats), `TestZombieIgnoresAProcOfAnotherPIDNamespace`
+  (the same zombie under a /proc whose `self` is another pid or missing,
+  and under this process's as the control), and on Linux
+  `TestAZombieHasExited`: a real
   zombie made with `waitid(P_PID, WEXITED|WNOWAIT)`, which asserts the
   premise (kill(pid, 0) still finds it), then Exited's Z, then ESRCH once
   reaped. The zombie is the test's own child, so it needs no container and
@@ -14940,8 +14942,10 @@ failure.
   and the tree hash checked before the next. The Mac's NC2 ran on
   `ba398401`. Every other cell ran on `c04c6e7a`, and the Mac's NC3 to NC11
   and dido's NC1, NC2 and NC7 ran again on `39a00bcf`, with the same
-  results. NC12 and NC14 ran on `39a00bcf`. The Mac column is macOS on this
-  laptop, the other two are dido as uid 1000:
+  results. NC12 and NC14 ran on `39a00bcf`, and after round 1's refactor
+  (Review below) every Mac cell from NC3 to NC14 ran again on `a2cc9940`,
+  where NC15 ran too. The Mac column is macOS on this laptop, the other two
+  are dido as uid 1000:
 
   | | mutation | Mac | dido, no `--init` | dido, `--init` |
   |---|---|---|---|---|
@@ -14958,6 +14962,7 @@ failure.
   | NC11 | an unparseable stat answers exited | the three unparseable rows red | | |
   | NC12 | both `self` checks dropped | the other-namespace and no-self rows red | the same two rows red | |
   | NC14 | the `self` mismatch check dropped | the other-namespace row red alone | | |
+  | NC15 | the `self` check refuses every /proc | the control row and every zombie row red | | |
 
   NC2 is the control the fix must not weaken: a live process left behind
   still fails both tests, on every host, and /proc says why. NC7 first ran
@@ -14981,6 +14986,12 @@ failure.
   that container (a grandchild of a `docker exec` session, or a child of a
   program the bridge kills mid-run) stays a zombie until the container
   exits. A zombie holds only its process-table slot. Noted, not changed.
+- **doctor's tests do not compile for a 32-bit target.** The compiler
+  reports four constants past a 32-bit int, three in
+  `TestPIDAliveRejectsOutOfRangePID` and one in
+  `TestPIDAlive_SelfAndBounds`. After round 1, a 32-bit vet of the tree
+  fails in `internal/doctor` alone. 32-bit is not a target (amd64 and
+  arm64 are), so they are left.
 - **A failed run leaves the fake CLI looping forever.** NC2 left three on
   the Mac (PPid 1), killed by pid. On a failure, cleanup creates the
   release file inside a `t.TempDir` whose own cleanup deletes it right
@@ -15000,3 +15011,21 @@ failure.
   hypothesis. Reading /proc at the moment the check fires turned it into a
   fact in one run, and logging each pass's answer showed the fix works
   through the new arm rather than by luck.
+
+### Review
+
+- **Round 1**, on `bee6a892`. CodeRabbit: "No actionable comments were
+  generated", `coveredCommitId` the head, no merge risk, with 0 included
+  reviews left (1 per hour). SonarCloud: gate passed with 1 new issue,
+  go:S3776 on `TestZombieReadsEveryTask` (cognitive complexity 17 of 15).
+  Taken in `a2cc9940`: planting moved into `plantProc`, the task whose stat
+  has gone became a table row, and the two `self` cases moved into
+  `TestZombieIgnoresAProcOfAnotherPIDNamespace`, which gained a control row
+  (NC15). Gemini: one finding, marked high. `[]int{…, math.MaxInt32 + 1,
+  math.MaxUint32 + 1}` overflows at compile time where int is 32 bits.
+  Accurate, and measured before it was taken: the bridge builds for
+  linux/386 and linux/arm, and a 32-bit vet of the tree failed in two
+  packages, on this literal and on doctor's (Out of scope). Taken in
+  `a2cc9940`: int64 variables converted at run time, which on 32-bit wrap
+  to values that are refused anyway. proctest then passed as a real
+  linux/386 binary on dido, `TestAZombieHasExited` included.
