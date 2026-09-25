@@ -13291,3 +13291,13 @@ been over its daily quota for recent PRs):
   fixture's root `dist`. Control R1, against `4affabe3`: with the
   exemption removed the fixture read 0 files and went red, while the
   whole-tree test stayed green, as its root is `../..`.
+- **Round 2**, on `5fa53b82`. CI: 20 of 20 pass, `test (windows-latest)`
+  and `test (macos-latest)` included, so the symlink and permission rows
+  ran on each platform that can create them. Gemini, asked again
+  (`/gemini review`): "no review comments to address". CodeRabbit's
+  walkthrough covers `5e48cac8..5fa53b82`, the whole PR, as "reviewed":
+  "No actionable comments were generated", merge risk minimal, with its
+  allowance then at one review an hour and none left. SonarCloud: gate
+  passed, 0 issues. CodeQL: 0 alerts. The one review thread is resolved.
+  This record is a docs-only commit after that round, so no bot reviewed
+  it.
