@@ -8,13 +8,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestARunningProcessHasNotExited is the control every other answer rests
 // on: a process that is plainly still there must never read as exited, on
 // Linux, where /proc is asked, as much as elsewhere.
+//
+// Asked over half a second, as the callers ask: their loops stop at the
+// first "exited", so one wrong answer at any poll passes a live process. A
+// single ask straight after Start catches the child still being exec'd, in
+// state R, and passed a /proc reading that took a sleeping process (S) for
+// an exited one. So on Linux the last answer must also rest on /proc having
+// seen `sleep` asleep.
 func TestARunningProcessHasNotExited(t *testing.T) {
 	cmd := exec.Command("sleep", "60")
 	if err := cmd.Start(); err != nil {
@@ -24,8 +33,18 @@ func TestARunningProcessHasNotExited(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	if exited, why := Exited(cmd.Process.Pid); exited {
-		t.Fatalf("Exited(%d) = true (%s) for a process that is still running", cmd.Process.Pid, why)
+	pid := cmd.Process.Pid
+	var why string
+	for i := 0; i < 50; i++ {
+		var exited bool
+		if exited, why = Exited(pid); exited {
+			t.Fatalf("Exited(%d) = true (%s) for a process that is still running", pid, why)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if runtime.GOOS == "linux" && !strings.Contains(why, "state S") {
+		t.Errorf("Exited(%d) = false, %q after 500 ms; on Linux the answer should rest on /proc "+
+			"reading `sleep` asleep (state S)", pid, why)
 	}
 }
 
