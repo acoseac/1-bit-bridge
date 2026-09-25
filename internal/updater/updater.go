@@ -41,6 +41,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -520,8 +521,10 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 			// put a line in the journal every poll cycle for a bridge
 			// that is simply waiting to be restarted.
 			logger.Info(autoInstallDeferredMessage, "err", err)
-		} else {
-			logger.Error("auto-install failed", "err", err)
+		} else if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			// An install the shutdown stopped is not a failed one: the
+			// next poll cycle after the restart tries again.
+			logger.Error("auto-install failed", "err", failure)
 		}
 		return
 	}
@@ -798,7 +801,16 @@ func (u *Updater) checkOnce(ctx context.Context) bool {
 	defer u.mu.Unlock()
 
 	if err != nil {
-		u.status.LastError = err.Error()
+		// A poll that was STOPPED says nothing about GitHub. Shutdown
+		// cancels Run's context, and "Check now" polls on the admin
+		// request's, which the client can leave. The status keeps what
+		// the last poll that answered found, and nothing is logged. It
+		// is still not a successful poll, so no auto-install runs off it.
+		failure := ctxerr.WithoutCancellation(ctx, err)
+		if failure == nil {
+			return false
+		}
+		u.status.LastError = failure.Error()
 		// Don't reset LastCheck — a transient failure shouldn't make the
 		// admin UI claim "haven't checked in days". Operators reading
 		// the UI care about the last *successful* poll.
@@ -812,12 +824,12 @@ func (u *Updater) checkOnce(ctx context.Context) bool {
 		// Transient errors (rate limit, network blip) leave the cached
 		// state alone so the operator still sees the last good answer
 		// while the bridge retries (Qodo bot review on PR #89).
-		if errors.Is(err, ErrNoReleasesPublished) {
+		if errors.Is(failure, ErrNoReleasesPublished) {
 			u.status.LatestVersion = ""
 			u.status.UpdateAvailable = false
 			u.status.ReleaseNotesURL = ""
 		}
-		logger.Error("poll", "repo", u.repo, "err", err)
+		logger.Error("poll", "repo", u.repo, "err", failure)
 		return false
 	}
 
