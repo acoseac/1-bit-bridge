@@ -13566,9 +13566,10 @@ scan (tsnet.go:615-625; registerListener refuses nothing), and #1005's
   was the defect, since the teardown runs before runServe's own cancel.
 - **Join, then close; drain before the join.** The goroutine sits in
   `http.Server.Serve` until Shutdown, so the published servers are
-  drained first; the wait comes next; the node is closed last. The wait
-  covers the HTTP/3 Serve goroutines too (`f.h3`), so nothing the
-  tailnet side started outlives runServe.
+  drained first, all at once (review round 1, below); the wait comes
+  next; the node is closed last. The wait covers the HTTP/3 Serve
+  goroutines too (`f.h3`), so nothing the tailnet side started outlives
+  runServe.
 - **One critical section begins stop and takes the snapshot**, and a
   publication after it is refused (the caller closes what it would have
   served). That is what makes "everything serving is something stop can
@@ -13722,3 +13723,28 @@ wrapper, the wiring and the upstream excerpts attached:
   with serve held in its shutdown branch showed the other ordering (the
   5-of-5 above); the assertion went, and the rule it wanted became its
   own deterministic unit test with the check behind it.
+
+### Review
+
+- **Round 1**, on `71674a8c`. CI: 20 of 20 pass, `test (windows-latest)`
+  and `test (macos-latest)` included. CodeQL: 0 open alerts on the PR ref.
+  CodeRabbit: "No actionable comments were generated", its walkthrough
+  covering `9ac6f595..71674a8c`, with its allowance at one review an hour
+  and none available.
+- **Gemini, taken:** stop drained the HTTP/3 servers one after another and
+  then HTTPS, on one deadline. Its framing was that a slow drain starves
+  the later ones of their grace. The effect worth fixing is narrower:
+  in-flight requests run on whatever Shutdown is called, since Shutdown
+  only closes listeners and waits, so what the order changed is that HTTPS
+  went on accepting NEW requests for as long as the HTTP/3 drain took,
+  and those were then cut by the node's close. The drains now run
+  together, as runServe's shutdown branch runs the LAN ones. Not
+  separately pinned: observing it takes a live HTTP/3 stream held open
+  across the drain. S10 (drain after the wait) was re-run on the new
+  block, and S2, and both still bite.
+- **SonarCloud, taken:** gate passed with one issue, godre:S8188 on
+  `lifecycle_test.go`: `startInBackground` created a cancellable context
+  whose cancel ran from `t.Cleanup`, which the rule cannot see; deferring
+  it would cancel the start at once. It takes `t.Context()` now, which
+  the framework cancels just before the cleanups run. W1 was re-run on
+  the new helper and still bites.
