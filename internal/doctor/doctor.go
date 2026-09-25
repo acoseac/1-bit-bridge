@@ -95,7 +95,10 @@ type Deps struct {
 	// caller did not look one up, which the check reports as skipped.
 	// `bridge init`'s preflight leaves it nil on purpose: it grades the
 	// install it is about to write, and a broken existing config must
-	// not block the re-init that replaces it.
+	// not block the re-init that replaces it. That holds for
+	// checkConfigFile only: the preflight's port checks, graded on init's
+	// defaults with no pid file behind them, still FAIL a bridge live on
+	// those ports.
 	//
 	// When it records a config that did not load, the port checks are
 	// not run: APIPort and AdminPort are then the caller's defaults, not

@@ -14317,3 +14317,181 @@ diff, both versions of `checkPort` and init's second pass:
   and CodeRabbit caught it. Both were reasoned from the shape of the ladder
   rather than read off it, and the fix both times was to read the order of
   the arms in `checkPort`.
+
+## 2026-09-25 — doctor grades no port from a config it could not load (#1022)
+
+#1021's entry named this under Out of scope: an unreadable config makes
+doctor grade DEFAULT ports with no pid file, and every host then FAILs a
+live bridge's own ports. #985's rule is that a config doctor cannot READ is
+a fact about the run, and the port lines did not follow it.
+
+### What was measured
+
+- **The mechanism.** `buildDoctorDepsFor` seeds `APIPort: 7788, AdminPort:
+  7789` and replaces them only inside `if err == nil`, from a config that
+  loaded. `OwnPIDFile` is set in the same branch, from `cfg.DataDir`. So a
+  config that was named or found and did not load leaves the defaults and no
+  pid file, `checkPort` finds a held port with no live pid of ours behind it,
+  and FAILs "another process owns this port". Since #1021 that is every
+  host. Before it, a host without lsof got the fallback's warn.
+- **Not only the permission case.** All three load errors config-file
+  reports reach the same state: a config this user cannot read (config-file
+  warns), a named `--config` that is not there, and one that does not load
+  (config-file fails). #985's own table recorded the third, "config-file
+  FAIL …, both ports FAIL; exit 1" for a copy of the config with a typo'd
+  key, which is the runbook's validate-before-restart run.
+- **The other direction.** On an install that does not use the defaults,
+  the same lines graded 7788 / 7789, usually free, and answered "free":
+  a pass about ports nothing binds.
+- **End to end**, on dido (Ubuntu 26.04, Docker 29.1.3). `bridge init` then
+  `bridge serve` as uid 1000 on init's defaults (`listenAddress: :7788`,
+  `adminAddress: 127.0.0.1:7789`, config dir 0700, file 0600), doctor as
+  uid 1000 or 1001 through `setpriv`. Two images: the stock `golang:1.26.6`
+  (no lsof) and the same with `apt-get install lsof`. Trees `9b707ebc`
+  (main) and `fc0af1ee` (the fix). Every row is identical in both images,
+  except row A's attribution wording (lsof: "bound by our own bridge (pid
+  N)"; no lsof: #1021's uid arm):
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | A | the bridge's user, its config | ports ok; 14 ok / 3 warn / 0 fail; exit 0 | unchanged |
+  | B | uid 1001, `--config` in the 0700 dir (stat EACCES) | config-file warn, config-dir FAIL, port-api FAIL, port-admin FAIL; 10 / 4 / 3; exit 1 | ports "not checked: the config that sets this port is not readable by this user"; 12 / 4 / 1; exit 1 (config-dir) |
+  | C | uid 1001, dir chmod 0711, file 0600 (open EACCES) | as B | as B |
+  | D | the bridge's user validates a copy with `libraryNmae: typo` | config-file FAIL, both ports FAIL; 11 / 3 / 3; exit 1 | ports "not checked: the config that sets this port does not load"; 13 / 3 / 1; exit 1 |
+  | E | the bridge's user, `--config …/bridge.yml` (not there) | config-file FAIL, config-dir "not checked", both ports FAIL; 11 / 3 / 3 | ports "not checked: the named config does not exist"; 13 / 3 / 1 |
+  | F | uid 1001, no config named or found (pre-setup) | both ports FAIL (the defaults are held); 12 / 3 / 2; exit 1 | unchanged |
+
+  Row F is the control. With nothing named or found, doctor runs before
+  `bridge init`, and the defaults are the ports init would write, so a
+  held one is still a conflict for the install about to be made.
+- **The init twin, measured, not fixed.** The same shape one layer over:
+  `withExistingInstallDeps` returns early when the existing config does not
+  load, leaving init's 7788 / 7789 and no pid file. With the bridge live on
+  the defaults and `libraryNmae: typo` appended to its config, `bridge init
+  --yes --force --no-service --dir <its dir> …` as the bridge's user exits
+  1, `[FAIL] port-api :7788 in use`, `[FAIL] port-admin :7789 in use`,
+  "fix the fail(s) above, or re-run with --skip-doctor to bypass", config
+  still broken. Both images, fix tree. This is the re-init CLAUDE.md said a
+  broken existing config "cannot block" (the #985 bullet); corrected there.
+
+### Decisions
+
+- **Every load error, not only the permission one.** The ports are a guess
+  with no pid file in all three. The reported case needs doctor run as the
+  wrong user, which the runbook says not to do; row D is the runbook's own
+  validate-before-restart step, on any edit that does not load. The narrow
+  form is NC2.
+- **"not checked", before OwnedPorts and before the bind probe.**
+  `ungradedConfigPortCheck` is the first thing `checkAPIPort` and
+  `checkAdminPort` ask, because the port is the guess: a verdict that waits
+  for the probe depends on whether a port the install may not use is bound,
+  or by whom. NC3 is the probe-first form (decline only what would FAIL),
+  NC4 the OwnedPorts-first one.
+- **ok, not warn.** config-file gives the one verdict about the config, at
+  the severity #985 chose, and the port lines add nothing to count: in no
+  row does ok against warn change the exit code. A check that declines for
+  a reason another line reports is ok elsewhere in the package too:
+  config-dir's "not checked" beside config-file's does-not-exist FAIL, and
+  tls-cert-sans's "no config to compare against". (The warns for a missing
+  input, "no data dir set" with "pass Deps.DataDir", are another shape: a
+  hint to a caller that left a Deps field empty.) Gemini argued for warn
+  (Consult).
+- **The line names no port.** A summary reading ":7788" beside "not
+  checked" would present the guess as the install's port. NC7.
+- **One classifier.** `ConfigFile.problem` gives config-file's verdict and
+  the port lines' reason, so the two cannot disagree about what went wrong.
+  Permission first, as config-file tested it: on a single `*PathError` the
+  two sentinels are exclusive, and a permission failure is a fact about the
+  run whatever else the error says.
+- **config-file's hints** said the checks below "ran on defaults". Two of
+  them now did not run at all, so all three hints say "ran without it, on
+  defaults or not at all" (one const, `ranWithoutIt`).
+- **lsof decides nothing here.** The branch returns before `checkPort`, and
+  the matrix is identical with and without lsof.
+
+### Tests and controls
+
+- `internal/doctor/ungraded_config_ports_test.go`:
+  `TestPortChecksDoNotGradeTheDefaultsOfAConfigThatDidNotLoad` drives both
+  port checks over the three load errors, in the shapes the lookup records
+  them, with the guessed port bound and free, plus an in-process caller
+  whose OwnedPorts holds the guess. Each must be ok, "not checked: <reason>",
+  naming no port. `TestPortChecksStillGradeTheDefaultsWhenNoConfigFailedToLoad`
+  is the control: nothing named or found, a nil lookup, and a config that
+  loaded each FAIL a held port with no pid of ours.
+- `cmd/bridge/doctor_ungraded_ports_test.go`:
+  `TestDoctorDoesNotGradeTheDefaultPortsOfAConfigItCannotLoad` goes through
+  `buildDoctorDeps` and `doctor.Run` with the REAL default ports held (by
+  the test, or already by something on the host, which is the same fact to
+  doctor), over a found config this user cannot read, a named one under a
+  directory it cannot traverse, a named one that is not there, and a found
+  one that does not load. The two permission rows skip on Windows (mode
+  bits deny nothing there) and as root (root reads the file, so the config
+  loads and its own ports are graded).
+- **Red first on the Mac, which has lsof**: all seven unit subtests and all
+  four end-to-end rows, each port FAILing ":7788 in use" or reading
+  "free (:N)"; the control green.
+- Negative controls against the committed fix (`fc0af1ee`), each restored
+  from HEAD and the tree checked clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | main's `doctor.go`, `configfile.go` and `cmd/bridge/doctor.go` (grep: 0 occurrences of the new names) | every "not checked" case red, unit and end to end; the control and the existing tests green |
+  | NC2 | the narrow form: decline only `configUnreadable` | the not-there and does-not-load rows red (unit and end to end) and the in-process row; the permission rows green |
+  | NC3 | decline only a guessed port that FAILs, after the probe | the three "guessed port free" rows and the in-process row red; end to end green, since it holds its ports |
+  | NC4 | after OwnedPorts, before the probe | the in-process row red, alone |
+  | NC5 | also decline when nothing was named or found | the pre-setup control red, alone |
+  | NC6 | warn instead of ok | every unit and end-to-end row red |
+  | NC7 | the summary appends the guessed port | every unit row red; end to end green (it does not check the port) |
+  | NC8 | `buildDoctorDepsFor` stops recording a found config's load error | the two found-config end-to-end rows red, and `TestDoctorOnlyWarnsAboutAConfigItCannotRead` and `TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad`; the named rows green |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the committed
+diff and the two judgment calls:
+
+- **Agreed:** every load error rather than the permission one ("catching a
+  conflict on port 7788 during a failed parse was grading an arbitrary
+  default"); the order ahead of OwnedPorts and the probe; permission before
+  not-exist; and the one loss (row B with the bridge stopped and something
+  else on 7788: FAIL before, "not checked" now) as acceptable, since an
+  accidental true positive on a guessed port does not justify false FAILs
+  on a running bridge.
+- **Argued warn over ok**, because a JSON consumer testing `.status ==
+  "ok"` reads a check that did not run as passing, and proposed the test
+  that settles it: find the consumers. Declined on that census. No consumer
+  reads a port line's status: the console's settings chips read only the
+  toolchain checks, the Diagnostics panel counts statuses, and the
+  conductor repo parses no doctor JSON. And declining beside another
+  line's verdict is ok elsewhere in the package (Decisions).
+- **Suggested** "the named config that sets this port does not exist" for
+  symmetry. Declined: the words match config-dir's line, two lines above,
+  for the same fact.
+
+### Out of scope
+
+- **`config-dir` FAILs a doctor run by another user.** Its write probe
+  (`not writable: … permission denied`) is the same fact about the run, so
+  rows B and C still exit 1 and print "fix the fail(s) above … or `bridge
+  init --skip-doctor`". A run by the bridge's own user is unaffected.
+- **The init twin** above: `bridge init --yes --force` over a broken config
+  refuses while the bridge is live on its defaults. The ports init writes
+  are graded only in the preflight when they did not change (#970's second
+  pass runs for changed ports alone), so "not checked" there would leave
+  them ungraded. It needs init's own answer, perhaps the pid file under the
+  data dir init already knows.
+- **The rest of a report graded without its config.** tls-cert's "no data
+  dir set" carries a developer's hint ("pass Deps.DataDir so doctor can
+  inspect cert state") on every config-less run, pre-setup included;
+  library-roots says "none configured (init will prompt)" and sidecar-paths
+  / variants-index "run after the first scan" about an installed bridge
+  whose config was not read. config-file's hint covers them ("the checks
+  below ran without it"); their wording is advice for a pre-setup host.
+- **#1021's liveness-arm wording** is still open: row A on the image
+  without lsof reads "pid attribution blocked — capability-bound binary".
+
+### Process notes
+
+- The init twin was found by running the re-init the #985 bullet described,
+  not by reading it: the bullet said a broken existing config "cannot
+  block" that re-init, and config-file is what it had checked.
