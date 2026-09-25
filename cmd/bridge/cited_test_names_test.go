@@ -211,12 +211,16 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // defined, although the go tool never compiles it, so a docblock citing it
 // passed.
 //
-// The last row failed until the walk stopped at a directory with its own
-// go.mod. Claude Code keeps its worktrees of other branches inside the tree,
-// under .claude/worktrees/, and each is a whole checkout with its own module.
-// The walk read them as this tree: an old copy's tests satisfied citations
-// this tree no longer backs, and its stale comments failed the guard in the
-// one checkout that held them.
+// The last two rows are other checkouts. Claude Code keeps its worktrees of
+// other branches inside the tree, under .claude/worktrees/, and each is a
+// whole checkout with its own module. The walk read them as this tree: an old
+// copy's tests satisfied citations this tree no longer backs, and its stale
+// comments failed the guard in the one checkout that held them. The first of
+// the two failed until the walk stopped at a directory with its own go.mod
+// (#995). The second has no go.mod, as a checkout git is still writing has
+// none yet, and failed until the walk also stopped at a directory holding a
+// `.git` entry (sweeptest.IsOtherCheckout). Its root holds one too, as every
+// real root does, and must still be read.
 func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 	// A lock's contents, as emacs writes them: user@host.pid:boot.
 	const lockData = "someone@host.1:1"
@@ -269,6 +273,17 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			writeTree(t, filepath.Join(root, ".claude", "worktrees", "old-branch"), map[string]string{
 				".git":      "gitdir: /elsewhere/.git/worktrees/old-branch\n",
 				"go.mod":    "module x\n",
+				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
+				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
+			})
+		}},
+		{"a checkout with no go.mod of its own, below a root that is a checkout", false, func(t *testing.T, root string) {
+			// In index order git writes cmd/ before go.mod, so a checkout
+			// it is still writing looks like this, and only its .git says
+			// whose it is.
+			writeTree(t, root, map[string]string{".git": "gitdir: /elsewhere/.git/worktrees/this\n"})
+			writeTree(t, filepath.Join(root, "worktrees", "mid-checkout"), map[string]string{
+				".git":      "gitdir: /elsewhere/.git/worktrees/mid-checkout\n",
 				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
 				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
 			})

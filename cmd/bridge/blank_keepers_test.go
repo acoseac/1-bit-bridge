@@ -1140,7 +1140,11 @@ func use(cfg struct{ Name string }) {
 	"nested/n.go":             "package n\n\nimport \"io\"\n\nvar _ = io.EOF\n",
 	"vendor/v/v.go":           "package v\n\nimport \"io\"\n\nvar _ = io.EOF\n",
 	"web/node_modules/m/m.go": "package m\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-	"internal/tsnet/ts.go":    "package tsnet\n\nimport \"errors\"\n\nfunc Status() error { return errors.New(\"tsnet: Status called before Start\") }\n",
+	// Nor another checkout, though this one sits at a plain path and has no
+	// go.mod of its own, as a checkout git is still writing has none yet.
+	"worktrees/mid/.git":   "gitdir: /elsewhere/.git/worktrees/mid\n",
+	"worktrees/mid/m.go":   "package m\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"internal/tsnet/ts.go": "package tsnet\n\nimport \"errors\"\n\nfunc Status() error { return errors.New(\"tsnet: Status called before Start\") }\n",
 	"internal/tsnet/tsnet_test.go": `package tsnet
 
 import "errors"

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,13 +49,29 @@ func TestShippedHashCostIsUnchanged(t *testing.T) {
 // declaration (an *ast.FuncDecl) from a call without a special case.
 func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 	root := filepath.Join("..", "..")
-	const setter = "SetTestHashCost"
-	var offenders []string
+	offenders, visited, err := hashCostSetterCallers(root)
+	if err != nil {
+		t.Fatalf("walking the tree: %v", err)
+	}
 	// Files actually visited, so a walk that silently matches nothing — a wrong
 	// root, a skip rule that swallowed the tree — fails instead of passing
 	// vacuously.
-	visited := 0
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	if visited == 0 {
+		t.Fatalf("walked %s and found no non-test Go files — the guard proved nothing", root)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", hashCostSetter, offenders)
+	}
+}
+
+// hashCostSetter is the setter TestNoProductionCodeLowersTheHashCost keeps
+// out of production code.
+const hashCostSetter = "SetTestHashCost"
+
+// hashCostSetterCallers returns the non-test Go files under root that call
+// hashCostSetter, or that it cannot parse, with how many files it read.
+func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -90,11 +107,11 @@ func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 			}
 			switch fn := call.Fun.(type) {
 			case *ast.Ident: // SetTestHashCost(…), from inside this package
-				if fn.Name == setter {
+				if fn.Name == hashCostSetter {
 					offenders = append(offenders, path)
 				}
 			case *ast.SelectorExpr: // adminauth.SetTestHashCost(…), from outside
-				if fn.Sel.Name == setter {
+				if fn.Sel.Name == hashCostSetter {
 					offenders = append(offenders, path)
 				}
 			}
@@ -102,14 +119,45 @@ func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 		})
 		return nil
 	})
+	return offenders, visited, err
+}
+
+// TestHashCostSweepSkipsOtherCheckouts runs the sweep over a tree shaped like
+// the main checkout: a root that is a checkout itself, with a caller below it
+// that must be found, and other checkouts inside it whose work in progress
+// must not be. One is Claude Code's worktree of another branch, with a call
+// and a half-written file; the other sits at a plain path and has no go.mod
+// of its own. Before the sweep skipped them, each failed this checkout's run.
+func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
+	root := t.TempDir()
+	for rel, body := range map[string]string{
+		".git/HEAD":        "ref: refs/heads/main\n",
+		"cmd/tool/main.go": "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n",
+
+		".claude/worktrees/old/.git":                      "gitdir: /elsewhere/.git/worktrees/old\n",
+		".claude/worktrees/old/go.mod":                    "module example\n",
+		".claude/worktrees/old/internal/adminauth/wip.go": "package adminauth\n\nfunc init() { SetTestHashCost(4) }\n",
+		".claude/worktrees/old/internal/manifest/half.go": "package manifest\n\nfunc half(\n",
+
+		"worktrees/plain/.git": "gitdir: /elsewhere/.git/worktrees/plain\n",
+		"worktrees/plain/x.go": "package x\n\nfunc init() { SetTestHashCost(4) }\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	offenders, visited, err := hashCostSetterCallers(root)
 	if err != nil {
-		t.Fatalf("walking the tree: %v", err)
+		t.Fatal(err)
 	}
-	if visited == 0 {
-		t.Fatalf("walked %s and found no non-test Go files — the guard proved nothing", root)
-	}
-	if len(offenders) > 0 {
-		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", setter, offenders)
+	want := []string{filepath.Join(root, "cmd", "tool", "main.go")}
+	if !slices.Equal(offenders, want) || visited != 1 {
+		t.Errorf("offenders = %q after reading %d files, want %q after reading 1 — "+
+			"the sweep read another checkout, or stopped reading this one", offenders, visited, want)
 	}
 }
 

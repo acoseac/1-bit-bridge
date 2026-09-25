@@ -794,6 +794,16 @@ func newFixture() {}
 // pick returns the value the package elects.
 func useIt() {}
 `,
+		// The root is a checkout, as every real root is, and is read. The
+		// checkout inside it, at a plain path and with no go.mod of its own,
+		// is not: nothing in it is this tree's, whatever its docs say.
+		".git/HEAD":     "ref: refs/heads/main\n",
+		"checkout/.git": "gitdir: /elsewhere/.git/worktrees/checkout\n",
+		"checkout/pkg/pkg.go": `package pkg
+
+// wipHelper returns what the renamed helper will.
+func renamed() {}
+`,
 	} {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
