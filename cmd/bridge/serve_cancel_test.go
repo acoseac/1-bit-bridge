@@ -469,10 +469,14 @@ func TestATsnetListenThatSucceedsAsTheShutdownBeginsClosesTheListener(t *testing
 	if node.opened == nil {
 		t.Fatal("precondition: ListenTLS opened no listener")
 	}
+	tcp, ok := node.opened.(*net.TCPListener)
+	if !ok {
+		t.Fatalf("the fake opened a %T, want a *net.TCPListener", node.opened)
+	}
 	// A deadline, so a listener left open fails the test instead of
 	// blocking it in Accept.
-	_ = node.opened.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
-	if _, err := node.opened.Accept(); !errors.Is(err, net.ErrClosed) {
+	_ = tcp.SetDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := tcp.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("the listener was left open: Accept = %v", err)
 	}
 	if got := stderr.String(); got != "" {
