@@ -2200,21 +2200,34 @@ what it claimed**, and none of it had a failing test.
   --skip-doctor`, and `--fix` printed "created … but chmod 0700 failed"
   about a directory it had not created. Where that user may write,
   config-dir vouched ok for a directory the bridge may not. On
-  `ConfigFile.problem() == configUnreadable`, `checkConfigDir` now
-  answers ok "not checked: the config in it is not readable by this
-  user", **before the create as well as the write** (a config below an
-  untraversable parent fails the create), and **whatever either probe
-  would answer**. **Only that error**: a config that does not load was
-  read by this user, who can be the bridge's, and it names its directory
-  as well as one that loads (the directory comes from the PATH). A run
-  that found nothing is by the user about to run `bridge init` there.
-  Both keep the probe and its FAIL, as does init's own preflight (a nil
-  lookup). **Ask which half is wrong before copying a decline**: the port
-  lines decline for all three load errors because their INPUT is the
-  guess, and config-dir declines for the one where the PROBER is. Such a
-  run now ends "all clear." (13 ok, 4 warn, 0 fail), as the footer does
-  whenever nothing FAILs, below config-file's warn saying the install was
-  not graded.
+  `configUnreadable`, `checkConfigDir` now answers ok "not checked: the
+  config in it is not readable by this user", **before the create as
+  well as the write** (a config below an untraversable parent fails the
+  create), and **whatever either probe would answer**. **Only that
+  error**: a config that does not load was read by this user, who can be
+  the bridge's, and it names its directory as well as one that loads (the
+  directory comes from the PATH). A run that found nothing is by the user
+  about to run `bridge init` there. Both keep the probe and its FAIL, as
+  does init's own preflight (a nil lookup). **Ask which half is wrong
+  before copying a decline**: the port lines decline for all three load
+  errors because their INPUT is the guess, and config-dir declines for
+  the one where the PROBER is. **The launcher's doctor row is the
+  exception to both declines** (`ConfigFile.PreSetup`, read through
+  `ungraded`; config-file keeps `problem()` and still warns). The menu
+  reads any stat error as "not installed", so over another user's
+  install, the root-owned dir a `sudo bridge init` leaves, it offers
+  Setup, and this row exists to preview Setup's preflight. That preflight
+  looks nothing up and FAILs the directory and the held default ports as
+  this user. This fix's first draft declined config-dir there too, so
+  beside #1022's "not checked" ports the row read "all clear." while Setup
+  refused (measured on dido); a Gemini consult caught it.
+  `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead`
+  drives both and requires the same lines. A wrong-user `bridge doctor
+  --config` run now ends "all clear." (13 ok, 4 warn, 0 fail), as the
+  footer does whenever nothing FAILs, below config-file's warn saying the
+  install was not graded. The same consult proposed rewording the footer
+  for every run with warns, which changes every report. That was not taken
+  here.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -2567,7 +2580,9 @@ mentions across the four `ops/audit-*.md` files.
   config-dir does rather than probe as this user (#1023).
   The launcher's pre-setup row names the platform path through
   `buildDoctorDepsFor(path, true)`, never `--config`, so its absence stays
-  "none found", ok. `bridge init`'s preflight leaves the lookup nil, so
+  "none found", ok, and a config there this user cannot read still leaves
+  config-dir and the ports graded, as Setup's preflight grades them
+  (#1023). `bridge init`'s preflight leaves the lookup nil, so
   config-file reports itself skipped and does not block the re-init that
   replaces a broken config. **The port checks still can**: this bullet said
   a broken existing config "cannot block" that re-init until 2026-09-25.
