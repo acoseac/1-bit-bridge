@@ -12889,6 +12889,10 @@ such a name: `.#<name>` beside the file it is editing.
   walk skips irregular files without a word. So a symlink can fail a build
   only through a glob match, and a regular file of the same name shows that
   match by being embedded. The reproduction ran both real shapes.
+- **The go command must be seen to read the overlay.** An overlay it
+  ignored would leave the planted listing equal to the plain one, and the
+  probe green over nothing (NC16). So a source file goes in beside the
+  plants, and must appear among the package's `GoFiles`.
 - **Discovery by `go list`, not by parsing directives**: it answers per
   platform with build tags applied, and each of the three CI platforms runs
   it.
@@ -12900,11 +12904,12 @@ such a name: `.#<name>` beside the file it is editing.
 
 ### Tests and controls
 
-Red on `d595b115` (the tests alone), green on `0217830d` (the fix):
+Red on `d595b115` (the tests alone), green on `0217830d` (the fix). The
+probe's overlay floor came after, in `c0e0b679`:
 
 | test | pins |
 |---|---|
-| `TestEveryEmbedPatternRefusesALeadingDot` (cmd/bridge) | for every package `go list` shows with an embed pattern, a lock beside every file (250 plants) plus a `.DS_Store` in every directory changes no embedded set and causes no error, and every embedded file has its lock planted beside it. Red before, on both packages |
+| `TestEveryEmbedPatternRefusesALeadingDot` (cmd/bridge) | for every package `go list` shows with an embed pattern, a lock beside every file plus a `.DS_Store` in every directory (252 plants) changes no embedded set and causes no error. Every embedded file has its lock planted beside it, and a source file planted the same way appears in the package's `GoFiles`, which proves the go command read the overlay there. Red before, on both packages |
 | `TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse` (internal/admin) | the comparison. A backup on either side is no disagreement; an embedded dot name is reported as the pattern's fault; `player/_util.js` as not embedded; a vanished file as missing. Red before on the two backups and the lock's diagnosis |
 | `TestEmbeddedTemplatesMatchDisk` (internal/admin), `TestEmbeddedUnitTemplatesMatchDisk` (internal/packaging) | templateFS and tmplFS against the files on disk, as `TestEmbeddedStaticTreeMatchesDisk` pins staticFS. Green before: they hold the sets |
 
@@ -12930,6 +12935,7 @@ exactly once, and the file restored after:
 | NC15a | real `_test.go` files, internal and external, each with `//go:embed *.tmpl` | red on the in-package test file's embedded files |
 | NC15b | the same, with `-test` removed from the probe | **green**: without it the probe cannot see a test file's embed |
 | NC15c | the external test file alone | red on the external test file's embedded files |
+| NC16 | the planted listing run without `-overlay` (against `c0e0b679`) | red, and ONLY the overlay floor: "the go command did not read the overlay" for both packages. The embed comparison alone was green |
 
 ### Out of scope
 

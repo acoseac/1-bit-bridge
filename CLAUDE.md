@@ -3114,7 +3114,10 @@ its twin.** The top list is older, shorter, and read first.
   top level. `TestEveryEmbedPatternRefusesALeadingDot` plants a lock
   beside every file and a `.DS_Store` in every directory of every
   embedding package, through `go list -overlay`, and requires the embedded
-  sets to be unchanged. It never writes the tree, since a real lock would
+  sets to be unchanged. A source file planted the same way must show up in
+  the package's `GoFiles`, because an overlay the go command did not read
+  leaves the two listings equal and the test green over nothing. It never
+  writes the tree, since a real lock would
   break the build of the test itself. An overlay file is always regular,
   and that shape answers for both: the go command asks a file's type only
   after a glob has matched its name. **It lists with `-test`**: plain `go
