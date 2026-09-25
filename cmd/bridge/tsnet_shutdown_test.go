@@ -24,12 +24,12 @@ import (
 
 // serve's tailnet side runs on one goroutine: the embedded node's start (up
 // to five minutes, interactive auth included), the status query and binds
-// for HTTP/3, then the HTTPS listen and Serve. serve's teardown closes the
-// node, and nothing joined that goroutine first, so the close could land
-// while it was still starting the node, binding, or opening a listener, and
-// on an error exit its context was still live, so nothing stopped it at all.
-// These tests boot serve in tsnet mode with a fake node (serveOpts.tsnetNode)
-// and hold that goroutine at each of those points across the exit.
+// for HTTP/3, then the HTTPS listen and Serve. Until #1009 nothing joined
+// it: serve's teardown closed the node while the goroutine could still be
+// starting it, binding, or opening a listener, and on an error exit its
+// context was still live, so nothing stopped it at all. These tests boot
+// serve in tsnet mode with a fake node (serveOpts.tsnetNode) and hold that
+// goroutine at each of those points across the exit.
 
 const (
 	msgAdminServer    = "admin server:"

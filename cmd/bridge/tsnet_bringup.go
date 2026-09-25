@@ -382,16 +382,17 @@ func (f *tsnetFront) http3Listeners() []tsnetH3Listener {
 // for the goroutine and every HTTP/3 Serve it started; and only then close
 // the node, which drains magicsock / netcheck / the control plane.
 //
-// The drains and the wait share ONE grace. They run long in exclusive
-// situations: the goroutine serves only once it has brought the node up,
-// and a Serve returns as soon as its Shutdown begins, so after a long drain
-// the goroutine has returned, and a goroutine still bringing the node up
-// has nothing to drain. A grace each would double the worst case for
-// nothing. A goroutine still running when the grace is out (a start stuck
-// in the part of upstream's start that takes no context, or a listen)
-// costs a line, never a hung exit; the node is then closed under it, and
-// the wrapper stops a start that Close lands on, while tsnetListen closes a
-// listener that lands after it.
+// The drains and the wait share ONE grace, because they are rarely long
+// together: the goroutine serves only once it has brought the node up,
+// and a Serve returns as soon as its Shutdown begins, so a long drain
+// leaves a goroutine that has returned, and a goroutine still bringing
+// the node up has at most its HTTP/3 servers published. A grace each
+// would double shutdown's worst case for that overlap. A goroutine still
+// running when the grace is out (a start stuck in the part of upstream's
+// start that takes no context, or a listen) costs a line, never a hung
+// exit; the node is then closed under it, and the wrapper stops a start
+// that Close lands on, while tsnetListen closes a listener that lands
+// after it.
 func (f *tsnetFront) stop(grace time.Duration) {
 	f.cancel()
 	f.mu.Lock()
