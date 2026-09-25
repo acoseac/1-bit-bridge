@@ -309,11 +309,12 @@ func (f *tsnetFront) serveHTTP3(ctx context.Context) {
 }
 
 // bindHTTP3 binds one HTTP/3 server per tailnet address, and reports a
-// bind that fails. It binds nothing once the shutdown has begun, and then
-// closes what it bound and returns none, reporting nothing: a bind that
-// fails after that is the node closing under it, and the wrapper's
-// "called before Start" carries no cancellation for ctxerr to find, so
-// the context is what tells it apart (tsnetListen's rule).
+// bind that fails. It binds no more once the shutdown has begun, and a
+// bind that fails after that is not reported: it is the node closing under
+// it, and the wrapper's "called before Start" carries no cancellation for
+// ctxerr to find, so the context is what tells it apart (tsnetListen's
+// rule). What it did bind goes to publishHTTP3, which refuses it once
+// stop has begun.
 func (f *tsnetFront) bindHTTP3(ctx context.Context, ips []netip.Addr, port string) []tsnetH3Listener {
 	listeners := make([]tsnetH3Listener, 0, len(ips))
 	for _, ip := range ips {
@@ -332,12 +333,6 @@ func (f *tsnetFront) bindHTTP3(ctx context.Context, ips []netip.Addr, port strin
 			srv:  &http3.Server{Handler: f.handler, TLSConfig: f.node.HTTP3TLSConfig()},
 			conn: pconn,
 		})
-	}
-	if ctx.Err() != nil {
-		for _, l := range listeners {
-			_ = l.conn.Close()
-		}
-		return nil
 	}
 	return listeners
 }

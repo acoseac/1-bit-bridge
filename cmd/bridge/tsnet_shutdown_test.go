@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
+	"github.com/quic-go/quic-go/http3"
 	"tailscale.com/ipn/ipnstate"
 )
 
@@ -278,14 +280,15 @@ func TestServeClosesATailnetListenerThatOpensAfterAnErrorExit(t *testing.T) {
 // while the goroutine is binding HTTP/3 on the node's second tailnet
 // address, after the first bind succeeded. That bind then fails the way
 // the wrapper answers once the node has closed. Nothing may be reported,
-// nothing bound after the shutdown began, and nothing served on the first
-// address: a server serving there as the node closes under it reports
-// `h3 serve tsnet` with the transport's closed error.
+// the third address not bound, and nothing served on the first: a server
+// serving there as the node closes under it reports `h3 serve tsnet` with
+// the transport's closed error. (A real node has two addresses at most;
+// the third is what shows a bind after the shutdown began.)
 func TestServeReportsNoTailnetHTTP3BindTheShutdownCutShort(t *testing.T) {
 	t.Cleanup(func() { metrics.RegisterTsnetProvider(nil) })
 	rec := loggingtest.Record(t)
 	node := newFakeTsnetNode()
-	node.ips = twoTailnetAddrs()
+	node.ips = append(twoTailnetAddrs(), netip.MustParseAddr("100.64.0.2"))
 	second := make(chan struct{})
 	hold := newGate()
 	node.bind = func(n int) (net.PacketConn, error) {
@@ -729,4 +732,55 @@ func takenAddress(t *testing.T) string {
 // twoTailnetAddrs is a dual-stack node's pair of tailnet addresses.
 func twoTailnetAddrs() []netip.Addr {
 	return []netip.Addr{netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("fd7a:115c:a1e0::1")}
+}
+
+// TestAServerPublishedAfterStopBeganIsRefused pins the publication gate.
+// stop takes what was published in the critical section that begins it,
+// so a publication after that is refused, and the caller closes what it
+// would have served. The window it closes, a cancel landing between
+// tsnetListen's own check and the publication, has no seam a boot test
+// can hold, so the gate is driven here directly.
+func TestAServerPublishedAfterStopBeganIsRefused(t *testing.T) {
+	f := stoppableFront(t, newFakeTsnetNode())
+	f.stop(time.Second)
+	if f.publishHTTPS(&http.Server{}) {
+		t.Error("an HTTPS server published after stop began was accepted, with nothing left to shut it down")
+	}
+	if f.publishHTTP3([]tsnetH3Listener{{srv: &http3.Server{}}}) {
+		t.Error("HTTP/3 servers published after stop began were accepted, with nothing left to shut them down")
+	}
+}
+
+// TestAServerPublishedBeforeStopIsShutDownByIt is the twin: what was
+// published before stop began is shut down by it.
+func TestAServerPublishedBeforeStopIsShutDownByIt(t *testing.T) {
+	f := stoppableFront(t, newFakeTsnetNode())
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{ReadHeaderTimeout: time.Second}
+	if !f.publishHTTPS(srv) {
+		t.Fatal("an HTTPS server published before stop was refused")
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(lis) }()
+	f.stop(time.Second)
+	select {
+	case err := <-served:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve = %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not shut down the HTTPS server published before it")
+	}
+}
+
+// stoppableFront is a tsnetFront with no goroutine behind it (its done is
+// closed already), so stop runs straight through to closing node.
+func stoppableFront(t *testing.T, node *fakeTsnetNode) *tsnetFront {
+	t.Helper()
+	done := make(chan struct{})
+	close(done)
+	return &tsnetFront{node: node, stderr: &safeBuffer{}, cancel: func() {}, done: done}
 }
