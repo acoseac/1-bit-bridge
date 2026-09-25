@@ -14772,3 +14772,30 @@ and three judgment calls:
   that string, and left its container running on dido. It is the pgrep
   self-match trap one step on. Kill by PID, or by a pattern only the
   target's argv can hold.
+
+### Review
+
+- **Round 1**, on `327e96a1`. Gemini: "No review comments were provided
+  for this pull request." SonarCloud: gate passed with 1 new issue,
+  go:S3776 on `TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig`
+  (cognitive complexity 16 against 15), taken in `dcc994a3`: the
+  assertions moved to `assertConfigDirVerdict`, as #1022's did for the same
+  rule, and NC1, NC12 and NC13 re-run against the refactor turned the same
+  rows red. CodeRabbit posted nothing at all, no walkthrough and no commit
+  status, for 22 minutes.
+- **Round 2**, on `dcc994a3`. SonarCloud: 0 new issues (the S3776 closed
+  as fixed). Gemini (`/gemini review`): two medium findings, both "os.Geteuid
+  is not defined on Windows, so this test file will not compile there",
+  about the root skips in `doctor_test.go` and `doctor_ungraded_ports_test.go`.
+  That is the false positive CLAUDE.md records under Bot-review
+  discipline, declined on measurement: `GOOS=windows go test -c` compiles
+  both packages for amd64 and arm64, `GOOS=windows go vet` passes, and the
+  PR's own `test (windows-latest)` leg had passed on `327e96a1` with both
+  lines in it. Both threads answered with that evidence and resolved.
+  CodeRabbit, asked with `@coderabbitai review` at 21:07: its first
+  walkthrough, at 21:17, covered `071850ad..dcc994a3` whole, "No actionable
+  comments were generated", `coveredCommitId` the head, merge risk minimal,
+  and it answered the command "Already reviewed the last commit". CodeQL
+  green.
+- Every read was paginated, and the `reviewThreads` connection was read to
+  `hasNextPage: false`: two threads, both Gemini's, both resolved.
