@@ -79,9 +79,37 @@ func checkEmbeddedMatchesDisk(t *testing.T, embedded fs.FS, root string, want fu
 // refuse inside a directory it walks. n is how many embedded files it
 // compared.
 func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string) bool) (problems []string, n int, err error) {
-	// Every file on disk under root, mapped to whether this FS should hold it.
+	onDisk, err := filesOnDisk(disk, root, want)
+	if err != nil {
+		return nil, 0, err
+	}
+	inEmbed, err := filesEmbedded(embedded, root)
+	if err != nil {
+		return nil, 0, err
+	}
+	for p, wanted := range onDisk {
+		if wanted && !inEmbed[p] {
+			problems = append(problems, p+" exists on disk but is NOT embedded, so a release "+
+				"build lacks it while a dev checkout serving from disk does not: the pattern "+
+				"does not reach it, or a leading '.' or '_' in a directory below the top level "+
+				"hides it from the walk")
+		}
+	}
+	for p := range inEmbed {
+		wanted, here := onDisk[p]
+		if problem := embeddedProblem(p, wanted, here); problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	sort.Strings(problems)
+	return problems, len(inEmbed), nil
+}
+
+// filesOnDisk maps every file on disk under root to whether want admits it,
+// skipping what the embed refuses.
+func filesOnDisk(disk fs.FS, root string, want func(name string) bool) (map[string]bool, error) {
 	onDisk := map[string]bool{}
-	err = fs.WalkDir(disk, root, func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(disk, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -95,60 +123,56 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 			}
 			return nil
 		}
-		if isEditorDetritus(d.Name()) {
-			return nil
+		if !isEditorDetritus(d.Name()) {
+			onDisk[p] = want(d.Name())
 		}
-		onDisk[p] = want(d.Name())
 		return nil
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("walk %s/ on disk: %w", root, err)
+		return nil, fmt.Errorf("walk %s/ on disk: %w", root, err)
 	}
+	return onDisk, nil
+}
 
+// filesEmbedded lists the files embedded under root, except a backup: that is
+// embedded wherever a pattern walks its directory (see isEditorDetritus), so
+// on this side it is no disagreement either.
+func filesEmbedded(embedded fs.FS, root string) (map[string]bool, error) {
 	inEmbed := map[string]bool{}
-	err = fs.WalkDir(embedded, root, func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(embedded, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		// A backup is embedded wherever a pattern walks its directory (see
-		// isEditorDetritus), so on this side it is no disagreement either.
 		if !d.IsDir() && !strings.HasSuffix(d.Name(), "~") {
 			inEmbed[p] = true
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("walk embedded %s/: %w", root, err)
+		return nil, fmt.Errorf("walk embedded %s/: %w", root, err)
 	}
+	return inEmbed, nil
+}
 
-	for p, wanted := range onDisk {
-		if wanted && !inEmbed[p] {
-			problems = append(problems, p+" exists on disk but is NOT embedded, so a release "+
-				"build lacks it while a dev checkout serving from disk does not: the pattern "+
-				"does not reach it, or a leading '.' or '_' in a directory below the top level "+
-				"hides it from the walk")
-		}
+// embeddedProblem describes what is wrong with embedding p, given whether the
+// disk side has p (here) and wants it (wanted), or returns "" when nothing is.
+func embeddedProblem(p string, wanted, here bool) string {
+	switch {
+	// First, whatever the disk side made of the name: a leading "." in any
+	// element is the pattern's doing. "/"+p reaches the first element too,
+	// which is the whole path when root is ".".
+	case strings.Contains("/"+p, "/."):
+		return p + ` is embedded, and a leading "." names an editor's lock, a .DS_Store or ` +
+			`a swap file: the pattern lets it through. Start every glob element with [^.], ` +
+			`never * (TestEveryEmbedPatternRefusesALeadingDot)`
+	case wanted:
+		return ""
+	case here:
+		return p + " is embedded, but it is not a file this FS holds: the pattern is wider " +
+			"than the FS it fills"
+	default:
+		return p + " is embedded but missing from disk (stale build cache?)"
 	}
-	for p := range inEmbed {
-		wanted, here := onDisk[p]
-		switch {
-		// First, whatever the disk side made of the name: a leading "." in
-		// any element is the pattern's doing. "/"+p reaches the first
-		// element too, which is the whole path when root is ".".
-		case strings.Contains("/"+p, "/."):
-			problems = append(problems, p+` is embedded, and a leading "." names an editor's `+
-				`lock, a .DS_Store or a swap file: the pattern lets it through. Start every glob `+
-				`element with [^.], never * (TestEveryEmbedPatternRefusesALeadingDot)`)
-		case wanted:
-		case here:
-			problems = append(problems, p+" is embedded, but it is not a file this FS holds: "+
-				"the pattern is wider than the FS it fills")
-		default:
-			problems = append(problems, p+" is embedded but missing from disk (stale build cache?)")
-		}
-	}
-	sort.Strings(problems)
-	return problems, len(inEmbed), nil
 }
 
 // TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse drives
