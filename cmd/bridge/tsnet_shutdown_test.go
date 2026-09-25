@@ -385,6 +385,58 @@ func TestServeStillReportsATailnetHTTP3BindThatFails(t *testing.T) {
 	node.mustHaveBeenClosedOnceAfterUse(t)
 }
 
+// TestServeWaitsForATailnetHTTP3ServeReportingAFailure pins the join on the
+// HTTP/3 Serve goroutines, and is the twin of the `h3 serve tsnet`
+// assertions above: a server whose conn fails on a live context is still
+// reported. The goroutine reporting it is held in that report across a
+// shutdown, and runServe must wait for it. stop joins every Serve goroutine
+// the tailnet side started, not only the goroutine that started them.
+func TestServeWaitsForATailnetHTTP3ServeReportingAFailure(t *testing.T) {
+	t.Cleanup(func() { metrics.RegisterTsnetProvider(nil) })
+	park := loggingtest.ParkOn(t, msgH3ServeFailed)
+	node := newFakeTsnetNode()
+	node.ips = twoTailnetAddrs()[:1]
+	node.bind = func(int) (net.PacketConn, error) { return net.ListenPacket("udp", "127.0.0.1:0") }
+	node.listen = func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	cfgPath := writeTsnetConfig(t, "127.0.0.1:0", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	stderr := &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0", tsnetNode: node},
+			&safeBuffer{}, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	// Registered after the drain, so it runs before it.
+	t.Cleanup(park.Release)
+	t.Cleanup(node.closeHandedOut)
+
+	// The HTTP/3 server has started by the time the goroutine listens for
+	// HTTPS. Its conn then fails under it, as a socket error would.
+	waitForServe(t, node.listenEntered, "the tailnet listen", exited, done, stderr)
+	conns := node.handedOutConns()
+	if len(conns) != 1 {
+		t.Fatalf("precondition: the node handed out %d HTTP/3 conn(s), want 1", len(conns))
+	}
+	_ = conns[0].PacketConn.Close()
+	park.Wait(t)
+	cancel()
+	select {
+	case <-exited:
+		t.Errorf("runServe returned while an HTTP/3 Serve goroutine its tailnet side started was "+
+			"still running; stderr=%s", stderr.String())
+	case <-time.After(time.Second):
+	}
+	park.Release()
+	if code := waitServeExit(t, exited, done, stderr); code != 0 {
+		t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	mustReportOnceServe(t, &park.Recorder, msgH3ServeFailed)
+	node.mustHaveBeenClosedOnceAfterUse(t)
+}
+
 // fakeTsnetNode is the embedded tailnet node for serve's boot tests
 // (serveOpts.tsnetNode). A test holds its Start, its ListenTLS or one of its
 // ListenPacket binds open across serve's exit. It records the calls that
