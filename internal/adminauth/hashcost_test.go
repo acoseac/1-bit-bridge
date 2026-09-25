@@ -76,15 +76,19 @@ const hashCostSetter = "SetTestHashCost"
 
 // hashCostSetterCallers returns the non-test Go files under root that call
 // hashCostSetter, or that it cannot parse, with how many files it read.
+//
+// It walks with filepath.WalkDir, which asks hashCostDirRule about a
+// directory before listing it. filepath.Walk lists it first, so a directory
+// the rule skips still failed the run when it could not be listed.
 func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return hashCostDirRule(root, path, info.Name())
+		if d.IsDir() {
+			return hashCostDirRule(root, path, d.Name())
 		}
-		if !hashCostReads(path, info.Name()) {
+		if !hashCostReads(path, d.Name()) {
 			return nil
 		}
 		visited++
@@ -107,6 +111,15 @@ func hashCostDirRule(root, path, name string) error {
 	}
 	switch name {
 	case ".git", "dist", "bin", "node_modules", "testdata":
+		return filepath.SkipDir
+	}
+	// Nor a directory whose name begins with "_", which the go tool ignores
+	// at any depth (`go help packages`), so no build compiles what is in it.
+	// CLAUDE.md tells an operator to put a throwaway helper in one, and a
+	// helper in mid-edit there failed this guard as "could not parse". The
+	// go tool's "." rule is not borrowed with it: this walk reads the Go
+	// program tracked under .github/, and that rule would drop it.
+	if strings.HasPrefix(name, "_") {
 		return filepath.SkipDir
 	}
 	// Nor another checkout inside this one (sweeptest.IsOtherCheckout), such

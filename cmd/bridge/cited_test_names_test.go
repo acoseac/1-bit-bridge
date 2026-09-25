@@ -736,11 +736,23 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
-// whose conventions are not ours to police; another checkout; and any
-// directory that holds a go.mod of its own. The root itself is never
-// skipped. filepath.WalkDir hands the first callback the root's own base
-// name, so with the name list checked first, a checkout cloned into a
-// directory called bin, dist or vendor skipped itself. (Gemini on #995.)
+// whose conventions are not ours to police; a directory whose name begins
+// with "_"; another checkout; and any directory that holds a go.mod of its
+// own. The root itself is never skipped. filepath.WalkDir hands the first
+// callback the root's own base name, so with the name list checked first, a
+// checkout cloned into a directory called bin, dist or vendor skipped
+// itself. (Gemini on #995.)
+//
+// A directory whose name begins with "_" is ignored by the go tool at any
+// depth (`go help packages`), so `go test ./...` runs no test in it, and a
+// test declared there satisfies no citation here. CLAUDE.md tells an
+// operator to put a throwaway helper in one, and the walk read it: a test
+// there satisfied a citation this tree does not back, which passes, and a
+// comment there, or a test file in mid-edit, failed the guard. The name
+// decides before the directory is listed, as filepath.WalkDir asks first,
+// so one the walk cannot list fails nothing either. A doc in one goes unread
+// with it. Git would track such a doc, unlike a file inside another
+// checkout, and on 2026-09-25 it tracked no file below a "_" directory.
 //
 // A directory with its own go.mod is another module. `go test ./...` from
 // the root never runs it, so a test declared there satisfies no citation
@@ -770,6 +782,9 @@ func skipsForCitations(root, path, name string) bool {
 	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
 		return true
 	}
+	if strings.HasPrefix(name, "_") {
+		return true
+	}
 	if sweeptest.IsOtherCheckout(root, path) {
 		return true
 	}
@@ -795,7 +810,8 @@ func skipsForCitations(root, path, name string) bool {
 //
 // The go tool's `.`-directory rule is not borrowed. `.github/` holds a
 // tracked doc and a tracked Go file this guard reads, and that rule would
-// drop both. Its nested-module rule is borrowed, in skipsForCitations.
+// drop both. Its `_`-directory and nested-module rules are borrowed, in
+// skipsForCitations.
 func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 	switch {
 	case strings.HasSuffix(name, ".md"):
