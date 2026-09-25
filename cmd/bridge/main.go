@@ -2263,6 +2263,12 @@ type serveOpts struct {
 	// which pass a fake so a start or a listen can be held open across a
 	// shutdown, with no tailnet. Per invocation for tailscaleCLI's reason.
 	tsnetNode tsnetNode
+	// wrapAPIHandler wraps the API handler every listener serves: LAN
+	// HTTPS, LAN HTTP/3 and the tailnet's. Nil (the handler as built)
+	// everywhere but the boot tests, which add a route that ignores its
+	// request's context, to hold a drain open across a shutdown. Per
+	// invocation for tailscaleCLI's reason.
+	wrapAPIHandler func(http.Handler) http.Handler
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -4244,9 +4250,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		tlsConfig.NextProtos = append([]string{"h2", "http/1.1"}, extra...)
 	}
 
+	// apiHandler is the API handler a listener serves: a fresh mux per
+	// call over the server's shared state (its rate limiters are the
+	// server's), as apiSrv.Handler() is, wrapped for a boot test that
+	// asked (serveOpts.wrapAPIHandler).
+	apiHandler := func() http.Handler {
+		if opts.wrapAPIHandler != nil {
+			return opts.wrapAPIHandler(apiSrv.Handler())
+		}
+		return apiSrv.Handler()
+	}
+
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
-		Handler:   apiSrv.Handler(),
+		Handler:   apiHandler(),
 		TLSConfig: tlsConfig,
 		// Defence-in-depth against slow-loris / half-open sockets.
 		// WriteTimeout is deliberately left UNSET (zero) because
@@ -5032,7 +5049,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 				if lanTLSConfig != nil {
 					lanH3Srv = &http3.Server{
-						Handler:   apiSrv.Handler(), // Crucial: Extract the compiled http.Handler
+						Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
 						TLSConfig: lanTLSConfig,
 					}
 					go func() {
@@ -5109,7 +5126,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var tsFront *tsnetFront
 	var tsnetServeErr <-chan error // nil outside tsnet mode, so never ready
 	if tsnetServer != nil {
-		tsFront = startTsnetFront(ctx, tsnetServer, apiSrv.Handler(), cfg.ListenAddress, !cfg.DisableHTTP3, stderr)
+		tsFront = startTsnetFront(ctx, tsnetServer, apiHandler(), cfg.ListenAddress, !cfg.DisableHTTP3, stderr)
 		defer tsFront.stop(shutdownGrace)
 		tsnetServeErr = tsFront.serveErr
 	}

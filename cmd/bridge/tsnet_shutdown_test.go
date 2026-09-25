@@ -944,6 +944,48 @@ func TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
 	}
 }
 
+// TestStopClosesTheNodeOnlyOnceTheForceCloseHasToldTheClient: past its
+// deadline, http3.Server.Shutdown calls Close, which writes each
+// connection's CONNECTION_CLOSE and only then waits for the handlers. A
+// stop that closes the node the moment the grace runs out closes the conn
+// those writes go to (a real node's Close takes its netstack down), so a
+// client whose request is held is never told, and waits out its idle
+// timeout. stop must give quic-go's force-close its allowance first.
+func TestStopClosesTheNodeOnlyOnceTheForceCloseHasToldTheClient(t *testing.T) {
+	route := newHeldRoute()
+	serverTLS, clientTLS := loopbackTLSPair(t)
+	node := newFakeTsnetNode()
+	node.bind = func(int) (net.PacketConn, error) { return net.ListenPacket("udp", "127.0.0.1:0") }
+	// Handed out by the node, so its Close closes the conn, as a real
+	// node's does.
+	conn, err := node.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(node.closeHandedOut)
+	srv := &http3.Server{Handler: route.wrap(http.NotFoundHandler()), TLSConfig: serverTLS}
+	f := stoppableFront(t, node)
+	if !f.publishHTTP3([]tsnetH3Listener{{srv: srv, conn: conn}}) {
+		t.Fatal("precondition: an HTTP/3 server published before stop was refused")
+	}
+	go func() { _ = srv.Serve(conn) }()
+	told := newHTTP3Client(t, clientTLS).get("https://" + conn.LocalAddr().String() + heldPath)
+	// Registered last, so it runs first: the held handler goes before the
+	// rest is torn down.
+	t.Cleanup(route.release.open)
+	select {
+	case <-route.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("precondition: the HTTP/3 request never reached the handler")
+	}
+
+	f.stop(500 * time.Millisecond)
+	if n := node.closeCount(); n != 1 {
+		t.Fatalf("precondition: the node was closed %d time(s), want once", n)
+	}
+	mustHaveBeenToldTheServerClosed(t, told)
+}
+
 // loopbackTLSPair is a server TLS config with a fresh self-signed
 // certificate for 127.0.0.1, and a client config that trusts exactly it.
 func loopbackTLSPair(t *testing.T) (server, client *tls.Config) {
