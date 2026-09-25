@@ -3141,7 +3141,7 @@ its twin.** The top list is older, shorter, and read first.
   `TestEmbeddedUnitTemplatesMatchDisk` pin the other two FSes the same way.
 - **A test that sweeps this repo's own files skips a directory below its
   root that holds a `.git` entry: another checkout, which is not this
-  tree** (#NNN). Claude Code keeps its worktrees of other branches under
+  tree** (#1007). Claude Code keeps its worktrees of other branches under
   `.claude/worktrees/`, each a whole checkout that git does not track and
   CI never has. With the three the main checkout held, 1,208 of the 1,617
   files the hash-cost guard opened were theirs, and 3,366 of the 4,513 the
@@ -3561,7 +3561,7 @@ its twin.** The top list is older, shorter, and read first.
   that exists. Three leftover worktrees still held the stale citations, so
   the extended guard went red in the main checkout alone, and an old copy's
   tests can satisfy a citation this tree no longer backs, which passes. That
-  was the one directory rule #995 added (#NNN added the `.git` rule, for a
+  was the one directory rule #995 added (#1007 added the `.git` rule, for a
   checkout with no go.mod); #993's reason for not borrowing the go tool's
   `.`-directory rule (`.github/`) still holds. (#995)
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through

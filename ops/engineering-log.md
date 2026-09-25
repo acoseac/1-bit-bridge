@@ -13043,7 +13043,7 @@ build proves nothing. Both are red on the same floors.
   the split behaviour-identical. **The Gemini app reviewed no commit of
   this PR** (daily quota, all session). Three direct consults stood in.
 
-## 2026-09-25 — a checkout nested in this one is not this tree (#NNN)
+## 2026-09-25 — a checkout nested in this one is not this tree (#1007)
 
 #993's entry recorded that three root walks read `.claude/worktrees/`,
 where Claude Code keeps whole checkouts of other branches, each with a
