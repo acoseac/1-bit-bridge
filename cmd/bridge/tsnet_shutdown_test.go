@@ -884,7 +884,8 @@ func TestATailnetHTTP3BindCutShortByTheShutdownServesNothing(t *testing.T) {
 // every connection's handling to finish. A handler that ignores its
 // context (a read from a hung NAS mount, say) therefore held stop, and the
 // exit with it, for as long as it blocked. stop gives the drains the grace,
-// says so, and closes the node under them (CodeRabbit, #1009).
+// and quic-go's force-close its allowance past it, says so, and closes the
+// node under them (CodeRabbit, #1009).
 func TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
 	release := newGate()
 	t.Cleanup(release.open)

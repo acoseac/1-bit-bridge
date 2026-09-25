@@ -24,8 +24,8 @@ import (
 // out lost the client's CONNECTION_CLOSE every time, whether the
 // connection was idle, streaming or held by such a handler, and the
 // client learned of the close only from its idle timeout. Closed after
-// this allowance, it lost none. Closing a tailnet node closes its conns
-// the same way.
+// this allowance, it lost none. A tailnet node's Close closes the conns
+// its servers write to, so the same holds there.
 const http3ForceCloseAllowance = time.Second
 
 // drainedWithin waits until drained is closed, for as long as ctx lasts and
