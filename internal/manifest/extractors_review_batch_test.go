@@ -42,6 +42,13 @@ func TestSkipID3v2(t *testing.T) {
 		{"v2.3 footer-bit-set is ignored", append(tag(3, 0x10), marker...), 10 + payloadSize},
 		{"v2.4 footer skips extra 10", append(tag(4, 0x10), marker...), 10 + payloadSize + 10},
 		{"too short rewinds to start", []byte("ID3"), 0},
+		// A tagger that prepends a new tag without removing the old leaves a
+		// stack, which Core Audio skips in turn (measured 2026-09-25).
+		{"a stack of v2.3 then v2.4 skips both", append(append(tag(3, 0x00), tag(4, 0x00)...), marker...), 2 * (10 + payloadSize)},
+		{"a stack at the cap skips every tag", append(bytes.Repeat(tag(3, 0x00), 8), marker...),
+			8 * (10 + payloadSize)},
+		{"a stack past the cap stops at the cap", append(bytes.Repeat(tag(3, 0x00), 8+1), marker...),
+			8 * (10 + payloadSize)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,6 +139,44 @@ func TestExtractFLAC_ID3v2PrefixStillReadsFormatAndMultiValue(t *testing.T) {
 	// Multi-value ARTIST recovered past the prefix (applyFLACMultiValueArtists).
 	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
 		t.Errorf("Artist = %q, want %q (multi-value join must skip the ID3v2 prefix)", tr.Artist, "Abdullah Ibrahim; Ekaya")
+	}
+}
+
+// TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue is F4 behind a
+// STACK of prepended tags — a tagger that adds a new tag without removing the
+// old. Core Audio plays such a file; skipping one tag left the cursor on the
+// second, so the fLaC check failed and both passes bailed.
+func TestExtractFLAC_ID3v2StackStillReadsFormatAndMultiValue(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.flac")
+	writeMinimalFLACPairs(t, base, 96000, 24, [][2]string{
+		{"TITLE", "Reflections"},
+		{"ARTIST", "Abdullah Ibrahim"},
+		{"ARTIST", "Ekaya"},
+	})
+	flacBytes, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatalf("read base flac: %v", err)
+	}
+	stack := append(buildID3v2_3(map[string]string{"title": "Older tag"}),
+		buildID3v2_3(map[string]string{"title": "Newer tag"})...)
+	p := filepath.Join(dir, "stacked.flac")
+	if err := os.WriteFile(p, append(stack, flacBytes...), 0o644); err != nil {
+		t.Fatalf("write stacked flac: %v", err)
+	}
+
+	tr := &Track{Path: "stacked.flac", Size: 1, ModTime: time.Now()}
+	if err := Extract(p, tr); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if tr.SampleRate == nil || *tr.SampleRate != 96000 {
+		t.Errorf("SampleRate = %v, want 96000 (the format parse must skip the whole stack)", tr.SampleRate)
+	}
+	if tr.BitsPerSample == nil || *tr.BitsPerSample != 24 {
+		t.Errorf("BitsPerSample = %v, want 24 (the format parse must skip the whole stack)", tr.BitsPerSample)
+	}
+	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
+		t.Errorf("Artist = %q, want %q (the multi-value join must skip the whole stack)", tr.Artist, "Abdullah Ibrahim; Ekaya")
 	}
 }
 
