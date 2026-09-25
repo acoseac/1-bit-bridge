@@ -3,6 +3,7 @@ package admin
 import (
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,47 +143,86 @@ func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string)
 // on the embedded side is a pattern letting it through, and the report says
 // that rather than blaming a cache.
 func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
-	disk := fstest.MapFS{
-		"static/app.js":           {},
-		"static/app.js~":          {},
-		"static/.#app.js":         {},
-		"static/.DS_Store":        {},
-		"static/player/boot.js":   {},
-		"static/player/boot.js~":  {},
-		"static/player/.#boot.js": {},
-		"static/player/_util.js":  {},
-	}
-	embedded := fstest.MapFS{
-		"static/app.js":          {},
-		"static/app.js~":         {},
-		"static/player/boot.js":  {},
-		"static/player/boot.js~": {},
-		"static/.#app.js":        {}, // what static/* embedded from a Windows-shape lock
-		"static/gone.js":         {},
-	}
-	problems, _, err := embedDiskProblems(embedded, disk, "static", func(string) bool { return true })
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := map[string]string{
-		"static/.#app.js":        `a leading "."`,
-		"static/gone.js":         "missing from disk",
-		"static/player/_util.js": "is NOT embedded",
-	}
-	for _, p := range problems {
-		file, _, _ := strings.Cut(p, " ")
-		phrase, ok := want[file]
-		switch {
-		case !ok:
-			t.Errorf("unexpected problem: %s", p)
-		case !strings.Contains(p, phrase):
-			t.Errorf("the problem for %s should say %q: %s", file, phrase, p)
-		}
-		delete(want, file)
-	}
-	for file := range want {
-		t.Errorf("no problem reported for %s", file)
+	for _, tc := range []struct {
+		name     string
+		root     string
+		want     func(name string) bool
+		disk     fstest.MapFS
+		embedded fstest.MapFS
+		problems map[string]string // file -> a phrase its problem must contain
+	}{
+		{
+			name: "static",
+			root: "static",
+			want: func(string) bool { return true },
+			disk: fstest.MapFS{
+				"static/app.js":           {},
+				"static/app.js~":          {},
+				"static/.#app.js":         {},
+				"static/.DS_Store":        {},
+				"static/player/boot.js":   {},
+				"static/player/boot.js~":  {},
+				"static/player/.#boot.js": {},
+				"static/player/_util.js":  {},
+				// A tool's dot-directory. The embed refuses it at every level
+				// ([^.] at the top, the walk below), so it is not the console's.
+				"static/.cache/tool.js":        {},
+				"static/player/.cache/deep.js": {},
+			},
+			embedded: fstest.MapFS{
+				"static/app.js":          {},
+				"static/app.js~":         {},
+				"static/player/boot.js":  {},
+				"static/player/boot.js~": {},
+				"static/.#app.js":        {}, // what static/* embedded from a Windows-shape lock
+				"static/gone.js":         {},
+			},
+			problems: map[string]string{
+				"static/.#app.js":        `a leading "."`,
+				"static/gone.js":         "missing from disk",
+				"static/player/_util.js": "is NOT embedded",
+			},
+		},
+		{
+			// A file this FS should not hold, embedded by a pattern wider than
+			// its own: it is on disk, so "missing from disk" would be false.
+			name: "templates",
+			root: "templates",
+			want: func(name string) bool { return path.Ext(name) == ".html" },
+			disk: fstest.MapFS{
+				"templates/page.html": {},
+				"templates/notes.txt": {},
+			},
+			embedded: fstest.MapFS{
+				"templates/page.html": {},
+				"templates/notes.txt": {},
+			},
+			problems: map[string]string{
+				"templates/notes.txt": "wider than",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems, _, err := embedDiskProblems(tc.embedded, tc.disk, tc.root, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := maps.Clone(tc.problems)
+			for _, p := range problems {
+				file, _, _ := strings.Cut(p, " ")
+				phrase, ok := want[file]
+				switch {
+				case !ok:
+					t.Errorf("unexpected problem: %s", p)
+				case !strings.Contains(p, phrase):
+					t.Errorf("the problem for %s should say %q: %s", file, phrase, p)
+				}
+				delete(want, file)
+			}
+			for file := range want {
+				t.Errorf("no problem reported for %s", file)
+			}
+		})
 	}
 }
 
