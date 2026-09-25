@@ -1,14 +1,18 @@
 package admin
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // TestEmbeddedStaticTreeMatchesDisk guards a failure mode that is not a
@@ -32,52 +36,140 @@ import (
 // suck a macOS .DS_Store (and any editor swap file) into every release
 // binary. The fix is to notice, which is what this does.
 func TestEmbeddedStaticTreeMatchesDisk(t *testing.T) {
+	checkEmbeddedMatchesDisk(t, staticFS, "static", func(string) bool { return true })
+}
+
+// TestEmbeddedTemplatesMatchDisk is the same pin for templateFS: every .html
+// file under templates/ is embedded, and nothing else is. New parses the
+// templates at startup, so one that is missing from the embed fails the
+// console's construction outright.
+func TestEmbeddedTemplatesMatchDisk(t *testing.T) {
+	checkEmbeddedMatchesDisk(t, templateFS, "templates", func(name string) bool {
+		return path.Ext(name) == ".html"
+	})
+}
+
+// checkEmbeddedMatchesDisk fails t for every disagreement embedDiskProblems
+// finds between embedded and the package directory, and when nothing under
+// root is embedded at all.
+func checkEmbeddedMatchesDisk(t *testing.T, embedded fs.FS, root string, want func(name string) bool) {
+	t.Helper()
+	problems, n, err := embedDiskProblems(embedded, os.DirFS("."), root, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+	if n == 0 {
+		t.Fatalf("nothing is embedded under %s/: the embed directive is broken", root)
+	}
+}
+
+// embedDiskProblems compares the files embedded under root with the files on
+// disk under root whose names want admits, and describes each disagreement.
+// n is how many embedded files it compared.
+func embedDiskProblems(embedded, disk fs.FS, root string, want func(name string) bool) (problems []string, n int, err error) {
 	onDisk := map[string]bool{}
-	err := filepath.WalkDir("static", func(p string, d os.DirEntry, err error) error {
+	err = fs.WalkDir(disk, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if d.IsDir() || isEditorDetritus(d.Name()) || !want(d.Name()) {
 			return nil
 		}
-		if isEditorDetritus(d.Name()) {
-			return nil
-		}
-		onDisk[filepath.ToSlash(p)] = true
+		onDisk[p] = true
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk disk static/: %v", err)
+		return nil, 0, fmt.Errorf("walk %s/ on disk: %w", root, err)
 	}
 
-	embedded := map[string]bool{}
-	err = fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+	inEmbed := map[string]bool{}
+	err = fs.WalkDir(embedded, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if !d.IsDir() {
-			embedded[p] = true
+			inEmbed[p] = true
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk embedded static/: %v", err)
+		return nil, 0, fmt.Errorf("walk embedded %s/: %w", root, err)
 	}
 
 	for p := range onDisk {
-		if !embedded[p] {
-			t.Errorf("%s exists on disk but is NOT embedded — a leading '.' or '_' in a "+
-				"path segment excludes it from //go:embed static/*, so it will 404 in a "+
-				"release build while working from a dev checkout", p)
+		if !inEmbed[p] {
+			problems = append(problems, p+" exists on disk but is NOT embedded, so a release "+
+				"build lacks it while a dev checkout serving from disk does not: the pattern "+
+				"does not reach it, or a leading '.' or '_' in a directory below the top level "+
+				"hides it from the walk")
 		}
 	}
-	for p := range embedded {
+	for p := range inEmbed {
 		if !onDisk[p] {
-			t.Errorf("%s is embedded but missing from disk (stale build cache?)", p)
+			problems = append(problems, p+" is embedded but missing from disk (stale build cache?)")
 		}
 	}
-	if len(embedded) == 0 {
-		t.Fatal("no embedded static assets — the embed directive is broken")
+	sort.Strings(problems)
+	return problems, len(inEmbed), nil
+}
+
+// TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse drives
+// embedDiskProblems with what an editor and the OS leave beside the console's
+// files, on both sides of the comparison.
+//
+// The embedded side holds what a pattern cannot refuse. A backup (`app.js~`)
+// is embedded by any pattern that reaches its directory, because the go
+// tool's walk below a matched directory skips only "." and "_" names. So a
+// backup is no disagreement, whichever side it is on: it was reported as
+// "embedded but missing from disk (stale build cache?)" about a file sitting
+// on disk, every time emacs saved an asset. A leading "." IS refused, so one
+// on the embedded side is a pattern letting it through, and the report says
+// that rather than blaming a cache.
+func TestEmbedDiskProblemsJudgesEachSideByWhatItsRuleCanRefuse(t *testing.T) {
+	disk := fstest.MapFS{
+		"static/app.js":           {},
+		"static/app.js~":          {},
+		"static/.#app.js":         {},
+		"static/.DS_Store":        {},
+		"static/player/boot.js":   {},
+		"static/player/boot.js~":  {},
+		"static/player/.#boot.js": {},
+		"static/player/_util.js":  {},
+	}
+	embedded := fstest.MapFS{
+		"static/app.js":          {},
+		"static/app.js~":         {},
+		"static/player/boot.js":  {},
+		"static/player/boot.js~": {},
+		"static/.#app.js":        {}, // what static/* embedded from a Windows-shape lock
+		"static/gone.js":         {},
+	}
+	problems, _, err := embedDiskProblems(embedded, disk, "static", func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"static/.#app.js":        `a leading "."`,
+		"static/gone.js":         "missing from disk",
+		"static/player/_util.js": "is NOT embedded",
+	}
+	for _, p := range problems {
+		file, _, _ := strings.Cut(p, " ")
+		phrase, ok := want[file]
+		switch {
+		case !ok:
+			t.Errorf("unexpected problem: %s", p)
+		case !strings.Contains(p, phrase):
+			t.Errorf("the problem for %s should say %q: %s", file, phrase, p)
+		}
+		delete(want, file)
+	}
+	for file := range want {
+		t.Errorf("no problem reported for %s", file)
 	}
 }
 
