@@ -515,6 +515,19 @@ lost my library."
   4 MiB until v15, costing every moov-after-mdat M4A (ffmpeg's default) its
   codec, rate, bits and duration. The M4A fixtures in `testdata/m4a` are
   byte-identical to the iOS app's `AVTagFixtures`; regenerate both or neither.
+- **`skipID3v2` walks a STACK of prepended ID3v2 tags, at most
+  `maxStackedID3v2Tags` (8), not only the first** (ExtractorVersion 16, from the
+  iOS app's FLAC follow-up to #1935). A tagger that prepends a new tag without
+  removing the old leaves two, and Core Audio plays such a FLAC (measured
+  2026-09-25); stopping after one left the cursor on the second, so the fLaC
+  check failed ("bad magic ID3") and the track lost its rate, depth, duration
+  and multi-value artists, and an MP3's frame search began inside a tag. Its
+  iOS twin, `FLACStreamInfo.magicOffset(reading:)` (the engine's STREAMINFO
+  read and the scanner's `streamStart` share it), has the same cap and the same
+  v2.4-only footer, and also refuses a size byte that isn't synchsafe (Core
+  Audio refuses that file) where this masks it, as it always has. **Don't stop
+  after one tag, don't drop the cap, and don't change one side's walk without
+  the other.**
 - **`Track.Enriched` allocates per row; don't reintroduce package-level singleton
   bool pointers.** `Track` is exported, so a shared pointer lets any downstream
   write clobber every subsequent read for the process lifetime. The cost is
