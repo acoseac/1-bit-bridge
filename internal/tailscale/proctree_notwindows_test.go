@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/proctest"
 )
 
 // wrappedCLI is a fake `tailscale` shaped like the standalone macOS
@@ -94,8 +96,9 @@ func (c wrappedCLI) innerPID(t *testing.T) int {
 //   - The call returns and the inner process lives on. That is what
 //     unblocking Wait by other means (Cmd.WaitDelay closing the pipes)
 //     would give: a prompt return with the writer still running. The
-//     inner pid must be gone, which a killed process is within
-//     milliseconds and a blocked one never is.
+//     inner process must have exited, which a killed one has within
+//     milliseconds and a blocked one never has. Exited, not reaped: a
+//     zombie writes nothing, and whether one is reaped is up to init.
 func TestCancelStopsTheWholeCLIProcessTree(t *testing.T) {
 	cases := []struct {
 		name string
@@ -135,17 +138,21 @@ func TestCancelStopsTheWholeCLIProcessTree(t *testing.T) {
 					"Wait stayed blocked on the pipes the orphan held.", tc.name)
 			}
 
+			// proctest, not kill(pid, 0): nothing here reaps the inner
+			// process, a grandchild, and where init does not either (a
+			// container run without --init) it stays a zombie, which
+			// kill(pid, 0) calls alive.
 			deadline := time.Now().Add(5 * time.Second)
 			for {
-				err := syscall.Kill(pid, 0)
-				if errors.Is(err, syscall.ESRCH) {
+				exited, why := proctest.Exited(pid)
+				if exited {
 					break
 				}
 				if time.Now().After(deadline) {
 					c.let()
 					t.Fatalf("%s returned, but the CLI process it started (pid %d) is still "+
-						"alive 5s after the cancel (kill(pid, 0) = %v). It will write "+
-						"whenever it finishes, after its caller has moved on.", tc.name, pid, err)
+						"alive 5s after the cancel (%s). It will write "+
+						"whenever it finishes, after its caller has moved on.", tc.name, pid, why)
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
