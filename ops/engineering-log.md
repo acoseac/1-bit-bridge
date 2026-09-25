@@ -13288,5 +13288,6 @@ been over its daily quota for recent PRs):
   name against its skip list. Not reachable from the whole-tree test,
   whose root is `../..`, but the helper now takes any root and every other
   walk here exempts it. Taken, and pinned by naming the hash-cost
-  fixture's root `dist`: with the exemption removed, the fixture reads
-  nothing (NC R1 below).
+  fixture's root `dist`. Control R1, against `4affabe3`: with the
+  exemption removed the fixture read 0 files and went red, while the
+  whole-tree test stayed green, as its root is `../..`.
