@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +34,8 @@ const (
 // up alongside it, under the same grace. The deferred stop that follows the
 // shutdown branch's must do nothing, so each drain reports giving up once,
 // both clients are told the server closed, and the node is closed once,
-// after use.
+// after use. The tailnet goroutine returns once its servers' drains begin,
+// so nothing reports giving up on it.
 func TestServeShutdownDrainsTheTailnetBesideTheLAN(t *testing.T) {
 	t.Cleanup(func() { metrics.RegisterTsnetProvider(nil) })
 	lanRoute, tailnetRoute := newHeldRouteAt(heldPathLAN), newHeldRouteAt(heldPathTailnet)
@@ -113,6 +115,10 @@ func TestServeShutdownDrainsTheTailnetBesideTheLAN(t *testing.T) {
 	}
 	mustReportOnce(t, stderr, msgLANHTTP3GaveUp)
 	mustReportOnce(t, stderr, msgTsnetDrainGaveUp)
+	if s := stderr.String(); strings.Contains(s, msgTsnetGaveUp) {
+		t.Errorf("shutdown reported giving up on the tailnet goroutine, which returns once its "+
+			"servers' drains begin; stderr=%s", s)
+	}
 	mustHaveBeenToldTheServerClosed(t, lanTold)
 	mustHaveBeenToldTheServerClosed(t, tailnetTold)
 	mustBeFreeOnUDP(t, addr)
