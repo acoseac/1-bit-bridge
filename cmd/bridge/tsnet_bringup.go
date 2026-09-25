@@ -376,11 +376,13 @@ func (f *tsnetFront) http3Listeners() []tsnetH3Listener {
 
 // stop is serve's teardown of its tailnet side, deferred so it runs on
 // EVERY exit path, and in this order: cancel the goroutine; refuse any
-// later publication and take what was published; drain that, HTTP/3 first,
-// then HTTPS, so in-flight requests on either get a clean
-// http.ErrServerClosed instead of a mid-flight socket / QUIC reset; wait
-// for the goroutine and every HTTP/3 Serve it started; and only then close
-// the node, which drains magicsock / netcheck / the control plane.
+// later publication and take what was published; drain that, every server
+// at once, so in-flight requests on any of them get a clean
+// http.ErrServerClosed instead of a mid-flight socket / QUIC reset, and
+// none goes on accepting while another drains (Gemini, #1009: drained one
+// after another, HTTPS accepted new requests for as long as HTTP/3 took);
+// wait for the goroutine and every HTTP/3 Serve it started; and only then
+// close the node, which drains magicsock / netcheck / the control plane.
 //
 // The drains and the wait share ONE grace, because they are rarely long
 // together: the goroutine serves only once it has brought the node up,
@@ -402,13 +404,23 @@ func (f *tsnetFront) stop(grace time.Duration) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
+	var drains sync.WaitGroup
 	for _, l := range h3 {
-		_ = l.srv.Shutdown(shutdownCtx)
-		_ = l.conn.Close()
+		drains.Add(1)
+		go func() {
+			defer drains.Done()
+			_ = l.srv.Shutdown(shutdownCtx)
+			_ = l.conn.Close()
+		}()
 	}
 	if https != nil {
-		_ = https.Shutdown(shutdownCtx)
+		drains.Add(1)
+		go func() {
+			defer drains.Done()
+			_ = https.Shutdown(shutdownCtx)
+		}()
 	}
+	drains.Wait()
 
 	select {
 	case <-f.done:

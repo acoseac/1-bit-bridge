@@ -151,11 +151,12 @@ func newFakeNodeServer(t *testing.T, n *fakeNode) *Server {
 }
 
 // startInBackground runs s.Start on its own goroutine, on a context nothing
-// cancels until the test ends, and returns its result. The test waits for
-// that goroutine before it ends.
+// cancels until the test ends (t.Context, cancelled just before the
+// cleanups run), and returns its result. The test waits for that goroutine
+// before it ends.
 func startInBackground(t *testing.T, s *Server) <-chan error {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := t.Context()
 	result := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
@@ -163,7 +164,6 @@ func startInBackground(t *testing.T, s *Server) <-chan error {
 		result <- s.Start(ctx)
 	}()
 	t.Cleanup(func() {
-		cancel()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
