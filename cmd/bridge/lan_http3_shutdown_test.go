@@ -136,22 +136,26 @@ func TestServeErrorExitIsBoundedByALANHTTP3HandlerThatIgnoresItsContext(t *testi
 // release and never asks its context, like a read from a hung mount.
 // Every other request goes to the API handler as usual.
 type heldRoute struct {
+	path    string
 	entered chan struct{} // closed at the first request
 	release *gate
 	once    sync.Once
 }
 
-// newHeldRoute is a heldRoute nothing has entered, and whose release is
-// still shut.
-func newHeldRoute() *heldRoute {
-	return &heldRoute{entered: make(chan struct{}), release: newGate()}
+// newHeldRoute is a heldRoute at heldPath.
+func newHeldRoute() *heldRoute { return newHeldRouteAt(heldPath) }
+
+// newHeldRouteAt is a heldRoute at path that nothing has entered, and
+// whose release is still shut.
+func newHeldRouteAt(path string) *heldRoute {
+	return &heldRoute{path: path, entered: make(chan struct{}), release: newGate()}
 }
 
 // wrap is the serveOpts.wrapAPIHandler that adds the route in front of
 // next.
 func (h *heldRoute) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != heldPath {
+		if r.URL.Path != h.path {
 			next.ServeHTTP(w, r)
 			return
 		}
