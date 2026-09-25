@@ -86,24 +86,29 @@ func TestDoctorGradesTheConfigDirOnlyForAUserWhoCanReadTheConfig(t *testing.T) {
 			cwd, platform := isolateConfigEnv(t)
 			cfgPath, absentIsPreSetup := tc.install(t, cwd, platform)
 			rep := doctor.Run(context.Background(), buildDoctorDepsFor(cfgPath, absentIsPreSetup))
-
-			if c := findCheck(t, rep, "config-file"); c.Status != tc.configFile {
-				t.Errorf("config-file = %s %q, want %s", c.Status, c.Summary, tc.configFile)
-			}
-			c := findCheck(t, rep, "config-dir")
-			if c.Status != tc.configDir {
-				t.Fatalf("config-dir = %s %q (hint %q), want %s …%s", c.Status, c.Summary, c.Hint, tc.configDir, tc.has)
-			}
-			// A fail must be the one the mode bits give: a fixture that
-			// denied nothing would fail for another reason, or not at all.
-			if tc.configDir == doctor.Fail && (!strings.HasPrefix(c.Hint, tc.has) || !strings.Contains(c.Hint, "permission denied")) {
-				t.Errorf("config-dir = fail %q (hint %q), want a hint starting %q about a permission denied",
-					c.Summary, c.Hint, tc.has)
-			}
-			if tc.configDir == doctor.OK && !strings.HasPrefix(c.Summary, tc.has) {
-				t.Errorf("config-dir = ok %q, want it to start %q", c.Summary, tc.has)
-			}
+			assertConfigDirVerdict(t, rep, tc.configFile, tc.configDir, tc.has)
 		})
+	}
+}
+
+// assertConfigDirVerdict requires config-file's status, and config-dir's,
+// with has starting config-dir's summary on an ok and its hint on a fail.
+// A fail must be the one the mode bits give: a fixture that denied nothing
+// would fail for another reason, or not at all.
+func assertConfigDirVerdict(t *testing.T, rep doctor.Report, configFile, configDir doctor.Status, has string) {
+	t.Helper()
+	if c := findCheck(t, rep, "config-file"); c.Status != configFile {
+		t.Errorf("config-file = %s %q, want %s", c.Status, c.Summary, configFile)
+	}
+	c := findCheck(t, rep, "config-dir")
+	switch {
+	case c.Status != configDir:
+		t.Errorf("config-dir = %s %q (hint %q), want %s …%s", c.Status, c.Summary, c.Hint, configDir, has)
+	case configDir == doctor.Fail && (!strings.HasPrefix(c.Hint, has) || !strings.Contains(c.Hint, "permission denied")):
+		t.Errorf("config-dir = fail %q (hint %q), want a hint starting %q about a permission denied",
+			c.Summary, c.Hint, has)
+	case configDir == doctor.OK && !strings.HasPrefix(c.Summary, has):
+		t.Errorf("config-dir = ok %q, want it to start %q", c.Summary, has)
 	}
 }
 
