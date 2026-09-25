@@ -2263,6 +2263,12 @@ type serveOpts struct {
 	// which pass a fake so a start or a listen can be held open across a
 	// shutdown, with no tailnet. Per invocation for tailscaleCLI's reason.
 	tsnetNode tsnetNode
+	// wrapAPIHandler wraps the API handler every listener serves: LAN
+	// HTTPS, LAN HTTP/3 and the tailnet's. Nil (the handler as built)
+	// everywhere but the boot tests, which add a route that ignores its
+	// request's context, to hold a drain open across a shutdown. Per
+	// invocation for tailscaleCLI's reason.
+	wrapAPIHandler func(http.Handler) http.Handler
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -4244,9 +4250,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		tlsConfig.NextProtos = append([]string{"h2", "http/1.1"}, extra...)
 	}
 
+	// apiHandler is the API handler a listener serves: a fresh mux per
+	// call over the server's shared state (its rate limiters are the
+	// server's), as apiSrv.Handler() is, wrapped for a boot test that
+	// asked (serveOpts.wrapAPIHandler).
+	apiHandler := func() http.Handler {
+		if opts.wrapAPIHandler != nil {
+			return opts.wrapAPIHandler(apiSrv.Handler())
+		}
+		return apiSrv.Handler()
+	}
+
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
-		Handler:   apiSrv.Handler(),
+		Handler:   apiHandler(),
 		TLSConfig: tlsConfig,
 		// Defence-in-depth against slow-loris / half-open sockets.
 		// WriteTimeout is deliberately left UNSET (zero) because
@@ -5001,8 +5018,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		defer ml.Close()
 	}
 
-	var lanH3Srv *http3.Server
-	var udpConn *net.UDPConn
+	var lanH3 *lanHTTP3
 
 	if !cfg.DisableHTTP3 {
 		// 1. Resilient LAN Listener
@@ -5010,7 +5026,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		if err != nil {
 			logger.Warn("Failed to resolve UDP address, bypassing HTTP/3", "err", err)
 		} else {
-			udpConn, err = net.ListenUDP("udp", udpAddr)
+			udpConn, err := net.ListenUDP("udp", udpAddr)
 			if err != nil {
 				logger.Warn("Failed to bind LAN UDP socket, running HTTP/2 only", "err", err)
 			} else {
@@ -5031,23 +5047,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 
 				if lanTLSConfig != nil {
-					lanH3Srv = &http3.Server{
-						Handler:   apiSrv.Handler(), // Crucial: Extract the compiled http.Handler
-						TLSConfig: lanTLSConfig,
+					lanH3 = &lanHTTP3{
+						srv: &http3.Server{
+							Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
+							TLSConfig: lanTLSConfig,
+						},
+						conn:   udpConn,
+						stderr: stderr,
 					}
-					go func() {
-						if err := lanH3Srv.Serve(udpConn); err != nil &&
-							!errors.Is(err, http.ErrServerClosed) &&
-							!strings.Contains(err.Error(), "server closed") {
-							logger.Error("h3 serve direct", "err", err)
-						}
-					}()
+					go lanH3.serve()
 				} else {
 					logger.Warn("LAN TLS configuration is missing; bypassing LAN HTTP/3 initialization")
-					if udpConn != nil {
-						_ = udpConn.Close()
-						udpConn = nil
-					}
+					_ = udpConn.Close()
 				}
 			}
 		}
@@ -5064,23 +5075,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// LAN HTTP/3 teardown as a defer so EVERY exit path drains the QUIC
 	// listener and closes the bound UDP socket — not just the ctx.Done
 	// graceful branch. The three startup-error branches below (serveErr /
-	// adminErr / tsnetServeErr) `return 1` without touching lanH3Srv or
-	// udpConn, and lanH3Srv.Serve(udpConn) doesn't observe ctx; because
-	// runServe can return to the launcher menu (the process stays alive),
-	// a leaked Serve goroutine + a still-bound UDP port made the next
-	// "Start now" fail net.ListenUDP with "address already in use" and
-	// silently fall back to HTTP/2-only. Mirrors the tsnet side's stop below.
-	// Idempotent against the ctx.Done branch's explicit graceful drain:
-	// http3.Server.Shutdown + udpConn.Close both tolerate a second call.
+	// adminErr / tsnetServeErr) `return 1` without touching the LAN HTTP/3
+	// server, and its Serve doesn't observe ctx; because runServe can
+	// return to the launcher menu (the process stays alive), a leaked
+	// Serve goroutine + a still-bound UDP port made the next "Start now"
+	// fail net.ListenUDP with "address already in use" and silently fall
+	// back to HTTP/2-only. Mirrors the tsnet side's stop below.
+	//
+	// stop is bounded, like the tsnet side's: a handler that ignores its
+	// context once held this drain, and the exit, for as long as it
+	// blocked. It drains once, so after the ctx.Done branch, which drains
+	// the server beside the HTTPS one, this call does nothing (see
+	// lanHTTP3.stop for why a second drain would be a second wait).
 	// Nil-guarded — either bind may have failed or HTTP/3 may be disabled.
 	defer func() {
-		if lanH3Srv != nil {
+		if lanH3 != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 			defer cancel()
-			_ = lanH3Srv.Shutdown(shutdownCtx)
-		}
-		if udpConn != nil {
-			_ = udpConn.Close()
+			lanH3.stop(shutdownCtx)
 		}
 	}()
 
@@ -5109,7 +5121,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var tsFront *tsnetFront
 	var tsnetServeErr <-chan error // nil outside tsnet mode, so never ready
 	if tsnetServer != nil {
-		tsFront = startTsnetFront(ctx, tsnetServer, apiSrv.Handler(), cfg.ListenAddress, !cfg.DisableHTTP3, stderr)
+		tsFront = startTsnetFront(ctx, tsnetServer, apiHandler(), cfg.ListenAddress, !cfg.DisableHTTP3, stderr)
 		defer tsFront.stop(shutdownGrace)
 		tsnetServeErr = tsFront.serveErr
 	}
@@ -5166,13 +5178,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}()
 
-		if lanH3Srv != nil {
+		if lanH3 != nil {
+			// Under the same grace as the HTTPS server, so neither goes
+			// on accepting while the other drains. stop is bounded, and
+			// http.Server.Shutdown returns at its deadline, so this wait
+			// is bounded too. stop closes the UDP socket as well.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := lanH3Srv.Shutdown(shutdownCtx); err != nil {
-					fmt.Fprintf(stderr, "lan h3 shutdown: %v\n", err)
-				}
+				lanH3.stop(shutdownCtx)
 			}()
 		}
 		// The tailnet servers are not drained here: tsFront.stop, deferred,
@@ -5182,10 +5196,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 		wg.Wait()
 		cancel() // Explicitly release context resources immediately
-
-		if udpConn != nil {
-			_ = udpConn.Close()
-		}
 	}
 	return 0
 }
