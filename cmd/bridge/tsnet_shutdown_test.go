@@ -801,7 +801,7 @@ func twoTailnetAddrs() []netip.Addr {
 // can hold, so the gate is driven here directly.
 func TestAServerPublishedAfterStopBeganIsRefused(t *testing.T) {
 	f := stoppableFront(t, newFakeTsnetNode())
-	f.stop(time.Second)
+	stopWithin(f, time.Second)
 	if f.publishHTTPS(&http.Server{}) {
 		t.Error("an HTTPS server published after stop began was accepted, with nothing left to shut it down")
 	}
@@ -824,7 +824,7 @@ func TestAServerPublishedBeforeStopIsShutDownByIt(t *testing.T) {
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(lis) }()
-	f.stop(time.Second)
+	stopWithin(f, time.Second)
 	select {
 	case err := <-served:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -928,7 +928,7 @@ func TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		f.stop(grace)
+		stopWithin(f, grace)
 	}()
 	drainLoopOnCleanup(t, release.open, stopped, "stop, once the handler was let go")
 	select {
@@ -980,7 +980,7 @@ func TestStopClosesTheNodeOnlyOnceTheForceCloseHasToldTheClient(t *testing.T) {
 		t.Fatal("precondition: the HTTP/3 request never reached the handler")
 	}
 
-	f.stop(500 * time.Millisecond)
+	stopWithin(f, 500*time.Millisecond)
 	if n := node.closeCount(); n != 1 {
 		t.Fatalf("precondition: the node was closed %d time(s), want once", n)
 	}
@@ -1022,6 +1022,14 @@ func loopbackTLSPair(t *testing.T) (server, client *tls.Config) {
 	}
 	client = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, NextProtos: []string{http3.NextProtoH3}}
 	return server, client
+}
+
+// stopWithin stops f with a drain context of grace, as serve's teardown
+// does.
+func stopWithin(f *tsnetFront, grace time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	f.stop(ctx)
 }
 
 // stoppableFront is a tsnetFront with no goroutine behind it (its done is

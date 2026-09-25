@@ -5122,7 +5122,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var tsnetServeErr <-chan error // nil outside tsnet mode, so never ready
 	if tsnetServer != nil {
 		tsFront = startTsnetFront(ctx, tsnetServer, apiHandler(), cfg.ListenAddress, !cfg.DisableHTTP3, stderr)
-		defer tsFront.stop(shutdownGrace)
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			tsFront.stop(shutdownCtx)
+		}()
 		tsnetServeErr = tsFront.serveErr
 	}
 

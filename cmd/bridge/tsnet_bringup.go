@@ -372,12 +372,13 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 // wait for the goroutine and every HTTP/3 Serve it started; and only then
 // close the node, which drains magicsock / netcheck / the control plane.
 //
-// The drains and the wait share ONE grace, because they are rarely long
-// together: the goroutine serves only once it has brought the node up,
-// and a Serve returns as soon as its Shutdown begins, so a long drain
-// leaves a goroutine that has returned, and a goroutine still bringing
-// the node up has at most its HTTP/3 servers published. A grace each
-// would double shutdown's worst case for that overlap.
+// ctx is the drain's, and the drains and the wait share it: ONE grace,
+// because they are rarely long together. The goroutine serves only once
+// it has brought the node up, and a Serve returns as soon as its Shutdown
+// begins, so a long drain leaves a goroutine that has returned, and a
+// goroutine still bringing the node up has at most its HTTP/3 servers
+// published. A grace each would double shutdown's worst case for that
+// overlap.
 //
 // Both waits are BOUNDED by it, the drains included. quic-go runs
 // ServeHTTP inside the WaitGroup of the connection's handling goroutine,
@@ -397,21 +398,19 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 // takes down the conn those writes go to: closed the moment the grace ran
 // out, it cost every client still connected its close, and a client with
 // a request in flight then waited out its idle timeout.
-func (f *tsnetFront) stop(grace time.Duration) {
+func (f *tsnetFront) stop(ctx context.Context) {
 	f.cancel()
 	f.mu.Lock()
 	f.stopping = true
 	h3, https := f.h3Servers, f.https
 	f.mu.Unlock()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
-	defer cancel()
 	var drains sync.WaitGroup
 	for _, l := range h3 {
 		drains.Add(1)
 		go func() {
 			defer drains.Done()
-			_ = l.srv.Shutdown(shutdownCtx)
+			_ = l.srv.Shutdown(ctx)
 			_ = l.conn.Close()
 		}()
 	}
@@ -419,7 +418,7 @@ func (f *tsnetFront) stop(grace time.Duration) {
 		drains.Add(1)
 		go func() {
 			defer drains.Done()
-			_ = https.Shutdown(shutdownCtx)
+			_ = https.Shutdown(ctx)
 		}()
 	}
 	drained := make(chan struct{})
@@ -427,10 +426,10 @@ func (f *tsnetFront) stop(grace time.Duration) {
 		defer close(drained)
 		drains.Wait()
 	}()
-	if !drainedWithin(shutdownCtx, drained) {
+	if !drainedWithin(ctx, drained) {
 		fmt.Fprintln(f.stderr, "shutdown: the tailnet servers did not drain within grace; closing the node under them")
 	}
-	if !closedWithin(shutdownCtx, f.done) {
+	if !closedWithin(ctx, f.done) {
 		fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
 	}
 	if err := f.node.Close(); err != nil {
