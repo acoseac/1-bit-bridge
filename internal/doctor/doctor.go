@@ -55,8 +55,11 @@ const (
 // assertions, admin-UI mapping, or CI dashboards. Extracted because
 // SonarCloud go:S1192 flagged the repeated literals across the doctor
 // per-check builders (warn/fail/ok branches in checkConfigDir,
-// checkTLSCert, checkLibraryRoots, checkServiceManager).
+// checkTLSCert, checkLibraryRoots, checkServiceManager), and again at the
+// port checks' third use (#1022).
 const (
+	checkNamePortAPI        = "port-api"
+	checkNamePortAdmin      = "port-admin"
 	checkNameConfigDir      = "config-dir"
 	checkNameTLSCert        = "tls-cert"
 	checkNameLibraryRoots   = "library-roots"
@@ -95,7 +98,14 @@ type Deps struct {
 	// caller did not look one up, which the check reports as skipped.
 	// `bridge init`'s preflight leaves it nil on purpose: it grades the
 	// install it is about to write, and a broken existing config must
-	// not block the re-init that replaces it.
+	// not block the re-init that replaces it. That holds for
+	// checkConfigFile only: the preflight's port checks, graded on init's
+	// defaults with no pid file behind them, still FAIL a bridge live on
+	// those ports.
+	//
+	// When it records a config that did not load, the port checks are
+	// not run: APIPort and AdminPort are then the caller's defaults, not
+	// the config's (ungradedConfigPortCheck).
 	ConfigFile *ConfigFile
 	// APIPort is the main HTTPS port the server binds, typically 7788.
 	APIPort int
@@ -545,17 +555,73 @@ func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
 }
 
 func checkAPIPort(ctx context.Context, d Deps) Check {
-	if owned := ownedPortCheck("port-api", d.APIPort, d.OwnedPorts); owned != nil {
-		return *owned
-	}
-	return checkPort(ctx, "port-api", d.APIPort, d.OwnPIDFile)
+	return checkListenPort(ctx, d, checkNamePortAPI, d.APIPort)
 }
 
 func checkAdminPort(ctx context.Context, d Deps) Check {
-	if owned := ownedPortCheck("port-admin", d.AdminPort, d.OwnedPorts); owned != nil {
+	return checkListenPort(ctx, d, checkNamePortAdmin, d.AdminPort)
+}
+
+// checkListenPort is the ladder both port checks climb, for the port it is
+// handed with the name it is handed: a config that did not load declines
+// (ungradedConfigPortCheck), then a port the caller bound answers
+// (ownedPortCheck), then the bind probe (checkPort). The port is passed,
+// never derived from the name, for the reason ownedPortCheck gives.
+func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
+	if c := ungradedConfigPortCheck(name, d.ConfigFile); c != nil {
+		return *c
+	}
+	if owned := ownedPortCheck(name, port, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort(ctx, "port-admin", d.AdminPort, d.OwnPIDFile)
+	return checkPort(ctx, name, port, d.OwnPIDFile)
+}
+
+// ungradedConfigPortCheck answers a port check whose port no config set:
+// one was named or found and did not load (config-file says why). It
+// returns nil when the config loaded, when none was named or found, and
+// when there was no lookup.
+//
+// The caller seeds Deps with the default ports and replaces them only from
+// a config that loads, and the pid file's path comes from the same config.
+// So what reaches this check is a guess at the port, with no pid file to
+// recognise the bridge by. Graded, it answered "another process owns this
+// port" about the bridge's own listeners wherever those are the defaults:
+// `bridge doctor` run by a user who cannot read a service-owned config
+// FAILed both ports on every host (#1021's table). Where they are not, it
+// answered "free" about ports nothing binds, a check passing because the
+// thing it guards is absent.
+//
+// So the line says it was not checked, and why, and leaves the verdict to
+// config-file, which gives it once at the severity #985 chose: a warn for
+// a config this user cannot read (a fact about the run), a fail for one
+// that is not there or does not load. It is ok, like config-dir's "not
+// checked" for a named config that is not there, and it names no port,
+// since the guessed one would read as the install's.
+//
+// It comes before OwnedPorts and the bind probe because the port is the
+// guess: the answer must not depend on whether a port the install may not
+// use is bound, or by whom.
+//
+// A lookup that found nothing where nothing was named is not this case.
+// That is doctor run before `bridge init`, and the defaults are then the
+// ports init will write, so they are graded. Nor is a nil lookup: `bridge
+// init`'s preflight and its second port pass grade the ports they were
+// handed.
+func ungradedConfigPortCheck(name string, c *ConfigFile) *Check {
+	var why string
+	switch c.problem() {
+	case configUnreadable:
+		why = "the config that sets this port is not readable by this user"
+	case configNotThere:
+		why = "the named config does not exist"
+	case configDoesNotLoad:
+		why = "the config that sets this port does not load"
+	default:
+		return nil
+	}
+	r := ok(name, "not checked: "+why)
+	return &r
 }
 
 // ownedPortCheck short-circuits a port check the caller has told us it

@@ -209,15 +209,18 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Five claims in this list have gone stale and been corrected** — the WAV/AIFF
+**Six claims in this list have gone stale and been corrected** — the WAV/AIFF
 extractor gap, the `deletedIds` field name, "the bridge has no DLNA Search",
-`manualDescriptionURL` being unimplemented, and (2026-09-22) "`waveform_path`
+`manualDescriptionURL` being unimplemented, (2026-09-22) "`waveform_path`
 has the same shape and NO adoption yet", which #954 had falsified two days
-earlier by wiring `integrity.LocateWaveform` into `analysisStoreAdapter`. Each
+earlier by wiring `integrity.LocateWaveform` into `analysisStoreAdapter`, and
+(2026-09-25) "a broken existing config cannot block the re-init that replaces
+it", which held for config-file and not for the port checks. The first five
 cost a later session real time; the fourth was written **after** the PR that
 falsified it, by a session that had this very warning in front of it, and the
 fifth sent `bridge doctor` on telling operators to run `bridge analyze --force`
-— hours of decoding to recover curves the next request rebinds for free.
+— hours of decoding to recover curves the next request rebinds for free. The
+sixth was found by measuring the re-init rather than reading the bullet.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -2162,6 +2165,30 @@ what it claimed**, and none of it had a failing test.
   runners have it. `withoutLsof` sets `lsofPath = ""`, the state
   `resolveLsof` leaves on such a host, so the no-lsof leg runs on every
   runner.
+- **…and grades no port at all from a config it could not load**
+  (#1022). `buildDoctorDepsFor` seeds 7788 / 7789 and replaces them only
+  from a config that loads, and the pid file's path comes from the same
+  config. So a config that was named or found and did not load left the
+  port checks grading a guess with no pid file behind it. Run by a user
+  who cannot read a service-owned config (`bridge init` makes its dir
+  0700), doctor warned about the config and then FAILed both ports,
+  "another process owns this port", against the live bridge's own
+  listeners: on every host with lsof, and since #1021 on every host. The
+  runbook's validate-before-restart run on an edit with a typo got the
+  same two false FAILs beside the real one, and an install off the
+  defaults read "free" about ports nothing binds. For any load error,
+  `ungradedConfigPortCheck` now answers ok "not checked", with the reason
+  from `ConfigFile.problem` (config-file's own classifier), naming no
+  port. **It runs before OwnedPorts and the bind probe**, so the answer
+  cannot depend on who holds a guessed port. **ok, not warn**: config-file
+  gives the one verdict about the config at #985's severity, a check that
+  declines for a reason another line reports is ok elsewhere here too
+  (config-dir's "not checked", tls-cert-sans), and no consumer reads a
+  port line's status (a Gemini consult argued warn for JSON consumers;
+  declined on that census). **The trigger is a load error, never an absent
+  config**: with nothing named or found, doctor runs before `bridge init`
+  and the defaults ARE the ports init writes, so they are graded, and a
+  held one still FAILs.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -2509,12 +2536,18 @@ mentions across the four `ops/audit-*.md` files.
   error into "not found"**, which is right for its fallback walk and wrong
   for a named path, so doctor re-stats a named path to learn why. One this
   user cannot reach or READ only WARNS, because that is a fact about the
-  doctor run (the public-mode layout, as with the cert key). The launcher's
-  pre-setup row names the platform path through `buildDoctorDepsFor(path,
-  true)`, never `--config`, so its absence stays "none found", ok.
-  `bridge init`'s preflight leaves the lookup nil, so the check reports
-  itself skipped and a broken existing config cannot block the re-init
-  that replaces it. (#984, #985)
+  doctor run (the public-mode layout, as with the cert key), and the port
+  checks then say "not checked" rather than grade the defaults (#1022).
+  The launcher's pre-setup row names the platform path through
+  `buildDoctorDepsFor(path, true)`, never `--config`, so its absence stays
+  "none found", ok. `bridge init`'s preflight leaves the lookup nil, so
+  config-file reports itself skipped and does not block the re-init that
+  replaces a broken config. **The port checks still can**: this bullet said
+  a broken existing config "cannot block" that re-init until 2026-09-25.
+  With the config unloadable, the preflight grades 7788 / 7789 with no pid
+  file, and a bridge still live on them FAILs both, so `bridge init --yes
+  --force` refuses (measured in #1022, not fixed there: init's two port
+  passes need their own answer). (#984, #985)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and
@@ -3657,10 +3690,19 @@ its twin.** The top list is older, shorter, and read first.
   Querying the reviews API showed CodeRabbit's last review sitting on an
   older commit for five of six PRs while every one of them had in fact
   passed on its current head — the pass is an EDIT to the walkthrough issue
-  comment, which carries the `headCommitId` it covers. The check that works
-  is grepping that comment for the verdict string and comparing its
-  `headCommitId` to the PR head. Absence of new findings is not a pass, and
-  saying so out loud without checking is how this was learned twice. (#967–#972)
+  comment. **Compare `coveredCommitId` to the PR head, never
+  `headCommitId`**: the marker is `final_review_risk_coverage`'s
+  `"coveredCommitId"`, and it moves only when a review finishes. This
+  bullet said `headCommitId` until #1022, and a paused walkthrough defeats
+  that check: its "Run this review for free" checkbox carries the head's
+  `headCommitId` while the last round's verdict string stays in the
+  comment, so on #1022 grep said "No actionable comments" and head
+  `4eb5ff6f` while `coveredCommitId` said `5ff22781`. Absence of new
+  findings is not a pass, and saying so out loud without checking is how
+  this was learned twice. (#967–#972) **Editing the PR body re-renders the
+  walkthrough and drops a pause notice's checkbox**; `@coderabbitai review`
+  then answers "Review rate limited" and puts the notice, checkbox and all,
+  back for the current head (#1022).
 - **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
   a page, and a long PR's newest round is on the page it drops.** On #996
   (40 reviews, 38 review comments) every check read page one only. Two

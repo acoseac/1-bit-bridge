@@ -237,6 +237,11 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 // only until `bridge init` writes the platform config.
 func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	d := doctor.Deps{
+		// The ports `bridge init` writes, which a run that finds no config
+		// grades. A config that loads replaces them below. One that was
+		// named or found and did not load leaves them here, and the port
+		// checks then say "not checked" rather than grade a guess with no
+		// pid file behind it (doctor's ungradedConfigPortCheck).
 		APIPort:   7788,
 		AdminPort: 7789,
 		// Same resolution the console's export and `bridge logs` use, so all
