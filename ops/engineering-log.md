@@ -13645,6 +13645,7 @@ twins:
 | `TestATailnetHTTP3BindCutShortByTheShutdownServesNothing` | nothing published or served once the shutdown began (unit) |
 | `TestAServerPublishedAfterStopBeganIsRefused` | the publication gate (unit: no seam holds that window) |
 | `TestAServerPublishedBeforeStopIsShutDownByIt` | twin of the gate |
+| `TestStopIsBoundedByAnHTTP3HandlerThatIgnoresItsContext` | the drains are bounded by the grace: a real HTTP/3 request to a handler that ignores its context does not hold stop (review round 3) |
 
 Controls, each against the committed fix with one mutation asserted to
 apply exactly once, restored from git after each:
@@ -13665,6 +13666,7 @@ apply exactly once, restored from git after each:
 | S9 | the HTTP/3 Serve goroutines not waited for | the Serve-join test |
 | S10 | stop drains after the wait | the twin (the grace ran out on a Serve nobody had shut down) |
 | M1 | runServe does not defer stop | the error-exit and join tests |
+| D1 | stop waits for its drains with no bound (round 3) | the bounded-drain test |
 
 S1, S2, S9 and S10 were run again after the drains and the wait came to
 share one grace, with the same result (S2's mutation rewritten for the new
@@ -13687,11 +13689,13 @@ wrapper, the wiring and the upstream excerpts attached:
   the addresses Up requires before returning a status (ipnlocal
   local.go:1479). And it is reachable only past the grace, which is
   upstream's own race.
-- **Declined:** drop the shutdown branch's early HTTP/3 drain and make
-  stop the only drainer. stop's second Shutdown is silent (its error is
-  discarded), and the early drain is what keeps tailnet HTTP/3 draining
-  beside the LAN servers on SIGINT; the asymmetry with tailnet HTTPS,
-  drained only in stop, predates this change.
+- **Declined, then taken in round 3:** drop the shutdown branch's early
+  HTTP/3 drain and make stop the only drainer. It was declined on the
+  grounds that stop's second Shutdown is silent and the early drain keeps
+  tailnet HTTP/3 draining beside the LAN servers on SIGINT. Round 3 found
+  the early drain's wait unbounded (below), which outweighs the latency;
+  the teardown this PR replaced drained tailnet HTTPS only after that
+  branch anyway.
 - **Agreed with the design:** no interleaving closes the node before the
   goroutine returns within the grace; no deadlock from phase 3 closing
   under the lifecycle lock (upstream calls back only into the log
@@ -13759,3 +13763,24 @@ wrapper, the wiring and the upstream excerpts attached:
   `@coderabbitai review` answered "Review rate limited", and the
   walkthrough said "wait 40 minutes for your next included review", its
   coverage still at `71674a8c`.
+- **Round 3**: CodeRabbit's included pass, triggered with `@coderabbitai
+  review` once the notice's wait had passed ("Review triggered"),
+  covering `71674a8c..2f3e9e05`. One Major, taken: stop's `drains.Wait()`
+  had no bound. Verified in quic-go v0.62 before acting: `handleConn`
+  "blocks until all HTTP handlers for all streams have returned",
+  `handleRequestStream` calls `ServeHTTP` synchronously, and `Shutdown`
+  past its deadline calls `Close`, which waits on `connHandlingDone`. So
+  an HTTP/3 handler that ignores its context held stop, and serve's exit,
+  for as long as it blocked. The teardown this PR replaced had the same
+  wait. Red first (`c9174df3`): a real HTTP/3 request (quic-go's
+  `http3.Transport`, a self-signed certificate trusted through `RootCAs`)
+  to a handler that blocks until the test lets it go kept a 500 ms stop
+  running at 5 s. Fixed in `ab70d96e`: the drains wait until the shared
+  grace runs out, a line says so, and the node is closed under them. The
+  shutdown branch's early drain of the tailnet HTTP/3 servers went with
+  it, since its wait was the same one, ahead of stop's (the consult item
+  above). D1 pins the bound, the new test passed 15 times under `-race`,
+  and the whole matrix was re-run on the final code: every control
+  bites. **Out of scope, and filed as a follow-up:**
+  the LAN HTTP/3 drains, in the shutdown branch and in the LAN defer,
+  wait the same way.

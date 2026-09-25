@@ -2340,7 +2340,16 @@ mentions across the four `ops/audit-*.md` files.
   the server closed and cancels that start WITHOUT waiting (upstream's
   own start takes no context), and the start closes the node it built
   instead of publishing it; after Close, or on a context already done,
-  Start builds nothing. **Hold the window, not its aftermath**: a first
+  Start builds nothing. **A drain is a wait too, and stop's is bounded**:
+  quic-go runs `ServeHTTP` inside the wait `http3.Server.Shutdown` makes
+  past its deadline (it calls `Close`, which waits for every connection's
+  handling), so an HTTP/3 handler that ignores its context (a read from a
+  hung mount) held an unbounded drain, and the exit, for as long as it
+  blocked (CodeRabbit on #1009). `stop` is therefore the ONLY drainer of
+  the tailnet side: the shutdown branch's early drain of the tailnet
+  HTTP/3 servers was the same wait, ahead of stop's. The LAN HTTP/3 drains
+  (that branch, and the LAN defer) have the same shape and are NOT bounded
+  yet. **Hold the window, not its aftermath**: a first
   draft of the listener test released the listen after runServe had
   returned, and PASSED on the unfixed code, because runServe's final
   cancel had run by then and #1005's post-check caught it. The window is
