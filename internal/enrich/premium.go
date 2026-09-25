@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
 // ErrNoCredential is returned by RefetchPremium when no usable Atlas credential
@@ -79,8 +81,9 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, size int) bool {
 	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
-		if !errors.Is(err, ErrNoCredential) {
-			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "err", err)
+		// A fetch the shutdown stopped is not reported either.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) {
+			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "err", failure)
 		}
 		return false // no credential / transport error → CAA path
 	}
@@ -107,7 +110,11 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		return false
 	}
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
-		logger.Warn("atlas premium cover write", "mbid", mbid, "size", size, "err", err)
+		// A body the shutdown cut off is not a failed write; the write
+		// removed its temp file either way.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("atlas premium cover write", "mbid", mbid, "size", size, "err", failure)
+		}
 		return false
 	}
 	logger.Debug("atlas premium cover cached", "mbid", mbid, "size", size)
