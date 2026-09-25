@@ -6,10 +6,13 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // TestMain lowers the work factor for this package's suite. Everything here
@@ -48,68 +51,161 @@ func TestShippedHashCostIsUnchanged(t *testing.T) {
 // declaration (an *ast.FuncDecl) from a call without a special case.
 func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 	root := filepath.Join("..", "..")
-	const setter = "SetTestHashCost"
-	var offenders []string
+	offenders, visited, err := hashCostSetterCallers(root)
+	if err != nil {
+		t.Fatalf("walking the tree: %v", err)
+	}
 	// Files actually visited, so a walk that silently matches nothing — a wrong
 	// root, a skip rule that swallowed the tree — fails instead of passing
-	// vacuously.
-	visited := 0
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	// vacuously. Not just none: the walk skips whole directories that are
+	// other checkouts, so the floor has to catch a rule that swallowed the
+	// largest subtree, internal/ (355 of the 410 files the tree held when it
+	// was set), and not only one that swallowed all of it.
+	if visited < 100 {
+		t.Fatalf("walked %s and read %d non-test Go files, want >=100 — the walk is not seeing the tree", root, visited)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", hashCostSetter, offenders)
+	}
+}
+
+// hashCostSetter is the setter TestNoProductionCodeLowersTheHashCost keeps
+// out of production code.
+const hashCostSetter = "SetTestHashCost"
+
+// hashCostSetterCallers returns the non-test Go files under root that call
+// hashCostSetter, or that it cannot parse, with how many files it read.
+func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			switch info.Name() {
-			case ".git", "dist", "bin", "node_modules", "testdata":
-				return filepath.SkipDir
-			}
-			return nil
+			return hashCostDirRule(root, path, info.Name())
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		// Nor a file the go tool ignores (a name beginning with "." or "_"):
-		// it is never compiled, so it cannot weaken production. Parsing one
-		// is not fail-closed, it is wrong: emacs's `.#store.go` lock is a
-		// dangling symlink or a file of lock data, and it was reported here
-		// as a production caller of the setter.
-		if name := info.Name(); strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		if !hashCostReads(path, info.Name()) {
 			return nil
 		}
 		visited++
-		file, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if perr != nil {
-			// A file this package cannot parse is not evidence of compliance.
-			offenders = append(offenders, path+": could not parse: "+perr.Error())
-			return nil
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch fn := call.Fun.(type) {
-			case *ast.Ident: // SetTestHashCost(…), from inside this package
-				if fn.Name == setter {
-					offenders = append(offenders, path)
-				}
-			case *ast.SelectorExpr: // adminauth.SetTestHashCost(…), from outside
-				if fn.Sel.Name == setter {
-					offenders = append(offenders, path)
-				}
-			}
-			return true
-		})
+		offenders = append(offenders, hashCostSetterCallsIn(path)...)
 		return nil
 	})
+	return offenders, visited, err
+}
+
+// hashCostDirRule is hashCostSetterCallers' answer for a directory: SkipDir
+// for one that holds none of this checkout's production code, nil to
+// descend.
+func hashCostDirRule(root, path, name string) error {
+	// The rules are for the directories below the root. The whole-tree
+	// test's root is "../..", which no rule names, but a caller's root may
+	// be called anything, and one called dist skipped the whole tree.
+	// (Gemini on #1007.)
+	if path == root {
+		return nil
+	}
+	switch name {
+	case ".git", "dist", "bin", "node_modules", "testdata":
+		return filepath.SkipDir
+	}
+	// Nor another checkout inside this one (sweeptest.IsOtherCheckout), such
+	// as Claude Code's worktrees of other branches: none of it is this
+	// checkout's production code, and a half-written file there failed this
+	// checkout's run.
+	if sweeptest.IsOtherCheckout(root, path) {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// hashCostReads reports whether hashCostSetterCallers reads the file at
+// path: non-test Go source.
+func hashCostReads(path, name string) bool {
+	if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		return false
+	}
+	// Nor a file the go tool ignores (a name beginning with "." or "_"): it
+	// is never compiled, so it cannot weaken production. Parsing one is not
+	// fail-closed, it is wrong: emacs's `.#store.go` lock is a dangling
+	// symlink or a file of lock data, and it was reported here as a
+	// production caller of the setter.
+	return !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
+}
+
+// hashCostSetterCallsIn returns path once for each call of hashCostSetter
+// in the file at path, or once, with the error, when the file does not
+// parse.
+func hashCostSetterCallsIn(path string) []string {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("walking the tree: %v", err)
+		// A file this package cannot parse is not evidence of compliance.
+		return []string{path + ": could not parse: " + err.Error()}
 	}
-	if visited == 0 {
-		t.Fatalf("walked %s and found no non-test Go files — the guard proved nothing", root)
+	var calls []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && calledName(call) == hashCostSetter {
+			calls = append(calls, path)
+		}
+		return true
+	})
+	return calls
+}
+
+// calledName returns the name a call is made through: the identifier for
+// SetTestHashCost(…) from inside this package, the selector's for
+// adminauth.SetTestHashCost(…) from outside, and "" for anything else.
+func calledName(call *ast.CallExpr) string {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name
+	case *ast.SelectorExpr:
+		return fn.Sel.Name
 	}
-	if len(offenders) > 0 {
-		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", setter, offenders)
+	return ""
+}
+
+// TestHashCostSweepSkipsOtherCheckouts runs the sweep over a tree shaped like
+// the main checkout: a root that is a checkout itself, with two callers below
+// it that must be found, and other checkouts inside it whose work in progress
+// must not be. One is Claude Code's worktree of another branch, with a call
+// and a half-written file; the other sits at a plain path and has no go.mod
+// of its own. Before the sweep skipped them, each failed this checkout's run.
+//
+// The root's own name is one the walk skips below it, dist. The walk tests
+// the names of the directories under the root, never the root's.
+func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "dist")
+	for rel, body := range map[string]string{
+		".git/HEAD":                  "ref: refs/heads/main\n",
+		"cmd/tool/main.go":           "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n",
+		"internal/adminauth/cost.go": "package adminauth\n\nfunc init() { SetTestHashCost(4) }\n",
+
+		".claude/worktrees/old/.git":                      "gitdir: /elsewhere/.git/worktrees/old\n",
+		".claude/worktrees/old/go.mod":                    "module example\n",
+		".claude/worktrees/old/internal/adminauth/wip.go": "package adminauth\n\nfunc init() { SetTestHashCost(4) }\n",
+		".claude/worktrees/old/internal/manifest/half.go": "package manifest\n\nfunc half(\n",
+
+		"worktrees/plain/.git": "gitdir: /elsewhere/.git/worktrees/plain\n",
+		"worktrees/plain/x.go": "package x\n\nfunc init() { SetTestHashCost(4) }\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	offenders, visited, err := hashCostSetterCallers(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A call from outside the package and one from inside it, in the order
+	// the walk reaches them.
+	want := []string{filepath.Join(root, "cmd", "tool", "main.go"), filepath.Join(root, "internal", "adminauth", "cost.go")}
+	if !slices.Equal(offenders, want) || visited != 2 {
+		t.Errorf("offenders = %q after reading %d files, want %q after reading 2 — "+
+			"the sweep read another checkout, or stopped reading this one", offenders, visited, want)
 	}
 }
 

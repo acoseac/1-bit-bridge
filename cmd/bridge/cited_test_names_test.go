@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // TestEveryCitedTestNameExists is the mechanical version of a class this tree
@@ -211,12 +213,16 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // defined, although the go tool never compiles it, so a docblock citing it
 // passed.
 //
-// The last row failed until the walk stopped at a directory with its own
-// go.mod. Claude Code keeps its worktrees of other branches inside the tree,
-// under .claude/worktrees/, and each is a whole checkout with its own module.
-// The walk read them as this tree: an old copy's tests satisfied citations
-// this tree no longer backs, and its stale comments failed the guard in the
-// one checkout that held them.
+// The last two rows are other checkouts. Claude Code keeps its worktrees of
+// other branches inside the tree, under .claude/worktrees/, and each is a
+// whole checkout with its own module. The walk read them as this tree: an old
+// copy's tests satisfied citations this tree no longer backs, and its stale
+// comments failed the guard in the one checkout that held them. The first of
+// the two failed until the walk stopped at a directory with its own go.mod
+// (#995). The second has no go.mod, as a checkout git is still writing has
+// none yet, and failed until the walk also stopped at a directory holding a
+// `.git` entry (sweeptest.IsOtherCheckout). Its root holds one too, as every
+// real root does, and must still be read.
 func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 	// A lock's contents, as emacs writes them: user@host.pid:boot.
 	const lockData = "someone@host.1:1"
@@ -269,6 +275,17 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			writeTree(t, filepath.Join(root, ".claude", "worktrees", "old-branch"), map[string]string{
 				".git":      "gitdir: /elsewhere/.git/worktrees/old-branch\n",
 				"go.mod":    "module x\n",
+				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
+				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
+			})
+		}},
+		{"a checkout with no go.mod of its own, below a root that is a checkout", false, func(t *testing.T, root string) {
+			// In index order git writes cmd/ before go.mod, so a checkout
+			// it is still writing looks like this, and only its .git says
+			// whose it is.
+			writeTree(t, root, map[string]string{".git": "gitdir: /elsewhere/.git/worktrees/this\n"})
+			writeTree(t, filepath.Join(root, "worktrees", "mid-checkout"), map[string]string{
+				".git":      "gitdir: /elsewhere/.git/worktrees/mid-checkout\n",
 				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
 				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
 			})
@@ -671,11 +688,11 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
-// whose conventions are not ours to police; and any directory that holds a
-// go.mod of its own. The root itself is never skipped. filepath.WalkDir hands
-// the first callback the root's own base name, so with the name list checked
-// first, a checkout cloned into a directory called bin, dist or vendor
-// skipped itself. (Gemini on #995.)
+// whose conventions are not ours to police; another checkout; and any
+// directory that holds a go.mod of its own. The root itself is never
+// skipped. filepath.WalkDir hands the first callback the root's own base
+// name, so with the name list checked first, a checkout cloned into a
+// directory called bin, dist or vendor skipped itself. (Gemini on #995.)
 //
 // A directory with its own go.mod is another module. `go test ./...` from
 // the root never runs it, so a test declared there satisfies no citation
@@ -693,11 +710,19 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // directory. So a symlink to one counts, and a dangling link or a directory
 // of that name does not. If the stat fails for any other reason the walk
 // reads the directory, and its own ReadDir reports what is wrong.
+//
+// That rule does not see every checkout, so the walk also stops at one
+// holding a `.git` entry (sweeptest.IsOtherCheckout). A checkout git is
+// still writing has no go.mod yet, since cmd/ comes before go.mod in index
+// order, and while it had none its tests satisfied this tree's citations.
 func skipsForCitations(root, path, name string) bool {
 	if path == root {
 		return false
 	}
 	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
+		return true
+	}
+	if sweeptest.IsOtherCheckout(root, path) {
 		return true
 	}
 	fi, err := os.Stat(filepath.Join(path, "go.mod"))

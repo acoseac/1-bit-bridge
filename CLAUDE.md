@@ -3139,6 +3139,45 @@ its twin.** The top list is older, shorter, and read first.
   missing from disk (stale build cache?)" while it sat on disk, every time
   emacs saved an asset. `TestEmbeddedTemplatesMatchDisk` and
   `TestEmbeddedUnitTemplatesMatchDisk` pin the other two FSes the same way.
+- **A test that sweeps this repo's own files skips a directory below its
+  root that holds a `.git` entry: another checkout, which is not this
+  tree** (#1007). Claude Code keeps its worktrees of other branches under
+  `.claude/worktrees/`, each a whole checkout that git does not track and
+  CI never has. With the three the main checkout held, 1,208 of the 1,617
+  files the hash-cost guard opened were theirs, and 3,366 of the 4,513 the
+  flac-handle guard opened, so a half-written file or a call in progress in
+  any of them failed this checkout's run. `sweeptest.IsOtherCheckout` is
+  the ONE definition, in a package only tests import: `os.Lstat` of
+  `<dir>/.git`, whether a directory, a `gitdir:` file or a symlink,
+  dangling or not, and never the root. The five sweeps from the module root
+  apply it (the citation, docblock and blank-keeper guards,
+  `TestNoProductionCodeLowersTheHashCost` and
+  `TestNoLeakyFlacConstructors`), and **a new sweep from the root applies
+  it too**. It is not the go tool's rule and does not replace it. #995's
+  go.mod rule sees another MODULE, and a checkout git is still writing has
+  no go.mod yet (in index order `cmd/` comes before `go.mod`): there a
+  nested test satisfied a stale citation, a false pass. The docblock
+  guard's `.` rule sees `.claude/` and not a checkout at a plain path,
+  which doubled the files it read and failed it. **It drops no tracked
+  file**: listing every file each walk opened, before and after, showed
+  that, and in a clone it holds by construction, since git will not add a
+  file inside another repository. The shapes where git and `os.Lstat`
+  disagree (an empty `.git`, a `gitdir:` file pointing nowhere, a `git
+  init` inside a tracked directory) exist only in a local checkout. **A
+  skip that can drop a whole subtree needs a floor that catches the
+  largest one going missing.** The hash-cost floor was `visited == 0`,
+  which a walk that lost `internal/` passed, and is `>= 100` now; the flac
+  walk had none, and needs 100 files of each kind plus one that imports
+  the package, because only importers are judged. **Demonstrate on the
+  geometry, not on the report**: of the three failures this was filed
+  with, only the work-in-progress one still reproduced on main, since #995
+  had closed the false pass for a checkout with a go.mod and #993 the
+  locks. A scratch clone holding the same three worktrees at the same
+  commits measured all of it, and the main checkout was never written.
+  Still read, and a separate defect: a `_` directory, which the go tool
+  ignores, by the hash-cost and citation walks. A half-written helper in
+  `_reextract/` fails the first, and a test there satisfies a citation in
+  the second.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
@@ -3522,8 +3561,9 @@ its twin.** The top list is older, shorter, and read first.
   that exists. Three leftover worktrees still held the stale citations, so
   the extended guard went red in the main checkout alone, and an old copy's
   tests can satisfy a citation this tree no longer backs, which passes. That
-  is the one directory rule added; #993's reason for not borrowing the go
-  tool's `.`-directory rule (`.github/`) still holds. (#995)
+  was the one directory rule #995 added (#1007 added the `.git` rule, for a
+  checkout with no go.mod); #993's reason for not borrowing the go tool's
+  `.`-directory rule (`.github/`) still holds. (#995)
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through
   an invalid fallback:**
   `--platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx}`.

@@ -6,10 +6,13 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/sweeptest"
 )
 
 // mewkizFlacPkg is the top-level mewkiz package. The `/meta` subpackage
@@ -61,75 +64,180 @@ var leakyFlacConstructors = map[string]string{
 // import alias rather than assuming the local name is `flac`.
 func TestNoLeakyFlacConstructors(t *testing.T) {
 	root := moduleRoot(t)
+	sweep, err := leakyFlacCalls(root)
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	// A walk that reads nothing reports nothing, and until these floors the
+	// test had none. The tree held 410 non-test and 739 test files when they
+	// were set, and one file importing the package: internal/manifest's
+	// fixture writer, the kind of file this guard was written about. Files
+	// that do not import it are parsed and never judged, so the count alone
+	// cannot show that the walk reached a single call it guards.
+	if sweep.nonTest < 100 || sweep.test < 100 {
+		t.Fatalf("parsed %d non-test and %d test .go files under %s, want >=100 of each — "+
+			"the walk is not seeing the tree", sweep.nonTest, sweep.test, root)
+	}
+	if sweep.importers == 0 {
+		t.Fatalf("no file under %s imports %s, so no call was judged — the walk is not "+
+			"reaching the fixture writer, or nothing imports the package any more and "+
+			"this guard has nothing left to guard", root, mewkizFlacPkg)
+	}
 
-	var found []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	if len(sweep.calls) > 0 {
+		t.Errorf("mewkiz/flac path-taking constructors leak the file handle "+
+			"(Stream.Close cannot close a *bufio.Reader), which blocks "+
+			"deletion on Windows:\n\t%s", strings.Join(sweep.calls, "\n\t"))
+	}
+}
+
+// flacSweep is what leakyFlacCalls found under a root: each call of a
+// leakyFlacConstructors entry, as "file:line: call — use …", the non-test
+// and test files it parsed, and how many of those import mewkizFlacPkg,
+// which are the only files whose calls it can judge.
+type flacSweep struct {
+	calls         []string
+	nonTest, test int
+	importers     int
+}
+
+// leakyFlacCalls walks the Go files under root for calls of the
+// leakyFlacConstructors entries.
+func leakyFlacCalls(root string) (sweep flacSweep, err error) {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			// Skip VCS metadata, vendored trees, and the `_`-prefixed
-			// scratch dirs the repo uses for throwaway helpers (both
-			// are already invisible to `go ./...`).
-			name := d.Name()
-			if name == ".git" || name == "vendor" || strings.HasPrefix(name, "_") {
-				return filepath.SkipDir
-			}
-			return nil
+			return flacDirRule(root, path, d.Name())
 		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
+		if strings.HasSuffix(path, ".go") {
+			sweep.judge(root, path)
 		}
-
-		fset := token.NewFileSet()
-		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if perr != nil {
-			// A file that does not parse is not this test's problem —
-			// the build will say so far more clearly.
-			return nil //nolint:nilerr // deliberate: build reports parse errors
-		}
-
-		local, ok := localNameFor(file, mewkizFlacPkg)
-		if !ok {
-			return nil
-		}
-
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			rel = path
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			ident, ok := sel.X.(*ast.Ident)
-			if !ok || ident.Name != local {
-				return true
-			}
-			want, banned := leakyFlacConstructors[sel.Sel.Name]
-			if !banned {
-				return true
-			}
-			found = append(found, rel+":"+
-				strconv.Itoa(fset.Position(call.Pos()).Line)+
-				": "+local+"."+sel.Sel.Name+" — use "+want)
-			return true
-		})
 		return nil
 	})
+	return sweep, err
+}
+
+// flacDirRule is leakyFlacCalls' answer for a directory: SkipDir for one
+// whose code is not this checkout's, nil to descend.
+func flacDirRule(root, path, name string) error {
+	// The rules below are for the directories under the root. A checkout's
+	// own directory may be called anything, and one whose name began with
+	// "_" skipped the whole tree.
+	if path == root {
+		return nil
+	}
+	// Skip VCS metadata, vendored trees, and the `_`-prefixed scratch dirs
+	// the repo uses for throwaway helpers (both are already invisible to
+	// `go ./...`). And another checkout inside this one
+	// (sweeptest.IsOtherCheckout), such as Claude Code's worktrees of other
+	// branches: none of it is this checkout's code, and a call in progress
+	// there failed this checkout's run.
+	if name == ".git" || name == "vendor" || strings.HasPrefix(name, "_") ||
+		sweeptest.IsOtherCheckout(root, path) {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// judge parses the Go file at path, counts it, and records each call in it
+// of a leakyFlacConstructors entry, named by its path relative to root.
+func (s *flacSweep) judge(root, path string) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("walk %s: %v", root, err)
+		// A file that does not parse is not this test's problem — the
+		// build will say so far more clearly.
+		return
+	}
+	if strings.HasSuffix(path, "_test.go") {
+		s.test++
+	} else {
+		s.nonTest++
 	}
 
-	if len(found) > 0 {
-		t.Errorf("mewkiz/flac path-taking constructors leak the file handle "+
-			"(Stream.Close cannot close a *bufio.Reader), which blocks "+
-			"deletion on Windows:\n\t%s", strings.Join(found, "\n\t"))
+	local, ok := localNameFor(file, mewkizFlacPkg)
+	if !ok {
+		return
+	}
+	s.importers++
+
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if name, ok := leakyFlacCall(n, local); ok {
+			s.calls = append(s.calls, rel+":"+
+				strconv.Itoa(fset.Position(n.Pos()).Line)+
+				": "+local+"."+name+" — use "+leakyFlacConstructors[name])
+		}
+		return true
+	})
+}
+
+// leakyFlacCall reports the constructor n calls when n is a call of a
+// leakyFlacConstructors entry through local, the file's name for the
+// package.
+func leakyFlacCall(n ast.Node, local string) (string, bool) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	if ident, ok := sel.X.(*ast.Ident); !ok || ident.Name != local {
+		return "", false
+	}
+	_, banned := leakyFlacConstructors[sel.Sel.Name]
+	return sel.Sel.Name, banned
+}
+
+// TestFlacSweepSkipsOtherCheckouts runs the sweep over a tree shaped like the
+// main checkout: a root that is a checkout itself, with a leaky call below it
+// that must be found, and other checkouts inside it whose work in progress
+// must not be. One is Claude Code's worktree of another branch; the other
+// sits at a plain path and has no go.mod of its own. Before the sweep
+// skipped them, each failed this checkout's run.
+//
+// The root's own name begins with "_", as a checkout's directory may. The
+// walk tests the names of the directories below the root, never the root's,
+// or it skips the whole tree and reports nothing.
+func TestFlacSweepSkipsOtherCheckouts(t *testing.T) {
+	const leaky = "package p\n\nimport \"github.com/mewkiz/flac\"\n\n" +
+		"func probe(path string) { s, _ := flac.ParseFile(path); _ = s }\n"
+	root := filepath.Join(t.TempDir(), "_checkout")
+	for rel, body := range map[string]string{
+		".git/HEAD":  "ref: refs/heads/main\n",
+		"p/probe.go": leaky,
+
+		".claude/worktrees/old/.git":       "gitdir: /elsewhere/.git/worktrees/old\n",
+		".claude/worktrees/old/go.mod":     "module example\n",
+		".claude/worktrees/old/p/probe.go": leaky,
+
+		"worktrees/plain/.git":       "gitdir: /elsewhere/.git/worktrees/plain\n",
+		"worktrees/plain/p/probe.go": leaky,
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweep, err := leakyFlacCalls(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join("p", "probe.go") + ":5: flac.ParseFile — use " + leakyFlacConstructors["ParseFile"]}
+	if !slices.Equal(sweep.calls, want) || sweep.nonTest != 1 || sweep.test != 0 || sweep.importers != 1 {
+		t.Errorf("found %q after parsing %d non-test and %d test files (%d importing the package), "+
+			"want %q after parsing 1 non-test file — the sweep read another checkout, or stopped "+
+			"reading this one", sweep.calls, sweep.nonTest, sweep.test, sweep.importers, want)
 	}
 }
 
