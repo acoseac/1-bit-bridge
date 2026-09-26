@@ -2440,7 +2440,7 @@ what it claimed**, and none of it had a failing test.
   cannot read** (L7, another user's; root's daemon on the NUC is this
   shape) still warned, exit 0, until the next bullet.
 - **…and a listener another UID created is not the bridge's, so a
-  holder this user cannot read FAILs too** (#NNNN). Row L7, left by
+  holder this user cannot read FAILs too** (#1032). Row L7, left by
   #1030: the capability-bound bridge live on its old ports, its config
   edited to a port held by a process of ANOTHER user, or by root's
   daemon (L7z, the NUC's likelier shape). No readable process holds that
@@ -3755,7 +3755,7 @@ its twin.** The top list is older, shorter, and read first.
   that way, so `kill -INT` did nothing, and what read as a leak on main
   was a test still running. (#1025)
 - **A test that starts a child with `SysProcAttr.Credential` changes
-  its OWN dumpable flag on Linux** (#NNNN). Go forks with
+  its OWN dumpable flag on Linux** (#1032). Go forks with
   `CLONE_VFORK|CLONE_VM` (unless a user namespace is asked for), so the
   child's setuid or setgid runs `commit_creds` on memory it still shares
   with the test process, and the kernel resets that memory's dumpable
@@ -3763,7 +3763,7 @@ its twin.** The top list is older, shorter, and read first.
   container's) then cannot read the test process's descriptors, and every
   later test that attributes a port to it fails: only as root, only where
   lsof is installed, and never alone (measured on dido: two #1028 tests
-  after the first form of #NNNN's L7 kernel test). **Have the child drop
+  after the first form of #1032's L7 kernel test). **Have the child drop
   to its uid itself, after exec** (`dropToChildUID`), and assert the test
   process's `PR_GET_DUMPABLE` did not move. No production code uses
   `Credential`; one that did would make the BRIDGE non-dumpable the same

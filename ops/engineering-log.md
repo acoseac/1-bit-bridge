@@ -16497,7 +16497,7 @@ defaulted and resolved). The guards themselves sort into two kinds:
   of the three tests here asserted "nothing was reaped" in a directory
   holding nothing reapable.
 
-## 2026-09-26 — doctor rules a hidden bridge out of a port another uid's listener holds (#NNNN)
+## 2026-09-26 — doctor rules a hidden bridge out of a port another uid's listener holds (#1032)
 
 #1030's Out of scope recorded row L7: a bridge granted
 `cap_net_bind_service` runs with dumpable=0, and when its config is edited to
