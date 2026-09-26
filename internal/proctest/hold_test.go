@@ -296,6 +296,10 @@ func holdAsChild(dir string) {
 		fmt.Fprintln(os.Stderr, "start the held shell:", err)
 		os.Exit(1)
 	}
+	// Reaped if it exits while this process lives. Unreaped, a shell whose
+	// hold ended at once stays a zombie, which kill(pid, 0) finds on macOS,
+	// and the parent's check that it holds would pass it.
+	go func() { _ = cmd.Wait() }()
 	eof := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, os.Stdin)
