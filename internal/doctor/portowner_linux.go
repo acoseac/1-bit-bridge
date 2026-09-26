@@ -45,10 +45,12 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 // where the owner probe could not rule the recorded bridge out: where /proc
 // read every one of the bridge's descriptors and none is a listener on the
 // port (row L4), or found every listener on the port held by processes it
-// can read (row L6), the port FAILs without asking. Even so this is the
-// ceiling of what an unprivileged observer can learn: another hidden
-// process of this user's, one with dumpable=0 too or in another group,
-// still matches.
+// can read (row L6) or created by a uid the bridge does not run as (row L7),
+// the port FAILs without asking. Even so this is the ceiling of what an
+// unprivileged observer can learn: another hidden process of this user's,
+// one with dumpable=0 too or in another group, still matches, and its
+// listener carries the bridge's own uid, so the census cannot rule the
+// bridge out beside it either (row L6h).
 func hiddenListenerOfThisUser(port int) (bool, error) {
 	return hiddenListenerOf(procNetTCPFiles, "/proc", port, os.Getuid())
 }
@@ -76,9 +78,10 @@ func hiddenListenerOfThisUser(port int) (bool, error) {
 // dumpable=0 (a binary granted cap_net_bind_service), keeps its descriptors
 // from an unprivileged observer, and the answer is then false, as lsof's
 // exit 1 is. The sighting says which it was (procSighting), and where every
-// socket listening on the port is held by a process this user CAN read, it
-// rules such a pid out all the same (procSighting's census). An error means
-// neither socket table could be read.
+// socket listening on the port is held by a process this user CAN read, or
+// was created by a uid such a pid does not run as, it rules the pid out all
+// the same (procSighting's census). An error means neither socket table
+// could be read.
 func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
 		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil

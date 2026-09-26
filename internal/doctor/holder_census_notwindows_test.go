@@ -57,8 +57,12 @@ func capturedTables(t *testing.T) []string {
 // the recorded pid SHARES with a readable process, and a bridge never
 // shares its listener (net.Listen, close-on-exec, no descriptor handed on).
 // Anything that leaves one listener without a readable holder leaves the
-// pid possible, as before: a holder this user cannot read either, a table
-// that did not read.
+// pid possible here: a holder this user cannot read either, a table that
+// did not read. These fixtures give the recorded pid no status, so /proc
+// shows no uid for it and only the holders can rule it out; where it does
+// show one, a listener another uid created rules it out too, which
+// TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener
+// pins.
 func TestProcSightingRulesOutAPidItCannotReadByThePortsOtherHolders(t *testing.T) {
 	const blind = "the blind spot"
 	unreadable := ownerSighting{saw: "/proc does not let this user read pid 4242's descriptors", blind: blind}
@@ -148,25 +152,34 @@ func TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead(t *testing
 // /proc mounted for another namespace numbers every process differently.
 // Its <pid> is then some unrelated process, and the port's holders there
 // include the recorded bridge itself under another number: finding it,
-// ruling it out by its own descriptors or ruling it out by those holders
-// would each be an answer about some other process. Measured on Linux 7.0
-// for proctest: under `unshare --pid --fork` without --mount-proc, a
-// process whose own pid is 1 reads /proc/self as 480456.
+// ruling it out by its own descriptors, by those holders, or by the uid its
+// status shows would each be an answer about some other process. Measured
+// on Linux 7.0 for proctest: under `unshare --pid --fork` without
+// --mount-proc, a process whose own pid is 1 reads /proc/self as 480456.
 func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 	tables := capturedTables(t)
+	// otherUID is a status for pid 4242 whose fsuid is not the uid that
+	// created 7789's listener (1000): under a /proc this process can trust,
+	// that rules the pid out (the second control).
+	const otherUID = "1001\t1001\t1001\t1001"
 	for _, tc := range []struct {
-		name  string
-		procs map[int]map[string]string
-		port  int
+		name   string
+		procs  map[int]map[string]string
+		status string // pid 4242's Uid values; "" writes no status
+		port   int
 	}{
-		{"the pid holds the listener", map[int]map[string]string{4242: fdFixture}, 7789},
-		{"the pid's descriptors read without one", map[int]map[string]string{4242: fdFixture}, 443},
-		{"another process holds every listener", map[int]map[string]string{5000: {"3": "socket:[24680]"}}, 7789},
+		{"the pid holds the listener", map[int]map[string]string{4242: fdFixture}, "", 7789},
+		{"the pid's descriptors read without one", map[int]map[string]string{4242: fdFixture}, "", 443},
+		{"another process holds every listener", map[int]map[string]string{5000: {"3": "socket:[24680]"}}, "", 7789},
+		{"another uid than the pid's created every listener", nil, otherUID, 7789},
 	} {
 		for _, self := range []string{"480456", ""} {
 			t.Run(tc.name+"/self "+strconv.Quote(self), func(t *testing.T) {
-				root := reselfProcRoot(t, writeProcRoot(t, tc.procs), self)
-				found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot")
+				root := writeProcRoot(t, tc.procs)
+				if tc.status != "" {
+					writeStatus(t, root, 4242, tc.status)
+				}
+				found, seen, err := procSighting(tables, reselfProcRoot(t, root, self), tc.port, 4242, "the blind spot")
 				requireNoAnswerFromAnotherNamespace(t, found, seen, err, self)
 			})
 		}
@@ -175,6 +188,13 @@ func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 		root := writeProcRoot(t, map[int]map[string]string{4242: fdFixture})
 		if found, _, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || !found {
 			t.Errorf("got %v, %v; want the pid found holding the listener", found, err)
+		}
+	})
+	t.Run("the control: its self is this process, and another uid created the listener", func(t *testing.T) {
+		root := writeProcRoot(t, nil)
+		writeStatus(t, root, 4242, otherUID)
+		if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || found || !seen.ruledOut {
+			t.Errorf("got %v, %+v, %v; want the pid ruled out by the uid that created the listener", found, seen, err)
 		}
 	})
 }

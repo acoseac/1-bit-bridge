@@ -803,8 +803,8 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // process that holds the port. And a probe that saw everything there was to
 // see rules our pid out: Windows' listener table, or /proc reading all of
 // our descriptors, or, where it could not read them, finding every listener
-// on the port held by processes it can read. So the text is the probe's
-// account (ownerSighting).
+// on the port held by a process it can read or created by a uid ours does
+// not run as. So the text is the probe's account (ownerSighting).
 //
 // A pid the account rules out holds nothing on this port: its descriptors
 // were all read and none is a listener on the port, or the table names
@@ -817,14 +817,17 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // runbook's check before a restart) exited 0, and the restarted bridge
 // could not bind: #970's defect, in this ladder (#1028's row L4, and row L6
 // for a bridge granted the capability, whose descriptors nothing reads).
+// Where that process ran as another user, or root, and so could not be read
+// either, the port warned, exit 0, to the same end (#1030's row L7).
 //
 // The uid arm now answers only for a listener this user created that no
 // process it can read holds (hiddenListenerOfThisUser): how a
 // capability-bound bridge on its own port looks, the NUC's ordinary state
 // (row L2). A listener that a readable process holds is that process's,
-// which matters where no ruling-out is possible: beside a listener of
-// another user's on the same port at another address, that process's
-// listener read ok before (#1030).
+// which matters where no ruling-out is possible: where hidepid hides our
+// bridge's uid, a listener of another user's on the same port at another
+// address leaves it possible, and a listener of this user's beside it,
+// held by a readable process, read ok before (#1030).
 func liveUnseenVerdict(name string, port, ownPID int, seen ownerSighting) Check {
 	conflict := fmt.Sprintf(":%d in use", port)
 	if seen.ruledOut {

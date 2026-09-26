@@ -2395,9 +2395,9 @@ what it claimed**, and none of it had a failing test.
   do not read in full, `procSighting` walks every `/proc/<pid>/fd` this
   user CAN read (`socketHolders`), and every socket listening on the
   port held by one of them, other than the pid, rules the pid out
-  (`heldByOthers`), so #1029's arm FAILs it. An inode names one socket,
-  and a listener of the pid's own is held by it alone, which nothing
-  here reads, so it would have no holder. **The one shape a census cannot
+  (`heldByOthers`, now `listenersNotOf`'s first half), so #1029's arm
+  FAILs it. An inode names one socket, and a listener of the pid's own is
+  held by it alone, which nothing here reads, so it would have no holder. **The one shape a census cannot
   see is a socket the pid SHARES with a readable process, and the bridge
   shares none**: every listener is its own `net.Listen` (close-on-exec),
   it consumes no inherited fd (`internal/supervision` only READS
@@ -2407,15 +2407,18 @@ what it claimed**, and none of it had a failing test.
   socket activation or a listener handoff to the bridge breaks this
   premise; revisit the census in the same change.** A listener with no
   readable holder (another user's process, root's, io_uring, another pid
-  namespace), or a table that did not read, leaves the pid possible, and
-  root in a container without CAP_SYS_PTRACE lists every fd directory and
-  reads no other uid's link, so nothing there changes (R6 stays a warn).
+  namespace) left the pid possible here, as a table that did not read
+  still does; the next bullet rules it out by the uid that created it.
+  Root in a container without CAP_SYS_PTRACE lists every fd directory
+  and reads no other uid's link, so the holders change nothing for it
+  (R6 stays a warn).
   **The uid arm** (`hiddenListenerOf`) now needs both marks of that
   bridge: the listener was created by this uid, AND no process this user
   can read holds it. One a readable process holds is that process's. The
-  census cannot rule out where another listener has no readable holder
-  (L6m: root's `[::1]:7788` beside the same-user holder), and there the
-  old arm said ok. It is a warn now, and still exits 0. **Both halves are
+  census could not rule out where another listener has no readable holder
+  (L6m: another user's `[::1]:7788` beside the same-user holder), and
+  there the old arm said ok. It was a warn after this change, exit 0, and
+  FAILs since the next bullet's. **Both halves are
   needed, and the census is the one that fixes L6**: with it disabled
   (NC1) L6 reads warn, exit 0, from the refined arm alone. **Every
   pid-numbered `/proc` read first checks `/proc/self` against `getpid`**
@@ -2433,11 +2436,54 @@ what it claimed**, and none of it had a failing test.
   CAP_SYS_PTRACE. **A test stands the bridge in without setcap**:
   `prctl(PR_SET_DUMPABLE, 0)` in a re-run of the test binary gives the
   same root-owned 0500 fd directory (measured), so CI runs L2 and L6 on
-  the real kernel (`hidden_bridge_linux_test.go`). **Still open: a holder
-  this user cannot read** (L7, another user's; root's daemon on the NUC
-  is this shape) warns, exit 0. The recorded pid's uid is readable from
-  `/proc/<pid>/status` under dumpable=0, and a listener another uid
-  created is not the bridge's.
+  the real kernel (`hidden_bridge_linux_test.go`). **A holder this user
+  cannot read** (L7, another user's; root's daemon on the NUC is this
+  shape) still warned, exit 0, until the next bullet.
+- **…and a listener another UID created is not the bridge's, so a
+  holder this user cannot read FAILs too** (#1032). Row L7, left by
+  #1030: the capability-bound bridge live on its old ports, its config
+  edited to a port held by a process of ANOTHER user, or by root's
+  daemon (L7z, the NUC's likelier shape). No readable process holds that
+  listener, so nothing ruled the bridge out: `bridge doctor --config`
+  warned, exit 0, `bridge init --force` saved the port, and the restart
+  could not bind (dido, both images, and as root: R7). **The census's
+  second half** (`listenersNotOf`): a listener no readable process holds
+  is another's when the uid that created it, the tables' uid column, is
+  not the recorded pid's fsuid, the FOURTH value of `Uid:` in
+  `/proc/<pid>/status` (`pidFSUID`, read behind the `/proc/self` guard,
+  NC4). That file reads where the pid's descriptors do not (dumpable=0,
+  to its own user and to container root). **The fsuid, not the real or
+  effective uid**: a socket is stamped with its creator's fsuid
+  (measured: root that called `setfsuid(1234)` and listened shows
+  `Uid: 0 0 0 1234` and row uid 1234), and only `fchown` re-stamps one.
+  **The premise is the bridge's, checked in the binary, not the
+  source**: no setuid-family call, `AllThreadsSyscall`,
+  `ParseUnixRights` or `net.FileListener` is linked into the linux build
+  (`go tool nm`), nothing fchowns a socket, and every thread carries the
+  leader's creds (one distinct `Uid:` line across 16 to 20 threads).
+  **Adding a privilege drop, `setfsuid`, socket activation or a listener
+  handoff breaks it; revisit the census in the same change.** **No
+  special case for the overflow uid**: both files render a uid through
+  the reader's user namespace, so DIFFERENT values always name different
+  uids, 65534 included, and only EQUAL ones are ambiguous (two unmapped
+  uids both render 65534), which `createdByAnother` never counts as
+  another (measured in two user namespaces on dido; treating 65534 as
+  unknown turned two correct rulings-out into warns, NC7). A readable
+  holder is named ahead of a creator uid, since it is what an operator
+  stops. **hidepid=1 or 2 hides a dumpable=0 process's status from its
+  own user too**, so L7 stays a warn there (measured, with a hidepid=0
+  remount as the control). A pid file naming a recycled pid of another
+  user now FAILs a port whose listeners that uid did not create, the
+  trust #1029 already gave a recycled pid of the same user (P7a, P7b).
+  **Still open: a hidden holder of the bridge's OWN uid** (row L6h:
+  another capability-bound binary of the service user, or one of its
+  processes in another group): its listener carries the bridge's uid,
+  nothing unprivileged tells the two apart, and the uid arm reads ok.
+  The runbook's answer is the moved port's own line: the running bridge
+  is still on the old port, so anything but `free` on the new one is
+  another process. The L7 kernel test takes root (it runs the holder,
+  the bridge and doctor as two other uids), so it runs on dido and skips
+  in CI, where the fixture tests carry the rule.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -3708,6 +3754,20 @@ its twin.** The top list is older, shorter, and read first.
   of a non-interactive shell starts with SIGINT ignored and Go keeps it
   that way, so `kill -INT` did nothing, and what read as a leak on main
   was a test still running. (#1025)
+- **A test that starts a child with `SysProcAttr.Credential` changes
+  its OWN dumpable flag on Linux** (#1032). Go forks with
+  `CLONE_VFORK|CLONE_VM` (unless a user namespace is asked for), so the
+  child's setuid or setgid runs `commit_creds` on memory it still shares
+  with the test process, and the kernel resets that memory's dumpable
+  flag to `fs.suid_dumpable` (2 on Ubuntu). Root without CAP_SYS_PTRACE (a
+  container's) then cannot read the test process's descriptors, and every
+  later test that attributes a port to it fails: only as root, only where
+  lsof is installed, and never alone (measured on dido: two #1028 tests
+  after the first form of #1032's L7 kernel test). **Have the child drop
+  to its uid itself, after exec** (`dropToChildUID`), and assert the test
+  process's `PR_GET_DUMPABLE` did not move. No production code uses
+  `Credential`; one that did would make the BRIDGE non-dumpable the same
+  way, hiding it from every same-user owner probe.
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the

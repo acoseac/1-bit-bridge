@@ -201,9 +201,9 @@ func listenerSockets(paths []string, port int) (sockets map[string]int, unread b
 // is any process of this user's, and the arm answered ok on it for another
 // process's listener beside a capability-bound bridge that held no socket
 // on the port (#1028's row L6), wherever the census could not rule that
-// bridge out: when a listener of root's shares the port at another address,
-// say. A listener that a process this user can read holds is that
-// process's.
+// bridge out: when hidepid hides the bridge's uid and a listener of root's
+// shares the port at another address, say. A listener that a process this
+// user can read holds is that process's.
 //
 // Unlike the census it is handed no pid, so it does not check /proc's pid
 // namespace (procOfAnotherPIDNamespace), and neither direction needs it. A
@@ -241,20 +241,101 @@ func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, er
 	return false, nil
 }
 
-// heldByOthers returns the pids under procRoot whose descriptors hold the
-// sockets, and whether every socket has a holder there other than pid
-// (socketHolders): the census procSighting rules out a pid it cannot read
-// with.
-func heldByOthers(procRoot string, sockets map[string]int, pid int) ([]int, bool) {
+// listenersNotOf is the census procSighting rules out a pid it cannot read
+// with: whether every socket in sockets, all listening on one port, is shown
+// to be another process's (all), and by what. A socket is another process's
+// when a process under procRoot other than pid holds it and this user can
+// read that process's descriptors (socketHolders), or, where no such process
+// holds it, when the uid that created it is not the one pid runs as
+// (createdByAnother, against pidFSUID). holders are the pids of the first
+// kind, creators the uids of the second, and pidUID is pid's fsuid, or -1
+// where /proc does not show it. A socket that is neither leaves all false.
+//
+// A holder is named in preference to a creator, since the process that holds
+// the port is what an operator stops. The walk runs whatever the uids say,
+// for that reason.
+func listenersNotOf(procRoot string, sockets map[string]int, pid int) (holders, creators []int, pidUID int, all bool) {
 	held := socketHolders(procRoot, sockets, pid)
-	var holders []int
-	for s := range sockets {
-		if len(held[s]) == 0 {
-			return nil, false
+	pidUID = pidFSUID(procRoot, pid)
+	for s, creator := range sockets {
+		switch {
+		case len(held[s]) > 0:
+			holders = append(holders, held[s]...)
+		case createdByAnother(creator, pidUID):
+			creators = append(creators, creator)
+		default:
+			return nil, nil, pidUID, false
 		}
-		holders = append(holders, held[s]...)
 	}
-	return holders, true
+	return holders, creators, pidUID, true
+}
+
+// createdByAnother reports whether a socket whose table row gives creator as
+// the uid that created it was created by a uid other than pidUID, a
+// process's fsuid: the uid a socket it creates now carries. -1 on either
+// side is a value /proc did not show, which says nothing.
+//
+// Both values are rendered through the user namespace of the process that
+// opened the file (from_kuid_munged(seq_user_ns(…))), and this process opens
+// both, so each is the same function of the kernel's uid. Different values
+// therefore name different uids, the overflow uid (65534, what a uid
+// unmapped in that namespace renders as) included: only EQUAL values are
+// ambiguous, since two unmapped uids both render 65534, and equal is never
+// "another". Measured on dido (2026-09-26): in a user namespace that maps
+// only root, a uid-1000 process's listener row and its status Uid line both
+// read 65534, and in one mapping root to 1000, root's sshd listener reads
+// 1000 while the uid-1000 process reads 65534.
+func createdByAnother(creator, pidUID int) bool {
+	return creator >= 0 && pidUID >= 0 && creator != pidUID
+}
+
+// pidFSUID returns pid's fsuid as /proc/<pid>/status under procRoot shows
+// it, or -1 when the file does not read or does not show one (statusFSUID).
+//
+// The file reads where the pid's descriptors do not: it is mode 0444, and
+// the kernel's ptrace check guards the descriptors, not it. So it reads for
+// a process of another user, and for one with dumpable=0 (a binary granted
+// cap_net_bind_service), to its own user and to root without CAP_SYS_PTRACE
+// (measured on dido for #1030). It does not read under hidepid=1 or 2, which
+// hide a process that fails that ptrace check, dumpable=0 ones from their own
+// user included: the uid is then unknown, and nothing is ruled out by it.
+func pidFSUID(procRoot string, pid int) int {
+	f, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	if err != nil {
+		return -1
+	}
+	defer func() { _ = f.Close() }()
+	return statusFSUID(f)
+}
+
+// statusFSUID reads the fsuid from a /proc/<pid>/status file: the fourth
+// value of its "Uid:" line, which lists the real, effective, saved and
+// filesystem uids in that order. -1 when there is no such line or that value
+// does not parse.
+//
+// The fsuid, not the real or effective uid, because it is what a socket is
+// stamped with: sock_alloc() takes current_fsuid() for the socket's inode,
+// and the socket's sk_uid, the uid column of /proc/net/tcp, is set from it.
+// It follows the effective uid unless setfsuid(2) is called, which the
+// bridge never does.
+func statusFSUID(r io.Reader) int {
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		rest, found := strings.CutPrefix(sc.Text(), "Uid:")
+		if !found {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) < 4 {
+			return -1
+		}
+		uid, err := strconv.Atoi(f[3])
+		if err != nil || uid < 0 {
+			return -1
+		}
+		return uid
+	}
+	return -1
 }
 
 // socketHolders walks the process directories under procRoot, /proc in
@@ -270,8 +351,9 @@ func heldByOthers(procRoot string, sockets map[string]int, pid int) ([]int, bool
 // io_uring or kept in a BPF map after its descriptor closed, one in flight
 // through a unix socket, a kernel socket, or one held by a process of
 // another pid namespace that shares this network namespace. Neither caller
-// reads a missing holder as an answer: the census leaves the recorded pid
-// possible, and the uid arm counts the socket as hidden, as before.
+// reads a missing holder as an answer: the census asks next which uid
+// created the socket (listenersNotOf), and the uid arm counts the socket as
+// hidden, as before.
 //
 // The walk reads every process this user can: a ReadDir, then a Readlink
 // per descriptor. Measured on a 290-process host (dido, 2026-09-26): 1.1 to

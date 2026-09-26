@@ -5,6 +5,7 @@ package doctor
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -46,12 +48,23 @@ const undumpableReady = "undumpable child ready, port "
 // exits by itself.
 func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 	t.Helper()
+	return startUndumpableAs(t, -1, listen)
+}
+
+// startUndumpableAs is startUndumpable with the child running as uid, and
+// the gid of the same number, which takes root; a negative uid leaves it
+// this process's. The child drops to it itself (dropToChildUID).
+func startUndumpableAs(t *testing.T, uid int, listen bool) (pid, port int) {
+	t.Helper()
 	mode := "idle"
 	if listen {
 		mode = "listen"
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
 	cmd.Env = append(os.Environ(), undumpableChildEnv+"="+mode)
+	if uid >= 0 {
+		cmd.Env = append(cmd.Env, childUIDEnv+"="+strconv.Itoa(uid))
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	// The writer is dropped here and still stays open: cmd keeps it
@@ -89,6 +102,7 @@ func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 
 // runUndumpable is the child's side of startUndumpable. It never returns.
 func runUndumpable(mode string) {
+	dropToChildUID()
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fmt.Fprintln(os.Stderr, "prctl(PR_SET_DUMPABLE, 0):", err)
 		os.Exit(1)
@@ -105,6 +119,55 @@ func runUndumpable(mode string) {
 	fmt.Printf("%s%d\n", undumpableReady, port)
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	os.Exit(0)
+}
+
+// childUIDEnv makes a child of these tests drop to the uid it names, and the
+// gid of the same number, before anything else (dropToChildUID).
+const childUIDEnv = "DOCTOR_TEST_CHILD_UID"
+
+// dropToChildUID drops this process, a child of these tests, to the uid
+// childUIDEnv names, if any, and the gid of the same number, with no
+// supplementary groups.
+//
+// The child does it itself, after exec, rather than the parent asking for it
+// (SysProcAttr.Credential): Go forks with CLONE_VM (syscall/exec_linux.go
+// adds CLONE_VFORK|CLONE_VM unless a user namespace is asked for), so a
+// child that changes its credentials before exec does so on the memory it
+// still shares with its parent, and the kernel resets that memory's
+// dumpable flag, the PARENT's, to fs.suid_dumpable. Measured on dido, where
+// it is 2: after one such child the test process read dumpable=2, so root
+// without CAP_SYS_PTRACE (a container's) could no longer read its
+// descriptors, and the later tests that attribute a port to it failed, only
+// when run as root.
+func dropToChildUID() {
+	v := os.Getenv(childUIDEnv)
+	if v == "" {
+		return
+	}
+	uid, err := strconv.Atoi(v)
+	if err == nil {
+		err = syscall.Setgroups(nil)
+	}
+	if err == nil {
+		err = syscall.Setgid(uid)
+	}
+	if err == nil {
+		err = syscall.Setuid(uid)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drop to uid %s: %v\n", v, err)
+		os.Exit(1)
+	}
+}
+
+// dumpable is this process's dumpable flag (prctl(PR_GET_DUMPABLE)).
+func dumpable(t *testing.T) int {
+	t.Helper()
+	d, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 // hiddenFrom reports whether this user cannot read every one of pid's
@@ -228,4 +291,126 @@ func TestHiddenListenerOfThisUserOnTheKernel(t *testing.T) {
 	if hidden, err := hiddenListenerOfThisUser(port); err != nil || !hidden {
 		t.Errorf("the stand-in's listener: hidden %v, err %v; want hidden, since no process this user reads holds it", hidden, err)
 	}
+}
+
+// TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries pins, on the real
+// kernel, the two facts the census's second half rests on, for a process
+// with dumpable=0 (the stand-in for a bridge granted cap_net_bind_service):
+// its /proc/<pid>/status reads where its descriptors may not, and the fsuid
+// there is the uid the socket tables give the listener it created. The
+// census rules such a process out of a port whose listeners another uid
+// created, so a disagreement here would FAIL the bridge's own port.
+func TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries(t *testing.T) {
+	if mode := os.Getenv(undumpableChildEnv); mode != "" {
+		runUndumpable(mode)
+	}
+	bridge, port := startUndumpable(t, true)
+	uid := pidFSUID("/proc", bridge)
+	if uid != os.Getuid() {
+		t.Fatalf("pid %d's status shows fsuid %d; want this user's, %d", bridge, uid, os.Getuid())
+	}
+	sockets, _, err := listenerSockets(procNetTCPFiles, port)
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("the socket tables list %v for the stand-in's listener on :%d (err %v), want one socket", sockets, port, err)
+	}
+	for s, creator := range sockets {
+		if creator != uid {
+			t.Errorf("the stand-in's listener %s was created by uid %d in the tables; its status shows %d", s, creator, uid)
+		}
+	}
+}
+
+// portCheckChildEnv makes this test binary, run again by
+// TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge, the doctor run:
+// it checks the port its value names against the pid file it names
+// ("<port> <pid file>") and prints the Check as JSON.
+const portCheckChildEnv = "DOCTOR_TEST_PORT_CHECK_CHILD"
+
+// runPortCheck is the port-check child's side. It never returns.
+func runPortCheck(t *testing.T, spec string) {
+	dropToChildUID()
+	portText, pidFile, ok := strings.Cut(spec, " ")
+	port, err := strconv.Atoi(portText)
+	if !ok || err != nil {
+		fmt.Fprintln(os.Stderr, "bad port-check spec:", spec)
+		os.Exit(1)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(checkPort(t.Context(), "port-test", port, pidFile)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge is row L7 of
+// #1030's matrix on the real kernel: the recorded bridge runs with
+// dumpable=0 (the stand-in for a bridge granted cap_net_bind_service), and
+// the port its config was edited to is held by a process of ANOTHER user,
+// which doctor, run as the bridge's user, cannot read either. Nothing ruled
+// the bridge out, the check warned, `bridge doctor --config` exited 0, and
+// the restart could not bind.
+//
+// The listener's row gives the uid that created it, and the bridge's status
+// gives the uid it runs as, which differ, so the listener is not the
+// bridge's and the port FAILs. It takes root, to run the holder, the bridge
+// and doctor as two users that are not this process's; doctor runs as the
+// bridge's user, as the runbook says to, so root's own view plays no part.
+func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
+	if mode := os.Getenv(undumpableChildEnv); mode != "" {
+		runUndumpable(mode)
+	}
+	if spec := os.Getenv(portCheckChildEnv); spec != "" {
+		runPortCheck(t, spec)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root, to run processes as two users other than this one")
+	}
+	const bridgeUID, holderUID = 4071, 4072
+	before := dumpable(t)
+	_, port := startUndumpableAs(t, holderUID, true)
+	bridge, _ := startUndumpableAs(t, bridgeUID, false)
+	pidFile := filepath.Join(sharedDir(t), "server.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
+		childUIDEnv+"="+strconv.Itoa(bridgeUID))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the doctor run as uid %d: %v\n%s", bridgeUID, err, stderr.String())
+	}
+	var c Check
+	if err := json.Unmarshal(out, &c); err != nil {
+		t.Fatalf("the doctor run printed %q: %v", out, err)
+	}
+	if c.Status != Fail {
+		t.Fatalf("got %v (%s / %s), want fail", c.Status, c.Summary, c.Hint)
+	}
+	want := fmt.Sprintf("/proc shows every socket listening on this port created by uid %d, while pid %d runs as uid %d",
+		holderUID, bridge, bridgeUID)
+	if !strings.Contains(c.Hint, want) || !strings.Contains(c.Hint, "stop the process that holds the port") {
+		t.Errorf("the hint does not give the creator, or does not say to stop the holder:\n got %s\nwant …%s…", c.Hint, want)
+	}
+	if after := dumpable(t); after != before {
+		t.Errorf("this process's dumpable flag went from %d to %d while its children took other uids, "+
+			"which keeps its descriptors from root without CAP_SYS_PTRACE in every later test (dropToChildUID)", before, after)
+	}
+}
+
+// sharedDir makes a directory any user can search, for a file a child of
+// another uid reads: t.TempDir's parents are 0700 and the test's own.
+func sharedDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "doctor-uid-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
