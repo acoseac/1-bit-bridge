@@ -15930,10 +15930,12 @@ have left it passing.
   | L5 | as L4, holder uid 1001 | warn, exit 0 | FAIL, exit 1 |
   | L6 | L4 over a capability-bound bridge | ok | ok (Out of scope) |
 
-  R2 and R4 are root without CAP_SYS_PTRACE, which Docker drops: `/proc`
-  lists the directory (CAP_DAC_OVERRIDE) and every readlink of uid 1000's
-  links is refused, so nothing is ruled out and the uid arm (uid 0) does not
-  match.
+  R2 and R4 are root without CAP_SYS_PTRACE, which Docker drops, and
+  ptrace's read check wants it for another uid's process or a dumpable=0
+  one: both read "/proc does not let this user read pid N's descriptors"
+  (that account does not say whether the listing or the links were
+  refused), so nothing is ruled out, and the uid arm (uid 0) does not match
+  a uid-1000 listener.
 
   The Mac (macOS 27, uid 501), main's and the fix's binaries: M1 (root's
   Tailscale extension recorded, its 127.0.0.1:50062), M2 (a `sleep`
@@ -16084,6 +16086,23 @@ filesystem.
   grades the install's current ports. The stopped-bridge twin already did.
   It is the class #1027 recorded, the preflight grading ports init will not
   write (task_95e50ccb).
+
+### Review
+
+- **Round 1.** Gemini on `474512c1` and on `4b76f4c0`: no comments.
+  CodeRabbit had posted nothing (no walkthrough, no pause notice) fifteen
+  minutes after the PR opened. Its pass on `4b76f4c0` (`coveredCommitId`,
+  the head) came on its own twenty minutes in: "No actionable comments were
+  generated". It used the hour's last included review. The
+  `@coderabbitai review` sent meanwhile was answered "Already reviewed the
+  last commit", so it bought nothing.
+- **Round 2** was my own re-read, comments and docs only: a docblock line
+  past the wrap, the L4 sentence in `procSecondOpinion`'s doc (it put a
+  verdict and a sighting side by side), and two claims that went past what
+  was measured. The runbook line said L4 "read ok" before, which held on
+  Linux while Windows warned. It also left out that the FAIL needs doctor
+  to be able to read the bridge's descriptors. And this entry said how
+  root in the container failed to read R2/R4's links, which was inferred.
 
 ### Process notes
 

@@ -123,8 +123,9 @@ func lsofPIDs(out []byte) ([]int, bool) {
 // ptrace's read check). Where every one of them read and none is a listener
 // on the port, the pid holds none on any address, and the verdict that
 // follows (checkPort's liveness arm) must be the same on a host with lsof as
-// on one without: #1028's row L4 passed where lsof was installed and was
-// ruled out where it was not.
+// on one without: #1028's row L4 was ruled out where lsof was missing and
+// not where it was installed, so a verdict on the ruling-out alone would
+// have been chosen by the tool.
 //
 // So a /proc match is a match: an inode names one socket. A /proc ruling-out
 // is joined to lsof's account, which keeps the pids lsof named, and carries

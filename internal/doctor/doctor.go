@@ -785,12 +785,12 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 				// of our descriptors) rules our pid out. So the text is
 				// the probe's account of what it saw (ownerSighting).
 				//
-				// A pid the account rules out is no bridge of ours on
-				// this port, alive or not: its descriptors were all read
-				// and none is a listener on the port, or the table names
-				// every listener and ours is not among them. The port is
-				// another process's, and FAILs as it does with no live
-				// pid behind it. The uid arm below used to answer ok for
+				// A pid the account rules out holds nothing on this port,
+				// running or not: its descriptors were all read and none
+				// is a listener on the port, or the table names every
+				// listener and ours is not among them. The port is another
+				// process's, and FAILs as it does with no live pid behind
+				// it. The uid arm below used to answer ok for
 				// it on Linux whenever that other process ran as this
 				// user: a bridge still running on the ports of the config
 				// it started with, whose config was then edited to a port
@@ -877,9 +877,10 @@ func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
 // that a held port is its own: a probe that failed warns, and a live pid
 // the probe did not name, and could not rule out, warns, or is ok on Linux
 // when the listener runs as this user. That is sound for a port the
-// bridge's config names, and here no config names one. init writes its defaults, and an install that had
-// moved off them (because something else holds 7788, say) has a live
-// bridge on its own ports while another process holds the one init writes.
+// bridge's config names, and here no config names one. init writes its
+// defaults, and an install that had moved off them (because something else
+// holds 7788, say) has a live bridge on its own ports while another process
+// holds the one init writes.
 // Excused, that port is saved, and the restarted bridge cannot bind it:
 // #970's defect, which the second port pass avoids by clearing the pid file
 // for a port the run is choosing. Cleared here, the bridge's own listeners
