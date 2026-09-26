@@ -35,11 +35,13 @@ type ownerSighting struct {
 	// to add, and always when ruledOut.
 	blind string
 	// ruledOut reports that what the probe saw excludes the pid as the
-	// port's holder: it saw the port's listeners and they are other
-	// processes, or it read every one of the pid's descriptors and none is
-	// a listener on the port. The zero value keeps the hedged advice ("if
-	// our bridge is what holds the port, this is expected"), which is the
-	// safe one to fall back on.
+	// port's holder: it saw every listener on the port and they are other
+	// processes (Windows' listener table), or it read every one of the
+	// pid's descriptors, against every socket table, and none is a
+	// listener on the port (/proc). Never lsof, which lists only the
+	// processes it can see (lsofSighting). The zero value keeps the hedged
+	// advice ("if our bridge is what holds the port, this is expected"),
+	// which is the safe one to fall back on.
 	ruledOut bool
 }
 
@@ -65,12 +67,16 @@ func (s ownerSighting) because() string {
 // pid, from what it printed: nothing (its exit 1, "matched nothing"), a pid
 // a line, or something else.
 //
-// A pid a line is all `lsof -t` prints, and those processes hold the port,
-// so pid is ruled out. Nothing listed is what a listener hidden from this
-// user looks like, and blind says what lsof cannot see. Anything else is not
-// `lsof -t`'s output: busybox's applet ignores every option and lists every
-// open file (the image's lsof bullet in CLAUDE.md), so all it shows is that
-// pid is not in it.
+// A pid a line is all `lsof -t` prints, and names what holds the port. It
+// does not rule pid out: lsof lists only the processes this user may
+// inspect, and a bridge it cannot see (another user's, or one with
+// dumpable=0) can listen on the same port at another address, a
+// `listenAddress` on one interface beside a holder on loopback (CodeRabbit
+// on #1028). So every account from lsof keeps the blind spot and the
+// hedge. Nothing listed is what a listener hidden from this user looks
+// like. Anything else is not `lsof -t`'s output: busybox's applet ignores
+// every option and lists every open file (the image's lsof bullet in
+// CLAUDE.md), so all it shows is that pid is not in it.
 func lsofSighting(out []byte, pid int, blind string) ownerSighting {
 	pids, ok := lsofPIDs(out)
 	switch {
@@ -79,7 +85,7 @@ func lsofSighting(out []byte, pid int, blind string) ownerSighting {
 	case len(pids) == 0:
 		return ownerSighting{saw: "lsof lists no process listening on this port", blind: blind}
 	default:
-		return ownerSighting{saw: "lsof lists " + pidList(pids) + " listening on this port", ruledOut: true}
+		return ownerSighting{saw: "lsof lists " + pidList(pids) + " listening on this port", blind: blind}
 	}
 }
 
@@ -122,14 +128,19 @@ func listenerTableSighting(owners []int) ownerSighting {
 // No listener in the tables rules pid out: a bridge's listener would be
 // there. So does an fd directory read in full without one. A directory that
 // is not there, or that cannot be read in full, leaves pid possible, and
-// blind says what hides a process's descriptors. An error means neither
-// socket table could be read.
+// blind says what hides a process's descriptors. So does a socket table
+// that is there and could not be read (listenerSockets' unread), since the
+// listener may be in it: the account then says it covers the tables read
+// (CodeRabbit on #1028). An error means neither socket table could be read.
 func procSighting(tables []string, fdDir string, port, pid int, blind string) (bool, ownerSighting, error) {
-	sockets, err := listenerSockets(tables, port)
+	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {
 		return false, ownerSighting{}, err
 	}
 	if len(sockets) == 0 {
+		if unread {
+			return false, ownerSighting{saw: "/proc lists no socket listening on this port" + inTheTablesRead}, nil
+		}
 		return false, ownerSighting{saw: "/proc lists no socket listening on this port", ruledOut: true}, nil
 	}
 	held, readAll, err := fdDirHoldsSocket(fdDir, sockets)
@@ -142,10 +153,16 @@ func procSighting(tables []string, fdDir string, port, pid int, blind string) (b
 		return false, ownerSighting{saw: fmt.Sprintf("/proc could not list pid %d's descriptors (%s)", pid, oneLine(err.Error()))}, nil
 	case err != nil || !readAll:
 		return false, ownerSighting{saw: fmt.Sprintf("/proc does not let this user read pid %d's descriptors", pid), blind: blind}, nil
+	case unread:
+		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid) + inTheTablesRead}, nil
 	default:
 		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid), ruledOut: true}, nil
 	}
 }
+
+// inTheTablesRead scopes a /proc account to the socket tables it could read,
+// when one that is there could not be.
+const inTheTablesRead = " in the socket tables it could read"
 
 // pidList renders pids as "pid 5123" or "pids 5123, 6000", in order and
 // without repeats: a process listening on both address families is one

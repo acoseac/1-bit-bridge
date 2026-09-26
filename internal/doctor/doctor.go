@@ -775,13 +775,13 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 				// It is not the only way here, and this arm used to explain
 				// every arrival as that one. A bridge running as another
 				// user is as hidden, on every unix. A host with no lsof
-				// off Linux asks nothing. And a probe that saw the port's
-				// listeners and did not find our pid among them (lsof
-				// naming another process, /proc reading our descriptors,
-				// Windows' listener table) has attributed the port, to
-				// someone else. So the text is the probe's account of
-				// what it saw (ownerSighting), and the verdicts below are
-				// what they were: ok on a listener of our uid, else warn.
+				// off Linux asks nothing. lsof may name the process that
+				// holds the port. And a probe that saw everything there
+				// was to see (Windows' listener table, /proc reading all
+				// of our descriptors) rules our pid out. So the text is
+				// the probe's account of what it saw (ownerSighting), and
+				// the verdicts below are what they were: ok on a listener
+				// of our uid, else warn.
 				//
 				// Last resort before giving up: ask whether the listener is
 				// at least owned by OUR USER. On Linux that survives
@@ -820,8 +820,8 @@ const anotherProcessOwnsPort = "another process owns this port; stop it or pick 
 
 // liveUnseenHint is checkPort's warn hint when the recorded bridge is alive
 // and the owner probe did not see it on the port: the probe's account (s),
-// then advice that fits it. Where the probe saw the port's listeners and
-// the bridge was not among them, the hint says to stop the holder. Where it
+// then advice that fits it. Where what the probe saw rules the bridge out
+// (ownerSighting.ruledOut), the hint says to stop the holder. Where it
 // could have missed the bridge, it says why and keeps the hedge.
 func liveUnseenHint(ownPID int, s ownerSighting) string {
 	lead := fmt.Sprintf("our bridge (pid %d) is still running, but %s", ownPID, s.account())
@@ -835,7 +835,8 @@ func liveUnseenHint(ownPID int, s ownerSighting) string {
 // chosenUnseenHint is checkChosenPort's refusal of a port the recorded bridge
 // was not seen holding while it is alive, built like liveUnseenHint. Only a
 // probe that could have missed the bridge leaves "stop that bridge and
-// re-run" as a way through; one that saw the holder rules it out.
+// re-run" as a way through; one whose account rules the bridge out does
+// not.
 func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
 	lead := fmt.Sprintf("the bridge recorded in %s (pid %d) is running, but %s", ownPIDFile, ownPID, s.account())
 	if s.ruledOut {

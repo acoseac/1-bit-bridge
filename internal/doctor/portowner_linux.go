@@ -44,7 +44,7 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 func portOwnedByThisUser(port int) (bool, error) {
 	me := os.Getuid()
 	owned := false
-	err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
+	_, err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
 		uids, err := scanListenerUIDs(r, port)
 		if err != nil {
 			return false, err

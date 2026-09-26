@@ -7,9 +7,10 @@ import (
 
 // TestLsofSightingReadsWhatLsofPrinted pins lsof's account of a port on
 // which it did not name the pid asked about, from its output alone: a pid a
-// line rules the pid out and names the holders, nothing listed keeps the
-// blind spot, and output in any other shape (busybox's applet) says only
-// that the pid is not in it.
+// line names the holders, nothing listed says so, and output in any other
+// shape (busybox's applet) says only that the pid is not in it. None of them
+// rules the pid out, since lsof lists only what this user may inspect, and
+// every one keeps the blind spot.
 func TestLsofSightingReadsWhatLsofPrinted(t *testing.T) {
 	const blind = "the blind spot"
 	for _, tc := range []struct {
@@ -19,8 +20,8 @@ func TestLsofSightingReadsWhatLsofPrinted(t *testing.T) {
 	}{
 		{"nothing listed", "", ownerSighting{saw: "lsof lists no process listening on this port", blind: blind}},
 		{"blank lines only", "\n\n", ownerSighting{saw: "lsof lists no process listening on this port", blind: blind}},
-		{"one pid", "1305\n", ownerSighting{saw: "lsof lists pid 1305 listening on this port", ruledOut: true}},
-		{"pids out of order, one twice", "1400\n1305\n1400\n", ownerSighting{saw: "lsof lists pids 1305, 1400 listening on this port", ruledOut: true}},
+		{"one pid", "1305\n", ownerSighting{saw: "lsof lists pid 1305 listening on this port", blind: blind}},
+		{"pids out of order, one twice", "1400\n1305\n1400\n", ownerSighting{saw: "lsof lists pids 1305, 1400 listening on this port", blind: blind}},
 		{"a line that is no pid", "1305\nCOMMAND\n", ownerSighting{saw: "lsof's output does not name pid 4242", blind: blind}},
 		{"busybox's applet", "1  /usr/local/bin/bridge  0  /dev/null\n", ownerSighting{saw: "lsof's output does not name pid 4242", blind: blind}},
 		{"a pid that is no pid", "0\n", ownerSighting{saw: "lsof's output does not name pid 4242", blind: blind}},

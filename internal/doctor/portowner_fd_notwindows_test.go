@@ -31,30 +31,35 @@ func writeTable(t *testing.T, dir, name, body string) string {
 // only in tcp6 and an IPv4-only one only in tcp, so both tables are read,
 // and a table that is missing (a kernel built without IPv6) is not an
 // error while the other answers. With neither readable there is no answer,
-// and that is an error rather than "nothing listens".
+// and that is an error rather than "nothing listens". A table that is there
+// and cannot be read is skipped as before, and reported as unread, so a
+// miss over it rules nothing out (CodeRabbit on #1028).
 func TestListenerSocketsReadsBothFamilies(t *testing.T) {
 	dir := t.TempDir()
 	v4 := writeTable(t, dir, "tcp", procNetTCPFixture)
 	v6 := writeTable(t, dir, "tcp6", procNetTCP6Fixture)
 	missing := filepath.Join(dir, "absent")
+	unreadable := t.TempDir() // a directory: it opens, and a read of it fails
 
 	for _, tc := range []struct {
-		name    string
-		paths   []string
-		port    int
-		want    map[string]bool
-		wantErr bool
+		name       string
+		paths      []string
+		port       int
+		want       map[string]bool
+		wantUnread bool
+		wantErr    bool
 	}{
-		{"ipv4 listener", []string{v4, v6}, 7789, map[string]bool{"socket:[24680]": true}, false},
-		{"ipv6 listener", []string{v4, v6}, 443, map[string]bool{"socket:[6213098]": true}, false},
-		{"tcp6 missing", []string{v4, missing}, 7789, map[string]bool{"socket:[24680]": true}, false},
-		{"nothing listens", []string{v4, v6}, 8080, map[string]bool{}, false},
-		{"no table readable", []string{missing, missing}, 7789, nil, true},
+		{"ipv4 listener", []string{v4, v6}, 7789, map[string]bool{"socket:[24680]": true}, false, false},
+		{"ipv6 listener", []string{v4, v6}, 443, map[string]bool{"socket:[6213098]": true}, false, false},
+		{"tcp6 missing", []string{v4, missing}, 7789, map[string]bool{"socket:[24680]": true}, false, false},
+		{"tcp6 unreadable", []string{v4, unreadable}, 7789, map[string]bool{"socket:[24680]": true}, true, false},
+		{"nothing listens", []string{v4, v6}, 8080, map[string]bool{}, false, false},
+		{"no table readable", []string{missing, missing}, 7789, nil, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := listenerSockets(tc.paths, tc.port)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			got, unread, err := listenerSockets(tc.paths, tc.port)
+			if (err != nil) != tc.wantErr || unread != tc.wantUnread {
+				t.Fatalf("unread %v, err %v; want unread %v, error %v", unread, err, tc.wantUnread, tc.wantErr)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
@@ -182,6 +187,40 @@ func TestProcSightingOfAnFdPathThatIsNoDirectory(t *testing.T) {
 	if _, _, err := procSighting([]string{absent, absent}, writeFdDir(t, fdFixture), 7789, 4242, "the blind spot"); err == nil {
 		t.Error("with neither table readable there is no answer, and that is an error")
 	}
+}
+
+// TestProcSightingDoesNotRuleOutOverATableItCouldNotRead: a socket table
+// that is there and cannot be read may hold the recorded bridge's listener,
+// so no miss over it rules the bridge out. Its account says it covers the
+// tables read, and a match in the tables that were read still stands.
+func TestProcSightingDoesNotRuleOutOverATableItCouldNotRead(t *testing.T) {
+	dir := t.TempDir()
+	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), t.TempDir()}
+	fdDir := writeFdDir(t, fdFixture)
+	for _, tc := range []struct {
+		name      string
+		port      int
+		want      ownerSighting
+		wantFound bool
+	}{
+		{"a listener in the table read, and the pid holds it", 7789, ownerSighting{}, true},
+		{"no listener in the table read", 443,
+			ownerSighting{saw: "/proc lists no socket listening on this port in the socket tables it could read"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, seen, err := procSighting(tables, fdDir, tc.port, 4242, "the blind spot")
+			if err != nil || found != tc.wantFound || seen != tc.want {
+				t.Errorf("got %v, %+v, %v; want %v, %+v, no error", found, seen, err, tc.wantFound, tc.want)
+			}
+		})
+	}
+	t.Run("the pid's descriptors read, and none is a listener read", func(t *testing.T) {
+		noListener := writeFdDir(t, map[string]string{"0": "/dev/null", "3": "socket:[11111]"})
+		want := ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port in the socket tables it could read"}
+		if found, seen, err := procSighting(tables, noListener, 7789, 4242, "the blind spot"); err != nil || found || seen != want {
+			t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, want)
+		}
+	})
 }
 
 // chmodForTest sets a fixture directory's mode and restores a mode the

@@ -36,45 +36,6 @@ func withLsofAnswering(t *testing.T, stdout string, code int) {
 	}
 }
 
-// requireNoCapabilityClaim fails when text blames a capability-bound binary
-// anywhere it cannot be the reason: in every account on a platform without
-// file capabilities, and on Linux wherever the probe saw the port's
-// listeners and they were other processes.
-func requireNoCapabilityClaim(t *testing.T, text string, ruledOut bool) {
-	t.Helper()
-	if strings.Contains(text, "capability-bound") {
-		t.Errorf("names a capability-bound binary, a cause the probe did not establish: %s", text)
-	}
-	if (runtime.GOOS != "linux" || ruledOut) && (strings.Contains(text, "cap_net_bind_service") || strings.Contains(text, "dumpable")) {
-		t.Errorf("gives a capability as the reason where none can be (%s, ruled out %v): %s", runtime.GOOS, ruledOut, text)
-	}
-}
-
-// requireBlindSpot checks the part of a hedged hint that says why the probe
-// could have missed the recorded bridge: what this platform's probe cannot
-// see, as an unprivileged user. Root sees what the others do not, and the
-// hint then says nothing about it.
-func requireBlindSpot(t *testing.T, hint string) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		return
-	}
-	var want []string
-	switch runtime.GOOS {
-	case "linux":
-		want = []string{fmt.Sprintf("uid %d cannot read the descriptors", os.Geteuid()), "another user or group", "dumpable=0"}
-	case "darwin":
-		want = []string{fmt.Sprintf("lsof run as uid %d rather than root sees only that user's processes", os.Geteuid())}
-	default:
-		return
-	}
-	for _, w := range want {
-		if !strings.Contains(hint, w) {
-			t.Errorf("hint does not say what the probe cannot see (%q): %s", w, hint)
-		}
-	}
-}
-
 // TestLivenessArmGivesLsofsAccount: when the recorded bridge is alive and
 // lsof ran cleanly without naming it, checkPort's liveness arm said "pid
 // attribution blocked — capability-bound binary" (ok) or blamed
@@ -84,11 +45,13 @@ func requireBlindSpot(t *testing.T, hint string) {
 // user; and when lsof named the process that holds the port, which is not
 // a failure to attribute it at all.
 //
-// So the line says what lsof reported. Nothing listed leaves the recorded
-// bridge possible, and the hint says what lsof cannot see and keeps the
-// "this is expected" hedge. Pids listed rule it out, and the hint names them
-// and says to stop that process. The verdicts are the arm's own: ok when a
-// listener runs as this user, warn otherwise.
+// So the line says what lsof reported, and names the pids it listed.
+// Nothing lsof reports rules the recorded bridge out: it lists only the
+// processes this user may inspect, and a bridge it cannot see can listen on
+// the same port at another address (CodeRabbit on #1028). So every hint
+// says what lsof cannot see and keeps the "this is expected" hedge. The
+// verdicts are the arm's own: ok when a listener runs as this user, warn
+// otherwise.
 func TestLivenessArmGivesLsofsAccount(t *testing.T) {
 	for _, tc := range lsofAccountCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,8 +64,9 @@ func TestLivenessArmGivesLsofsAccount(t *testing.T) {
 	}
 }
 
-// lsofAccountCase is one answer lsof gives about a port the recorded
-// bridge (pid 4242) does not hold, and the account the check should give.
+// lsofAccountCase is one answer lsof gives about a port on which it did
+// not name the recorded bridge (pid 4242), and the account the check
+// should give.
 type lsofAccountCase struct {
 	name     string
 	stdout   string
@@ -113,8 +77,8 @@ type lsofAccountCase struct {
 
 var lsofAccountCases = []lsofAccountCase{
 	{"lsof lists nothing", "", 1, "lsof lists no process listening on this port", false},
-	{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", true},
-	{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", true},
+	{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", false},
+	{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", false},
 	// busybox's applet ignores -t and the rest, and lists every open file
 	// it can read.
 	{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, "lsof's output does not name pid 4242", false},
@@ -148,23 +112,6 @@ func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase)
 	}
 	requireNoCapabilityClaim(t, c.Hint, tc.ruledOut)
 	requireAdviceFitsTheAccount(t, c.Hint, tc.ruledOut)
-}
-
-// requireAdviceFitsTheAccount: a probe that named the holder leaves one
-// thing to do, stop it; one that could have missed the recorded bridge
-// keeps the hedge and says what it cannot see.
-func requireAdviceFitsTheAccount(t *testing.T, hint string, ruledOut bool) {
-	t.Helper()
-	if ruledOut {
-		if !strings.Contains(hint, "stop the process that holds the port") || strings.Contains(hint, "this is expected") {
-			t.Errorf("the probe named the holder, so the hint must say to stop it and not call the port expected: %s", hint)
-		}
-		return
-	}
-	if !strings.Contains(hint, "If our bridge is what holds the port, this is expected") {
-		t.Errorf("nothing ruled the bridge out, so the hint must keep the hedge: %s", hint)
-	}
-	requireBlindSpot(t, hint)
 }
 
 // TestLivenessArmWithoutLsofGivesTheHostsAccount: with no lsof, Linux reads
