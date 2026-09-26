@@ -16,7 +16,8 @@ import (
 
 // listeningChildEnv makes this test binary, run again by one of the tests
 // that use startListeningChild, the process they record as a live bridge
-// (runListeningChild). Its value is the child's mode: "listen" or "idle".
+// (runListeningChild). Its value is the child's mode: "listen" (on
+// 127.0.0.1), "listen6" (on [::1]) or "idle".
 const listeningChildEnv = "DOCTOR_TEST_LISTENING_CHILD"
 
 // listeningChildReady opens the line the child prints once it is ready,
@@ -24,22 +25,19 @@ const listeningChildEnv = "DOCTOR_TEST_LISTENING_CHILD"
 const listeningChildReady = "listening child ready, port "
 
 // startListeningChild runs this test binary again as a process of this user
-// that listens on a loopback port of its own when listen is set, as a
-// running bridge does on the ports of the config it started with, and holds
-// no port otherwise. It returns the child's pid and that port (0 when it
-// listens on none). The test that calls it must hand the child to
-// runListeningChild first thing (the child runs that test alone).
+// that listens on a loopback port of its own, as a running bridge does on
+// the ports of the config it started with: on 127.0.0.1 in mode "listen",
+// on [::1] in mode "listen6", and on nothing in mode "idle". It returns the
+// child's pid and that port (0 when it listens on none). The test that
+// calls it must hand the child to runListeningChild first thing (the child
+// runs that test alone).
 //
 // The child holds until its stdin reaches EOF: the test's cleanup kills it
 // first, and if this binary dies before that, the pipe closes and the child
 // exits by itself. The same shape as the Linux tests' startUndumpable,
 // without making the child non-dumpable, so it runs on every platform.
-func startListeningChild(t *testing.T, listen bool) (pid, port int) {
+func startListeningChild(t *testing.T, mode string) (pid, port int) {
 	t.Helper()
-	mode := "idle"
-	if listen {
-		mode = "listen"
-	}
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
 	cmd.Env = append(os.Environ(), listeningChildEnv+"="+mode)
 	var stderr bytes.Buffer
@@ -82,11 +80,12 @@ func startListeningChild(t *testing.T, listen bool) (pid, port int) {
 // references from a finalizer, so a collection while the child waits would
 // otherwise free the port the test records as the bridge's.
 func runListeningChild(mode string) {
+	addr := map[string]string{"listen": "127.0.0.1:0", "listen6": "[::1]:0"}[mode]
 	var l net.Listener
 	port := 0
-	if mode == "listen" {
+	if addr != "" {
 		var err error
-		if l, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+		if l, err = net.Listen("tcp", addr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

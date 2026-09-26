@@ -86,9 +86,9 @@ func (s ownerSighting) because() string {
 // on #1028). So every account of that answer keeps the blind spot and the
 // hedge; on macOS what rules pid out is lsof asked about pid itself
 // (ownListenersSighting). Nothing listed is what a listener hidden from
-// this user looks like. Anything else is not `lsof -t`'s output: busybox's applet ignores
-// every option and lists every open file (the image's lsof bullet in
-// CLAUDE.md), so all it shows is that pid is not in it.
+// this user looks like. Anything else is not `lsof -t`'s output: busybox's
+// applet ignores every option and lists every open file (the image's lsof
+// bullet in CLAUDE.md), so all it shows is that pid is not in it.
 func lsofSighting(out []byte, pid int, blind string) ownerSighting {
 	pids, ok := lsofPIDs(out)
 	switch {
@@ -172,10 +172,12 @@ func procSecondOpinion(lsofSeen ownerSighting, procFound bool, procSeen ownerSig
 // runs `lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN -F n`). A listener on the
 // port is a match. Listeners, none on the port, rule pid out: lsof lists a
 // process's descriptors only where the kernel lets this user read them, and
-// that check (XNU's proc_security_policy) is the same for every descriptor
-// of one process, so a pid lsof lists at all is one whose every listener it
-// read. Nothing listed, or output of another shape, says nothing, and
-// procSecondOpinion leaves lsof's first account as it was.
+// that check (XNU's proc_security_policy) is made per process, not per
+// descriptor, so a pid lsof lists at all is one whose descriptors it read.
+// Only a listener opened while lsof reads can be missed, and a bridge binds
+// its listeners as it starts. Nothing listed, or output of another shape,
+// says nothing, and procSecondOpinion leaves lsof's first account as it
+// was.
 //
 // Nothing listed is what three processes look like: one with no listener,
 // one this user may not read (another user's, or root's to anyone but

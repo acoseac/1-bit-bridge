@@ -158,7 +158,7 @@ func TestPortCheckFailsAPortTheLiveBridgeListensBeside(t *testing.T) {
 	if mode := os.Getenv(listeningChildEnv); mode != "" {
 		runListeningChild(mode)
 	}
-	bridge, bridgePort := startListeningChild(t, true)
+	bridge, bridgePort := startListeningChild(t, "listen")
 	account, ruledOut := ownListenerAccount(t, bridge, bridgePort)
 	port, pidFile := bindPort(t), writePIDFile(t, bridge)
 

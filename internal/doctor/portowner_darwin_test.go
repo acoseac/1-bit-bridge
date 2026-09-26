@@ -14,12 +14,13 @@ import (
 )
 
 // TestOwnListenersOnTheKernel drives macOS's second look at a recorded pid
-// (pidListensOnPort) against real processes: a bridge stand-in listening on
-// a port of its own, one that listens on nothing, and root's launchd. lsof
-// lists the stand-in's listener, which is a match on its own port and rules
-// it out of any other. It lists nothing for the other two, which is what a
-// process with no listener and one this user may not read (#1028's row M1,
-// root's Tailscale extension) both look like, so neither is ruled out.
+// (pidListensOnPort) against real processes: bridge stand-ins listening on
+// a port of their own (on 127.0.0.1, and on [::1], which lsof names in
+// brackets), one that listens on nothing, and root's launchd. lsof lists a
+// stand-in's listener, which is a match on its own port and rules it out of
+// any other. It lists nothing for the other two, which is what a process
+// with no listener and one this user may not read (#1028's row M1, root's
+// Tailscale extension) both look like, so neither is ruled out.
 func TestOwnListenersOnTheKernel(t *testing.T) {
 	if mode := os.Getenv(listeningChildEnv); mode != "" {
 		runListeningChild(mode)
@@ -27,23 +28,33 @@ func TestOwnListenersOnTheKernel(t *testing.T) {
 	if !lsofResolved() {
 		t.Skip("no lsof on this Mac, and lsof is what reads a pid's listeners here")
 	}
-	bridge, own := startListeningChild(t, true)
-	idle, _ := startListeningChild(t, false)
+	bridge, own := startListeningChild(t, "listen")
+	bridge6, own6 := startListeningChild(t, "listen6")
+	idle, _ := startListeningChild(t, "idle")
 	held := bindPort(t)
 
-	t.Run("the bridge's own port", func(t *testing.T) {
-		found, seen, err := pidListensOnPort(t.Context(), own, bridge)
-		if err != nil || !found {
-			t.Errorf("got %v, %+v, %v; want found", found, seen, err)
-		}
-	})
-	t.Run("a port another process holds", func(t *testing.T) {
-		found, seen, err := pidListensOnPort(t.Context(), held, bridge)
-		want := ownerSighting{saw: fmt.Sprintf("lsof lists pid %d listening only on 127.0.0.1:%d", bridge, own), ruledOut: true}
-		if err != nil || found || seen != want {
-			t.Errorf("got %v, %+v, %v; want not found, %+v", found, seen, err, want)
-		}
-	})
+	for _, b := range []struct {
+		name     string
+		pid, own int
+		addr     string
+	}{
+		{"", bridge, own, fmt.Sprintf("127.0.0.1:%d", own)},
+		{", on IPv6", bridge6, own6, fmt.Sprintf("[::1]:%d", own6)},
+	} {
+		t.Run("the bridge's own port"+b.name, func(t *testing.T) {
+			found, seen, err := pidListensOnPort(t.Context(), b.own, b.pid)
+			if err != nil || !found {
+				t.Errorf("got %v, %+v, %v; want found", found, seen, err)
+			}
+		})
+		t.Run("a port another process holds"+b.name, func(t *testing.T) {
+			found, seen, err := pidListensOnPort(t.Context(), held, b.pid)
+			want := ownerSighting{saw: fmt.Sprintf("lsof lists pid %d listening only on %s", b.pid, b.addr), ruledOut: true}
+			if err != nil || found || seen != want {
+				t.Errorf("got %v, %+v, %v; want not found, %+v", found, seen, err, want)
+			}
+		})
+	}
 	t.Run("a process with no listener", func(t *testing.T) {
 		requireNotRuledOut(t, held, idle)
 	})
@@ -85,7 +96,7 @@ func TestABlindedLsofRulesNoBridgeOut(t *testing.T) {
 	if err != nil {
 		t.Skipf("no sandbox-exec to blind lsof with: %v", err)
 	}
-	bridge, own := startListeningChild(t, true)
+	bridge, own := startListeningChild(t, "listen")
 	held := bindPort(t)
 	pidFile := writePIDFile(t, bridge)
 

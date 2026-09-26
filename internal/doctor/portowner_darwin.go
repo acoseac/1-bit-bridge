@@ -31,8 +31,9 @@ import (
 // whose effective uid was 501, the app-sandboxed and hardened-runtime ones
 // among them, and none of the 211 others, so a clean miss about a pid of
 // lsof's own uid could rule it out. But an lsof that a sandbox denies
-// process info reads no process and exits 1 all the same, silently, and that
-// rule would FAIL a sandboxed doctor's own bridge on its own port. And
+// process info lists no process's listener and exits 1 all the same,
+// silently, and that rule would FAIL a sandboxed doctor's own bridge on its
+// own port. And
 // `netstat -anv`, which names every listener's pid from a shell: run by a Go
 // process, started from a shell or by launchd, it printed no TCP socket.
 //
