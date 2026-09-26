@@ -40,9 +40,10 @@ type ownerSighting struct {
 	blind string
 	// ruledOut reports that what the probe saw excludes the pid as the
 	// port's holder: it saw every listener on the port and they are other
-	// processes (Windows' listener table, or /proc's census of the holders
-	// it can read where it could not read the pid), or it read every one
-	// of the pid's descriptors, against every socket table, and none is a
+	// processes' (Windows' listener table, or, where /proc could not read
+	// the pid, its census: each listener held by a process it can read or
+	// created by a uid the pid does not run as), or it read every one of
+	// the pid's descriptors, against every socket table, and none is a
 	// listener on the port (/proc, asked on Linux after lsof misses or in
 	// its place). Never lsof alone, which lists only the processes it can
 	// see (lsofSighting). The zero value keeps the hedged advice ("if our
@@ -123,13 +124,14 @@ func lsofPIDs(out []byte) ([]int, bool) {
 // rules the pid out (lsofSighting). /proc reads the pid's own descriptors,
 // under the kernel check lsof's readlinks meet too (proc_fd_access_allowed,
 // ptrace's read check). Where every one of them read and none is a listener
-// on the port, or where it could not read them and the processes it can
-// read hold every listener on the port (procSighting's census), the pid
-// holds none on any address, and the verdict that follows (checkPort's
-// liveness arm) must be the same on a host with lsof as on one without:
-// #1028's row L4 was ruled out where lsof was missing and not where it was
-// installed, so a verdict on the ruling-out alone would have been chosen by
-// the tool. The census sits inside /proc's answer for the same reason.
+// on the port, or where it could not read them and every listener on the
+// port is held by a process it can read or was created by a uid the pid
+// does not run as (procSighting's census), the pid holds none on any
+// address, and the verdict that follows (checkPort's liveness arm) must be
+// the same on a host with lsof as on one without: #1028's row L4 was ruled
+// out where lsof was missing and not where it was installed, so a verdict
+// on the ruling-out alone would have been chosen by the tool. The census
+// sits inside /proc's answer for the same reason.
 //
 // So a /proc match is a match: an inode names one socket. A /proc ruling-out
 // is joined to lsof's account, which keeps the pids lsof named, and carries
@@ -178,25 +180,41 @@ func listenerTableSighting(owners []int) ownerSighting {
 // (CodeRabbit on #1028). An error means neither socket table could be read.
 //
 // Where pid's descriptors could not be read in full, the port's OTHER
-// holders can still rule it out: every socket listening on the port held
-// by a process this user can read, other than pid (heldByOthers). An inode
-// names one socket, and a listener of pid's own would be held by pid alone,
-// which nothing here can read, so it would have no holder. That is the
-// capability-bound bridge (#1028's row L6): it runs with dumpable=0, no
-// probe can read it, and when its config was edited to a port another
-// process of the same user holds, the uid arm answered ok for that
-// process's listener. The one shape the census cannot see is a socket pid
-// SHARES with a readable process, and a bridge shares no listener: it makes
-// each with net.Listen, close-on-exec, and hands none on, and no process of
-// this user can take one from a dumpable=0 process (pidfd_getfd needs
-// CAP_SYS_PTRACE there). Windows' listener table rules a pid out on the
-// same terms, since a duplicated socket keeps the binder's pid. A listener
-// with no readable holder, or a table that did not read, leaves pid
+// listeners can still rule it out (listenersNotOf): every socket listening
+// on the port held by a process this user can read, other than pid, or
+// created by a uid pid does not run as. That is the capability-bound bridge:
+// it runs with dumpable=0, no probe can read it, and when its config was
+// edited to a port something else holds, the check said ok (#1028's row L6,
+// a holder of the same user) or warned (#1030's row L7, a holder of another
+// user's, or of root's).
+//
+// The holders: an inode names one socket, and a listener of pid's own would
+// be held by pid alone, which nothing here can read, so it would have no
+// holder. The one shape this cannot see is a socket pid SHARES with a
+// readable process, and a bridge shares no listener: it makes each with
+// net.Listen, close-on-exec, and hands none on, and no process of this user
+// can take one from a dumpable=0 process (pidfd_getfd needs CAP_SYS_PTRACE
+// there). Windows' listener table rules a pid out on the same terms, since
+// a duplicated socket keeps the binder's pid.
+//
+// The creators, for a listener no readable process holds, which is what a
+// process of another user holds: the table's uid column is the fsuid that
+// created the socket, and /proc/<pid>/status shows pid's, readable where its
+// descriptors are not (pidFSUID). A bridge's listener carries the bridge's
+// own: it creates each itself, never changes uid (no setuid-family call is
+// linked into it), takes no listener from another process (nothing parses
+// SCM_RIGHTS or makes a listener from an fd), and never fchowns a socket,
+// the one call that re-stamps the column. So a listener another uid created
+// is not the bridge's. Equal uids say nothing, and nor does a uid /proc
+// does not show (createdByAnother).
+//
+// A listener that is neither, or a table that did not read, leaves pid
 // possible, as before.
 //
-// Everything that reads a pid's directory first checks that procRoot
-// numbers processes as this process does (procOfAnotherPIDNamespace):
-// under another pid namespace's /proc, <pid> is some other process.
+// Everything that reads a pid's directory, its status included, first
+// checks that procRoot numbers processes as this process does
+// (procOfAnotherPIDNamespace): under another pid namespace's /proc, <pid> is
+// some other process.
 func procSighting(tables []string, procRoot string, port, pid int, blind string) (bool, ownerSighting, error) {
 	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {
@@ -228,11 +246,27 @@ func procSighting(tables []string, procRoot string, port, pid int, blind string)
 		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid), ruledOut: true}, nil
 	}
 	if !unread {
-		if holders, all := heldByOthers(procRoot, sockets, pid); all {
-			return false, ownerSighting{saw: "/proc shows every socket listening on this port held by " + pidList(holders), ruledOut: true}, nil
+		if holders, creators, pidUID, all := listenersNotOf(procRoot, sockets, pid); all {
+			return false, ownerSighting{saw: othersListeningAccount(holders, creators, pid, pidUID), ruledOut: true}, nil
 		}
 	}
 	return false, possible, nil
+}
+
+// othersListeningAccount is /proc's account of a port whose every listener
+// it showed to be another process's (listenersNotOf): the readable processes
+// that hold them, then the uids that created the rest, against the uid pid
+// runs as.
+func othersListeningAccount(holders, creators []int, pid, pidUID int) string {
+	const account = "/proc shows every socket listening on this port "
+	if len(creators) == 0 {
+		return account + "held by " + pidList(holders)
+	}
+	by := "created by " + uidList(creators)
+	if len(holders) > 0 {
+		by = "held by " + pidList(holders) + " or " + by
+	}
+	return account + by + fmt.Sprintf(", while pid %d runs as uid %d", pid, pidUID)
 }
 
 // inTheTablesRead scopes a /proc account to the socket tables it could read,
@@ -242,14 +276,21 @@ const inTheTablesRead = " in the socket tables it could read"
 // pidList renders pids as "pid 5123" or "pids 5123, 6000", in order and
 // without repeats: a process listening on both address families is one
 // holder.
-func pidList(pids []int) string {
-	sorted := slices.Compact(slices.Sorted(slices.Values(pids)))
+func pidList(pids []int) string { return idList("pid", pids) }
+
+// uidList renders uids as pidList renders pids: "uid 0" or "uids 0, 1001".
+func uidList(uids []int) string { return idList("uid", uids) }
+
+// idList renders ids after noun, pluralised with an "s" past one, in order
+// and without repeats.
+func idList(noun string, ids []int) string {
+	sorted := slices.Compact(slices.Sorted(slices.Values(ids)))
 	words := make([]string, len(sorted))
-	for i, p := range sorted {
-		words[i] = strconv.Itoa(p)
+	for i, id := range sorted {
+		words[i] = strconv.Itoa(id)
 	}
 	if len(words) == 1 {
-		return "pid " + words[0]
+		return noun + " " + words[0]
 	}
-	return "pids " + strings.Join(words, ", ")
+	return noun + "s " + strings.Join(words, ", ")
 }

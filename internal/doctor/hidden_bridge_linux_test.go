@@ -5,6 +5,7 @@ package doctor
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -46,12 +48,23 @@ const undumpableReady = "undumpable child ready, port "
 // exits by itself.
 func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 	t.Helper()
+	return startUndumpableAs(t, os.Args[0], nil, listen)
+}
+
+// startUndumpableAs is startUndumpable running the test binary at bin, as
+// cred's user when cred is set (which takes root; bin must be one that user
+// can run, sharedTestBinary).
+func startUndumpableAs(t *testing.T, bin string, cred *syscall.Credential, listen bool) (pid, port int) {
+	t.Helper()
 	mode := "idle"
 	if listen {
 		mode = "listen"
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd := exec.Command(bin, "-test.run=^"+t.Name()+"$")
 	cmd.Env = append(os.Environ(), undumpableChildEnv+"="+mode)
+	if cred != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	// The writer is dropped here and still stays open: cmd keeps it
@@ -228,4 +241,135 @@ func TestHiddenListenerOfThisUserOnTheKernel(t *testing.T) {
 	if hidden, err := hiddenListenerOfThisUser(port); err != nil || !hidden {
 		t.Errorf("the stand-in's listener: hidden %v, err %v; want hidden, since no process this user reads holds it", hidden, err)
 	}
+}
+
+// TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries pins, on the real
+// kernel, the two facts the census's second half rests on, for a process
+// with dumpable=0 (the stand-in for a bridge granted cap_net_bind_service):
+// its /proc/<pid>/status reads where its descriptors may not, and the fsuid
+// there is the uid the socket tables give the listener it created. The
+// census rules such a process out of a port whose listeners another uid
+// created, so a disagreement here would FAIL the bridge's own port.
+func TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries(t *testing.T) {
+	if mode := os.Getenv(undumpableChildEnv); mode != "" {
+		runUndumpable(mode)
+	}
+	bridge, port := startUndumpable(t, true)
+	uid := pidFSUID("/proc", bridge)
+	if uid != os.Getuid() {
+		t.Fatalf("pid %d's status shows fsuid %d; want this user's, %d", bridge, uid, os.Getuid())
+	}
+	sockets, _, err := listenerSockets(procNetTCPFiles, port)
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("the socket tables list %v for the stand-in's listener on :%d (err %v), want one socket", sockets, port, err)
+	}
+	for s, creator := range sockets {
+		if creator != uid {
+			t.Errorf("the stand-in's listener %s was created by uid %d in the tables; its status shows %d", s, creator, uid)
+		}
+	}
+}
+
+// portCheckChildEnv makes this test binary, run again by
+// TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge, the doctor run:
+// it checks the port its value names against the pid file it names
+// ("<port> <pid file>") and prints the Check as JSON.
+const portCheckChildEnv = "DOCTOR_TEST_PORT_CHECK_CHILD"
+
+// runPortCheck is the port-check child's side. It never returns.
+func runPortCheck(t *testing.T, spec string) {
+	portText, pidFile, ok := strings.Cut(spec, " ")
+	port, err := strconv.Atoi(portText)
+	if !ok || err != nil {
+		fmt.Fprintln(os.Stderr, "bad port-check spec:", spec)
+		os.Exit(1)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(checkPort(t.Context(), "port-test", port, pidFile)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge is row L7 of
+// #1030's matrix on the real kernel: the recorded bridge runs with
+// dumpable=0 (the stand-in for a bridge granted cap_net_bind_service), and
+// the port its config was edited to is held by a process of ANOTHER user,
+// which doctor, run as the bridge's user, cannot read either. Nothing ruled
+// the bridge out, the check warned, `bridge doctor --config` exited 0, and
+// the restart could not bind.
+//
+// The listener's row gives the uid that created it, and the bridge's status
+// gives the uid it runs as, which differ, so the listener is not the
+// bridge's and the port FAILs. It takes root, to run the holder, the bridge
+// and doctor as two users that are not this process's; doctor runs as the
+// bridge's user, as the runbook says to, so root's own view plays no part.
+func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
+	if mode := os.Getenv(undumpableChildEnv); mode != "" {
+		runUndumpable(mode)
+	}
+	if spec := os.Getenv(portCheckChildEnv); spec != "" {
+		runPortCheck(t, spec)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root, to run processes as two users other than this one")
+	}
+	const bridgeUID, holderUID = 4071, 4072
+	dir, bin := sharedTestBinary(t)
+	_, port := startUndumpableAs(t, bin, &syscall.Credential{Uid: holderUID, Gid: holderUID}, true)
+	bridge, _ := startUndumpableAs(t, bin, &syscall.Credential{Uid: bridgeUID, Gid: bridgeUID}, false)
+	pidFile := filepath.Join(dir, "server.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: bridgeUID, Gid: bridgeUID}}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the doctor run as uid %d: %v\n%s", bridgeUID, err, stderr.String())
+	}
+	var c Check
+	if err := json.Unmarshal(out, &c); err != nil {
+		t.Fatalf("the doctor run printed %q: %v", out, err)
+	}
+	if c.Status != Fail {
+		t.Fatalf("got %v (%s / %s), want fail", c.Status, c.Summary, c.Hint)
+	}
+	want := fmt.Sprintf("/proc shows every socket listening on this port created by uid %d, while pid %d runs as uid %d",
+		holderUID, bridge, bridgeUID)
+	if !strings.Contains(c.Hint, want) || !strings.Contains(c.Hint, "stop the process that holds the port") {
+		t.Errorf("the hint does not give the creator, or does not say to stop the holder:\n got %s\nwant …%s…", c.Hint, want)
+	}
+}
+
+// sharedTestBinary copies this test binary into a new directory that any
+// user can search, and returns the directory and the copy. Run as root, go
+// test builds the binary under a 0700 directory, which a child running as
+// another user cannot reach.
+func sharedTestBinary(t *testing.T) (dir, bin string) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err = os.MkdirTemp("", "doctor-uid-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin = filepath.Join(dir, "doctor.test")
+	if err := os.WriteFile(bin, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, bin
 }
