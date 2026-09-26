@@ -2,8 +2,10 @@ package doctor
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,7 +124,17 @@ func scanListenerInodes(r io.Reader, port int) ([]string, error) {
 // read is skipped, because a kernel built without IPv6 has no
 // /proc/net/tcp6 and the other family may still answer; the first such
 // error is returned only when no table could be read at all.
-func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err error)) error {
+//
+// unread reports a table skipped for any reason but its absence. A match
+// the scan found in the tables it read stands, and so does the error
+// contract above, which the verdicts rest on: the uid scan and the /proc
+// attribution answer as they always have. What unread changes is only
+// what a MISS may claim. The scan saw less than the namespace's sockets,
+// so "not in the tables" rules nothing out (procSighting; CodeRabbit on
+// #1028, which proposed returning the error instead: that turns a bridge
+// found in /proc/net/tcp beside an unreadable tcp6 from ok into a probe
+// failure).
+func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err error)) (unread bool, err error) {
 	var firstErr error
 	readAny := false
 	for _, path := range paths {
@@ -130,7 +142,7 @@ func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err err
 		// loop, so a plain `defer` would hold every descriptor until the
 		// function returns, and a bare post-call Close is skipped on a
 		// panic.
-		done, err := func() (bool, error) {
+		done, tableErr := func() (bool, error) {
 			f, err := os.Open(path)
 			if err != nil {
 				return false, err
@@ -138,32 +150,36 @@ func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err err
 			defer func() { _ = f.Close() }()
 			return scan(f)
 		}()
-		if err != nil {
+		if tableErr != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = tableErr
+			}
+			if !errors.Is(tableErr, fs.ErrNotExist) {
+				unread = true
 			}
 			continue
 		}
 		readAny = true
 		if done {
-			return nil
+			return unread, nil
 		}
 	}
 	if !readAny {
-		return firstErr
+		return unread, firstErr
 	}
-	return nil
+	return unread, nil
 }
 
 // listenerSockets returns the fd-link text of every socket listening on
 // port in the given tables, `socket:[<inode>]`, which is how
-// /proc/<pid>/fd renders a socket descriptor.
-func listenerSockets(paths []string, port int) (map[string]bool, error) {
-	sockets := map[string]bool{}
-	err := readSocketTables(paths, func(r io.Reader) (bool, error) {
-		inodes, err := scanListenerInodes(r, port)
-		if err != nil {
-			return false, err
+// /proc/<pid>/fd renders a socket descriptor, and whether a table that is
+// there could not be read (readSocketTables' unread).
+func listenerSockets(paths []string, port int) (sockets map[string]bool, unread bool, err error) {
+	sockets = map[string]bool{}
+	unread, err = readSocketTables(paths, func(r io.Reader) (bool, error) {
+		inodes, scanErr := scanListenerInodes(r, port)
+		if scanErr != nil {
+			return false, scanErr
 		}
 		for _, inode := range inodes {
 			sockets["socket:["+inode+"]"] = true
@@ -171,33 +187,46 @@ func listenerSockets(paths []string, port int) (map[string]bool, error) {
 		return false, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, unread, err
 	}
-	return sockets, nil
+	return sockets, unread, nil
 }
 
 // fdDirHoldsSocket reports whether any descriptor in fdDir, a process's
-// /proc/<pid>/fd, links to one of sockets.
+// /proc/<pid>/fd, links to one of sockets (held), and when none does,
+// whether every descriptor could be read (readAll).
 //
 // An inode names one socket, so a match proves the process holds that
 // listener; it cannot come from another process's socket. A directory that
-// cannot be listed answers false, as lsof's "ran, matched nothing" does:
-// the process is gone, or belongs to another user, or runs with dumpable=0
-// (a binary granted cap_net_bind_service), and the kernel denies its fd
-// table to an unprivileged observer. That is the case checkPort's liveness
-// arm exists for, so it must reach that arm rather than read as a broken
-// probe. A descriptor closed between the listing and its readlink is
-// skipped for the same reason.
-func fdDirHoldsSocket(fdDir string, sockets map[string]bool) bool {
+// cannot be listed returns its error and no match, as lsof's "ran, matched
+// nothing" does: the process is gone, or belongs to another user, or runs
+// with dumpable=0 (a binary granted cap_net_bind_service), and the kernel
+// denies its fd table to an unprivileged observer. procSighting tells those
+// apart for the account and never passes the error on, because that is the
+// case checkPort's liveness arm exists for, and it must reach that arm
+// rather than read as a broken probe.
+//
+// A directory can list and still refuse its links: listing takes the
+// process's uid, and a readlink the kernel's full ptrace read check, which
+// also compares the groups. Such a descriptor clears readAll, since the
+// socket may be behind it. One closed between the listing and its readlink
+// does not: it is no longer a socket the process holds.
+func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool, err error) {
 	entries, err := os.ReadDir(fdDir)
 	if err != nil {
-		return false
+		return false, false, err
 	}
+	readAll = true
 	for _, e := range entries {
 		link, err := os.Readlink(filepath.Join(fdDir, e.Name()))
-		if err == nil && sockets[link] {
-			return true
+		switch {
+		case err == nil:
+			if sockets[link] {
+				return true, readAll, nil
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			readAll = false
 		}
 	}
-	return false
+	return false, readAll, nil
 }

@@ -2,8 +2,6 @@ package doctor
 
 import (
 	"os"
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -80,26 +78,5 @@ func assertAPIPortVerdict(t *testing.T, d Deps, want Status) {
 	if c := rep.Checks[0]; c.Status != want {
 		t.Errorf("OwnPIDPortsUnknown=%v: got %v (%s / %s), want %v",
 			d.OwnPIDPortsUnknown, c.Status, c.Summary, c.Hint, want)
-	}
-}
-
-// TestChosenPortRefusalNamesTheRecordedBridge pins the hint on the row
-// that is most likely to be the operator's own bridge: running, with a
-// port nothing can attribute to it. The FAIL stands, since nothing says
-// the port is that bridge's, but the hint has to say which bridge was
-// found and how to settle it, or it reads "another process owns this
-// port" about what may be the operator's own listener.
-func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
-	withPIDAlive(t, true)
-	withPortOwner(t, false, nil)
-	pidFile := writePIDFile(t, 4242)
-	c := checkChosenPort(t.Context(), "port-test", bindPort(t), pidFile)
-	if c.Status != Fail {
-		t.Fatalf("got %v (%s), want fail", c.Status, c.Summary)
-	}
-	for _, want := range []string{pidFile, "pid " + strconv.Itoa(4242), "stop that bridge"} {
-		if !strings.Contains(c.Hint, want) {
-			t.Errorf("hint does not say %q: %s", want, c.Hint)
-		}
 	}
 }

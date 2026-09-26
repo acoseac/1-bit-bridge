@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"syscall"
 	"unsafe"
 
@@ -132,7 +133,11 @@ var (
 // the given local TCP port, querying BOTH the IPv4 and IPv6 owner-PID
 // listener tables natively via iphlpapi.dll (no shell-out). The error
 // return signals a probe-MECHANISM failure (DLL/proc can't load, or the
-// API errors) so checkPort degrades to Warn rather than a hard Fail.
+// API errors) so checkPort degrades to Warn rather than a hard Fail. When
+// it answers false with no error, the sighting names the pids the tables
+// give for the port (listenerTableSighting): this probe sees every
+// listener's owner, so a miss here rules the pid out, and the hint says so
+// rather than blaming a capability Windows does not have.
 //
 // The context is accepted for signature parity with the unix twin and goes
 // unused: there is no subprocess to bound here, and GetExtendedTcpTable is
@@ -140,44 +145,58 @@ var (
 // against. Keeping the parameter means the caller has one shape to reason
 // about — and means a future Windows probe that DOES block has the context
 // already in hand.
-func isPIDListeningOnPort(_ context.Context, port, targetPID int) (bool, error) {
+func isPIDListeningOnPort(_ context.Context, port, targetPID int) (bool, ownerSighting, error) {
 	// Resolve the proc explicitly: LazyProc.Call panics if Find fails, so
 	// a missing/blocked iphlpapi.dll must be turned into an error here.
 	if err := procGetExtendedTcp.Find(); err != nil {
-		return false, fmt.Errorf("iphlpapi GetExtendedTcpTable unavailable: %w", err)
+		return false, ownerSighting{}, fmt.Errorf("iphlpapi GetExtendedTcpTable unavailable: %w", err)
 	}
-	// The two families share one scan (pidOwnsPortFamily); only the row type
-	// and the field-access closure differ. The closure captures port/targetPID.
-	v4, err := pidOwnsPortFamily(windows.AF_INET, "INET", func(r mibTCPRowOwnerPID) bool {
-		return ntohsPort(r.LocalPort) == port && int(r.OwningPID) == targetPID
+	// The two families share one scan (portOwnersFamily); only the row type
+	// and the field-access closure differ. A match in the IPv4 table ends
+	// the probe before the IPv6 table is read, as it always has, so an
+	// IPv6 read that fails cannot turn a found pid into a probe error.
+	v4, err := portOwnersFamily(windows.AF_INET, "INET", port, func(r mibTCPRowOwnerPID) (int, int) {
+		return ntohsPort(r.LocalPort), int(r.OwningPID)
 	})
-	if err != nil || v4 {
-		return v4, err
+	if err != nil {
+		return false, ownerSighting{}, err
 	}
-	return pidOwnsPortFamily(windows.AF_INET6, "INET6", func(r mibTCP6RowOwnerPID) bool {
-		return ntohsPort(r.LocalPort) == port && int(r.OwningPID) == targetPID
+	if slices.Contains(v4, targetPID) {
+		return true, ownerSighting{}, nil
+	}
+	v6, err := portOwnersFamily(windows.AF_INET6, "INET6", port, func(r mibTCP6RowOwnerPID) (int, int) {
+		return ntohsPort(r.LocalPort), int(r.OwningPID)
 	})
+	if err != nil {
+		return false, ownerSighting{}, err
+	}
+	if slices.Contains(v6, targetPID) {
+		return true, ownerSighting{}, nil
+	}
+	return false, listenerTableSighting(append(v4, v6...)), nil
 }
 
-// pidOwnsPortFamily fetches the owner-PID LISTENER table for one address
-// family and reports whether any row satisfies match. Generic over the row
-// type T so the IPv4 and IPv6 scans share one implementation — the row
-// layouts differ, but the fetch + bounds-check + iterate shape is identical.
-func pidOwnsPortFamily[T any](family int, af string, match func(T) bool) (bool, error) {
+// portOwnersFamily fetches the owner-PID LISTENER table for one address
+// family and returns the owning pid of every row on port. Generic over the
+// row type T so the IPv4 and IPv6 scans share one implementation — the row
+// layouts differ, but the fetch + bounds-check + iterate shape is identical;
+// row gives a row's (port, pid).
+func portOwnersFamily[T any](family int, af string, port int, row func(T) (int, int)) ([]int, error) {
 	buf, err := extendedTCPTable(family)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	rows, err := tcpTableEntries[T](buf, af)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	var owners []int
 	for i := range rows {
-		if match(rows[i]) {
-			return true, nil
+		if p, pid := row(rows[i]); p == port {
+			owners = append(owners, pid)
 		}
 	}
-	return false, nil
+	return owners, nil
 }
 
 // tcpTableEntries reinterprets a GetExtendedTcpTable buffer as the typed

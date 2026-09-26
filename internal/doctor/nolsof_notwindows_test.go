@@ -24,6 +24,10 @@ func withoutLsof(t *testing.T) {
 	lsofPath = ""
 }
 
+// lsofResolved reports whether this host has an lsof the probe runs, the
+// state withoutLsof takes away. Windows answers false: it has its own probe.
+func lsofResolved() bool { return lsofPath != "" }
+
 // TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds.
 //
 // checkPort used to end in `if !portProbeAvailable() { return warn(…) }`,

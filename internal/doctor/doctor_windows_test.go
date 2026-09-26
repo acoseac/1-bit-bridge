@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+// lsofResolved is the unix predicate's Windows twin: the probe here is
+// GetExtendedTcpTable, never lsof.
+func lsofResolved() bool { return false }
+
 // TestPIDAlive_WindowsLiveForeignProcess pins the direction the Windows
 // implementation actually promises, and the one checkPort leans on: a live
 // process that is NOT us must read as alive.
@@ -56,7 +60,7 @@ func TestIsPIDListeningOnPort_Windows(t *testing.T) {
 	defer lis.Close()
 	port := lis.Addr().(*net.TCPAddr).Port
 
-	found, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
+	found, _, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
 	if perr != nil {
 		t.Fatalf("probe errored: %v", perr)
 	}
@@ -77,11 +81,16 @@ func TestIsPIDListeningOnPort_WindowsFreePort(t *testing.T) {
 	port := lis.Addr().(*net.TCPAddr).Port
 	_ = lis.Close()
 
-	found, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
+	found, seen, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
 	if perr != nil {
 		t.Fatalf("probe errored: %v", perr)
 	}
 	if found {
 		t.Errorf("no listener should be attributed on freed port %d", port)
+	}
+	// The listener table has no row on the port, so the account says so,
+	// and says it of a probe that sees every listener's owner.
+	if want := "Windows' TCP listener table lists no process listening on this port"; seen.saw != want || !seen.ruledOut {
+		t.Errorf("sighting = %+v, want %q, ruled out", seen, want)
 	}
 }

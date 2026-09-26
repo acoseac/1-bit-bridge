@@ -76,7 +76,7 @@ func TestIsPIDListeningOnPortHonoursCallerCancellation(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	found, err := isPIDListeningOnPort(ctx, 7788, os.Getpid())
+	found, _, err := isPIDListeningOnPort(ctx, 7788, os.Getpid())
 	elapsed := time.Since(start)
 
 	if elapsed > cancelPropagationBudget {
@@ -111,7 +111,7 @@ func TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly(t *testing.T) {
 	// A live, never-cancelled caller context; only the internal
 	// probeTimeout can end this.
 	start := time.Now()
-	_, err := isPIDListeningOnPort(context.Background(), 7788, os.Getpid())
+	_, _, err := isPIDListeningOnPort(context.Background(), 7788, os.Getpid())
 	elapsed := time.Since(start)
 
 	if err == nil {

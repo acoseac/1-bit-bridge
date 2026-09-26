@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 func portOwnedByThisUser(port int) (bool, error) {
 	me := os.Getuid()
 	owned := false
-	err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
+	_, err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
 		uids, err := scanListenerUIDs(r, port)
 		if err != nil {
 			return false, err
@@ -82,14 +83,32 @@ func portOwnedByThisUser(port int) (bool, error) {
 // Its limits are lsof's own: a process of another user, or one with
 // dumpable=0 (a binary granted cap_net_bind_service), keeps its descriptors
 // from an unprivileged observer, and the answer is then false, as lsof's
-// exit 1 is. An error means neither socket table could be read.
-func pidListensOnPort(port, pid int) (bool, error) {
+// exit 1 is. The sighting says which it was (procSighting). An error means
+// neither socket table could be read.
+func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
-		return false, nil
+		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil
 	}
-	sockets, err := listenerSockets(procNetTCPFiles, port)
-	if err != nil || len(sockets) == 0 {
-		return false, err
+	return procSighting(procNetTCPFiles, filepath.Join("/proc", strconv.Itoa(pid), "fd"), port, pid, blindSpot())
+}
+
+// blindSpot says what an owner probe run as this user cannot see on Linux,
+// for the account of a port it did not attribute (ownerSighting.blind).
+// lsof and pidListensOnPort share it, since both read /proc/<pid>/fd, and
+// the kernel shows a process's descriptor links only to a reader whose uid
+// AND gid match the process's, and only while the process is dumpable
+// (ptrace's read check), unless the reader holds CAP_SYS_PTRACE. A binary
+// granted cap_net_bind_service runs with dumpable=0: the case #640's arm
+// was written for, which is why it is named, as an example.
+//
+// Root gets "": outside a container it reads every process, and inside one
+// Docker does not grant CAP_SYS_PTRACE, so it may not. Nothing short of a
+// probe says which, and saying nothing is not false.
+func blindSpot() string {
+	uid := os.Geteuid()
+	if uid == 0 {
+		return ""
 	}
-	return fdDirHoldsSocket(filepath.Join("/proc", strconv.Itoa(pid), "fd"), sockets), nil
+	return fmt.Sprintf("uid %d cannot read the descriptors of a process that runs as another user or group, "+
+		"or with dumpable=0, which is how a binary granted cap_net_bind_service runs", uid)
 }

@@ -746,7 +746,7 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 	// Port is in use. Is it us?
 	if ownPIDFile != "" {
 		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
-			found, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
+			found, seen, probeErr := ownerProbeFunc(ctx, port, ownPID)
 			switch {
 			case probeErr != nil:
 				// The probe MECHANISM failed (e.g. an antivirus blocked
@@ -763,33 +763,38 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 				return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
 			case pidAliveFunc(ownPID):
 				// The probe ran cleanly and did NOT name our PID, yet the
-				// PID we recorded at startup is still running. On a bridge
-				// that binds a privileged port through a file capability
-				// (`setcap cap_net_bind_service=+ep`, which the deployment
-				// runbook prescribes so a non-root service can bind :443)
-				// this is the EXPECTED result, not a conflict: that binary
-				// runs with dumpable=0, so no unprivileged observer can
-				// attribute the port to a pid — lsof, `ss -p` and a direct
-				// readlink of /proc/<pid>/fd all fail identically.
+				// PID we recorded at startup is still running. That is the
+				// EXPECTED result, not a conflict, on a bridge that binds a
+				// privileged port through a file capability (`setcap
+				// cap_net_bind_service=+ep`, which the deployment runbook
+				// prescribes so a non-root service can bind :443): that
+				// binary runs with dumpable=0, so no unprivileged observer
+				// can attribute the port to a pid — lsof, `ss -p` and a
+				// direct readlink of /proc/<pid>/fd all fail identically.
+				//
+				// It is not the only way here, and this arm used to explain
+				// every arrival as that one. A bridge running as another
+				// user is as hidden, on every unix. A host with no lsof
+				// off Linux asks nothing. lsof may name the process that
+				// holds the port. And a probe that saw everything there
+				// was to see (Windows' listener table, /proc reading all
+				// of our descriptors) rules our pid out. So the text is
+				// the probe's account of what it saw (ownerSighting), and
+				// the verdicts below are what they were: ok on a listener
+				// of our uid, else warn.
 				//
 				// Last resort before giving up: ask whether the listener is
 				// at least owned by OUR USER. On Linux that survives
 				// dumpable=0 (see portowner_linux.go); everywhere else it
 				// answers "don't know" and we fall through to the Warn.
 				if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
-					return ok(name, fmt.Sprintf(
-						"in use by a process running as this user (uid %d; pid attribution blocked — capability-bound binary)",
-						os.Getuid()))
+					return ok(name, fmt.Sprintf("in use by a process running as this user (uid %d; %s)",
+						os.Getuid(), seen.account()))
 				}
 				// "Our recorded pid is alive and something holds the port"
 				// is materially different from "we have no idea who owns
 				// this", and only the second deserves a Fail.
-				return warn(name, fmt.Sprintf(":%d in use", port),
-					fmt.Sprintf("our bridge (pid %d) is still running, but this host would not attribute "+
-						"the port to it — a binary granted cap_net_bind_service runs with dumpable=0, which "+
-						"blocks port→pid attribution for any non-root observer. If that is this install, "+
-						"this is expected; otherwise stop the other process or change the address in bridge.yaml",
-						ownPID))
+				return warn(name, fmt.Sprintf(":%d in use", port), liveUnseenHint(ownPID, seen))
 			}
 		}
 	}
@@ -812,6 +817,34 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // anotherProcessOwnsPort is the hint on a held port with no live bridge of
 // ours behind it.
 const anotherProcessOwnsPort = "another process owns this port; stop it or pick a different address in bridge.yaml"
+
+// liveUnseenHint is checkPort's warn hint when the recorded bridge is alive
+// and the owner probe did not see it on the port: the probe's account (s),
+// then advice that fits it. Where what the probe saw rules the bridge out
+// (ownerSighting.ruledOut), the hint says to stop the holder. Where it
+// could have missed the bridge, it says why and keeps the hedge.
+func liveUnseenHint(ownPID int, s ownerSighting) string {
+	lead := fmt.Sprintf("our bridge (pid %d) is still running, but %s", ownPID, s.account())
+	if s.ruledOut {
+		return lead + ": stop the process that holds the port, or change the address in bridge.yaml"
+	}
+	return lead + s.because() + ". If our bridge is what holds the port, this is expected; " +
+		"otherwise stop the other process or change the address in bridge.yaml"
+}
+
+// chosenUnseenHint is checkChosenPort's refusal of a port the recorded bridge
+// was not seen holding while it is alive, built like liveUnseenHint. Only a
+// probe that could have missed the bridge leaves "stop that bridge and
+// re-run" as a way through; one whose account rules the bridge out does
+// not.
+func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
+	lead := fmt.Sprintf("the bridge recorded in %s (pid %d) is running, but %s", ownPIDFile, ownPID, s.account())
+	if s.ruledOut {
+		return lead + ": stop the process that holds the port and re-run"
+	}
+	return lead + s.because() + ", and with no config that loads nothing says it binds this port. " +
+		"If it does, stop that bridge and re-run; otherwise stop the process that holds the port"
+}
 
 // checkChosenPort grades a port the caller is choosing for a bridge whose
 // ports it could not read (Deps.OwnPIDPortsUnknown): `bridge init` over an
@@ -845,7 +878,7 @@ func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile stri
 	if err != nil || ownPID <= 0 {
 		return fail(name, conflict, anotherProcessOwnsPort)
 	}
-	found, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
+	found, seen, probeErr := ownerProbeFunc(ctx, port, ownPID)
 	switch {
 	case probeErr == nil && found:
 		return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
@@ -858,12 +891,7 @@ func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile stri
 				"that holds the port",
 			oneLine(probeErr.Error()), ownPIDFile, ownPID))
 	default:
-		return fail(name, conflict, fmt.Sprintf(
-			"the bridge recorded in %s (pid %d) is running but was not seen listening on this port, and with no "+
-				"config that loads nothing says it binds it. If it does (a binary granted cap_net_bind_service cannot "+
-				"be attributed by a non-root user), stop that bridge and re-run; otherwise stop the process that "+
-				"holds the port",
-			ownPIDFile, ownPID))
+		return fail(name, conflict, chosenUnseenHint(ownPIDFile, ownPID, seen))
 	}
 }
 
@@ -1328,7 +1356,9 @@ func windowsStartupDir() string {
 // isPIDListeningOnPort is platform-provided — the lsof-backed unix
 // implementation lives in doctor_notwindows.go and the native iphlpapi.dll
 // implementation in doctor_windows.go. The "is it us?" branch of checkPort
-// calls it; see the per-platform docs for the (found, error) contract.
+// calls it, through ownerProbeFunc; see the per-platform docs for the
+// (found, sighting, error) contract, and ownerSighting for what a miss says
+// about itself.
 //
 // isPIDListeningOnPort takes the context on BOTH platforms even though only
 // the unix one spawns a subprocess to bound. One signature keeps the caller
@@ -1347,6 +1377,12 @@ func windowsStartupDir() string {
 var (
 	pidAliveFunc  = pidAlive
 	portOwnerFunc = portOwnedByThisUser
+	// ownerProbeFunc is the owner probe itself (isPIDListeningOnPort),
+	// indirected so a test can hand both port ladders every kind of
+	// account, a ruled-out miss included, on every platform. Only
+	// Windows' table and Linux's /proc produce one for real, so without
+	// it nothing on a Mac could show that no verdict turns on the account.
+	ownerProbeFunc = isPIDListeningOnPort
 )
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.

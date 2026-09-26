@@ -30,13 +30,16 @@ var lsofCommand = exec.CommandContext
 // cut short) so checkPort can degrade to Warn rather than a hard Fail — a
 // broken probe must never break a healthy install whose config names the
 // port. (checkChosenPort, for a port no config names, refuses instead.)
+// When it answers false with no error, the sighting says what the probe
+// saw, which is how the arms that explain a miss explain it (ownerSighting):
+// lsof listing nothing, lsof naming other pids, or the /proc account.
 //
 // Where no usable lsof resolved, Linux answers from /proc itself
 // (pidListensOnPort, the same kernel tables lsof reads), so attribution
 // there does not depend on lsof being installed; its error means neither
 // socket table could be read. Elsewhere it returns (false, nil): the port
 // cannot be attributed, and checkPort asks next whether the recorded pid
-// is alive at all.
+// is alive at all. Either way the sighting opens with the missing lsof.
 //
 // Implementation: `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints one PID
 // per line. We check membership across ALL of them (not just the first)
@@ -59,9 +62,14 @@ var lsofCommand = exec.CommandContext
 // on a healthy install. Confirming it doesn't is not something this repo
 // can do without a wedged mount to test against, so the deadline stands
 // alone until someone can.
-func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error) {
+func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, ownerSighting, error) {
 	if lsofPath == "" {
-		return pidListensOnPort(port, targetPID)
+		found, seen, err := pidListensOnPort(port, targetPID)
+		if found || err != nil {
+			return found, ownerSighting{}, err
+		}
+		seen.saw = "this host has no lsof, and " + seen.account()
+		return false, seen, nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -78,10 +86,10 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error
 		// 50ms, which sends whoever reads the hint hunting a wedged mount
 		// that was never involved.
 		if callerErr := ctx.Err(); callerErr != nil {
-			return false, fmt.Errorf("lsof port probe aborted by caller: %w", callerErr)
+			return false, ownerSighting{}, fmt.Errorf("lsof port probe aborted by caller: %w", callerErr)
 		}
 		if ctxErr := probeCtx.Err(); ctxErr != nil {
-			return false, fmt.Errorf("lsof port probe timed out after %s: %w", probeTimeout, ctxErr)
+			return false, ownerSighting{}, fmt.Errorf("lsof port probe timed out after %s: %w", probeTimeout, ctxErr)
 		}
 		// lsof exit code 1 means it ran but matched nothing (the common
 		// case when the port's owner isn't visible to us) — that's "not
@@ -91,16 +99,18 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error
 		// degrades to Warn rather than a false Fail.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return false, nil
+			return false, lsofSighting(nil, targetPID, blindSpot()), nil
 		}
-		return false, err
+		return false, ownerSighting{}, err
 	}
 	for _, f := range strings.Fields(string(out)) {
 		if n, convErr := strconv.Atoi(f); convErr == nil && n == targetPID {
-			return true, nil
+			return true, ownerSighting{}, nil
 		}
 	}
-	return false, nil
+	// Not found, and read from the same output: lsof named other pids, or
+	// printed something that is not `lsof -t`'s answer (lsofSighting).
+	return false, lsofSighting(out, targetPID, blindSpot()), nil
 }
 
 // lsofPath is the absolute path to lsof, resolved ONCE at package init.
