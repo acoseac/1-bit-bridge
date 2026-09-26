@@ -149,3 +149,40 @@ func TestParseSockDiagLeavesOutWhatItCannotRead(t *testing.T) {
 		})
 	}
 }
+
+// TestEachFamilyKeepsTheFamiliesThatAnswered: listenerCgroups asks the
+// kernel once per address family, and one it cannot answer for must not
+// cost the other its answers (Gemini on #1033: an error from the AF_INET6
+// dump dropped the AF_INET listeners' cgroups too). A family that failed is
+// left out whole, even what it read before it failed, and an error means
+// none answered.
+func TestEachFamilyKeepsTheFamiliesThatAnswered(t *testing.T) {
+	v4 := map[string]uint64{"socket:[100]": 7}
+	failed := errors.New("the kernel said no")
+	dump := func(answers map[uint8]map[string]uint64, errs map[uint8]error) func(uint8) (map[string]uint64, error) {
+		return func(family uint8) (map[string]uint64, error) {
+			return answers[family], errs[family]
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		answers map[uint8]map[string]uint64
+		errs    map[uint8]error
+		want    map[string]uint64
+		wantErr bool
+	}{
+		{"both answer", map[uint8]map[string]uint64{2: v4, 10: {"socket:[200]": 9}}, nil,
+			map[string]uint64{"socket:[100]": 7, "socket:[200]": 9}, false},
+		{"IPv6 fails", map[uint8]map[string]uint64{2: v4}, map[uint8]error{10: failed}, v4, false},
+		{"IPv4 fails after reading one socket", map[uint8]map[string]uint64{2: v4, 10: {"socket:[200]": 9}},
+			map[uint8]error{2: failed}, map[string]uint64{"socket:[200]": 9}, false},
+		{"neither answers", nil, map[uint8]error{2: failed, 10: failed}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := eachFamily([]uint8{2, 10}, dump(tc.answers, tc.errs))
+			if (err != nil) != tc.wantErr || !maps.Equal(got, tc.want) {
+				t.Errorf("got %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

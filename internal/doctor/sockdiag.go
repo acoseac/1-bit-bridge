@@ -103,6 +103,37 @@ func sockDiagMessage(typ uint16, body []byte, port int, into map[string]uint64) 
 	return false, nil
 }
 
+// eachFamily asks dump about each address family in families and merges
+// the answers of those that answered in full. A family that did not is left
+// out whole, whatever it had read before it failed, and its sockets are then
+// absent from the answer, which counts nothing for them in the census
+// (cgroupsNotOf needs every socket it is asked about to be there). That is
+// readSocketTables' rule for a socket table that is not there: one family
+// the kernel cannot answer for must not cost the other its answers. An
+// error, the first family's, means none answered.
+func eachFamily(families []uint8, dump func(family uint8) (map[string]uint64, error)) (map[string]uint64, error) {
+	merged := map[string]uint64{}
+	var firstErr error
+	answered := false
+	for _, family := range families {
+		got, err := dump(family)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		answered = true
+		for s, id := range got {
+			merged[s] = id
+		}
+	}
+	if !answered {
+		return nil, firstErr
+	}
+	return merged, nil
+}
+
 // addListenerCgroup reads one struct inet_diag_msg and the attributes after
 // it, and records the socket's cgroup in into when it listens on port.
 func addListenerCgroup(msg []byte, port int, into map[string]uint64) error {

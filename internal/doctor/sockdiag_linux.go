@@ -28,16 +28,15 @@ const sockDiagTimeout = 2 * time.Second
 // cgroup is the id of the cgroup's directory on the cgroup2 mount, its
 // inode number, fixed when socket(2) created the socket (commit
 // 6e3a401fc8af, which added the attribute in 5.8, says so: it is "not
-// changed when process get moved to another cgroup"). An error means the
-// answer is unknown, and the census then counts nothing by cgroup.
+// changed when process get moved to another cgroup"). An error means
+// neither family answered, and the census then counts nothing by cgroup; a
+// family that did not answer is left out (eachFamily).
 func listenerCgroups(port int) (map[string]uint64, error) {
-	cgroups := map[string]uint64{}
-	for _, family := range []uint8{unix.AF_INET, unix.AF_INET6} {
-		if err := dumpListenerCgroups(family, port, cgroups); err != nil {
-			return nil, err
-		}
-	}
-	return cgroups, nil
+	return eachFamily([]uint8{unix.AF_INET, unix.AF_INET6}, func(family uint8) (map[string]uint64, error) {
+		cgroups := map[string]uint64{}
+		err := dumpListenerCgroups(family, port, cgroups)
+		return cgroups, err
+	})
 }
 
 // dumpListenerCgroups asks for one address family's TCP listeners and adds
