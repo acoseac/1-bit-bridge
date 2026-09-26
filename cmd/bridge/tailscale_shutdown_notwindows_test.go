@@ -4,14 +4,14 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/proctest"
 )
 
 // wrappedTailscaleScript is the "app" behind the fake wrapper: `status`
@@ -95,17 +95,21 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 		t.Fatalf("runServe did not return after the cancel; stderr=%s", stderr.String())
 	}
 
-	// Serve has returned. The `tailscale cert` it started must be gone:
-	// a killed process is reaped within milliseconds, a live one never is.
+	// Serve has returned. The `tailscale cert` it started must have
+	// exited: a killed process has within milliseconds, a live one never
+	// does. Asked through proctest, not kill(pid, 0): nothing in this test
+	// reaps the CLI, serve's grandchild, and where init does not either (a
+	// container run without --init) it stays a zombie, which kill(pid, 0)
+	// calls running.
 	for deadline := time.Now().Add(5 * time.Second); ; {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		exited, why := proctest.Exited(pid)
+		if exited {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("serve has returned, but the `tailscale cert` it started (pid %d) is still "+
-				"running (kill(pid, 0) = %v). It will write into the data dir whenever it "+
-				"finishes, after serve is gone. stderr=%s", pid, err, stderr.String())
+				"running (%s). It will write into the data dir whenever it "+
+				"finishes, after serve is gone. stderr=%s", pid, why, stderr.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
