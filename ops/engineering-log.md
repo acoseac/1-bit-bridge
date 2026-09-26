@@ -15710,7 +15710,7 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   | L4 | bridge live on 7790, config edited to 7788, which another uid-1000 process holds | ok | "pid attribution blocked — capability-bound binary" | "lsof lists pid 335 listening on this port"; without lsof "/proc shows no descriptor of pid 320 listening on this port" |
   | L5 | as L4, the holder uid 1001 | warn | capability hint | lsof: "lsof lists no process…" with the blind spot and the hedge; without lsof: "/proc shows no descriptor of pid 378 listening on this port: stop the process that holds the port…" |
   | M1 | Mac: recorded pid 65775, root's Tailscale extension, holding 127.0.0.1:50062 | warn | capability hint | "lsof lists no process listening on this port (lsof run as uid 501 rather than root sees only that user's processes)", then the hedge |
-  | M2 | Mac: recorded pid a live `sleep`, :39127 held by 1Password (pid 1305) | warn | capability hint | "lsof lists pid 1305 listening on this port: stop the process that holds the port, or change the address in bridge.yaml" |
+  | M2 | Mac: recorded pid a live `sleep`, :39127 held by 1Password (pid 1305) | warn | capability hint | "lsof lists pid 1305 listening on this port (lsof run as uid 501 rather than root sees only that user's processes)", then the hedge. Round 1's first commit said "…: stop the process that holds the port", which review 1 showed to over-claim |
   | W1 | home-pc: recorded pid sshd (4380), 127.0.0.1:7788 held by a PowerShell `TcpListener` (pid 5872) | warn | capability hint | "Windows' TCP listener table lists pid 5872 on this port: stop the process…" |
 
   The capability text was true in L2 alone. In L3 and M1 the recorded pid
@@ -15738,10 +15738,12 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   `listenerTableSighting` from GetExtendedTcpTable's rows. It carries what
   the probe saw, what it cannot see as this user (`blindSpot`: another user
   or group, or dumpable=0, on Linux; another user, for lsof on macOS; nothing
-  on Windows), and whether what it saw rules the pid out. `ruledOut` is lsof
-  naming other pids, `/proc` reading every descriptor without the listener
-  or listing no listener at all, and the Windows table. The zero value is
-  the hedge, which is the safe advice for a probe that sets nothing.
+  on Windows), and whether what it saw rules the pid out. Only a probe that
+  saw everything there was to see may: `/proc` reading every one of the
+  pid's descriptors against every socket table (or finding no listener in
+  any of them), and the Windows table. Never lsof (review round 1, below).
+  The zero value is the hedge, which is the safe advice for a probe that
+  sets nothing.
 - **Found and error are unchanged, and the Windows probe still stops at an
   IPv4 match** before reading the IPv6 table, so an IPv6 read that fails
   cannot turn a found pid into a probe error.
@@ -15749,6 +15751,12 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   that holds the port", and `checkChosenPort` drops "stop that bridge and
   re-run", which would free nothing. A pid the probe could have missed keeps
   the hedge and gets the blind spot in parentheses.
+- **The verdicts are pinned apart from the text, on every platform.**
+  `ownerProbeFunc` indirects the owner probe as `pidAliveFunc` and
+  `portOwnerFunc` already did, and `TestPortVerdictsIgnoreTheSighting` hands
+  both ladders every kind of answer, a ruled-out miss included. Only Windows'
+  table and Linux's `/proc` produce one for real, so before the seam a
+  verdict keyed on it passed every test on the Mac (NC6 after round 1).
 - **The ok summary gives the account and not the blind spot**, for length.
   The production NUC's line moves from "(uid 1000; pid attribution blocked
   — capability-bound binary)" to "(uid 1000; lsof lists no process listening
@@ -15782,27 +15790,37 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   `liveness_account_test.go` runs the real probe on every platform:
   `TestLivenessArmNamesTheListenerThePlatformProbeSaw` and
   `TestChosenPortRefusalOfAPortTheProbeSawAnotherHold`, the test process
-  holding the port and its parent recorded. `sighting_test.go` covers the
-  pure pieces, and `TestProcSightingAccountsForEachMiss` covers the `/proc`
-  account on fixtures, a 0400 directory standing in for links that list and
-  do not read.
+  holding the port and its parent recorded, plus
+  `TestPortVerdictsIgnoreTheSighting` over the seam (20 rows).
+  `sighting_test.go` covers the pure pieces, and
+  `TestProcSightingAccountsForEachMiss` covers the `/proc` account on
+  fixtures, a 0400 directory standing in for links that list and do not
+  read; `TestProcSightingDoesNotRuleOutOverATableItCouldNotRead` and
+  `TestProcSightingOfAnFdPathThatIsNoDirectory` cover a table that does not
+  read (a directory in its place) and an fd path that is a file.
 - **Red first on the Mac**: every wording test failed on main, and the
   verdict table passed on main, 20 of 20.
-- Negative controls against the committed fix (`25ccc6a9`), each restored
-  and the tree checked clean before the next:
+- Negative controls, each restored and the tree checked clean before the
+  next. The first ten ran against `25ccc6a9`; after review round 1 every one
+  was re-run against the new head, and the results below are those:
 
   | | mutation | result |
   |---|---|---|
-  | NC1 | `checkPort`'s old fixed text back, probe plumbing kept | the three `checkPort` wording tests red; the verdict table green. The first attempt did not build (`seen` unused) and was rerun with the call site discarding it |
-  | NC2 | both hints ignore `ruledOut` | the ruled-out rows of four tests red |
+  | NC1 | `checkPort`'s old fixed text back, probe plumbing kept | the three `checkPort` wording tests red; both verdict tables green. The first attempt did not build (`seen` unused) and was rerun with the call site discarding it |
+  | NC2 | both hints ignore `ruledOut` | on `25ccc6a9` four tests red; after round 1, on the Mac, only `TestUnseenHintsFitTheSighting` (no lsof account is ruled out any more; on Linux and Windows the real-probe tests still are) |
   | NC3 | lsof's pids never read | the lsof unit test, both real-probe tests and the lsof account red |
   | NC4 | a link that does not read is ignored, as before | `TestProcSightingAccountsForEachMiss` red |
-  | NC5 | macOS's blind spot claims the Linux capability | both lsof tests that check the blind spot red |
-  | NC6 | a ruled-out miss FAILs instead of warning | the verdict table red, with five others |
+  | NC5 | macOS's blind spot claims the Linux capability | four tests red, both real-probe tests among them once lsof accounts carry the blind spot |
+  | NC6 | a ruled-out miss FAILs instead of warning | on `25ccc6a9` the lsof verdict table red, with five others. After round 1 it PASSED on the Mac, since nothing there produced a ruled-out account: the gap `ownerProbeFunc` closes. With the seam, `TestPortVerdictsIgnoreTheSighting` red |
   | NC7 | the missing lsof dropped from the account | the no-lsof test red |
-  | NC-W | home-pc: the Windows owners dropped | both real-probe tests red |
-  | NC-L1 | dido, lsof image: Linux's blind spot always empty | the lsof account and the chosen-port hint red |
-  | NC-L2 | dido, no-lsof image: `/proc` reading every descriptor no longer rules the pid out | five tests red, the fixture and real-kernel ones among them |
+  | NC8 | a hedged miss FAILs instead of warning | both verdict tables red, with seven others |
+  | NC9 | `checkPort` calls the probe directly, bypassing the seam | `TestPortVerdictsIgnoreTheSighting` red |
+  | NCR1 | lsof naming other pids rules the bridge out again (review round 1 reverted) | the lsof unit test, the lsof account and both real-probe tests red |
+  | NCR2 | a table that did not read no longer stops a miss ruling the bridge out | `TestProcSightingDoesNotRuleOutOverATableItCouldNotRead` red |
+  | NCR3 | an absent table counts as not read | `TestListenerSocketsReadsBothFamilies` red |
+  | NC-W | home-pc: the Windows owners dropped (on `25ccc6a9`) | both real-probe tests red |
+  | NC-L1 | dido, lsof image: Linux's blind spot always empty (on `25ccc6a9`) | the lsof account and the chosen-port hint red |
+  | NC-L2 | dido, no-lsof image: `/proc` reading every descriptor no longer rules the pid out (on `25ccc6a9`) | five tests red, the fixture and real-kernel ones among them |
 
 - `go test -race ./internal/doctor/ ./cmd/bridge/` in both dido images as
   uid 1000, and `go test ./internal/doctor/` on home-pc (Go 1.27.1): ok.
@@ -15816,6 +15834,30 @@ macOS lsof's uid rule, GetExtendedTcpTable without elevation) and found no
 verdict change. It added the Windows edge cases recorded above, and, on
 Linux, that a saved uid that differs, a group held only as a supplementary
 group, or a user namespace also hides a same-uid process's links.
+
+### Review
+
+- **Round 1**, on `03f4265c`. Gemini: no comments. CodeRabbit ("Actionable
+  comments posted: 2"), both taken:
+  - **lsof naming another pid does not rule the recorded bridge out.** It
+    lists only the processes this user may inspect, and a bridge it cannot
+    see can listen on the same port at another address, a `listenAddress`
+    on one interface beside a holder on loopback: two listeners that do not
+    overlap bind side by side, and the doctor's bind probe is loopback-only.
+    The first commit's M2 hint ("…: stop the process that holds the port")
+    over-claimed exactly there. Every lsof account now keeps the blind spot
+    and the hedge, and names the pids it listed.
+  - **A socket table that is there and did not read cannot support a miss.**
+    `readSocketTables` skipped any table that failed while another read,
+    which is right for an absent `tcp6` (a kernel without IPv6) and wrong
+    for one that failed to read, since the listener may be in it. The
+    proposed fix returned the error instead. That moves verdicts: a bridge
+    found in `/proc/net/tcp` beside an unreadable `tcp6` would go from ok to
+    a probe failure (a warn in `checkPort`, a FAIL in `checkChosenPort`).
+    Taken as a flag, `unread`, which only withholds `ruledOut`; the error
+    contract, the uid scan and `found` are as they were.
+  - The first finding cost the Mac its only ruled-out path, and NC6 then
+    passed there: hence `ownerProbeFunc` and the seam table.
 
 ### Out of scope
 

@@ -2289,14 +2289,24 @@ what it claimed**, and none of it had a failing test.
   (`blindSpot`, per platform: another user or group, or dumpable=0, on
   Linux; another user, for lsof on macOS; nothing on Windows, whose
   listener table carries every listener's pid), and whether what it saw
-  RULES THE PID OUT (lsof naming other pids, `/proc` reading every one of
-  its descriptors, the Windows table). The ok summary gives the account.
-  Both hints say to stop the holder when the pid is ruled out, and keep
-  the hedge and the blind spot when it is not; the zero `ruledOut` is the
-  hedge, the safe fallback for a probe that sets nothing. **The verdicts
-  are untouched**: `TestPortVerdictsDoNotDependOnTheAccount` walks both
-  ladders over every lsof answer, alive or not, owned or not, and passes
-  on main unmodified; moving one verdict turns it red. #1021's rule, that
+  RULES THE PID OUT. Only a probe that saw everything there was to see
+  may: Windows' listener table, or `/proc` reading every one of the pid's
+  descriptors against every socket table. **Never lsof**: it lists only
+  the processes this user may inspect, so naming another holder does not
+  exclude a hidden bridge listening on the same port at another address,
+  and a socket table that is there and did not read leaves the pid
+  possible as well (both CodeRabbit on #1028, the second by a flag rather
+  than the error it proposed, which would have moved a verdict). The ok
+  summary gives the account. Both hints say to stop the holder when the
+  pid is ruled out, and keep the hedge and the blind spot when it is not;
+  the zero `ruledOut` is the hedge, the safe fallback for a probe that sets
+  nothing. **The verdicts are untouched, and pinned apart from the text**:
+  `TestPortVerdictsDoNotDependOnTheAccount` walks both ladders over every
+  lsof answer and passed on main before the accounts existed, and
+  `TestPortVerdictsIgnoreTheSighting` feeds every kind of account through
+  `ownerProbeFunc`, a ruled-out one included. Only Windows and Linux make
+  one for real, so without the seam a verdict keyed on it passed every
+  test on a Mac (NC6). #1021's rule, that
   a missing tool may explain a verdict and never decides one, has a
   second half: **the explanation is the one the probe established.** Root
   gets no blind spot, because inside a Docker container it lacks
