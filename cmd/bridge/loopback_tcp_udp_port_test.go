@@ -238,5 +238,5 @@ func mustBindTCPAndUDP(t *testing.T, addr string) {
 	if err != nil {
 		t.Fatalf("the drawn address %s does not bind on UDP: %v", addr, err)
 	}
-	_ = pc.Close()
+	defer pc.Close()
 }
