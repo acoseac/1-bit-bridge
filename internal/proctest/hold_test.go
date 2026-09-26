@@ -26,17 +26,25 @@ type heldShell struct {
 	err    error         // cmd.Wait's answer, set before exited is closed
 }
 
-// startHeldShell starts a heldShell and waits until it has recorded its
-// pid. Its directory's name holds a single quote, so every test that uses
-// it also pins the quoting. Its cleanup releases the shell and waits for
-// it, recreating the directory first if a test removed it, so whatever a
-// test does, nothing it started is left running.
+// startHeldShell starts a heldShell in a new directory, as
+// startHeldShellIn does. The directory's name holds a single quote, so
+// every test that uses it also pins the quoting.
 func startHeldShell(t *testing.T) *heldShell {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "the fake's dir")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return startHeldShellIn(t, dir, filepath.Join(dir, "pid"), filepath.Join(dir, "release"))
+}
+
+// startHeldShellIn starts a heldShell holding on the pid file and release
+// file in dir, which it hands HoldUntilReleased spelled as pidArg and
+// releaseArg, and waits until it has recorded its pid. Its cleanup
+// releases the shell and waits for it, recreating dir first if a test
+// removed it, so whatever a test does, nothing it started is left running.
+func startHeldShellIn(t *testing.T, dir, pidArg, releaseArg string) *heldShell {
+	t.Helper()
 	h := &heldShell{
 		dir:     dir,
 		pidFile: filepath.Join(dir, "pid"),
@@ -44,7 +52,7 @@ func startHeldShell(t *testing.T) *heldShell {
 		wrote:   filepath.Join(dir, "wrote"),
 		exited:  make(chan struct{}),
 	}
-	h.cmd = exec.Command("/bin/sh", "-c", HoldUntilReleased(h.pidFile, h.release)+": > "+shellQuote(h.wrote)+"\n")
+	h.cmd = exec.Command("/bin/sh", "-c", HoldUntilReleased(pidArg, releaseArg)+": > "+shellQuote(h.wrote)+"\n")
 	if err := h.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +181,36 @@ func TestAHeldShellEndsWithItsDirectory(t *testing.T) {
 		t.Fatal("the held shell is still waiting 5 s after its directory was removed. A run " +
 			"whose cleanups release it and then remove its directory, before it has looked, " +
 			"leaves it waiting forever.")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(h.err, &exitErr) || exitErr.ExitCode() != unreleasedStatus {
+		t.Fatalf("the shell exited with %v; want status %d, the hold's own", h.err, unreleasedStatus)
+	}
+}
+
+// TestAHeldShellGivenBareNamesEndsWithItsDirectory: a bare name's
+// directory is ".", which the shell finds for as long as its working
+// directory exists, removed or not, so the directory arm would never fire.
+// HoldUntilReleased makes the names absolute, against the test's working
+// directory, before it writes the script.
+func TestAHeldShellGivenBareNamesEndsWithItsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "held")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The shell inherits it, so the bare names resolve to the same files
+	// for it as for this test.
+	t.Chdir(dir)
+	h := startHeldShellIn(t, dir, "pid", "release")
+	h.holds(t)
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-h.exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held shell, given bare names, is still waiting 5 s after its directory was removed")
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(h.err, &exitErr) || exitErr.ExitCode() != unreleasedStatus {
