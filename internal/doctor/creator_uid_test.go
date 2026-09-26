@@ -107,7 +107,8 @@ func TestOthersListeningAccountNamesHoldersThenCreators(t *testing.T) {
 			"/proc shows every socket listening on this port held by pid 5000 or created by uid 0, while pid 4242 runs as uid 1000"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := othersListeningAccount(tc.holders, tc.creators, 4242, 1000); got != tc.want {
+			o := othersListening{holders: tc.holders, creators: tc.creators, pidUID: 1000}
+			if got := o.account(4242); got != tc.want {
 				t.Errorf("got  %q\nwant %q", got, tc.want)
 			}
 		})

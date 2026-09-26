@@ -117,7 +117,7 @@ func TestProcSightingRulesOutAPidItCannotReadByThePortsOtherHolders(t *testing.T
 			if tc.holderOff != 0 {
 				chmodForTest(t, procFdDir(root, tc.holderOff), 0o000)
 			}
-			found, seen, err := procSighting(tc.tables(t), root, tc.port, 4242, blind)
+			found, seen, err := procSighting(tc.tables(t), root, tc.port, 4242, blind, nil)
 			if err != nil || found || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, tc.want)
 			}
@@ -142,7 +142,7 @@ func TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead(t *testing
 	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), t.TempDir()}
 	root := writeProcRoot(t, map[int]map[string]string{5000: {"3": "socket:[24680]"}})
 	want := ownerSighting{saw: "/proc has no pid 4242"}
-	if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || found || seen != want {
+	if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil); err != nil || found || seen != want {
 		t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, want)
 	}
 }
@@ -179,21 +179,21 @@ func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 				if tc.status != "" {
 					writeStatus(t, root, 4242, tc.status)
 				}
-				found, seen, err := procSighting(tables, reselfProcRoot(t, root, self), tc.port, 4242, "the blind spot")
+				found, seen, err := procSighting(tables, reselfProcRoot(t, root, self), tc.port, 4242, "the blind spot", nil)
 				requireNoAnswerFromAnotherNamespace(t, found, seen, err, self)
 			})
 		}
 	}
 	t.Run("the control: its self is this process", func(t *testing.T) {
 		root := writeProcRoot(t, map[int]map[string]string{4242: fdFixture})
-		if found, _, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || !found {
+		if found, _, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil); err != nil || !found {
 			t.Errorf("got %v, %v; want the pid found holding the listener", found, err)
 		}
 	})
 	t.Run("the control: its self is this process, and another uid created the listener", func(t *testing.T) {
 		root := writeProcRoot(t, nil)
 		writeStatus(t, root, 4242, otherUID)
-		if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || found || !seen.ruledOut {
+		if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil); err != nil || found || !seen.ruledOut {
 			t.Errorf("got %v, %+v, %v; want the pid ruled out by the uid that created the listener", found, seen, err)
 		}
 	})

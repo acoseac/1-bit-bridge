@@ -242,32 +242,61 @@ func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, er
 }
 
 // listenersNotOf is the census procSighting rules out a pid it cannot read
-// with: whether every socket in sockets, all listening on one port, is shown
-// to be another process's (all), and by what. A socket is another process's
-// when a process under procRoot other than pid holds it and this user can
-// read that process's descriptors (socketHolders), or, where no such process
-// holds it, when the uid that created it is not the one pid runs as
-// (createdByAnother, against pidFSUID). holders are the pids of the first
-// kind, creators the uids of the second, and pidUID is pid's fsuid, or -1
-// where /proc does not show it. A socket that is neither leaves all false.
+// with: whether every socket in sockets, all listening on port, is shown to
+// be another process's (all), and by what (othersListening). A socket is
+// another process's when a process under procRoot other than pid holds it
+// and this user can read that process's descriptors (socketHolders); or,
+// where no such process holds it, when the uid that created it is not the
+// one pid runs as (createdByAnother, against pidFSUID); or, where that uid
+// is pid's own or not shown, when the cgroup it was created in is not pid's
+// and does not nest with it (cgroupsNotOf, from cgroupsOf). A socket that
+// is none of these leaves all false.
 //
 // A holder is named in preference to a creator, since the process that holds
 // the port is what an operator stops. The walk runs whatever the uids say,
-// for that reason.
-func listenersNotOf(procRoot string, sockets map[string]int, pid int) (holders, creators []int, pidUID int, all bool) {
+// for that reason, and a uid is read before a cgroup, which costs a question
+// to the kernel and, where the cgroups differ, a walk of the cgroup tree.
+func listenersNotOf(procRoot string, sockets map[string]int, pid, port int, cgroupsOf socketCgroups) (othersListening, bool) {
 	held := socketHolders(procRoot, sockets, pid)
-	pidUID = pidFSUID(procRoot, pid)
+	o := othersListening{pidUID: pidFSUID(procRoot, pid)}
+	var rest []string
 	for s, creator := range sockets {
 		switch {
 		case len(held[s]) > 0:
-			holders = append(holders, held[s]...)
-		case createdByAnother(creator, pidUID):
-			creators = append(creators, creator)
+			o.holders = append(o.holders, held[s]...)
+		case createdByAnother(creator, o.pidUID):
+			o.creators = append(o.creators, creator)
 		default:
-			return nil, nil, pidUID, false
+			rest = append(rest, s)
 		}
 	}
-	return holders, creators, pidUID, true
+	if len(rest) > 0 {
+		cgroups, pidCgroup, all := cgroupsNotOf(procRoot, pid, rest, port, cgroupsOf)
+		if !all {
+			return othersListening{}, false
+		}
+		o.cgroups, o.pidCgroup = cgroups, pidCgroup
+	}
+	return o, true
+}
+
+// othersListening is the census's account of a port it rules the recorded
+// pid out of (listenersNotOf): what showed each listener on the port to be
+// another process's.
+type othersListening struct {
+	// holders are the processes, other than the recorded pid, that hold a
+	// listener and whose descriptors this user can read.
+	holders []int
+	// creators are the uids that created a listener no readable process
+	// holds, and pidUID the fsuid the recorded pid runs as, -1 where /proc
+	// does not show it.
+	creators []int
+	pidUID   int
+	// cgroups are the cgroups the listeners neither of those accounts for
+	// were created in, and pidCgroup the one the recorded pid runs in
+	// (cgroupsNotOf).
+	cgroups   []string
+	pidCgroup string
 }
 
 // createdByAnother reports whether a socket whose table row gives creator as

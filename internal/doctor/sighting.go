@@ -215,7 +215,7 @@ func listenerTableSighting(owners []int) ownerSighting {
 // checks that procRoot numbers processes as this process does
 // (procOfAnotherPIDNamespace): under another pid namespace's /proc, <pid> is
 // some other process.
-func procSighting(tables []string, procRoot string, port, pid int, blind string) (bool, ownerSighting, error) {
+func procSighting(tables []string, procRoot string, port, pid int, blind string, cgroupsOf socketCgroups) (bool, ownerSighting, error) {
 	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {
 		return false, ownerSighting{}, err
@@ -246,27 +246,41 @@ func procSighting(tables []string, procRoot string, port, pid int, blind string)
 		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid), ruledOut: true}, nil
 	}
 	if !unread {
-		if holders, creators, pidUID, all := listenersNotOf(procRoot, sockets, pid); all {
-			return false, ownerSighting{saw: othersListeningAccount(holders, creators, pid, pidUID), ruledOut: true}, nil
+		if others, all := listenersNotOf(procRoot, sockets, pid, port, cgroupsOf); all {
+			return false, ownerSighting{saw: others.account(pid), ruledOut: true}, nil
 		}
 	}
 	return false, possible, nil
 }
 
-// othersListeningAccount is /proc's account of a port whose every listener
-// it showed to be another process's (listenersNotOf): the readable processes
-// that hold them, then the uids that created the rest, against the uid pid
-// runs as.
-func othersListeningAccount(holders, creators []int, pid, pidUID int) string {
-	const account = "/proc shows every socket listening on this port "
-	if len(creators) == 0 {
-		return account + "held by " + pidList(holders)
+// account is /proc's account of a port whose every listener it showed to
+// be another process's (listenersNotOf): the readable processes that hold
+// them, then the uids and the cgroups that created the rest, against the
+// uid and the cgroup pid runs as and in. The kernel's socket diagnostics
+// join /proc as the source when a cgroup is named, since /proc/net/tcp{,6}
+// does not carry one. An account without cgroups keeps #1032's words.
+func (o othersListening) account(pid int) string {
+	lead := "/proc shows every socket listening on this port "
+	if len(o.cgroups) > 0 {
+		lead = "/proc and the kernel's socket diagnostics show every socket listening on this port "
 	}
-	by := "created by " + uidList(creators)
-	if len(holders) > 0 {
-		by = "held by " + pidList(holders) + " or " + by
+	var terms, created, runs []string
+	if len(o.holders) > 0 {
+		terms = append(terms, "held by "+pidList(o.holders))
 	}
-	return account + by + fmt.Sprintf(", while pid %d runs as uid %d", pid, pidUID)
+	if len(o.creators) > 0 {
+		created = append(created, "by "+uidList(o.creators))
+		runs = append(runs, fmt.Sprintf("as uid %d", o.pidUID))
+	}
+	if len(o.cgroups) > 0 {
+		created = append(created, "in "+cgroupList(o.cgroups))
+		runs = append(runs, "in cgroup "+o.pidCgroup)
+	}
+	if len(created) == 0 {
+		return lead + strings.Join(terms, " or ")
+	}
+	terms = append(terms, "created "+strings.Join(created, " or "))
+	return lead + strings.Join(terms, " or ") + fmt.Sprintf(", while pid %d runs ", pid) + strings.Join(runs, " ")
 }
 
 // inTheTablesRead scopes a /proc account to the socket tables it could read,
@@ -280,6 +294,16 @@ func pidList(pids []int) string { return idList("pid", pids) }
 
 // uidList renders uids as pidList renders pids: "uid 0" or "uids 0, 1001".
 func uidList(uids []int) string { return idList("uid", uids) }
+
+// cgroupList renders cgroup paths as pidList renders pids: "cgroup
+// /system.slice/x.service" or "cgroups /a.service, /b.service".
+func cgroupList(cgroups []string) string {
+	sorted := slices.Compact(slices.Sorted(slices.Values(cgroups)))
+	if len(sorted) == 1 {
+		return "cgroup " + sorted[0]
+	}
+	return "cgroups " + strings.Join(sorted, ", ")
+}
 
 // idList renders ids after noun, pluralised with an "s" past one, in order
 // and without repeats.

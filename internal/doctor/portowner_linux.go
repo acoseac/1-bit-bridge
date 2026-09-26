@@ -86,7 +86,7 @@ func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
 		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil
 	}
-	return procSighting(procNetTCPFiles, "/proc", port, pid, blindSpot())
+	return procSighting(procNetTCPFiles, "/proc", port, pid, blindSpot(), nil)
 }
 
 // blindSpot says what an owner probe run as this user cannot see on Linux,
