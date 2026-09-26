@@ -104,7 +104,8 @@ func TestOwnListenersSightingReadsWhatLsofListed(t *testing.T) {
 			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:7890", ruledOut: true}},
 		{"listening elsewhere, out of order, one twice", "p4242\nf5\nn127.0.0.1:7891\nf4\nn127.0.0.1:7890\nf6\nn127.0.0.1:7891\n", false,
 			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:7890, 127.0.0.1:7891", ruledOut: true}},
-		// The port is read as a number, not matched as a suffix.
+		// The port is read as a number, not matched as a suffix (the other
+		// direction follows the table).
 		{"listening on a port this one ends with", "p4242\nf4\nn127.0.0.1:9127\n", false,
 			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:9127", ruledOut: true}},
 		{"listening on the port beside another", "p4242\nf4\nn127.0.0.1:7890\nf5\nn127.0.0.1:39127\n", true, ownerSighting{}},
@@ -126,6 +127,11 @@ func TestOwnListenersSightingReadsWhatLsofListed(t *testing.T) {
 				t.Errorf("got %v, %+v; want %v, %+v", found, seen, tc.wantFound, tc.want)
 			}
 		})
+	}
+	// A listener on a port that ends with the one asked about is not on it.
+	found, seen := ownListenersSighting([]byte("p4242\nf4\nn127.0.0.1:39127\n"), 9127, pid)
+	if want := (ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:39127", ruledOut: true}); found || seen != want {
+		t.Errorf("port 9127 against a listener on 39127: got %v, %+v; want not found, %+v", found, seen, want)
 	}
 }
 
