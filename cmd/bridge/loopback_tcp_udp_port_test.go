@@ -14,7 +14,7 @@ import (
 // drawLoopbackTCPAndUDPAddr takes, and tcpAndUDPDraws is how many it tries.
 // The range lies below the ephemeral range of every platform the bridge
 // targets (Linux hands ports out from 32768, Windows and macOS from 49152),
-// so no allocator hands a number in it to anything.
+// so no allocator ever hands out a number in it.
 const (
 	tcpAndUDPPortLo = 20000
 	tcpAndUDPPortHi = 32767
