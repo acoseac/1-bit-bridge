@@ -3826,7 +3826,10 @@ its twin.** The top list is older, shorter, and read first.
   this was learned twice. (#967–#972) **Editing the PR body re-renders the
   walkthrough and drops a pause notice's checkbox**; `@coderabbitai review`
   then answers "Review rate limited" and puts the notice, checkbox and all,
-  back for the current head (#1022).
+  back for the current head (#1022). **Push nothing while a ticked review
+  runs**: on #1026 an on-demand run still "Starting" when two fix commits
+  landed never posted, and the notice came back for the new head, so the
+  checkbox had to be ticked again.
 - **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
   a page, and a long PR's newest round is on the page it drops.** On #996
   (40 reviews, 38 review comments) every check read page one only. Two

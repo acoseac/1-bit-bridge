@@ -15482,3 +15482,21 @@ on a number with a client end in TIME_WAIT succeeded above.
   CodeRabbit had reached its plan limit; asked, the user chose its free
   on-demand review, so `@coderabbitai review` brought the pause notice back
   (a PR-body edit had re-rendered it away) and its checkbox was ticked.
+- **Round 3**, on `296976ce`. Gemini: one medium, `defer pc.Close()` in
+  `mustBindTCPAndUDP`, matching the deferred listener close above it.
+  Taken in `1bd28a98`; behavior-neutral, since the deferred calls still
+  close the UDP socket first. The on-demand CodeRabbit run ticked for
+  `a4f828f4` was still starting when `296976ce` and `1bd28a98` landed; it
+  never posted, and the notice came back for the new head (CLAUDE.md's
+  CodeRabbit bullet now says to push nothing while a ticked review runs).
+- **Round 4**, on `1bd28a98`. Gemini: three mediums, declined on their
+  threads. A bounds check in `drawLoopbackTCPAndUDPAddrIn`: `rand.IntN`
+  panics only for `lo > hi`, which none of its three callers can pass (the
+  constants, and two ranges derived in the file), and `draws <= 0` cannot
+  panic. One `t.Cleanup` per hold helper instead of one per socket: the
+  same sockets close at the same point either way. CodeRabbit's on-demand
+  review, ticked again for this head: "No actionable comments were
+  generated", `coveredCommitId` the head. SonarCloud: gate passed, the
+  S3776 issue closed as fixed, 0 new. CI: 20 of 20 checks passed,
+  `test (windows-latest)` among them. This round's record and the CLAUDE.md
+  sentence landed afterwards, in a docs-only commit no bot reviewed.
