@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,7 +39,7 @@ func withProcAnswering(t *testing.T, found bool, seen ownerSighting, err error) 
 	t.Helper()
 	orig := procOwnerFunc
 	t.Cleanup(func() { procOwnerFunc = orig })
-	procOwnerFunc = func(int, int) (bool, ownerSighting, error) { return found, seen, err }
+	procOwnerFunc = func(context.Context, int, int) (bool, ownerSighting, error) { return found, seen, err }
 }
 
 // procCannotTell is a /proc answer that neither finds the pid nor rules it

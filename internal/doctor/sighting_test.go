@@ -35,12 +35,14 @@ func TestLsofSightingReadsWhatLsofPrinted(t *testing.T) {
 	}
 }
 
-// TestProcSecondOpinionOnAnLsofMiss pins what /proc's answer about the
-// recorded pid does to lsof's account of a port on which lsof did not name
-// it. A /proc match is a match. A /proc ruling-out is joined to lsof's
-// account, the pids lsof named kept and no blind spot carried. Anything
-// else leaves lsof's account whole, blind spot included: a pid /proc cannot
-// read, the stub's answer off Linux, and neither socket table readable.
+// TestProcSecondOpinionOnAnLsofMiss pins what the second look's answer about
+// the recorded pid (/proc's on Linux, lsof's listing of the pid's own
+// listeners on macOS) does to lsof's account of a port on which lsof did not
+// name it. A match is a match. A ruling-out is joined to lsof's account, the
+// pids lsof named kept and no blind spot carried. Anything else leaves lsof's
+// account whole, blind spot included: a pid /proc cannot read, a pid whose
+// listeners lsof lists none of, the answer where nothing else looks, and
+// neither socket table readable.
 func TestProcSecondOpinionOnAnLsofMiss(t *testing.T) {
 	lsofSeen := ownerSighting{saw: "lsof lists pid 1305 listening on this port", blind: "the blind spot"}
 	procOut := ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}
@@ -59,7 +61,12 @@ func TestProcSecondOpinionOnAnLsofMiss(t *testing.T) {
 		}},
 		{"proc cannot read the pid", false, ownerSighting{saw: "/proc does not let this user read pid 4242's descriptors", blind: "the blind spot"}, nil, false, lsofSeen},
 		{"proc has no such pid", false, ownerSighting{saw: "/proc has no pid 4242"}, nil, false, lsofSeen},
-		{"the stub off Linux", false, ownerSighting{saw: "nothing else here matches a process to a port"}, nil, false, lsofSeen},
+		{"nothing else looks", false, ownerSighting{saw: nothingElseMatches}, nil, false, lsofSeen},
+		{"lsof lists the pid's own listeners elsewhere", false, ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:7890", ruledOut: true}, nil, false, ownerSighting{
+			saw:      "lsof lists pid 1305 listening on this port, and lsof lists pid 4242 listening only on 127.0.0.1:7890",
+			ruledOut: true,
+		}},
+		{"lsof lists no listener of the pid", false, ownerSighting{saw: "lsof lists no listener of pid 4242"}, nil, false, lsofSeen},
 		{"proc read no socket table", false, ownerSighting{}, errors.New("no table"), false, lsofSeen},
 		// An error outranks what came with it: nothing /proc says without
 		// having read a table is evidence.
@@ -67,6 +74,54 @@ func TestProcSecondOpinionOnAnLsofMiss(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			found, seen := procSecondOpinion(lsofSeen, tc.procFound, tc.procSeen, tc.procErr)
+			if found != tc.wantFound || seen != tc.want {
+				t.Errorf("got %v, %+v; want %v, %+v", found, seen, tc.wantFound, tc.want)
+			}
+		})
+	}
+}
+
+// TestOwnListenersSightingReadsWhatLsofListed pins macOS's second look from
+// what `lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN -F n` printed alone. A
+// listener on the port, at any address, is a match. Listeners of the pid,
+// none on the port, rule it out, and the account lists them in order and
+// without repeats, since they are where the running bridge actually listens.
+// Everything else says nothing: no listener listed (a process with none,
+// one this user may not read, and an lsof a sandbox blinds all print that),
+// and output of any other shape, another process's records among them,
+// which is what lsof prints without `-a`.
+func TestOwnListenersSightingReadsWhatLsofListed(t *testing.T) {
+	const pid, port = 4242, 39127
+	notItsListeners := ownerSighting{saw: "lsof's output does not list pid 4242's listeners"}
+	noListener := ownerSighting{saw: "lsof lists no listener of pid 4242"}
+	for _, tc := range []struct {
+		name      string
+		out       string
+		wantFound bool
+		want      ownerSighting
+	}{
+		{"listening elsewhere", "p4242\nf4\nn127.0.0.1:7890\n", false,
+			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:7890", ruledOut: true}},
+		{"listening elsewhere, out of order, one twice", "p4242\nf5\nn127.0.0.1:7891\nf4\nn127.0.0.1:7890\nf6\nn127.0.0.1:7891\n", false,
+			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:7890, 127.0.0.1:7891", ruledOut: true}},
+		// The port is read as a number, not matched as a suffix.
+		{"listening on a port this one ends with", "p4242\nf4\nn127.0.0.1:9127\n", false,
+			ownerSighting{saw: "lsof lists pid 4242 listening only on 127.0.0.1:9127", ruledOut: true}},
+		{"listening on the port beside another", "p4242\nf4\nn127.0.0.1:7890\nf5\nn127.0.0.1:39127\n", true, ownerSighting{}},
+		{"listening on the port over IPv6", "p4242\nf4\nn[::1]:39127\n", true, ownerSighting{}},
+		{"listening on the port at every address", "p4242\nf4\nn*:39127\n", true, ownerSighting{}},
+		{"nothing listed", "", false, noListener},
+		{"the process named, no listener", "p4242\n", false, noListener},
+		{"another process's records beside the pid's, as without -a", "p1305\nf52\nn127.0.0.1:39127\np4242\nf4\nn127.0.0.1:7890\n", false, notItsListeners},
+		{"another process's records alone", "p1305\nf52\nn127.0.0.1:7890\n", false, notItsListeners},
+		{"a name that is no address, as for a file", "p4242\nfcwd\nn/private/tmp\n", false, notItsListeners},
+		{"a port out of range", "p4242\nf4\nn127.0.0.1:70000\n", false, notItsListeners},
+		{"a listener before any process", "f4\nn127.0.0.1:7890\n", false, notItsListeners},
+		{"lsof -t's output", "4242\n", false, notItsListeners},
+		{"busybox's applet", "1  /usr/local/bin/bridge  0  /dev/null\n", false, notItsListeners},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, seen := ownListenersSighting([]byte(tc.out), port, pid)
 			if found != tc.wantFound || seen != tc.want {
 				t.Errorf("got %v, %+v; want %v, %+v", found, seen, tc.wantFound, tc.want)
 			}

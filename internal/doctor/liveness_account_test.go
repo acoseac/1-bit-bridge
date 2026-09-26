@@ -17,7 +17,11 @@ import (
 // and Linux's /proc, which reads the parent's descriptors, rule the parent
 // out, and lsof, which lists only what it can see, does not. On Linux /proc
 // is asked after lsof too, so there lsof's account is followed by /proc's.
-// A host with nothing to ask names no one, and the test skips.
+// On macOS lsof is asked next for the parent's own listeners, and the
+// parent holds none: nothing listed is also what a process lsof may not
+// read looks like, so nothing rules it out (parentListens skips a run whose
+// parent does listen). A host with nothing to ask names no one, and the
+// test skips.
 func realHolderAccount(t *testing.T) (string, bool) {
 	t.Helper()
 	parentRuledOut := fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", os.Getppid())
@@ -27,9 +31,38 @@ func realHolderAccount(t *testing.T) (string, bool) {
 	case lsofResolved() && runtime.GOOS == "linux":
 		return fmt.Sprintf("lsof lists pid %d listening on this port, and %s", os.Getpid(), parentRuledOut), true
 	case lsofResolved():
+		parentListens(t)
 		return fmt.Sprintf("lsof lists pid %d listening on this port", os.Getpid()), false
 	case runtime.GOOS == "linux":
 		return "this host has no lsof, and " + parentRuledOut, true
+	}
+	t.Skip("no lsof here and no /proc to read, so nothing can say who holds the port")
+	return "", false
+}
+
+// ownListenerAccount is the account this host's owner probe gives of a port
+// the test process holds, asked about a recorded bridge (a child of this
+// test) that listens on bridgePort and holds nothing on this one, and
+// whether it rules the bridge out. As realHolderAccount, but the bridge
+// listens, so on macOS lsof asked for its own listeners lists them, none on
+// this port, which rules it out there too.
+func ownListenerAccount(t *testing.T, bridge, bridgePort int) (string, bool) {
+	t.Helper()
+	bridgeRuledOut := fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", bridge)
+	switch {
+	case runtime.GOOS == "windows":
+		return fmt.Sprintf("Windows' TCP listener table lists pid %d on this port", os.Getpid()), true
+	case lsofResolved() && runtime.GOOS == "linux":
+		return fmt.Sprintf("lsof lists pid %d listening on this port, and %s", os.Getpid(), bridgeRuledOut), true
+	case lsofResolved() && runtime.GOOS == "darwin":
+		return fmt.Sprintf("lsof lists pid %d listening on this port, and lsof lists pid %d listening only on 127.0.0.1:%d",
+			os.Getpid(), bridge, bridgePort), true
+	case lsofResolved():
+		return fmt.Sprintf("lsof lists pid %d listening on this port", os.Getpid()), false
+	case runtime.GOOS == "linux":
+		return "this host has no lsof, and " + bridgeRuledOut, true
+	case runtime.GOOS == "darwin":
+		return "this host has no lsof, and " + nothingElseMatches, false
 	}
 	t.Skip("no lsof here and no /proc to read, so nothing can say who holds the port")
 	return "", false
@@ -86,8 +119,10 @@ func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
 // Where the probe's account rules the bridge out (Linux's /proc, after lsof
 // or without it; Windows' table) the port is another process's, and the
 // check FAILs, as it does with no live bridge behind the port. Where it
-// cannot (lsof on macOS, which lists only what it can see) the arm is
-// unchanged.
+// cannot (macOS, where lsof lists no listener of the parent, and so cannot
+// tell it from a process it may not read) the arm is unchanged;
+// TestPortCheckFailsAPortTheLiveBridgeListensBeside records a bridge that
+// listens, which macOS rules out too.
 //
 // On Linux the uid arm no longer answers for this listener either, since a
 // process this user can read holds it (#1030): this test used to assert
@@ -103,6 +138,47 @@ func TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf(t *testing.T) {
 	}
 	if ruledOut && !strings.Contains(c.Hint, "stop the process that holds the port") {
 		t.Errorf("the FAIL does not say to stop the holder: %s", c.Hint)
+	}
+}
+
+// TestPortCheckFailsAPortTheLiveBridgeListensBeside is row ML4 of #1029's
+// matrix, on every platform: the recorded bridge (a child of this test) is
+// alive and listening on a port of its own, as a bridge runs on the ports of
+// the config it started with, and the port checked, the one its config was
+// then edited to, is held by another process (this one). On macOS nothing
+// ruled such a bridge out: lsof names this process on the port and lists
+// only what it can see, so the check warned, `bridge doctor --config` (the
+// runbook's check before a restart) exited 0, and the restart could not
+// bind. lsof asked for the bridge's own listeners lists its port and not
+// this one, which rules it out, as /proc does on Linux and the listener
+// table on Windows. So the port FAILs, and the hint names where the bridge
+// listens; over a config that did not load (checkChosenPort) the refusal
+// stops offering to stop that bridge, which would free nothing.
+func TestPortCheckFailsAPortTheLiveBridgeListensBeside(t *testing.T) {
+	if mode := os.Getenv(listeningChildEnv); mode != "" {
+		runListeningChild(mode)
+	}
+	bridge, bridgePort := startListeningChild(t, true)
+	account, ruledOut := ownListenerAccount(t, bridge, bridgePort)
+	port, pidFile := bindPort(t), writePIDFile(t, bridge)
+
+	c := checkPort(t.Context(), "port-test", port, pidFile)
+	if want := unseenVerdict(ruledOut); c.Status != want {
+		t.Fatalf("got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, want)
+	}
+	if want := fmt.Sprintf("our bridge (pid %d) is still running, but %s", bridge, account); !strings.HasPrefix(c.Hint, want) {
+		t.Errorf("hint does not give the probe's account:\n got %s\nwant %s…", c.Hint, want)
+	}
+	requireNoCapabilityClaim(t, c.Hint, ruledOut)
+	requireAdviceFitsTheAccount(t, c.Hint, ruledOut)
+
+	chosen := checkChosenPort(t.Context(), "port-test", port, pidFile)
+	if chosen.Status != Fail {
+		t.Fatalf("checkChosenPort: got %v (%s / %s), want fail", chosen.Status, chosen.Summary, chosen.Hint)
+	}
+	if offered := strings.Contains(chosen.Hint, "stop that bridge and re-run"); offered == ruledOut {
+		t.Errorf("ruled out %v, and stopping the recorded bridge offered %v; want the one to exclude the other: %s",
+			ruledOut, offered, chosen.Hint)
 	}
 }
 
@@ -241,9 +317,10 @@ func ladderVerdicts(found, probeFailed, alive, ruledOut, owned bool) (port, chos
 // and requires the verdicts ladderVerdicts gives. Of the sighting, the
 // verdict reads whether it rules the pid out and nothing else: two
 // accounts that rule it out in different words, and two that do not, get
-// the same verdicts. A ruled-out miss comes for real only from Windows'
-// table and Linux's /proc, so this is the one pin, on a Mac, of what the
-// verdict takes from the account (ownerProbeFunc).
+// the same verdicts. A ruled-out miss comes for real from Windows' table and
+// Linux's /proc, and on macOS only for a recorded pid that listens
+// somewhere, so this is the one pin of what the verdict takes from every
+// kind of account, on every platform (ownerProbeFunc).
 func TestPortVerdictsReadOnlyRuledOutFromTheSighting(t *testing.T) {
 	for _, a := range probeAnswers {
 		for _, alive := range []bool{true, false} {

@@ -13,6 +13,10 @@ import (
 // GetExtendedTcpTable, never lsof.
 func lsofResolved() bool { return false }
 
+// parentListens is the unix helper's Windows twin, never reached: it guards
+// an lsof expectation, and lsofResolved is false here.
+func parentListens(*testing.T) {}
+
 // TestPIDAlive_WindowsLiveForeignProcess pins the direction the Windows
 // implementation actually promises, and the one checkPort leans on: a live
 // process that is NOT us must read as alive.
