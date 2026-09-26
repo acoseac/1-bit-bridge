@@ -16734,7 +16734,7 @@ was declined as recorded.
   suspect first, then read the process's own state (`PR_GET_DUMPABLE`)
   rather than guessing at the tool that stopped seeing it.
 
-## 2026-09-26 — doctor rules a hidden bridge out of a port a listener in another cgroup holds (#PR)
+## 2026-09-26 — doctor rules a hidden bridge out of a port a listener in another cgroup holds (#1033)
 
 #1032's Out of scope recorded row L6h: a bridge granted
 `cap_net_bind_service` runs with dumpable=0, and when its config is edited to

@@ -2482,7 +2482,7 @@ what it claimed**, and none of it had a failing test.
   in CI, where the fixture tests carry the rule.
 - **…and a listener created in a cgroup that does not nest with the
   bridge's is not the bridge's either, so a hidden holder of its OWN uid
-  FAILs too** (#PR). Row L6h, left by #1032: the capability-bound bridge
+  FAILs too** (#1033). Row L6h, left by #1032: the capability-bound bridge
   live on its old ports, its config edited to a port held by ANOTHER
   hidden process of the same uid (a second capability-bound binary of the
   service user in its own unit, one of its processes in another group,
