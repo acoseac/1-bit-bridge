@@ -3466,6 +3466,36 @@ its twin.** The top list is older, shorter, and read first.
   over 500 ms, as the callers poll, and on Linux requires /proc's S. Probe
   a child you DO reap by reaping it (`cmd.Wait`, then ESRCH), as doctor's
   `pidAlive` tests do. (#1024)
+- **A process a test holds on a release file must end by itself once
+  nobody can release it, so hold it with `proctest.HoldUntilReleased`,
+  never a hand-rolled loop.** Both tailscale shutdown fakes looped
+  `while [ ! -e release ]` on a file in a `t.TempDir`. When the fake
+  survived, the defect those tests catch, the test's cleanup created the
+  file and t.TempDir's own cleanup, registered earlier and so run next,
+  removed the directory straight after. Polling every 20 ms, the fake
+  almost never saw it and looped forever, reparented to init: under a
+  mutation that let the CLI survive, 23 of 25 fakes stayed on macOS and 6
+  of 8 on Linux. A file that exists for microseconds is a signal a poller
+  misses; a directory that is gone stays gone. So the hold's wait also
+  ends, with status 3 and the fake's work not run, once the release
+  file's directory is gone or the test binary that built the script is.
+  The second covers a run that dies before its cleanups: a
+  `-test.timeout` panic or a SIGINT left a fake on main and none with the
+  hold. Neither is true while the test runs, so neither weakens the tests:
+  under the mutation both stay red on every host, and with
+  `proctest.Exited` made to lie both fail on their "wrote after the
+  cancel" check. Three traps met on the way. **Where the hold is what is
+  under test, its failure path cannot lean on it**:
+  `TestAHeldShellEndsWithItsTestBinary` released its shell and failed,
+  and under the control that restored the old loop it left that shell
+  looping, the same defect one level down; it now releases and waits.
+  **A child that holds a shell must reap it**, or a hold that ends at
+  once leaves a zombie that kill(pid, 0) finds on macOS, and the check
+  that it holds passed that control. **A harness that means to kill a
+  test binary with SIGINT must reset the signal first**: a background job
+  of a non-interactive shell starts with SIGINT ignored and Go keeps it
+  that way, so `kill -INT` did nothing, and what read as a leak on main
+  was a test still running. (#1025)
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the
