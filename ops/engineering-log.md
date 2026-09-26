@@ -17200,6 +17200,35 @@ the check to ask at all. Its explanation of the netstat filtering (audit
 sessions) does not fit the launchd-started process that read the full
 list, so only the observations are recorded.
 
+### Review
+
+- **Round 1**, on `5c0e633c`. CI green (20 checks), SonarCloud's gate
+  passed. CodeRabbit ("Actionable comments posted: 1"): `parentListens`
+  ran lsof unbounded and discarded its error, so a stalled lsof held the
+  package until the 30-minute test timeout and a failed run read as "the
+  parent holds no listener". Taken in `11cb2c4d`, and at a second site with
+  the same defect (the blinded-lsof test's premise check, bounded only by
+  `t.Context()`): both take `probeTimeout`, read only exit 1 as nothing
+  listed, and skip otherwise. Measured with a stalled stand-in: 10.01 s and
+  no skip before, 2 s and a skip after. CodeRabbit verified the second site
+  itself on the thread.
+- **The stand-in for lsof has to `exec`.** A shell that forks `sleep 10`
+  still took 10 s after the fix: the killed shell's grandchild holds the
+  output pipe open, the #997 shape. Real lsof is one process.
+- **Gemini's app was over its daily quota** and did no review. A direct
+  review consult on the Go diff stood in (recorded on the PR). It found no
+  input that yields a false ruling-out. Taken in `2f1f788d`: a `pid <= 0`
+  guard on the macOS look (Linux's has one; unreachable from today's
+  callers; NC11), and `startListeningChild` naming the child's test by its
+  top-level name, since `-test.run` matches a subtest's name as a regexp
+  and one it cannot parse stops the child before it starts
+  (`TestAListeningChildStartsFromASubtest`; NC12, whose first form
+  concatenated both names into a regexp that matched nothing and failed
+  every child test: a botched control, rerun). Declined: "macOS 27 does
+  not exist" (this host's `sw_vers` says 27.0), `-F n` → `-Fn` (the
+  measured output is exactly `p`/`f`/`n`, and any other shape voids the
+  listing), and a stdin-EOF comment it misread.
+
 ### Out of scope
 
 - **A recorded pid that holds no listener stays a warn** (M2: a recycled
