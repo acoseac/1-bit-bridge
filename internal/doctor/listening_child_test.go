@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -162,8 +163,9 @@ func collectBeforeReady() {
 // it has queued, by its own counts (runtime/metrics). Counts rather than a
 // sentinel finalizer of this function's own: one goroutine runs finalizers,
 // a batch at a time and each batch newest first (runtime/mfinal.go), so a
-// sentinel can run ahead of the listener's, and cleanups, which
-// fd_posix.go has a TODO to use instead, run on goroutines of their own.
+// sentinel can run ahead of the listener's, and cleanups, which a comment
+// in fd_posix.go proposes for the netFD instead, run on goroutines of their
+// own.
 func collectAndFinalize() error {
 	runtime.GC()
 	s := []metrics.Sample{
@@ -172,21 +174,20 @@ func collectAndFinalize() error {
 		{Name: "/gc/cleanups/queued:cleanups"},
 		{Name: "/gc/cleanups/executed:cleanups"},
 	}
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
-		metrics.Read(s)
-		for _, m := range s {
-			if m.Value.Kind() != metrics.KindUint64 {
-				return fmt.Errorf("runtime/metrics has no %s", m.Name)
-			}
+	metrics.Read(s)
+	for _, m := range s {
+		if m.Value.Kind() != metrics.KindUint64 {
+			return fmt.Errorf("runtime/metrics has no %s", m.Name)
 		}
-		if s[1].Value.Uint64() >= s[0].Value.Uint64() && s[3].Value.Uint64() >= s[2].Value.Uint64() {
-			return nil
-		}
+	}
+	for deadline := time.Now().Add(10 * time.Second); s[1].Value.Uint64() < s[0].Value.Uint64() || s[3].Value.Uint64() < s[2].Value.Uint64(); metrics.Read(s) {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("10 s after a collection, the runtime had run %d of the %d finalizers and %d of the %d cleanups it queued",
 				s[1].Value.Uint64(), s[0].Value.Uint64(), s[3].Value.Uint64(), s[2].Value.Uint64())
 		}
+		time.Sleep(time.Millisecond)
 	}
+	return nil
 }
 
 // TestACollectionClosesAListenerNothingReferences is the premise the tests
@@ -212,14 +213,23 @@ func TestACollectionClosesAListenerNothingReferences(t *testing.T) {
 // nothing that references the listener. It is a function of its own, never
 // inlined, so no variable of its caller's can hold the listener.
 //
+// The port is drawn from 20000–32767, below every platform's ephemeral
+// range (Linux's starts at 32768, macOS's and Windows' at 49152), as
+// cmd/bridge's freeLoopbackTCPAndUDPAddr draws. An ephemeral port, once the
+// collection frees it, could be handed to another process's bind or
+// connect before the rebind that looks at it.
+//
 //go:noinline
 func listenAndDrop(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for range 20 {
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(20000+rand.IntN(32767-20000+1)))
+		if l, err := net.Listen("tcp", addr); err == nil {
+			return l.Addr().(*net.TCPAddr).Port
+		}
 	}
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("no port in 20000..32767 bound in 20 draws")
+	return 0
 }
 
 // requirePortHeld fails the test unless something still listens on
