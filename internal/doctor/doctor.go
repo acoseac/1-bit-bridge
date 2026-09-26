@@ -803,8 +803,9 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // process that holds the port. And a probe that saw everything there was to
 // see rules our pid out: Windows' listener table, or /proc reading all of
 // our descriptors, or, where it could not read them, finding every listener
-// on the port held by a process it can read or created by a uid ours does
-// not run as. So the text is the probe's account (ownerSighting).
+// on the port held by a process it can read, or created by a uid ours does
+// not run as or in a cgroup that does not nest with ours. So the text is
+// the probe's account (ownerSighting).
 //
 // A pid the account rules out holds nothing on this port: its descriptors
 // were all read and none is a listener on the port, or the table names
@@ -818,7 +819,12 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // could not bind: #970's defect, in this ladder (#1028's row L4, and row L6
 // for a bridge granted the capability, whose descriptors nothing reads).
 // Where that process ran as another user, or root, and so could not be read
-// either, the port warned, exit 0, to the same end (#1030's row L7).
+// either, the port warned, exit 0, to the same end (#1030's row L7), and
+// where it ran as this user, hidden as the bridge is (another
+// capability-bound binary of the service user, or one of its processes in
+// another group), the uid arm read ok, since its listener carries our uid
+// (row L6h); the cgroup it was created in tells it apart when that is not
+// ours.
 //
 // The uid arm now answers only for a listener this user created that no
 // process it can read holds (hiddenListenerOfThisUser): how a

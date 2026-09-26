@@ -191,7 +191,7 @@ func TestProcSightingAccountsForEachMiss(t *testing.T) {
 			if tc.needsUser && os.Geteuid() == 0 {
 				t.Skip("root reads a directory whatever its mode")
 			}
-			found, seen, err := procSighting(tables, tc.procRoot(t), tc.port, 4242, blind)
+			found, seen, err := procSighting(tables, tc.procRoot(t), tc.port, 4242, blind, nil)
 			if err != nil || found != tc.wantFound || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want %v, %+v, no error", found, seen, err, tc.wantFound, tc.want)
 			}
@@ -213,12 +213,12 @@ func TestProcSightingOfAnFdPathThatIsNoDirectory(t *testing.T) {
 	if err := os.WriteFile(procFdDir(root, 4242), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot")
+	found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil)
 	if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc could not list pid 4242's descriptors (") {
 		t.Errorf("got %v, %+v, %v; want a miss naming the listing error", found, seen, err)
 	}
 	absent := filepath.Join(dir, "absent")
-	if _, _, err := procSighting([]string{absent, absent}, writeProcRoot(t, map[int]map[string]string{4242: fdFixture}), 7789, 4242, "the blind spot"); err == nil {
+	if _, _, err := procSighting([]string{absent, absent}, writeProcRoot(t, map[int]map[string]string{4242: fdFixture}), 7789, 4242, "the blind spot", nil); err == nil {
 		t.Error("with neither table readable there is no answer, and that is an error")
 	}
 }
@@ -242,7 +242,7 @@ func TestProcSightingDoesNotRuleOutOverATableItCouldNotRead(t *testing.T) {
 			ownerSighting{saw: "/proc lists no socket listening on this port in the socket tables it could read"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot")
+			found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot", nil)
 			if err != nil || found != tc.wantFound || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want %v, %+v, no error", found, seen, err, tc.wantFound, tc.want)
 			}
@@ -251,7 +251,7 @@ func TestProcSightingDoesNotRuleOutOverATableItCouldNotRead(t *testing.T) {
 	t.Run("the pid's descriptors read, and none is a listener read", func(t *testing.T) {
 		noListener := writeProcRoot(t, map[int]map[string]string{4242: {"0": "/dev/null", "3": "socket:[11111]"}})
 		want := ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port in the socket tables it could read"}
-		if found, seen, err := procSighting(tables, noListener, 7789, 4242, "the blind spot"); err != nil || found || seen != want {
+		if found, seen, err := procSighting(tables, noListener, 7789, 4242, "the blind spot", nil); err != nil || found || seen != want {
 			t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, want)
 		}
 	})

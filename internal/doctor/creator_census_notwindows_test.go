@@ -144,7 +144,7 @@ func TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener(t *
 			if !tc.notInProc && os.Geteuid() == 0 {
 				t.Skip("root reads a directory whatever its mode")
 			}
-			found, seen, err := procSighting(tablesWith(t, tc.rows...), tc.procRoot(t), 7788, 4242, blind)
+			found, seen, err := procSighting(tablesWith(t, tc.rows...), tc.procRoot(t), 7788, 4242, blind, nil)
 			if err != nil || found || seen != tc.want {
 				t.Errorf("got %v, %+v, %v;\nwant false, %+v, no error", found, seen, err, tc.want)
 			}
@@ -227,7 +227,7 @@ func TestProcSightingRulesNothingOutByCreatorsOverATableItCouldNotRead(t *testin
 		{"tcp6 is there and did not read", []string{read[0], t.TempDir()}, want},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			found, seen, err := procSighting(tc.tables, root, 7788, 4242, "the blind spot")
+			found, seen, err := procSighting(tc.tables, root, 7788, 4242, "the blind spot", nil)
 			if err != nil || found || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, tc.want)
 			}

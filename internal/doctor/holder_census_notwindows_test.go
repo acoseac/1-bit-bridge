@@ -117,7 +117,7 @@ func TestProcSightingRulesOutAPidItCannotReadByThePortsOtherHolders(t *testing.T
 			if tc.holderOff != 0 {
 				chmodForTest(t, procFdDir(root, tc.holderOff), 0o000)
 			}
-			found, seen, err := procSighting(tc.tables(t), root, tc.port, 4242, blind)
+			found, seen, err := procSighting(tc.tables(t), root, tc.port, 4242, blind, nil)
 			if err != nil || found || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, tc.want)
 			}
@@ -142,7 +142,7 @@ func TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead(t *testing
 	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), t.TempDir()}
 	root := writeProcRoot(t, map[int]map[string]string{5000: {"3": "socket:[24680]"}})
 	want := ownerSighting{saw: "/proc has no pid 4242"}
-	if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || found || seen != want {
+	if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil); err != nil || found || seen != want {
 		t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, want)
 	}
 }
@@ -158,45 +158,71 @@ func TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead(t *testing
 // --mount-proc, a process whose own pid is 1 reads /proc/self as 480456.
 func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 	tables := capturedTables(t)
-	// otherUID is a status for pid 4242 whose fsuid is not the uid that
-	// created 7789's listener (1000): under a /proc this process can trust,
-	// that rules the pid out (the second control).
-	const otherUID = "1001\t1001\t1001\t1001"
-	for _, tc := range []struct {
-		name   string
-		procs  map[int]map[string]string
-		status string // pid 4242's Uid values; "" writes no status
-		port   int
-	}{
-		{"the pid holds the listener", map[int]map[string]string{4242: fdFixture}, "", 7789},
-		{"the pid's descriptors read without one", map[int]map[string]string{4242: fdFixture}, "", 443},
-		{"another process holds every listener", map[int]map[string]string{5000: {"3": "socket:[24680]"}}, "", 7789},
-		{"another uid than the pid's created every listener", nil, otherUID, 7789},
+	for _, tc := range []namespaceCase{
+		{name: "the pid holds the listener", procs: map[int]map[string]string{4242: fdFixture}, port: 7789},
+		{name: "the pid's descriptors read without one", procs: map[int]map[string]string{4242: fdFixture}, port: 443},
+		{name: "another process holds every listener", procs: map[int]map[string]string{5000: {"3": "socket:[24680]"}}, port: 7789},
+		{name: "another uid than the pid's created every listener", status: otherUIDThanTheListeners, port: 7789},
+		{name: "another cgroup than the pid's created every listener", status: bridgeUIDs, port: 7789, cgroups: true},
 	} {
 		for _, self := range []string{"480456", ""} {
 			t.Run(tc.name+"/self "+strconv.Quote(self), func(t *testing.T) {
-				root := writeProcRoot(t, tc.procs)
-				if tc.status != "" {
-					writeStatus(t, root, 4242, tc.status)
-				}
-				found, seen, err := procSighting(tables, reselfProcRoot(t, root, self), tc.port, 4242, "the blind spot")
+				root, cgroups := tc.fixture(t)
+				found, seen, err := procSighting(tables, reselfProcRoot(t, root, self), tc.port, 4242, "the blind spot", cgroups)
 				requireNoAnswerFromAnotherNamespace(t, found, seen, err, self)
 			})
 		}
 	}
 	t.Run("the control: its self is this process", func(t *testing.T) {
 		root := writeProcRoot(t, map[int]map[string]string{4242: fdFixture})
-		if found, _, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || !found {
+		if found, _, err := procSighting(tables, root, 7789, 4242, "the blind spot", nil); err != nil || !found {
 			t.Errorf("got %v, %v; want the pid found holding the listener", found, err)
 		}
 	})
-	t.Run("the control: its self is this process, and another uid created the listener", func(t *testing.T) {
-		root := writeProcRoot(t, nil)
-		writeStatus(t, root, 4242, otherUID)
-		if found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot"); err != nil || found || !seen.ruledOut {
-			t.Errorf("got %v, %+v, %v; want the pid ruled out by the uid that created the listener", found, seen, err)
-		}
-	})
+	for _, tc := range []namespaceCase{
+		{name: "another uid created the listener", status: otherUIDThanTheListeners, port: 7789},
+		{name: "another cgroup created the listener", status: bridgeUIDs, port: 7789, cgroups: true},
+	} {
+		t.Run("the control: its self is this process, and "+tc.name, func(t *testing.T) {
+			root, cgroups := tc.fixture(t)
+			if found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot", cgroups); err != nil || found || !seen.ruledOut {
+				t.Errorf("got %v, %+v, %v; want the pid ruled out, since %s", found, seen, err, tc.name)
+			}
+		})
+	}
+}
+
+// otherUIDThanTheListeners is a status for pid 4242 whose fsuid is not the
+// uid that created 7789's listener in capturedTables (1000): under a /proc
+// this process can trust, that rules the pid out.
+const otherUIDThanTheListeners = "1001\t1001\t1001\t1001"
+
+// namespaceCase is one row of
+// TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace: the processes in the
+// fixture /proc, pid 4242's Uid values ("" writes no status), the port, and
+// whether 4242 runs in one cgroup while the listener was created in another.
+type namespaceCase struct {
+	name    string
+	procs   map[int]map[string]string
+	status  string
+	port    int
+	cgroups bool
+}
+
+// fixture builds the case's /proc, and its cgroup source when it has one.
+// The cgroup2 mount is written as both this process and pid 480456 would
+// read it, so that only the namespace check stands between the census and a
+// ruling-out by cgroup.
+func (c namespaceCase) fixture(t *testing.T) (string, socketCgroups) {
+	t.Helper()
+	root := writeProcRoot(t, c.procs)
+	if c.status != "" {
+		writeStatus(t, root, 4242, c.status)
+	}
+	if !c.cgroups {
+		return root, nil
+	}
+	return root, cgroupsBesideBridge(t, root, 24680, strconv.Itoa(os.Getpid()), "480456")
 }
 
 // reselfProcRoot points a fixture /proc's self link at self, or removes it

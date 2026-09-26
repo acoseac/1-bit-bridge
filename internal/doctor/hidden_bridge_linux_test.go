@@ -56,6 +56,14 @@ func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 // this process's. The child drops to it itself (dropToChildUID).
 func startUndumpableAs(t *testing.T, uid int, listen bool) (pid, port int) {
 	t.Helper()
+	return startUndumpableIn(t, uid, "", listen)
+}
+
+// startUndumpableIn is startUndumpableAs with the child in the cgroup whose
+// directory is cgroupDir, which it moves itself into before it listens
+// (joinChildCgroup); "" leaves it in this process's.
+func startUndumpableIn(t *testing.T, uid int, cgroupDir string, listen bool) (pid, port int) {
+	t.Helper()
 	mode := "idle"
 	if listen {
 		mode = "listen"
@@ -64,6 +72,9 @@ func startUndumpableAs(t *testing.T, uid int, listen bool) (pid, port int) {
 	cmd.Env = append(os.Environ(), undumpableChildEnv+"="+mode)
 	if uid >= 0 {
 		cmd.Env = append(cmd.Env, childUIDEnv+"="+strconv.Itoa(uid))
+	}
+	if cgroupDir != "" {
+		cmd.Env = append(cmd.Env, childCgroupEnv+"="+cgroupDir)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -102,6 +113,7 @@ func startUndumpableAs(t *testing.T, uid int, listen bool) (pid, port int) {
 
 // runUndumpable is the child's side of startUndumpable. It never returns.
 func runUndumpable(mode string) {
+	joinChildCgroup()
 	dropToChildUID()
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fmt.Fprintln(os.Stderr, "prctl(PR_SET_DUMPABLE, 0):", err)
@@ -124,6 +136,26 @@ func runUndumpable(mode string) {
 // childUIDEnv makes a child of these tests drop to the uid it names, and the
 // gid of the same number, before anything else (dropToChildUID).
 const childUIDEnv = "DOCTOR_TEST_CHILD_UID"
+
+// childCgroupEnv makes a child of these tests move itself into the cgroup
+// whose directory it names, first of all, while it still has the
+// credentials that takes (joinChildCgroup).
+const childCgroupEnv = "DOCTOR_TEST_CHILD_CGROUP"
+
+// joinChildCgroup moves this process, a child of these tests, into the
+// cgroup childCgroupEnv names, if any, by writing "0" (the writer) into its
+// cgroup.procs. It runs before the child listens, so its listener is
+// created in that cgroup: the socket keeps the cgroup it was created in.
+func joinChildCgroup() {
+	dir := os.Getenv(childCgroupEnv)
+	if dir == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("0"), 0); err != nil {
+		fmt.Fprintf(os.Stderr, "join cgroup %s: %v\n", dir, err)
+		os.Exit(1)
+	}
+}
 
 // dropToChildUID drops this process, a child of these tests, to the uid
 // childUIDEnv names, if any, and the gid of the same number, with no
@@ -369,23 +401,7 @@ func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
 	before := dumpable(t)
 	_, port := startUndumpableAs(t, holderUID, true)
 	bridge, _ := startUndumpableAs(t, bridgeUID, false)
-	pidFile := filepath.Join(sharedDir(t), "server.pid")
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
-	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
-		childUIDEnv+"="+strconv.Itoa(bridgeUID))
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("the doctor run as uid %d: %v\n%s", bridgeUID, err, stderr.String())
-	}
-	var c Check
-	if err := json.Unmarshal(out, &c); err != nil {
-		t.Fatalf("the doctor run printed %q: %v", out, err)
-	}
+	c := checkPortAs(t, bridgeUID, port, bridge)
 	if c.Status != Fail {
 		t.Fatalf("got %v (%s / %s), want fail", c.Status, c.Summary, c.Hint)
 	}
@@ -398,6 +414,32 @@ func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
 		t.Errorf("this process's dumpable flag went from %d to %d while its children took other uids, "+
 			"which keeps its descriptors from root without CAP_SYS_PTRACE in every later test (dropToChildUID)", before, after)
 	}
+}
+
+// checkPortAs runs checkPort in a child of this test binary as uid, and the
+// gid of the same number, against a pid file naming bridge, and returns the
+// Check it printed. Taking another uid takes root; the child drops to it
+// itself (dropToChildUID), so this process's dumpable flag stays as it is.
+func checkPortAs(t *testing.T, uid, port, bridge int) Check {
+	t.Helper()
+	pidFile := filepath.Join(sharedDir(t), "server.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
+		childUIDEnv+"="+strconv.Itoa(uid))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the doctor run as uid %d: %v\n%s", uid, err, stderr.String())
+	}
+	var c Check
+	if err := json.Unmarshal(out, &c); err != nil {
+		t.Fatalf("the doctor run printed %q: %v", out, err)
+	}
+	return c
 }
 
 // sharedDir makes a directory any user can search, for a file a child of
