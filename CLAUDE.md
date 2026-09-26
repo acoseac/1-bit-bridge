@@ -2268,10 +2268,10 @@ what it claimed**, and none of it had a failing test.
   binary (dumpable=0), keeps its descriptors from a non-root observer, and
   the refusal's hint names the recorded bridge and, where the probe could
   have missed it, says to stop it first (the next bullet, #1028).
-  **An ok is not proof of attribution**: on Linux the uid arm answers ok
-  for a test's own listener, so `TestPortCheck_OwnPIDMatches` asserts the
-  "bound by our own bridge" summary; with the `/proc` path removed it had
-  passed on the uid arm.
+  **An ok is not proof of attribution**: on Linux the uid arm answered ok
+  for a test's own listener until #PRNUM, so `TestPortCheck_OwnPIDMatches`
+  asserts the "bound by our own bridge" summary; with the `/proc` path
+  removed it had passed on the uid arm.
 - **…and a live recorded bridge the probe did not see is explained by what
   the probe SAW, never by the one case the arm was written for** (#1028).
   #640's liveness arm said "pid attribution blocked — capability-bound
@@ -2348,14 +2348,64 @@ what it claimed**, and none of it had a failing test.
   images where main let both through (an ok and a warn, both exit 0), the
   capability-bound L2 keeps its ok,
   and root in a container (no CAP_SYS_PTRACE) rules nothing out. **Two
-  shapes stay open.** One is L4 over a capability-bound bridge, the NUC's
-  shape: `/proc` cannot read that bridge, so the uid arm still answers
-  for the holder lsof named. The other is L4 on macOS, where lsof would
-  see a same-user pid but nothing reads the pid's uid. **A test that
+  shapes stayed open.** One, L4 over a capability-bound bridge (the NUC's
+  shape, row L6), is closed by the next bullet (#PRNUM). The other is L4
+  on macOS, where lsof would see a same-user pid but nothing reads the
+  pid's uid. **A test that
   records a pid of its own choosing forces what the probe says about it**
   (`procOwnerFunc`, `withUnattributedMiss`). On Linux, pid 4242 may be a
   readable process of the test's own user, and Windows' table rules it
   out, so a test left to the host was grading a different arm.
+- **…and a bridge no probe can read is ruled out by the port's OTHER
+  holders, and the uid arm answers only for a listener no readable
+  process holds** (#PRNUM). Row L6, #1029's open shape: a bridge granted
+  `cap_net_bind_service` runs with dumpable=0, so as its own user
+  `/proc/<pid>/fd` is root's and EACCES, and nothing rules it out. With
+  it live on its old ports and its config edited to a port ANOTHER
+  process of the same user holds, the uid arm answered ok for that
+  process's listener (`… lsof lists pid 579 listening on this port`),
+  `bridge doctor --config` exited 0 and the restart could not bind, in
+  both dido images. **The census**: where the recorded pid's descriptors
+  do not read in full, `procSighting` walks every `/proc/<pid>/fd` this
+  user CAN read (`socketHolders`), and every socket listening on the
+  port held by one of them, other than the pid, rules the pid out
+  (`heldByOthers`), so #1029's arm FAILs it. An inode names one socket,
+  and a listener of the pid's own is held by it alone, which nothing
+  here reads, so it would have no holder. **The one shape a census cannot
+  see is a socket the pid SHARES with a readable process, and the bridge
+  shares none**: every listener is its own `net.Listen` (close-on-exec),
+  it consumes no inherited fd (`internal/supervision` only READS
+  `LISTEN_FDS`), hands none on, and `pidfd_getfd` on a dumpable=0
+  process needs CAP_SYS_PTRACE. Windows' listener table rules out on the
+  same terms, since a duplicated socket keeps the binder's pid. **Adding
+  socket activation or a listener handoff to the bridge breaks this
+  premise; revisit the census in the same change.** A listener with no
+  readable holder (another user's process, root's, io_uring, another pid
+  namespace), or a table that did not read, leaves the pid possible, and
+  root in a container without CAP_SYS_PTRACE lists every fd directory and
+  reads no other uid's link, so nothing there changes (R6 stays a warn).
+  **The uid arm** (`hiddenListenerOf`) now needs both marks of that
+  bridge: the listener was created by this uid, AND no process this user
+  can read holds it. One a readable process holds is that process's. The
+  census cannot rule out where another listener has no readable holder
+  (L6m: root's `[::1]:7788` beside the same-user holder), and there the
+  old arm said ok. It is a warn now, and still exits 0. **Both halves are
+  needed, and the census is the one that fixes L6**: with it disabled
+  (NC1) L6 reads warn, exit 0, from the refined arm alone. **Every
+  pid-numbered `/proc` read first checks `/proc/self` against `getpid`**
+  (`procOfAnotherPIDNamespace`, proctest's rule): under another pid
+  namespace's `/proc`, `<pid>` is some other process, and the recorded
+  bridge can be a "holder" under another number (a Gemini consult called
+  the guard necessary). **The walk is cheap**: 1.1 to 1.8 ms as a user
+  over dido's 290 processes, 11 to 15 ms as root without
+  CAP_SYS_PTRACE. **A test stands the bridge in without setcap**:
+  `prctl(PR_SET_DUMPABLE, 0)` in a re-run of the test binary gives the
+  same root-owned 0500 fd directory (measured), so CI runs L2 and L6 on
+  the real kernel (`hidden_bridge_linux_test.go`). **Still open: a holder
+  this user cannot read** (L7, another user's; root's daemon on the NUC
+  is this shape) warns, exit 0. The recorded pid's uid is readable from
+  `/proc/<pid>/status` under dumpable=0, and a listener another uid
+  created is not the bridge's.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),

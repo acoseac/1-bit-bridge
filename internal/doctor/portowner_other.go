@@ -7,12 +7,13 @@ import (
 	"os"
 )
 
-// hiddenListenerOfThisUser is the non-Linux stub for checkPort's last-resort
-// port attribution. It always answers "don't know" so the caller falls
-// through to its Warn.
+// hiddenListenerOfThisUser is the non-Linux stub for checkPort's
+// last-resort port attribution. It always answers "don't know" so the
+// caller falls through to its Warn.
 //
 // The real implementation (portowner_linux.go) reads the `uid` column of
-// /proc/net/tcp{,6}, which exists only on Linux. It is there to rescue one
+// /proc/net/tcp{,6}, and the descriptors of the processes this user can
+// read under /proc, which exist only on Linux. It is there to rescue one
 // specific deployment shape — a bridge granted cap_net_bind_service so it
 // can bind :443 unprivileged, whose resulting dumpable=0 blocks port→pid
 // attribution — and that shape is Linux-only by construction: macOS has no

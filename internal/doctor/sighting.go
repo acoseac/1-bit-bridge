@@ -40,8 +40,9 @@ type ownerSighting struct {
 	blind string
 	// ruledOut reports that what the probe saw excludes the pid as the
 	// port's holder: it saw every listener on the port and they are other
-	// processes (Windows' listener table), or it read every one of the
-	// pid's descriptors, against every socket table, and none is a
+	// processes (Windows' listener table, or /proc's census of the holders
+	// it can read where it could not read the pid), or it read every one
+	// of the pid's descriptors, against every socket table, and none is a
 	// listener on the port (/proc, asked on Linux after lsof misses or in
 	// its place). Never lsof alone, which lists only the processes it can
 	// see (lsofSighting). The zero value keeps the hedged advice ("if our
@@ -122,18 +123,21 @@ func lsofPIDs(out []byte) ([]int, bool) {
 // rules the pid out (lsofSighting). /proc reads the pid's own descriptors,
 // under the kernel check lsof's readlinks meet too (proc_fd_access_allowed,
 // ptrace's read check). Where every one of them read and none is a listener
-// on the port, the pid holds none on any address, and the verdict that
-// follows (checkPort's liveness arm) must be the same on a host with lsof as
-// on one without: #1028's row L4 was ruled out where lsof was missing and
-// not where it was installed, so a verdict on the ruling-out alone would
-// have been chosen by the tool.
+// on the port, or where it could not read them and the processes it can
+// read hold every listener on the port (procSighting's census), the pid
+// holds none on any address, and the verdict that follows (checkPort's
+// liveness arm) must be the same on a host with lsof as on one without:
+// #1028's row L4 was ruled out where lsof was missing and not where it was
+// installed, so a verdict on the ruling-out alone would have been chosen by
+// the tool. The census sits inside /proc's answer for the same reason.
 //
 // So a /proc match is a match: an inode names one socket. A /proc ruling-out
 // is joined to lsof's account, which keeps the pids lsof named, and carries
-// no blind spot. Anything else (a pid /proc cannot read, or neither socket
-// table readable) leaves lsof's account as it was: /proc could see no more
-// than lsof did. Off Linux, pidListensOnPort's stub neither finds nor rules
-// out, so lsof's account stands there.
+// no blind spot. Anything else (a pid /proc cannot read, on a port whose
+// listeners it cannot account for, or neither socket table readable)
+// leaves lsof's account as it was: /proc could see no more than lsof did.
+// Off Linux, pidListensOnPort's stub neither finds nor rules out, so lsof's
+// account stands there.
 func procSecondOpinion(lsofSeen ownerSighting, procFound bool, procSeen ownerSighting, procErr error) (bool, ownerSighting) {
 	switch {
 	case procErr != nil:

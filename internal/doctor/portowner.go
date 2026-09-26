@@ -24,9 +24,10 @@ import (
 // Linux dependency, so there is no reason to hide it from macOS and Windows
 // CI.
 //
-// The same holds for the table reader and the fd walk below them, which
-// take their paths as arguments: portowner_linux.go hands them /proc, and
-// the tests hand them fixture files.
+// The same holds for the table reader, the fd walk and the census of a
+// port's holders below them, which take their paths as arguments:
+// portowner_linux.go hands them /proc, and the tests hand them fixture
+// files.
 
 // tcpStateListen is TCP_LISTEN as rendered in the `st` column.
 const tcpStateListen = "0A"

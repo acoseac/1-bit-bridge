@@ -15,9 +15,9 @@ import (
 // Package var so tests can point it at fixture files.
 var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 
-// hiddenListenerOfThisUser reports whether any process running as the
-// current user holds a LISTEN socket on this TCP port (hiddenListenerOf,
-// over this host's /proc).
+// hiddenListenerOfThisUser reports whether a LISTEN socket on this TCP port
+// was created by the current user and is held by no process this user can
+// read (hiddenListenerOf, over this host's /proc).
 //
 // This is the fallback for a bridge that binds a privileged port through a
 // file capability (`setcap cap_net_bind_service=+ep`, which the deployment
@@ -35,14 +35,20 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 // process's fsuid at socket-creation time, which for a capability binary
 // (no setuid, so real == effective == fsuid) is the service user.
 //
-// UID equality is deliberately WEAKER than PID equality — another process
-// running as the same user matches too. The caller words its verdict to say
-// exactly that, and asks only where the owner probe could not rule the
-// recorded bridge out: where /proc read every one of the bridge's
-// descriptors and none is a listener on the port, a listener of this uid is
-// another process of the same user, and the port FAILs without asking
-// (#1028's row L4). It is the ceiling of what an unprivileged observer can
-// learn, and strictly more than the "unknown owner" it replaces.
+// UID equality alone is WEAKER than PID equality: another process running
+// as the same user matches too. So the listener must also be hidden, held
+// by no process this user can read, as the capability-bound bridge's is.
+// One that a readable process holds is that process's, and until #PRNUM it
+// matched as well: beside a capability-bound bridge whose config was edited
+// to a port another process of the same user holds, it answered ok (#1028's
+// row L6). The caller words its verdict to say what matched, and asks only
+// where the owner probe could not rule the recorded bridge out: where /proc
+// read every one of the bridge's descriptors and none is a listener on the
+// port (row L4), or found every listener on the port held by processes it
+// can read (row L6), the port FAILs without asking. Even so this is the
+// ceiling of what an unprivileged observer can learn: another hidden
+// process of this user's, one with dumpable=0 too or in another group,
+// still matches.
 func hiddenListenerOfThisUser(port int) (bool, error) {
 	return hiddenListenerOf(procNetTCPFiles, "/proc", port, os.Getuid())
 }
@@ -69,7 +75,9 @@ func hiddenListenerOfThisUser(port int) (bool, error) {
 // Its limits are lsof's own: a process of another user, or one with
 // dumpable=0 (a binary granted cap_net_bind_service), keeps its descriptors
 // from an unprivileged observer, and the answer is then false, as lsof's
-// exit 1 is. The sighting says which it was (procSighting). An error means
+// exit 1 is. The sighting says which it was (procSighting), and where every
+// socket listening on the port is held by a process this user CAN read, it
+// rules such a pid out all the same (procSighting's census). An error means
 // neither socket table could be read.
 func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
