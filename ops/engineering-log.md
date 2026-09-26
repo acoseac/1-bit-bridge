@@ -17228,6 +17228,15 @@ list, so only the observations are recorded.
   not exist" (this host's `sw_vers` says 27.0), `-F n` → `-Fn` (the
   measured output is exactly `p`/`f`/`n`, and any other shape voids the
   listing), and a stdin-EOF comment it misread.
+- **Round 2**, on `2f1f788d`. CodeRabbit had used its hour's included
+  review; its pause notice offered a free on-demand one ("free for the next
+  13 days", charged $0.00), taken by ticking the checkbox, which leaves the
+  included allowance shared across the user's projects alone. Nothing was
+  pushed while it ran. "No actionable comments were generated", merge risk
+  "Minimal"; its one retained note (a readable listing is assumed complete)
+  is what `ownListenersSighting`'s doc already qualifies: the check is per
+  process, and only a listener opened while lsof reads can be missed.
+  SonarCloud passed on every head. Gemini stayed over quota.
 
 ### Out of scope
 
@@ -17252,3 +17261,12 @@ list, so only the observations are recorded.
 - **#1028's netstat note was measured from a shell**, and holds only
   there. A positive result is about the context it was measured in, as a
   negative one is about the table it looked in.
+- **`git commit --amend -m` stages nothing.** The round-2 paragraph above
+  was written into the log, and the commit amended to say "rounds 1 and
+  2", without `-a` or an add: the amend changed only the message, the
+  push carried round 1 alone, and #1034 merged that way. It surfaced only
+  when `gh pr merge` refused to check out main over the uncommitted file.
+  `git show --stat` would not have caught it either: the log was already
+  in the commit, with round 1. What catches it is what was left behind:
+  `git diff HEAD --stat` must be empty before the push (CodeRabbit on
+  #1035, correcting this note's first form, which prescribed `git show`).
