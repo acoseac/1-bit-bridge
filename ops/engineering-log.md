@@ -17261,3 +17261,10 @@ list, so only the observations are recorded.
 - **#1028's netstat note was measured from a shell**, and holds only
   there. A positive result is about the context it was measured in, as a
   negative one is about the table it looked in.
+- **`git commit --amend -m` stages nothing.** The round-2 paragraph above
+  was written into the log, and the commit amended to say "rounds 1 and
+  2", without `-a` or an add: the amend changed only the message, the
+  push carried round 1 alone, and #1034 merged that way. It surfaced only
+  when `gh pr merge` refused to check out main over the uncommitted file.
+  Before pushing a commit whose message names its content, read `git show
+  --stat` against the message.
