@@ -15396,21 +15396,27 @@ random numbers from a range no allocator uses.
   `TestTheTCPAndUDPPortDrawsAreIndependent` holds the bottom third of a
   60-number range and draws twenty numbers from it: a walk up from the
   bottom fails every time, independent draws about once in 3.5 billion.
-  `TestTheTCPAndUDPPortDrawNamesEveryRefusal` holds a four-number range whole
-  and requires a failure naming six refused binds, all in the range.
+  `TestTheTCPAndUDPPortDrawNamesEveryRefusal` holds a four-number range
+  whole, on UDP and then on TCP, and requires a failure naming six refused
+  binds, all in the range, and all TCP's when TCP is held (it is bound
+  first). The TCP case came from review round 1, below.
 - **Red first**, `3d1b5223`: the helper made error-returning, its algorithm
   unchanged. The first test failed 5 of 5 on macOS and 3 of 3 on the Windows
   11 host, each naming twenty consecutive refused numbers, in 0.00 s and
   0.01 s.
-- Controls, each applied to `b0394ada` in a scratch worktree and restored
-  (tree `aa86a9cb`, clean after each), `-count=3`:
+- Controls, each applied in a scratch worktree and restored, the tree hash
+  checked clean after each, `-count=3`. NC1 to NC4 ran first on `b0394ada`
+  (tree `aa86a9cb`), where NC4 also turned the independence test red 1 of 3
+  and NC1 was repeated on the Windows 11 host with the same result. All five
+  then ran on `b00a5d43` (tree `7b4fa4e2`), with these results:
 
   | | mutation | red |
   |---|---|---|
-  | NC1 | numbers from the TCP cursor, the old draw | the run test and the message test, 3 of 3, on macOS and on Windows 11 |
+  | NC1 | numbers from the TCP cursor, the old draw | the run test and both message cases, 3 of 3 |
   | NC2 | a walk up the range from its bottom | the independence test, 3 of 3 |
-  | NC3 | the failure no longer lists the draws | the message test, 3 of 3 |
-  | NC4 | UDP never bound | the message test 3 of 3, the independence test 1 of 3 |
+  | NC3 | the failure no longer lists the draws | both message cases, 3 of 3 |
+  | NC4 | UDP never bound | the message test's UDP case, 3 of 3 |
+  | NC5 | TCP never bound | the message test's TCP case, 3 of 3; before it, every test passed NC5, 5 of 5 |
 
 - On the final tree each of the three tests passes 50 of 50 on Windows 11
   and 20 of 20 on macOS, and the helper's three consumers
@@ -15456,3 +15462,13 @@ on a number with a client end in TIME_WAIT succeeded above.
 - **zsh does not word-split an unquoted variable**, so `$S cmd` with
   `S="ssh -S … host"` runs a command named by the whole string; a wrapper
   script carried the multiplexed connection instead.
+
+### Review
+
+- **Round 1**, on `bd48a835`. Gemini's app: a summary, no comments.
+  CodeRabbit: one comment, labelled trivial: every refusal test held UDP
+  numbers only, so nothing proved the draw rejects a number held on TCP.
+  True, and measured before it was fixed: with the TCP bind deleted (NC5)
+  all three tests passed 5 of 5. Taken in `b00a5d43`: the message test
+  holds its range on each protocol in turn. SonarCloud: gate passed. CI: 20
+  of 20 checks passed, `test (windows-latest)` among them.
