@@ -172,6 +172,27 @@ func listenerTableSighting(owners []int) ownerSighting {
 // that is there and could not be read (listenerSockets' unread), since the
 // listener may be in it: the account then says it covers the tables read
 // (CodeRabbit on #1028). An error means neither socket table could be read.
+//
+// Where pid's descriptors could not be read in full, the port's OTHER
+// holders can still rule it out: every socket listening on the port held
+// by a process this user can read, other than pid (heldByOthers). An inode
+// names one socket, and a listener of pid's own would be held by pid alone,
+// which nothing here can read, so it would have no holder. That is the
+// capability-bound bridge (#1028's row L6): it runs with dumpable=0, no
+// probe can read it, and when its config was edited to a port another
+// process of the same user holds, the uid arm answered ok for that
+// process's listener. The one shape the census cannot see is a socket pid
+// SHARES with a readable process, and a bridge shares no listener: it makes
+// each with net.Listen, close-on-exec, and hands none on, and no process of
+// this user can take one from a dumpable=0 process (pidfd_getfd needs
+// CAP_SYS_PTRACE there). Windows' listener table rules a pid out on the
+// same terms, since a duplicated socket keeps the binder's pid. A listener
+// with no readable holder, or a table that did not read, leaves pid
+// possible, as before.
+//
+// Everything that reads a pid's directory first checks that procRoot
+// numbers processes as this process does (procOfAnotherPIDNamespace):
+// under another pid namespace's /proc, <pid> is some other process.
 func procSighting(tables []string, procRoot string, port, pid int, blind string) (bool, ownerSighting, error) {
 	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {
@@ -183,21 +204,31 @@ func procSighting(tables []string, procRoot string, port, pid int, blind string)
 		}
 		return false, ownerSighting{saw: "/proc lists no socket listening on this port", ruledOut: true}, nil
 	}
+	if other := procOfAnotherPIDNamespace(procRoot); other != "" {
+		return false, ownerSighting{saw: other}, nil
+	}
 	held, readAll, err := fdDirHoldsSocket(filepath.Join(procRoot, strconv.Itoa(pid), "fd"), sockets)
+	var possible ownerSighting
 	switch {
 	case held:
 		return true, ownerSighting{}, nil
 	case errors.Is(err, fs.ErrNotExist):
-		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil
+		possible = ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}
 	case err != nil && !errors.Is(err, fs.ErrPermission):
-		return false, ownerSighting{saw: fmt.Sprintf("/proc could not list pid %d's descriptors (%s)", pid, oneLine(err.Error()))}, nil
+		possible = ownerSighting{saw: fmt.Sprintf("/proc could not list pid %d's descriptors (%s)", pid, oneLine(err.Error()))}
 	case err != nil || !readAll:
-		return false, ownerSighting{saw: fmt.Sprintf("/proc does not let this user read pid %d's descriptors", pid), blind: blind}, nil
+		possible = ownerSighting{saw: fmt.Sprintf("/proc does not let this user read pid %d's descriptors", pid), blind: blind}
 	case unread:
 		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid) + inTheTablesRead}, nil
 	default:
 		return false, ownerSighting{saw: fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", pid), ruledOut: true}, nil
 	}
+	if !unread {
+		if holders, all := heldByOthers(procRoot, sockets, pid); all {
+			return false, ownerSighting{saw: "/proc shows every socket listening on this port held by " + pidList(holders), ruledOut: true}, nil
+		}
+	}
+	return false, possible, nil
 }
 
 // inTheTablesRead scopes a /proc account to the socket tables it could read,

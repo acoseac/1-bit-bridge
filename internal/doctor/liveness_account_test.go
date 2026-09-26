@@ -88,16 +88,15 @@ func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
 // check FAILs, as it does with no live bridge behind the port. Where it
 // cannot (lsof on macOS, which lists only what it can see) the arm is
 // unchanged.
+//
+// On Linux the uid arm no longer answers for this listener either, since a
+// process this user can read holds it (#PRNUM): this test used to assert
+// the arm's old answer as its premise, and
+// TestHiddenListenerOfThisUserOnTheKernel now pins the new one, beside the
+// tables listing the listener as this user's.
 func TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf(t *testing.T) {
 	_, ruledOut := realHolderAccount(t)
 	port := bindPort(t)
-	if runtime.GOOS == "linux" {
-		// The premise: this process's listener runs as this user, so the
-		// uid arm alone would call the port ours.
-		if owned, err := hiddenListenerFunc(port); err != nil || !owned {
-			t.Fatalf("the uid scan does not see this process's listener on :%d as this user's (owned %v, err %v)", port, owned, err)
-		}
-	}
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, os.Getppid()))
 	if want := unseenVerdict(ruledOut); c.Status != want {
 		t.Fatalf("got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, want)

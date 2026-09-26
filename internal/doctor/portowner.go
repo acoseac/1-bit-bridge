@@ -189,20 +189,133 @@ func listenerSockets(paths []string, port int) (sockets map[string]int, unread b
 }
 
 // hiddenListenerOf reports whether a socket listening on port in the given
-// tables was created by uid (hiddenListenerOfThisUser). procRoot is not
-// read yet. An error means no table could be read.
+// tables was created by uid AND is held by no process under procRoot whose
+// descriptors this user can read (socketHolders). It is the uid arm's
+// question (hiddenListenerOfThisUser), asked of this host's /proc there and
+// of fixtures in the tests. An error means no table could be read.
+//
+// Both marks are needed, and they are the marks of a bridge granted
+// cap_net_bind_service, which runs as this user and with dumpable=0, so
+// that no process of this user's can read its descriptors. The first alone
+// is any process of this user's, and the arm answered ok on it for another
+// process's listener beside a capability-bound bridge that held no socket
+// on the port (#1028's row L6), wherever the census could not rule that
+// bridge out: when a listener of root's shares the port at another address,
+// say. A listener that a process this user can read holds is that
+// process's.
 func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, error) {
-	_ = procRoot
 	sockets, _, err := listenerSockets(tables, port)
 	if err != nil {
 		return false, err
 	}
-	for _, u := range sockets {
+	mine := map[string]int{}
+	for s, u := range sockets {
 		if u == uid {
+			mine[s] = u
+		}
+	}
+	if len(mine) == 0 {
+		return false, nil
+	}
+	held := socketHolders(procRoot, mine, 0)
+	for s := range mine {
+		if len(held[s]) == 0 {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// heldByOthers returns the pids under procRoot whose descriptors hold the
+// sockets, and whether every socket has a holder there other than pid
+// (socketHolders): the census procSighting rules out a pid it cannot read
+// with.
+func heldByOthers(procRoot string, sockets map[string]int, pid int) ([]int, bool) {
+	held := socketHolders(procRoot, sockets, pid)
+	var holders []int
+	for s := range sockets {
+		if len(held[s]) == 0 {
+			return nil, false
+		}
+		holders = append(holders, held[s]...)
+	}
+	return holders, true
+}
+
+// socketHolders walks the process directories under procRoot, /proc in
+// production, and returns, for each socket in sockets, the pids whose
+// descriptors link to it, as far as this user can read them. It skips the
+// pid skip, 0 for none.
+//
+// A process whose fd directory does not list, or whose links do not read,
+// adds nothing: the kernel keeps its descriptors from this user (another
+// user's process, or one with dumpable=0, a binary granted
+// cap_net_bind_service). So a socket only such a process holds has no
+// holder here. So does a socket no descriptor holds: one registered with
+// io_uring or kept in a BPF map after its descriptor closed, one in flight
+// through a unix socket, a kernel socket, or one held by a process of
+// another pid namespace that shares this network namespace. Neither caller
+// reads a missing holder as an answer: the census leaves the recorded pid
+// possible, and the uid arm counts the socket as hidden, as before.
+//
+// The walk reads every process this user can: a ReadDir, then a Readlink
+// per descriptor. Measured on a 290-process host (dido, 2026-09-26): 1.1 to
+// 1.8 ms as a user, most directories refusing the listing; 5 to 6 ms as
+// root; 11 to 15 ms as root without CAP_SYS_PTRACE, where every directory
+// lists and no link reads.
+func socketHolders(procRoot string, sockets map[string]int, skip int) map[string][]int {
+	held := map[string][]int{}
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return held
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || pid == skip {
+			continue
+		}
+		fdDir := filepath.Join(procRoot, e.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			if _, listener := sockets[link]; listener {
+				held[link] = append(held[link], pid)
+			}
+		}
+	}
+	return held
+}
+
+// procOfAnotherPIDNamespace says why the processes under procRoot may not
+// be numbered as this process's pid namespace numbers them, or returns ""
+// when they are.
+//
+// A recorded pid is a number in this process's namespace, as kill(2) reads
+// it, and a /proc mounted for another namespace numbers every process
+// differently. Its <pid> is then an unrelated process, and the recorded
+// bridge can be among the port's holders under another number, so finding
+// the pid there, ruling it out by its own descriptors, or ruling it out by
+// the port's holders would each be an answer about some other process.
+// Such a /proc names someone else as its self: measured on Linux 7.0 for
+// proctest, under `unshare --pid --fork` without --mount-proc, a process
+// whose own pid is 1 reads /proc/self as 480456.
+func procOfAnotherPIDNamespace(procRoot string) string {
+	self, err := os.Readlink(filepath.Join(procRoot, "self"))
+	switch {
+	case err != nil:
+		return fmt.Sprintf("/proc does not say which process reads it, so it may number another pid namespace's processes (%s)",
+			oneLine(err.Error()))
+	case self != strconv.Itoa(os.Getpid()):
+		return fmt.Sprintf("/proc numbers another pid namespace's processes (its self is %s, and this process is pid %d)",
+			self, os.Getpid())
+	}
+	return ""
 }
 
 // fdDirHoldsSocket reports whether any descriptor in fdDir, a process's
