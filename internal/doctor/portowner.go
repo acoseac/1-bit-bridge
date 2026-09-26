@@ -204,6 +204,10 @@ func listenerSockets(paths []string, port int) (sockets map[string]int, unread b
 // bridge out: when a listener of root's shares the port at another address,
 // say. A listener that a process this user can read holds is that
 // process's.
+//
+// Unlike the census it is handed no pid, so it does not check /proc's pid
+// namespace (procOfAnotherPIDNamespace): a readable holder is one whatever
+// number /proc gives it.
 func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, error) {
 	sockets, _, err := listenerSockets(tables, port)
 	if err != nil {
