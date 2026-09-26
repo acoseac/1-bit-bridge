@@ -39,11 +39,11 @@ func newWrappedCLI(t *testing.T) wrappedCLI {
 		wrote:   filepath.Join(dir, "wrote"),
 	}
 	inner := filepath.Join(dir, "tailscale-app")
-	// The pid goes through a rename so a reader never sees it half
-	// written. `sleep` is a child of this shell, so it shares the group.
+	// The hold's `sleep` is a child of this shell, so it shares the group.
+	// The hold ends by itself once dir or this test binary is gone, so a
+	// run that leaves the process behind does not leave it looping.
 	innerScript := "#!/bin/sh\n" +
-		"echo $$ > '" + c.pidFile + ".tmp' && mv '" + c.pidFile + ".tmp' '" + c.pidFile + "'\n" +
-		"while [ ! -e '" + c.release + "' ]; do sleep 0.02; done\n" +
+		proctest.HoldUntilReleased(c.pidFile, c.release) +
 		": > '" + c.wrote + "'\n"
 	if err := os.WriteFile(inner, []byte(innerScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -53,7 +53,9 @@ func newWrappedCLI(t *testing.T) wrappedCLI {
 	if err := os.WriteFile(c.wrapper, []byte("#!/bin/sh\n'"+inner+"' \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Whatever happens, never leave the inner process waiting.
+	// Release a surviving inner process, so a call still blocked on it
+	// returns. dir goes straight after, which is what ends one that
+	// misses the release.
 	t.Cleanup(c.let)
 	return c
 }

@@ -14,12 +14,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/proctest"
 )
 
-// wrappedTailscaleScript is the "app" behind the fake wrapper: `status`
-// answers at once with a MagicDNS name, so the startup pass goes on to
-// mint; `cert` records its pid, waits to be released, and only then
-// writes the file it was given, as `tailscale cert` does. PIDFILE and
-// RELEASE are replaced with paths.
-const wrappedTailscaleScript = `#!/bin/sh
+// wrappedTailscaleScript returns the "app" behind the fake wrapper:
+// `status` answers at once with a MagicDNS name, so the startup pass goes
+// on to mint; `cert` records its pid in pidFile, waits to be released, and
+// only then writes the file it was given, as `tailscale cert` does. The
+// wait is proctest.HoldUntilReleased's, which also ends, without the
+// write, once release's directory or this test binary is gone.
+func wrappedTailscaleScript(pidFile, release string) string {
+	return `#!/bin/sh
 case "$1" in
 status)
 	printf '%s' '{"Self":{"HostName":"bridge","DNSName":"bridge.example.ts.net.","TailscaleIPs":["100.64.0.1"]},"MagicDNSSuffix":"example.ts.net"}'
@@ -28,13 +30,12 @@ cert)
 	for arg in "$@"; do
 		case "$arg" in --cert-file=*) cert="${arg#--cert-file=}" ;; esac
 	done
-	echo $$ > 'PIDFILE.tmp' && mv 'PIDFILE.tmp' 'PIDFILE'
-	while [ ! -e 'RELEASE' ]; do sleep 0.02; done
-	: > "$cert"
+` + proctest.HoldUntilReleased(pidFile, release) + `	: > "$cert"
 	exit 0 ;;
 esac
 exit 1
 `
+}
 
 // TestServeLeavesNoTailscaleCLIRunning is the flaky boot test's defect,
 // made deterministic and run on the real exec path, with no seam: serve
@@ -57,8 +58,7 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 	pidFile := filepath.Join(bin, "pid")
 	release := filepath.Join(bin, "release")
 	inner := filepath.Join(bin, "tailscale-app")
-	script := strings.NewReplacer("PIDFILE", pidFile, "RELEASE", release).Replace(wrappedTailscaleScript)
-	if err := os.WriteFile(inner, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(inner, []byte(wrappedTailscaleScript(pidFile, release)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bin, "tailscale"), []byte("#!/bin/sh\n'"+inner+"' \"$@\"\n"), 0o755); err != nil {
@@ -82,8 +82,9 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0"}, &safeBuffer{}, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	// Runs before the drain: whatever state a failure left, the fake is
-	// released rather than left waiting past the test.
+	// Runs before the drain, so a serve still waiting on a fake the cancel
+	// did not stop can finish. bin goes after the drain, which is what
+	// ends a fake that misses the release.
 	t.Cleanup(let)
 
 	pid := waitForCLIPid(t, pidFile, done, stderr)

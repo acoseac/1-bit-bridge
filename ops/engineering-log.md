@@ -15068,3 +15068,205 @@ failure.
   Closed in `ca4ce758` (Decisions, NC16). dido then passed 27 of 27 in all
   four configurations, and without `--init` all 9 passes still answered
   through the zombie arm.
+
+## 2026-09-26 — a fake CLI left behind by a failing run ends by itself (#1025)
+
+#1024's entry left this under Out of scope (chip task_c5a6f49d): when the
+two tailscale shutdown tests fail because their fake CLI survived, the fake
+loops forever. The test's cleanup creates the release file the fake polls
+for, and t.TempDir's own cleanup, registered earlier and so run next,
+removes the directory straight after. Measured, then fixed with one hold
+both fakes share, `proctest.HoldUntilReleased`.
+
+### What was measured
+
+- **The leak, on main `5ad2db9b`** under NC2 (`stopTreeOnCancel` sets
+  `WaitDelay` and returns before the group kill, so the CLI survives the
+  cancel), macOS. `TestCancelStopsTheWholeCLIProcessTree`, `-count=10`: 20
+  of 20 subtests red, 18 fakes left looping, each with PPid 1 and a
+  `sleep 0.02` child (a first `-count=1` run had left 1 of 2).
+  `TestServeLeavesNoTailscaleCLIRunning`, `-count=5`: 5 of 5 red, 5 left.
+  So 23 of 25 across the two counted runs. The tree test's fakes escape
+  more often (2 of 20) than the serve test's (0 of 5): its failure path
+  releases before `t.Fatalf`, so the window also holds the Fatalf and the
+  Goexit, while the serve test releases only in the cleanup, right before
+  the drain.
+- **The same on Linux**: dido, `golang:1.26.6`, uid 1000, with a PID 1 of
+  `sleep infinity` so that nothing reaps and the container outlives the
+  run (tests run with `docker exec`, then `ps` lists what is left). The
+  tree test, `-count=3`: 6 red, 4 fakes live and 2 zombies. The serve
+  test, `-count=2`: 2 red, 2 live. So 6 of 8.
+- **A test binary that dies before its cleanups.** Main under NC2, macOS.
+  With `-test.timeout=3s`, which panics mid-poll (exit 2) and runs no
+  cleanup, each test left one fake and its temp dir. With SIGINT at its
+  default disposition, the tree test exited 130 and left one fake.
+- **A measurement that was wrong first.** The first SIGINT run sent
+  `kill -INT` to a test binary started as a background job of a
+  non-interactive shell. Such a job starts with SIGINT ignored, and a Go
+  program keeps an inherited SIG_IGN, so the binary did not die: 3.3 s
+  later it was still in state S. What looked like a leak on main was a test
+  still running its 5 s poll. It was redone with the disposition reset
+  (`python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT,
+  signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' <binary> …`), and
+  with `-test.timeout`, both above.
+- **With the fix** (`18b520c5`, whose `hold.go` equals the final one but
+  for the absolute paths the consult added), under NC2. macOS: the tree
+  test, `-count=10`, 20 of 20 red and 0 left; the serve test, `-count=5`,
+  5 of 5 red and 0 left; `-test.timeout=3s` and SIGINT, 0 left (the temp
+  dir stays, since no cleanup ran). Linux as above: 6 of 6 red with 0 live
+  and 6 zombies, 2 of 2 red with 0 live and 2 zombies (exited, and
+  unreaped only because that PID 1 reaps nothing).
+- **The pass/fail matrix on dido** (`go test` as PID 1, and `--init`):
+  unmutated, `internal/proctest` and `internal/tailscale` at `-count=3` and
+  the serve test at `-count=3` (three PASS lines, 0.15 to 0.17 s each)
+  pass in both; under NC2 both tests fail in both, and the failure
+  messages read the survivor's /proc state as S.
+- **A released survivor still writes.** Under NC2 with `proctest.Exited`
+  mutated to always answer "exited", the tests reach their second check:
+  the tree test failed "wrote after the cancel" in 6 of 6 subtests and the
+  serve test "wrote its cert after serve returned" in 3 of 3, with nothing
+  left behind. The same lie over the real `stopTreeOnCancel` passes both
+  (`-count=2`), since no CLI survives to write.
+- **The census.** A grep of test sources for shell polling loops (`while
+  [`, `until [`, `sleep 0.`, `#!/bin/sh`) found the two holds and
+  `internal/transcode`'s `fakeSoxScript`, whose barrier wait gives up
+  after 3000 polls (60 s). The other stubs run `sleep 10` or exit at once.
+- **How fast the directory arm ends a shell**: 34.5 ms from `rm -rf` to
+  its exit, timed from a shell harness, which is one poll plus the timing.
+
+### Decisions
+
+- **The hold ends on its own evidence, not on a signal from the test.** A
+  release file that exists for microseconds is a signal a 20 ms poller
+  misses; a directory that is gone stays gone. So the wait also ends once
+  the release file's directory is gone, which needs no pid and no kill.
+  The two other directions were weighed:
+  - **SIGKILL the recorded pid from the cleanup.** The survivor is a
+    grandchild the test cannot reap, and macOS has no pidfd, so a kill by
+    pid races the pid's reuse. Under NC2 the fake also shares the test
+    binary's process group, so a group kill is not available either.
+  - **Keep the release until the fake has exited** (release, then wait on
+    `Exited`). It works only while cleanups run, needs the pid, and does
+    nothing for a binary that dies first. It is used in one place, the
+    hold's own test, where the hold cannot be leaned on
+    (`releaseAndWait`).
+- **And once the test binary is gone** (`kill -0` on the pid baked in when
+  the script is built), for the run that dies before its cleanups.
+  `kill -0` finds a zombie and a reused pid alike, so a binary left
+  unreaped (its `go` command killed too, under a PID 1 that reaps nothing)
+  or a pid handed to another process of this user before the next poll
+  keeps the shell waiting until that one is gone. The doc says so. **Not a
+  parent-death check**: the survivor under test IS orphaned (its wrapper is
+  killed), so ending on reparenting ends exactly the process the test must
+  find, and NC2 would pass.
+- **Status 3, and the fake's work not run.** The work writes into the
+  directory being removed (the tree test's marker) or beside it (the serve
+  test's cert, in the config dir under the same test root), and a write
+  racing `RemoveAll` is how "directory not empty" happens. The distinct
+  status lets the directory tests tell the hold's exit from a failed
+  write or a syntax error.
+- **One helper in `internal/proctest`, not two edits.** Both fakes had the
+  same hand-rolled loop, and both test packages already import proctest.
+  It also quotes its paths as one shell word. The old scripts did not, and
+  nothing broke only because t.TempDir drops `'` from a test's name; an
+  unusual TMPDIR would have.
+- **Paths are made absolute before the script is written** (the consult
+  below). A bare name's directory is ".", which the shell finds for as
+  long as its working directory exists, removed or not.
+- **The consumers keep their cleanup release.** It still lets a serve, or
+  a call, blocked on a surviving fake finish before the drain rather than
+  wait out the grace. The hold is what ends a fake that misses it. The
+  tests' own failure paths are unchanged for the same reason.
+
+### Tests and controls
+
+- `internal/proctest`: `TestAHeldShellGoesOnOnceReleased` (released, the
+  script goes on and exits 0; the marker is its work),
+  `TestAHeldShellEndsWithItsDirectory` (the directory removed without a
+  release, status 3), `TestAHeldShellGivenBareNamesEndsWithItsDirectory`
+  (the same through `t.Chdir` and bare names), and
+  `TestAHeldShellEndsWithItsTestBinary`, which runs its own binary again
+  as a child that holds the shell, SIGKILLs and reaps the child, and asks
+  `Exited` about the shell, the directory still there and no release made.
+  Every one first requires the shell to be still waiting 300 ms after it
+  recorded its pid, so a hold that ends at once cannot pass the tests that
+  only ask whether it ends. The two quoted-path helpers put a `'` in the
+  directory's name.
+- **Red first**: R0 below is the old loop, in the helper.
+- Controls, each applied to a committed tree in a scratch worktree,
+  restored from HEAD and the tree hash checked, then the leftover shells
+  listed. R0 to R6 ran on `18b520c5` and, after the two test fixes (Process
+  notes), on `075d4574`. R7, and a final pass of all eight on both
+  platforms, ran on the final code commit, `9e08f088`. The Linux column is
+  dido with `go test` as PID 1; R0 also ran with a PID 1 that reaps
+  nothing, and left 0 live shells.
+
+  | | mutation | macOS | Linux |
+  |---|---|---|---|
+  | R0 | the old loop: neither arm | the two directory tests and the test-binary test red | the same |
+  | R1 | no directory arm | the two directory tests red | the same |
+  | R2 | no test-binary arm | the test-binary test red alone | the same |
+  | R3 | the loop waits on another file | the release test red, and its cleanup had to kill the shell | the same |
+  | R4 | the hold exits at once | all red, through the "still waiting" checks | the same |
+  | R5 | no quote escaping | the two quoted-path tests red | the same |
+  | R6 | `kill -0` on the parent of the test binary | the test-binary test red alone | the same |
+  | R7 | the paths not made absolute | the bare-name test red alone | the same |
+
+  None left a shell running. NC2 and the lying probe, above, are the
+  controls on the two consuming tests.
+
+### Consult
+
+`consult.py` (gemini-3.8-flash) over the whole code diff, with four
+questions. Taken: a bare name defeats the directory arm (R7 above). Taken
+into the doc: `kill -0` also finds a zombie test binary. No finding on
+whether the hold can end while its test runs (same uid, same pid
+namespace, `kill` and `[` builtins in dash, bash and busybox). Declined,
+with the evidence: "the re-exec test leaks zombies when `go test` is PID
+1" (every orphaned grandchild does there, #1024, and a zombie holds only
+its slot); "the `StdinPipe` write end is never closed" (`Cmd.Wait` closes
+it once the child exits); "the `return` after `holdAsChild` is dead code"
+(it is, while `holdAsChild` ends in `os.Exit`; without it an edit that
+returned would run the parent's half inside the child).
+
+### Out of scope
+
+- **`internal/transcode`'s fake sox** waits on barrier files with a bound
+  of its own (3000 polls, 60 s), so it ends by itself. Its barriers pass
+  between two concurrent fakes rather than from a test's cleanup.
+- **The zombie test binary** (Decisions). Reaching it takes a PID 1 that
+  reaps nothing and outlives the run, with the `go` command killed as
+  well; in a container whose PID 1 is `go test`, everything dies with it.
+- **doctor's `pidAlive`**, #1024's first Out of scope item, is untouched.
+
+### Process notes
+
+- **The test of the hold met the defect it tests.** Under R0,
+  `TestAHeldShellEndsWithItsTestBinary`'s failure path created the release
+  file and failed, t.TempDir removed the directory straight after, and its
+  own shell looped on (killed by pid). Where the hold is what is under
+  test, the failure path releases and waits (`5e069e32`).
+- **A zombie hid an early exit.** Under R4 the test-binary test passed on
+  macOS: the child never reaped its shell, and kill(pid, 0) finds the
+  zombie, so the check that it holds saw nothing. The child now reaps it
+  (`075d4574`). Linux would have caught it through /proc's Z.
+- **A control that no longer builds is not a control.** Once `mustAbs`
+  used `path/filepath`, R0 and R1 as first written removed that import;
+  they were rewritten and built before the final pass.
+- **`pgrep -f` matches the command line of the shell that runs it**, so
+  a check for leftovers finds itself. The checks here spell the pattern
+  `tailscale-ap[p]`.
+
+### Review
+
+- **Round 1**, on `48f7584a`. CodeRabbit: "No actionable comments were
+  generated", its `coveredCommitId` the head (`kind: reviewed`), no pause
+  notice. SonarCloud: gate passed, 0 new issues, 0 hotspots. Gemini's app
+  answered with its daily-quota warning, so a direct consult
+  (`consult.py`, gemini-3.8-flash) over the final diff stood in: no
+  finding on the code (`mustAbs`, `startHeldShellIn`, the bare-name
+  test's cleanup order), on vacuous or flaky tests, or on the CLAUDE.md
+  bullet. The one falsification it proposed was run: the whole proctest
+  package at `-race -count=20 -shuffle=on`, under 24 `yes` burners on 12
+  cores, passed in 40 s and left no shell. CI: 20 of 20 checks passed,
+  `test (windows-latest)` among them.
