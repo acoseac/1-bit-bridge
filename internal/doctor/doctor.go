@@ -746,7 +746,7 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 	// Port is in use. Is it us?
 	if ownPIDFile != "" {
 		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
-			found, seen, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
+			found, seen, probeErr := ownerProbeFunc(ctx, port, ownPID)
 			switch {
 			case probeErr != nil:
 				// The probe MECHANISM failed (e.g. an antivirus blocked
@@ -878,7 +878,7 @@ func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile stri
 	if err != nil || ownPID <= 0 {
 		return fail(name, conflict, anotherProcessOwnsPort)
 	}
-	found, seen, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
+	found, seen, probeErr := ownerProbeFunc(ctx, port, ownPID)
 	switch {
 	case probeErr == nil && found:
 		return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
@@ -1356,8 +1356,9 @@ func windowsStartupDir() string {
 // isPIDListeningOnPort is platform-provided — the lsof-backed unix
 // implementation lives in doctor_notwindows.go and the native iphlpapi.dll
 // implementation in doctor_windows.go. The "is it us?" branch of checkPort
-// calls it; see the per-platform docs for the (found, sighting, error)
-// contract, and ownerSighting for what a miss says about itself.
+// calls it, through ownerProbeFunc; see the per-platform docs for the
+// (found, sighting, error) contract, and ownerSighting for what a miss says
+// about itself.
 //
 // isPIDListeningOnPort takes the context on BOTH platforms even though only
 // the unix one spawns a subprocess to bound. One signature keeps the caller
@@ -1376,6 +1377,12 @@ func windowsStartupDir() string {
 var (
 	pidAliveFunc  = pidAlive
 	portOwnerFunc = portOwnedByThisUser
+	// ownerProbeFunc is the owner probe itself (isPIDListeningOnPort),
+	// indirected so a test can hand both port ladders every kind of
+	// account, a ruled-out miss included, on every platform. Only
+	// Windows' table and Linux's /proc produce one for real, so without
+	// it nothing on a Mac could show that no verdict turns on the account.
+	ownerProbeFunc = isPIDListeningOnPort
 )
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.

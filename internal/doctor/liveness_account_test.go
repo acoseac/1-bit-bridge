@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -132,4 +134,85 @@ func requireAdviceFitsTheAccount(t *testing.T, hint string, ruledOut bool) {
 		t.Errorf("nothing ruled the bridge out, so the hint must keep the hedge: %s", hint)
 	}
 	requireBlindSpot(t, hint)
+}
+
+// withOwnerProbe forces the owner probe's answer for a test (ownerProbeFunc).
+func withOwnerProbe(t *testing.T, found bool, seen ownerSighting, err error) {
+	t.Helper()
+	orig := ownerProbeFunc
+	t.Cleanup(func() { ownerProbeFunc = orig })
+	ownerProbeFunc = func(context.Context, int, int) (bool, ownerSighting, error) { return found, seen, err }
+}
+
+// probeAnswer is one answer the owner probe can give about a held port
+// whose recorded bridge is pid 4242.
+type probeAnswer struct {
+	name  string
+	found bool
+	seen  ownerSighting
+	err   error
+}
+
+var probeAnswers = []probeAnswer{
+	{"found", true, ownerSighting{}, nil},
+	{"probe failed", false, ownerSighting{}, errors.New("the probe broke")},
+	{"miss, ruled out", false, ownerSighting{saw: "the table lists pid 1305 on this port", ruledOut: true}, nil},
+	{"miss, hedged", false, ownerSighting{saw: "lsof lists no process listening on this port", blind: "the blind spot"}, nil},
+	{"miss, no account", false, ownerSighting{}, nil},
+}
+
+// ladderVerdicts is what both port ladders answer for a held port whose
+// recorded bridge is pid 4242, from the probe's found and its error, the
+// pid's liveness and the uid arm alone: the verdicts as they were before
+// the probe had an account to give. checkPort warns on a failed probe, is
+// ok on a match, and otherwise leans on liveness and the uid arm;
+// checkChosenPort is ok on a match and refuses everything else.
+func ladderVerdicts(found, probeFailed, alive, owned bool) (port, chosen Status) {
+	switch {
+	case probeFailed:
+		return Warn, Fail
+	case found:
+		return OK, OK
+	case !alive:
+		return Fail, Fail
+	case owned:
+		return OK, Fail
+	default:
+		return Warn, Fail
+	}
+}
+
+// TestPortVerdictsIgnoreTheSighting hands both ladders every kind of answer
+// the owner probe gives, accounts of every kind included, with the recorded
+// pid alive or not and the listener this user's or not, and requires the
+// verdicts ladderVerdicts gives. A ruled-out miss comes for real only from
+// Windows' table and Linux's /proc, so this is the one pin, on a Mac, that
+// no verdict turns on the account (ownerProbeFunc).
+func TestPortVerdictsIgnoreTheSighting(t *testing.T) {
+	for _, a := range probeAnswers {
+		for _, alive := range []bool{true, false} {
+			for _, owned := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s/alive=%v/owned=%v", a.name, alive, owned), func(t *testing.T) {
+					requireLadderVerdicts(t, a, alive, owned)
+				})
+			}
+		}
+	}
+}
+
+// requireLadderVerdicts grades one held port through both ladders with the
+// probe forced to a, and requires ladderVerdicts' answer.
+func requireLadderVerdicts(t *testing.T, a probeAnswer, alive, owned bool) {
+	t.Helper()
+	withOwnerProbe(t, a.found, a.seen, a.err)
+	withPIDAlive(t, alive)
+	withPortOwner(t, owned, nil)
+	port, chosen := ladderVerdicts(a.found, a.err != nil, alive, owned)
+	pidFile, held := writePIDFile(t, 4242), bindPort(t)
+	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
+		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
+	}
+	if c := checkChosenPort(t.Context(), "port-test", held, pidFile); c.Status != chosen {
+		t.Errorf("checkChosenPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, chosen)
+	}
 }

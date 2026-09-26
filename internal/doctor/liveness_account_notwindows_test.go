@@ -171,8 +171,10 @@ func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 // TestPortVerdictsDoNotDependOnTheAccount pins both ladders' verdicts for
 // every answer the lsof probe can give, with the recorded pid alive or not
 // and the listener this user's or not. The explanation of a miss comes from
-// the probe; the verdict must not. This table passes on the code before the
-// accounts existed, unchanged.
+// the probe; the verdict must not. Its first form ran on main before the
+// accounts existed and passed there, 20 of 20. lsof no longer rules a pid
+// out, so the account a verdict could turn on is pinned apart, on every
+// platform, by TestPortVerdictsIgnoreTheSighting.
 func TestPortVerdictsDoNotDependOnTheAccount(t *testing.T) {
 	for _, a := range lsofAnswers {
 		for _, alive := range []bool{true, false} {
@@ -201,33 +203,14 @@ var lsofAnswers = []lsofAnswer{
 	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
 }
 
-// verdictsBeforeTheAccount is what both ladders answered before the
-// accounts existed: checkPort warns on a failed probe, is ok on a match,
-// and otherwise leans on liveness and the uid arm; checkChosenPort is ok on
-// a match alone.
-func verdictsBeforeTheAccount(a lsofAnswer, alive, owned bool) (port, chosen Status) {
-	switch {
-	case a.code == 2:
-		return Warn, Fail
-	case a.name == "recorded pid listed":
-		return OK, OK
-	case !alive:
-		return Fail, Fail
-	case owned:
-		return OK, Fail
-	default:
-		return Warn, Fail
-	}
-}
-
 // requireVerdictsBeforeTheAccount grades one held port through both
-// ladders and requires the verdicts verdictsBeforeTheAccount gives.
+// ladders, lsof answering a, and requires the verdicts ladderVerdicts gives.
 func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, alive, owned bool) {
 	t.Helper()
 	withLsofAnswering(t, a.stdout, a.code)
 	withPIDAlive(t, alive)
 	withPortOwner(t, owned, nil)
-	port, chosen := verdictsBeforeTheAccount(a, alive, owned)
+	port, chosen := ladderVerdicts(a.name == "recorded pid listed", a.code == 2, alive, owned)
 	pidFile, held := writePIDFile(t, 4242), bindPort(t)
 	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
 		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
