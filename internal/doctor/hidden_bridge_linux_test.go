@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,7 +46,8 @@ const undumpableReady = "undumpable child ready, port "
 //
 // The child holds until its stdin reaches EOF: the test's cleanup kills it
 // first, and if this binary dies before that, the pipe closes and the child
-// exits by itself.
+// exits by itself. It runs a collection before it says it is ready
+// (collectBeforeReady).
 func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 	t.Helper()
 	return startUndumpableAs(t, -1, listen)
@@ -112,6 +114,11 @@ func startUndumpableIn(t *testing.T, uid int, cgroupDir string, listen bool) (pi
 }
 
 // runUndumpable is the child's side of startUndumpable. It never returns.
+//
+// The listener is kept alive past the wait, as runListeningChild keeps its
+// own: net closes a listener nothing references from a finalizer, so a
+// collection while the child waits would otherwise free the port the test
+// records as the bridge's, or as the holder's.
 func runUndumpable(mode string) {
 	joinChildCgroup()
 	dropToChildUID()
@@ -119,18 +126,35 @@ func runUndumpable(mode string) {
 		fmt.Fprintln(os.Stderr, "prctl(PR_SET_DUMPABLE, 0):", err)
 		os.Exit(1)
 	}
+	var l net.Listener
 	port := 0
 	if mode == "listen" {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
+		var err error
+		if l, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		port = l.Addr().(*net.TCPAddr).Port
 	}
+	collectBeforeReady()
 	fmt.Printf("%s%d\n", undumpableReady, port)
 	_, _ = io.Copy(io.Discard, os.Stdin)
+	runtime.KeepAlive(l)
 	os.Exit(0)
+}
+
+// TestAnUndumpableChildKeepsItsPortThroughACollection is
+// TestAListeningChildKeepsItsPortThroughACollection for the capability-bound
+// stand-in, whose listener is the bridge's or the holder's in every test
+// here. Until the KeepAlive, only a local nothing read after the port held
+// it, so a collection while the child waited would have closed it, and the
+// test would have graded a free port.
+func TestAnUndumpableChildKeepsItsPortThroughACollection(t *testing.T) {
+	if mode := os.Getenv(undumpableChildEnv); mode != "" {
+		runUndumpable(mode)
+	}
+	_, port := startUndumpable(t, true)
+	requirePortHeld(t, port)
 }
 
 // childUIDEnv makes a child of these tests drop to the uid it names, and the
