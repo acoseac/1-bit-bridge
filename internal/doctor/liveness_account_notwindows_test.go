@@ -90,57 +90,81 @@ func requireBlindSpot(t *testing.T, hint string) {
 // and says to stop that process. The verdicts are the arm's own: ok when a
 // listener runs as this user, warn otherwise.
 func TestLivenessArmGivesLsofsAccount(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		stdout   string
-		code     int
-		account  string
-		ruledOut bool
-	}{
-		{"lsof lists nothing", "", 1, "lsof lists no process listening on this port", false},
-		{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", true},
-		{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", true},
-		// busybox's applet ignores -t and the rest, and lists every open
-		// file it can read.
-		{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, "lsof's output does not name pid 4242", false},
-	} {
+	for _, tc := range lsofAccountCases {
 		t.Run(tc.name, func(t *testing.T) {
 			withLsofAnswering(t, tc.stdout, tc.code)
 			withPIDAlive(t, true)
 			pidFile := writePIDFile(t, 4242)
-
-			t.Run("listener runs as this user", func(t *testing.T) {
-				withPortOwner(t, true, nil)
-				c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
-				want := fmt.Sprintf("in use by a process running as this user (uid %d; %s)", os.Getuid(), tc.account)
-				if c.Status != OK || c.Summary != want {
-					t.Errorf("got %v %q, want ok %q", c.Status, c.Summary, want)
-				}
-				requireNoCapabilityClaim(t, c.Summary, tc.ruledOut)
-			})
-			t.Run("listener not attributable to this user", func(t *testing.T) {
-				withPortOwner(t, false, nil)
-				c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
-				if c.Status != Warn {
-					t.Fatalf("got %v (%s / %s), want warn", c.Status, c.Summary, c.Hint)
-				}
-				if !strings.HasPrefix(c.Hint, "our bridge (pid 4242) is still running, but "+tc.account) {
-					t.Errorf("hint does not open with lsof's account %q: %s", tc.account, c.Hint)
-				}
-				requireNoCapabilityClaim(t, c.Hint, tc.ruledOut)
-				if tc.ruledOut {
-					if !strings.Contains(c.Hint, "stop the process that holds the port") || strings.Contains(c.Hint, "this is expected") {
-						t.Errorf("lsof named the holder, so the hint must say to stop it and not call the port expected: %s", c.Hint)
-					}
-					return
-				}
-				if !strings.Contains(c.Hint, "If our bridge is what holds the port, this is expected") {
-					t.Errorf("nothing ruled the bridge out, so the hint must keep the hedge: %s", c.Hint)
-				}
-				requireBlindSpot(t, c.Hint)
-			})
+			t.Run("listener runs as this user", func(t *testing.T) { requireOwnedPortAccount(t, pidFile, tc) })
+			t.Run("listener not attributable to this user", func(t *testing.T) { requireUnownedPortAccount(t, pidFile, tc) })
 		})
 	}
+}
+
+// lsofAccountCase is one answer lsof gives about a port the recorded
+// bridge (pid 4242) does not hold, and the account the check should give.
+type lsofAccountCase struct {
+	name     string
+	stdout   string
+	code     int
+	account  string
+	ruledOut bool
+}
+
+var lsofAccountCases = []lsofAccountCase{
+	{"lsof lists nothing", "", 1, "lsof lists no process listening on this port", false},
+	{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", true},
+	{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", true},
+	// busybox's applet ignores -t and the rest, and lists every open file
+	// it can read.
+	{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, "lsof's output does not name pid 4242", false},
+}
+
+// requireOwnedPortAccount grades a held port whose listener runs as this
+// user: the uid arm's ok, with lsof's account in place of a cause.
+func requireOwnedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase) {
+	t.Helper()
+	withPortOwner(t, true, nil)
+	c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
+	want := fmt.Sprintf("in use by a process running as this user (uid %d; %s)", os.Getuid(), tc.account)
+	if c.Status != OK || c.Summary != want {
+		t.Errorf("got %v %q, want ok %q", c.Status, c.Summary, want)
+	}
+	requireNoCapabilityClaim(t, c.Summary, tc.ruledOut)
+}
+
+// requireUnownedPortAccount grades a held port whose listener is not
+// attributable to this user: the warn, whose hint opens with lsof's account
+// and gives the advice that account leaves.
+func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase) {
+	t.Helper()
+	withPortOwner(t, false, nil)
+	c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
+	if c.Status != Warn {
+		t.Fatalf("got %v (%s / %s), want warn", c.Status, c.Summary, c.Hint)
+	}
+	if !strings.HasPrefix(c.Hint, "our bridge (pid 4242) is still running, but "+tc.account) {
+		t.Errorf("hint does not open with lsof's account %q: %s", tc.account, c.Hint)
+	}
+	requireNoCapabilityClaim(t, c.Hint, tc.ruledOut)
+	requireAdviceFitsTheAccount(t, c.Hint, tc.ruledOut)
+}
+
+// requireAdviceFitsTheAccount: a probe that named the holder leaves one
+// thing to do, stop it; one that could have missed the recorded bridge
+// keeps the hedge and says what it cannot see.
+func requireAdviceFitsTheAccount(t *testing.T, hint string, ruledOut bool) {
+	t.Helper()
+	if ruledOut {
+		if !strings.Contains(hint, "stop the process that holds the port") || strings.Contains(hint, "this is expected") {
+			t.Errorf("the probe named the holder, so the hint must say to stop it and not call the port expected: %s", hint)
+		}
+		return
+	}
+	if !strings.Contains(hint, "If our bridge is what holds the port, this is expected") {
+		t.Errorf("nothing ruled the bridge out, so the hint must keep the hedge: %s", hint)
+	}
+	requireBlindSpot(t, hint)
 }
 
 // TestLivenessArmWithoutLsofGivesTheHostsAccount: with no lsof, Linux reads
@@ -203,46 +227,65 @@ func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 // the probe; the verdict must not. This table passes on the code before the
 // accounts existed, unchanged.
 func TestPortVerdictsDoNotDependOnTheAccount(t *testing.T) {
-	type answer struct {
-		name   string
-		stdout string
-		code   int
-	}
-	for _, a := range []answer{
-		{"probe failed", "", 2},
-		{"recorded pid listed", "4242\n", 0},
-		{"nothing listed", "", 1},
-		{"another pid listed", "1305\n", 0},
-		{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
-	} {
+	for _, a := range lsofAnswers {
 		for _, alive := range []bool{true, false} {
 			for _, owned := range []bool{true, false} {
-				var port, chosen Status
-				switch {
-				case a.code == 2:
-					port, chosen = Warn, Fail
-				case a.name == "recorded pid listed":
-					port, chosen = OK, OK
-				case !alive:
-					port, chosen = Fail, Fail
-				case owned:
-					port, chosen = OK, Fail
-				default:
-					port, chosen = Warn, Fail
-				}
 				t.Run(fmt.Sprintf("%s/alive=%v/owned=%v", a.name, alive, owned), func(t *testing.T) {
-					withLsofAnswering(t, a.stdout, a.code)
-					withPIDAlive(t, alive)
-					withPortOwner(t, owned, nil)
-					pidFile, held := writePIDFile(t, 4242), bindPort(t)
-					if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
-						t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
-					}
-					if c := checkChosenPort(t.Context(), "port-test", held, pidFile); c.Status != chosen {
-						t.Errorf("checkChosenPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, chosen)
-					}
+					requireVerdictsBeforeTheAccount(t, a, alive, owned)
 				})
 			}
 		}
+	}
+}
+
+// lsofAnswer is one thing lsof can answer about a held port whose recorded
+// bridge is pid 4242.
+type lsofAnswer struct {
+	name   string
+	stdout string
+	code   int
+}
+
+var lsofAnswers = []lsofAnswer{
+	{"probe failed", "", 2},
+	{"recorded pid listed", "4242\n", 0},
+	{"nothing listed", "", 1},
+	{"another pid listed", "1305\n", 0},
+	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
+}
+
+// verdictsBeforeTheAccount is what both ladders answered before the
+// accounts existed: checkPort warns on a failed probe, is ok on a match,
+// and otherwise leans on liveness and the uid arm; checkChosenPort is ok on
+// a match alone.
+func verdictsBeforeTheAccount(a lsofAnswer, alive, owned bool) (port, chosen Status) {
+	switch {
+	case a.code == 2:
+		return Warn, Fail
+	case a.name == "recorded pid listed":
+		return OK, OK
+	case !alive:
+		return Fail, Fail
+	case owned:
+		return OK, Fail
+	default:
+		return Warn, Fail
+	}
+}
+
+// requireVerdictsBeforeTheAccount grades one held port through both
+// ladders and requires the verdicts verdictsBeforeTheAccount gives.
+func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, alive, owned bool) {
+	t.Helper()
+	withLsofAnswering(t, a.stdout, a.code)
+	withPIDAlive(t, alive)
+	withPortOwner(t, owned, nil)
+	port, chosen := verdictsBeforeTheAccount(a, alive, owned)
+	pidFile, held := writePIDFile(t, 4242), bindPort(t)
+	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
+		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
+	}
+	if c := checkChosenPort(t.Context(), "port-test", held, pidFile); c.Status != chosen {
+		t.Errorf("checkChosenPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, chosen)
 	}
 }

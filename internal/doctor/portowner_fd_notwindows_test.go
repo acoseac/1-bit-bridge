@@ -161,23 +161,27 @@ func TestProcSightingAccountsForEachMiss(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("the fd path is not a directory", func(t *testing.T) {
-		notDir := filepath.Join(t.TempDir(), "fd")
-		if err := os.WriteFile(notDir, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		found, seen, err := procSighting(tables, notDir, 7789, 4242, blind)
-		if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc could not list pid 4242's descriptors (") {
-			t.Errorf("got %v, %+v, %v; want a miss naming the listing error", found, seen, err)
-		}
-	})
-	t.Run("no socket table readable", func(t *testing.T) {
-		absent := filepath.Join(dir, "absent")
-		if _, _, err := procSighting([]string{absent, absent}, writeFdDir(t, fdFixture), 7789, 4242, blind); err == nil {
-			t.Error("with neither table readable there is no answer, and that is an error")
-		}
-	})
+// TestProcSightingOfAnFdPathThatIsNoDirectory: a listing that fails for a
+// reason other than a missing process or a denial names its error, and
+// leaves the pid possible. With neither socket table readable there is no
+// answer at all, and that is the probe's error.
+func TestProcSightingOfAnFdPathThatIsNoDirectory(t *testing.T) {
+	dir := t.TempDir()
+	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), writeTable(t, dir, "tcp6", procNetTCP6Fixture)}
+	notDir := filepath.Join(dir, "fd")
+	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, seen, err := procSighting(tables, notDir, 7789, 4242, "the blind spot")
+	if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc could not list pid 4242's descriptors (") {
+		t.Errorf("got %v, %+v, %v; want a miss naming the listing error", found, seen, err)
+	}
+	absent := filepath.Join(dir, "absent")
+	if _, _, err := procSighting([]string{absent, absent}, writeFdDir(t, fdFixture), 7789, 4242, "the blind spot"); err == nil {
+		t.Error("with neither table readable there is no answer, and that is an error")
+	}
 }
 
 // chmodForTest sets a fixture directory's mode and restores a mode the
