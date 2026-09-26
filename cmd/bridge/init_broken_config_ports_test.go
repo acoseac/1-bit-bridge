@@ -49,9 +49,10 @@ func TestInitReplacesABrokenConfigWhileItsBridgeHoldsTheDefaultPorts(t *testing.
 //
 // With no config to say which ports that bridge binds, its being alive says
 // nothing about these ports. checkPort's liveness arm would still excuse
-// them, as a warn or (on Linux, where the listener runs as this user) an ok,
-// and init would save a port its restarted bridge cannot bind: #970's
-// defect. Only the bridge seen listening there may excuse a port.
+// them wherever its probe could not rule that bridge out, as a warn or (on
+// Linux, where the listener runs as this user) an ok, and init would save a
+// port its restarted bridge cannot bind: #970's defect. Only the bridge
+// seen listening there may excuse a port.
 //
 // The recorded pid is this test binary's parent (the `go test` that is
 // waiting for it): alive for the whole test, and holding neither port. The

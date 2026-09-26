@@ -376,10 +376,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	//
 	// And the pid file is CLEARED for the ones that did change.
 	// checkPort's "is it us?" ladder answers ok or warn — never fail —
-	// whenever our own recorded pid is alive, which is right for a port
-	// the running bridge is supposed to hold and wrong for one it is
-	// not: a live bridge binds what ITS config says, so it cannot
-	// legitimately own a port that is not in it. Left set, an occupied
+	// whenever our own recorded pid is alive and the owner probe could
+	// not rule it out, which is right for a port the running bridge is
+	// supposed to hold and wrong for one it is not: a live bridge binds
+	// what ITS config says, so it cannot legitimately own a port that is
+	// not in it. Left set, an occupied
 	// new port on a host that cannot attribute it (a capability-bound
 	// binary, a blocked probe) read as "our bridge is still running",
 	// HasFail stayed false, and the config was saved anyway — the check

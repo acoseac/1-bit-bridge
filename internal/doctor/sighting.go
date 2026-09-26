@@ -21,8 +21,11 @@ import (
 // and a hint naming cap_net_bind_service and dumpable=0. That is one shape,
 // a bridge granted the capability, and the arm printed it for a bridge
 // running as another user, for a port whose holder lsof had just named, and
-// on macOS and Windows, which have no such capability. The verdicts are
-// unchanged; only the account now comes from the probe.
+// on macOS and Windows, which have no such capability.
+//
+// One verdict turns on it: a live recorded pid that the sighting rules out
+// FAILs the port in checkPort, as a dead one does, since the port is then
+// another process's (the liveness arm). The words never decide anything.
 //
 // Untagged, like the /proc parser in portowner.go, so what each account says
 // is tested on every platform rather than only where its probe runs.
@@ -38,10 +41,11 @@ type ownerSighting struct {
 	// port's holder: it saw every listener on the port and they are other
 	// processes (Windows' listener table), or it read every one of the
 	// pid's descriptors, against every socket table, and none is a
-	// listener on the port (/proc). Never lsof, which lists only the
-	// processes it can see (lsofSighting). The zero value keeps the hedged
-	// advice ("if our bridge is what holds the port, this is expected"),
-	// which is the safe one to fall back on.
+	// listener on the port (/proc, asked on Linux after lsof misses or in
+	// its place). Never lsof alone, which lists only the processes it can
+	// see (lsofSighting). The zero value keeps the hedged advice ("if our
+	// bridge is what holds the port, this is expected") and the verdict
+	// that goes with it, which is the safe one to fall back on.
 	ruledOut bool
 }
 
@@ -105,6 +109,40 @@ func lsofPIDs(out []byte) ([]int, bool) {
 		pids = append(pids, n)
 	}
 	return pids, true
+}
+
+// procSecondOpinion is what the /proc attribution adds to lsof's account
+// (lsofSeen) of a port on which lsof did not name the pid, given /proc's own
+// answer about that pid: whether it found the pid holding a listener on the
+// port, its sighting, and its error. isPIDListeningOnPort asks it after
+// every clean lsof miss.
+//
+// lsof lists only the processes this user may inspect, so its miss never
+// rules the pid out (lsofSighting). /proc reads the pid's own descriptors,
+// under the kernel check lsof's readlinks meet too (proc_fd_access_allowed,
+// ptrace's read check). Where every one of them read and none is a listener
+// on the port, the pid holds none on any address, and the verdict that
+// follows (checkPort's liveness arm) must be the same on a host with lsof as
+// on one without: #1028's row L4 passed where lsof was installed and was
+// ruled out where it was not.
+//
+// So a /proc match is a match: an inode names one socket. A /proc ruling-out
+// is joined to lsof's account, which keeps the pids lsof named, and carries
+// no blind spot. Anything else (a pid /proc cannot read, or neither socket
+// table readable) leaves lsof's account as it was: /proc could see no more
+// than lsof did. Off Linux, pidListensOnPort's stub neither finds nor rules
+// out, so lsof's account stands there.
+func procSecondOpinion(lsofSeen ownerSighting, procFound bool, procSeen ownerSighting, procErr error) (bool, ownerSighting) {
+	switch {
+	case procErr != nil:
+		return false, lsofSeen
+	case procFound:
+		return true, ownerSighting{}
+	case procSeen.ruledOut:
+		return false, ownerSighting{saw: lsofSeen.account() + ", and " + procSeen.account(), ruledOut: true}
+	default:
+		return false, lsofSeen
+	}
 }
 
 // listenerTableSighting is Windows' account (doctor_windows.go) of a port

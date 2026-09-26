@@ -13,8 +13,9 @@ import (
 //
 // With the config, a held port behind a live recorded bridge is probably
 // that bridge's, because its config names the port: checkPort's liveness
-// arm answers ok or warn. Without it nothing names the port. The install
-// may have moved off init's defaults (because something else holds
+// arm answers ok or warn, unless the probe saw enough to rule the bridge
+// out, which is a FAIL there too. Without it nothing names the port. The
+// install may have moved off init's defaults (because something else holds
 // 7788, say), so its bridge is alive on its own ports while another process
 // holds the one init writes, and excusing that port saves a config the
 // restarted bridge cannot bind. Only the bridge seen listening there says
@@ -34,9 +35,12 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		{"the recorded bridge seen listening", func(t *testing.T) (int, string) {
 			return bindPort(t), writePIDFile(t, os.Getpid())
 		}, OK, OK},
-		// pid 4242 is not the holder, so no probe names it. Alive, with the
-		// listener running as this user: the Linux uid arm's ok.
+		// pid 4242 is not the holder, so no probe names it, and the probe
+		// is forced to a miss that cannot rule it out, as a capability-bound
+		// bridge's is. Alive, with the listener running as this user: the
+		// Linux uid arm's ok.
 		{"recorded bridge alive, listener runs as this user", func(t *testing.T) (int, string) {
+			withUnattributedMiss(t)
 			withPIDAlive(t, true)
 			withPortOwner(t, true, nil)
 			return bindPort(t), writePIDFile(t, 4242)
@@ -44,10 +48,20 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		// Alive, and nothing can say who holds the port: the liveness
 		// arm's warn.
 		{"recorded bridge alive, holder unattributable", func(t *testing.T) (int, string) {
+			withUnattributedMiss(t)
 			withPIDAlive(t, true)
 			withPortOwner(t, false, nil)
 			return bindPort(t), writePIDFile(t, 4242)
 		}, Fail, Warn},
+		// Alive, and the probe saw enough to rule it out (/proc read all of
+		// its descriptors, or Windows' table named the holders): the port
+		// is another process's, whoever the listener runs as.
+		{"recorded bridge alive, ruled out, listener runs as this user", func(t *testing.T) (int, string) {
+			withOwnerProbe(t, false, ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}, nil)
+			withPIDAlive(t, true)
+			withPortOwner(t, true, nil)
+			return bindPort(t), writePIDFile(t, 4242)
+		}, Fail, Fail},
 		{"recorded bridge not running", func(t *testing.T) (int, string) {
 			withPIDAlive(t, false)
 			return bindPort(t), writePIDFile(t, 4242)

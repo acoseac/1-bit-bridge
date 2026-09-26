@@ -51,6 +51,19 @@ func bindPort(t *testing.T) int {
 	return lis.Addr().(*net.TCPAddr).Port
 }
 
+// withUnattributedMiss forces the owner probe to the miss a capability-bound
+// bridge produces: it ran cleanly, did not name the recorded pid, and could
+// not rule it out. The tests below record pid 4242 and hold the port
+// themselves, and left to the host the probe answers something else there:
+// Windows' listener table names the test process and rules 4242 out, and
+// /proc on Linux rules out a 4242 that is a process of the test's own user.
+// Either is a port the recorded bridge demonstrably does not hold, which
+// FAILs, and not the arm these tests are about.
+func withUnattributedMiss(t *testing.T) {
+	t.Helper()
+	withOwnerProbe(t, false, ownerSighting{saw: "lsof lists no process listening on this port", blind: "the blind spot"}, nil)
+}
+
 // TestPortCheck_LivePIDUnattributableWarns is the fix for the production
 // false-FAIL on bridge.ars.md.
 //
@@ -62,6 +75,7 @@ func bindPort(t *testing.T) int {
 // "another process owns this port" against the operator's own healthy
 // bridge.
 func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
+	withUnattributedMiss(t)
 	withPIDAlive(t, true)
 	withPortOwner(t, false, nil) // can't tell who owns it
 	port := bindPort(t)
@@ -95,6 +109,7 @@ func TestPortCheck_DeadPIDStillFails(t *testing.T) {
 // last-resort probe CAN say the listener belongs to our uid, that is a
 // better answer than the Warn and doctor reports ok.
 func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
+	withUnattributedMiss(t)
 	withPIDAlive(t, true)
 	withPortOwner(t, true, nil)
 	port := bindPort(t)
@@ -109,6 +124,7 @@ func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 // last-resort probe must not be read as a positive match. It lands on the
 // same Warn as "asked and got no match".
 func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
+	withUnattributedMiss(t)
 	withPIDAlive(t, true)
 	withPortOwner(t, true, os.ErrPermission) // owned=true but errored
 	port := bindPort(t)

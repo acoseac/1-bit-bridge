@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,12 @@ import (
 // exiting with code, so a test chooses what lsof reports: exit 1 with no
 // output is lsof's "matched nothing", a pid a line is `lsof -t`'s answer.
 // The output goes through a file, so the shell prints it byte for byte.
+//
+// It also sets what /proc answers after lsof misses (procOwnerFunc) to an
+// answer that adds nothing, so the test grades lsof's answer alone on every
+// unix. Left to the host, /proc on Linux would read the recorded pid, and
+// pid 4242 may be a process of the test's own user, which it rules out. A
+// test that wants /proc's opinion sets it after this (withProcAnswering).
 func withLsofAnswering(t *testing.T, stdout string, code int) {
 	t.Helper()
 	sh, err := exec.LookPath("sh")
@@ -34,6 +41,7 @@ func withLsofAnswering(t *testing.T, stdout string, code int) {
 	lsofCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, sh, "-c", `cat "$0"; exit "$1"`, out, strconv.Itoa(code))
 	}
+	withProcAnswering(t, false, procCannotTell, nil)
 }
 
 // TestLivenessArmGivesLsofsAccount: when the recorded bridge is alive and
@@ -117,15 +125,16 @@ func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase)
 // TestLivenessArmWithoutLsofGivesTheHostsAccount: with no lsof, Linux reads
 // /proc itself (pidListensOnPort) and every other unix has nothing to ask.
 // The recorded pid here is this test's parent: alive, of this user,
-// readable, and holding no port of ours. So /proc rules it out, and a host
-// with nothing to ask says so rather than blaming a capability.
+// readable, and holding no port of ours. So /proc rules it out, and the port
+// FAILs as another process's; a host with nothing to ask says so rather
+// than blaming a capability, and warns.
 func TestLivenessArmWithoutLsofGivesTheHostsAccount(t *testing.T) {
 	withoutLsof(t)
 	withPortOwner(t, false, nil)
 	ppid := os.Getppid()
 	c := checkPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, ppid))
-	if c.Status != Warn {
-		t.Fatalf("got %v (%s / %s), want warn", c.Status, c.Summary, c.Hint)
+	if want := unseenVerdict(runtime.GOOS == "linux"); c.Status != want {
+		t.Fatalf("got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, want)
 	}
 	lead := fmt.Sprintf("our bridge (pid %d) is still running, but this host has no lsof, and ", ppid)
 	if runtime.GOOS == "linux" {
@@ -169,19 +178,29 @@ func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 }
 
 // TestPortVerdictsDoNotDependOnTheAccount pins both ladders' verdicts for
-// every answer the lsof probe can give, with the recorded pid alive or not
-// and the listener this user's or not. The explanation of a miss comes from
-// the probe; the verdict must not. Its first form ran on main before the
-// accounts existed and passed there, 20 of 20. lsof no longer rules a pid
-// out, so the account a verdict could turn on is pinned apart, on every
-// platform, by TestPortVerdictsIgnoreTheSighting.
+// every answer the lsof probe can give, each with every answer /proc can
+// give after it, the recorded pid alive or not and the listener this user's
+// or not. The explanation of a miss comes from the probe; the verdict turns
+// on what it establishes, never on its words. Its first form, lsof alone,
+// ran on main before the accounts existed and passed there, 20 of 20.
+//
+// The /proc answers are what changed the rows. lsof lists only the
+// processes this user may inspect, so it never rules the recorded bridge
+// out. /proc, asked after an lsof miss, reads the bridge's own descriptors:
+// where none is a listener on the port, the port is another process's and
+// both ladders FAIL (the L4 rows of #1028's matrix, which the uid arm
+// passed); where one is, it is the bridge's own and both are ok. The
+// sighting's other half is pinned on every platform by
+// TestPortVerdictsReadOnlyRuledOutFromTheSighting.
 func TestPortVerdictsDoNotDependOnTheAccount(t *testing.T) {
 	for _, a := range lsofAnswers {
-		for _, alive := range []bool{true, false} {
-			for _, owned := range []bool{true, false} {
-				t.Run(fmt.Sprintf("%s/alive=%v/owned=%v", a.name, alive, owned), func(t *testing.T) {
-					requireVerdictsBeforeTheAccount(t, a, alive, owned)
-				})
+		for _, p := range procAnswers {
+			for _, alive := range []bool{true, false} {
+				for _, owned := range []bool{true, false} {
+					t.Run(fmt.Sprintf("%s/%s/alive=%v/owned=%v", a.name, p.name, alive, owned), func(t *testing.T) {
+						requireVerdictsBeforeTheAccount(t, a, p, alive, owned)
+					})
+				}
 			}
 		}
 	}
@@ -203,19 +222,104 @@ var lsofAnswers = []lsofAnswer{
 	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
 }
 
+// procAnswer is one thing /proc can answer about pid 4242 after lsof did
+// not name it: that pid holds the listener, its descriptors read and none
+// is the listener, or it cannot tell.
+type procAnswer struct {
+	name  string
+	found bool
+	seen  ownerSighting
+}
+
+var procAnswers = []procAnswer{
+	{"proc cannot tell", false, procCannotTell},
+	{"proc rules the pid out", false, procRulesOut},
+	{"proc sees the pid listening", true, ownerSighting{}},
+}
+
 // requireVerdictsBeforeTheAccount grades one held port through both
-// ladders, lsof answering a, and requires the verdicts ladderVerdicts gives.
-func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, alive, owned bool) {
+// ladders, lsof answering a and /proc p when lsof misses, and requires the
+// verdicts ladderVerdicts gives. /proc is asked only after a clean miss, so
+// it decides nothing where lsof failed or named the pid.
+func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, p procAnswer, alive, owned bool) {
 	t.Helper()
 	withLsofAnswering(t, a.stdout, a.code)
+	withProcAnswering(t, p.found, p.seen, nil)
 	withPIDAlive(t, alive)
 	withPortOwner(t, owned, nil)
-	port, chosen := ladderVerdicts(a.name == "recorded pid listed", a.code == 2, alive, owned)
+	listed, failed := a.name == "recorded pid listed", a.code == 2
+	missed := !listed && !failed
+	found := listed || (missed && p.found)
+	port, chosen := ladderVerdicts(found, failed, alive, missed && p.seen.ruledOut, owned)
 	pidFile, held := writePIDFile(t, 4242), bindPort(t)
 	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
 		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
 	}
 	if c := checkChosenPort(t.Context(), "port-test", held, pidFile); c.Status != chosen {
 		t.Errorf("checkChosenPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, chosen)
+	}
+}
+
+// TestLsofMissAsksProcForASecondOpinion drives the owner probe with lsof
+// answering through sh(1) and /proc's answer forced, and pins when /proc is
+// asked and what its answer does to lsof's.
+//
+// lsof lists only the processes this user may inspect, so its miss cannot
+// rule the recorded bridge out, and in #1028's L4 row the lsof image passed
+// a port another process held where the image without lsof, reading /proc,
+// ruled the bridge out: one set of facts, two verdicts, chosen by whether
+// lsof is installed. So after a clean miss the probe asks /proc too. A
+// /proc that sees the pid holding the listener is a match; one that rules
+// it out joins its account to lsof's; one that cannot tell, or cannot read
+// either socket table, leaves lsof's account as it was. /proc is not asked
+// where lsof named the pid, nor where lsof failed: the failure path is the
+// one checkPort degrades to a warn, and stays as it was.
+func TestLsofMissAsksProcForASecondOpinion(t *testing.T) {
+	lsofNothing := "lsof lists no process listening on this port"
+	lsofOther := "lsof lists pid 1305 listening on this port"
+	for _, tc := range []struct {
+		name       string
+		stdout     string
+		code       int
+		procFound  bool
+		procSeen   ownerSighting
+		procErr    error
+		wantAsked  bool
+		wantFound  bool
+		wantSeen   ownerSighting
+		wantErrSet bool
+	}{
+		{"lsof failed", "", 2, false, procRulesOut, nil, false, false, ownerSighting{}, true},
+		{"lsof named the pid", "4242\n", 0, false, procRulesOut, nil, false, true, ownerSighting{}, false},
+		{"nothing listed, proc rules out", "", 1, false, procRulesOut, nil, true, false,
+			ownerSighting{saw: lsofNothing + ", and " + procRulesOut.saw, ruledOut: true}, false},
+		{"another pid listed, proc rules out", "1305\n", 0, false, procRulesOut, nil, true, false,
+			ownerSighting{saw: lsofOther + ", and " + procRulesOut.saw, ruledOut: true}, false},
+		{"another pid listed, proc sees the pid", "1305\n", 0, true, ownerSighting{}, nil, true, true, ownerSighting{}, false},
+		{"another pid listed, proc cannot tell", "1305\n", 0, false, procCannotTell, nil, true, false,
+			ownerSighting{saw: lsofOther, blind: blindSpot()}, false},
+		{"another pid listed, proc read no table", "1305\n", 0, false, ownerSighting{}, errors.New("no table"), true, false,
+			ownerSighting{saw: lsofOther, blind: blindSpot()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withLsofAnswering(t, tc.stdout, tc.code)
+			asked := 0
+			orig := procOwnerFunc
+			t.Cleanup(func() { procOwnerFunc = orig })
+			procOwnerFunc = func(port, pid int) (bool, ownerSighting, error) {
+				asked++
+				if pid != 4242 {
+					t.Errorf("/proc asked about pid %d, want the recorded 4242", pid)
+				}
+				return tc.procFound, tc.procSeen, tc.procErr
+			}
+			found, seen, err := isPIDListeningOnPort(t.Context(), 7788, 4242)
+			if (err != nil) != tc.wantErrSet || found != tc.wantFound || seen != tc.wantSeen {
+				t.Errorf("got %v, %+v, %v; want %v, %+v, error %v", found, seen, err, tc.wantFound, tc.wantSeen, tc.wantErrSet)
+			}
+			if (asked > 0) != tc.wantAsked || asked > 1 {
+				t.Errorf("/proc asked %d times, want asked %v, once at most", asked, tc.wantAsked)
+			}
+		})
 	}
 }

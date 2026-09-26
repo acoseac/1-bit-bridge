@@ -39,7 +39,11 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 //
 // UID equality is deliberately WEAKER than PID equality — another process
 // running as the same user matches too. The caller words its verdict to say
-// exactly that. It is the ceiling of what an unprivileged observer can
+// exactly that, and asks only where the owner probe could not rule the
+// recorded bridge out: where /proc read every one of the bridge's
+// descriptors and none is a listener on the port, a listener of this uid is
+// another process of the same user, and the port FAILs without asking
+// (#1028's row L4). It is the ceiling of what an unprivileged observer can
 // learn, and strictly more than the "unknown owner" it replaces.
 func portOwnedByThisUser(port int) (bool, error) {
 	me := os.Getuid()
@@ -67,8 +71,10 @@ func portOwnedByThisUser(port int) (bool, error) {
 // port, from /proc alone: the port's listener inodes from the socket
 // tables, then the process's own descriptors, each of which links to
 // `socket:[<inode>]` for a socket. It is the question lsof answers for
-// isPIDListeningOnPort, asked of the same kernel tables lsof reads, and it
-// is asked only where no usable lsof resolved.
+// isPIDListeningOnPort, asked of the same kernel tables lsof reads: in
+// lsof's place where no usable lsof resolved, and after lsof ran and did
+// not name the pid, since lsof's miss cannot rule the pid out and this can
+// (procSecondOpinion).
 //
 // So attribution on Linux does not depend on whether lsof is installed. It
 // is Priority standard on Debian and Ubuntu, so their minimal installs and

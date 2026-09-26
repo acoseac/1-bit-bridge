@@ -50,11 +50,14 @@ func writeServerPIDFile(dataDir string) (path string, err error) {
 // doctor does not take a leftover file on trust: checkPort asks the OS
 // whether that PID actually holds the port (isPIDListeningOnPort). A PID
 // that is no longer running excuses nothing, so a stale file leaves a
-// bound port graded as a conflict. A RECYCLED one is excused as though it
-// were ours: reported as our own bridge when the process that inherited it
-// holds the port, and otherwise answered by the liveness arm's warn or
-// same-uid ok. Removing the file on the way out keeps the common case
-// clean, and leaves a stale file only after an exit that skipped this.
+// bound port graded as a conflict. A RECYCLED one is taken for ours:
+// reported as our own bridge when the process that inherited it holds the
+// port, and otherwise judged by the liveness arm, which FAILs the port
+// where the owner probe could read that process and rule it out (Windows'
+// listener table; Linux's /proc, for a process of this user) and otherwise
+// answers with its warn or same-uid ok. Removing the file on the way out
+// keeps the common case clean, and leaves a stale file only after an exit
+// that skipped this.
 func removeServerPIDFile(path string) {
 	if path == "" {
 		return

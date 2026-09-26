@@ -2303,7 +2303,7 @@ what it claimed**, and none of it had a failing test.
   nothing. **The verdicts are untouched, and pinned apart from the text**:
   `TestPortVerdictsDoNotDependOnTheAccount` walks both ladders over every
   lsof answer and passed on main before the accounts existed, and
-  `TestPortVerdictsIgnoreTheSighting` feeds every kind of account through
+  `TestPortVerdictsReadOnlyRuledOutFromTheSighting` feeds every kind of account through
   `ownerProbeFunc`, a ruled-out one included. Only Windows and Linux make
   one for real, so without the seam a verdict keyed on it passed every
   test on a Mac (NC6). #1021's rule, that

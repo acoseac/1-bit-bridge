@@ -26,14 +26,17 @@ import (
 func portOwnedByThisUser(int) (bool, error) { return false, nil }
 
 // pidListensOnPort is the non-Linux stub for the /proc attribution that
-// isPIDListeningOnPort asks where no usable lsof resolved. There is no
-// socket table to walk here: macOS ships lsof in its base system, so a Mac
-// reaches this only with lsof removed, and Windows attributes natively
-// (GetExtendedTcpTable, doctor_windows.go) and never calls it.
+// isPIDListeningOnPort asks where no usable lsof resolved, and after an
+// lsof miss. There is no socket table to walk here: macOS ships lsof in its
+// base system, so a Mac reaches the first only with lsof removed, and
+// Windows attributes natively (GetExtendedTcpTable, doctor_windows.go) and
+// never calls it.
 //
 // (false, nil) is "asked and got no match", lsof's own answer for a port it
 // cannot attribute. The sighting says nothing looked, which leaves the
-// recorded bridge possible; the caller puts the missing lsof in front of it.
+// recorded bridge possible: without lsof the caller puts the missing lsof in
+// front of it, and after lsof's miss it adds nothing to lsof's account
+// (procSecondOpinion).
 func pidListensOnPort(int, int) (bool, ownerSighting, error) {
 	return false, ownerSighting{saw: "nothing else here matches a process to a port"}, nil
 }

@@ -15753,10 +15753,12 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   the hedge and gets the blind spot in parentheses.
 - **The verdicts are pinned apart from the text, on every platform.**
   `ownerProbeFunc` indirects the owner probe as `pidAliveFunc` and
-  `portOwnerFunc` already did, and `TestPortVerdictsIgnoreTheSighting` hands
-  both ladders every kind of answer, a ruled-out miss included. Only Windows'
-  table and Linux's `/proc` produce one for real, so before the seam a
-  verdict keyed on it passed every test on the Mac (NC6 after round 1).
+  `portOwnerFunc` already did, and `…PortVerdictsIgnoreTheSighting` (since
+  renamed `TestPortVerdictsReadOnlyRuledOutFromTheSighting`, when a
+  ruled-out miss became a FAIL) hands both ladders every kind of answer, a
+  ruled-out miss included. Only Windows' table and Linux's `/proc` produce
+  one for real, so before the seam a verdict keyed on it passed every test
+  on the Mac (NC6 after round 1).
 - **The ok summary gives the account and not the blind spot**, for length.
   The production NUC's line moves from "(uid 1000; pid attribution blocked
   — capability-bound binary)" to "(uid 1000; lsof lists no process listening
@@ -15791,7 +15793,7 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   `TestLivenessArmNamesTheListenerThePlatformProbeSaw` and
   `TestChosenPortRefusalOfAPortTheProbeSawAnotherHold`, the test process
   holding the port and its parent recorded, plus
-  `TestPortVerdictsIgnoreTheSighting` over the seam (20 rows).
+  `…PortVerdictsIgnoreTheSighting` over the seam (20 rows).
   `sighting_test.go` covers the pure pieces, and
   `TestProcSightingAccountsForEachMiss` covers the `/proc` account on
   fixtures, a 0400 directory standing in for links that list and do not
@@ -15811,10 +15813,10 @@ this user (uid 1000; pid attribution blocked — capability-bound binary)`.
   | NC3 | lsof's pids never read | the lsof unit test, both real-probe tests and the lsof account red |
   | NC4 | a link that does not read is ignored, as before | `TestProcSightingAccountsForEachMiss` red |
   | NC5 | macOS's blind spot claims the Linux capability | four tests red, both real-probe tests among them once lsof accounts carry the blind spot |
-  | NC6 | a ruled-out miss FAILs instead of warning | on `25ccc6a9` the lsof verdict table red, with five others. After round 1 it PASSED on the Mac, since nothing there produced a ruled-out account: the gap `ownerProbeFunc` closes. With the seam, `TestPortVerdictsIgnoreTheSighting` red |
+  | NC6 | a ruled-out miss FAILs instead of warning | on `25ccc6a9` the lsof verdict table red, with five others. After round 1 it PASSED on the Mac, since nothing there produced a ruled-out account: the gap `ownerProbeFunc` closes. With the seam, `…PortVerdictsIgnoreTheSighting` red |
   | NC7 | the missing lsof dropped from the account | the no-lsof test red |
   | NC8 | a hedged miss FAILs instead of warning | both verdict tables red, with seven others |
-  | NC9 | `checkPort` calls the probe directly, bypassing the seam | `TestPortVerdictsIgnoreTheSighting` red |
+  | NC9 | `checkPort` calls the probe directly, bypassing the seam | `…PortVerdictsIgnoreTheSighting` red |
   | NCR1 | lsof naming other pids rules the bridge out again (review round 1 reverted) | the lsof unit test, the lsof account and both real-probe tests red |
   | NCR2 | a table that did not read no longer stops a miss ruling the bridge out | `TestProcSightingDoesNotRuleOutOverATableItCouldNotRead` red |
   | NCR3 | an absent table counts as not read | `TestListenerSocketsReadsBothFamilies` red |
