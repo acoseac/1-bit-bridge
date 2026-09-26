@@ -63,22 +63,23 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			port, pidFile := tc.setup(t)
-			for _, unknown := range []bool{true, false} {
-				want := tc.wantKnown
-				if unknown {
-					want = tc.want
-				}
-				d := Deps{APIPort: port, OwnPIDFile: pidFile, OwnPIDPortsUnknown: unknown}
-				rep := RunPortChecks(t.Context(), d, true, false)
-				if len(rep.Checks) != 1 {
-					t.Fatalf("RunPortChecks returned %d checks, want the one port-api", len(rep.Checks))
-				}
-				if c := rep.Checks[0]; c.Status != want {
-					t.Errorf("OwnPIDPortsUnknown=%v: got %v (%s / %s), want %v",
-						unknown, c.Status, c.Summary, c.Hint, want)
-				}
-			}
+			assertAPIPortVerdict(t, Deps{APIPort: port, OwnPIDFile: pidFile, OwnPIDPortsUnknown: true}, tc.want)
+			assertAPIPortVerdict(t, Deps{APIPort: port, OwnPIDFile: pidFile}, tc.wantKnown)
 		})
+	}
+}
+
+// assertAPIPortVerdict grades d's API port through RunPortChecks, as
+// `bridge init` does, and requires the one check it returns to be want.
+func assertAPIPortVerdict(t *testing.T, d Deps, want Status) {
+	t.Helper()
+	rep := RunPortChecks(t.Context(), d, true, false)
+	if len(rep.Checks) != 1 {
+		t.Fatalf("RunPortChecks returned %d checks, want the one port-api", len(rep.Checks))
+	}
+	if c := rep.Checks[0]; c.Status != want {
+		t.Errorf("OwnPIDPortsUnknown=%v: got %v (%s / %s), want %v",
+			d.OwnPIDPortsUnknown, c.Status, c.Summary, c.Hint, want)
 	}
 }
 
