@@ -215,9 +215,12 @@ func TestTakeSidecarInventoryBudgetCountsWhatItDidNotClassify(t *testing.T) {
 	}
 }
 
-// TestTakeSidecarInventoryRefusesAnEmptyRoot — WalkDir("") walks the
-// process working directory. An inventory of "" must never be an inventory
-// of the cwd, which would then be handed to something that unlinks.
+// TestTakeSidecarInventoryRefusesAnEmptyRoot — the refusal comes before
+// resolveSidecarRoot, and filepath.EvalSymlinks("") is ".", the process
+// working directory, so without it an inventory of "" would be an
+// inventory of the cwd, handed to something that unlinks. The reason this
+// gave before, that WalkDir("") walks the working directory, is false:
+// WalkDir("") reports ENOENT.
 func TestTakeSidecarInventoryRefusesAnEmptyRoot(t *testing.T) {
 	if _, err := TakeSidecarInventory(context.Background(), "", nil, SidecarInventoryOptions{}); err == nil {
 		t.Fatal("an empty root was accepted")

@@ -895,8 +895,13 @@ func ArtistImagePath(cacheDir, mbid string) string {
 // revalidation, not take the whole grid down.
 func CachedArtistImages(cacheDir string) (map[string]string, error) {
 	if cacheDir == "" {
-		// An unconfigured dir must not fall through to os.ReadDir(""), which
-		// would enumerate the process's working directory (Gemini on PR #495).
+		// An unconfigured cache holds no portraits. os.ReadDir("") would give
+		// the same answer, since it fails with ENOENT, which the branch below
+		// maps to an empty map. It does not enumerate the working directory,
+		// as this comment said after Gemini on PR #495. Answering here keeps
+		// that from resting on ReadDir's error, and keeps a "" resolved
+		// first (filepath.Clean("") is ".") from listing the working
+		// directory.
 		return map[string]string{}, nil
 	}
 	entries, err := os.ReadDir(cacheDir)

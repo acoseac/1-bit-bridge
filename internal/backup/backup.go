@@ -417,11 +417,17 @@ func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
 // part-way through one would leave behind exactly the manifest-less
 // residue this function exists to reclaim.
 func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (int, error) {
-	// Refuse an empty root: os.ReadDir("") reads the process's CURRENT WORKING
-	// DIRECTORY, and this function DELETES the subdirectories it finds without a
-	// manifest.json. A misconfigured/empty backupsRoot would therefore reap
-	// unrelated directories next to wherever the bridge happens to run (Gemini
-	// HIGH, post-merge review of #531). Fail closed instead.
+	// Refuse an empty root. Not because os.ReadDir("") reads the working
+	// directory, as the post-merge review of #531 said: it fails with ENOENT
+	// on every platform (measured with go1.26.6 on macOS, Linux and Windows),
+	// so an empty root would fall into the not-exist branch below and reap
+	// nothing, silently. It is refused because an empty backupsRoot is a
+	// misconfiguration the caller should hear about (PruneResult.ReapErr),
+	// and because this check runs before anything can turn "" into the
+	// working directory: filepath.Clean("") is ".", and filepath.Join("",
+	// name) is relative to it, so a root resolved before the listing, or a
+	// name joined onto an empty one, WOULD reap unrelated directories next to
+	// wherever the bridge runs. TestReapOrphansRefusesAnEmptyRoot pins it.
 	if strings.TrimSpace(backupsRoot) == "" {
 		return 0, errors.New("backup: ReapOrphans requires a non-empty backups root")
 	}

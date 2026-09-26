@@ -232,8 +232,10 @@ type SidecarLister interface {
 // was true, and was the defect.) A root change also drops the
 // chunk-resume cursor — a cursor is a position in one tree, and
 // compared against another it can prune that whole tree as "already
-// swept". An empty answer is a REFUSAL, not a walk of "": WalkDir("")
-// walks the process working directory.
+// swept". An empty answer is a REFUSAL (tick). WalkDir("") only reports
+// ENOENT, but a root resolved first is "." (filepath.EvalSymlinks("")
+// and filepath.Clean("") both answer it), the working directory, and
+// this sweep unlinks.
 func NewOrphanSidecarSweeper(lister SidecarLister, outputDir func() string, interval time.Duration) *OrphanSidecarSweeper {
 	return &OrphanSidecarSweeper{
 		lister:    lister,
@@ -362,7 +364,8 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		root = s.outputDir()
 	}
 	if root == "" {
-		// Nothing resolved — never walk "" (the working directory).
+		// Nothing resolved: refuse, before anything could resolve "" to
+		// "." (the working directory; WalkDir("") itself only errors).
 		logger.Warn("orphan sidecar sweep: refusing — no variants directory resolved")
 		return 0
 	}

@@ -653,8 +653,13 @@ const scratchReapAge = 2 * time.Hour
 // reclaiming disk must never be able to fail an update.
 func ReapScratchDirs(dataDir string, now time.Time) int {
 	if dataDir == "" {
-		// Never enumerate the process working directory — os.ReadDir("")
-		// would, and this function deletes what it finds.
+		// Never sweep the process working directory. os.ReadDir("") is not
+		// how that would happen: it fails with ENOENT, so this would return
+		// 0 below anyway. A root resolved before the listing would
+		// (filepath.Clean("") is ".", filepath.Abs("") the working
+		// directory), and this function deletes what it matches, so an
+		// unset DataDir is refused before anything can resolve it
+		// (TestReapScratchDirsRefusesEmptyRoot).
 		return 0
 	}
 	entries, err := os.ReadDir(dataDir)

@@ -148,9 +148,12 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		traversed int
 	)
 	if root == "" {
-		// WalkDir("") walks the process working directory — the
-		// ReapOrphans rule. Nothing to inventory is not "inventory
-		// everything under the cwd".
+		// Refused BEFORE resolveSidecarRoot, which is what makes this
+		// load-bearing: filepath.EvalSymlinks("") answers "." (measured
+		// with go1.26.6 on macOS, Linux and Windows), so an unguarded ""
+		// would inventory the working directory and hand it to a sweep that
+		// unlinks. WalkDir("") alone only reports ENOENT. Nothing to
+		// inventory is not "inventory everything under the cwd".
 		return inv, fmt.Errorf("integrity: no sidecar directory")
 	}
 	// Resolve before walking — see resolveSidecarRoot. Unresolved, a

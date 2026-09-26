@@ -454,6 +454,34 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 	}
 }
 
+// TestReapOrphansRefusesAnEmptyRoot pins the empty-root refusal, which had
+// no test. The reason it was given, that os.ReadDir("") reads the working
+// directory, is false: os.ReadDir("") fails with ENOENT on every platform
+// (measured with go1.26.6 on macOS, Linux and Windows), so without the
+// guard an empty root reaches the not-exist branch and reaps nothing,
+// silently. The guard turns that misconfiguration into an error the caller
+// reports (PruneResult.ReapErr), and it runs before anything could turn ""
+// into the working directory: filepath.Clean("") is ".", and
+// filepath.Join("", name) is relative to it. So the working directory here
+// holds a manifest-less directory, which the reaper takes for an orphan
+// wherever it lists it.
+func TestReapOrphansRefusesAnEmptyRoot(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	orphan := filepath.Join(cwd, "20260101T000000Z")
+	if err := os.Mkdir(orphan, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{"", "  "} {
+		if n, err := backup.ReapOrphans(root, 0); err == nil || n != 0 {
+			t.Errorf("ReapOrphans(%q) = %d, %v; want 0 and an error", root, n, err)
+		}
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("the working directory's manifest-less directory was touched: %v", err)
+	}
+}
+
 // ReapOrphans reclaims crash-orphaned partial snapshots — dirs with a
 // near-full bridge.db copy but NO manifest.json (writer died between
 // the DB copy and the manifest write). `List` skips them, so Prune's

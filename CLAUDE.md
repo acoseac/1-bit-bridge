@@ -209,18 +209,23 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Six claims in this list have gone stale and been corrected** — the WAV/AIFF
-extractor gap, the `deletedIds` field name, "the bridge has no DLNA Search",
-`manualDescriptionURL` being unimplemented, (2026-09-22) "`waveform_path`
-has the same shape and NO adoption yet", which #954 had falsified two days
-earlier by wiring `integrity.LocateWaveform` into `analysisStoreAdapter`, and
-(2026-09-25) "a broken existing config cannot block the re-init that replaces
-it", which held for config-file and not for the port checks. The first five
-cost a later session real time; the fourth was written **after** the PR that
-falsified it, by a session that had this very warning in front of it, and the
-fifth sent `bridge doctor` on telling operators to run `bridge analyze --force`
-— hours of decoding to recover curves the next request rebinds for free. The
-sixth was found by measuring the re-init rather than reading the bullet.
+**Seven claims in this list have been wrong and been corrected** — the
+WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
+Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
+"`waveform_path` has the same shape and NO adoption yet", which #954 had
+falsified two days earlier by wiring `integrity.LocateWaveform` into
+`analysisStoreAdapter`, (2026-09-25) "a broken existing config cannot block
+the re-init that replaces it", which held for config-file and not for the port
+checks, and (2026-09-26) "`os.ReadDir("")` reads the process working
+directory". The first five cost a later session real time; the fourth was
+written **after** the PR that falsified it, by a session that had this very
+warning in front of it, and the fifth sent `bridge doctor` on telling
+operators to run `bridge analyze --force` — hours of decoding to recover
+curves the next request rebinds for free. The sixth was found by measuring
+the re-init rather than reading the bullet. The seventh was never true: a
+bot's finding on #531, accepted without a probe, it spread to six code
+comments and three test docblocks, two of whose tests passed with the
+refusal deleted, and a bot on #1030 quoted it back as a rule.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -1388,7 +1393,9 @@ no failing test — which is the shape to expect in this area.
   `func() string`. A root change drops the sweeper's chunk-resume cursor —
   a position in ONE tree; against another root `dirEntirelyBehindCursor`
   can prune that whole tree as "already swept" — and an empty answer is a
-  refusal, never `WalkDir("")`. The Jobs chips gate on the INTERVAL, as the
+  refusal, taken before anything can resolve `""` to the working directory
+  (the `ReapOrphans` bullet under Config; `WalkDir("")` itself only
+  errors). The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
   the watchers tick regardless. (#917)
 
@@ -1903,8 +1910,27 @@ no failing test — which is the shape to expect in this area.
   creates the user** — otherwise `WORKDIR`/`VOLUME` create it root-owned and the
   first-run cert mint fails. Env overrides apply between defaults and path
   resolution so relative paths keep their config-dir semantics.
-- **`ReapOrphans`-style directory reapers must refuse an empty root** —
-  `os.ReadDir("")` reads the process working directory.
+- **`ReapOrphans`-style directory reapers must refuse an empty root, BEFORE
+  anything resolves it — and not because `os.ReadDir("")` reads the working
+  directory, which is false.** It fails with ENOENT on every platform, and
+  `filepath.WalkDir("")` visits `""` with an lstat ENOENT (measured with
+  go1.26.6 on macOS, Linux and Windows; this bullet said otherwise until
+  #1031). The working directory is reached through what an empty root
+  BECOMES: `filepath.Clean("")` is `"."`, `filepath.Abs("")` is the working
+  directory, `filepath.EvalSymlinks("")` answers `"."`, and
+  `filepath.Join("", name)` is relative to it, which let `os.RemoveAll`
+  delete the working directory's `sub/` in the probe. The EvalSymlinks case
+  is why `integrity.TakeSidecarInventory`'s and
+  `TreeHoldsVariantSidecars`' refusals are load-bearing: both resolve the
+  root before walking. Everywhere else the refusal keeps a future
+  resolution from reaching the working directory, and makes an empty root
+  an explicit answer rather than one that rests on ReadDir's error (in
+  `backup.ReapOrphans`, an error the caller reports instead of a silent
+  no-op). **A test of such a refusal must plant something in the working
+  directory** (`t.Chdir` into a temp dir) and require it untouched, or it
+  cannot see the change that matters, a root resolved before the listing.
+  The updater's and the orphan sweeper's planted nothing and passed with the
+  refusal deleted, and backup's had no test.
 - **The retention reap fails closed on an empty live-token set**, and the two
   empty forms are NOT interchangeable: `nil` deletes zero rows while
   `[]string{}` deletes EVERY row — and the caller builds the dangerous spelling.
