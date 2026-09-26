@@ -53,11 +53,12 @@ func writeServerPIDFile(dataDir string) (path string, err error) {
 // bound port graded as a conflict. A RECYCLED one is taken for ours:
 // reported as our own bridge when the process that inherited it holds the
 // port, and otherwise judged by the liveness arm, which FAILs the port
-// where the owner probe could read that process and rule it out (Windows'
-// listener table; Linux's /proc, for a process of this user) and otherwise
-// answers with its warn or same-uid ok. Removing the file on the way out
-// keeps the common case clean, and leaves a stale file only after an exit
-// that skipped this.
+// where the owner probe could rule that process out (Windows' listener
+// table; Linux's /proc, for a process of this user, or for any process
+// when every listener on the port is held by one it can read or was created
+// by a uid that process does not run as) and otherwise answers with its
+// warn or same-uid ok. Removing the file on the way out keeps the common
+// case clean, and leaves a stale file only after an exit that skipped this.
 func removeServerPIDFile(path string) {
 	if path == "" {
 		return

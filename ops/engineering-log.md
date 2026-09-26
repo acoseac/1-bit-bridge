@@ -16496,3 +16496,224 @@ defaulted and resolved). The guards themselves sort into two kinds:
 - **A test that plants nothing can only prove the absence of a crash.** Two
   of the three tests here asserted "nothing was reaped" in a directory
   holding nothing reapable.
+
+## 2026-09-26 — doctor rules a hidden bridge out of a port another uid's listener holds (#NNNN)
+
+#1030's Out of scope recorded row L7: a bridge granted
+`cap_net_bind_service` runs with dumpable=0, and when its config is edited to
+a port held by a process this user cannot read (another user's, or root's
+daemon, the NUC's likelier shape), that listener has no readable holder, so
+the census could not rule the bridge out and the check warned, exit 0.
+
+### What was measured
+
+- **The rows around L7 on main (`ea7d9f28`) and the fix (`2049cc12`)**, dido
+  (Ubuntu 26.04, kernel 7.0, Docker 29.1.3), images `attrword/nolsof:1.26.6`
+  and `attrword/lsof:1.26.6`, `~/attrword/runl7.sh` (e2e/verdict-l7.sh). The
+  bridge is the same binary with `setcap cap_net_bind_service=+ep`, live on
+  7790/7791; doctor runs as uid 1000 unless noted. **Both images gave the
+  same verdict in every row, on main and on the fix:**
+
+  | row | shape | main | fix |
+  |---|---|---|---|
+  | L2 | the bridge on its own ports | ok, exit 0 | same, same line |
+  | R2 | L2, doctor as root in the container | warn | same |
+  | L7 | config edited to 7788, which a uid-1001 holder has | warn, exit 0 | FAIL, exit 1: "our bridge (pid 242) is still running, but this host has no lsof, and /proc shows every socket listening on this port created by uid 1001, while pid 242 runs as uid 1000: stop the process that holds the port, or change the address in bridge.yaml" (lsof: "…but lsof lists no process listening on this port, and /proc shows…") |
+  | R7 | L7, doctor as root (no CAP_SYS_PTRACE) | warn | FAIL, the same account |
+  | L7r | L7, then the bridge restarted | `bind: address already in use` | the same: the consequence the check now catches |
+  | L7z | L7, the holder root's | warn, exit 0 | FAIL: "…created by uid 0, while pid 357 runs as uid 1000…" |
+  | L7i | L7, then `bridge init --yes --force` | exit 0, config saved with `:7788` | exit 1, port-api FAIL, config untouched |
+  | L7c | L7's holder, the config broken by an unknown key, then `bridge init --yes --force` | FAIL, hint "…If it does, stop that bridge and re-run; otherwise stop the process that holds the port" | FAIL, hint "…created by uid 1001, while pid 518 runs as uid 1000: stop the process that holds the port and re-run" |
+  | L6m | the uid-1000 holder on 127.0.0.1:7788 and a uid-1001 holder on [::1]:7788 | warn, exit 0 | FAIL: "…held by pid 633 or created by uid 1001, while pid 593 runs as uid 1000…" |
+  | L6h | L6, the uid-1000 holder itself capability-bound | ok, exit 0 | same (Out of scope) |
+  | L3x | the bridge as uid 1001, doctor as uid 1000, the holder uid 1002 | warn | FAIL: "…created by uid 1002, while pid 763 runs as uid 1001…" |
+  | P7a | L7, the pid file naming the holder itself (a recycled pid of the holder's uid) | port-api warn, port-admin ok | port-api warn; port-admin FAIL: "…created by uid 1000, while pid 885 runs as uid 1001…" |
+  | P7b | L7, the pid file naming a `sleep` of uid 1002 | port-api warn, port-admin ok | both FAIL |
+
+  #1029's matrix (`runv.sh`: L1–L6, R2, R4, L4r, L4i) on the fix, diffed
+  against main with pids normalised: identical, in both images. #1030's
+  (`runl6.sh`): identical but for L7 and L6m, warn → FAIL, in both.
+- **hidepid** (`runhp.sh`, the container given CAP_SYS_ADMIN, doctor run
+  inside `unshare -m` over a fresh `mount -t proc -o hidepid=N`): under
+  hidepid=2 the capability-bound bridge's `/proc/<pid>` is invisible to its
+  own user, under hidepid=1 visible with its status unreadable, so L7 stays a
+  warn on the fix (identical to main) and L2 stays ok. The control, a fresh
+  mount with hidepid=0, gives the fix's FAIL, so the mount is not what masks
+  it.
+- **What a socket is stamped with.** As root on dido's host, a process that
+  called `setfsuid(1234)` and then listened shows `Uid: 0 0 0 1234` in its
+  status and uid 1234 in its `/proc/net/tcp` row: the FSUID, not the real or
+  effective uid. `fchown(fd, 4321)` on the socket then rewrote the row to
+  4321, the one call that re-stamps it.
+- **How an unmapped uid renders.** A uid-1000, non-dumpable listener read by
+  root in three user namespaces: in the init one, row uid 1000 and `Uid:
+  1000 …`; under `unshare -U -r` (only kuid 0 mapped) both read 65534; under
+  `unshare -U --map-user=1000` (kuid 0 mapped to 1000) both read 65534 while
+  root's sshd listener reads 1000. `/proc/sys/kernel/overflowuid` is 65534.
+- **The capability-bound bridge's status and threads**: its status reads as
+  uid 1000 while its fds are denied, and `/proc/<pid>/task/*/status` gives
+  one distinct `Uid:` line across 16 to 20 threads, every run.
+- **The bridge never changes uid or takes a listener**, from the linux/amd64
+  binary (`go tool nm`, go1.26.6): no `Setuid`, `Setresuid`, `Setreuid`,
+  `Seteuid`, `Setfsuid` or `AllThreadsSyscall` from syscall or x/sys/unix; no
+  `ParseUnixRights` (godbus's receive path is dead-code-eliminated, its send
+  path linked) and no `net.FileListener`. The linked `Fchown` callers are
+  sqlite and libc, on files. No `SysProcAttr.Credential` in production code.
+
+### Decisions
+
+- **The census's second half.** A socket no readable process holds is
+  another process's when the uid that created it (the table's uid column) is
+  not the recorded pid's fsuid (`pidFSUID`, the fourth value of `Uid:` in
+  `/proc/<pid>/status`). Every socket accounted for, by a holder or by its
+  creator, rules the pid out, and #1029's arm FAILs it. It rides inside
+  `procSighting`'s census for #1030's reasons: both ladders get it, and the
+  lsof and no-lsof images agree. `heldByOthers` became `listenersNotOf`.
+- **The fsuid, not the real or effective uid**, because that is what the
+  socket carries (measured above). NC2 compares the real uid and turns the
+  rows that tell them apart red.
+- **No special case for the overflow uid.** Both files render through the
+  opener's user namespace, `from_kuid_munged(seq_user_ns(…))`, and one
+  process opens both, so each is the same function of the kernel's uid:
+  different values name different uids, 65534 included. Only equal values
+  are ambiguous, and `createdByAnother` never calls equal "another". A rule
+  that treated 65534 as unknown on either side (NC7) turns two correct
+  rulings-out into warns. The task proposed making the overflow uid count
+  as possible; the measurement showed that half is needed only for EQUAL
+  values, which the comparison already gives.
+- **A readable holder is named ahead of the creator uid**, since it is the
+  process to stop (NC8). The holder walk runs whatever the uids say.
+- **The premise**, beyond the census's no-sharing one: the bridge creates its
+  listeners as its own fsuid and keeps it. It is checked in the binary
+  (above) rather than argued from the source, because a dependency could
+  call any of those; CLAUDE.md names what would break it.
+- **FAIL, not warn**, for #1029's reasons: only a FAIL makes `bridge doctor`
+  exit 1 and `bridge init`'s preflight refuse (L7i).
+- **The uid arm stays keyed to getuid.** Keying it to the bridge's fsuid
+  would turn R6 (root in a container, which reads no other uid's fds, beside
+  a same-uid holder) into a false ok. Also requiring the bridge's fsuid
+  would narrow one contrived shape (doctor run as a user other than the
+  bridge's, a hidden listener of doctor's uid beside a possible one of the
+  bridge's); declined, since nothing realistic reaches it and the ok there
+  predates this change.
+- **A recycled pid of another user** now FAILs a port whose listeners its
+  uid did not create (P7b; P7a's port-admin), where the uid arm said ok.
+  That is the trust #1029 already gave a recycled pid of the same user (its
+  fds read, none a listener, FAIL). The FAIL is right whenever the recorded
+  bridge is really gone, since the port is then someone else's. The one
+  misleading shape is a pid file left by a `serve` that died without its
+  deferred removal, recycled by another user's process, beside a bridge
+  that did not write it: the hint then names the operator's own listener.
+  `removeServerPIDFile`'s docblock, which enumerates when a recycled pid
+  FAILs, is updated.
+- **Gemini's ParseUint suggestion declined**: every build target is 64-bit
+  (`make build-all`, goreleaser: amd64 and arm64), where `Atoi` holds every
+  uid.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the design, with
+`procSighting`, the parser, the uid scan and the liveness arm attached. It
+confirmed that `sk_uid` is set once from `sock_alloc`'s `current_fsuid()`
+and changed only by `sockfs_setattr` (fchown), that no `setsockopt`, BPF
+helper or cgroup path writes it, that `SO_REUSEPORT` requires equal
+`sk_uid` across a group, that `IORING_OP_SOCKET` uses the submitter's (or a
+registered personality's) fsuid, and that `f_cred->user_ns` is fixed at
+open, so the two renderings cannot use different namespaces for one reader.
+It proposed the per-thread status check measured above. Its ParseUint point
+was declined as recorded.
+
+### Tests and controls
+
+- `creator_uid_test.go` (every platform): `TestStatusFSUIDReadsTheFourthUidValue`,
+  `TestPIDFSUIDReadsTheStatusUnderProcRoot`,
+  `TestCreatedByAnotherSaysNothingOfAnUnknownOrEqualUID`,
+  `TestOthersListeningAccountNamesHoldersThenCreators`.
+- `creator_census_notwindows_test.go` (every unix, fixture tables from
+  `tablesWith` and a fixture `/proc` with `writeStatus`):
+  `TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener`
+  (seventeen rows: eight ruled out, among them L6m's mixed shape, the
+  fsuid-not-real row and both one-sided overflow rows; nine left possible,
+  among them L2/L6h, equal overflow uids, a status missing, unreadable or
+  without a Uid line, an unparsed column, and hidepid=2) and
+  `TestProcSightingRulesNothingOutByCreatorsOverATableItCouldNotRead`.
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace` gained a creator row
+  and a second control.
+- `hidden_bridge_linux_test.go` (the real kernel):
+  `TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries` (any user) and
+  `TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge` (root only: the
+  holder as uid 4072, the stand-in bridge and doctor as uid 4071, all
+  children of the test binary). It skips in CI, which runs tests as an
+  unprivileged user.
+- **The first form of that root-only test broke two others.** It started its
+  children with `SysProcAttr.Credential`. Go forks with
+  `CLONE_VFORK|CLONE_VM` (go1.26.6 `syscall/exec_linux.go`, unless a user
+  namespace is asked for), so each child changed its credentials on memory it
+  still shared with the test process, and the kernel reset that memory's
+  dumpable flag, the TEST process's, to `fs.suid_dumpable` (2 on dido).
+  Measured with a throwaway test after it: `PR_GET_DUMPABLE` 2 where it was
+  1, `/proc/<self>/fd` links unreadable to root without CAP_SYS_PTRACE, and
+  lsof listing nothing. `TestLivenessArmNamesTheListenerThePlatformProbeSaw`
+  and `TestChosenPortRefusalOfAPortTheProbeSawAnotherHold` run later and
+  attribute a port to the test process, so they failed: only as root, only
+  in the lsof image, and never alone. Children now drop to their uid after
+  exec (`dropToChildUID`), and the test asserts the test process's dumpable
+  flag did not move. NC-dump (the forked child changing only its gid)
+  trips that assertion in both images, and in the lsof image fails the two
+  tests again; in the no-lsof image they pass, which is why the assertion
+  is there. No production code uses `Credential`.
+- **Red first**, on main (`ea7d9f28`) with the new test files: on the Mac,
+  the seven rows ruled out by a creator uid (the holder-named row passes on
+  main, whose census gives it the same words), the unread-table control and
+  the namespace test's second control, with main's line "got … {saw:/proc does not let
+  this user read pid 4242's descriptors …}"; every possible row passed, as
+  it must. On dido, the same as uid 1000 in both images, and the root-only
+  kernel test: "got warn (:32929 in use / our bridge (pid 149) is still
+  running, but this host has no lsof, and /proc does not let this user read
+  pid 149's descriptors (uid 4071 cannot read …)), want fail".
+- Negative controls against `2049cc12` on the Mac, each reverted with
+  `git checkout --` and the tree checked clean before the next; every one
+  built:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | the creator half never rules out | the seven rows ruled out by a creator uid, the unread control, the namespace control, the comparison table |
+  | NC2 | the real uid compared, not the fsuid | the two rows that tell them apart, three parser rows, the status reader |
+  | NC3 | the census runs over a table that did not read | both unread-table tests (#1030's and this one's) |
+  | NC4 | the creator half ahead of the pid-namespace guard | the namespace test's creator rows, both selves |
+  | NC5 | an unknown pid uid counts as another | twelve rows across #1028's, #1030's and this change's tests, and the comparison table |
+  | NC6 | an unparsed uid column counts as another | that row and the comparison table |
+  | NC7 | the overflow uid counts as unknown on either side | the two one-sided overflow rows and the comparison table |
+  | NC8 | the creator named ahead of a readable holder | the holder-named row |
+  | NC9 | the census rules out when ANY listener is accounted for | the one-own-uid-listener row and #1030's two-listener row |
+
+  On dido against `a4d9ac70`: NC1 turns the root-only kernel test to warn in
+  both images, and NC-dump is above.
+- `go test -count=1 ./internal/doctor/` in both dido images, as uid 1000
+  and as root: ok.
+
+### Out of scope
+
+- **L6h: a hidden holder of the bridge's OWN uid** (another
+  capability-bound binary of the service user, or one of its processes in
+  another group). Its listener carries the bridge's uid and no readable
+  process holds it, which is exactly how the bridge on its own port looks,
+  so the uid arm reads ok. Nothing an unprivileged reader has tells them
+  apart. The runbook's check is the moved port's line: the running bridge is
+  still on the old port, so anything but `free` on the new one is another
+  process.
+- **hidepid=1 or 2**: the bridge's status is hidden from its own user too,
+  and L7 stays a warn there.
+- **macOS: L4 stays a warn** (ML4 in #1029's entry).
+
+### Process notes
+
+- #1030's CLAUDE.md bullet called L6m's second holder "root's"; the row it
+  measured had a uid-1001 holder there (its own entry above says so). The
+  bullet is corrected; nothing turned on it.
+- **A test that changes its children's credentials changes its own**, on
+  Linux, through Go's shared-memory fork. It took a full-package run as
+  root to see it: the kernel tests passed, the package passed as a user,
+  and two unrelated tests failed only after this one. Isolate by running the
+  suspect first, then read the process's own state (`PR_GET_DUMPABLE`)
+  rather than guessing at the tool that stopped seeing it.
