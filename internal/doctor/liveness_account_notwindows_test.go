@@ -20,11 +20,13 @@ import (
 // output is lsof's "matched nothing", a pid a line is `lsof -t`'s answer.
 // The output goes through a file, so the shell prints it byte for byte.
 //
-// It also sets what /proc answers after lsof misses (procOwnerFunc) to an
-// answer that adds nothing, so the test grades lsof's answer alone on every
-// unix. Left to the host, /proc on Linux would read the recorded pid, and
-// pid 4242 may be a process of the test's own user, which it rules out. A
-// test that wants /proc's opinion sets it after this (withProcAnswering).
+// It also sets what the second look answers after lsof misses
+// (procOwnerFunc) to an answer that adds nothing, so the test grades lsof's
+// answer alone on every unix. Left to the host, /proc on Linux would read
+// the recorded pid, and pid 4242 may be a process of the test's own user,
+// which it rules out; on macOS the second look would run this same
+// stand-in. A test that wants the second opinion sets it after this
+// (withProcAnswering).
 func withLsofAnswering(t *testing.T, stdout string, code int) {
 	t.Helper()
 	sh, err := exec.LookPath("sh")
@@ -42,6 +44,31 @@ func withLsofAnswering(t *testing.T, stdout string, code int) {
 		return exec.CommandContext(ctx, sh, "-c", `cat "$0"; exit "$1"`, out, strconv.Itoa(code))
 	}
 	withProcAnswering(t, false, procCannotTell, nil)
+}
+
+// parentListens skips the test when lsof lists a TCP listener of the test's
+// parent: a runner that listens (a debugger's server, say) is one lsof reads,
+// so on macOS the second look lists its listeners and rules it out, and
+// realHolderAccount's expectation is for the parent `go test` is, which holds
+// none. It asks lsof directly, not through the code under test, bounded by
+// probeTimeout as every run of lsof in production is (a wedged mount holds
+// lsof). Only lsof's exit 1, "matched nothing", says the parent holds no
+// listener; a run that failed or timed out says nothing, and skips too
+// (CodeRabbit on #1034: its error was discarded, so a failed run read as
+// "holds none").
+func parentListens(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, lsofPath, "-nP", "-a", "-p", strconv.Itoa(os.Getppid()), "-iTCP", "-sTCP:LISTEN", "-t").Output()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil && strings.TrimSpace(string(out)) != "":
+		t.Skipf("the test's parent (pid %d) holds a TCP listener, so lsof reads it and rules it out; "+
+			"this test expects a parent that holds none, as `go test` does", os.Getppid())
+	case err != nil && (ctx.Err() != nil || !errors.As(err, &exitErr) || exitErr.ExitCode() != 1):
+		t.Skipf("cannot tell whether the test's parent (pid %d) holds a TCP listener: %v", os.Getppid(), err)
+	}
 }
 
 // TestLivenessArmGivesLsofsAccount: when the recorded bridge is alive and
@@ -184,14 +211,15 @@ func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 // on what it establishes, never on its words. Its first form, lsof alone,
 // ran on main before the accounts existed and passed there, 20 of 20.
 //
-// The /proc answers are what changed the rows. lsof lists only the
-// processes this user may inspect, so it never rules the recorded bridge
-// out. /proc, asked after an lsof miss, reads the bridge's own descriptors:
-// where none is a listener on the port, the port is another process's and
-// both ladders FAIL (the L4 rows of #1028's matrix, which the uid arm
-// passed); where one is, it is the bridge's own and both are ok. The
-// sighting's other half is pinned on every platform by
-// TestPortVerdictsReadOnlyRuledOutFromTheSighting.
+// The second look's answers are what changed the rows. lsof, asked who
+// listens on the port, lists only the processes this user may inspect, so
+// it never rules the recorded bridge out. The second look, asked after its
+// miss, reads the bridge's own descriptors (/proc on Linux, lsof's listing
+// of its listeners on macOS): where none is a listener on the port, the
+// port is another process's and both ladders FAIL (the L4 rows of #1028's
+// matrix, which the uid arm passed, and #1029's ML4); where one is, it is
+// the bridge's own and both are ok. The sighting's other half is pinned on
+// every platform by TestPortVerdictsReadOnlyRuledOutFromTheSighting.
 func TestPortVerdictsDoNotDependOnTheAccount(t *testing.T) {
 	for _, a := range lsofAnswers {
 		for _, p := range procAnswers {
@@ -222,9 +250,10 @@ var lsofAnswers = []lsofAnswer{
 	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
 }
 
-// procAnswer is one thing /proc can answer about pid 4242 after lsof did
-// not name it: that pid holds the listener, its descriptors read and none
-// is the listener, or it cannot tell.
+// procAnswer is one thing the second look (/proc on Linux, lsof's listing
+// of the pid's own listeners on macOS) can answer about pid 4242 after lsof
+// did not name it: that pid holds the listener, it was read and holds none
+// on the port, or it cannot tell.
 type procAnswer struct {
 	name  string
 	found bool
@@ -261,8 +290,9 @@ func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, p procAnswer, a
 }
 
 // TestLsofMissAsksProcForASecondOpinion drives the owner probe with lsof
-// answering through sh(1) and /proc's answer forced, and pins when /proc is
-// asked and what its answer does to lsof's.
+// answering through sh(1) and the second look's answer forced (/proc's on
+// Linux, lsof's listing of the pid's own listeners on macOS), and pins when
+// it is asked and what its answer does to lsof's.
 //
 // lsof lists only the processes this user may inspect, so its miss cannot
 // rule the recorded bridge out, and in #1028's L4 row the lsof image passed
@@ -306,7 +336,7 @@ func TestLsofMissAsksProcForASecondOpinion(t *testing.T) {
 			asked := 0
 			orig := procOwnerFunc
 			t.Cleanup(func() { procOwnerFunc = orig })
-			procOwnerFunc = func(port, pid int) (bool, ownerSighting, error) {
+			procOwnerFunc = func(_ context.Context, port, pid int) (bool, ownerSighting, error) {
 				asked++
 				if pid != 4242 {
 					t.Errorf("/proc asked about pid %d, want the recorded 4242", pid)

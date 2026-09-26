@@ -46,8 +46,11 @@ type ownerSighting struct {
 	// nest with the pid's), or it read every one of
 	// the pid's descriptors, against every socket table, and none is a
 	// listener on the port (/proc, asked on Linux after lsof misses or in
-	// its place). Never lsof alone, which lists only the processes it can
-	// see (lsofSighting). The zero value keeps the hedged advice ("if our
+	// its place), or it read the pid's own listeners and none is on the
+	// port (lsof asked about the pid itself, on macOS after its first
+	// answer misses: ownListenersSighting). Never lsof's answer about the
+	// port alone, which lists only the processes it can see
+	// (lsofSighting). The zero value keeps the hedged advice ("if our
 	// bridge is what holds the port, this is expected") and the verdict
 	// that goes with it, which is the safe one to fall back on.
 	ruledOut bool
@@ -80,11 +83,12 @@ func (s ownerSighting) because() string {
 // inspect, and a bridge it cannot see (another user's, or one with
 // dumpable=0) can listen on the same port at another address, a
 // `listenAddress` on one interface beside a holder on loopback (CodeRabbit
-// on #1028). So every account from lsof keeps the blind spot and the
-// hedge. Nothing listed is what a listener hidden from this user looks
-// like. Anything else is not `lsof -t`'s output: busybox's applet ignores
-// every option and lists every open file (the image's lsof bullet in
-// CLAUDE.md), so all it shows is that pid is not in it.
+// on #1028). So every account of that answer keeps the blind spot and the
+// hedge; on macOS what rules pid out is lsof asked about pid itself
+// (ownListenersSighting). Nothing listed is what a listener hidden from
+// this user looks like. Anything else is not `lsof -t`'s output: busybox's
+// applet ignores every option and lists every open file (the image's lsof
+// bullet in CLAUDE.md), so all it shows is that pid is not in it.
 func lsofSighting(out []byte, pid int, blind string) ownerSighting {
 	pids, ok := lsofPIDs(out)
 	switch {
@@ -115,11 +119,13 @@ func lsofPIDs(out []byte) ([]int, bool) {
 	return pids, true
 }
 
-// procSecondOpinion is what the /proc attribution adds to lsof's account
-// (lsofSeen) of a port on which lsof did not name the pid, given /proc's own
-// answer about that pid: whether it found the pid holding a listener on the
-// port, its sighting, and its error. isPIDListeningOnPort asks it after
-// every clean lsof miss.
+// procSecondOpinion is what a second look at the pid adds to lsof's account
+// (lsofSeen) of a port on which lsof did not name the pid, given that look's
+// own answer about the pid: whether it found the pid holding a listener on
+// the port, its sighting, and its error. isPIDListeningOnPort asks it after
+// every clean lsof miss, through procOwnerFunc: the /proc attribution on
+// Linux, and on macOS lsof asked about the pid itself (pidListensOnPort, in
+// portowner_linux.go and portowner_darwin.go).
 //
 // lsof lists only the processes this user may inspect, so its miss never
 // rules the pid out (lsofSighting). /proc reads the pid's own descriptors,
@@ -140,8 +146,13 @@ func lsofPIDs(out []byte) ([]int, bool) {
 // no blind spot. Anything else (a pid /proc cannot read, on a port whose
 // listeners it cannot account for, or neither socket table readable)
 // leaves lsof's account as it was: /proc could see no more than lsof did.
-// Off Linux, pidListensOnPort's stub neither finds nor rules out, so lsof's
-// account stands there.
+//
+// On macOS the second look lists the pid's own listeners
+// (ownListenersSighting), and its answers are merged the same way: one on
+// the port is a match, listeners elsewhere rule the pid out and join lsof's
+// account, and nothing listed leaves that account as it was. Elsewhere
+// pidListensOnPort's stub neither finds nor rules out, so lsof's account
+// stands there.
 func procSecondOpinion(lsofSeen ownerSighting, procFound bool, procSeen ownerSighting, procErr error) (bool, ownerSighting) {
 	switch {
 	case procErr != nil:
@@ -154,6 +165,101 @@ func procSecondOpinion(lsofSeen ownerSighting, procFound bool, procSeen ownerSig
 		return false, lsofSeen
 	}
 }
+
+// ownListenersSighting is macOS's second look at a port on which lsof, asked
+// who listens there, did not name pid: what lsof printed when asked for
+// pid's own TCP listeners instead (pidListensOnPort in portowner_darwin.go
+// runs `lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN -F n`). A listener on the
+// port is a match. Listeners, none on the port, rule pid out: lsof lists a
+// process's descriptors only where the kernel lets this user read them, and
+// that check (XNU's proc_security_policy) is made per process, not per
+// descriptor, so a pid lsof lists at all is one whose descriptors it read.
+// Only a listener opened while lsof reads can be missed, and a bridge binds
+// its listeners as it starts. Nothing listed, or output of another shape,
+// says nothing, and procSecondOpinion leaves lsof's first account as it
+// was.
+//
+// Nothing listed is what three processes look like: one with no listener,
+// one this user may not read (another user's, or root's to anyone but
+// root), and ANY process to an lsof that a sandbox keeps from reading
+// processes, which exits 1 with no output and nothing on stderr (measured
+// on macOS 27 with process-info-pidinfo or -pidfdinfo denied). The third
+// is why the ruling-out rests on what lsof listed and not on the pid's
+// uid: lsof run as a pid's own user may read it, and a rule on the uid
+// would rule a sandboxed doctor's own bridge out of its own port, a FAIL
+// on the bridge's own listener.
+func ownListenersSighting(out []byte, port, pid int) (bool, ownerSighting) {
+	addrs, ok := lsofListenerAddrs(out, pid)
+	switch {
+	case !ok:
+		return false, ownerSighting{saw: fmt.Sprintf("lsof's output does not list pid %d's listeners", pid)}
+	case len(addrs) == 0:
+		return false, ownerSighting{saw: fmt.Sprintf("lsof lists no listener of pid %d", pid)}
+	}
+	for _, addr := range addrs {
+		if listenerPort(addr) == port {
+			return true, ownerSighting{}
+		}
+	}
+	sorted := slices.Compact(slices.Sorted(slices.Values(addrs)))
+	return false, ownerSighting{
+		saw:      fmt.Sprintf("lsof lists pid %d listening only on %s", pid, strings.Join(sorted, ", ")),
+		ruledOut: true,
+	}
+}
+
+// lsofListenerAddrs reads what `lsof -F n` prints about pid's TCP
+// listeners: a "p" line naming the process, then, for each listener, an "f"
+// line (its descriptor) and an "n" line (its local address). It returns the
+// addresses, and false for output of any other shape, and for output that
+// names another process or an address with no port. `-a` makes lsof AND the
+// pid with the listener filter; without it lsof ORs them, and prints every
+// process's listeners beside all of pid's files, which reads as another
+// shape here rather than as pid's listeners.
+func lsofListenerAddrs(out []byte, pid int) ([]string, bool) {
+	var addrs []string
+	named := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			if n, err := strconv.Atoi(line[1:]); err != nil || n != pid {
+				return nil, false
+			}
+			named = true
+		case 'f':
+		case 'n':
+			if !named || listenerPort(line[1:]) < 0 {
+				return nil, false
+			}
+			addrs = append(addrs, line[1:])
+		default:
+			return nil, false
+		}
+	}
+	return addrs, true
+}
+
+// listenerPort is the port of a local address as `lsof -nP` names it
+// (127.0.0.1:7890, *:7890, [::1]:7890), or -1 where it names none.
+func listenerPort(addr string) int {
+	i := strings.LastIndexByte(addr, ':')
+	if i < 0 {
+		return -1
+	}
+	port, err := strconv.Atoi(addr[i+1:])
+	if err != nil || port <= 0 || port > 65535 {
+		return -1
+	}
+	return port
+}
+
+// nothingElseMatches is the account of a second look that had nothing to
+// look with: macOS without lsof (portowner_darwin.go), and the unixes that
+// are neither Linux nor macOS (portowner_otherunix.go).
+const nothingElseMatches = "nothing else here matches a process to a port"
 
 // listenerTableSighting is Windows' account (doctor_windows.go) of a port
 // whose rows in GetExtendedTcpTable's listener tables do not carry the pid

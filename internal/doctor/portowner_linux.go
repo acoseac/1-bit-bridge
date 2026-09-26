@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -86,7 +87,11 @@ func hiddenListenerOfThisUser(port int) (bool, error) {
 // not nest with its (the kernel's socket diagnostics, listenerCgroups), it
 // rules the pid out all the same (procSighting's census). An error means
 // neither socket table could be read.
-func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
+//
+// The context is for macOS's look (portowner_darwin.go), which runs lsof;
+// this one reads /proc, which no wedged mount holds, and #1029 measured the
+// walk at 173–228 ms over 50,000 descriptors.
+func pidListensOnPort(_ context.Context, port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
 		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil
 	}

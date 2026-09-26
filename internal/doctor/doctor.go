@@ -804,14 +804,16 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // see rules our pid out: Windows' listener table, or /proc reading all of
 // our descriptors, or, where it could not read them, finding every listener
 // on the port held by a process it can read, or created by a uid ours does
-// not run as or in a cgroup that does not nest with ours. So the text is
-// the probe's account (ownerSighting).
+// not run as or in a cgroup that does not nest with ours, or, on macOS,
+// lsof listing our own listeners, none on the port. So the text is the
+// probe's account (ownerSighting).
 //
 // A pid the account rules out holds nothing on this port: its descriptors
 // were all read and none is a listener on the port, or the table names
 // every listener and ours is not among them, or every listener is another
-// process's. The port is another process's, and FAILs as it does with no
-// live pid behind it. The uid arm below used to answer ok for it on Linux
+// process's, or lsof listed its listeners and none is on the port. The
+// port is another process's, and FAILs as it does with no live pid behind
+// it. The uid arm below used to answer ok for it on Linux
 // whenever that other process ran as this user: a bridge still running on
 // the ports of the config it started with, whose config was then edited to
 // a port something else holds, read ok, `bridge doctor --config` (the
@@ -824,7 +826,10 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // capability-bound binary of the service user, or one of its processes in
 // another group), the uid arm read ok, since its listener carries our uid
 // (row L6h); the cgroup it was created in tells it apart when that is not
-// ours.
+// ours. On macOS, where nothing ruled a pid out until lsof was asked for
+// the bridge's own listeners, such an edit warned, exit 0, whoever held the
+// port (#1029's row ML4, whose holder ran as this user, and the same edit
+// to a port a process of root's holds).
 //
 // The uid arm now answers only for a listener this user created that no
 // process it can read holds (hiddenListenerOfThisUser): how a
@@ -1424,9 +1429,10 @@ var (
 	hiddenListenerFunc = hiddenListenerOfThisUser
 	// ownerProbeFunc is the owner probe itself (isPIDListeningOnPort),
 	// indirected so a test can hand both port ladders every kind of
-	// account, a ruled-out miss included, on every platform. Only
-	// Windows' table and Linux's /proc produce one for real, so without
-	// it nothing on a Mac could show that no verdict turns on the account.
+	// account, a ruled-out miss included, on every platform. Windows'
+	// table, Linux's /proc and macOS's listing of a pid's own listeners
+	// produce one for real, the last only for a pid that listens
+	// somewhere, so no host produces every kind.
 	ownerProbeFunc = isPIDListeningOnPort
 )
 

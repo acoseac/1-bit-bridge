@@ -16,19 +16,19 @@ import (
 // no listener has nothing a bridge could hold.
 func TestPIDListensOnPortReadsProc(t *testing.T) {
 	port := bindPort(t)
-	found, _, err := pidListensOnPort(port, os.Getpid())
+	found, _, err := pidListensOnPort(t.Context(), port, os.Getpid())
 	if err != nil || !found {
 		t.Fatalf("pidListensOnPort(%d, self) = %v, %v; want true — this process holds the listener", port, found, err)
 	}
 	ppid := os.Getppid()
-	found, seen, err := pidListensOnPort(port, ppid)
+	found, seen, err := pidListensOnPort(t.Context(), port, ppid)
 	if err != nil || found {
 		t.Errorf("pidListensOnPort(%d, parent) = %v, %v; want false — the parent holds no port of ours", port, found, err)
 	}
 	if want := fmt.Sprintf("/proc shows no descriptor of pid %d listening on this port", ppid); seen.saw != want || !seen.ruledOut {
 		t.Errorf("parent's sighting = %+v, want %q, ruled out", seen, want)
 	}
-	found, seen, err = pidListensOnPort(mustFreePort(t), os.Getpid())
+	found, seen, err = pidListensOnPort(t.Context(), mustFreePort(t), os.Getpid())
 	if err != nil || found {
 		t.Errorf("a port nothing listens on = %v, %v; want false", found, err)
 	}

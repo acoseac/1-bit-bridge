@@ -15878,7 +15878,9 @@ group, or a user namespace also hides a same-uid process's links.
   `/proc` first on Linux (#1027's Out of scope) would close it.
 - **macOS's `netstat -anv` names every listener's pid without root.** It
   could attribute M1 where lsof cannot, which could change a verdict, so it
-  is its own change too.
+  is its own change too. (Corrected 2026-09-26, #1034: that holds where a
+  shell runs it. Run by a Go process, the bridge's case, from a shell or as
+  a launchd job, it printed no TCP row at all.)
 
 ### Process notes
 
@@ -16082,7 +16084,11 @@ filesystem.
 - **macOS: L4 stays a warn, exit 0** (ML4). lsof there sees every process
   of this user, so its miss about a same-user recorded pid could rule the
   pid out, given the pid's uid (`kern.proc.pid`). `netstat -anv` (#1028's
-  Out of scope) would answer it too.
+  Out of scope) would answer it too. (Closed by #1034, and by neither: an
+  lsof a sandbox blinds misses as cleanly, so the uid rule FAILed a
+  sandboxed doctor's own bridge, and netstat run by a Go process lists no
+  TCP socket. What rules the bridge out there is lsof's listing of the
+  bridge's own listeners.)
 - **A re-init that changes a port now FAILs the OLD one** when a live
   bridge's config names a port another process holds, since the preflight
   grades the install's current ports. The stopped-bridge twin already did.
@@ -17014,3 +17020,235 @@ was built on them.
 - NC8's first form deleted the variable it compared and did not build; a
   control that does not build proves nothing, so it was rerun with the
   comparison neutralised.
+
+## 2026-09-26 — on macOS, doctor rules out a live bridge lsof lists listening elsewhere (#1034)
+
+#1029's Out of scope recorded row ML4: on macOS nothing set `ruledOut`, so a
+bridge still running on the ports of the config it started with, whose
+config was then edited to a port another process holds, warned, and
+`bridge doctor --config` exited 0 ahead of a restart that could not bind.
+It proposed reading the recorded pid's uid (`kern.proc.pid`): lsof run as a
+user lists every process of that user, so its miss about a pid of that user
+would rule the pid out. The task that picked it up said to measure that
+first, sandboxed and hardened processes and root included, and to consider
+`netstat -anv`. Both were measured and neither was taken.
+
+### What was measured
+
+All on this Mac (macOS 27.0, 26A428, arm64, uid 501, the base system's
+lsof 4.91), with no password-less sudo, so nothing as root.
+
+- **lsof's reach, as a census.** Of 825 processes, 614 ran with effective
+  uid 501, and `lsof -nP -Fp` (run as uid 501) read every one of them and
+  none of the other 211. A later census counted 620, of which 91 were
+  app-sandboxed (the `com.apple.security.app-sandbox` entitlement) and 107
+  hardened-runtime: all read. It is the EFFECTIVE uid that counts:
+  loginwindow (euid 501, ruid 0) was read, and `ps` (setuid root: euid 0,
+  ruid 501) was not.
+- **Controlled targets, all read.** A Go listener as built (ad-hoc,
+  linker-signed), the same signed `-o runtime`, one that called
+  `PT_DENY_ATTACH` first, both together, and three run under `sandbox-exec`
+  (`allow default`; `deny process-info*`; `deny default` with network
+  allowed): lsof as uid 501 listed each one's listener, and
+  `kern.proc.pid` gave euid 501 for each. Rosetta is not installed here, so
+  there is no translated row.
+- **A sandboxed CALLER blinds lsof silently.** Under `sandbox-exec -p
+  '(version 1)(allow default)(deny process-info-pidinfo)'`, or
+  `-pidfdinfo`, `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` about a same-user
+  listener exits 1 with no output and nothing on stderr: byte for byte its
+  "matched nothing". Denying `process-info-listpids` (or `process-info*`)
+  exits 1 too, and says `can't get PID byte count` on stderr, which the
+  probe does not read. So the uid rule would read a sandboxed doctor's own
+  bridge as not holding its own port.
+- **netstat from the bridge prints no TCP socket.** From zsh, `netstat -anv
+  -p tcp` listed 104 lines with every socket's pid, root's included. Run as
+  a child of a Go binary, it printed nothing and exited 0: with the Go
+  binary started from zsh (`sh -c netstat` under it too, and Homebrew's
+  python the same) and with it started by launchd (`launchctl submit`, the
+  context `bridge serve`'s `/api/doctor` runs in). The Go process's own
+  `sysctl net.inet.tcp.pcblist_n` returned 48 bytes (no socket) when `go
+  run` started it, 664 with one listener of its own, and the full 61,032
+  bytes when zsh or launchd did. The mechanism was not established. lsof,
+  which reads per process (`proc_pidfdinfo`), answered identically in all
+  of those contexts.
+- **The per-pid listing.** `lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN -F n`
+  prints `p<pid>`, then `f<fd>` and `n<address>` for each listener
+  (`127.0.0.1:65192`, Go's dual-stack wildcard as `*:51681`, `[::1]:51682`),
+  exit 0. For a process with no listener, for root's launchd (pid 1) and
+  under either sandbox denial it exits 1 with no output. Median 14.0 ms
+  over 20 runs, against 27.4 ms for the port query.
+- **End to end, main (`efd4ac20`) and the fix (`ebbcec3a`).** A fixture
+  bridge (`bridge init --no-service`, Tailscale, mDNS and HTTP/3 off) on
+  127.0.0.1:7890 / :7891, doctor as uid 501 (`scratchpad/…/e2e/matrix.sh`):
+
+  | row | shape | main | fix |
+  |---|---|---|---|
+  | ML1 | the bridge's own config | ok, exit 0 | same |
+  | ML4 | api edited to 1Password's 127.0.0.1:39127 (pid 1305, uid 501) | warn, exit 0 | FAIL, exit 1: "our bridge (pid 85801) is still running, but lsof lists pid 1305 listening on this port, and lsof lists pid 85801 listening only on 127.0.0.1:7890, 127.0.0.1:7891: stop the process that holds the port, or change the address in bridge.yaml" |
+  | ML4a | admin edited to :39127 | warn, exit 0 | FAIL, exit 1 |
+  | ML7 | api edited to root's Tailscale extension's 127.0.0.1:50062 | warn, exit 0 | FAIL, exit 1: "…but lsof lists no process listening on this port, and lsof lists pid 85801 listening only on 127.0.0.1:7890, 127.0.0.1:7891: stop the process…" |
+  | M1 | recorded pid 65775 (root's Tailscale extension) on its own :50062 | warn | same |
+  | M2 | recorded pid a live `sleep`, :39127 | warn | same |
+  | MS1 | ML1, doctor under `deny process-info-pidfdinfo` | warn, warn, exit 0 | same |
+  | MS4 | ML4, doctor under the same | warn, exit 0 | same |
+  | ML4i | ML4's config in place, then `bridge init --yes --force --no-service` | exit 0, config saved with `:7788` | exit 1, port-api FAIL, config untouched |
+  | ML4r | the bridge restarted on ML4's config | `bind: address already in use` | the same: what the check now catches |
+
+  The same matrix with the fix binary signed `-o runtime` (the flag a
+  notarized release carries) gave the fix column for ML1 through MS4.
+
+### Decisions
+
+- **The ruling-out rests on what lsof LISTED, never on whether it could
+  have.** After the port query's clean miss, macOS's `pidListensOnPort`
+  (`portowner_darwin.go`) asks lsof for the recorded pid's own TCP
+  listeners, and `ownListenersSighting` reads the answer: listeners, none
+  on the port, rule the pid out; one on the port is a match; nothing
+  listed says nothing. XNU checks `proc_info` per process and flavor
+  (`proc_security_policy`), not per descriptor, so a pid lsof lists at all
+  is one whose descriptors it read. Nothing listed is what a process with
+  no listener, one this user may not read, and any process to a blinded
+  lsof look like, so it cannot be a ruling-out; that is the whole of why
+  the uid rule was declined, and NC3b below shows it.
+- **Mirrored on the Linux design, not beside it.** It is the second look
+  behind the same seam (`procOwnerFunc`), merged by the same
+  `procSecondOpinion`, so the joined account reads as Linux's does ("lsof
+  lists pid 1305 listening on this port, and …"), and every test that
+  forces the second opinion covers macOS unchanged. The seam takes a
+  context now: the macOS look runs lsof, which stat()s mount points before
+  it reads any process, and a wedged mount holds it as it holds the first
+  run. Linux's `/proc` read ignores it (#1029's measured walk). Without
+  lsof there is nothing to look with (`nothingElseMatches`, the words the
+  other unixes' stub gives), so the no-lsof path is unchanged.
+- **M1 stays a warn**, as the task asked, and not by a special case: lsof
+  cannot read a root process as a user, so it lists nothing for it.
+- **netstat was declined on measurement**, not on its parsing hazards
+  (a process-name column truncated to 16 characters that can hold spaces):
+  run by the bridge it lists nothing.
+- **`-a` is load-bearing, and the reader fails safe without it.** Without
+  it lsof ORs `-p` with `-iTCP` and prints every process's listeners
+  beside all of the pid's files; the reader refuses any record of another
+  pid, and any name that is not an address with a port, so the listing is
+  void rather than read (NC2 turns the ruling-out off, never on).
+- **The listed addresses go in the account**, sorted and without repeats:
+  they are where the running bridge actually listens, which is the fact an
+  operator who just edited the config needs.
+- **Root is not measured, and the design does not need it**: a root doctor
+  rules out whatever its lsof lists, and a process root's lsof cannot read
+  (SIP, if it hides any) lists nothing.
+
+### Tests and controls
+
+- `sighting_test.go`: `TestOwnListenersSightingReadsWhatLsofListed` (15
+  rows, plus the port read in the reverse suffix direction) and two new
+  rows in `TestProcSecondOpinionOnAnLsofMiss`, on every platform.
+- `portowner_darwin_test.go` (the real kernel):
+  `TestOwnListenersOnTheKernel` (children listening on 127.0.0.1 and on
+  `[::1]`: each found on its port and ruled out elsewhere; an idle child
+  and launchd: neither),
+  `TestABlindedLsofRulesNoBridgeOut` (lsof wrapped in `sandbox-exec`, the
+  premise asserted first: both the bridge's own port and a held one warn),
+  `TestOwnListenersWithoutLsof`, `TestOwnListenersRunsReadWhatLsofAnswered`
+  and `TestOwnListenersRunHonoursTheCallersContext`.
+- `liveness_account_test.go`: `TestPortCheckFailsAPortTheLiveBridgeListensBeside`
+  is ML4 with the real probe on all three platforms, the recorded bridge a
+  re-run of the test binary that listens (`startListeningChild`,
+  `listening_child_test.go`), FAIL everywhere and the chosen-port refusal
+  no longer offering to stop it. The child keeps its listener reachable
+  past its wait: net closes an unreferenced listener from a finalizer.
+- **Red first**: with the macOS look turned off (NC1, main's behaviour
+  behind the new seam), 4 tests failed in 9 lines, exactly the macOS rows.
+- Negative controls against `ebbcec3a` (NC10 against `09848a2c`, which
+  added the IPv6 stand-in), each built, run `-count=1`, restored and the
+  tree checked clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | macOS look off | the ML4 test, the kernel test's two found / ruled-out subtests, the run outcomes, the context test |
+  | NC2 | no `-a` | the ML4 test and the kernel test's found / ruled-out subtests |
+  | NC3 | nothing listed rules the pid out | 7 tests, the blinded lsof's own-port subtest and launchd among them |
+  | NC3b | the uid rule, as #1029 proposed it (`kern.proc.pid` euid equal to ours after exit 1) | the blinded lsof test: "got fail (:50282 in use / our bridge (pid 82966) is still running, but lsof lists no process listening on this port, and pid 82966 runs as uid 501, whose every process lsof reads: stop the process that holds the port…)", on the bridge's own port; and the tests whose recorded pid holds no listener |
+  | NC4 | the reader takes any process's records | the two other-process rows |
+  | NC5 | a listener on the port read as a ruling-out | the kernel test's own-port subtest and three reader rows |
+  | NC6 | the run ignores the caller's context | the context test (2.00 s) |
+  | NC7 | lsof's exit 1 read as a failed run | the kernel test's idle and launchd subtests, the matched-nothing outcome |
+  | NC8 | the port matched as a suffix of the address | the reverse-direction assertion only: the table's forward row passed it |
+  | NC9 | the second look bypasses the seam | the stand-in tests (the lsof table, `TestLsofMissAsksProcForASecondOpinion`) |
+  | NC10 | the port read after the FIRST colon | the IPv6 stand-in's two kernel subtests and the reader's IPv6 row |
+- Linux: `go test -race -count=1 ./internal/doctor/` in both dido images
+  (`attrword/nolsof:1.26.6`, `attrword/lsof:1.26.6`) as uid 1000, and
+  without `-race` as root in the lsof image: ok. The ML4 test ran in both
+  images, not skipped: without lsof it is `/proc` alone that rules the
+  child out.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on four claims,
+with `portowner_darwin.go` attached. It agreed that the check is per
+process and flavor with no per-descriptor MACF hook (`fill_socketinfo`
+reads the socket directly), that the sandbox reasoning holds (App Sandbox
+profiles deny `process-info*` by default, so a doctor run from an App-Store
+terminal is blinded too), and that TCC and Endpoint Security do not
+mediate `proc_info`. It raised three failure modes, assessed rather than
+measured: a name the parser cannot split (void here by construction, any
+unparseable name voids the listing); lsof sizing its descriptor buffer
+before reading it, so a table that grew in between loses its newest slots;
+and a bind race at startup. Neither race reaches a steady bridge's own
+listener: its listeners are bound at startup, below the connections that
+grow the table, and the port must already be held at the bind probe for
+the check to ask at all. Its explanation of the netstat filtering (audit
+sessions) does not fit the launchd-started process that read the full
+list, so only the observations are recorded.
+
+### Review
+
+- **Round 1**, on `5c0e633c`. CI green (20 checks), SonarCloud's gate
+  passed. CodeRabbit ("Actionable comments posted: 1"): `parentListens`
+  ran lsof unbounded and discarded its error, so a stalled lsof held the
+  package until the 30-minute test timeout and a failed run read as "the
+  parent holds no listener". Taken in `11cb2c4d`, and at a second site with
+  the same defect (the blinded-lsof test's premise check, bounded only by
+  `t.Context()`): both take `probeTimeout`, read only exit 1 as nothing
+  listed, and skip otherwise. Measured with a stalled stand-in: 10.01 s and
+  no skip before, 2 s and a skip after. CodeRabbit verified the second site
+  itself on the thread.
+- **The stand-in for lsof has to `exec`.** A shell that forks `sleep 10`
+  still took 10 s after the fix: the killed shell's grandchild holds the
+  output pipe open, the #997 shape. Real lsof is one process.
+- **Gemini's app was over its daily quota** and did no review. A direct
+  review consult on the Go diff stood in (recorded on the PR). It found no
+  input that yields a false ruling-out. Taken in `2f1f788d`: a `pid <= 0`
+  guard on the macOS look (Linux's has one; unreachable from today's
+  callers; NC11), and `startListeningChild` naming the child's test by its
+  top-level name, since `-test.run` matches a subtest's name as a regexp
+  and one it cannot parse stops the child before it starts
+  (`TestAListeningChildStartsFromASubtest`; NC12, whose first form
+  concatenated both names into a regexp that matched nothing and failed
+  every child test: a botched control, rerun). Declined: "macOS 27 does
+  not exist" (this host's `sw_vers` says 27.0), `-F n` → `-Fn` (the
+  measured output is exactly `p`/`f`/`n`, and any other shape voids the
+  listing), and a stdin-EOF comment it misread.
+
+### Out of scope
+
+- **A recorded pid that holds no listener stays a warn** (M2: a recycled
+  pid, or a bridge still starting). lsof cannot tell it from a process it
+  may not read. The uid could, where no sandbox blinds lsof, and it is
+  declined for that one case.
+- **A bridge of another user, to a user** (a `UserName` LaunchDaemon, with
+  the operator running doctor) stays a warn, as does anything a blinded
+  lsof cannot read (MS4). Run doctor as the service's user, or as root.
+- **Root** was not measured (no password-less sudo on this Mac).
+- **The re-init that changes a port refuses on the OLD one** (ML4i), the
+  class #1029 recorded (task_95e50ccb).
+
+### Process notes
+
+- **The task's premise held and still could not be the rule.** lsof does
+  read every process of its own user, measured over the whole machine;
+  what the census could not show is a doctor whose lsof is sandboxed,
+  which is an ordinary way to run a CLI now. Measuring the CALLER, not only
+  the targets, is what found it.
+- **#1028's netstat note was measured from a shell**, and holds only
+  there. A positive result is about the context it was measured in, as a
+  negative one is about the table it looked in.

@@ -2375,9 +2375,11 @@ what it claimed**, and none of it had a failing test.
   capability-bound L2 keeps its ok,
   and root in a container (no CAP_SYS_PTRACE) rules nothing out. **Two
   shapes stayed open.** One, L4 over a capability-bound bridge (the NUC's
-  shape, row L6), is closed by the next bullet (#1030). The other is L4
-  on macOS, where lsof would see a same-user pid but nothing reads the
-  pid's uid. **A test that
+  shape, row L6), is closed by the next bullet (#1030). The other, L4 on
+  macOS (row ML4), is closed by the last bullet of this chain (#1034),
+  and NOT by the pid's uid, which this sentence proposed until
+  2026-09-26: an lsof a sandbox blinds exits 1 as a clean miss does, and
+  the uid rule FAILed a sandboxed doctor's own bridge. **A test that
   records a pid of its own choosing forces what the probe says about it**
   (`procOwnerFunc`, `withUnattributedMiss`). On Linux, pid 4242 may be a
   readable process of the test's own user, and Windows' table rules it
@@ -2540,6 +2542,44 @@ what it claimed**, and none of it had a failing test.
   child's `/proc/<pid>/cgroup`) run as any user wherever a cgroup2 mount
   holds the test's cgroup (measured in both dido images, as uid 1000 and
   as root).
+- **…and on macOS a live recorded bridge that lsof lists listening
+  elsewhere is ruled out by that LISTING, never by its uid** (#1034). Row
+  ML4, left open by #1029: nothing on macOS set `ruledOut`, so a bridge
+  live on its old ports, its config edited to a port another process holds
+  (1Password's, this user's; or root's Tailscale extension, row ML7),
+  warned, `bridge doctor --config` exited 0, and the restart could not
+  bind. After lsof's clean miss the probe now asks lsof for the recorded
+  pid's own TCP listeners (`lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN -F n`,
+  `portowner_darwin.go`), the macOS twin of Linux's `/proc` read, through
+  the same seam (`procOwnerFunc`, which takes the context now, since this
+  look runs lsof) and the same merge (`procSecondOpinion`). Listeners, none
+  on the port, rule the pid out (`ownListenersSighting`): XNU's check
+  (`proc_security_policy`) is made per process, not per descriptor, so a
+  pid lsof lists at all is one whose descriptors it read. One on the port
+  is a match. Nothing listed says nothing, which is what M1 (a recorded
+  pid of root's, to a user), a recorded pid with no listener (M2, a
+  recycled pid), a bridge of another user and a blinded lsof all look
+  like, so they stay warns. **Not the pid's uid** (`kern.proc.pid`), which
+  the #1029 bullet proposed: lsof as uid 501 read all 614 processes of
+  effective uid 501 and none of the other 211 (a later census: all 91
+  app-sandboxed and all 107 hardened-runtime ones), but an lsof a sandbox
+  denies `process-info-pidinfo` or `-pidfdinfo` (an App-Sandbox terminal's,
+  an agent's) exits 1 with no output and nothing on stderr, byte for byte
+  a clean miss, and the uid rule then FAILed a sandboxed doctor's own
+  bridge on its own port, "stop the process that holds the port" about the
+  bridge's own listener (NC3b; `TestABlindedLsofRulesNoBridgeOut` pins it).
+  **Not `netstat -anv`** either: run by a Go process, from a shell or as a
+  launchd job, it printed no TCP row at all, so #1028's note that it names
+  every listener's pid without root holds only where a shell runs it.
+  **The `-a` is load-bearing**: without it lsof ORs `-p` with `-iTCP` and
+  prints every process's listeners beside all of the pid's files, which
+  the reader refuses by its pid check (NC2), so a missing `-a` costs the
+  ruling-out and never invents one; any name the reader cannot parse voids
+  the whole listing for the same reason.
+  `TestPortCheckFailsAPortTheLiveBridgeListensBeside` records a child that
+  listens and FAILs on all three platforms; the tests that record the `go
+  test` parent, which holds no listener, still warn on macOS
+  (`parentListens` skips a run whose parent does listen).
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
