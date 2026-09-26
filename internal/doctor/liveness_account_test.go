@@ -90,7 +90,7 @@ func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
 // unchanged.
 //
 // On Linux the uid arm no longer answers for this listener either, since a
-// process this user can read holds it (#PRNUM): this test used to assert
+// process this user can read holds it (#1030): this test used to assert
 // the arm's old answer as its premise, and
 // TestHiddenListenerOfThisUserOnTheKernel now pins the new one, beside the
 // tables listing the listener as this user's.

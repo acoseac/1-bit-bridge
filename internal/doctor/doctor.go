@@ -824,7 +824,7 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // (row L2). A listener that a readable process holds is that process's,
 // which matters where no ruling-out is possible: beside a listener of
 // another user's on the same port at another address, that process's
-// listener read ok before (#PRNUM).
+// listener read ok before (#1030).
 func liveUnseenVerdict(name string, port, ownPID int, seen ownerSighting) Check {
 	conflict := fmt.Sprintf(":%d in use", port)
 	if seen.ruledOut {

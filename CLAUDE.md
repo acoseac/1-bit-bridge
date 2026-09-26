@@ -2269,7 +2269,7 @@ what it claimed**, and none of it had a failing test.
   the refusal's hint names the recorded bridge and, where the probe could
   have missed it, says to stop it first (the next bullet, #1028).
   **An ok is not proof of attribution**: on Linux the uid arm answered ok
-  for a test's own listener until #PRNUM, so `TestPortCheck_OwnPIDMatches`
+  for a test's own listener until #1030, so `TestPortCheck_OwnPIDMatches`
   asserts the "bound by our own bridge" summary; with the `/proc` path
   removed it had passed on the uid arm.
 - **…and a live recorded bridge the probe did not see is explained by what
@@ -2349,7 +2349,7 @@ what it claimed**, and none of it had a failing test.
   capability-bound L2 keeps its ok,
   and root in a container (no CAP_SYS_PTRACE) rules nothing out. **Two
   shapes stayed open.** One, L4 over a capability-bound bridge (the NUC's
-  shape, row L6), is closed by the next bullet (#PRNUM). The other is L4
+  shape, row L6), is closed by the next bullet (#1030). The other is L4
   on macOS, where lsof would see a same-user pid but nothing reads the
   pid's uid. **A test that
   records a pid of its own choosing forces what the probe says about it**
@@ -2358,7 +2358,7 @@ what it claimed**, and none of it had a failing test.
   out, so a test left to the host was grading a different arm.
 - **…and a bridge no probe can read is ruled out by the port's OTHER
   holders, and the uid arm answers only for a listener no readable
-  process holds** (#PRNUM). Row L6, #1029's open shape: a bridge granted
+  process holds** (#1030). Row L6, #1029's open shape: a bridge granted
   `cap_net_bind_service` runs with dumpable=0, so as its own user
   `/proc/<pid>/fd` is root's and EACCES, and nothing rules it out. With
   it live on its old ports and its config edited to a port ANOTHER

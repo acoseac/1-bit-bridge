@@ -38,7 +38,7 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 // UID equality alone is WEAKER than PID equality: another process running
 // as the same user matches too. So the listener must also be hidden, held
 // by no process this user can read, as the capability-bound bridge's is.
-// One that a readable process holds is that process's, and until #PRNUM it
+// One that a readable process holds is that process's, and until #1030 it
 // matched as well: beside a capability-bound bridge whose config was edited
 // to a port another process of the same user holds, it answered ok (#1028's
 // row L6). The caller words its verdict to say what matched, and asks only

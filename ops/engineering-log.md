@@ -16117,7 +16117,7 @@ filesystem.
   column disagrees with the recorded baseline, suspect the harness before
   the product.**
 
-## 2026-09-26 — doctor rules out a bridge it cannot read by the port's other holders (#PRNUM)
+## 2026-09-26 — doctor rules out a bridge it cannot read by the port's other holders (#1030)
 
 #1029's Out of scope recorded row L6: `checkPort`'s liveness arm answered ok
 for a port another process of the same user holds when the recorded bridge
