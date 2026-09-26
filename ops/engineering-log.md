@@ -15673,3 +15673,171 @@ and a missing config should stay a first install.
   host's probe, so it is its own change.
 - **A data dir that moved** has no pid file where init looks, so a live
   bridge on the ports init writes still refuses, with the plain hint.
+
+## 2026-09-26 — The liveness arm explains a live bridge it did not see with what the probe saw (#1028)
+
+#984 and #1021 both recorded it under Out of scope: `checkPort`'s liveness
+arm (#640), reached when the recorded pid is alive and the owner probe ran
+cleanly without naming it, explained itself as the case it was written for.
+Its ok line said "pid attribution blocked — capability-bound binary", and its
+warn hint named `cap_net_bind_service` and dumpable=0. The report measured it
+on 2026-09-25 in the stock `golang:1.26.6` image (no lsof), with a plain
+`bridge serve` as uid 1000: `[ok] port-api in use by a process running as
+this user (uid 1000; pid attribution blocked — capability-bound binary)`.
+`checkChosenPort`'s refusal (#1027) gave the same capability as its example.
+
+### What was measured
+
+- **The reported case no longer reaches the arm.** #1027 gave Linux without
+  lsof its own attribution through `/proc`, so row L1 below reads "bound by
+  our own bridge" in both images on main. The premise was stale for that
+  one case, and the arm was still reached, with the same text, in every
+  other row.
+- **End to end, main (`36e56a3f`) and the fix, verdicts first.** dido
+  (Ubuntu 26.04, Docker 29.1.3): `attrword/nolsof:1.26.6` (the stock golang
+  image plus `libcap2-bin`, asserted to have no lsof) and
+  `attrword/lsof:1.26.6` (the same with lsof), every bridge built from the
+  tree under test (`~/attrword/e2e/wording.sh`). The Mac (macOS 27,
+  the base system's lsof 4.91, uid 501). home-pc (Windows 11 Enterprise
+  10.0.26200, from an elevated SSH session). The verdict was the same on main and the fix in
+  every row, and the same in both images:
+
+  | row | shape | verdict | main said | the fix says |
+  |---|---|---|---|---|
+  | L1 | plain bridge, doctor as its user (uid 1000) | ok | bound by our own bridge | the same |
+  | L2 | bridge given `cap_net_bind_service=ep` (CapEff `0x400`; its fd directory denied to uid 1000) | ok | "pid attribution blocked — capability-bound binary" | "lsof lists no process listening on this port"; without lsof "this host has no lsof, and /proc does not let this user read pid 223's descriptors" |
+  | L3 | bridge as uid 1001, its config and pid file made readable, doctor as uid 1000 | warn | capability hint | "lsof lists no process…" (or the /proc line), then the Linux blind spot and the hedge |
+  | L4 | bridge live on 7790, config edited to 7788, which another uid-1000 process holds | ok | "pid attribution blocked — capability-bound binary" | "lsof lists pid 335 listening on this port"; without lsof "/proc shows no descriptor of pid 320 listening on this port" |
+  | L5 | as L4, the holder uid 1001 | warn | capability hint | lsof: "lsof lists no process…" with the blind spot and the hedge; without lsof: "/proc shows no descriptor of pid 378 listening on this port: stop the process that holds the port…" |
+  | M1 | Mac: recorded pid 65775, root's Tailscale extension, holding 127.0.0.1:50062 | warn | capability hint | "lsof lists no process listening on this port (lsof run as uid 501 rather than root sees only that user's processes)", then the hedge |
+  | M2 | Mac: recorded pid a live `sleep`, :39127 held by 1Password (pid 1305) | warn | capability hint | "lsof lists pid 1305 listening on this port: stop the process that holds the port, or change the address in bridge.yaml" |
+  | W1 | home-pc: recorded pid sshd (4380), 127.0.0.1:7788 held by a PowerShell `TcpListener` (pid 5872) | warn | capability hint | "Windows' TCP listener table lists pid 5872 on this port: stop the process…" |
+
+  The capability text was true in L2 alone. In L3 and M1 the recorded pid
+  runs as another user. In L4, M2 and W1 the probe had named the process
+  that holds the port. And M1, M2 and W1 are on platforms with no such
+  capability.
+- **macOS's lsof sees only its user's processes.** Run as uid 501,
+  `lsof -nP -iTCP -sTCP:LISTEN` listed that user's listeners and left out
+  root's launchd on 445 and kdc on 88. `netstat -anv` showed both, with
+  their pids, to the same user.
+- **Linux shows a process's fd links only to its uid AND group, while it is
+  dumpable.** Listing `/proc/<pid>/fd` takes the uid alone (the directory is
+  0500, owned by the task's euid, or by root when it is not dumpable), and a
+  readlink takes ptrace's full read check, which compares the gids as well.
+  So a directory can list and refuse its links, and `fdDirHoldsSocket` used
+  to read that as "none of its descriptors is the listener": ruled out, when
+  the socket may be behind a link it could not read.
+
+### Decisions
+
+- **The account comes from the probe that looked, not from a table of
+  causes.** `isPIDListeningOnPort` returns an `ownerSighting` beside found
+  and the error, built where each fact is known: `lsofSighting` from lsof's
+  own output, `procSighting` from the tables and the fd walk,
+  `listenerTableSighting` from GetExtendedTcpTable's rows. It carries what
+  the probe saw, what it cannot see as this user (`blindSpot`: another user
+  or group, or dumpable=0, on Linux; another user, for lsof on macOS; nothing
+  on Windows), and whether what it saw rules the pid out. `ruledOut` is lsof
+  naming other pids, `/proc` reading every descriptor without the listener
+  or listing no listener at all, and the Windows table. The zero value is
+  the hedge, which is the safe advice for a probe that sets nothing.
+- **Found and error are unchanged, and the Windows probe still stops at an
+  IPv4 match** before reading the IPv6 table, so an IPv6 read that fails
+  cannot turn a found pid into a probe error.
+- **Both hints follow the account.** A pid ruled out gets "stop the process
+  that holds the port", and `checkChosenPort` drops "stop that bridge and
+  re-run", which would free nothing. A pid the probe could have missed keeps
+  the hedge and gets the blind spot in parentheses.
+- **The ok summary gives the account and not the blind spot**, for length.
+  The production NUC's line moves from "(uid 1000; pid attribution blocked
+  — capability-bound binary)" to "(uid 1000; lsof lists no process listening
+  on this port)".
+- **Root gets no blind spot.** Outside a container it reads every process.
+  Inside Docker it lacks CAP_SYS_PTRACE and cannot, so the true clause
+  depends on something the probe does not know, and none is printed.
+- **lsof output that is not `lsof -t`'s** (busybox's applet, the #984
+  bullet) says only that the pid is not in it, rather than listing fd
+  numbers as pids.
+- **Windows' table is taken as naming every listener's owner.** The rows
+  are what `netstat -ano` prints, and a Gemini consult confirmed that
+  GetExtendedTcpTable needs no elevation. It could not be checked unelevated
+  here: the SSH session runs at High Mandatory Level, `runas /trustlevel`
+  started nothing over it, and a scheduled task would have changed the host.
+  The consult's edge cases do not reach a bridge, which binds its own
+  listener: an inherited or duplicated socket keeps the binder's pid,
+  http.sys endpoints (WinRM, IIS) show pid 4, and a portproxy or WSL relay
+  shows the proxy's.
+
+### Tests and controls
+
+- `liveness_account_notwindows_test.go`: `TestLivenessArmGivesLsofsAccount`
+  (lsof answering through `sh`, four answers, both arms),
+  `TestLivenessArmWithoutLsofGivesTheHostsAccount`,
+  `TestChosenPortRefusalNamesTheRecordedBridge` (moved here from the untagged
+  file and driven by an lsof that lists nothing, the case its docblock
+  describes; on every host with lsof, and on Windows, it had been passing
+  on a probe that named the holder),
+  and `TestPortVerdictsDoNotDependOnTheAccount`: 20 rows, both ladders.
+  `liveness_account_test.go` runs the real probe on every platform:
+  `TestLivenessArmNamesTheListenerThePlatformProbeSaw` and
+  `TestChosenPortRefusalOfAPortTheProbeSawAnotherHold`, the test process
+  holding the port and its parent recorded. `sighting_test.go` covers the
+  pure pieces, and `TestProcSightingAccountsForEachMiss` covers the `/proc`
+  account on fixtures, a 0400 directory standing in for links that list and
+  do not read.
+- **Red first on the Mac**: every wording test failed on main, and the
+  verdict table passed on main, 20 of 20.
+- Negative controls against the committed fix (`25ccc6a9`), each restored
+  and the tree checked clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | `checkPort`'s old fixed text back, probe plumbing kept | the three `checkPort` wording tests red; the verdict table green. The first attempt did not build (`seen` unused) and was rerun with the call site discarding it |
+  | NC2 | both hints ignore `ruledOut` | the ruled-out rows of four tests red |
+  | NC3 | lsof's pids never read | the lsof unit test, both real-probe tests and the lsof account red |
+  | NC4 | a link that does not read is ignored, as before | `TestProcSightingAccountsForEachMiss` red |
+  | NC5 | macOS's blind spot claims the Linux capability | both lsof tests that check the blind spot red |
+  | NC6 | a ruled-out miss FAILs instead of warning | the verdict table red, with five others |
+  | NC7 | the missing lsof dropped from the account | the no-lsof test red |
+  | NC-W | home-pc: the Windows owners dropped | both real-probe tests red |
+  | NC-L1 | dido, lsof image: Linux's blind spot always empty | the lsof account and the chosen-port hint red |
+  | NC-L2 | dido, no-lsof image: `/proc` reading every descriptor no longer rules the pid out | five tests red, the fixture and real-kernel ones among them |
+
+- `go test -race ./internal/doctor/ ./cmd/bridge/` in both dido images as
+  uid 1000, and `go test ./internal/doctor/` on home-pc (Go 1.27.1): ok.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the diff and
+four claims the wording rests on. It agreed with all four (the uid-only
+listing and uid-plus-gid readlink, root in Docker without CAP_SYS_PTRACE,
+macOS lsof's uid rule, GetExtendedTcpTable without elevation) and found no
+verdict change. It added the Windows edge cases recorded above, and, on
+Linux, that a saved uid that differs, a group held only as a supplementary
+group, or a user namespace also hides a same-uid process's links.
+
+### Out of scope
+
+- **L4's ok is wrong.** The uid arm answers ok for a port that another
+  process of this user holds, so the runbook's validate-before-restart run
+  passes an edit to such a port, and the restart cannot bind: #970's defect,
+  in the ordinary ladder. The account now names the holder on that line,
+  and `ruledOut` already says the recorded bridge does not hold the port.
+  Using it would change a verdict, so it is its own change.
+- **L5 differs between the images, with the same verdict.** Without lsof,
+  `/proc` reads the recorded bridge's own descriptors and rules it out.
+  lsof lists nothing it can see and does not look at the recorded pid, so
+  the hint keeps the hedge. Both are true, and the second is less precise.
+  `/proc` first on Linux (#1027's Out of scope) would close it.
+- **macOS's `netstat -anv` names every listener's pid without root.** It
+  could attribute M1 where lsof cannot, which could change a verdict, so it
+  is its own change too.
+
+### Process notes
+
+- The report's measured case had been fixed by #1027 the day after it was
+  measured. Measuring main before designing is what showed the arm still
+  mattered, in every other shape.
+- NC1's first run failed to build, which is "control invalid", never a
+  pass. It was rerun to a build before it counted.

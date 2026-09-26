@@ -2264,11 +2264,48 @@ what it claimed**, and none of it had a failing test.
   host with lsof accepted (NC-F, one set of facts, two verdicts). Its
   limits are lsof's: another user's process, or a `cap_net_bind_service`
   binary (dumpable=0), keeps its descriptors from a non-root observer, and
-  the refusal's hint names the recorded bridge and says to stop it first.
+  the refusal's hint names the recorded bridge and, where the probe could
+  have missed it, says to stop it first (the next bullet, #1028).
   **An ok is not proof of attribution**: on Linux the uid arm answers ok
   for a test's own listener, so `TestPortCheck_OwnPIDMatches` asserts the
   "bound by our own bridge" summary; with the `/proc` path removed it had
   passed on the uid arm.
+- **…and a live recorded bridge the probe did not see is explained by what
+  the probe SAW, never by the one case the arm was written for** (#1028).
+  #640's liveness arm said "pid attribution blocked — capability-bound
+  binary" on its ok line, and blamed `cap_net_bind_service` and dumpable=0
+  in its warn hint, for every live recorded pid the probe did not name,
+  and `checkChosenPort`'s refusal gave the same capability as its example.
+  Measured on main, that is true of one shape, a bridge granted the
+  capability. It was printed for a bridge running as another user (dido,
+  both images; the Mac, where lsof run without root lists only that
+  user's processes), for a port whose holder lsof had just NAMED, and on
+  macOS and Windows, which have no such capability. The case reported, a
+  plain bridge in the no-lsof image, already read "bound by our own
+  bridge" since #1027's `/proc` attribution. `isPIDListeningOnPort` now
+  returns an `ownerSighting` beside found and the error, written by the
+  probe that looked (`lsofSighting`, `procSighting`,
+  `listenerTableSighting`): what it saw, what it cannot see as this user
+  (`blindSpot`, per platform: another user or group, or dumpable=0, on
+  Linux; another user, for lsof on macOS; nothing on Windows, whose
+  listener table carries every listener's pid), and whether what it saw
+  RULES THE PID OUT (lsof naming other pids, `/proc` reading every one of
+  its descriptors, the Windows table). The ok summary gives the account.
+  Both hints say to stop the holder when the pid is ruled out, and keep
+  the hedge and the blind spot when it is not; the zero `ruledOut` is the
+  hedge, the safe fallback for a probe that sets nothing. **The verdicts
+  are untouched**: `TestPortVerdictsDoNotDependOnTheAccount` walks both
+  ladders over every lsof answer, alive or not, owned or not, and passes
+  on main unmodified; moving one verdict turns it red. #1021's rule, that
+  a missing tool may explain a verdict and never decides one, has a
+  second half: **the explanation is the one the probe established.** Root
+  gets no blind spot, because inside a Docker container it lacks
+  CAP_SYS_PTRACE and "root sees everything" is false too. **One ok is
+  wrong, and left for its own change**: a bridge live on its old port,
+  with the config edited to a port another process of this user holds,
+  gets the uid arm's ok, so the runbook's validate-before-restart run
+  passes and the restart cannot bind. The line now says lsof names that
+  process.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
