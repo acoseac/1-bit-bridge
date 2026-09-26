@@ -216,8 +216,11 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := checkPort(t.Context(), "port-test", addr.Port, pidFile)
-	if c.Status != OK {
-		t.Errorf("own-pid bind should be ok, got %v %s (hint: %s)", c.Status, c.Summary, c.Hint)
+	// The summary, not only the status: on Linux the liveness arm also
+	// answers ok for this listener (its uid is ours), so an ok alone would
+	// pass with the match broken.
+	if c.Status != OK || !strings.Contains(c.Summary, "bound by our own bridge") {
+		t.Errorf("own-pid bind should be ok \"bound by our own bridge\", got %v %s (hint: %s)", c.Status, c.Summary, c.Hint)
 	}
 }
 
