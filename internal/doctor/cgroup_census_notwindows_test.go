@@ -80,13 +80,19 @@ func (f cgroupFixture) id(t *testing.T, cg string) uint64 {
 // mount.
 func (f cgroupFixture) mountAt(t *testing.T, root, self string) {
 	t.Helper()
+	writeMountinfo(t, root, self, "30 25 0:26 / "+strings.ReplaceAll(f.point, " ", `\040`)+
+		" rw,nosuid,nodev,noexec,relatime shared:9 - cgroup2 cgroup2 rw,nsdelegate\n")
+}
+
+// writeMountinfo writes pid self's mountinfo in the fixture /proc at root: a
+// proc mount, then lines.
+func writeMountinfo(t *testing.T, root, self, lines string) {
+	t.Helper()
 	dir := filepath.Join(root, self)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	info := "22 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw\n" +
-		"30 25 0:26 / " + strings.ReplaceAll(f.point, " ", `\040`) +
-		" rw,nosuid,nodev,noexec,relatime shared:9 - cgroup2 cgroup2 rw,nsdelegate\n"
+	info := "22 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw\n" + lines
 	if err := os.WriteFile(filepath.Join(dir, "mountinfo"), []byte(info), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +161,7 @@ func (c cgroupCase) sighting(t *testing.T) (bool, ownerSighting, error) {
 		writeCgroupFile(t, root, 4242, body)
 	}
 	if c.noMount {
-		selfDir := filepath.Join(root, strconv.Itoa(os.Getpid()))
-		if err := os.MkdirAll(selfDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(selfDir, "mountinfo"), []byte("22 28 0:21 / /proc rw - proc proc rw\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeMountinfo(t, root, strconv.Itoa(os.Getpid()), "")
 	} else {
 		f.mountAt(t, root, strconv.Itoa(os.Getpid()))
 	}

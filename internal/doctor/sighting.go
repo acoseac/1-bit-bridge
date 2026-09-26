@@ -220,8 +220,8 @@ func listenerTableSighting(owners []int) ownerSighting {
 // /proc/<pid>/cgroup the one pid runs in, readable where its descriptors
 // are not. A bridge creates its listeners in the cgroup it runs in and
 // never moves, so a listener created in a cgroup that neither is pid's,
-// holds it, nor sits below it is not the bridge's (cgroupsNotOf, which says
-// why nesting and anything this process cannot see count nothing).
+// contains it, nor sits below it is not the bridge's (cgroupsNotOf, which
+// says why nesting and anything this process cannot see count nothing).
 //
 // A listener that is none of these, or a table that did not read, leaves
 // pid possible, as before.

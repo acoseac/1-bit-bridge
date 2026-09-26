@@ -59,29 +59,8 @@ func parseSockDiag(b []byte, port int, into map[string]uint64) (done bool, err e
 		if msgLen < nlmsgHeaderLen || msgLen > len(b) {
 			return false, errSockDiagMalformed
 		}
-		body := b[nlmsgHeaderLen:msgLen]
-		switch ne.Uint16(b[4:]) {
-		case nlmsgDone:
-			if len(body) >= 4 {
-				if status := int32(ne.Uint32(body)); status < 0 {
-					return true, fmt.Errorf("socket diagnostics: the kernel ended the dump with errno %d", -status)
-				}
-			}
-			return true, nil
-		case nlmsgError:
-			if len(body) < 4 {
-				return false, errSockDiagMalformed
-			}
-			if status := int32(ne.Uint32(body)); status < 0 {
-				return false, fmt.Errorf("socket diagnostics: the kernel refused the request with errno %d", -status)
-			}
-			// An acknowledgement, which a dump request does not ask for:
-			// nothing follows it.
-			return true, nil
-		case sockDiagByFamily:
-			if err := addListenerCgroup(body, port, into); err != nil {
-				return false, err
-			}
+		if done, err := sockDiagMessage(ne.Uint16(b[4:]), b[nlmsgHeaderLen:msgLen], port, into); done || err != nil {
+			return done, err
 		}
 		// Messages are padded to a 4-byte boundary (NLMSG_ALIGN); the last
 		// in a datagram may end without its padding.
@@ -90,6 +69,36 @@ func parseSockDiag(b []byte, port int, into map[string]uint64) (done bool, err e
 			break
 		}
 		b = b[next:]
+	}
+	return false, nil
+}
+
+// sockDiagMessage reads one message of the reply, of netlink type typ, its
+// body after the header: the dump's end (NLMSG_DONE, and the status there),
+// an NLMSG_ERROR, or a socket (addListenerCgroup). Any other type is
+// skipped.
+func sockDiagMessage(typ uint16, body []byte, port int, into map[string]uint64) (done bool, err error) {
+	ne := binary.NativeEndian
+	switch typ {
+	case nlmsgDone:
+		if len(body) >= 4 {
+			if status := int32(ne.Uint32(body)); status < 0 {
+				return true, fmt.Errorf("socket diagnostics: the kernel ended the dump with errno %d", -status)
+			}
+		}
+		return true, nil
+	case nlmsgError:
+		if len(body) < 4 {
+			return false, errSockDiagMalformed
+		}
+		if status := int32(ne.Uint32(body)); status < 0 {
+			return false, fmt.Errorf("socket diagnostics: the kernel refused the request with errno %d", -status)
+		}
+		// An acknowledgement, which a dump request does not ask for:
+		// nothing follows it.
+		return true, nil
+	case sockDiagByFamily:
+		return false, addListenerCgroup(body, port, into)
 	}
 	return false, nil
 }
