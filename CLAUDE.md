@@ -2475,15 +2475,71 @@ what it claimed**, and none of it had a failing test.
   remount as the control). A pid file naming a recycled pid of another
   user now FAILs a port whose listeners that uid did not create, the
   trust #1029 already gave a recycled pid of the same user (P7a, P7b).
-  **Still open: a hidden holder of the bridge's OWN uid** (row L6h:
-  another capability-bound binary of the service user, or one of its
-  processes in another group): its listener carries the bridge's uid,
-  nothing unprivileged tells the two apart, and the uid arm reads ok.
-  The runbook's answer is the moved port's own line: the running bridge
-  is still on the old port, so anything but `free` on the new one is
-  another process. The L7 kernel test takes root (it runs the holder,
+  A hidden holder of the bridge's OWN uid (row L6h) was left open here;
+  the next bullet closes it wherever that holder runs in another
+  cgroup. The L7 kernel test takes root (it runs the holder,
   the bridge and doctor as two other uids), so it runs on dido and skips
   in CI, where the fixture tests carry the rule.
+- **…and a listener created in a cgroup that does not nest with the
+  bridge's is not the bridge's either, so a hidden holder of its OWN uid
+  FAILs too** (#PR). Row L6h, left by #1032: the capability-bound bridge
+  live on its old ports, its config edited to a port held by ANOTHER
+  hidden process of the same uid (a second capability-bound binary of the
+  service user in its own unit, one of its processes in another group,
+  one in a container, or one hand-started from another login). No
+  readable process holds that listener and it carries the bridge's uid,
+  so the uid arm read ok, `bridge doctor --config` exited 0, `bridge init
+  --force` saved the port, and the restart could not bind (dido's host,
+  the real binary in systemd units, a container and two SSH sessions,
+  with lsof and without). **The census's third accounting**
+  (`cgroupsNotOf`, after the readable holders and the creator uids): the
+  kernel's socket diagnostics (`NETLINK_SOCK_DIAG`, what `ss --cgroup`
+  reads, `listenerCgroups`) give the cgroup each listener was created
+  in, to any user and for root's sockets too, as the id of that cgroup's
+  directory on the cgroup2 mount (its inode: 60 of 60 on dido, equal to
+  `name_to_handle_at`'s id), and `/proc/<pid>/cgroup`, readable where a
+  dumpable=0 process's descriptors are not, the one the bridge runs in.
+  **A socket keeps the cgroup it was created in**: the kernel commit
+  that added the attribute (6e3a401fc8af, Linux 5.8) says so, and a
+  holder root moved to another unit still reported its first. So a
+  listener created in a cgroup that neither is the bridge's, contains
+  it, nor sits below it is another process's, **given the premise**: the
+  bridge creates its listeners in the cgroup it runs in and never moves.
+  Nothing in it writes `cgroup.procs` or asks systemd to move it, and
+  **systemd moves no running service** (systemd 259: a `Slice=` edit plus
+  daemon-reload left the process in place until a restart); root does,
+  and a bridge moved to another cgroup after it listened FAILs its own
+  port (row CM, the hint naming both cgroups), while one moved into a
+  child of its own nests and stays ok (CMd). **Adding socket activation
+  (systemd creates the socket in the `.socket` unit's cgroup), a
+  listener handoff, threaded cgroups or a self-move breaks it; revisit
+  the census in the same change.** **Nesting counts nothing**, in either
+  direction: 5.8 to 5.14 (and 5.10.y before 5.10.226) stamp every new
+  socket with the ROOT cgroup once net_cls or net_prio v1 tagging is in
+  use (8520e224f547), and threads in threaded cgroups or a delegated
+  subtree put a process's own sockets below its cgroup. **Nor does
+  anything this process cannot see**: no attribute (before 5.8, or no
+  `CONFIG_SOCK_CGROUP_DATA`), hidepid, a v1-only host, a path outside the
+  mount (`/../x`, how a container renders a host cgroup; `unifiedCgroup`
+  refuses it BEFORE it is joined onto the mount point, which would climb
+  out of it, NC10), a deleted cgroup, one past the walk's budget of 4,096
+  directories. So in a container, where every process shares its one
+  cgroup, nothing changes. The kernel ends a dump it refuses with
+  `NLMSG_DONE` carrying a negative errno, not with `NLMSG_ERROR`
+  (captured), and the parser reads that status; its tests run on every
+  platform against datagrams captured from a real kernel in a container's
+  own network namespace, so no host address is in them. **Still open: a
+  hidden holder in the bridge's OWN cgroup** (row C6s: a second process
+  the bridge's unit starts, one started from the same login session, any
+  process of the bridge's container). The runbook's answer is the moved
+  port's own line: the running bridge is still on the old port, so
+  anything but `free` on the new one is another process. The root-only
+  kernel test makes two cgroups under its own, so it runs on dido's host
+  and skips in CI and in containers (read-only cgroupfs); the kernel-fact
+  tests (`listenerCgroups` against a real listener, a dumpable=0
+  child's `/proc/<pid>/cgroup`) run as any user wherever a cgroup2 mount
+  holds the test's cgroup (measured in both dido images, as uid 1000 and
+  as root).
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),

@@ -16733,3 +16733,260 @@ was declined as recorded.
   and two unrelated tests failed only after this one. Isolate by running the
   suspect first, then read the process's own state (`PR_GET_DUMPABLE`)
   rather than guessing at the tool that stopped seeing it.
+
+## 2026-09-26 — doctor rules a hidden bridge out of a port a listener in another cgroup holds (#PR)
+
+#1032's Out of scope recorded row L6h: a bridge granted
+`cap_net_bind_service` runs with dumpable=0, and when its config is edited to
+a port that ANOTHER hidden process of the SAME uid holds (another
+capability-bound binary of the service user, or one of its processes in
+another group), no readable process holds that listener and it carries the
+bridge's own uid, which is how the bridge on its own port looks. The uid arm
+read ok. The lead, measured on dido's host as uid 1000: `ss -ltnH --cgroup`
+shows the cgroup that created every TCP listener, root's included.
+
+### What was measured
+
+- **What the kernel gives an unprivileged user.** A `SOCK_DIAG_BY_FAMILY`
+  dump of TCP listeners (`NETLINK_SOCK_DIAG`, `inet_diag_req_v2`, family
+  AF_INET and AF_INET6, `idiag_ext = 0`, states = `1 << TCP_LISTEN`), sent
+  as uid 1000 on dido (Ubuntu 26.04, kernel 7.0), returned every listener in
+  the network namespace, root's included, each with the attributes 8
+  (SHUTDOWN), 11 (SKV6ONLY, v6 only), 21 (`INET_DIAG_CGROUP_ID`) and 22
+  (SOCKOPT), and no MARK (15, CAP_NET_ADMIN only). Both families took 0.2
+  ms together.
+- **When the attribute came, and what it promises.** Commit 6e3a401fc8af
+  ("inet_diag: add cgroup id attribute", 2020-04-30) is in v5.8 and not in
+  v5.7 (`gh api repos/torvalds/linux/compare`). It is filled
+  unconditionally under `CONFIG_SOCK_CGROUP_DATA`, from
+  `sock_cgroup_ptr(&sk->sk_cgrp_data)`, and its message says the id is set
+  in socket(2), inherited by accepted sockets, "not changed when process
+  get moved to another cgroup", can point to a deleted cgroup, and "When
+  net_cls or net_prio cgroup is activated this ID is equal to 1 (root
+  cgroup ID) for newly created sockets".
+- **That fallback's lifetime.** Fixed by 8520e224f547 ("bpf, cgroups: Fix
+  cgroup v2 fallback on v1/v2 mixed mode"), which is in v5.15 and not
+  v5.14; backported to 5.10.y as cf002be3b8d9, first in v5.10.226 (compare
+  against the gregkh/linux mirror's tags). 5.4.y never had the attribute.
+- **The id is the directory's inode.** Over dido's 60 cgroup directories,
+  every `st_ino` equals the id `name_to_handle_at` returns (how `ss` maps
+  ids to paths), and the ids the dump reported (ssh.socket 3814,
+  systemd-resolved 2585, ...) are the inodes of those units' directories.
+  The root is 1.
+- **`/proc/<pid>/cgroup` reads where the descriptors do not**: 0444, and a
+  capability-bound holder of uid 1000, whose fd directory uid 1000 cannot
+  list, showed `0::/system.slice/cgA.service`; so did root's sshd and pid 1.
+- **A socket keeps its cgroup.** A capability-bound holder in transient
+  unit cgA, listening, was moved by root into cgB's `cgroup.procs`: its
+  `/proc/<pid>/cgroup` read cgB and its listener still reported cgA's id.
+- **systemd moves no running service.** systemd 259: a unit started in
+  `Slice=cgmva.slice`, its file edited to `cgmvb.slice`, then
+  `daemon-reload` (twice) and `set-property CPUWeight=50`: the process
+  stayed in `/cgmva.slice/cgmv.service` (systemctl showed the new Slice
+  and the old ControlGroup) until `restart`, whose new process was in
+  cgmvb.
+- **Socket activation stamps the activator's cgroup**: sshd's :22
+  listeners report `/system.slice/ssh.socket`.
+- **Cgroup namespaces.** In a Docker container with a private cgroup
+  namespace (Docker's default on cgroup v2) `/proc/self/cgroup` is `0::/`,
+  the cgroup2 mount at `/sys/fs/cgroup` has root `/` and one directory,
+  and the container's listeners report that directory's inode. With the
+  host's network and pid namespaces, a host process reads
+  `0::/../cgA.service` and a host listener's id is in no visible
+  directory. With `--cgroupns=host`, everything maps as on the host.
+- **The kernel refuses a dump with DONE, not ERROR.** Asked for IP
+  protocol 250, the whole answer was one `NLMSG_DONE` carrying -ENOENT.
+  The datagrams in `sockdiag_parse_test.go` were captured in a container's
+  own network namespace (three loopback listeners of the capturing
+  process), so no host address is in the repo.
+- **Cost.** A walk of dido's cgroup tree (60 to 64 directories) took 4.5 to
+  4.8 ms; the census walks only when a listener's cgroup differs from the
+  bridge's, and stops at what it was looking for.
+- **The rows, on dido's host with the real binary** (`~/cgw/verdict-cg.sh`
+  and `sessions-cg.sh`): the bridge as a transient system unit of uid 1000
+  with `setcap cap_net_bind_service=+ep` (so dumpable=0), live on
+  7790/7791; doctor as uid 1000; the host has lsof, and each doctor row
+  was run again from the no-lsof image sharing the host's pid, network and
+  cgroup namespaces (`DOC_IMAGE`). The verdicts agree in both, on main
+  (`dcc152fa`) and the fix:
+
+  | row | shape | main | fix |
+  |---|---|---|---|
+  | C2 | the bridge in cgbr.service on its own ports | ok, exit 0 | same |
+  | C6h | config edited to 7788, which a capability-bound holder of uid 1000 in cghold.service has | ok, exit 0 | FAIL, exit 1: "…and /proc and the kernel's socket diagnostics show every socket listening on this port created in cgroup /system.slice/cghold.service, while pid N runs in cgroup /system.slice/cgbr.service: stop the process that holds the port, or change the address in bridge.yaml" |
+  | C6hr | C6h, then the bridge restarted | `bind: address already in use` | the same: the consequence the check now catches |
+  | C6hi | C6h, then `bridge init --yes --force` | exit 0, config saved with `:7788` / `:7789` | exit 1, port-api FAIL, config untouched |
+  | C6hc | C6h's holder, the config broken by an unknown key, then `bridge init --yes --force` | FAIL, hint "…If it does, stop that bridge and re-run; otherwise stop the process that holds the port" | FAIL, hint "…created in cgroup /system.slice/cghold.service, while pid N runs in cgroup /system.slice/cgbr.service: stop the process that holds the port and re-run" |
+  | C6g | the holder a plain binary of uid 1000, gid 1001 | ok, exit 0 | FAIL, as C6h |
+  | C6d | the holder capability-bound in a Docker container on the host network, as uid 1000 | ok, exit 0 | FAIL, naming `/system.slice/docker-<id>.scope` |
+  | C6s | the holder in the bridge's OWN unit | ok, exit 0 | same (Out of scope) |
+  | CM | C2, then root moved the bridge's process into a sibling cgroup | ok, exit 0 | FAIL on both ports, naming cgbr.service and cgmoved (the premise broken) |
+  | CMd | C2, then root moved it into a child of its own cgroup | ok, exit 0 | same (nested) |
+  | S2 | the bridge hand-started from an SSH session, on its own ports | ok, exit 0 | same |
+  | S6h | a capability-bound holder of uid 1000 hand-started from ANOTHER SSH session | ok, exit 0 | FAIL, naming session-769.scope against session-766.scope |
+  | S6s | both started from the same SSH session | ok, exit 0 | same (Out of scope) |
+
+- **The container matrices** (`runv.sh`, `runl6.sh`, `runl7.sh`: 31 rows
+  per image, both images) on the fix, diffed against main with pids
+  normalised: identical. Every process in a container shares one cgroup,
+  so the accounting answers nothing there, the container's L6h row
+  included.
+
+### Decisions
+
+- **The census's third accounting** (`cgroupsNotOf`, called by
+  `listenersNotOf`): a listener no readable process holds and no other uid
+  created is another process's when the cgroup it was created in and the
+  one the recorded pid runs in are both visible and neither contains the
+  other. It rides inside `procSighting` for #1030's reason, so both
+  ladders get it and lsof changes nothing.
+- **Nesting counts nothing, in both directions.** Ancestors cover the
+  5.8-5.14 root fallback; descendants cover threaded cgroups and a
+  delegated subtree, where a process's own sockets sit below the cgroup
+  `/proc/<pid>/cgroup` names (the consult's point); either covers a
+  process moved into a child of its own cgroup, or out of one (CMd). The
+  cost is a holder in a cgroup nested with the bridge's, which nothing
+  realistic produces.
+- **Only what this process can see counts.** A socket id the bounded walk
+  of the cgroup2 mount does not find counts nothing: outside this cgroup
+  namespace (a doctor in a private-namespace container reading a host
+  socket), a deleted cgroup, one past the budget. A pid cgroup path that is
+  not clean (`/../x`) is refused before it is joined onto the mount
+  point, which would climb out of it (NC10 goes red only because the
+  fixture plants a directory where the climb lands). The alternative,
+  "unrelated to every visible ancestor counts", would also rule out a host
+  holder seen from such a container, and would turn the root fallback,
+  which is invisible from there, into a false FAIL.
+- **The premise, and what breaking it costs.** The bridge creates its
+  listeners in the cgroup it runs in and never moves: it writes no
+  `cgroup.procs`, asks systemd for nothing, and systemd moves no running
+  service. A bridge root moved after it listened FAILs its own ports (CM),
+  and the hint names both cgroups; a restart clears it. Detecting a move
+  from the cgroup's creation time against the process's start was
+  considered and declined: it cannot see a move into an older cgroup.
+- **The equal-id comparison is a shortcut, never the rule.** It spares
+  the bridge's own port the walk; an equal cgroup nests, so dropping it
+  changes no verdict (NC8 stays green, and the comment says so).
+- **Netlink, not `ss`.** `ss` is iproute2 (priority important, yet absent
+  from the stock golang image), and its output is a format; the kernel
+  interface is what `ss` itself reads. No kernel-side port filter: the
+  parser's is the one filter, pinned by a capture holding another port.
+- **The account names both sources.** With a cgroup in it, the lead is
+  "/proc and the kernel's socket diagnostics show"; without one, #1032's
+  words are unchanged (the container matrices diff clean).
+- **No fuzz target.** Kernel replies are not one of the five untrusted
+  surfaces the nightly fuzz covers. A throwaway target ran 4.5 M parser
+  inputs and 2.2 M reader inputs without a panic, and was deleted.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on six questions,
+with the measurements above. What it contributed and held up: systemd has
+no implicit moves (daemon-reload, reexec, switch-root, subtree_control,
+oomd); an unprivileged user cannot move a process out of a session scope or
+a system service (root-owned `cgroup.procs`); `.socket` units stamp their
+own cgroup; io_uring sockets carry the submitter's; the id is global and
+both renderings are relative to the reader's cgroup namespace; and threaded
+cgroups or a delegated subtree put a process's own sockets BELOW its
+cgroup, which made nesting count nothing in both directions. **Two of its
+answers were wrong, and the primary sources settle both**: it named
+"commit 8182b578c900" and Linux 4.18 for the attribute (it is 6e3a401fc8af,
+5.8), and it said the mixed-mode fix, which it called e663a8a3a, was never
+backported to 5.10.y (it is 8520e224f547, backported as cf002be3b8d9 in
+5.10.226). Checkable claims were checked against `gh api` before anything
+was built on them.
+
+### Tests and controls
+
+- `sockdiag_parse_test.go` (every platform, against the captures):
+  `TestParseSockDiagReadsTheCgroupOfEachListenerOnThePort`,
+  `TestParseSockDiagFailsARefusedDump`,
+  `TestParseSockDiagLeavesOutWhatItCannotRead`.
+- `cgroup_test.go` (every platform): `TestUnifiedCgroupReadsTheV2Line`,
+  `TestCgroup2MountsReadsMountinfo`, `TestUnescapeMountinfo`,
+  `TestCgroupNestedIsContainmentEitherWay`,
+  `TestMountOfCgroupPrefersTheWidestMount`, `TestCgroupListRendersPaths`.
+- `cgroup_census_notwindows_test.go` (every unix; a fixture cgroup tree
+  whose directories' inodes stand in for the ids):
+  `TestProcSightingRulesOutAPidItCannotReadByTheCgroupThatCreatedEachListener`
+  (twenty rows: six ruled out, fourteen left possible) and
+  `TestTheCensusAsksForCgroupsOnlyAboutWhatNothingElseAccountsFor`;
+  `cgroup_walk_notwindows_test.go`: `TestFindCgroupsStopsAtItsBudget`;
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace` gained a cgroup
+  row (the mountinfo planted for both selves, so only the guard stands
+  between the census and a ruling-out) and its control.
+- `hidden_cgroup_linux_test.go` (the real kernel):
+  `TestListenerCgroupsReportsTheCgroupAListenerWasCreatedIn` and
+  `TestAHiddenBridgesCgroupReadsWhereItsDescriptorsDoNot` (any user where a
+  cgroup2 mount holds the test's cgroup), and
+  `TestPortCheckFailsAPortAHiddenHolderInAnotherCgroupHolds` (root, on a
+  writable cgroup2 mount: two cgroups under the test's own, children that
+  join theirs before they listen, doctor as the same uid; subtests for the
+  sibling holder, a holder in the bridge's own cgroup, and the bridge on
+  its own port). `checkPortAs` factors #1032's doctor-child runner.
+- **Red first**, the new census files on the plumbing commit `d7d5eae6`
+  (the source parameter passed, the accounting stubbed): the six
+  ruled-out rows, the census-asks row and the namespace test's cgroup
+  control failed ("got false, {saw:/proc does not let this user read pid
+  4242's descriptors …}"); every possible row passed. The kernel test does
+  not compile there; NC1 on dido stands for it.
+- Negative controls against the fix on the Mac, each restored with
+  `git checkout --` and the tree checked clean before the next; each
+  built:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | the accounting never rules out | the six ruled-out rows, the census-asks row, the namespace control; on dido's host as root, the kernel test's sibling-holder subtest ("got ok … want fail"), the other two subtests green |
+  | NC2 | nesting counts as another cgroup | the root, ancestor and descendant rows |
+  | NC3 | a cgroup the walk does not find counts as another | the invisible-cgroup row |
+  | NC4 | the census answers ahead of the pid-namespace guard | the namespace test's cgroup, uid and holder rows |
+  | NC5 | the doctor's own cgroup read in place of the pid's | the six ruled-out rows, the census-asks row, the namespace control |
+  | NC6 | the parser ignores the port | five parser rows: the three IPv4 ones, and the two edited-capture rows, which the other port's listener now fills |
+  | NC7 | the parser ignores DONE's status | the refused-dump test |
+  | NC8 | the equal-id shortcut dropped | green, by design (Decisions) |
+  | NC9 | the walk ignores its budget | the budget test |
+  | NC10 | a climbing path accepted | the reader's row and the census row |
+  | NC11 | every mount's root taken to be / | the mountinfo and widest-mount tests |
+  | NC12 | the kernel asked before the other accounts | the three census-asks rows |
+  | NC13 | the account keeps #1032's lead with a cgroup in it | the six ruled-out rows |
+  | NC14 | a deleted cgroup accepted | the reader's row |
+
+- `go test -count=1 ./internal/doctor/`: the Mac; both dido images as uid
+  1000 and as root; dido's host as root and as dido (a cross-compiled test
+  binary). All ok, no test cgroup left behind.
+
+### Out of scope
+
+- **A hidden holder inside the bridge's OWN cgroup** (C6s, S6s: a second
+  process the bridge's unit starts, one started from the same login
+  session, any process of the bridge's container). Same uid, same cgroup:
+  nothing unprivileged tells it from the bridge. The runbook's moved-port
+  line stays the answer.
+- **A bridge moved by root after it listened** FAILs its own ports (CM);
+  recorded above as the premise's cost.
+- **Kernels before 5.8, v1-only hosts, hidepid=1 or 2, and a doctor in a
+  private-namespace container reading a host bridge** answer as before.
+- **macOS: L4 stays a warn** (ML4 in #1029's entry).
+
+### Process notes
+
+- **The LAN route to dido died mid-run** (banner-exchange timeouts after
+  the Mac changed networks; ping at ~100 ms). One multiplexed SSH
+  connection over the tailnet carried the rest, except the session rows,
+  which need a fresh connection each: every channel of a multiplexed
+  connection shares its login session, so its scope.
+- **`pkill -f`/`pgrep -f` matched their own SSH shell** (the pattern was
+  in the command line) and a stray holder from the timed-out run
+  contaminated the first session rows: fixed with `[h]older` patterns.
+  The private memory already records this trap for wait loops.
+- **Two harness rows were wrong before the product was**: C6g's holder
+  never started (systemd-run rejected a numeric `--gid` its first time,
+  status 216/GROUP; `setpriv` inside a root unit works), and C6d's holder
+  read "readable" because the probe only listed the fd directory. Its
+  links were denied (the holder holds CAP_NET_BIND_SERVICE and uid 1000
+  holds nothing, so ptrace's permitted-set check refuses), so the row was
+  right and the probe too weak: the harness now counts readable socket
+  links.
+- NC8's first form deleted the variable it compared and did not build; a
+  control that does not build proves nothing, so it was rerun with the
+  comparison neutralised.

@@ -89,7 +89,11 @@ const cgroupWalkBudget = 4096
 // container's one cgroup, this answers nothing, as before.
 //
 // cgroupsOf is asked only here, and only when rest is not empty, which
-// the bridge's own port always gives it.
+// the bridge's own port always gives it. That port is the ordinary state,
+// so pid's own cgroup is compared by id before anything is walked: it costs
+// one question to the kernel and no walk. The comparison is only that
+// shortcut, never the rule: an equal cgroup nests, so the walk would give
+// the same answer.
 func cgroupsNotOf(procRoot string, pid int, rest []string, port int, cgroupsOf socketCgroups) (cgroups []string, pidCgroup string, all bool) {
 	if cgroupsOf == nil {
 		return nil, "", false
