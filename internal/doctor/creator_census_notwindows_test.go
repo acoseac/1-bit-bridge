@@ -91,22 +91,7 @@ func TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener(t *
 	ruledOut := func(account string) ownerSighting {
 		return ownerSighting{saw: "/proc shows every socket listening on this port " + account, ruledOut: true}
 	}
-	for _, tc := range []struct {
-		name string
-		rows []listening
-		// holders are processes other than the recorded pid, whose
-		// descriptors this user can read.
-		holders map[int]map[string]string
-		// status is the recorded pid's Uid values, "" for a status with no
-		// Uid line; noStatus leaves the file out and statusOff makes it
-		// unreadable. notInProc leaves the pid out of /proc altogether, as
-		// hidepid=2 does; otherwise its fd directory is there and cannot be
-		// listed, as a dumpable=0 process's cannot.
-		status              string
-		noStatus, statusOff bool
-		notInProc           bool
-		want                ownerSighting
-	}{
+	for _, tc := range []creatorCase{
 		{name: "L7: another user's listener, which no process this user can read holds",
 			rows: []listening{{uid: "1001", inode: 300}}, status: bridgeUIDs,
 			want: ruledOut("created by uid 1001, while pid 4242 runs as uid 1000")},
@@ -159,29 +144,54 @@ func TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener(t *
 			if !tc.notInProc && os.Geteuid() == 0 {
 				t.Skip("root reads a directory whatever its mode")
 			}
-			procs := map[int]map[string]string{}
-			for pid, links := range tc.holders {
-				procs[pid] = links
-			}
-			if !tc.notInProc {
-				procs[4242] = bridgeElsewhere
-			}
-			root := writeProcRoot(t, procs)
-			if !tc.notInProc {
-				chmodForTest(t, procFdDir(root, 4242), 0o000)
-				if !tc.noStatus {
-					writeStatus(t, root, 4242, tc.status)
-				}
-				if tc.statusOff {
-					statusOff(t, root, 4242)
-				}
-			}
-			found, seen, err := procSighting(tablesWith(t, tc.rows...), root, 7788, 4242, blind)
+			found, seen, err := procSighting(tablesWith(t, tc.rows...), tc.procRoot(t), 7788, 4242, blind)
 			if err != nil || found || seen != tc.want {
 				t.Errorf("got %v, %+v, %v;\nwant false, %+v, no error", found, seen, err, tc.want)
 			}
 		})
 	}
+}
+
+// creatorCase is one row of
+// TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener.
+type creatorCase struct {
+	name string
+	rows []listening
+	// holders are processes other than the recorded pid, whose descriptors
+	// this user can read.
+	holders map[int]map[string]string
+	// status is the recorded pid's Uid values, "" for a status with no Uid
+	// line; noStatus leaves the file out and statusOff makes it unreadable.
+	// notInProc leaves the pid out of /proc altogether, as hidepid=2 does;
+	// otherwise its fd directory is there and cannot be listed, as a
+	// dumpable=0 process's cannot.
+	status              string
+	noStatus, statusOff bool
+	notInProc           bool
+	want                ownerSighting
+}
+
+// procRoot builds the case's fixture /proc: its holders, and the recorded
+// pid, 4242, as the case describes it.
+func (c creatorCase) procRoot(t *testing.T) string {
+	t.Helper()
+	procs := map[int]map[string]string{}
+	for pid, links := range c.holders {
+		procs[pid] = links
+	}
+	if c.notInProc {
+		return writeProcRoot(t, procs)
+	}
+	procs[4242] = bridgeElsewhere
+	root := writeProcRoot(t, procs)
+	chmodForTest(t, procFdDir(root, 4242), 0o000)
+	if !c.noStatus {
+		writeStatus(t, root, 4242, c.status)
+	}
+	if c.statusOff {
+		statusOff(t, root, 4242)
+	}
+	return root
 }
 
 // statusOff makes pid's status in a fixture /proc unreadable, and restores a

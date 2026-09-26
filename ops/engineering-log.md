@@ -16692,6 +16692,22 @@ was declined as recorded.
 - `go test -count=1 ./internal/doctor/` in both dido images, as uid 1000
   and as root: ok.
 
+### Review
+
+- **Round 1**, on `d1445266`. CodeRabbit: "No actionable comments were
+  generated" (its walkthrough's `coveredCommitId` is that head), every
+  pre-merge check passed. SonarCloud: quality gate passed, no hotspots, one
+  go:S3776 (cognitive complexity 26 against 15) on
+  `TestProcSightingRulesOutAPidItCannotReadByTheUIDThatCreatedEachListener`,
+  fixed by moving the row type to package level (`creatorCase`) with a
+  method that builds its fixture `/proc`. Gemini (one comment, medium)
+  proposed reading the pid's status lazily, only once a listener without a
+  readable holder turns up, behind a `-2` "not loaded" sentinel. **Declined
+  on measurement**: on dido one status read is ~20 µs even from Python,
+  against 1.33 ms for the holder walk that already runs just above it, once
+  per port check; and the sentinel would give the returned `pidUID` a third
+  meaning beside "the fsuid" and "-1, not shown".
+
 ### Out of scope
 
 - **L6h: a hidden holder of the bridge's OWN uid** (another
