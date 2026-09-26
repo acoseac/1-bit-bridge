@@ -16955,6 +16955,30 @@ was built on them.
   1000 and as root; dido's host as root and as dido (a cross-compiled test
   binary). All ok, no test cgroup left behind.
 
+### Review
+
+- **Round 1**, on `a0826e15`. CodeRabbit: "No actionable comments were
+  generated in the recent review" (its walkthrough's `coveredCommitId` is
+  that head). CodeQL and every CI leg passed. SonarCloud: quality gate
+  passed, with one go:S3776 (cognitive complexity 20 against 15) on
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace`, which the cgroup
+  row had pushed over: fixed as #1032 fixed its own, the row type moved to
+  package level (`namespaceCase`) with a method that builds its fixture,
+  the two self-is-this-process controls in one loop, and every subtest
+  name kept. (The parser's loop had already been split for the same rule,
+  in `197a33df`, before the PR was opened.) Gemini (one comment, high):
+  an AF_INET6 dump that fails fails `listenerCgroups` as a whole. **Taken
+  in part**: the first family's error discarded the other family's
+  answers, so `eachFamily` now keeps the families that answered in full
+  and leaves a failed one out whole (`TestEachFamilyKeepsTheFamiliesThatAnswered`;
+  NC15, a failing family failing the query, and NC16, a failed family's
+  partial answers kept, each turn it red). **Declined in part, with the
+  reason on the thread**: the finding said this degraded the bridge's own
+  IPv4 port to "a false Warn". It could not, since an error from the query
+  makes the cgroup accounting count nothing, which is main's behaviour, and
+  the uid arm then answers ok for that port (row C2); what it cost was the
+  ruling-out of L6h on such a kernel.
+
 ### Out of scope
 
 - **A hidden holder inside the bridge's OWN cgroup** (C6s, S6s: a second
