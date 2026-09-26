@@ -1915,7 +1915,7 @@ no failing test — which is the shape to expect in this area.
   directory, which is false.** It fails with ENOENT on every platform, and
   `filepath.WalkDir("")` visits `""` with an lstat ENOENT (measured with
   go1.26.6 on macOS, Linux and Windows; this bullet said otherwise until
-  #PRNUM). The working directory is reached through what an empty root
+  #1031). The working directory is reached through what an empty root
   BECOMES: `filepath.Clean("")` is `"."`, `filepath.Abs("")` is the working
   directory, `filepath.EvalSymlinks("")` answers `"."`, and
   `filepath.Join("", name)` is relative to it, which let `os.RemoveAll`

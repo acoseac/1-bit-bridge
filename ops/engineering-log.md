@@ -675,7 +675,7 @@ A full-codebase audit (`ops/audit-2026-07-18.md` — 53 bugs · 53 quick wins ·
 - **`doctor_windows.go` calls `syscall.Syscall6(proc.Addr(), …)`, not `proc.Call(…)`** ([doctor_windows.go](internal/doctor/doctor_windows.go), #526). `LazyProc.Call` is NOT `//go:uintptrescapes`, so Go's unsafe.Pointer rule-4 liveness special-case applies to none of its arguments — and a `runtime.KeepAlive` cannot cure a `uintptr` that was stored in a local first. `Syscall6` IS annotated, so inline `uintptr(unsafe.Pointer(…))` arguments are pinned across the call. Validate with `GOOS=windows go vet` — the `unsafeptr` analyzer is the real check, and the file doesn't compile on a non-Windows host.
 - **Booklet GC is skipped while a library scan is in flight** (`ScanInProgress: scanner.IsScanning`, #527/#533). Mid-rescan the album-release-MBID universe is transiently partial (an admin root add/remove runs `WipeFilesystemTracks` + rescan), so GCing against it deletes the booklet rows + cached PDFs for every filesystem album and re-fetches them next cycle. The nil hook = GC runs (legacy behaviour), so the wiring is what activates it.
 - **Pairing `Delete` logs an orphan token ONLY when it was never delivered** ([store.go](internal/pairing/store.go), #523/#533). A `delivered` flag set inside `Poll` where it returns the RawToken (additive — it does not change what Poll returns) gates the log, so the NORMAL ack flow (poll → persist → DELETE) stays silent and only a delete-without-ever-polling leaves a breadcrumb. **It must NOT revoke** — `onTimer`'s TTL+grace sweep stays the only sanctioned revoke path (pinned by `TestDeleteAfterApprovePreventsRevoke`).
-- **`backup.ReapOrphans` refuses an empty root** (#536): it DELETES subdirectories that lack a `manifest.json`, and `os.ReadDir("")` reads the process working directory — a misconfigured/empty `backupsRoot` would reap unrelated directories next to wherever the bridge runs. Any future directory-reaping helper needs the same fail-closed guard. *(Corrected 2026-09-26, #PRNUM: `os.ReadDir("")` fails with ENOENT and reads nothing, on every platform. The refusal is still right, for the reasons in the #PRNUM entry: `filepath.Clean("")`, `Abs("")` and `EvalSymlinks("")` all resolve to the working directory, and `Join("", name)` is relative to it.)*
+- **`backup.ReapOrphans` refuses an empty root** (#536): it DELETES subdirectories that lack a `manifest.json`, and `os.ReadDir("")` reads the process working directory — a misconfigured/empty `backupsRoot` would reap unrelated directories next to wherever the bridge runs. Any future directory-reaping helper needs the same fail-closed guard. *(Corrected 2026-09-26, #1031: `os.ReadDir("")` fails with ENOENT and reads nothing, on every platform. The refusal is still right, for the reasons in the #1031 entry: `filepath.Clean("")`, `Abs("")` and `EvalSymlinks("")` all resolve to the working directory, and `Join("", name)` is relative to it.)*
 - Smaller pins: `buildDailyMix` must not emit a visible-but-empty family (#523); `SoxArgs` returns the tmp-path it computes so `RunSox` can't independently rebuild a drifting one (#535); the "All Tracks" childCount uses the raw `lib.TrackCount()` the flat list actually enumerates (#535); systemd `ExecStart` needs `$`→`$$` while path settings must NOT get it (env expansion vs specifier expansion), and the Windows batch template needs `%`→`%%` while `SpawnDetached`'s argv must not double (#526).
 
 **Deliberately NOT done** (tracked in the audit doc): **B25** — renderer controlURL refresh; the server-side fix can't be copied verbatim because a failed re-fetch upserts a stub whose merge advances `LastSeenAt` while keeping the dead URL, pinning it forever, so it needs `Remove(udn)`-first or a stub-merge gate. **Q6** — combining the two `ffprobe` spawns would touch decode.go's load-bearing length-complete-decode gate for a one-fork saving. Refactors **L1** (five full-library reconciliation streams per scan → one), **L2** (`Validate()` mutates its receiver — split out `Normalize()`), **L3** (`atomicwrite` parent-dir fsync for crash-durability).
@@ -5489,9 +5489,9 @@ tick. Two consequences that were not in the finding:
 - **An empty answer is a refusal.** The old string argument could not be
   empty; the provider returns `""` on a nil config snapshot, and
   `WalkDir("")` walks the process working directory. Same rule as
-  `ReapOrphans`. *(Corrected 2026-09-26, #PRNUM: `WalkDir("")` visits `""`
+  `ReapOrphans`. *(Corrected 2026-09-26, #1031: `WalkDir("")` visits `""`
   with an lstat ENOENT and walks nothing. The refusal is still right, since
-  a root resolved first is `"."`; the #PRNUM entry has the measurement.)*
+  a root resolved first is `"."`; the #1031 entry has the measurement.)*
 
 The Jobs chips gated on `UpscaleStats() != nil`, which is nil while
 `upscale.enabled` is false; both sweepers are constructed whenever their
@@ -16381,7 +16381,7 @@ guard necessary. Its placement advice was declined, as recorded above.
   **A fixture for a ruling-out must hold everything the rule assumes; write
   down what the recorded process holds before asking who else does.**
 
-## 2026-09-26 — `os.ReadDir("")` does not read the working directory (#PRNUM)
+## 2026-09-26 — `os.ReadDir("")` does not read the working directory (#1031)
 
 CLAUDE.md's rule said "`ReapOrphans`-style directory reapers must refuse an
 empty root — `os.ReadDir("")` reads the process working directory". The
