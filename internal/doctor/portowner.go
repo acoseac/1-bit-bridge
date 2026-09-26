@@ -206,8 +206,18 @@ func listenerSockets(paths []string, port int) (sockets map[string]int, unread b
 // process's.
 //
 // Unlike the census it is handed no pid, so it does not check /proc's pid
-// namespace (procOfAnotherPIDNamespace): a readable holder is one whatever
-// number /proc gives it.
+// namespace (procOfAnotherPIDNamespace), and neither direction needs it. A
+// readable holder is one whatever number /proc gives it. And a /proc that
+// could omit a holder this namespace's /proc would list never gets here:
+// the socket tables are /proc/self/net's, and only a /proc of this pid
+// namespace or of an ancestor resolves self, and an ancestor's lists every
+// process of this one. Measured on dido (#1030): with a container's /proc
+// mounted over this process's (`nsenter -m`), readlink /proc/self fails and
+// both tables are unreadable, so this answers an error; under `unshare
+// --pid --fork` without --mount-proc, the tables read and /proc lists all
+// 321 host processes. The census's guard here would only turn the
+// capability-bound bridge's own port from ok to a warn under that ancestor
+// /proc.
 func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, error) {
 	sockets, _, err := listenerSockets(tables, port)
 	if err != nil {

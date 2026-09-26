@@ -165,23 +165,9 @@ func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 	} {
 		for _, self := range []string{"480456", ""} {
 			t.Run(tc.name+"/self "+strconv.Quote(self), func(t *testing.T) {
-				root := writeProcRoot(t, tc.procs)
-				if err := os.Remove(filepath.Join(root, "self")); err != nil {
-					t.Fatal(err)
-				}
-				if self != "" {
-					if err := os.Symlink(self, filepath.Join(root, "self")); err != nil {
-						t.Fatal(err)
-					}
-				}
+				root := reselfProcRoot(t, writeProcRoot(t, tc.procs), self)
 				found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot")
-				if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc ") ||
-					!strings.Contains(seen.saw, "pid namespace") {
-					t.Errorf("got %v, %+v, %v; want no answer about pid 4242, saying why", found, seen, err)
-				}
-				if self != "" && !strings.Contains(seen.saw, self) {
-					t.Errorf("the account does not name the self it read (%s): %s", self, seen.saw)
-				}
+				requireNoAnswerFromAnotherNamespace(t, found, seen, err, self)
 			})
 		}
 	}
@@ -191,6 +177,37 @@ func TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace(t *testing.T) {
 			t.Errorf("got %v, %v; want the pid found holding the listener", found, err)
 		}
 	})
+}
+
+// reselfProcRoot points a fixture /proc's self link at self, or removes it
+// when self is "", and returns the root.
+func reselfProcRoot(t *testing.T, root, self string) string {
+	t.Helper()
+	link := filepath.Join(root, "self")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if self == "" {
+		return root
+	}
+	if err := os.Symlink(self, link); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// requireNoAnswerFromAnotherNamespace requires procSighting to have found
+// nothing and ruled nothing out, with an account that says why: /proc may
+// be another pid namespace's, and names the self it read, if any.
+func requireNoAnswerFromAnotherNamespace(t *testing.T, found bool, seen ownerSighting, err error, self string) {
+	t.Helper()
+	if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc ") ||
+		!strings.Contains(seen.saw, "pid namespace") {
+		t.Errorf("got %v, %+v, %v; want no answer about pid 4242, saying why", found, seen, err)
+	}
+	if self != "" && !strings.Contains(seen.saw, self) {
+		t.Errorf("the account does not name the self it read (%s): %s", self, seen.saw)
+	}
 }
 
 // TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds is the uid
@@ -243,6 +260,26 @@ func TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds(t *testing.T)
 		absent := filepath.Join(t.TempDir(), "absent")
 		if _, err := hiddenListenerOf([]string{absent, absent}, writeProcRoot(t, nil), 7789, 1000); err == nil {
 			t.Error("with neither table readable there is no answer, and that is an error")
+		}
+	})
+	// It is handed no pid, so a /proc whose self names another process
+	// changes nothing: where the socket tables read at all, such a /proc is
+	// an ancestor namespace's, which lists every process this one's would
+	// (hiddenListenerOf's docblock has the measurement). The census's guard
+	// here was proposed in review, and would turn the capability-bound
+	// bridge's own port from ok to a warn there.
+	t.Run("a /proc whose self is another pid namespace's", func(t *testing.T) {
+		for _, tc := range []struct {
+			procs map[int]map[string]string
+			want  bool
+		}{
+			{map[int]map[string]string{5000: {"3": "socket:[11111]"}}, true},
+			{map[int]map[string]string{5000: {"3": "socket:[24680]"}}, false},
+		} {
+			root := reselfProcRoot(t, writeProcRoot(t, tc.procs), "480456")
+			if got, err := hiddenListenerOf(capturedTables(t), root, 7789, 1000); err != nil || got != tc.want {
+				t.Errorf("holders %v: got %v, %v; want %v, no error", tc.procs, got, err, tc.want)
+			}
 		}
 	})
 }

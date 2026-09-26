@@ -2396,7 +2396,13 @@ what it claimed**, and none of it had a failing test.
   (`procOfAnotherPIDNamespace`, proctest's rule): under another pid
   namespace's `/proc`, `<pid>` is some other process, and the recorded
   bridge can be a "holder" under another number (a Gemini consult called
-  the guard necessary). **The walk is cheap**: 1.1 to 1.8 ms as a user
+  the guard necessary). **The uid arm deliberately skips that guard**: it
+  reads no pid, and a `/proc` whose socket tables read at all is this pid
+  namespace's or an ancestor's (`/proc/net` is `self/net`), which omits no
+  process of this one. Measured on dido: under `nsenter -m` into a
+  container both tables are unreadable, and under `unshare --pid --fork`
+  the ancestor `/proc` lists every host process. CodeRabbit proposed the
+  guard there, and it would only turn L2 into a warn. **The walk is cheap**: 1.1 to 1.8 ms as a user
   over dido's 290 processes, 11 to 15 ms as root without
   CAP_SYS_PTRACE. **A test stands the bridge in without setcap**:
   `prctl(PR_SET_DUMPABLE, 0)` in a re-run of the test binary gives the

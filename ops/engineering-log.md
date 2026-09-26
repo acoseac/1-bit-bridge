@@ -16311,6 +16311,35 @@ guard necessary. Its placement advice was declined, as recorded above.
 - `go test -count=1 ./internal/doctor/` in both dido images as uid 1000,
   and the kernel and fixture tests as root in both: ok.
 
+### Review
+
+- **Round 1**, on `f9131650`. Gemini: no comments. SonarCloud: quality gate
+  passed, one go:S3776 (cognitive complexity 20 against 15) on
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace`. Fixed by extracting
+  `reselfProcRoot` and `requireNoAnswerFromAnotherNamespace`.
+  CodeRabbit ("Actionable comments posted: 1", Minor) proposed the
+  `/proc/self` guard in `hiddenListenerOf` too. Its reasoning was that a
+  `/proc` of another pid namespace could omit a holder of this user's, and
+  the uid arm would then call the port's listener hidden: L6's ok again.
+  **Declined on measurement.** `/proc/net` is `self/net`, so the socket
+  tables read only under a `/proc` whose self resolves. That is this pid
+  namespace's or an ancestor's, and an ancestor's lists every process of
+  this one. On dido, under `nsenter -m` into a container (a descendant
+  namespace's `/proc` over this process's), `readlink /proc/self` failed and
+  both tables were unreadable, so the arm answers an error and cannot say
+  ok. Under `unshare --pid --fork` without `--mount-proc` (an ancestor's),
+  the tables read and `/proc` listed all 321 host processes. Adding the
+  guard would only turn L2 into a warn there. The accurate half was taken:
+  the docblock had argued only that a readable holder is real, and now also
+  argues that nothing is omitted. A fixture row
+  (`TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds`, "a /proc
+  whose self is another pid namespace's") pins the decision, and a sentence
+  in CLAUDE.md records it.
+- Controls on the round (`5c913119`): NC4 again, against the refactored
+  guard test, turned the six guard rows red. NC12, CodeRabbit's guard
+  added to `hiddenListenerOf`, turned the new row red: "got false; want
+  true".
+
 ### Out of scope
 
 - **L7: a holder this user cannot read** (another user's process, root's
