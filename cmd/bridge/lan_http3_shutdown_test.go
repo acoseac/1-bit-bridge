@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -286,33 +285,6 @@ func writeLANConfig(t *testing.T, adminAddress string) (cfgPath, dataDir string)
 		t.Fatal(err)
 	}
 	return cfgPath, dataDir
-}
-
-// freeLoopbackTCPAndUDPAddr is freeLoopbackPort for an address serve binds
-// twice: its LAN HTTPS listener takes the TCP port and its HTTP/3 server
-// the UDP port of the same number, and a test that speaks HTTP/3 to serve
-// has to know that one, which serve prints nowhere. The gap between the
-// release and serve's bind is freeLoopbackPort's, and fails as loudly: a
-// TCP port taken meanwhile fails serve's listen, and a UDP one leaves the
-// HTTP/3 request unanswered, which waitForServe reports.
-func freeLoopbackTCPAndUDPAddr(t *testing.T) string {
-	t.Helper()
-	for range 20 {
-		lis, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(lis.Addr().(*net.TCPAddr).Port))
-		pc, err := net.ListenPacket("udp", addr)
-		_ = lis.Close()
-		if err != nil {
-			continue // that number is taken on UDP; draw another
-		}
-		_ = pc.Close()
-		return addr
-	}
-	t.Fatal("no loopback port free on both TCP and UDP in 20 draws")
-	return ""
 }
 
 // alreadyOpen is a channel that is already closed, for a printHold that
