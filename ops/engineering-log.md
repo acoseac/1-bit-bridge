@@ -15256,3 +15256,17 @@ returned would run the parent's half inside the child).
 - **`pgrep -f` matches the command line of the shell that runs it**, so
   a check for leftovers finds itself. The checks here spell the pattern
   `tailscale-ap[p]`.
+
+### Review
+
+- **Round 1**, on `48f7584a`. CodeRabbit: "No actionable comments were
+  generated", its `coveredCommitId` the head (`kind: reviewed`), no pause
+  notice. SonarCloud: gate passed, 0 new issues, 0 hotspots. Gemini's app
+  answered with its daily-quota warning, so a direct consult
+  (`consult.py`, gemini-3.8-flash) over the final diff stood in: no
+  finding on the code (`mustAbs`, `startHeldShellIn`, the bare-name
+  test's cleanup order), on vacuous or flaky tests, or on the CLAUDE.md
+  bullet. The one falsification it proposed was run: the whole proctest
+  package at `-race -count=20 -shuffle=on`, under 24 `yes` burners on 12
+  cores, passed in 40 s and left no shell. CI: 20 of 20 checks passed,
+  `test (windows-latest)` among them.
