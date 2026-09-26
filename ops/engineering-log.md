@@ -17385,6 +17385,33 @@ kept), `runPortCheck` (holds nothing) and `internal/proctest`'s
   | NC4 | one `runtime.GC()`, no wait; with NC1 | the child's test red 200/200, the premise test green 200/200, at GOMAXPROCS 12 and 1 |
   | NC5 | two `runtime.GC()`s, no wait; with NC1 | the same |
 
+### Review
+
+- **Round 1**, on `f9c3876f`. CI: 16 checks passed and none failed before
+  the round-1 push. SonarCloud's gate passed with one new issue, go:S1135
+  ("complete the task associated to this TODO comment") on
+  `collectAndFinalize`'s docblock, which named `fd_posix.go`'s TODO: the
+  rule reads the word, not the intent. Reworded in `4e9b1731`. Gemini's
+  app was over its daily quota, and CodeRabbit paused at its plan limit
+  (one included review an hour).
+- **A direct consult stood in** (the Gemini API, `consult.py`, with the
+  diff and both files). It agreed that `executed >= queued`, read after
+  `runtime.GC` returns, means every finalizer and cleanup that collection
+  queued has returned; that the KeepAlive holds across a read syscall;
+  and that the port rebinds at once on all three platforms, since a
+  socket that never accepted a connection leaves no TIME_WAIT. Its caveat
+  on the first point is the premise test's job: the counts say nothing
+  about an object the collection found reachable. **Taken** in
+  `4e9b1731`: the premise test's dropped listener sat on an EPHEMERAL
+  port, which another process's bind or connect could be handed between
+  the collection that frees it and the rebind that looks, so it is drawn
+  from 20000–32767 as `freeLoopbackTCPAndUDPAddr` draws (NC3 rerun: red,
+  at port 30888); and the metric kinds are checked once, not per poll.
+  **Declined**: that the premise test poll `net.Listen` after a bare
+  `runtime.GC()` instead of calling `collectAndFinalize`. It exists to
+  show that the function the children run closes a dropped listener, and
+  a test of another wait would show nothing about it.
+
 ### Process notes
 
 - **A timer in a premise is a claim about the runtime, and it had a
