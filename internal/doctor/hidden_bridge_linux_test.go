@@ -48,22 +48,22 @@ const undumpableReady = "undumpable child ready, port "
 // exits by itself.
 func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 	t.Helper()
-	return startUndumpableAs(t, os.Args[0], nil, listen)
+	return startUndumpableAs(t, -1, listen)
 }
 
-// startUndumpableAs is startUndumpable running the test binary at bin, as
-// cred's user when cred is set (which takes root; bin must be one that user
-// can run, sharedTestBinary).
-func startUndumpableAs(t *testing.T, bin string, cred *syscall.Credential, listen bool) (pid, port int) {
+// startUndumpableAs is startUndumpable with the child running as uid, and
+// the gid of the same number, which takes root; a negative uid leaves it
+// this process's. The child drops to it itself (dropToChildUID).
+func startUndumpableAs(t *testing.T, uid int, listen bool) (pid, port int) {
 	t.Helper()
 	mode := "idle"
 	if listen {
 		mode = "listen"
 	}
-	cmd := exec.Command(bin, "-test.run=^"+t.Name()+"$")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
 	cmd.Env = append(os.Environ(), undumpableChildEnv+"="+mode)
-	if cred != nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	if uid >= 0 {
+		cmd.Env = append(cmd.Env, childUIDEnv+"="+strconv.Itoa(uid))
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -102,6 +102,7 @@ func startUndumpableAs(t *testing.T, bin string, cred *syscall.Credential, liste
 
 // runUndumpable is the child's side of startUndumpable. It never returns.
 func runUndumpable(mode string) {
+	dropToChildUID()
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fmt.Fprintln(os.Stderr, "prctl(PR_SET_DUMPABLE, 0):", err)
 		os.Exit(1)
@@ -118,6 +119,55 @@ func runUndumpable(mode string) {
 	fmt.Printf("%s%d\n", undumpableReady, port)
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	os.Exit(0)
+}
+
+// childUIDEnv makes a child of these tests drop to the uid it names, and the
+// gid of the same number, before anything else (dropToChildUID).
+const childUIDEnv = "DOCTOR_TEST_CHILD_UID"
+
+// dropToChildUID drops this process, a child of these tests, to the uid
+// childUIDEnv names, if any, and the gid of the same number, with no
+// supplementary groups.
+//
+// The child does it itself, after exec, rather than the parent asking for it
+// (SysProcAttr.Credential): Go forks with CLONE_VM (syscall/exec_linux.go
+// adds CLONE_VFORK|CLONE_VM unless a user namespace is asked for), so a
+// child that changes its credentials before exec does so on the memory it
+// still shares with its parent, and the kernel resets that memory's
+// dumpable flag, the PARENT's, to fs.suid_dumpable. Measured on dido, where
+// it is 2: after one such child the test process read dumpable=2, so root
+// without CAP_SYS_PTRACE (a container's) could no longer read its
+// descriptors, and the later tests that attribute a port to it failed, only
+// when run as root.
+func dropToChildUID() {
+	v := os.Getenv(childUIDEnv)
+	if v == "" {
+		return
+	}
+	uid, err := strconv.Atoi(v)
+	if err == nil {
+		err = syscall.Setgroups(nil)
+	}
+	if err == nil {
+		err = syscall.Setgid(uid)
+	}
+	if err == nil {
+		err = syscall.Setuid(uid)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drop to uid %s: %v\n", v, err)
+		os.Exit(1)
+	}
+}
+
+// dumpable is this process's dumpable flag (prctl(PR_GET_DUMPABLE)).
+func dumpable(t *testing.T) int {
+	t.Helper()
+	d, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 // hiddenFrom reports whether this user cannot read every one of pid's
@@ -278,6 +328,7 @@ const portCheckChildEnv = "DOCTOR_TEST_PORT_CHECK_CHILD"
 
 // runPortCheck is the port-check child's side. It never returns.
 func runPortCheck(t *testing.T, spec string) {
+	dropToChildUID()
 	portText, pidFile, ok := strings.Cut(spec, " ")
 	port, err := strconv.Atoi(portText)
 	if !ok || err != nil {
@@ -315,16 +366,16 @@ func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
 		t.Skip("needs root, to run processes as two users other than this one")
 	}
 	const bridgeUID, holderUID = 4071, 4072
-	dir, bin := sharedTestBinary(t)
-	_, port := startUndumpableAs(t, bin, &syscall.Credential{Uid: holderUID, Gid: holderUID}, true)
-	bridge, _ := startUndumpableAs(t, bin, &syscall.Credential{Uid: bridgeUID, Gid: bridgeUID}, false)
-	pidFile := filepath.Join(dir, "server.pid")
+	before := dumpable(t)
+	_, port := startUndumpableAs(t, holderUID, true)
+	bridge, _ := startUndumpableAs(t, bridgeUID, false)
+	pidFile := filepath.Join(sharedDir(t), "server.pid")
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(bridge)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin, "-test.run=^"+t.Name()+"$")
-	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: bridgeUID, Gid: bridgeUID}}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(os.Environ(), portCheckChildEnv+"="+strconv.Itoa(port)+" "+pidFile,
+		childUIDEnv+"="+strconv.Itoa(bridgeUID))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -343,19 +394,17 @@ func TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge(t *testing.T) {
 	if !strings.Contains(c.Hint, want) || !strings.Contains(c.Hint, "stop the process that holds the port") {
 		t.Errorf("the hint does not give the creator, or does not say to stop the holder:\n got %s\nwant …%s…", c.Hint, want)
 	}
+	if after := dumpable(t); after != before {
+		t.Errorf("this process's dumpable flag went from %d to %d while its children took other uids, "+
+			"which keeps its descriptors from root without CAP_SYS_PTRACE in every later test (dropToChildUID)", before, after)
+	}
 }
 
-// sharedTestBinary copies this test binary into a new directory that any
-// user can search, and returns the directory and the copy. Run as root, go
-// test builds the binary under a 0700 directory, which a child running as
-// another user cannot reach.
-func sharedTestBinary(t *testing.T) (dir, bin string) {
+// sharedDir makes a directory any user can search, for a file a child of
+// another uid reads: t.TempDir's parents are 0700 and the test's own.
+func sharedDir(t *testing.T) string {
 	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err = os.MkdirTemp("", "doctor-uid-")
+	dir, err := os.MkdirTemp("", "doctor-uid-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,13 +412,5 @@ func sharedTestBinary(t *testing.T) (dir, bin string) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(self)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin = filepath.Join(dir, "doctor.test")
-	if err := os.WriteFile(bin, body, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return dir, bin
+	return dir
 }
