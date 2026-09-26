@@ -134,24 +134,42 @@ func TestTheTCPAndUDPPortDrawsAreIndependent(t *testing.T) {
 // names every address it tried and the error each one got, which is all a
 // one-off failure on CI leaves to diagnose it by. The message used to say
 // only that twenty draws had failed.
+//
+// The range is held on each protocol in turn, so a draw that skipped
+// either bind would return a number from it. With TCP held every refusal
+// is TCP's, since TCP is bound first. With UDP held a refusal can still be
+// TCP's, where something else happens to hold that number on TCP.
 func TestTheTCPAndUDPPortDrawNamesEveryRefusal(t *testing.T) {
-	const size, draws = 4, 6
-	lo := tcpAndUDPPortLo + rand.IntN(tcpAndUDPPortHi-tcpAndUDPPortLo-size+2)
-	holdUDPRun(t, lo, lo+size-1)
+	for _, tc := range []struct {
+		held string
+		hold func(t *testing.T, lo, hi int)
+	}{
+		{"udp", holdUDPRun},
+		{"tcp", holdTCPRun},
+	} {
+		t.Run(tc.held, func(t *testing.T) {
+			const size, draws = 4, 6
+			lo := tcpAndUDPPortLo + rand.IntN(tcpAndUDPPortHi-tcpAndUDPPortLo-size+2)
+			tc.hold(t, lo, lo+size-1)
 
-	addr, err := drawLoopbackTCPAndUDPAddrIn(lo, lo+size-1, draws)
-	if err == nil {
-		t.Fatalf("drew %s from %d..%d, every number of which is held on UDP", addr, lo, lo+size-1)
-	}
-	msg := err.Error()
-	tried := regexp.MustCompile(`127\.0\.0\.1:(\d+): bind: `).FindAllStringSubmatch(msg, -1)
-	if len(tried) != draws {
-		t.Fatalf("the failure names %d refused binds, want one per draw (%d): %s", len(tried), draws, msg)
-	}
-	for _, m := range tried {
-		if port, _ := strconv.Atoi(m[1]); port < lo || port > lo+size-1 {
-			t.Errorf("the failure names port %d, outside the range drawn from (%d..%d): %s", port, lo, lo+size-1, msg)
-		}
+			addr, err := drawLoopbackTCPAndUDPAddrIn(lo, lo+size-1, draws)
+			if err == nil {
+				t.Fatalf("drew %s from %d..%d, every number of which is held on %s", addr, lo, lo+size-1, tc.held)
+			}
+			msg := err.Error()
+			tried := regexp.MustCompile(`listen (tcp|udp) 127\.0\.0\.1:(\d+): bind: `).FindAllStringSubmatch(msg, -1)
+			if len(tried) != draws {
+				t.Fatalf("the failure names %d refused binds, want one per draw (%d): %s", len(tried), draws, msg)
+			}
+			for _, m := range tried {
+				if tc.held == "tcp" && m[1] != "tcp" {
+					t.Errorf("a draw from a range held on TCP was refused on %s: %s", m[1], msg)
+				}
+				if port, _ := strconv.Atoi(m[2]); port < lo || port > lo+size-1 {
+					t.Errorf("the failure names port %d, outside the range drawn from (%d..%d): %s", port, lo, lo+size-1, msg)
+				}
+			}
+		})
 	}
 }
 
@@ -193,6 +211,19 @@ func holdUDPRun(t *testing.T, lo, hi int) {
 			continue
 		}
 		t.Cleanup(func() { _ = pc.Close() })
+	}
+}
+
+// holdTCPRun is holdUDPRun on TCP: a listener at every number in [lo, hi]
+// for the rest of the test.
+func holdTCPRun(t *testing.T, lo, hi int) {
+	t.Helper()
+	for port := lo; port <= hi; port++ {
+		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = lis.Close() })
 	}
 }
 
