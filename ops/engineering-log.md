@@ -15408,7 +15408,9 @@ random numbers from a range no allocator uses.
   checked clean after each, `-count=3`. NC1 to NC4 ran first on `b0394ada`
   (tree `aa86a9cb`), where NC4 also turned the independence test red 1 of 3
   and NC1 was repeated on the Windows 11 host with the same result. All five
-  then ran on `b00a5d43` (tree `7b4fa4e2`), with these results:
+  then ran on `b00a5d43` (tree `7b4fa4e2`), and again on `d336180a` (tree
+  `eceb561d`) after round 2 moved the message test's body into a helper,
+  with the same results both times:
 
   | | mutation | red |
   |---|---|---|
@@ -15472,3 +15474,11 @@ on a number with a client end in TIME_WAIT succeeded above.
   all three tests passed 5 of 5. Taken in `b00a5d43`: the message test
   holds its range on each protocol in turn. SonarCloud: gate passed. CI: 20
   of 20 checks passed, `test (windows-latest)` among them.
+- **Round 2**, on `a4f828f4`. Gemini's app (asked with `/gemini review`): a
+  summary, no comments. SonarCloud: gate passed, one new issue, go:S3776:
+  the message test's table put a loop inside the `t.Run` closure, cognitive
+  complexity 17 against 15. Taken in `d336180a`: the per-protocol body is
+  `mustNameEveryRefusal`, the checks unchanged, the five controls re-run.
+  CodeRabbit had reached its plan limit; asked, the user chose its free
+  on-demand review, so `@coderabbitai review` brought the pause notice back
+  (a PR-body edit had re-rendered it away) and its checkbox was ticked.
