@@ -2,7 +2,12 @@
 
 package doctor
 
-import "os"
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+)
 
 // procNetTCPFiles are the per-network-namespace socket tables scanned for a
 // listener's owning UID. Both families are read because a Go server binding
@@ -37,39 +42,54 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 // learn, and strictly more than the "unknown owner" it replaces.
 func portOwnedByThisUser(port int) (bool, error) {
 	me := os.Getuid()
-	var firstErr error
-	readAny := false
-	for _, path := range procNetTCPFiles {
-		// Wrapped in a closure so the Close is deferred: this runs in a
-		// loop, so a plain `defer` would hold every descriptor until the
-		// function returns, and a bare post-call Close is skipped on a
-		// panic.
-		uids, err := func() ([]int, error) {
-			f, err := os.Open(path)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = f.Close() }()
-			return scanListenerUIDs(f, port)
-		}()
+	owned := false
+	err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
+		uids, err := scanListenerUIDs(r, port)
 		if err != nil {
-			// A kernel built without IPv6 has no /proc/net/tcp6. That is
-			// not a failure — the other family may still answer — so the
-			// error is kept only in case NEITHER file could be read.
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+			return false, err
 		}
-		readAny = true
 		for _, uid := range uids {
 			if uid == me {
+				owned = true
 				return true, nil
 			}
 		}
+		return false, nil
+	})
+	if owned {
+		return true, nil
 	}
-	if !readAny {
-		return false, firstErr
+	return false, err
+}
+
+// pidListensOnPort reports whether pid holds a LISTEN socket on this TCP
+// port, from /proc alone: the port's listener inodes from the socket
+// tables, then the process's own descriptors, each of which links to
+// `socket:[<inode>]` for a socket. It is the question lsof answers for
+// isPIDListeningOnPort, asked of the same kernel tables lsof reads, and it
+// is asked only where no usable lsof resolved.
+//
+// So attribution on Linux does not depend on whether lsof is installed. It
+// is Priority standard on Debian and Ubuntu, so their minimal installs and
+// container images lack it, and there the "is it us?" ladder could only
+// reach its liveness arm. That arm is enough for a port the running
+// bridge's config names, and not for one a caller is choosing, where only
+// the recorded bridge seen listening may excuse a held port
+// (checkChosenPort). Without this, such a host would refuse a bridge's own
+// port that a host with lsof accepts: one set of facts, two verdicts,
+// chosen by a tool.
+//
+// Its limits are lsof's own: a process of another user, or one with
+// dumpable=0 (a binary granted cap_net_bind_service), keeps its descriptors
+// from an unprivileged observer, and the answer is then false, as lsof's
+// exit 1 is. An error means neither socket table could be read.
+func pidListensOnPort(port, pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
 	}
-	return false, nil
+	sockets, err := listenerSockets(procNetTCPFiles, port)
+	if err != nil || len(sockets) == 0 {
+		return false, err
+	}
+	return fdDirHoldsSocket(filepath.Join("/proc", strconv.Itoa(pid), "fd"), sockets), nil
 }

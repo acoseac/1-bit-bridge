@@ -273,6 +273,11 @@ func TestInitPreflightGradesTheInstallsOwnPortsAndPidFile(t *testing.T) {
 		t.Errorf("OwnPIDFile = %q, want %q — without it checkPort cannot tell the operator's "+
 			"own running bridge from a stranger, and a re-init aborts", d.OwnPIDFile, wantPID)
 	}
+	// A config that loads names its bridge's ports, so the whole "is it
+	// us?" ladder applies to them.
+	if d.OwnPIDPortsUnknown {
+		t.Error("OwnPIDPortsUnknown = true for a config that loaded")
+	}
 }
 
 // TestInitPreflightLeavesAFirstInstallsPortsAlone is the negative
@@ -281,13 +286,18 @@ func TestInitPreflightGradesTheInstallsOwnPortsAndPidFile(t *testing.T) {
 // keeps the existing skip" judgement recorded in its docblock would be
 // quietly untrue for the port checks.
 func TestInitPreflightLeavesAFirstInstallsPortsAlone(t *testing.T) {
-	d := doctor.Deps{APIPort: 7788, AdminPort: 7789}
-	withExistingInstallDeps(&d, filepath.Join(t.TempDir(), "bridge.yaml"))
+	dir := t.TempDir()
+	// DataDir set as initCmd sets it, so a helper that pointed a missing
+	// config at the data dir's pid file, as it does a broken one, fails
+	// here rather than being stopped by an empty DataDir.
+	d := doctor.Deps{DataDir: filepath.Join(dir, "data"), APIPort: 7788, AdminPort: 7789}
+	withExistingInstallDeps(&d, filepath.Join(dir, "bridge.yaml"))
 	if d.APIPort != 7788 || d.AdminPort != 7789 {
 		t.Errorf("ports = %d/%d, want the caller's 7788/7789 untouched", d.APIPort, d.AdminPort)
 	}
-	if d.OwnPIDFile != "" {
-		t.Errorf("OwnPIDFile = %q, want empty — there is no install to own a pid file", d.OwnPIDFile)
+	if d.OwnPIDFile != "" || d.OwnPIDPortsUnknown {
+		t.Errorf("OwnPIDFile = %q, OwnPIDPortsUnknown = %v; want empty and false — there is no install "+
+			"to own a pid file", d.OwnPIDFile, d.OwnPIDPortsUnknown)
 	}
 }
 
