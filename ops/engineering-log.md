@@ -15500,3 +15500,176 @@ on a number with a client end in TIME_WAIT succeeded above.
   S3776 issue closed as fixed, 0 new. CI: 20 of 20 checks passed,
   `test (windows-latest)` among them. This round's record and the CLAUDE.md
   sentence landed afterwards, in a docs-only commit no bot reviewed.
+
+## 2026-09-26 — bridge init recognises the bridge it replaces over a config that does not load (#1027)
+
+#1022's entry recorded this as "The init twin, measured, not fixed": with a
+bridge live on its defaults and its config then broken on disk, `bridge
+init --yes --force`, the run that replaces that config, refused on the
+bridge's own listeners.
+
+### What was measured
+
+- **The mechanism, in both passes.** `withExistingInstallDeps` returned
+  early on any `config.Load` error, so the preflight kept init's 7788 /
+  7789 and had no `OwnPIDFile`; `checkPort` found both held with no live
+  pid of ours and FAILed them. The second port pass had the same defect one
+  step later: it grades the ports init will write that differ from the
+  preflight's, and with no config the preflight's were init's defaults, so
+  a public re-init's own ports counted as "changed", and #970 clears the
+  pid file for a changed port.
+- **What init knows without the config.** It always writes `dataDir:
+  <dir>/data`, and `bridge serve` writes `<dataDir>/server.pid`, so the
+  bridge a re-init replaces is recorded where init already looks, unless
+  the operator moved the data dir.
+- **End to end**, on dido (Ubuntu 26.04, Docker 29.1.3): the stock
+  `golang:1.26.6` image (no lsof) and `lsofcheck/golang-lsof:1.26.6`, trees
+  `c83f61ce` (main) and the fix, every bridge and every init as uid 1000
+  (`~/inittwin/inittwin2.sh`). The two images agreed on every row:
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | A | bridge live on 7788 / 7789, its config broken (`libraryNmae: typo`), `init --yes --force` | exit 1, port-api and port-admin FAIL ":… in use", typo kept | exit 0, config replaced, TLS fingerprint kept |
+  | B | bridge live on 7790 / 7791, its config broken, another bridge (same uid) on 7788, `init --yes --force` writes the defaults | exit 1, port-api FAIL | exit 1, port-api FAIL, the hint naming `/tmp/b/data/server.pid (pid N)` as running but not seen on the port |
+  | C | public bridge live on 127.0.0.1:7794 / :7793, its config broken, the public re-init on the same ports | exit 1 in the second pass, both FAIL, "the config was NOT changed" | ports pass, config replaced; exit 1 at the existing-adminauth step (Out of scope) |
+  | D | A's bridge stopped (no pid file), its config broken, another bridge on 7788 | exit 1, port-api FAIL | the same |
+
+  B and D are the controls. B is the scenario that rules out the obvious
+  fix, and it was run: with the new pid file behind the full ladder (the
+  tree mutated as NC-B below), B's re-init exited 0 in both images and
+  printed no port line at all, since the uid arm answers ok for another
+  process of the same user. It wrote `listenAddress: :7788`, and the
+  restarted bridge exited 1 with `listen :7788: … bind: address already in
+  use` (`~/inittwin/rowb-restart.sh`). The fix refuses there, and leaves
+  7790 / 7791 in the config.
+- **Windows**, on home-pc (Go 1.27.1, the default ports free): the doctor
+  and init tests pass, the four end-to-end ones among them;
+  GetExtendedTcpTable attributes the test's listener to the test process
+  and not to its parent.
+
+### Decisions
+
+- **Only attribution excuses a port** (`checkChosenPort`, under
+  `doctor.Deps.OwnPIDPortsUnknown`). With no config nothing says which
+  ports the recorded bridge binds, so its being alive says nothing about
+  the port, and the uid arm cannot tell it from another process of the same
+  user. The verdict is ok only when the probe sees the recorded pid
+  listening on the port. Liveness picks the hint and nothing else.
+- **A failed probe is a FAIL there.** `checkPort` degrades one to a warn so
+  a broken probe cannot break a healthy install whose config names the
+  port. Here nothing does, and a warn would let B through on a host where
+  lsof times out on a wedged mount.
+- **The second pass keeps the pid file in that mode** instead of clearing
+  it. Its ports are "changed" only against a guess, and the pid file is
+  already confined to the one arm a port the run is choosing may use.
+  #970's clearing stays for a config that loaded: there the config
+  positively says the bridge does not bind the changed port.
+- **A missing config stays a first install.** Nothing there shows an
+  install, and a pid file left in a reused directory can be stale or
+  recycled. The deleted-config-while-running case keeps its FAIL.
+- **Attribution does not depend on lsof on Linux.** With attribution the
+  only excuse, a host without lsof refused A while a host with it passed:
+  one set of facts, two verdicts (NC-F), the defect #1021 removed from the
+  other direction. Where no lsof resolves, `isPIDListeningOnPort` now
+  reads the listener's inode from `/proc/net/tcp{,6}` (column 9, through
+  the same LISTEN-row filter as the uid scan) and looks for it among
+  `/proc/<pid>/fd`'s `socket:[N]` links, the tables lsof reads. An inode
+  names one socket, so a match cannot come from another process. An fd
+  directory that cannot be listed (another user's process, dumpable=0) is
+  no match, as lsof's exit 1 is; both socket tables unreadable is an
+  error. lsof stays first where it resolves, so hosts with lsof behave as
+  before. Measured on dido before relying on it: column 9 is the inode,
+  the link reads `socket:[<inode>]`, and a same-uid process that is not a
+  descendant can be read from a separate session under Yama
+  `ptrace_scope=1` (it restricts ATTACH, not READ); another uid's fd
+  directory is EACCES.
+- **The ordinary ladder gains the same path.** On a Linux host without
+  lsof a live bridge is now "bound by our own bridge (pid N)" before the
+  uid arm, whose wording blames a capability-bound binary (#1021's Out of
+  scope). A capability-bound bridge still reaches that arm, where the
+  wording is right.
+- **`bindVerdict` is `checkPort`'s bind probe, moved** so both ladders
+  share it, with its comments. `anotherProcessOwnsPort` is the hint both
+  give with no live bridge behind the port.
+
+### Tests and controls
+
+- `cmd/bridge/init_broken_config_ports_test.go`: four tests drive the real
+  `initCmd` over an install whose config does not load, the test process
+  playing the recorded bridge. `TestInitReplacesABrokenConfigWhileItsBridgeHoldsTheDefaultPorts`
+  (A) and `TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites`
+  (C) must pass; `…RefusesADefaultPortItsBridgeIsNotSeenHolding` and
+  `…RefusesAWrittenPortItsBridgeIsNotSeenHolding` record this binary's
+  parent (alive, holding no port) and must refuse. The two on the defaults
+  skip when another process holds 7788 or 7789, and the two public ones
+  when either is taken, since the preflight grades them first.
+  `TestInitPreflightPointsAnUnloadableConfigAtItsDataDirsPidFile` pins the
+  wiring for a config that does not load and one this user cannot read.
+- `TestInitPreflightLeavesAFirstInstallsPortsAlone` now sets `DataDir` as
+  initCmd does, so a helper that pointed a missing config at the pid file
+  fails it rather than being stopped by an empty `DataDir`.
+- `internal/doctor/chosen_port_test.go`: the same facts through
+  `RunPortChecks` with `OwnPIDPortsUnknown` and without, as a table.
+  `chosen_port_notwindows_test.go`: a failed probe FAILs there and warns in
+  `checkPort`. `TestChosenPortRefusalNamesTheRecordedBridge` pins the hint.
+- `/proc`: `TestScanListenerInodes` on the captured tables,
+  `TestListenerSocketsReadsBothFamilies` and
+  `TestFdDirHoldsSocketMatchesOnlyTheListenersInode` on fixture files
+  (every unix), `TestPIDListensOnPortReadsProc` against the kernel (Linux),
+  and two Linux tests with `withoutLsof`: the ordinary ladder attributes,
+  and `checkChosenPort` recognises the recorded bridge.
+- **Red first on the Mac**: A and C failed on main, B and D's tests
+  passed.
+- Negative controls against the committed fix (`a025f61f`), each restored
+  from HEAD and the tree checked clean before the next, on the Mac except
+  NC-F:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC-A | the broken-config branch in `withExistingInstallDeps` disabled | A, C and both wiring rows red; the controls green |
+  | NC-B | `checkListenPort` ignores `OwnPIDPortsUnknown` (the full ladder) | both stranger tests and the table's two live-pid rows red |
+  | NC-C | the second pass clears the pid file as before | C red, alone |
+  | NC-D | liveness excuses a port in `checkChosenPort` | the stranger tests, the two live-pid rows and the hint test red |
+  | NC-E | a failed probe warns in `checkChosenPort` | the probe test red, alone |
+  | NC-F | no `/proc` fallback (`return false, nil` without lsof), dido | no-lsof image: A, C, the table's "seen listening" row and both `withoutLsof` tests red; lsof image: only the two `withoutLsof` tests |
+  | NC-G | a missing config treated as broken | `TestInitPreflightLeavesAFirstInstallsPortsAlone` red, alone |
+  | NC-H | the fd walk matches any socket | the fd test red |
+  | NC-I | the LISTEN filter dropped | the inode, uid and table-reader tests red |
+  | NC-J | the inode read from column 8 | the inode and table-reader tests red |
+  | NC-K | a missing table is an error though the other answers | the "tcp6 missing" row red |
+
+- NC-F found a vacuous pass in this change: `TestPortCheck_OwnPIDMatches`
+  skipped without lsof, and narrowing that skip to non-Linux let it run on
+  a Linux host without lsof, where it passed with the fallback removed, on
+  the uid arm. It asserts the "bound by our own bridge" summary now
+  (`c4efa01c`), and fails under NC-F.
+- A full `go test -race ./...` in the stock `golang:1.26.6` image on dido
+  (no lsof, uid 1000): 50 packages ok, 4 without tests.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the design
+before any code, with `checkPort`, init's two passes and both probes
+attached. It agreed on all five questions: attribution is the only
+discriminator between A and B that needs no config; `/proc` attribution
+cannot answer true for a process that does not hold the socket (inodes are
+unique; namespaces and dumpable=0 only cost a false negative); a failed
+probe must FAIL in this mode; the asymmetry with #970's clearing holds;
+and a missing config should stay a first install.
+
+### Out of scope
+
+- **A public re-init over an existing public install exits 1** after
+  saving the config: `store.MintInitial` refuses because
+  `adminauth.json` exists ("existing admin credentials found … run `bridge
+  admin reset-password` to rotate"). Row C shows it on main's successful
+  paths too; it is not about ports.
+- **The preflight grades init's defaults on a public run** (a first install
+  or, now, a broken config), ports a public init does not write. Another
+  process on 7788 refuses such a run. Pre-existing for a first install.
+- **`/proc` first on Linux**, rather than only where lsof is missing, would
+  make lsof unnecessary there and sidestep both busybox's applet (the
+  #984 bullet) and lsof's stat of a wedged mount. It changes every Linux
+  host's probe, so it is its own change.
+- **A data dir that moved** has no pid file where init looks, so a live
+  bridge on the ports init writes still refuses, with the plain hint.

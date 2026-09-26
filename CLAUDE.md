@@ -2142,8 +2142,11 @@ what it claimed**, and none of it had a failing test.
   bridge is still running", `HasFail` stayed false, and the config saved
   anyway — the check passing because the thing it guards is absent, one
   level in from the defect the pass exists for. Clear `OwnPIDFile` for a
-  changed port. `RunPortChecks` takes WHICH ports to grade, because port 0
-  is a legal value with its own verdict and cannot double as "skip this one".
+  changed port, except where no config says which ports the running bridge
+  binds: there it stays, confined to attribution (`OwnPIDPortsUnknown`,
+  the "…over a config that is there and does not load" bullet below).
+  `RunPortChecks` takes WHICH ports to grade, because port 0 is a legal
+  value with its own verdict and cannot double as "skip this one".
 - **…and clearing it did nothing on a host without lsof, because the
   verdict read which tools the host HAS** (#1021). `checkPort` ended in
   `if !portProbeAvailable() { return warn(…) }`, goreview F9's fix (#429)
@@ -2228,6 +2231,44 @@ what it claimed**, and none of it had a failing test.
   install was not graded. The same consult proposed rewording the footer
   for every run with warns, which changes every report. That was not taken
   here.
+- **…and over a config that is there and does not load, init recognises
+  the bridge it replaces by the pid file in the data dir it WRITES, and
+  only where the probe SEES that bridge on the port** (#1027).
+  `withExistingInstallDeps` returned early on any load error, so the
+  preflight graded 7788 / 7789 with no pid file: a bridge live on its
+  defaults whose config then broke FAILed both port checks, and `bridge
+  init --yes --force`, the run that replaces that config, refused (#1022
+  measured it). A public re-init refused in the second pass instead,
+  because "changed" was measured against init's defaults and #970 clears
+  the pid for a changed port. init always writes `<dir>/data` and serve
+  records `<dataDir>/server.pid`, so the bridge the re-init replaces is
+  known without its config wherever the data dir did not move. That pid
+  file is wired with `doctor.Deps.OwnPIDPortsUnknown`, which confines the
+  "is it us?" ladder to ATTRIBUTION (`checkChosenPort`): a held port is
+  excused only when the probe sees the recorded pid listening on it.
+  **Liveness, the uid arm and a failed probe excuse nothing there**,
+  because no config says which ports that bridge binds: an install that
+  had moved off the defaults (because something else holds 7788, say)
+  has a live bridge on its own ports while another process holds the one
+  init writes. With the full ladder behind that pid file the re-init
+  saved `:7788` without a word, and the restarted bridge died on `bind:
+  address already in use` (row B on dido, with and without lsof): #970's
+  defect. The second pass keeps that pid file rather than clearing it. **A
+  MISSING config stays a first install**, with no pid file: nothing there
+  shows an install, and a leftover pid can be stale or recycled (a Gemini
+  consult agreed). **Attribution does not depend on lsof on Linux**:
+  where none resolves, `isPIDListeningOnPort` reads the listener's inode
+  from `/proc/net/tcp{,6}` and looks for it among `/proc/<pid>/fd`'s
+  `socket:[N]` links (`pidListensOnPort`), the tables lsof itself reads.
+  Without that, a host with no lsof refused the bridge's own port that a
+  host with lsof accepted (NC-F, one set of facts, two verdicts). Its
+  limits are lsof's: another user's process, or a `cap_net_bind_service`
+  binary (dumpable=0), keeps its descriptors from a non-root observer, and
+  the refusal's hint names the recorded bridge and says to stop it first.
+  **An ok is not proof of attribution**: on Linux the uid arm answers ok
+  for a test's own listener, so `TestPortCheck_OwnPIDMatches` asserts the
+  "bound by our own bridge" summary; with the `/proc` path removed it had
+  passed on the uid arm.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
@@ -2587,12 +2628,14 @@ mentions across the four `ops/audit-*.md` files.
   config-dir and the ports graded, as Setup's preflight grades them
   (#1023). `bridge init`'s preflight leaves the lookup nil, so
   config-file reports itself skipped and does not block the re-init that
-  replaces a broken config. **The port checks still can**: this bullet said
-  a broken existing config "cannot block" that re-init until 2026-09-25.
-  With the config unloadable, the preflight grades 7788 / 7789 with no pid
-  file, and a bridge still live on them FAILs both, so `bridge init --yes
-  --force` refuses (measured in #1022, not fixed there: init's two port
-  passes need their own answer). (#984, #985)
+  replaces a broken config. Since #1027 the port checks do not block it
+  either: they recognise the bridge being replaced by the pid file in the
+  data dir init writes, by attribution only (the "…over a config that is
+  there and does not load" bullet). This bullet said a broken existing
+  config "cannot block" that re-init until 2026-09-25, when the port
+  checks still could: with the config unloadable the preflight graded
+  7788 / 7789 with no pid file, and a bridge still live on them FAILed
+  both. (#984, #985)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and
