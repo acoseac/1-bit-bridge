@@ -262,24 +262,26 @@ func TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds(t *testing.T)
 			t.Error("with neither table readable there is no answer, and that is an error")
 		}
 	})
-	// It is handed no pid, so a /proc whose self names another process
-	// changes nothing: where the socket tables read at all, such a /proc is
-	// an ancestor namespace's, which lists every process this one's would
-	// (hiddenListenerOf's docblock has the measurement). The census's guard
-	// here was proposed in review, and would turn the capability-bound
-	// bridge's own port from ok to a warn there.
-	t.Run("a /proc whose self is another pid namespace's", func(t *testing.T) {
-		for _, tc := range []struct {
-			procs map[int]map[string]string
-			want  bool
-		}{
-			{map[int]map[string]string{5000: {"3": "socket:[11111]"}}, true},
-			{map[int]map[string]string{5000: {"3": "socket:[24680]"}}, false},
-		} {
-			root := reselfProcRoot(t, writeProcRoot(t, tc.procs), "480456")
-			if got, err := hiddenListenerOf(capturedTables(t), root, 7789, 1000); err != nil || got != tc.want {
-				t.Errorf("holders %v: got %v, %v; want %v, no error", tc.procs, got, err, tc.want)
-			}
+}
+
+// TestHiddenListenerOfIgnoresWhichPIDNamespaceProcIsFrom: the uid arm is
+// handed no pid, so a /proc whose self names another process changes
+// nothing. Where the socket tables read at all, such a /proc is an ancestor
+// namespace's, which lists every process this one's would
+// (hiddenListenerOf's docblock has the measurement). The census's guard
+// here was proposed in review (CodeRabbit on #1030), and would turn the
+// capability-bound bridge's own port from ok to a warn there.
+func TestHiddenListenerOfIgnoresWhichPIDNamespaceProcIsFrom(t *testing.T) {
+	for _, tc := range []struct {
+		procs map[int]map[string]string
+		want  bool
+	}{
+		{map[int]map[string]string{5000: {"3": "socket:[11111]"}}, true},
+		{map[int]map[string]string{5000: {"3": "socket:[24680]"}}, false},
+	} {
+		root := reselfProcRoot(t, writeProcRoot(t, tc.procs), "480456")
+		if got, err := hiddenListenerOf(capturedTables(t), root, 7789, 1000); err != nil || got != tc.want {
+			t.Errorf("holders %v: got %v, %v; want %v, no error", tc.procs, got, err, tc.want)
 		}
-	})
+	}
 }

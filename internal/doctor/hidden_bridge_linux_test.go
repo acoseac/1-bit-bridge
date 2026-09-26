@@ -54,6 +54,11 @@ func startUndumpable(t *testing.T, listen bool) (pid, port int) {
 	cmd.Env = append(os.Environ(), undumpableChildEnv+"="+mode)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	// The writer is dropped here and still stays open: cmd keeps it
+	// (parentIOPipes) and closes it only in Wait, once the child has
+	// exited, or on a failed Start. The cleanup below holds cmd, so no
+	// finalizer can close it early. internal/proctest's held shells rely
+	// on the same thing.
 	if _, err := cmd.StdinPipe(); err != nil {
 		t.Fatal(err)
 	}

@@ -16331,14 +16331,30 @@ guard necessary. Its placement advice was declined, as recorded above.
   the tables read and `/proc` listed all 321 host processes. Adding the
   guard would only turn L2 into a warn there. The accurate half was taken:
   the docblock had argued only that a readable holder is real, and now also
-  argues that nothing is omitted. A fixture row
-  (`TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds`, "a /proc
-  whose self is another pid namespace's") pins the decision, and a sentence
-  in CLAUDE.md records it.
+  argues that nothing is omitted. A fixture test
+  (`TestHiddenListenerOfIgnoresWhichPIDNamespaceProcIsFrom`, a row of the
+  uid-arm table until round 2 split it out for Sonar) pins the decision,
+  and a sentence in CLAUDE.md records it. CodeRabbit then checked the row,
+  withdrew the finding and resolved the thread.
 - Controls on the round (`5c913119`): NC4 again, against the refactored
   guard test, turned the six guard rows red. NC12, CodeRabbit's guard
   added to `hiddenListenerOf`, turned the new row red: "got false; want
   true".
+- **Round 2**, on `de460c9e`. CodeRabbit: paused at the plan limit (its
+  walkthrough's `coveredCommitId` stays `f9131650`). SonarCloud: the
+  go:S3776 moved to the uid-arm table test, which the pinning row had
+  pushed to 18. The row became its own test. Gemini (two comments, HIGH)
+  said the helper that starts the non-dumpable child drops the writer
+  `cmd.StdinPipe()` returns, so a GC finalizer could close the pipe and
+  the child would exit early: a flake. **Declined on the source** (Go
+  1.26.6's `os/exec`). `StdinPipe` appends the writer to
+  `cmd.parentIOPipes` (exec.go:1070), and the pipes are closed only in
+  `Wait` after the child exits (:954), on a failed `Start` (:655), or on
+  the context and `WaitDelay` paths (:867, :998), which the helper does
+  not use. The cleanup closure holds `cmd`, so the writer is reachable
+  until then and no finalizer runs. `internal/proctest`'s held shells drop
+  it the same way. The accurate half was taken: the helper now says why
+  dropping it is safe.
 
 ### Out of scope
 
