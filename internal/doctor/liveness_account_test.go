@@ -59,7 +59,7 @@ func unseenVerdict(ruledOut bool) Status {
 // bridge out, the port is another process's and FAILs.
 func TestLivenessArmNamesTheListenerThePlatformProbeSaw(t *testing.T) {
 	account, ruledOut := realHolderAccount(t)
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	ppid := os.Getppid()
 	c := checkPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, ppid))
 	if want := unseenVerdict(ruledOut); c.Status != want {
@@ -94,7 +94,7 @@ func TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		// The premise: this process's listener runs as this user, so the
 		// uid arm alone would call the port ours.
-		if owned, err := portOwnerFunc(port); err != nil || !owned {
+		if owned, err := hiddenListenerFunc(port); err != nil || !owned {
 			t.Fatalf("the uid scan does not see this process's listener on :%d as this user's (owned %v, err %v)", port, owned, err)
 		}
 	}
@@ -263,7 +263,7 @@ func requireLadderVerdicts(t *testing.T, a probeAnswer, alive, owned bool) {
 	t.Helper()
 	withOwnerProbe(t, a.found, a.seen, a.err)
 	withPIDAlive(t, alive)
-	withPortOwner(t, owned, nil)
+	withHiddenListener(t, owned, nil)
 	port, chosen := ladderVerdicts(a.found, a.err != nil, alive, a.seen.ruledOut, owned)
 	pidFile, held := writePIDFile(t, 4242), bindPort(t)
 	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {

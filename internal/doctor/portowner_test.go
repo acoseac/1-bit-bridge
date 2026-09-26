@@ -10,16 +10,16 @@ import (
 	"testing"
 )
 
-// withPortOwner forces portOwnerFunc for a test. A host's real answer
-// depends on whether THIS user happens to own a listener on the probed
-// port, which flips between platforms and between "bound by the test" and
-// "bound by something else" — so the branch has to be driven explicitly or
-// the assertion is about the host, not the code.
-func withPortOwner(t *testing.T, owned bool, err error) {
+// withHiddenListener forces the uid arm's answer (hiddenListenerFunc) for a
+// test. A host's real answer depends on whether THIS user happens to own a
+// listener on the probed port, which flips between platforms and between
+// "bound by the test" and "bound by something else" — so the branch has to
+// be driven explicitly or the assertion is about the host, not the code.
+func withHiddenListener(t *testing.T, owned bool, err error) {
 	t.Helper()
-	orig := portOwnerFunc
-	t.Cleanup(func() { portOwnerFunc = orig })
-	portOwnerFunc = func(int) (bool, error) { return owned, err }
+	orig := hiddenListenerFunc
+	t.Cleanup(func() { hiddenListenerFunc = orig })
+	hiddenListenerFunc = func(int) (bool, error) { return owned, err }
 }
 
 // withPIDAlive forces pidAliveFunc for a test.
@@ -77,7 +77,7 @@ func withUnattributedMiss(t *testing.T) {
 func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 	withUnattributedMiss(t)
 	withPIDAlive(t, true)
-	withPortOwner(t, false, nil) // can't tell who owns it
+	withHiddenListener(t, false, nil) // can't tell who owns it
 	port := bindPort(t)
 
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
@@ -94,7 +94,7 @@ func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 // conflict on that port has to stay a Fail.
 func TestPortCheck_DeadPIDStillFails(t *testing.T) {
 	withPIDAlive(t, false)
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	port := bindPort(t)
 
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
@@ -111,7 +111,7 @@ func TestPortCheck_DeadPIDStillFails(t *testing.T) {
 func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 	withUnattributedMiss(t)
 	withPIDAlive(t, true)
-	withPortOwner(t, true, nil)
+	withHiddenListener(t, true, nil)
 	port := bindPort(t)
 
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
@@ -126,7 +126,7 @@ func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
 	withUnattributedMiss(t)
 	withPIDAlive(t, true)
-	withPortOwner(t, true, os.ErrPermission) // owned=true but errored
+	withHiddenListener(t, true, os.ErrPermission) // owned=true but errored
 	port := bindPort(t)
 
 	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))

@@ -4,10 +4,7 @@ package doctor
 
 import (
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"strconv"
 )
 
 // procNetTCPFiles are the per-network-namespace socket tables scanned for a
@@ -18,8 +15,9 @@ import (
 // Package var so tests can point it at fixture files.
 var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 
-// portOwnedByThisUser reports whether any process running as the current
-// user holds a LISTEN socket on this TCP port.
+// hiddenListenerOfThisUser reports whether any process running as the
+// current user holds a LISTEN socket on this TCP port (hiddenListenerOf,
+// over this host's /proc).
 //
 // This is the fallback for a bridge that binds a privileged port through a
 // file capability (`setcap cap_net_bind_service=+ep`, which the deployment
@@ -45,26 +43,8 @@ var procNetTCPFiles = []string{"/proc/net/tcp", "/proc/net/tcp6"}
 // another process of the same user, and the port FAILs without asking
 // (#1028's row L4). It is the ceiling of what an unprivileged observer can
 // learn, and strictly more than the "unknown owner" it replaces.
-func portOwnedByThisUser(port int) (bool, error) {
-	me := os.Getuid()
-	owned := false
-	_, err := readSocketTables(procNetTCPFiles, func(r io.Reader) (bool, error) {
-		uids, err := scanListenerUIDs(r, port)
-		if err != nil {
-			return false, err
-		}
-		for _, uid := range uids {
-			if uid == me {
-				owned = true
-				return true, nil
-			}
-		}
-		return false, nil
-	})
-	if owned {
-		return true, nil
-	}
-	return false, err
+func hiddenListenerOfThisUser(port int) (bool, error) {
+	return hiddenListenerOf(procNetTCPFiles, "/proc", port, os.Getuid())
 }
 
 // pidListensOnPort reports whether pid holds a LISTEN socket on this TCP
@@ -95,7 +75,7 @@ func pidListensOnPort(port, pid int) (bool, ownerSighting, error) {
 	if pid <= 0 {
 		return false, ownerSighting{saw: fmt.Sprintf("/proc has no pid %d", pid)}, nil
 	}
-	return procSighting(procNetTCPFiles, filepath.Join("/proc", strconv.Itoa(pid), "fd"), port, pid, blindSpot())
+	return procSighting(procNetTCPFiles, "/proc", port, pid, blindSpot())
 }
 
 // blindSpot says what an owner probe run as this user cannot see on Linux,

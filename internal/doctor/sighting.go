@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -160,9 +161,9 @@ func listenerTableSighting(owners []int) ownerSighting {
 }
 
 // procSighting is the /proc attribution: whether pid holds a socket
-// listening on port, read from the socket tables and the fd directory it is
-// handed (pidListensOnPort hands it /proc's; the tests hand it fixtures),
-// and when it does not, what /proc showed.
+// listening on port, read from the socket tables and the process
+// directories under procRoot (pidListensOnPort hands it /proc; the tests
+// hand it fixtures), and when it does not, what /proc showed.
 //
 // No listener in the tables rules pid out: a bridge's listener would be
 // there. So does an fd directory read in full without one. A directory that
@@ -171,7 +172,7 @@ func listenerTableSighting(owners []int) ownerSighting {
 // that is there and could not be read (listenerSockets' unread), since the
 // listener may be in it: the account then says it covers the tables read
 // (CodeRabbit on #1028). An error means neither socket table could be read.
-func procSighting(tables []string, fdDir string, port, pid int, blind string) (bool, ownerSighting, error) {
+func procSighting(tables []string, procRoot string, port, pid int, blind string) (bool, ownerSighting, error) {
 	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {
 		return false, ownerSighting{}, err
@@ -182,7 +183,7 @@ func procSighting(tables []string, fdDir string, port, pid int, blind string) (b
 		}
 		return false, ownerSighting{saw: "/proc lists no socket listening on this port", ruledOut: true}, nil
 	}
-	held, readAll, err := fdDirHoldsSocket(fdDir, sockets)
+	held, readAll, err := fdDirHoldsSocket(filepath.Join(procRoot, strconv.Itoa(pid), "fd"), sockets)
 	switch {
 	case held:
 		return true, ownerSighting{}, nil

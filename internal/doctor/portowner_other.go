@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// portOwnedByThisUser is the non-Linux stub for checkPort's last-resort
+// hiddenListenerOfThisUser is the non-Linux stub for checkPort's last-resort
 // port attribution. It always answers "don't know" so the caller falls
 // through to its Warn.
 //
@@ -23,7 +23,7 @@ import (
 // means "asked and got no match", which lands on the same Warn as a real
 // no-match. Reporting a mechanism error here would imply something is
 // broken on hosts where there is simply nothing to ask.
-func portOwnedByThisUser(int) (bool, error) { return false, nil }
+func hiddenListenerOfThisUser(int) (bool, error) { return false, nil }
 
 // pidListensOnPort is the non-Linux stub for the /proc attribution that
 // isPIDListeningOnPort asks where no usable lsof resolved, and after an

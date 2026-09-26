@@ -46,9 +46,9 @@ const (
 )
 
 // eachListenRow calls fn with the fields of every LISTEN-state row whose
-// local port matches. The row filter is shared by the uid and inode scans
-// below, so the two cannot disagree about which rows are the port's
-// listeners.
+// local port matches: the one row filter scanListenRows reads the inode and
+// the uid through, so no reader of the tables can disagree with another
+// about which rows are the port's listeners.
 func eachListenRow(r io.Reader, port int, fn func(f []string)) error {
 	// The port half of local_address is BIG-endian hex, zero-padded to four
 	// digits: 443 -> "01BB", 7789 -> "1E6D". (The address half is
@@ -81,42 +81,37 @@ func eachListenRow(r io.Reader, port int, fn func(f []string)) error {
 	return sc.Err()
 }
 
-// scanListenerUIDs returns the owning UID of every LISTEN row whose local
-// port matches. Split from portOwnedByThisUser so it can be tested against
-// captured real /proc output without needing a matching live socket, a
-// particular uid, or Linux.
-func scanListenerUIDs(r io.Reader, port int) ([]int, error) {
-	var uids []int
-	err := eachListenRow(r, port, func(f []string) {
-		if len(f) <= colUID {
-			return
-		}
-		uid, err := strconv.Atoi(f[colUID])
-		if err != nil {
-			return
-		}
-		uids = append(uids, uid)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return uids, nil
+// listenRow is one LISTEN row of a socket table: the socket's inode, as the
+// table renders it (decimal), and the uid that created the socket, or -1
+// where that column does not parse. The inode is what a process's
+// /proc/<pid>/fd link names, `socket:[<inode>]`, which is how a listener is
+// tied to the process holding it. The uid is the creator's fsuid, fixed at
+// socket(2) and mapped into the reader's user namespace, as getuid is.
+type listenRow struct {
+	inode string
+	uid   int
 }
 
-// scanListenerInodes returns the socket inode of every LISTEN row whose
-// local port matches, as the table renders it (decimal).
-func scanListenerInodes(r io.Reader, port int) ([]string, error) {
-	var inodes []string
+// scanListenRows returns every LISTEN row whose local port matches. Split
+// from the table reader so it can be tested against captured real /proc
+// output without needing a matching live socket, a particular uid, or
+// Linux.
+func scanListenRows(r io.Reader, port int) ([]listenRow, error) {
+	var rows []listenRow
 	err := eachListenRow(r, port, func(f []string) {
 		if len(f) <= colInode {
 			return
 		}
-		inodes = append(inodes, f[colInode])
+		uid, err := strconv.Atoi(f[colUID])
+		if err != nil {
+			uid = -1
+		}
+		rows = append(rows, listenRow{inode: f[colInode], uid: uid})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return inodes, nil
+	return rows, nil
 }
 
 // readSocketTables hands each socket table in paths to scan, in order, and
@@ -170,19 +165,20 @@ func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err err
 	return unread, nil
 }
 
-// listenerSockets returns the fd-link text of every socket listening on
-// port in the given tables, `socket:[<inode>]`, which is how
-// /proc/<pid>/fd renders a socket descriptor, and whether a table that is
-// there could not be read (readSocketTables' unread).
-func listenerSockets(paths []string, port int) (sockets map[string]bool, unread bool, err error) {
-	sockets = map[string]bool{}
+// listenerSockets returns every socket listening on port in the given
+// tables, as its fd-link text, `socket:[<inode>]`, which is how
+// /proc/<pid>/fd renders a socket descriptor, mapped to the uid that
+// created it (listenRow); and whether a table that is there could not be
+// read (readSocketTables' unread).
+func listenerSockets(paths []string, port int) (sockets map[string]int, unread bool, err error) {
+	sockets = map[string]int{}
 	unread, err = readSocketTables(paths, func(r io.Reader) (bool, error) {
-		inodes, scanErr := scanListenerInodes(r, port)
+		rows, scanErr := scanListenRows(r, port)
 		if scanErr != nil {
 			return false, scanErr
 		}
-		for _, inode := range inodes {
-			sockets["socket:["+inode+"]"] = true
+		for _, row := range rows {
+			sockets["socket:["+row.inode+"]"] = row.uid
 		}
 		return false, nil
 	})
@@ -190,6 +186,23 @@ func listenerSockets(paths []string, port int) (sockets map[string]bool, unread 
 		return nil, unread, err
 	}
 	return sockets, unread, nil
+}
+
+// hiddenListenerOf reports whether a socket listening on port in the given
+// tables was created by uid (hiddenListenerOfThisUser). procRoot is not
+// read yet. An error means no table could be read.
+func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, error) {
+	_ = procRoot
+	sockets, _, err := listenerSockets(tables, port)
+	if err != nil {
+		return false, err
+	}
+	for _, u := range sockets {
+		if u == uid {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // fdDirHoldsSocket reports whether any descriptor in fdDir, a process's
@@ -211,7 +224,7 @@ func listenerSockets(paths []string, port int) (sockets map[string]bool, unread 
 // also compares the groups. Such a descriptor clears readAll, since the
 // socket may be behind it. One closed between the listing and its readlink
 // does not: it is no longer a socket the process holds.
-func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool, err error) {
+func fdDirHoldsSocket(fdDir string, sockets map[string]int) (held, readAll bool, err error) {
 	entries, err := os.ReadDir(fdDir)
 	if err != nil {
 		return false, false, err
@@ -221,7 +234,7 @@ func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool
 		link, err := os.Readlink(filepath.Join(fdDir, e.Name()))
 		switch {
 		case err == nil:
-			if sockets[link] {
+			if _, listener := sockets[link]; listener {
 				return true, readAll, nil
 			}
 		case !errors.Is(err, fs.ErrNotExist):

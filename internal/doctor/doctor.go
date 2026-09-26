@@ -712,7 +712,7 @@ func ownedPortCheck(name string, port int, ownedPorts []int) *Check {
 // listenFunc is the TCP bind probe used by checkPort. A package var so
 // tests can inject a synthetic bind failure (e.g. a non-EADDRINUSE error
 // like EACCES) deterministically — the same test-seam convention as
-// pidAliveFunc and portOwnerFunc. Production code MUST NOT mutate it.
+// pidAliveFunc and hiddenListenerFunc. Production code MUST NOT mutate it.
 var listenFunc = net.Listen
 
 // probeBind attempts a bind and immediately releases it, returning the
@@ -824,7 +824,7 @@ func liveUnseenVerdict(name string, port, ownPID int, seen ownerSighting) Check 
 	// portowner_linux.go); everywhere else it answers "don't know" and we
 	// fall through to the Warn. Only a probe that could not rule our pid out
 	// gets here, so a listener of this uid may be our bridge, unseen.
-	if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
+	if hidden, hiddenErr := hiddenListenerFunc(port); hiddenErr == nil && hidden {
 		return ok(name, fmt.Sprintf("in use by a process running as this user (uid %d; %s)",
 			os.Getuid(), seen.account()))
 	}
@@ -1387,18 +1387,19 @@ func windowsStartupDir() string {
 // from having to know which platform can hang, and hands the next
 // implementation the context already.
 
-// pidAliveFunc and portOwnerFunc indirect the two platform-provided probes
-// that back checkPort's last-resort attribution arms, so tests can drive
-// those branches deterministically: neither "a PID that is definitely
-// dead" nor "a listener owned by a different user" can be conjured
-// portably on demand, and asserting them against whatever the host happens
-// to look like is how a test ends up passing for the wrong reason.
+// pidAliveFunc and hiddenListenerFunc indirect the two platform-provided
+// probes that back checkPort's last-resort attribution arms, so tests can
+// drive those branches deterministically: neither "a PID that is
+// definitely dead" nor "a listener owned by a different user" can be
+// conjured portably on demand, and asserting them against whatever the
+// host happens to look like is how a test ends up passing for the wrong
+// reason.
 //
 // Same seam convention as listenFunc above. Production code MUST NOT
 // mutate them.
 var (
-	pidAliveFunc  = pidAlive
-	portOwnerFunc = portOwnedByThisUser
+	pidAliveFunc       = pidAlive
+	hiddenListenerFunc = hiddenListenerOfThisUser
 	// ownerProbeFunc is the owner probe itself (isPIDListeningOnPort),
 	// indirected so a test can hand both port ladders every kind of
 	// account, a ruled-out miss included, on every platform. Only

@@ -34,6 +34,27 @@ const procNetTCP6Fixture = `  sl  local_address                         remote_a
    0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 6213098 2 0000000000000000 100 0 0 10 0
 `
 
+// listenRowUIDs and listenRowInodes project scanListenRows' answer onto
+// one column, for the tests below that pin each column's guards. Both are
+// nil for no rows.
+func listenRowUIDs(rows []listenRow) []int {
+	var uids []int
+	for _, r := range rows {
+		uids = append(uids, r.uid)
+	}
+	return uids
+}
+
+func listenRowInodes(rows []listenRow) []string {
+	var inodes []string
+	for _, r := range rows {
+		inodes = append(inodes, r.inode)
+	}
+	return inodes
+}
+
+// TestScanListenerUIDs reads the uid column of every LISTEN row on a port
+// (scanListenRows), over captured real tables.
 func TestScanListenerUIDs(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -89,11 +110,11 @@ func TestScanListenerUIDs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := scanListenerUIDs(strings.NewReader(tc.table), tc.port)
+			rows, err := scanListenRows(strings.NewReader(tc.table), tc.port)
 			if err != nil {
-				t.Fatalf("scanListenerUIDs: %v", err)
+				t.Fatalf("scanListenRows: %v", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
+			if got := listenRowUIDs(rows); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("port %d: got %v, want %v", tc.port, got, tc.want)
 			}
 		})
@@ -107,10 +128,11 @@ func TestScanListenerUIDs(t *testing.T) {
 // check that uid joins the result and a foreign process can be reported as
 // owning our port.
 func TestScanListenerUIDs_IgnoresNonListenRows(t *testing.T) {
-	got, err := scanListenerUIDs(strings.NewReader(procNetTCPFixture), 7789)
+	rows, err := scanListenRows(strings.NewReader(procNetTCPFixture), 7789)
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := listenRowUIDs(rows)
 	for _, uid := range got {
 		if uid == 65534 {
 			t.Fatalf("uid 65534 came from the ESTABLISHED row — the st==%s filter is not applied; "+
@@ -128,20 +150,21 @@ func TestScanListenerUIDs_IgnoresNonListenRows(t *testing.T) {
 // 7789 (0x1E6D) byte-swapped is 0x6D1E = 27934, which would match nothing on
 // a real host and make the whole check quietly useless.
 func TestScanListenerUIDs_PortIsBigEndian(t *testing.T) {
-	if got, _ := scanListenerUIDs(strings.NewReader(procNetTCPFixture), 7789); len(got) != 1 {
+	if got, _ := scanListenRows(strings.NewReader(procNetTCPFixture), 7789); len(got) != 1 {
 		t.Errorf("port 7789 (0x1E6D) should match the fixture's listener, got %v", got)
 	}
-	if got, _ := scanListenerUIDs(strings.NewReader(procNetTCPFixture), 27934); len(got) != 0 {
+	if got, _ := scanListenRows(strings.NewReader(procNetTCPFixture), 27934); len(got) != 0 {
 		t.Errorf("port 27934 (0x6D1E, the byte-swapped form) must NOT match, got %v", got)
 	}
 }
 
-// TestScanListenerInodes reads the inode column through the same row filter
-// as the uid scan, over the same captured tables. The inode is what ties a
-// listener to the process holding it (pidListensOnPort), so every guard
-// the uid scan has matters here too: an inode from the wrong column, from a
-// non-listening row, or from a remote port would attribute someone else's
-// socket to the recorded bridge.
+// TestScanListenerInodes reads the inode column of the same rows as the
+// uid test above, over the same captured tables. The inode is what ties a
+// listener to the process holding it (pidListensOnPort, and the census of
+// the port's holders), so every guard the uid column has matters here too:
+// an inode from the wrong column, from a non-listening row, or from a
+// remote port would attribute someone else's socket to the recorded bridge,
+// or to a holder that is not one.
 func TestScanListenerInodes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -162,11 +185,11 @@ func TestScanListenerInodes(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := scanListenerInodes(strings.NewReader(tc.table), tc.port)
+			rows, err := scanListenRows(strings.NewReader(tc.table), tc.port)
 			if err != nil {
-				t.Fatalf("scanListenerInodes: %v", err)
+				t.Fatalf("scanListenRows: %v", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
+			if got := listenRowInodes(rows); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("port %d: got %v, want %v", tc.port, got, tc.want)
 			}
 		})
