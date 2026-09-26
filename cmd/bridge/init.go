@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -186,7 +188,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// ladder needs one. Re-running init against a live install — the
 	// most ordinary reason to run it twice — therefore aborted, and this
 	// comment named that as a reason to pass the flag. withExistingInstallDeps
-	// reads the pid file and the real ports now, so the check answers.
+	// reads the pid file and the real ports now, so the check answers. It
+	// answers over a config that does not load too, from the pid file in
+	// the data dir init writes, excusing only a port that bridge is seen
+	// listening on.
 	//
 	// preflightDeps is kept for the SECOND port pass below: the ports
 	// graded here are the install's CURRENT ones, and a run that goes on
@@ -380,6 +385,15 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// HasFail stayed false, and the config was saved anyway — the check
 	// passing because the thing it guards is absent, one level in from
 	// the defect this whole pass exists for (CodeRabbit on #970).
+	//
+	// Except where the install's config did not load
+	// (OwnPIDPortsUnknown). Then the preflight graded init's defaults, so
+	// "changed" means only "not a default", and the port may well be the
+	// running bridge's own, as on a public re-init over a broken public
+	// config. Cleared, the pid file would refuse the bridge's own listeners
+	// here, as the preflight used to. It is kept, and it already excuses
+	// nothing but the recorded bridge seen listening on the port, the one
+	// arm of the ladder a port the run is choosing may be excused by.
 	if !*skipDoctor {
 		d := preflightDeps
 		apiPort, apiOK := configuredPort(cfg.ListenAddress)
@@ -388,7 +402,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		adminChanged := adminOK && adminPort != d.AdminPort
 		if apiChanged || adminChanged {
 			d.APIPort, d.AdminPort = apiPort, adminPort
-			d.OwnPIDFile = ""
+			if !d.OwnPIDPortsUnknown {
+				d.OwnPIDFile = ""
+			}
 			report := doctor.RunPortChecks(context.Background(), d, apiChanged, adminChanged)
 			if report.HasFail() {
 				printReport(stdout, report)
@@ -951,9 +967,29 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 // Everything both checks say about this state is warn-level by design
 // (neither a stale SAN set nor a clock-skewed NotBefore is a reason to
 // refuse to initialise), which is why ensureDoctorClean surfaces warns.
+//
+// A config that is there and does not load (a misspelt key, say) is the
+// re-init that exists to replace it, often while the install's bridge is
+// still serving. Nothing in it can be read, so the preflight grades init's
+// defaults, as for a first install. But the ports are not the only fact
+// here: init always writes the data dir d.DataDir names, and `bridge serve`
+// records its pid there, so the bridge this run replaces is known without
+// the config, wherever the data dir did not move. Without it, that
+// bridge's own listeners read as another process's, both port checks
+// FAILed, and the re-init refused (measured on 2026-09-25, #1022's log
+// entry). Its ports are unknown, though, so only the probe seeing it listen
+// on a port excuses that port (doctor's checkChosenPort), never its being
+// alive: an install that had moved off the defaults has a live bridge on
+// its own ports while another process may hold the one init writes.
 func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
+		// A first install has nothing at cfgPath and stays as it is. With
+		// no data dir there is no pid file to point at.
+		if !errors.Is(err, fs.ErrNotExist) && d.DataDir != "" {
+			d.OwnPIDFile = filepath.Join(d.DataDir, serverPIDFileName)
+			d.OwnPIDPortsUnknown = true
+		}
 		return
 	}
 	d.TLSCertPath, d.TLSKeyPath = resolveCertPaths(cfg)

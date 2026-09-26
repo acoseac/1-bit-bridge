@@ -98,10 +98,11 @@ type Deps struct {
 	// caller did not look one up, which the check reports as skipped.
 	// `bridge init`'s preflight leaves it nil on purpose: it grades the
 	// install it is about to write, and a broken existing config must
-	// not block the re-init that replaces it. That holds for
-	// checkConfigFile only: the preflight's port checks, graded on init's
-	// defaults with no pid file behind them, still FAIL a bridge live on
-	// those ports.
+	// not block the re-init that replaces it. Nor may its port checks,
+	// over the bridge's own listeners: for that config init sets
+	// OwnPIDPortsUnknown, so they grade init's defaults and the bridge
+	// recorded in the data dir init writes excuses a port it is seen
+	// listening on.
 	//
 	// When it records a config that did not load, the port checks are
 	// not run: APIPort and AdminPort are then the caller's defaults, not
@@ -159,6 +160,15 @@ type Deps struct {
 	// (doctor must be idempotent while the server is running). Empty
 	// skips the own-PID check — any bind is fail.
 	OwnPIDFile string
+	// OwnPIDPortsUnknown says the caller could not read which ports the
+	// bridge recorded in OwnPIDFile binds: `bridge init` over an install
+	// whose config is there and does not load. The pid file then comes
+	// from the data dir init writes, and the ports graded are init's own
+	// choice, so the only evidence that the recorded bridge holds one is
+	// the probe seeing it listen there (checkChosenPort). Its being alive
+	// says nothing about these ports, since a live bridge binds what its
+	// config says and nothing here says what that was.
+	OwnPIDPortsUnknown bool
 	// OwnedPorts lists ports the CALLER knows it bound itself.
 	//
 	// Only an in-process caller can populate this honestly — the admin
@@ -577,7 +587,10 @@ func expiryPhrase(days int) string {
 // supposed to hold and wrong for one it is not: a live bridge binds
 // what ITS config says, so it cannot legitimately own a port that is
 // not in it, and the excuse then hides a conflict that will stop the
-// next serve from binding (CodeRabbit on #970).
+// next serve from binding (CodeRabbit on #970). The exception is
+// Deps.OwnPIDPortsUnknown, where no config says which ports the bridge
+// binds and the pid file is already confined to the one arm that does
+// not need one: the recorded bridge seen listening on the port.
 func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
 	var checks []Check
 	if api {
@@ -600,14 +613,18 @@ func checkAdminPort(ctx context.Context, d Deps) Check {
 // checkListenPort is the ladder both port checks climb, for the port it is
 // handed with the name it is handed: a config that did not load declines
 // (ungradedConfigPortCheck), then a port the caller bound answers
-// (ownedPortCheck), then the bind probe (checkPort). The port is passed,
-// never derived from the name, for the reason ownedPortCheck gives.
+// (ownedPortCheck), then the bind probe (checkPort, or checkChosenPort when
+// the recorded bridge's ports are unknown). The port is passed, never
+// derived from the name, for the reason ownedPortCheck gives.
 func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
 	if c := ungradedConfigPortCheck(name, d.ConfigFile); c != nil {
 		return *c
 	}
 	if owned := ownedPortCheck(name, port, d.OwnedPorts); owned != nil {
 		return *owned
+	}
+	if d.OwnPIDPortsUnknown {
+		return checkChosenPort(ctx, name, port, d.OwnPIDFile)
 	}
 	return checkPort(ctx, name, port, d.OwnPIDFile)
 }
@@ -723,54 +740,8 @@ func probeBind(addr string) error {
 // binds loopback, so a wildcard probe here would false-fail it whenever
 // any unrelated service holds the same port on another interface.
 func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Check {
-	if port == 0 {
-		return warn(name, "no port set", "pass Deps."+name+"Port")
-	}
-	// Probe BOTH address families. Binding only 127.0.0.1 reports a port
-	// as free when something holds it on IPv6 alone — `[::]:port` under
-	// `bindv6only`, or an explicit `[::1]:port`. The bridge's own default
-	// listen address is a wildcard, so this is not exotic: doctor said
-	// "free", init proceeded, and serve then failed to bind. The port is
-	// occupied if EITHER family says so.
-	v4err := probeBind(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	v6err := probeBind(net.JoinHostPort("::1", strconv.Itoa(port)))
-
-	inUse := isAddrInUse(v4err) || isAddrInUse(v6err)
-	if !inUse && (v4err == nil || v6err == nil) {
-		// At least one family bound cleanly and neither reported a
-		// conflict. The other family failing is an environment fact, not
-		// a conflict — a v4-only host returns EADDRNOTAVAIL for ::1 —
-		// and must not be reported as a problem.
-		return ok(name, fmt.Sprintf("free (:%d)", port))
-	}
-	// Neither family bound. Report against whichever error is
-	// informative, preferring IPv4 since that is the one an operator
-	// will recognise.
-	err := v4err
-	if err == nil {
-		err = v6err
-	}
-	// Only "address already in use" means the port is genuinely occupied.
-	// Other bind failures — EACCES (a privileged port <1024 without
-	// elevation), EADDRNOTAVAIL, a transient network error — are
-	// environment/privilege problems, NOT a port conflict. Reporting them as
-	// the hard "another process owns this port" Fail would be wrong and would
-	// block `bridge init`; degrade to a Warn that names the real cause.
-	//
-	// isAddrInUse is platform-split rather than a bare
-	// errors.Is(err, syscall.EADDRINUSE): on Windows that constant is an
-	// INVENTED value (syscall.APPLICATION_ERROR + iota, per
-	// zerrors_windows.go's "Invented values to support what package os and
-	// others expects"), while a real bind conflict is WSAEADDRINUSE (10048),
-	// which stdlib syscall doesn't even define and nothing translates. The
-	// bare form is therefore always false on Windows — which silently
-	// degraded every real conflict to a Warn (letting `bridge init` proceed
-	// into a serve that can't bind) AND made the native GetExtendedTcpTable
-	// owner attribution below unreachable there.
-	if !inUse {
-		return warn(name, fmt.Sprintf(":%d not bindable", port),
-			"couldn't bind to probe this port ("+err.Error()+"); "+
-				"ports below 1024 need elevation, or the configured address may be invalid — check bridge.yaml")
+	if c, inUse := bindVerdict(name, port); !inUse {
+		return c
 	}
 	// Port is in use. Is it us?
 	if ownPIDFile != "" {
@@ -835,8 +806,122 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 	// that is not running holds nothing for it to find. Its absence alone
 	// turned the Fail into a warn, and `bridge init` on such a host saved a
 	// port another process held.
-	return fail(name, fmt.Sprintf(":%d in use", port),
-		"another process owns this port; stop it or pick a different address in bridge.yaml")
+	return fail(name, fmt.Sprintf(":%d in use", port), anotherProcessOwnsPort)
+}
+
+// anotherProcessOwnsPort is the hint on a held port with no live bridge of
+// ours behind it.
+const anotherProcessOwnsPort = "another process owns this port; stop it or pick a different address in bridge.yaml"
+
+// checkChosenPort grades a port the caller is choosing for a bridge whose
+// ports it could not read (Deps.OwnPIDPortsUnknown): `bridge init` over an
+// install whose config is there and does not load. A held port is excused
+// only when the probe sees the bridge recorded in ownPIDFile listening on
+// it, which is the one answer that says a restart of that bridge frees it.
+//
+// checkPort's other arms read the recorded bridge's LIVENESS as evidence
+// that a held port is its own: a probe that failed warns, and a live pid
+// the probe did not name warns, or is ok on Linux when the listener runs as
+// this user. That is sound for a port the bridge's config names, and here
+// no config names one. init writes its defaults, and an install that had
+// moved off them (often because something else holds 7788) has a live
+// bridge on its own ports while another process holds the one init writes.
+// Excused, that port is saved, and the restarted bridge cannot bind it:
+// #970's defect, which the second port pass avoids by clearing the pid file
+// for a port the run is choosing. Cleared here, the bridge's own listeners
+// read as another process's, and the re-init that would replace a broken
+// config refuses: the defect this exists for.
+//
+// So the verdict turns on attribution alone. A probe that failed is a FAIL
+// too, since nothing else says the recorded bridge binds this port, and
+// liveness only picks the hint.
+func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile string) Check {
+	c, inUse := bindVerdict(name, port)
+	if !inUse {
+		return c
+	}
+	conflict := fmt.Sprintf(":%d in use", port)
+	ownPID, err := readPID(ownPIDFile)
+	if err != nil || ownPID <= 0 {
+		return fail(name, conflict, anotherProcessOwnsPort)
+	}
+	found, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
+	switch {
+	case probeErr == nil && found:
+		return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
+	case !pidAliveFunc(ownPID):
+		return fail(name, conflict, anotherProcessOwnsPort)
+	case probeErr != nil:
+		return fail(name, conflict, fmt.Sprintf(
+			"the owner probe failed (%s), and with no config that loads nothing says the bridge recorded in %s "+
+				"(pid %d) binds this port. If it does, stop that bridge and re-run; otherwise stop the process "+
+				"that holds the port",
+			oneLine(probeErr.Error()), ownPIDFile, ownPID))
+	default:
+		return fail(name, conflict, fmt.Sprintf(
+			"the bridge recorded in %s (pid %d) is running but was not seen listening on this port, and with no "+
+				"config that loads nothing says it binds it. If it does (a binary granted cap_net_bind_service cannot "+
+				"be attributed by a non-root user), stop that bridge and re-run; otherwise stop the process that "+
+				"holds the port",
+			ownPIDFile, ownPID))
+	}
+}
+
+// bindVerdict is the bind probe both port ladders start from (checkPort
+// and checkChosenPort). It returns inUse when something holds the port,
+// and otherwise the check to report: free, not bindable, or no port set.
+func bindVerdict(name string, port int) (Check, bool) {
+	if port == 0 {
+		return warn(name, "no port set", "pass Deps."+name+"Port"), false
+	}
+	// Probe BOTH address families. Binding only 127.0.0.1 reports a port
+	// as free when something holds it on IPv6 alone — `[::]:port` under
+	// `bindv6only`, or an explicit `[::1]:port`. The bridge's own default
+	// listen address is a wildcard, so this is not exotic: doctor said
+	// "free", init proceeded, and serve then failed to bind. The port is
+	// occupied if EITHER family says so.
+	v4err := probeBind(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	v6err := probeBind(net.JoinHostPort("::1", strconv.Itoa(port)))
+
+	inUse := isAddrInUse(v4err) || isAddrInUse(v6err)
+	if !inUse && (v4err == nil || v6err == nil) {
+		// At least one family bound cleanly and neither reported a
+		// conflict. The other family failing is an environment fact, not
+		// a conflict — a v4-only host returns EADDRNOTAVAIL for ::1 —
+		// and must not be reported as a problem.
+		return ok(name, fmt.Sprintf("free (:%d)", port)), false
+	}
+	// Neither family bound. Report against whichever error is
+	// informative, preferring IPv4 since that is the one an operator
+	// will recognise.
+	err := v4err
+	if err == nil {
+		err = v6err
+	}
+	// Only "address already in use" means the port is genuinely occupied.
+	// Other bind failures — EACCES (a privileged port <1024 without
+	// elevation), EADDRNOTAVAIL, a transient network error — are
+	// environment/privilege problems, NOT a port conflict. Reporting them as
+	// the hard "another process owns this port" Fail would be wrong and would
+	// block `bridge init`; degrade to a Warn that names the real cause.
+	//
+	// isAddrInUse is platform-split rather than a bare
+	// errors.Is(err, syscall.EADDRINUSE): on Windows that constant is an
+	// INVENTED value (syscall.APPLICATION_ERROR + iota, per
+	// zerrors_windows.go's "Invented values to support what package os and
+	// others expects"), while a real bind conflict is WSAEADDRINUSE (10048),
+	// which stdlib syscall doesn't even define and nothing translates. The
+	// bare form is therefore always false on Windows — which silently
+	// degraded every real conflict to a Warn (letting `bridge init` proceed
+	// into a serve that can't bind) AND made the native GetExtendedTcpTable
+	// owner attribution unreachable there, since both ladders ask it only
+	// about a port this reports held.
+	if !inUse {
+		return warn(name, fmt.Sprintf(":%d not bindable", port),
+			"couldn't bind to probe this port ("+err.Error()+"); "+
+				"ports below 1024 need elevation, or the configured address may be invalid — check bridge.yaml"), false
+	}
+	return Check{}, true
 }
 
 func checkLibraryRoots(_ context.Context, d Deps) Check {

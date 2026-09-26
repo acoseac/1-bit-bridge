@@ -28,12 +28,15 @@ var lsofCommand = exec.CommandContext
 // checkPort's own-bridge branch; the error reports a probe-MECHANISM
 // failure (lsof is resolved but the invocation couldn't even start, or was
 // cut short) so checkPort can degrade to Warn rather than a hard Fail — a
-// broken probe must never break a healthy install.
+// broken probe must never break a healthy install whose config names the
+// port. (checkChosenPort, for a port no config names, refuses instead.)
 //
-// Returns (false, nil) when no usable lsof resolved on this host: the port
-// cannot be attributed, so checkPort asks next whether the recorded pid is
-// alive at all. That arm, not this function, is what keeps a live bridge
-// from reading as a conflict on such a host.
+// Where no usable lsof resolved, Linux answers from /proc itself
+// (pidListensOnPort, the same kernel tables lsof reads), so attribution
+// there does not depend on lsof being installed; its error means neither
+// socket table could be read. Elsewhere it returns (false, nil): the port
+// cannot be attributed, and checkPort asks next whether the recorded pid
+// is alive at all.
 //
 // Implementation: `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints one PID
 // per line. We check membership across ALL of them (not just the first)
@@ -58,7 +61,7 @@ var lsofCommand = exec.CommandContext
 // alone until someone can.
 func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error) {
 	if lsofPath == "" {
-		return false, nil
+		return pidListensOnPort(port, targetPID)
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()

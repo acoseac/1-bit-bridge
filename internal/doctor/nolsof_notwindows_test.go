@@ -3,7 +3,10 @@
 package doctor
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +93,39 @@ func TestPortCheckWithoutLsofStillAnswersALiveRecordedPID(t *testing.T) {
 					c.Status, c.Summary, c.Hint, tc.want)
 			}
 		})
+	}
+}
+
+// TestPortCheckWithoutLsofAttributesALiveBridgeFromProc: on Linux the
+// attribution itself does not need lsof. isPIDListeningOnPort reads the
+// same kernel tables lsof does (pidListensOnPort), so a live bridge that
+// holds its port is named as ours, rather than reaching the liveness arm's
+// uid answer, whose wording blames a capability-bound binary for what was
+// a missing tool.
+func TestPortCheckWithoutLsofAttributesALiveBridgeFromProc(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("attribution without lsof reads /proc, which only Linux has")
+	}
+	withoutLsof(t)
+	c := checkPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, os.Getpid()))
+	if c.Status != OK || !strings.Contains(c.Summary, "bound by our own bridge") {
+		t.Errorf("our own listener, no lsof: got %v (%s), want ok \"bound by our own bridge\"", c.Status, c.Summary)
+	}
+}
+
+// TestChosenPortWithoutLsofRecognisesTheRecordedBridge is the reported
+// case on a Linux host without lsof, which the stock golang image, and
+// Debian's and Ubuntu's minimal installs, are. checkChosenPort excuses a
+// port only when the recorded bridge is seen listening on it; were seeing
+// it to need lsof, the re-init that replaces a broken config would refuse
+// the bridge's own port here and go through where lsof is installed.
+func TestChosenPortWithoutLsofRecognisesTheRecordedBridge(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("attribution without lsof reads /proc, which only Linux has")
+	}
+	withoutLsof(t)
+	c := checkChosenPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, os.Getpid()))
+	if c.Status != OK {
+		t.Errorf("the recorded bridge holds the port, no lsof: got %v (%s / %s), want ok", c.Status, c.Summary, c.Hint)
 	}
 }

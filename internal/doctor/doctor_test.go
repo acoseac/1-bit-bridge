@@ -197,11 +197,12 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 		t.Skip("isPIDListeningOnPort uses lsof here — Windows has its own native probe + doctor_windows_test.go")
 	}
 	// isPIDListeningOnPort shells out to lsof, and the pid match is the
-	// subject. Without lsof the predicate returns (false, nil) and the ok
-	// comes, if at all, from the liveness arm (on Linux the listener's uid
-	// is ours), so the test would pass without exercising the match.
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("the pid match needs lsof, which isn't on PATH here")
+	// subject. Without lsof, Linux reads the same tables from /proc
+	// (pidListensOnPort), and anywhere else the predicate returns (false,
+	// nil) and the ok comes, if at all, from the liveness arm, so the test
+	// would pass without exercising the match.
+	if _, err := exec.LookPath("lsof"); err != nil && runtime.GOOS != "linux" {
+		t.Skip("the pid match needs lsof off Linux, and it isn't on PATH here")
 	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

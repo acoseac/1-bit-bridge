@@ -19,3 +19,13 @@ package doctor
 // no-match. Reporting a mechanism error here would imply something is
 // broken on hosts where there is simply nothing to ask.
 func portOwnedByThisUser(int) (bool, error) { return false, nil }
+
+// pidListensOnPort is the non-Linux stub for the /proc attribution that
+// isPIDListeningOnPort asks where no usable lsof resolved. There is no
+// socket table to walk here: macOS ships lsof in its base system, so a Mac
+// reaches this only with lsof removed, and Windows attributes natively
+// (GetExtendedTcpTable, doctor_windows.go) and never calls it.
+//
+// (false, nil) is "asked and got no match", lsof's own answer for a port it
+// cannot attribute.
+func pidListensOnPort(int, int) (bool, error) { return false, nil }

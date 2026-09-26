@@ -135,3 +135,40 @@ func TestScanListenerUIDs_PortIsBigEndian(t *testing.T) {
 		t.Errorf("port 27934 (0x6D1E, the byte-swapped form) must NOT match, got %v", got)
 	}
 }
+
+// TestScanListenerInodes reads the inode column through the same row filter
+// as the uid scan, over the same captured tables. The inode is what ties a
+// listener to the process holding it (pidListensOnPort), so every guard
+// the uid scan has matters here too: an inode from the wrong column, from a
+// non-listening row, or from a remote port would attribute someone else's
+// socket to the recorded bridge.
+func TestScanListenerInodes(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		port  int
+		want  []string
+	}{
+		{"ipv4 listener", procNetTCPFixture, 7789, []string{"24680"}},
+		{"ipv6 wildcard listener", procNetTCP6Fixture, 443, []string{"6213098"}},
+		// Fixture row 2 is an ESTABLISHED socket whose LOCAL port is 7789,
+		// inode 11111: the state filter keeps it out of the 7789 answer
+		// above, and nothing else listens there.
+		{"a port nothing listens on", procNetTCPFixture, 8080, nil},
+		// The v4 table's last row is an outbound connection TO :443
+		// (01BB in the REMOTE column), inode 6213105.
+		{"a remote :443 is not a local one", procNetTCPFixture, 443, nil},
+		{"header only", strings.SplitAfter(procNetTCPFixture, "\n")[0], 7789, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := scanListenerInodes(strings.NewReader(tc.table), tc.port)
+			if err != nil {
+				t.Fatalf("scanListenerInodes: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("port %d: got %v, want %v", tc.port, got, tc.want)
+			}
+		})
+	}
+}
