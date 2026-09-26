@@ -202,7 +202,7 @@ func TestAHeldShellEndsWithItsTestBinary(t *testing.T) {
 	pidFile, release := filepath.Join(dir, "pid"), filepath.Join(dir, "release")
 
 	var out bytes.Buffer
-	child := exec.Command(os.Args[0], "-test.run=^TestAHeldShellEndsWithItsTestBinary$")
+	child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
 	child.Env = append(os.Environ(), holdChildEnv+"="+dir)
 	child.Stdout, child.Stderr = &out, &out
 	// Held open until the child is reaped. If this binary dies first, the
@@ -252,16 +252,36 @@ func TestAHeldShellEndsWithItsTestBinary(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			// Released, so it does not outlive this test as well.
-			touch(release)
-			t.Fatalf("the held shell (pid %d) is still waiting (%s) 5 s after the test binary "+
+			t.Errorf("the held shell (pid %d) is still waiting (%s) 5 s after the test binary "+
 				"that started it died. A test binary killed before its cleanups releases "+
 				"nothing and removes nothing, so it would wait forever.", pid, why)
+			releaseAndWait(t, pid, release)
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the directory went too (%v), so the other arm may have ended the wait", err)
+	}
+}
+
+// releaseAndWait releases a held shell this test cannot reap, and waits up
+// to 5 s for it to exit. Releasing alone is not enough: t.TempDir's
+// cleanup would remove the release file straight after, and a shell whose
+// hold is what failed has nothing else to end it. That is the defect
+// HoldUntilReleased exists for, and here the hold is what is under test.
+func releaseAndWait(t *testing.T, pid int, release string) {
+	t.Helper()
+	touch(release)
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if exited, _ := Exited(pid); exited {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("the held shell (pid %d) ignored its release as well, and is still running", pid)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
