@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"slices"
 	"syscall"
@@ -276,3 +277,8 @@ func extendedTCPTable(family int) ([]byte, error) {
 func ntohsPort(localPort uint32) int {
 	return int(windows.Ntohs(uint16(localPort)))
 }
+
+// inodeOf is the unix helper's Windows twin, for the untagged cgroup
+// accounting (cgroupID), which only Linux reaches: a FileInfo here carries
+// no inode number, so it answers none.
+func inodeOf(fs.FileInfo) (uint64, bool) { return 0, false }

@@ -41,8 +41,9 @@ type ownerSighting struct {
 	// ruledOut reports that what the probe saw excludes the pid as the
 	// port's holder: it saw every listener on the port and they are other
 	// processes' (Windows' listener table, or, where /proc could not read
-	// the pid, its census: each listener held by a process it can read or
-	// created by a uid the pid does not run as), or it read every one of
+	// the pid, its census: each listener held by a process it can read, or
+	// created by a uid the pid does not run as or in a cgroup that does not
+	// nest with the pid's), or it read every one of
 	// the pid's descriptors, against every socket table, and none is a
 	// listener on the port (/proc, asked on Linux after lsof misses or in
 	// its place). Never lsof alone, which lists only the processes it can
@@ -125,8 +126,9 @@ func lsofPIDs(out []byte) ([]int, bool) {
 // under the kernel check lsof's readlinks meet too (proc_fd_access_allowed,
 // ptrace's read check). Where every one of them read and none is a listener
 // on the port, or where it could not read them and every listener on the
-// port is held by a process it can read or was created by a uid the pid
-// does not run as (procSighting's census), the pid holds none on any
+// port is held by a process it can read, or was created by a uid the pid
+// does not run as or in a cgroup that does not nest with the pid's
+// (procSighting's census), the pid holds none on any
 // address, and the verdict that follows (checkPort's liveness arm) must be
 // the same on a host with lsof as on one without: #1028's row L4 was ruled
 // out where lsof was missing and not where it was installed, so a verdict
@@ -182,11 +184,15 @@ func listenerTableSighting(owners []int) ownerSighting {
 // Where pid's descriptors could not be read in full, the port's OTHER
 // listeners can still rule it out (listenersNotOf): every socket listening
 // on the port held by a process this user can read, other than pid, or
-// created by a uid pid does not run as. That is the capability-bound bridge:
+// created by a uid pid does not run as, or, created by pid's own uid, in a
+// cgroup that does not nest with pid's (cgroupsNotOf, which asks the
+// kernel's socket diagnostics through cgroupsOf, since /proc/net/tcp{,6}
+// carries no cgroup). That is the capability-bound bridge:
 // it runs with dumpable=0, no probe can read it, and when its config was
 // edited to a port something else holds, the check said ok (#1028's row L6,
 // a holder of the same user) or warned (#1030's row L7, a holder of another
-// user's, or of root's).
+// user's, or of root's), or read ok again (row L6h, a hidden holder of the
+// same user in another cgroup).
 //
 // The holders: an inode names one socket, and a listener of pid's own would
 // be held by pid alone, which nothing here can read, so it would have no
@@ -208,13 +214,22 @@ func listenerTableSighting(owners []int) ownerSighting {
 // is not the bridge's. Equal uids say nothing, and nor does a uid /proc
 // does not show (createdByAnother).
 //
-// A listener that is neither, or a table that did not read, leaves pid
-// possible, as before.
+// The cgroups, for a listener of pid's own uid that no readable process
+// holds, which is what another hidden process of the same user holds: the
+// kernel's socket diagnostics give the cgroup that created the socket, and
+// /proc/<pid>/cgroup the one pid runs in, readable where its descriptors
+// are not. A bridge creates its listeners in the cgroup it runs in and
+// never moves, so a listener created in a cgroup that neither is pid's,
+// holds it, nor sits below it is not the bridge's (cgroupsNotOf, which says
+// why nesting and anything this process cannot see count nothing).
 //
-// Everything that reads a pid's directory, its status included, first
-// checks that procRoot numbers processes as this process does
-// (procOfAnotherPIDNamespace): under another pid namespace's /proc, <pid> is
-// some other process.
+// A listener that is none of these, or a table that did not read, leaves
+// pid possible, as before.
+//
+// Everything that reads a pid's directory, its status and its cgroup
+// included, first checks that procRoot numbers processes as this process
+// does (procOfAnotherPIDNamespace): under another pid namespace's /proc,
+// <pid> is some other process.
 func procSighting(tables []string, procRoot string, port, pid int, blind string, cgroupsOf socketCgroups) (bool, ownerSighting, error) {
 	sockets, unread, err := listenerSockets(tables, port)
 	if err != nil {

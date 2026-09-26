@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -221,4 +222,14 @@ func signal0Alive(err error) bool {
 		return true
 	}
 	return errors.Is(err, syscall.EPERM)
+}
+
+// inodeOf returns the inode number of the file fi describes, which on a
+// cgroup2 mount is the cgroup's id (cgroupID).
+func inodeOf(fi fs.FileInfo) (uint64, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(st.Ino), true
 }
