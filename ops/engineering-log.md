@@ -16380,3 +16380,119 @@ guard necessary. Its placement advice was declined, as recorded above.
   "no chmod" sentinel, so three rows ran against a readable bridge.
   **A fixture for a ruling-out must hold everything the rule assumes; write
   down what the recorded process holds before asking who else does.**
+
+## 2026-09-26 — `os.ReadDir("")` does not read the working directory (#PRNUM)
+
+CLAUDE.md's rule said "`ReapOrphans`-style directory reapers must refuse an
+empty root — `os.ReadDir("")` reads the process working directory". The
+premise came from a bot's HIGH on the post-merge review of #531. Nobody
+probed it, and it spread: six code comments (`backup.reapOrphans`,
+`updater.ReapScratchDirs`, `enrich.CachedArtistImages`,
+`integrity.TakeSidecarInventory`, and two in `integrity/sidecars.go`),
+three test docblocks, a second CLAUDE.md bullet (#917's "never
+`WalkDir("")`") and two entries here (#536's line, #917's). A bot on #1030
+then quoted the rule back as a reason to guard `socketHolders`.
+
+### What was measured
+
+A probe with the pinned toolchain (go1.26.6), run from a scratch working
+directory holding `sub/` and `file`, on macOS 27, on Linux (dido, Ubuntu
+26.04) and on Windows 11 (home-pc, the same binary cross-compiled). All
+three agreed:
+
+| call | result |
+|---|---|
+| `os.ReadDir("")`, `os.Open("")`, `os.Stat("")` | ENOENT (Windows: "The system cannot find the file specified"), nothing read |
+| `filepath.WalkDir("")`, `filepath.Walk("")` | one visit, of `""`, with an lstat ENOENT; nothing walked |
+| `os.Remove("")`, `os.MkdirAll("")` | ENOENT |
+| `os.RemoveAll("")` | nil, and nothing removed (Go issue 28830 keeps it silent) |
+| `fs.ReadDir(os.DirFS(""), ".")` | "os: DirFS with empty root" |
+| `filepath.Clean("")` | `"."`, and `os.ReadDir` of it lists the working directory |
+| `filepath.Abs("")` | the working directory |
+| `filepath.EvalSymlinks("")` | `"."`, no error, and `WalkDir` of it reaches the working directory's files |
+| `filepath.Join("", "sub")` | `"sub"`, relative: `os.RemoveAll` of it deleted the working directory's `sub/` |
+
+The source agrees. On Windows, `openDirNolog` calls `openFileNolog`, which
+returns ENOENT for an empty name before any syscall (src/os/file_windows.go).
+On unix, `open("")` reaches the kernel, which answers ENOENT for an empty
+pathname.
+
+### The sweep
+
+Every guard that states the reason, and every production function that
+resolves a path (`Clean`, `EvalSymlinks`, `Abs`, `fsutil.EvalSymlinksOrClean`)
+and walks, lists or deletes one (an AST scan of the tree, then the wrappers'
+callers). **No caller was found where the false premise left a guard missing
+or misplaced.** Every resolution of a root comes after its emptiness is
+checked, or takes a root that is never empty (`config.resolvePath` keeps
+`""` as `""`, and `Validate` rejects an empty library root; `DataDir` is
+defaulted and resolved). The guards themselves sort into two kinds:
+
+- **Load-bearing, for the unstated reason**: `TakeSidecarInventory` and
+  `TreeHoldsVariantSidecars` refuse `""` right before `resolveSidecarRoot`,
+  which is `filepath.EvalSymlinks`. Without the refusal
+  `TakeSidecarInventory` would inventory the working directory for the
+  forward sweeps (`upscale --gc`, `analyze --gc`), which both unlink what it
+  calls orphans, and `TreeHoldsVariantSidecars` would walk it.
+- **Defensive**: `backup.reapOrphans`, `updater.ReapScratchDirs`,
+  `integrity.OrphanSidecarSweeper.tick` and `enrich.CachedArtistImages`.
+  Without the refusal `ReadDir("")` and `WalkDir("")` error, so the answer
+  is the same no-op, except in `reapOrphans`, where it is a silent `(0, nil)`
+  instead of an error the caller reports. The refusal keeps a future
+  resolution of the root from reaching the working directory.
+
+### Decisions
+
+- **Every refusal stays; every stated reason is corrected**, in the code,
+  the test docblocks, CLAUDE.md (the `ReapOrphans` bullet, #917's bullet,
+  and the stale-claims tally, now seven) and this log. The two old entries
+  keep their words, with a dated correction after each: they are the record
+  of what was believed.
+- **The refusals nothing pinned are pinned by what they protect.**
+  `reapOrphans`' had no test. `TestReapScratchDirsRefusesEmptyRoot` and
+  `TestOrphanSidecarSweeperRefusesAnEmptyRoot` asserted a count of 0 from a
+  working directory holding nothing to reap, so they passed with the refusal
+  deleted, and would have passed a sweep of the working directory too. Each
+  now `t.Chdir`s into a temp directory holding what the sweep would take (a
+  manifest-less directory, an abandoned `install-*` dir, a sidecar-shaped
+  orphan past its grace) and requires it untouched, and backup's also
+  requires the error.
+- `CachedArtistImages` keeps no test: it is read-only, and its answer is the
+  same either way.
+
+### Tests and controls
+
+- New: `TestReapOrphansRefusesAnEmptyRoot` (`""` and whitespace).
+  Reworked: `TestReapScratchDirsRefusesEmptyRoot`,
+  `TestOrphanSidecarSweeperRefusesAnEmptyRoot`. Docblock only:
+  `TestTakeSidecarInventoryRefusesAnEmptyRoot`.
+- Negative controls against `a78cc854`, each reverted and the tree checked
+  clean before the next; every one built. The three that make a reaper act
+  on the working directory ran only the test that `t.Chdir`s into a temp
+  directory, since any other test calling the mutated function from the
+  package's source directory would act on the source tree.
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | backup: the refusal deleted | red: `ReapOrphans("") = 0, <nil>; want 0 and an error`, for `""` and `"  "` |
+  | NC2 | backup: deleted, and the root Cleaned before the listing | red: reaped 1, and the working directory's directory was gone |
+  | NC3 | updater: the refusal deleted | **green**: `ReadDir("")` fails, so the answer is 0 anyway |
+  | NC4 | updater: deleted, and the root Cleaned before the listing | red: swept 1, the abandoned dir gone |
+  | NC5 | sweeper: the refusal deleted | **green**: `WalkDir("")` reports ENOENT and unlinks nothing |
+  | NC6 | sweeper: deleted, and the root resolved before the walk (`resolveSidecarRoot`, as #959 made the CLI sweeps do) | red: unlinked 1, the orphan gone |
+  | NC7 | `TakeSidecarInventory`: the refusal deleted | red: "an empty root was accepted" |
+  | NC8 | `TreeHoldsVariantSidecars`: the refusal deleted | red: "want an error for an empty directory path" |
+
+  NC3 and NC5 staying green is the finding, not a gap: those refusals
+  protect against a change that has not been made, and the test pins the
+  property against that change (NC4, NC6) rather than the line.
+
+### Process notes
+
+- **A reviewer's claim about the standard library is a hypothesis, and a
+  ten-line probe settles it.** This one was stated as a fact about a guard
+  that DELETES, which is why it was believed, and it went unchecked into
+  thirteen places until one of them was quoted back as a rule.
+- **A test that plants nothing can only prove the absence of a crash.** Two
+  of the three tests here asserted "nothing was reaped" in a directory
+  holding nothing reapable.

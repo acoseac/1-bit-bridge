@@ -1927,8 +1927,10 @@ no failing test — which is the shape to expect in this area.
   an explicit answer rather than one that rests on ReadDir's error (in
   `backup.ReapOrphans`, an error the caller reports instead of a silent
   no-op). **A test of such a refusal must plant something in the working
-  directory** (`t.Chdir` into a temp dir): the updater's and the orphan
-  sweeper's passed with the refusal deleted, and backup's had no test.
+  directory** (`t.Chdir` into a temp dir) and require it untouched, or it
+  cannot see the change that matters, a root resolved before the listing.
+  The updater's and the orphan sweeper's planted nothing and passed with the
+  refusal deleted, and backup's had no test.
 - **The retention reap fails closed on an empty live-token set**, and the two
   empty forms are NOT interchangeable: `nil` deletes zero rows while
   `[]string{}` deletes EVERY row — and the caller builds the dangerous spelling.
