@@ -50,13 +50,24 @@ func withLsofAnswering(t *testing.T, stdout string, code int) {
 // parent: a runner that listens (a debugger's server, say) is one lsof reads,
 // so on macOS the second look lists its listeners and rules it out, and
 // realHolderAccount's expectation is for the parent `go test` is, which holds
-// none. It asks lsof directly, not through the code under test.
+// none. It asks lsof directly, not through the code under test, bounded by
+// probeTimeout as every run of lsof in production is (a wedged mount holds
+// lsof). Only lsof's exit 1, "matched nothing", says the parent holds no
+// listener; a run that failed or timed out says nothing, and skips too
+// (CodeRabbit on #1034: its error was discarded, so a failed run read as
+// "holds none").
 func parentListens(t *testing.T) {
 	t.Helper()
-	out, _ := exec.Command(lsofPath, "-nP", "-a", "-p", strconv.Itoa(os.Getppid()), "-iTCP", "-sTCP:LISTEN", "-t").Output()
-	if strings.TrimSpace(string(out)) != "" {
+	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, lsofPath, "-nP", "-a", "-p", strconv.Itoa(os.Getppid()), "-iTCP", "-sTCP:LISTEN", "-t").Output()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil && strings.TrimSpace(string(out)) != "":
 		t.Skipf("the test's parent (pid %d) holds a TCP listener, so lsof reads it and rules it out; "+
 			"this test expects a parent that holds none, as `go test` does", os.Getppid())
+	case err != nil && (ctx.Err() != nil || !errors.As(err, &exitErr) || exitErr.ExitCode() != 1):
+		t.Skipf("cannot tell whether the test's parent (pid %d) holds a TCP listener: %v", os.Getppid(), err)
 	}
 }
 

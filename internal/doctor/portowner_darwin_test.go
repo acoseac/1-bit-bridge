@@ -107,8 +107,14 @@ func TestABlindedLsofRulesNoBridgeOut(t *testing.T) {
 		return exec.CommandContext(ctx, sandboxExec, append([]string{"-p", profile, name}, args...)...)
 	}
 	// The premise, measured rather than assumed: the sandbox hides the
-	// bridge's listener from lsof and says nothing about it.
-	out, err := lsofCommand(t.Context(), lsofPath, "-nP", "-iTCP:"+strconv.Itoa(own), "-sTCP:LISTEN", "-t").CombinedOutput()
+	// bridge's listener from lsof and says nothing about it. Bounded by
+	// probeTimeout, as every production run of lsof is.
+	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
+	defer cancel()
+	out, err := lsofCommand(ctx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(own), "-sTCP:LISTEN", "-t").CombinedOutput()
+	if ctx.Err() != nil {
+		t.Skipf("the sandboxed lsof did not answer within %s: %v", probeTimeout, err)
+	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || len(out) != 0 {
 		t.Skipf("this sandbox no longer blinds lsof silently (%v, %q), so it cannot stand in for one that does", err, out)
