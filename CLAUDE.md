@@ -3659,6 +3659,26 @@ its twin.** The top list is older, shorter, and read first.
   (two writes in one tick leave them equal, so the check silently passes on the
   platform most likely to break). Normalize CRLF before any `\n`-literal scan of
   a static file — there is no `.gitattributes` pinning `eol`.
+- **A port free on BOTH TCP and UDP cannot come from either allocator, so
+  `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
+  once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP
+  each from a cursor of its own (macOS does the same for TCP; Linux draws both
+  at random), so asking an allocator again tests the NEXT number, not another
+  one: the old helper's twenty TCP draws were twenty consecutive numbers on
+  UDP. CI's Windows runners carry per-protocol WinNAT reservations: 200 UDP
+  numbers the TCP cursor still hands out (starting anywhere from 49509 to
+  58788) and 200 TCP numbers the UDP cursor still hands out (49698–49897), on
+  six of seven VMs sampled. A draw started in front of either block fails
+  twenty times with WSAEACCES, reproduced on three runners of three: the shape
+  of the one CI failure, twenty refusals in 10 ms. **So "draw UDP first" moves
+  the failure to the other block, more draws buy numbers the 200-long block
+  still covers, and parsing `netsh … excludedportrange` misses a run of held
+  sockets.** Random numbers are independent draws, and 20000–32767 lies below
+  every target platform's ephemeral range (Linux 32768, Windows and macOS
+  49152), so no allocator can hand the number out before serve binds it:
+  30,000 calls on six runners rejected no draw. A failure names every address
+  tried and its error; the old message said only "20 draws", which is why
+  finding this took a probe on the runner.
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
 - **A test asserting that a message NAMES A PATH must not substring-match the
@@ -3806,7 +3826,10 @@ its twin.** The top list is older, shorter, and read first.
   this was learned twice. (#967–#972) **Editing the PR body re-renders the
   walkthrough and drops a pause notice's checkbox**; `@coderabbitai review`
   then answers "Review rate limited" and puts the notice, checkbox and all,
-  back for the current head (#1022).
+  back for the current head (#1022). **Push nothing while a ticked review
+  runs**: on #1026 an on-demand run still "Starting" when two fix commits
+  landed never posted, and the notice came back for the new head, so the
+  checkbox had to be ticked again.
 - **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
   a page, and a long PR's newest round is on the page it drops.** On #996
   (40 reviews, 38 review comments) every check read page one only. Two
