@@ -41,6 +41,14 @@ var lsofCommand = exec.CommandContext
 // cannot be attributed, and checkPort asks next whether the recorded pid
 // is alive at all. Either way the sighting opens with the missing lsof.
 //
+// And where lsof ran cleanly and did not name the pid, /proc is asked too
+// (procSecondOpinion). lsof lists only the processes this user may inspect,
+// so its miss cannot rule the recorded bridge out, and /proc, reading that
+// pid's own descriptors, can: without it, a verdict that turns on the
+// ruling-out would depend on whether lsof is installed. Off Linux the
+// /proc stub adds nothing. A failed or cut-short lsof asks nothing more,
+// and stays the probe failure it always was.
+//
 // Implementation: `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints one PID
 // per line. We check membership across ALL of them (not just the first)
 // so a dual-stack / multi-interface listener set can't mask our own PID
@@ -64,7 +72,7 @@ var lsofCommand = exec.CommandContext
 // alone until someone can.
 func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, ownerSighting, error) {
 	if lsofPath == "" {
-		found, seen, err := pidListensOnPort(port, targetPID)
+		found, seen, err := procOwnerFunc(port, targetPID)
 		if found || err != nil {
 			return found, ownerSighting{}, err
 		}
@@ -98,20 +106,32 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, owner
 		// vanishing / permission) surfaces as an error so checkPort
 		// degrades to Warn rather than a false Fail.
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return false, lsofSighting(nil, targetPID, blindSpot()), nil
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return false, ownerSighting{}, err
 		}
-		return false, ownerSighting{}, err
+		out = nil
 	}
 	for _, f := range strings.Fields(string(out)) {
 		if n, convErr := strconv.Atoi(f); convErr == nil && n == targetPID {
 			return true, ownerSighting{}, nil
 		}
 	}
-	// Not found, and read from the same output: lsof named other pids, or
-	// printed something that is not `lsof -t`'s answer (lsofSighting).
-	return false, lsofSighting(out, targetPID, blindSpot()), nil
+	// Not found. lsof's account is read from the same output: nothing
+	// listed, other pids, or something that is not `lsof -t`'s answer
+	// (lsofSighting). Then /proc's (procSecondOpinion).
+	procFound, procSeen, procErr := procOwnerFunc(port, targetPID)
+	found, seen := procSecondOpinion(lsofSighting(out, targetPID, blindSpot()), procFound, procSeen, procErr)
+	return found, seen, nil
 }
+
+// procOwnerFunc is the /proc attribution (pidListensOnPort) as
+// isPIDListeningOnPort asks it: in lsof's place where no lsof resolved, and
+// after a clean lsof miss for a second opinion. A package var so a test
+// that records a pid of its own choosing can say what /proc answers about
+// that pid rather than ask the host: on Linux, pid 4242 may be a process of
+// the test's own user, which /proc can read and rule out. The same
+// convention as ownerProbeFunc. Production code MUST NOT mutate it.
+var procOwnerFunc = pidListensOnPort
 
 // lsofPath is the absolute path to lsof, resolved ONCE at package init.
 // "" means lsof is unavailable on this host: not installed, or — defending

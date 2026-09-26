@@ -28,12 +28,35 @@ func withoutLsof(t *testing.T) {
 // state withoutLsof takes away. Windows answers false: it has its own probe.
 func lsofResolved() bool { return lsofPath != "" }
 
+// withProcAnswering forces what the /proc attribution answers
+// (procOwnerFunc), which the owner probe asks where no lsof resolved and
+// after an lsof miss. A test that records a pid of its own choosing needs
+// it: on Linux that pid may be a live process of the test's own user, whose
+// descriptors /proc reads and rules out, and the verdict would then be the
+// host's rather than the test's.
+func withProcAnswering(t *testing.T, found bool, seen ownerSighting, err error) {
+	t.Helper()
+	orig := procOwnerFunc
+	t.Cleanup(func() { procOwnerFunc = orig })
+	procOwnerFunc = func(int, int) (bool, ownerSighting, error) { return found, seen, err }
+}
+
+// procCannotTell is a /proc answer that neither finds the pid nor rules it
+// out: its descriptors are hidden from this user, as another user's are, or
+// a capability-bound binary's.
+var procCannotTell = ownerSighting{saw: "/proc does not let this user read pid 4242's descriptors", blind: "the blind spot"}
+
+// procRulesOut is a /proc answer that rules the pid out: every one of its
+// descriptors read, and none a listener on the port.
+var procRulesOut = ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}
+
 // TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds.
 //
 // checkPort used to end in `if !portProbeAvailable() { return warn(…) }`,
 // goreview F9's answer to a live bridge the probe could not attribute
 // (#429). #640's liveness arm has answered that case since: a recorded pid
-// that is alive gets ok or warn before anything falls through. So what
+// that is alive, and that the probe cannot rule out, gets ok or warn before
+// anything falls through. So what
 // still reached the fallback was a bound port with no live pid of ours to
 // attribute it to. lsof could not change that answer (with no pid it is
 // never asked, and a dead pid holds nothing for it to find), yet its
@@ -76,18 +99,25 @@ func TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds(t *testing.T) {
 // the test above: taking the fallback out must not make every bound port
 // on such a host a Fail. A recorded pid that is alive still reaches #640's
 // arm, which answers for a live bridge the probe cannot attribute, with or
-// without lsof.
+// without lsof. What /proc says about the pid is forced, since pid 4242 may
+// be a readable process of this user on a Linux host: a pid /proc rules
+// out is not a bridge the probe cannot attribute, and its port FAILs,
+// whoever the listener runs as.
 func TestPortCheckWithoutLsofStillAnswersALiveRecordedPID(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
+		proc  ownerSighting
 		owned bool
 		want  Status
 	}{
-		{"listener owned by this user", true, OK},
-		{"owner not attributable", false, Warn},
+		{"listener owned by this user", procCannotTell, true, OK},
+		{"owner not attributable", procCannotTell, false, Warn},
+		{"recorded pid ruled out, listener owned by this user", procRulesOut, true, Fail},
+		{"recorded pid ruled out, owner not attributable", procRulesOut, false, Fail},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withoutLsof(t)
+			withProcAnswering(t, false, tc.proc, nil)
 			withPIDAlive(t, true)
 			withPortOwner(t, tc.owned, nil)
 			port := bindPort(t)

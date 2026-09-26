@@ -64,10 +64,13 @@ func isAddrInUse(err error) bool {
 // re-introduce the cross-account misread this helper is here to fix.
 //
 // A terminated-but-not-yet-reaped process can still be opened and so
-// reads as alive. That is the safe direction for the only caller —
-// checkPort uses this to soften a Fail into a Warn, so erring towards
-// alive costs a hint, while erring towards dead cries wolf about a
-// healthy install.
+// reads as alive. Here that costs a hint and never a verdict. Both port
+// ladders ask liveness only after the owner probe missed the pid, and
+// Windows' listener table rules out every pid it does not name
+// (listenerTableSighting), so a held port FAILs either way: liveness picks
+// between naming our bridge as running and calling the holder "another
+// process". A healthy install never gets here, since the table names its
+// listener's pid.
 func pidAlive(pid int) bool {
 	// Windows PIDs are a DWORD, so anything past uint32 is not a pid at
 	// all — and the cast below would SILENTLY TRUNCATE it into one that

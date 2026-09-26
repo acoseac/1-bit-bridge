@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,45 @@ func TestLsofSightingReadsWhatLsofPrinted(t *testing.T) {
 	}
 }
 
+// TestProcSecondOpinionOnAnLsofMiss pins what /proc's answer about the
+// recorded pid does to lsof's account of a port on which lsof did not name
+// it. A /proc match is a match. A /proc ruling-out is joined to lsof's
+// account, the pids lsof named kept and no blind spot carried. Anything
+// else leaves lsof's account whole, blind spot included: a pid /proc cannot
+// read, the stub's answer off Linux, and neither socket table readable.
+func TestProcSecondOpinionOnAnLsofMiss(t *testing.T) {
+	lsofSeen := ownerSighting{saw: "lsof lists pid 1305 listening on this port", blind: "the blind spot"}
+	procOut := ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}
+	for _, tc := range []struct {
+		name      string
+		procFound bool
+		procSeen  ownerSighting
+		procErr   error
+		wantFound bool
+		want      ownerSighting
+	}{
+		{"proc sees the pid listening", true, ownerSighting{}, nil, true, ownerSighting{}},
+		{"proc rules the pid out", false, procOut, nil, false, ownerSighting{
+			saw:      "lsof lists pid 1305 listening on this port, and /proc shows no descriptor of pid 4242 listening on this port",
+			ruledOut: true,
+		}},
+		{"proc cannot read the pid", false, ownerSighting{saw: "/proc does not let this user read pid 4242's descriptors", blind: "the blind spot"}, nil, false, lsofSeen},
+		{"proc has no such pid", false, ownerSighting{saw: "/proc has no pid 4242"}, nil, false, lsofSeen},
+		{"the stub off Linux", false, ownerSighting{saw: "nothing else here matches a process to a port"}, nil, false, lsofSeen},
+		{"proc read no socket table", false, ownerSighting{}, errors.New("no table"), false, lsofSeen},
+		// An error outranks what came with it: nothing /proc says without
+		// having read a table is evidence.
+		{"proc errored beside a ruling-out", false, procOut, errors.New("no table"), false, lsofSeen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, seen := procSecondOpinion(lsofSeen, tc.procFound, tc.procSeen, tc.procErr)
+			if found != tc.wantFound || seen != tc.want {
+				t.Errorf("got %v, %+v; want %v, %+v", found, seen, tc.wantFound, tc.want)
+			}
+		})
+	}
+}
+
 // TestListenerTableSightingRulesThePidOut: Windows' listener table carries
 // every listener's owning pid, so a miss there names who holds the port, or
 // that nothing listens on it, and never offers a blind spot.
@@ -60,7 +100,7 @@ func TestListenerTableSightingRulesThePidOut(t *testing.T) {
 // both and puts its blind spot in parentheses; and a sighting with no
 // account still reads as a sentence.
 func TestUnseenHintsFitTheSighting(t *testing.T) {
-	ruledOut := ownerSighting{saw: "lsof lists pid 1305 listening on this port", ruledOut: true}
+	ruledOut := ownerSighting{saw: "Windows' TCP listener table lists pid 1305 on this port", ruledOut: true}
 	hedged := ownerSighting{saw: "lsof lists no process listening on this port", blind: "the blind spot"}
 
 	for _, tc := range []struct {
@@ -68,7 +108,7 @@ func TestUnseenHintsFitTheSighting(t *testing.T) {
 		has, lacks []string
 	}{
 		{"live, ruled out", liveUnseenHint(4242, ruledOut),
-			[]string{"our bridge (pid 4242) is still running, but lsof lists pid 1305 listening on this port: stop the process that holds the port"},
+			[]string{"our bridge (pid 4242) is still running, but Windows' TCP listener table lists pid 1305 on this port: stop the process that holds the port"},
 			[]string{"this is expected"}},
 		{"live, hedged", liveUnseenHint(4242, hedged),
 			[]string{"our bridge (pid 4242) is still running, but lsof lists no process listening on this port (the blind spot). If our bridge is what holds the port, this is expected"},
@@ -77,7 +117,7 @@ func TestUnseenHintsFitTheSighting(t *testing.T) {
 			[]string{"our bridge (pid 4242) is still running, but the owner probe did not see it on this port. If our bridge"},
 			[]string{"but ."}},
 		{"chosen, ruled out", chosenUnseenHint("/d/server.pid", 4242, ruledOut),
-			[]string{"the bridge recorded in /d/server.pid (pid 4242) is running, but lsof lists pid 1305 listening on this port: stop the process that holds the port and re-run"},
+			[]string{"the bridge recorded in /d/server.pid (pid 4242) is running, but Windows' TCP listener table lists pid 1305 on this port: stop the process that holds the port and re-run"},
 			[]string{"stop that bridge"}},
 		{"chosen, hedged", chosenUnseenHint("/d/server.pid", 4242, hedged),
 			[]string{"is running, but lsof lists no process listening on this port (the blind spot), and with no config", "stop that bridge and re-run"},

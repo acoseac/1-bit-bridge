@@ -583,14 +583,15 @@ func expiryPhrase(days int) string {
 // A caller grading a port it is about to CHOOSE should also clear
 // Deps.OwnPIDFile. The "is it us?" ladder below checkPort's conflict
 // branch answers ok or warn — never fail — whenever our own recorded
-// pid is alive, which is right for a port the running bridge is
-// supposed to hold and wrong for one it is not: a live bridge binds
-// what ITS config says, so it cannot legitimately own a port that is
-// not in it, and the excuse then hides a conflict that will stop the
-// next serve from binding (CodeRabbit on #970). The exception is
-// Deps.OwnPIDPortsUnknown, where no config says which ports the bridge
-// binds and the pid file is already confined to the one arm that does
-// not need one: the recorded bridge seen listening on the port.
+// pid is alive and the owner probe could not rule it out, which is right
+// for a port the running bridge is supposed to hold and wrong for one it
+// is not: a live bridge binds what ITS config says, so it cannot
+// legitimately own a port that is not in it, and the excuse then hides a
+// conflict that will stop the next serve from binding (CodeRabbit on
+// #970). The exception is Deps.OwnPIDPortsUnknown, where no config says
+// which ports the bridge binds and the pid file is already confined to
+// the one arm that does not need one: the recorded bridge seen listening
+// on the port.
 func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
 	var checks []Check
 	if api {
@@ -728,10 +729,13 @@ func probeBind(addr string) error {
 // checkPort probes `port` on 127.0.0.1. If the bind succeeds the port is
 // reported free; if it fails with "address already in use" and the
 // holding PID matches our OwnPIDFile, we report ok — doctor is
-// idempotent while the server is running. Any other binder is a fail.
-// A bind failure that ISN'T EADDRINUSE (e.g. EACCES on a privileged port
-// without elevation) is a Warn, not a Fail — it's a privilege/environment
-// issue, not a port conflict.
+// idempotent while the server is running. Any other binder is a fail,
+// except behind a recorded bridge that is alive and that the owner probe
+// could neither name nor rule out: that one may be ours unseen, and gets
+// ok or warn (the liveness arm, liveUnseenVerdict). A bind failure that
+// ISN'T EADDRINUSE (e.g. EACCES on a privileged port without elevation) is
+// a Warn, not a Fail — it's a privilege/environment issue, not a port
+// conflict.
 //
 // Limitation: this probes loopback ONLY, so a conflict bound to a
 // specific non-loopback interface (e.g. 192.168.1.5:port) isn't detected
@@ -762,39 +766,7 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 			case found:
 				return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
 			case pidAliveFunc(ownPID):
-				// The probe ran cleanly and did NOT name our PID, yet the
-				// PID we recorded at startup is still running. That is the
-				// EXPECTED result, not a conflict, on a bridge that binds a
-				// privileged port through a file capability (`setcap
-				// cap_net_bind_service=+ep`, which the deployment runbook
-				// prescribes so a non-root service can bind :443): that
-				// binary runs with dumpable=0, so no unprivileged observer
-				// can attribute the port to a pid — lsof, `ss -p` and a
-				// direct readlink of /proc/<pid>/fd all fail identically.
-				//
-				// It is not the only way here, and this arm used to explain
-				// every arrival as that one. A bridge running as another
-				// user is as hidden, on every unix. A host with no lsof
-				// off Linux asks nothing. lsof may name the process that
-				// holds the port. And a probe that saw everything there
-				// was to see (Windows' listener table, /proc reading all
-				// of our descriptors) rules our pid out. So the text is
-				// the probe's account of what it saw (ownerSighting), and
-				// the verdicts below are what they were: ok on a listener
-				// of our uid, else warn.
-				//
-				// Last resort before giving up: ask whether the listener is
-				// at least owned by OUR USER. On Linux that survives
-				// dumpable=0 (see portowner_linux.go); everywhere else it
-				// answers "don't know" and we fall through to the Warn.
-				if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
-					return ok(name, fmt.Sprintf("in use by a process running as this user (uid %d; %s)",
-						os.Getuid(), seen.account()))
-				}
-				// "Our recorded pid is alive and something holds the port"
-				// is materially different from "we have no idea who owns
-				// this", and only the second deserves a Fail.
-				return warn(name, fmt.Sprintf(":%d in use", port), liveUnseenHint(ownPID, seen))
+				return liveUnseenVerdict(name, port, ownPID, seen)
 			}
 		}
 	}
@@ -805,24 +777,73 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 	//
 	// This used to end in `if !portProbeAvailable() { return warn(…) }`,
 	// goreview F9's answer to a LIVE bridge that a host without lsof could
-	// not attribute. The liveness arm above has answered that case since
-	// #640, so all the fallback still saw was this one, where lsof cannot
-	// change the answer: with no pid there is nothing to ask it, and a pid
-	// that is not running holds nothing for it to find. Its absence alone
-	// turned the Fail into a warn, and `bridge init` on such a host saved a
-	// port another process held.
+	// not attribute. The liveness arm (liveUnseenVerdict) has answered that
+	// case since #640, so all the fallback still saw was this one, where
+	// lsof cannot change the answer: with no pid there is nothing to ask it,
+	// and a pid that is not running holds nothing for it to find. Its
+	// absence alone turned the Fail into a warn, and `bridge init` on such a
+	// host saved a port another process held.
 	return fail(name, fmt.Sprintf(":%d in use", port), anotherProcessOwnsPort)
+}
+
+// liveUnseenVerdict is checkPort's liveness arm: the recorded bridge's pid
+// is alive, and the owner probe ran cleanly without naming it on the port
+// (seen is the probe's account of what it saw).
+//
+// That is the EXPECTED result, not a conflict, on a bridge that binds a
+// privileged port through a file capability (`setcap
+// cap_net_bind_service=+ep`, which the deployment runbook prescribes so a
+// non-root service can bind :443): that binary runs with dumpable=0, so no
+// unprivileged observer can attribute the port to a pid — lsof, `ss -p` and
+// a direct readlink of /proc/<pid>/fd all fail identically.
+//
+// It is not the only way here, and this arm used to explain every arrival
+// as that one. A bridge running as another user is as hidden, on every
+// unix. A host with no lsof off Linux asks nothing. lsof may name the
+// process that holds the port. And a probe that saw everything there was to
+// see (Windows' listener table, /proc reading all of our descriptors) rules
+// our pid out. So the text is the probe's account (ownerSighting).
+//
+// A pid the account rules out holds nothing on this port: its descriptors
+// were all read and none is a listener on the port, or the table names
+// every listener and ours is not among them. The port is another process's,
+// and FAILs as it does with no live pid behind it. The uid arm below used to
+// answer ok for it on Linux whenever that other process ran as this user: a
+// bridge still running on the ports of the config it started with, whose
+// config was then edited to a port something else holds, read ok, `bridge
+// doctor --config` (the runbook's check before a restart) exited 0, and the
+// restarted bridge could not bind: #970's defect, in this ladder (#1028's
+// row L4).
+func liveUnseenVerdict(name string, port, ownPID int, seen ownerSighting) Check {
+	conflict := fmt.Sprintf(":%d in use", port)
+	if seen.ruledOut {
+		return fail(name, conflict, liveUnseenHint(ownPID, seen))
+	}
+	// Last resort before giving up: ask whether the listener is at least
+	// owned by OUR USER. On Linux that survives dumpable=0 (see
+	// portowner_linux.go); everywhere else it answers "don't know" and we
+	// fall through to the Warn. Only a probe that could not rule our pid out
+	// gets here, so a listener of this uid may be our bridge, unseen.
+	if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
+		return ok(name, fmt.Sprintf("in use by a process running as this user (uid %d; %s)",
+			os.Getuid(), seen.account()))
+	}
+	// "Our recorded pid is alive and something holds the port" is
+	// materially different from "we have no idea who owns this", and only
+	// the second deserves a Fail.
+	return warn(name, conflict, liveUnseenHint(ownPID, seen))
 }
 
 // anotherProcessOwnsPort is the hint on a held port with no live bridge of
 // ours behind it.
 const anotherProcessOwnsPort = "another process owns this port; stop it or pick a different address in bridge.yaml"
 
-// liveUnseenHint is checkPort's warn hint when the recorded bridge is alive
-// and the owner probe did not see it on the port: the probe's account (s),
-// then advice that fits it. Where what the probe saw rules the bridge out
-// (ownerSighting.ruledOut), the hint says to stop the holder. Where it
-// could have missed the bridge, it says why and keeps the hedge.
+// liveUnseenHint is checkPort's hint when the recorded bridge is alive and
+// the owner probe did not see it on the port: the probe's account (s), then
+// advice that fits it. Where what the probe saw rules the bridge out
+// (ownerSighting.ruledOut), the check FAILs and the hint says to stop the
+// holder. Where it could have missed the bridge, the check warns, and the
+// hint says why and keeps the hedge.
 func liveUnseenHint(ownPID int, s ownerSighting) string {
 	lead := fmt.Sprintf("our bridge (pid %d) is still running, but %s", ownPID, s.account())
 	if s.ruledOut {
@@ -854,11 +875,12 @@ func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
 //
 // checkPort's other arms read the recorded bridge's LIVENESS as evidence
 // that a held port is its own: a probe that failed warns, and a live pid
-// the probe did not name warns, or is ok on Linux when the listener runs as
-// this user. That is sound for a port the bridge's config names, and here
-// no config names one. init writes its defaults, and an install that had
-// moved off them (because something else holds 7788, say) has a live
-// bridge on its own ports while another process holds the one init writes.
+// the probe did not name, and could not rule out, warns, or is ok on Linux
+// when the listener runs as this user. That is sound for a port the
+// bridge's config names, and here no config names one. init writes its
+// defaults, and an install that had moved off them (because something else
+// holds 7788, say) has a live bridge on its own ports while another process
+// holds the one init writes.
 // Excused, that port is saved, and the restarted bridge cannot bind it:
 // #970's defect, which the second port pass avoids by clearing the pid file
 // for a port the run is choosing. Cleared here, the bridge's own listeners

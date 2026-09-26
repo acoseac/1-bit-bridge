@@ -513,9 +513,10 @@ func TestConfiguredPortReadsAnEphemeralPortAsItself(t *testing.T) {
 // TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID.
 //
 // checkPort's "is it us?" ladder answers ok or warn — never fail —
-// whenever the pid in OwnPIDFile is alive: a probe that could not
-// attribute the port warns, and a listener merely owned by this uid is
-// reported ok. That is right for a port the running bridge is supposed
+// whenever the pid in OwnPIDFile is alive and the owner probe could not
+// rule it out: a probe that could not attribute the port warns, and a
+// listener merely owned by this uid is reported ok. That is right for a
+// port the running bridge is supposed
 // to hold, and wrong for one it is not. A live bridge binds what ITS
 // config says, so it cannot legitimately own a port absent from it —
 // and with the fallback left on, an occupied NEW port read as "our
@@ -597,12 +598,11 @@ func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
 			"is alive, so a pid file left in place would excuse it)\n--- stdout ---\n%s\n--- stderr ---\n%s",
 			out.String(), errOut.String())
 	}
-	// WHICH check refused, not merely that something did. The released
-	// api port cannot fail here — the live recorded pid downgrades any
-	// conflict on it to ok or warn, which is the very behaviour under
-	// test — so a bare "nonzero exit plus an unchanged config" would be
-	// satisfied by an unrelated failure and prove nothing about the held
-	// admin port (CodeRabbit on #970).
+	// WHICH check refused, not merely that something did. The api port
+	// is released and unchanged, so nothing grades it as held here, and
+	// a bare "nonzero exit plus an unchanged config" would be satisfied
+	// by an unrelated failure and prove nothing about the held admin port
+	// (CodeRabbit on #970).
 	if !strings.Contains(out.String(), "port-admin") {
 		t.Errorf("the refusal does not name port-admin, so it is not the held port that stopped "+
 			"this init:\n%s", out.String())
