@@ -16,8 +16,8 @@ import (
 // With the config, a held port behind a live recorded bridge is probably
 // that bridge's, because its config names the port: checkPort's liveness
 // arm answers ok or warn. Without it nothing names the port. The install
-// may have moved off init's defaults (often because something else holds
-// 7788), so its bridge is alive on its own ports while another process
+// may have moved off init's defaults (because something else holds
+// 7788, say), so its bridge is alive on its own ports while another process
 // holds the one init writes, and excusing that port saves a config the
 // restarted bridge cannot bind. Only the bridge seen listening there says
 // otherwise, so every other row is a FAIL.

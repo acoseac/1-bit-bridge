@@ -824,7 +824,7 @@ const anotherProcessOwnsPort = "another process owns this port; stop it or pick 
 // the probe did not name warns, or is ok on Linux when the listener runs as
 // this user. That is sound for a port the bridge's config names, and here
 // no config names one. init writes its defaults, and an install that had
-// moved off them (often because something else holds 7788) has a live
+// moved off them (because something else holds 7788, say) has a live
 // bridge on its own ports while another process holds the one init writes.
 // Excused, that port is saved, and the restarted bridge cannot bind it:
 // #970's defect, which the second port pass avoids by clearing the pid file
