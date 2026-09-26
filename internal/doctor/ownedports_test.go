@@ -59,7 +59,7 @@ func TestOwnedPortsEmptyKeepsExistingBehaviour(t *testing.T) {
 	port := lis.Addr().(*net.TCPAddr).Port
 
 	withPIDAlive(t, false)
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	if c := checkAPIPort(t.Context(), Deps{APIPort: port}); c.Status != Fail {
 		t.Errorf("bound port with no OwnedPorts and no pidfile: got %v, want fail", c.Status)
 	}

@@ -712,7 +712,7 @@ func ownedPortCheck(name string, port int, ownedPorts []int) *Check {
 // listenFunc is the TCP bind probe used by checkPort. A package var so
 // tests can inject a synthetic bind failure (e.g. a non-EADDRINUSE error
 // like EACCES) deterministically — the same test-seam convention as
-// pidAliveFunc and portOwnerFunc. Production code MUST NOT mutate it.
+// pidAliveFunc and hiddenListenerFunc. Production code MUST NOT mutate it.
 var listenFunc = net.Listen
 
 // probeBind attempts a bind and immediately releases it, returning the
@@ -801,30 +801,43 @@ func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Ch
 // as that one. A bridge running as another user is as hidden, on every
 // unix. A host with no lsof off Linux asks nothing. lsof may name the
 // process that holds the port. And a probe that saw everything there was to
-// see (Windows' listener table, /proc reading all of our descriptors) rules
-// our pid out. So the text is the probe's account (ownerSighting).
+// see rules our pid out: Windows' listener table, or /proc reading all of
+// our descriptors, or, where it could not read them, finding every listener
+// on the port held by processes it can read. So the text is the probe's
+// account (ownerSighting).
 //
 // A pid the account rules out holds nothing on this port: its descriptors
 // were all read and none is a listener on the port, or the table names
-// every listener and ours is not among them. The port is another process's,
-// and FAILs as it does with no live pid behind it. The uid arm below used to
-// answer ok for it on Linux whenever that other process ran as this user: a
-// bridge still running on the ports of the config it started with, whose
-// config was then edited to a port something else holds, read ok, `bridge
-// doctor --config` (the runbook's check before a restart) exited 0, and the
-// restarted bridge could not bind: #970's defect, in this ladder (#1028's
-// row L4).
+// every listener and ours is not among them, or every listener is another
+// process's. The port is another process's, and FAILs as it does with no
+// live pid behind it. The uid arm below used to answer ok for it on Linux
+// whenever that other process ran as this user: a bridge still running on
+// the ports of the config it started with, whose config was then edited to
+// a port something else holds, read ok, `bridge doctor --config` (the
+// runbook's check before a restart) exited 0, and the restarted bridge
+// could not bind: #970's defect, in this ladder (#1028's row L4, and row L6
+// for a bridge granted the capability, whose descriptors nothing reads).
+//
+// The uid arm now answers only for a listener this user created that no
+// process it can read holds (hiddenListenerOfThisUser): how a
+// capability-bound bridge on its own port looks, the NUC's ordinary state
+// (row L2). A listener that a readable process holds is that process's,
+// which matters where no ruling-out is possible: beside a listener of
+// another user's on the same port at another address, that process's
+// listener read ok before (#1030).
 func liveUnseenVerdict(name string, port, ownPID int, seen ownerSighting) Check {
 	conflict := fmt.Sprintf(":%d in use", port)
 	if seen.ruledOut {
 		return fail(name, conflict, liveUnseenHint(ownPID, seen))
 	}
-	// Last resort before giving up: ask whether the listener is at least
-	// owned by OUR USER. On Linux that survives dumpable=0 (see
-	// portowner_linux.go); everywhere else it answers "don't know" and we
-	// fall through to the Warn. Only a probe that could not rule our pid out
-	// gets here, so a listener of this uid may be our bridge, unseen.
-	if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
+	// Last resort before giving up: ask whether a listener on the port was
+	// created by OUR USER and is held by no process this user can read,
+	// which is how our bridge looks when it runs with dumpable=0. On Linux
+	// the socket tables' uid column survives that (portowner_linux.go);
+	// everywhere else it answers "don't know" and we fall through to the
+	// Warn. Only a probe that could not rule our pid out gets here, so such
+	// a listener may be our bridge, unseen.
+	if hidden, hiddenErr := hiddenListenerFunc(port); hiddenErr == nil && hidden {
 		return ok(name, fmt.Sprintf("in use by a process running as this user (uid %d; %s)",
 			os.Getuid(), seen.account()))
 	}
@@ -876,11 +889,11 @@ func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
 // checkPort's other arms read the recorded bridge's LIVENESS as evidence
 // that a held port is its own: a probe that failed warns, and a live pid
 // the probe did not name, and could not rule out, warns, or is ok on Linux
-// when the listener runs as this user. That is sound for a port the
-// bridge's config names, and here no config names one. init writes its
-// defaults, and an install that had moved off them (because something else
-// holds 7788, say) has a live bridge on its own ports while another process
-// holds the one init writes.
+// when a listener of this user's is held by no process it can read. That
+// is sound for a port the bridge's config names, and here no config names
+// one. init writes its defaults, and an install that had moved off them
+// (because something else holds 7788, say) has a live bridge on its own
+// ports while another process holds the one init writes.
 // Excused, that port is saved, and the restarted bridge cannot bind it:
 // #970's defect, which the second port pass avoids by clearing the pid file
 // for a port the run is choosing. Cleared here, the bridge's own listeners
@@ -1387,18 +1400,19 @@ func windowsStartupDir() string {
 // from having to know which platform can hang, and hands the next
 // implementation the context already.
 
-// pidAliveFunc and portOwnerFunc indirect the two platform-provided probes
-// that back checkPort's last-resort attribution arms, so tests can drive
-// those branches deterministically: neither "a PID that is definitely
-// dead" nor "a listener owned by a different user" can be conjured
-// portably on demand, and asserting them against whatever the host happens
-// to look like is how a test ends up passing for the wrong reason.
+// pidAliveFunc and hiddenListenerFunc indirect the two platform-provided
+// probes that back checkPort's last-resort attribution arms, so tests can
+// drive those branches deterministically: neither "a PID that is
+// definitely dead" nor "a listener owned by a different user" can be
+// conjured portably on demand, and asserting them against whatever the
+// host happens to look like is how a test ends up passing for the wrong
+// reason.
 //
 // Same seam convention as listenFunc above. Production code MUST NOT
 // mutate them.
 var (
-	pidAliveFunc  = pidAlive
-	portOwnerFunc = portOwnedByThisUser
+	pidAliveFunc       = pidAlive
+	hiddenListenerFunc = hiddenListenerOfThisUser
 	// ownerProbeFunc is the owner probe itself (isPIDListeningOnPort),
 	// indirected so a test can hand both port ladders every kind of
 	// account, a ruled-out miss included, on every platform. Only

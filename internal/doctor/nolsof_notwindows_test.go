@@ -119,7 +119,7 @@ func TestPortCheckWithoutLsofStillAnswersALiveRecordedPID(t *testing.T) {
 			withoutLsof(t)
 			withProcAnswering(t, false, tc.proc, nil)
 			withPIDAlive(t, true)
-			withPortOwner(t, tc.owned, nil)
+			withHiddenListener(t, tc.owned, nil)
 			port := bindPort(t)
 			c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
 			if c.Status != tc.want {

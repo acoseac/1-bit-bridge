@@ -16116,3 +16116,265 @@ filesystem.
   wrote no pid file, so both ran the no-pid branch. **When the control
   column disagrees with the recorded baseline, suspect the harness before
   the product.**
+
+## 2026-09-26 — doctor rules out a bridge it cannot read by the port's other holders (#1030)
+
+#1029's Out of scope recorded row L6: `checkPort`'s liveness arm answered ok
+for a port another process of the same user holds when the recorded bridge
+was granted `cap_net_bind_service`. That bridge runs with dumpable=0, so
+`/proc` cannot read its descriptors and nothing ruled it out, and the uid
+arm (`portOwnedByThisUser`: any LISTEN row on the port with this uid)
+answered for the holder's listener. It is the NUC's shape.
+
+### What was measured
+
+- **L6 on main (`99964441`), dido (Ubuntu 26.04, Docker 29.1.3), both images**
+  (`attrword/nolsof:1.26.6`, `attrword/lsof:1.26.6`, `~/attrword/runv.sh`):
+  `[ok] port-api in use by a process running as this user (uid 1000; lsof
+  lists pid 579 listening on this port)`, exit 0; without lsof "(… this
+  host has no lsof, and /proc does not let this user read pid 561's
+  descriptors)", exit 0.
+- **What a dumpable=0 process shows** (a test binary that called
+  `prctl(PR_SET_DUMPABLE, 0)`): to its own uid, `/proc/<pid>` is still
+  uid 1000's, `/proc/<pid>/fd` is `root:root 0500` and ReadDir is EACCES;
+  to root in a container without CAP_SYS_PTRACE the directory lists and
+  every readlink is EACCES; `/proc/<pid>/status` reads for both;
+  `kill(pid, 0)` succeeds. The same as the capability-bound bridge the
+  #1029 matrix recorded ("CapEff 0x400; fd as 1000: denied"), so a test
+  can stand one in without setcap.
+- **The cost of walking every `/proc/<pid>/fd`** (ReadDir, then a Readlink
+  per descriptor), dido's host, 290 processes, five runs each: 1.1 to 1.8 ms
+  as uid 1000 (287 directories refuse the listing), 5 to 6 ms as root, 11 to
+  15 ms as root without CAP_SYS_PTRACE in the host pid namespace (every
+  directory lists, 2,555 readlinks refused), 1.4 to 3.6 ms as uid 1000 in a
+  container sharing the host pid namespace.
+- **The bridge shares no listener.** Every TCP listener is its own
+  `net.Listen` (`cmd/bridge/main.go`, `internal/admin`, `internal/dlna`),
+  which Go opens close-on-exec. Nothing consumes an inherited fd:
+  `internal/supervision` only reads `LISTEN_FDS` to decide whether it is
+  supervised. No `ExtraFiles`, `FileListener`, `os.NewFile` or `UnixRights`
+  in production code. No socket unit ships.
+- **End to end, main (`99964441`) and the fix (`b590069e`)**, the rows
+  around L6 (`~/attrword/runl6.sh`, e2e/verdict-l6.sh). The bridge in every
+  row is the same binary with `setcap cap_net_bind_service=+ep`, live on
+  7790/7791, doctor as uid 1000 unless noted. **Both images gave the same
+  verdict in every row, on main and on the fix:**
+
+  | row | shape | main | fix |
+  |---|---|---|---|
+  | L2 | the bridge on its own ports | ok, exit 0 | same, same line |
+  | L6 | config edited to 7788, which a uid-1000 holder has | ok, exit 0 | FAIL, exit 1: "our bridge (pid 191) is still running, but lsof lists pid 218 listening on this port, and /proc shows every socket listening on this port held by pid 218: stop the process that holds the port, or change the address in bridge.yaml" (no lsof: "…but this host has no lsof, and /proc shows every socket…") |
+  | R6 | L6, doctor as root in the container | warn | same |
+  | L6r | L6, then the bridge restarted | `bind: address already in use` | the same: the consequence the check now catches |
+  | L6i | L6, then `bridge init --yes --force` | exit 0, config saved with `:7788` | exit 1, port-api FAIL, config untouched |
+  | L6c | L6's holder, the config broken by an unknown key, then `bridge init --yes --force` (the chosen-port ladder) | FAIL, hint "…If it does, stop that bridge and re-run; otherwise stop the process that holds the port" | FAIL, hint "…/proc shows every socket listening on this port held by pid 432: stop the process that holds the port and re-run" |
+  | L7 | L6, the holder uid 1001 | warn, exit 0 | same (Out of scope) |
+  | L6m | L6, the uid-1000 holder on 127.0.0.1:7788 and a uid-1001 holder on [::1]:7788 | ok, exit 0 | warn, exit 0 |
+
+  And #1029's own matrix (`runv.sh`: L1–L6, R2, R4, L4r, L4i) on the fix,
+  diffed against main with pids normalised: identical but for L6, in both
+  images.
+
+### Decisions
+
+- **The census.** Where `procSighting` cannot read the recorded pid's
+  descriptors in full (EACCES, links that do not read, or no such pid in
+  `/proc`), it takes the port's LISTEN rows and walks every process this
+  user can read (`socketHolders`). When every listener has a holder there
+  other than the pid (`heldByOthers`), the pid is ruled out: an inode names
+  one socket, and a listener of the pid's own would be held by it alone,
+  which nothing here can read, so it would have no holder. #1029's arm then
+  FAILs it. A table that did not read, or a listener with no readable
+  holder, leaves the pid possible, with the account it had.
+- **The census's one blind spot is a SHARED socket**, and it is the
+  bridge's premise that it shares none (measured above).
+  `pidfd_getfd` on a dumpable=0 process needs CAP_SYS_PTRACE, so no process
+  of this user can take one. Windows' listener table already rules out on
+  the same terms: a duplicated socket keeps the binder's pid. Written into
+  CLAUDE.md as a premise to revisit if socket activation or a listener
+  handoff ever lands.
+- **FAIL, not warn**, for #1029's reasons: only a FAIL makes `bridge doctor`
+  exit 1 and makes `bridge init`'s preflight refuse (L6i).
+- **The census sits in the `/proc` attribution, not in the liveness arm.**
+  The consult recommended the arm (one walk, the probe untouched). Declined:
+  `ownerSighting.ruledOut` already defines "saw every listener on the port
+  and they are other processes" (Windows' table), so the census is that
+  same statement made on Linux. Both ladders then get it. `checkChosenPort`'s
+  hint (L6c) stops offering to stop the bridge. The verdict ladder #1029
+  left stays as it was, so its seam tables still describe it. It also rides
+  inside `/proc`'s answer, which #1029 put after a clean lsof miss so the
+  two images agree. The cost is a second walk in the L2 shape (the census,
+  then the uid arm): 1 to 2 ms each as a user.
+- **The uid arm needs both marks** (`hiddenListenerOf`): the listener was
+  created by this uid, and no process this user can read holds it. A
+  listener a readable process holds is that process's. The census cannot
+  rule out when some listener has no readable holder, and there the old arm
+  still answered for the readable holder's listener (L6m: ok → warn). It
+  does not make L6 exit 1 by itself: with the census disabled (NC1), L6
+  reads warn.
+- **`/proc/self` is checked against `getpid` before anything pid-numbered**
+  (`procOfAnotherPIDNamespace`, the rule `proctest.Exited` follows). A
+  `/proc` of another pid namespace numbers every process differently, so
+  finding the pid, ruling it out by its own descriptors, or ruling it out by
+  the port's holders would each describe some other process. This also
+  guards the per-pid reading #1027 and #1028 built, which had the same
+  exposure. The consult called the guard necessary. The no-listener
+  ruling-out comes before it, since it reads no pid.
+- **The walk does not stop early.** It names every holder, so the hint says
+  "held by pids 5000, 6000" for a socket two processes share rather than
+  whichever was listed first. The recorded pid is skipped, a belt against a
+  race: a pid whose descriptors could not be read a moment earlier cannot
+  be read by the walk either.
+- **The wording.** The census's account is "/proc shows every socket
+  listening on this port held by pid 579", joined after lsof's by
+  `procSecondOpinion` as any `/proc` ruling-out is. The uid arm's ok summary
+  is unchanged ("in use by a process running as this user (uid 1000; …)"),
+  so the NUC's daily line does not move again.
+- **The uid arm is renamed**: `portOwnedByThisUser` → `hiddenListenerOfThisUser`,
+  `portOwnerFunc` → `hiddenListenerFunc`, `withPortOwner` →
+  `withHiddenListener`. The tables' `owned` flags kept their name. The two
+  single-column scanners became one (`scanListenRows`, inode and uid from
+  the one row filter), and `procSighting` takes the `/proc` root rather than
+  one fd directory. The test names this log cites were kept.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the design,
+with `checkPort`, the probe, the `/proc` parser, the uid scan and
+`ownerSighting` attached. It found the elimination sound given the no-sharing
+premise (Go's close-on-exec sockets, `pidfd_getfd`'s
+PTRACE_MODE_ATTACH_REALCREDS against a dumpable=0 target, a distinct inode per
+socket even under SO_REUSEPORT). It confirmed that every listener without a
+descriptor (io_uring fixed files, BPF sockmaps, SCM_RIGHTS in flight, kernel
+sockets, another pid namespace sharing the network namespace) only makes a
+listener unaccounted, the safe direction, and that `sk_uid` is the creator's
+fsuid, fixed, and mapped into the reader's user namespace as `getuid` is. It
+also confirmed that under hidepid=2 a dumpable=0 process is hidden from its
+own user, so L2 stays ok and L6 FAILs there too. It called the `/proc/self`
+guard necessary. Its placement advice was declined, as recorded above.
+
+### Tests and controls
+
+- `holder_census_notwindows_test.go` (every unix, fixture tables and a
+  fixture `/proc` from `writeProcRoot`):
+  `TestProcSightingRulesOutAPidItCannotReadByThePortsOtherHolders` (nine
+  rows: five ruled out, among them a pid not in `/proc`, two listeners held
+  by two processes and one socket two processes share; four left possible,
+  among them L2's own shape and a holder this user cannot read either),
+  `TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead`,
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace` (six rows and a
+  control), `TestHiddenListenerOfCountsOnlyAListenerNoReadableProcessHolds`
+  (eight rows, the mixed shape among them).
+- `hidden_bridge_linux_test.go` (Linux, the real kernel; the test binary run
+  again as a child that makes itself non-dumpable, holding until its stdin
+  closes): `TestPortCheckFailsAPortAHiddenBridgeIsRuledOutOfByItsHolder` (L6),
+  `TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK` (L2),
+  `TestChosenPortRefusalOfAPortAHiddenBridgeIsRuledOutOf` (L6c) and
+  `TestHiddenListenerOfThisUserOnTheKernel`. As root with CAP_SYS_PTRACE
+  the child's descriptors read and the census is not asked, so each asserts
+  its verdict everywhere and the census's words only where the child is
+  hidden; as root in a container (no CAP_SYS_PTRACE) they took the census
+  path.
+- `TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf` (#1029's L4 with the
+  real probe) lost its Linux premise, which asked the uid arm to claim this
+  process's own listener: the refined arm declines it, and
+  `TestHiddenListenerOfThisUserOnTheKernel` now pins that, beside the tables
+  listing the listener as this user's.
+- **Red first**, on the behaviour-neutral refactor (`dff19e0f`) plus the new
+  tests. On the Mac: the five ruled-out census rows, the six guard rows, and
+  the two uid-arm rows whose listener a readable process holds; the four
+  possible rows, the unread-table test and the guard's control passed. On
+  dido in both images, the same plus three kernel tests. The L6 one failed
+  with "got ok (in use by a process running as this user (uid 1000; lsof
+  lists pid 84 listening on this port))", production's line. The chosen-port
+  one offered "stop that bridge and re-run". The uid-arm one said "this
+  process's own listener: hidden true". The L2 kernel test passed on the
+  neutral code, as it must.
+- Negative controls against `b590069e`, each reverted with `git checkout --`
+  and the tree checked clean before the next; every one built:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | the census never rules out | the five ruled-out fixture rows; on dido, in both images, the L6 kernel test (now warn: the refined arm alone) and the L6c hint |
+  | NC2 | the uid arm back to any listener of this uid | the two uid-arm fixture rows; on dido `TestHiddenListenerOfThisUserOnTheKernel`, while the L6 kernel test stayed a FAIL through the census |
+  | NC3 | the census runs over a table that did not read | `TestProcSightingRulesNothingOutByHoldersOverATableItCouldNotRead` |
+  | NC4 | the `/proc/self` guard removed | the six guard rows |
+  | NC5 | the census rules out when ANY listener has another holder | "two listeners, one held by no process this user can read" |
+  | NC8 | the guard refuses every `/proc` | the guard's control and every `procSighting` fixture test that reads a pid |
+  | NC11 | the uid arm ignores whose listener it is | "another user's listener, held by no one here" and the mixed row |
+
+  NC2's first run did not build (its mutation left a loop variable unused).
+  That reads as "control invalid", never a pass, and it was rewritten and
+  rerun. The skip of the recorded pid in the walk has no control: no
+  fixture can make a directory unreadable to one read and readable to the
+  next.
+- `go test -count=1 ./internal/doctor/` in both dido images as uid 1000,
+  and the kernel and fixture tests as root in both: ok.
+
+### Review
+
+- **Round 1**, on `f9131650`. Gemini: no comments. SonarCloud: quality gate
+  passed, one go:S3776 (cognitive complexity 20 against 15) on
+  `TestProcSightingTrustsOnlyAProcOfItsOwnPIDNamespace`. Fixed by extracting
+  `reselfProcRoot` and `requireNoAnswerFromAnotherNamespace`.
+  CodeRabbit ("Actionable comments posted: 1", Minor) proposed the
+  `/proc/self` guard in `hiddenListenerOf` too. Its reasoning was that a
+  `/proc` of another pid namespace could omit a holder of this user's, and
+  the uid arm would then call the port's listener hidden: L6's ok again.
+  **Declined on measurement.** `/proc/net` is `self/net`, so the socket
+  tables read only under a `/proc` whose self resolves. That is this pid
+  namespace's or an ancestor's, and an ancestor's lists every process of
+  this one. On dido, under `nsenter -m` into a container (a descendant
+  namespace's `/proc` over this process's), `readlink /proc/self` failed and
+  both tables were unreadable, so the arm answers an error and cannot say
+  ok. Under `unshare --pid --fork` without `--mount-proc` (an ancestor's),
+  the tables read and `/proc` listed all 321 host processes. Adding the
+  guard would only turn L2 into a warn there. The accurate half was taken:
+  the docblock had argued only that a readable holder is real, and now also
+  argues that nothing is omitted. A fixture test
+  (`TestHiddenListenerOfIgnoresWhichPIDNamespaceProcIsFrom`, a row of the
+  uid-arm table until round 2 split it out for Sonar) pins the decision,
+  and a sentence in CLAUDE.md records it. CodeRabbit then checked the row,
+  withdrew the finding and resolved the thread.
+- Controls on the round (`5c913119`): NC4 again, against the refactored
+  guard test, turned the six guard rows red. NC12, CodeRabbit's guard
+  added to `hiddenListenerOf`, turned the new row red: "got false; want
+  true".
+- **Round 2**, on `de460c9e`. CodeRabbit: paused at the plan limit (its
+  walkthrough's `coveredCommitId` stays `f9131650`). SonarCloud: the
+  go:S3776 moved to the uid-arm table test, which the pinning row had
+  pushed to 18. The row became its own test. Gemini (two comments, HIGH)
+  said the helper that starts the non-dumpable child drops the writer
+  `cmd.StdinPipe()` returns, so a GC finalizer could close the pipe and
+  the child would exit early: a flake. **Declined on the source** (Go
+  1.26.6's `os/exec`). `StdinPipe` appends the writer to
+  `cmd.parentIOPipes` (exec.go:1070), and the pipes are closed only in
+  `Wait` after the child exits (:954), on a failed `Start` (:655), or on
+  the context and `WaitDelay` paths (:867, :998), which the helper does
+  not use. The cleanup closure holds `cmd`, so the writer is reachable
+  until then and no finalizer runs. `internal/proctest`'s held shells drop
+  it the same way. The accurate half was taken: the helper now says why
+  dropping it is safe.
+
+### Out of scope
+
+- **L7: a holder this user cannot read** (another user's process, root's
+  daemon, another capability-bound binary) leaves its listener without a
+  readable holder, so the census cannot rule the bridge out, and it stays a
+  warn, exit 0. On the NUC a root daemon is the likelier holder. The
+  recorded pid's uid is readable from `/proc/<pid>/status` under
+  dumpable=0, and a listener another uid created is not the bridge's, since
+  it creates its own as its own uid. That would close L7 and L6m, and it
+  changes verdicts, so it is its own change. The runbook keeps the manual
+  `ss -ltnp` check for that case.
+- **macOS: L4 stays a warn** (ML4 in #1029's entry); nothing here reads
+  another process's descriptors or a pid's uid there.
+
+### Process notes
+
+- The first fixture table gave the hidden bridge the very listener the
+  census was meant to find held by someone else, which is the sharing case
+  the census cannot see. Its `0o000` mode also collided with the table's
+  "no chmod" sentinel, so three rows ran against a readable bridge.
+  **A fixture for a ruling-out must hold everything the rule assumes; write
+  down what the recorded process holds before asking who else does.**

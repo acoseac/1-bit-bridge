@@ -42,7 +42,7 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		{"recorded bridge alive, listener runs as this user", func(t *testing.T) (int, string) {
 			withUnattributedMiss(t)
 			withPIDAlive(t, true)
-			withPortOwner(t, true, nil)
+			withHiddenListener(t, true, nil)
 			return bindPort(t), writePIDFile(t, 4242)
 		}, Fail, OK},
 		// Alive, and nothing can say who holds the port: the liveness
@@ -50,7 +50,7 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		{"recorded bridge alive, holder unattributable", func(t *testing.T) (int, string) {
 			withUnattributedMiss(t)
 			withPIDAlive(t, true)
-			withPortOwner(t, false, nil)
+			withHiddenListener(t, false, nil)
 			return bindPort(t), writePIDFile(t, 4242)
 		}, Fail, Warn},
 		// Alive, and the probe saw enough to rule it out (/proc read all of
@@ -59,7 +59,7 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		{"recorded bridge alive, ruled out, listener runs as this user", func(t *testing.T) (int, string) {
 			withOwnerProbe(t, false, ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}, nil)
 			withPIDAlive(t, true)
-			withPortOwner(t, true, nil)
+			withHiddenListener(t, true, nil)
 			return bindPort(t), writePIDFile(t, 4242)
 		}, Fail, Fail},
 		{"recorded bridge not running", func(t *testing.T) (int, string) {

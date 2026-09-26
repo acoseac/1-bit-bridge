@@ -24,9 +24,10 @@ import (
 // Linux dependency, so there is no reason to hide it from macOS and Windows
 // CI.
 //
-// The same holds for the table reader and the fd walk below them, which
-// take their paths as arguments: portowner_linux.go hands them /proc, and
-// the tests hand them fixture files.
+// The same holds for the table reader, the fd walk and the census of a
+// port's holders below them, which take their paths as arguments:
+// portowner_linux.go hands them /proc, and the tests hand them fixture
+// files.
 
 // tcpStateListen is TCP_LISTEN as rendered in the `st` column.
 const tcpStateListen = "0A"
@@ -46,9 +47,9 @@ const (
 )
 
 // eachListenRow calls fn with the fields of every LISTEN-state row whose
-// local port matches. The row filter is shared by the uid and inode scans
-// below, so the two cannot disagree about which rows are the port's
-// listeners.
+// local port matches: the one row filter scanListenRows reads the inode and
+// the uid through, so no reader of the tables can disagree with another
+// about which rows are the port's listeners.
 func eachListenRow(r io.Reader, port int, fn func(f []string)) error {
 	// The port half of local_address is BIG-endian hex, zero-padded to four
 	// digits: 443 -> "01BB", 7789 -> "1E6D". (The address half is
@@ -81,42 +82,37 @@ func eachListenRow(r io.Reader, port int, fn func(f []string)) error {
 	return sc.Err()
 }
 
-// scanListenerUIDs returns the owning UID of every LISTEN row whose local
-// port matches. Split from portOwnedByThisUser so it can be tested against
-// captured real /proc output without needing a matching live socket, a
-// particular uid, or Linux.
-func scanListenerUIDs(r io.Reader, port int) ([]int, error) {
-	var uids []int
-	err := eachListenRow(r, port, func(f []string) {
-		if len(f) <= colUID {
-			return
-		}
-		uid, err := strconv.Atoi(f[colUID])
-		if err != nil {
-			return
-		}
-		uids = append(uids, uid)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return uids, nil
+// listenRow is one LISTEN row of a socket table: the socket's inode, as the
+// table renders it (decimal), and the uid that created the socket, or -1
+// where that column does not parse. The inode is what a process's
+// /proc/<pid>/fd link names, `socket:[<inode>]`, which is how a listener is
+// tied to the process holding it. The uid is the creator's fsuid, fixed at
+// socket(2) and mapped into the reader's user namespace, as getuid is.
+type listenRow struct {
+	inode string
+	uid   int
 }
 
-// scanListenerInodes returns the socket inode of every LISTEN row whose
-// local port matches, as the table renders it (decimal).
-func scanListenerInodes(r io.Reader, port int) ([]string, error) {
-	var inodes []string
+// scanListenRows returns every LISTEN row whose local port matches. Split
+// from the table reader so it can be tested against captured real /proc
+// output without needing a matching live socket, a particular uid, or
+// Linux.
+func scanListenRows(r io.Reader, port int) ([]listenRow, error) {
+	var rows []listenRow
 	err := eachListenRow(r, port, func(f []string) {
 		if len(f) <= colInode {
 			return
 		}
-		inodes = append(inodes, f[colInode])
+		uid, err := strconv.Atoi(f[colUID])
+		if err != nil {
+			uid = -1
+		}
+		rows = append(rows, listenRow{inode: f[colInode], uid: uid})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return inodes, nil
+	return rows, nil
 }
 
 // readSocketTables hands each socket table in paths to scan, in order, and
@@ -170,19 +166,20 @@ func readSocketTables(paths []string, scan func(r io.Reader) (done bool, err err
 	return unread, nil
 }
 
-// listenerSockets returns the fd-link text of every socket listening on
-// port in the given tables, `socket:[<inode>]`, which is how
-// /proc/<pid>/fd renders a socket descriptor, and whether a table that is
-// there could not be read (readSocketTables' unread).
-func listenerSockets(paths []string, port int) (sockets map[string]bool, unread bool, err error) {
-	sockets = map[string]bool{}
+// listenerSockets returns every socket listening on port in the given
+// tables, as its fd-link text, `socket:[<inode>]`, which is how
+// /proc/<pid>/fd renders a socket descriptor, mapped to the uid that
+// created it (listenRow); and whether a table that is there could not be
+// read (readSocketTables' unread).
+func listenerSockets(paths []string, port int) (sockets map[string]int, unread bool, err error) {
+	sockets = map[string]int{}
 	unread, err = readSocketTables(paths, func(r io.Reader) (bool, error) {
-		inodes, scanErr := scanListenerInodes(r, port)
+		rows, scanErr := scanListenRows(r, port)
 		if scanErr != nil {
 			return false, scanErr
 		}
-		for _, inode := range inodes {
-			sockets["socket:["+inode+"]"] = true
+		for _, row := range rows {
+			sockets["socket:["+row.inode+"]"] = row.uid
 		}
 		return false, nil
 	})
@@ -190,6 +187,150 @@ func listenerSockets(paths []string, port int) (sockets map[string]bool, unread 
 		return nil, unread, err
 	}
 	return sockets, unread, nil
+}
+
+// hiddenListenerOf reports whether a socket listening on port in the given
+// tables was created by uid AND is held by no process under procRoot whose
+// descriptors this user can read (socketHolders). It is the uid arm's
+// question (hiddenListenerOfThisUser), asked of this host's /proc there and
+// of fixtures in the tests. An error means no table could be read.
+//
+// Both marks are needed, and they are the marks of a bridge granted
+// cap_net_bind_service, which runs as this user and with dumpable=0, so
+// that no process of this user's can read its descriptors. The first alone
+// is any process of this user's, and the arm answered ok on it for another
+// process's listener beside a capability-bound bridge that held no socket
+// on the port (#1028's row L6), wherever the census could not rule that
+// bridge out: when a listener of root's shares the port at another address,
+// say. A listener that a process this user can read holds is that
+// process's.
+//
+// Unlike the census it is handed no pid, so it does not check /proc's pid
+// namespace (procOfAnotherPIDNamespace), and neither direction needs it. A
+// readable holder is one whatever number /proc gives it. And a /proc that
+// could omit a holder this namespace's /proc would list never gets here:
+// the socket tables are /proc/self/net's, and only a /proc of this pid
+// namespace or of an ancestor resolves self, and an ancestor's lists every
+// process of this one. Measured on dido (#1030): with a container's /proc
+// mounted over this process's (`nsenter -m`), readlink /proc/self fails and
+// both tables are unreadable, so this answers an error; under `unshare
+// --pid --fork` without --mount-proc, the tables read and /proc lists all
+// 321 host processes. The census's guard here would only turn the
+// capability-bound bridge's own port from ok to a warn under that ancestor
+// /proc.
+func hiddenListenerOf(tables []string, procRoot string, port, uid int) (bool, error) {
+	sockets, _, err := listenerSockets(tables, port)
+	if err != nil {
+		return false, err
+	}
+	mine := map[string]int{}
+	for s, u := range sockets {
+		if u == uid {
+			mine[s] = u
+		}
+	}
+	if len(mine) == 0 {
+		return false, nil
+	}
+	held := socketHolders(procRoot, mine, 0)
+	for s := range mine {
+		if len(held[s]) == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// heldByOthers returns the pids under procRoot whose descriptors hold the
+// sockets, and whether every socket has a holder there other than pid
+// (socketHolders): the census procSighting rules out a pid it cannot read
+// with.
+func heldByOthers(procRoot string, sockets map[string]int, pid int) ([]int, bool) {
+	held := socketHolders(procRoot, sockets, pid)
+	var holders []int
+	for s := range sockets {
+		if len(held[s]) == 0 {
+			return nil, false
+		}
+		holders = append(holders, held[s]...)
+	}
+	return holders, true
+}
+
+// socketHolders walks the process directories under procRoot, /proc in
+// production, and returns, for each socket in sockets, the pids whose
+// descriptors link to it, as far as this user can read them. It skips the
+// pid skip, 0 for none.
+//
+// A process whose fd directory does not list, or whose links do not read,
+// adds nothing: the kernel keeps its descriptors from this user (another
+// user's process, or one with dumpable=0, a binary granted
+// cap_net_bind_service). So a socket only such a process holds has no
+// holder here. So does a socket no descriptor holds: one registered with
+// io_uring or kept in a BPF map after its descriptor closed, one in flight
+// through a unix socket, a kernel socket, or one held by a process of
+// another pid namespace that shares this network namespace. Neither caller
+// reads a missing holder as an answer: the census leaves the recorded pid
+// possible, and the uid arm counts the socket as hidden, as before.
+//
+// The walk reads every process this user can: a ReadDir, then a Readlink
+// per descriptor. Measured on a 290-process host (dido, 2026-09-26): 1.1 to
+// 1.8 ms as a user, most directories refusing the listing; 5 to 6 ms as
+// root; 11 to 15 ms as root without CAP_SYS_PTRACE, where every directory
+// lists and no link reads.
+func socketHolders(procRoot string, sockets map[string]int, skip int) map[string][]int {
+	held := map[string][]int{}
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return held
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || pid == skip {
+			continue
+		}
+		fdDir := filepath.Join(procRoot, e.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			if _, listener := sockets[link]; listener {
+				held[link] = append(held[link], pid)
+			}
+		}
+	}
+	return held
+}
+
+// procOfAnotherPIDNamespace says why the processes under procRoot may not
+// be numbered as this process's pid namespace numbers them, or returns ""
+// when they are.
+//
+// A recorded pid is a number in this process's namespace, as kill(2) reads
+// it, and a /proc mounted for another namespace numbers every process
+// differently. Its <pid> is then an unrelated process, and the recorded
+// bridge can be among the port's holders under another number, so finding
+// the pid there, ruling it out by its own descriptors, or ruling it out by
+// the port's holders would each be an answer about some other process.
+// Such a /proc names someone else as its self: measured on Linux 7.0 for
+// proctest, under `unshare --pid --fork` without --mount-proc, a process
+// whose own pid is 1 reads /proc/self as 480456.
+func procOfAnotherPIDNamespace(procRoot string) string {
+	self, err := os.Readlink(filepath.Join(procRoot, "self"))
+	switch {
+	case err != nil:
+		return fmt.Sprintf("/proc does not say which process reads it, so it may number another pid namespace's processes (%s)",
+			oneLine(err.Error()))
+	case self != strconv.Itoa(os.Getpid()):
+		return fmt.Sprintf("/proc numbers another pid namespace's processes (its self is %s, and this process is pid %d)",
+			self, os.Getpid())
+	}
+	return ""
 }
 
 // fdDirHoldsSocket reports whether any descriptor in fdDir, a process's
@@ -211,7 +352,7 @@ func listenerSockets(paths []string, port int) (sockets map[string]bool, unread 
 // also compares the groups. Such a descriptor clears readAll, since the
 // socket may be behind it. One closed between the listing and its readlink
 // does not: it is no longer a socket the process holds.
-func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool, err error) {
+func fdDirHoldsSocket(fdDir string, sockets map[string]int) (held, readAll bool, err error) {
 	entries, err := os.ReadDir(fdDir)
 	if err != nil {
 		return false, false, err
@@ -221,7 +362,7 @@ func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool
 		link, err := os.Readlink(filepath.Join(fdDir, e.Name()))
 		switch {
 		case err == nil:
-			if sockets[link] {
+			if _, listener := sockets[link]; listener {
 				return true, readAll, nil
 			}
 		case !errors.Is(err, fs.ErrNotExist):

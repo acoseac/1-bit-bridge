@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,15 +46,15 @@ func TestListenerSocketsReadsBothFamilies(t *testing.T) {
 		name       string
 		paths      []string
 		port       int
-		want       map[string]bool
+		want       map[string]int
 		wantUnread bool
 		wantErr    bool
 	}{
-		{"ipv4 listener", []string{v4, v6}, 7789, map[string]bool{"socket:[24680]": true}, false, false},
-		{"ipv6 listener", []string{v4, v6}, 443, map[string]bool{"socket:[6213098]": true}, false, false},
-		{"tcp6 missing", []string{v4, missing}, 7789, map[string]bool{"socket:[24680]": true}, false, false},
-		{"tcp6 unreadable", []string{v4, unreadable}, 7789, map[string]bool{"socket:[24680]": true}, true, false},
-		{"nothing listens", []string{v4, v6}, 8080, map[string]bool{}, false, false},
+		{"ipv4 listener", []string{v4, v6}, 7789, map[string]int{"socket:[24680]": 1000}, false, false},
+		{"ipv6 listener", []string{v4, v6}, 443, map[string]int{"socket:[6213098]": 1000}, false, false},
+		{"tcp6 missing", []string{v4, missing}, 7789, map[string]int{"socket:[24680]": 1000}, false, false},
+		{"tcp6 unreadable", []string{v4, unreadable}, 7789, map[string]int{"socket:[24680]": 1000}, true, false},
+		{"nothing listens", []string{v4, v6}, 8080, map[string]int{}, false, false},
 		{"no table readable", []string{missing, missing}, 7789, nil, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,21 +92,50 @@ var fdFixture = map[string]string{
 	"4": "socket:[24680]",
 }
 
+// writeProcRoot builds a fixture /proc: for each pid, a directory whose fd
+// directory holds that pid's descriptors (writeFdDir's links), and a self
+// link naming this process, as the real /proc's names the process reading
+// it.
+func writeProcRoot(t *testing.T, procs map[int]map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for pid, links := range procs {
+		fdDir := procFdDir(root, pid)
+		if err := os.MkdirAll(fdDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for fd, target := range links {
+			if err := os.Symlink(target, filepath.Join(fdDir, fd)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.Symlink(strconv.Itoa(os.Getpid()), filepath.Join(root, "self")); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// procFdDir is pid's fd directory in a fixture /proc.
+func procFdDir(root string, pid int) string {
+	return filepath.Join(root, strconv.Itoa(pid), "fd")
+}
+
 // TestFdDirHoldsSocketMatchesOnlyTheListenersInode walks a fixture fd
 // directory and matches the listener's inode and nothing else. A directory
 // that cannot be listed returns its error and no match; the caller must
 // not read that as a broken probe.
 func TestFdDirHoldsSocketMatchesOnlyTheListenersInode(t *testing.T) {
 	fdDir := writeFdDir(t, fdFixture)
-	if held, _, err := fdDirHoldsSocket(fdDir, map[string]bool{"socket:[24680]": true}); !held || err != nil {
+	if held, _, err := fdDirHoldsSocket(fdDir, map[string]int{"socket:[24680]": 1000}); !held || err != nil {
 		t.Errorf("the descriptor linked to the listener's inode was not found (err %v)", err)
 	}
-	if held, readAll, err := fdDirHoldsSocket(fdDir, map[string]bool{"socket:[99999]": true}); held || !readAll || err != nil {
+	if held, readAll, err := fdDirHoldsSocket(fdDir, map[string]int{"socket:[99999]": 1000}); held || !readAll || err != nil {
 		t.Errorf("an inode no descriptor links to: held %v, readAll %v, err %v; want no match, every link read", held, readAll, err)
 	}
 	// A directory that cannot be listed: the process is gone, or its
 	// descriptors are denied to this user. No match, and the error says which.
-	if held, _, err := fdDirHoldsSocket(filepath.Join(fdDir, "absent"), map[string]bool{"socket:[24680]": true}); held || !errors.Is(err, fs.ErrNotExist) {
+	if held, _, err := fdDirHoldsSocket(filepath.Join(fdDir, "absent"), map[string]int{"socket:[24680]": 1000}); held || !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("an absent fd directory: held %v, err %v; want no match and ErrNotExist", held, err)
 	}
 }
@@ -126,30 +156,31 @@ func TestProcSightingAccountsForEachMiss(t *testing.T) {
 	dir := t.TempDir()
 	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), writeTable(t, dir, "tcp6", procNetTCP6Fixture)}
 	const blind = "the blind spot"
+	holding := func(t *testing.T) string { return writeProcRoot(t, map[int]map[string]string{4242: fdFixture}) }
 	unlistable := func(t *testing.T) string {
-		fdDir := writeFdDir(t, fdFixture)
-		chmodForTest(t, fdDir, 0o000)
-		return fdDir
+		root := holding(t)
+		chmodForTest(t, procFdDir(root, 4242), 0o000)
+		return root
 	}
 	linksUnreadable := func(t *testing.T) string {
-		fdDir := writeFdDir(t, fdFixture)
-		chmodForTest(t, fdDir, 0o400) // read without search: lists, and no readlink
-		return fdDir
+		root := holding(t)
+		chmodForTest(t, procFdDir(root, 4242), 0o400) // read without search: lists, and no readlink
+		return root
 	}
 	for _, tc := range []struct {
 		name      string
 		port      int
-		fdDir     func(t *testing.T) string
+		procRoot  func(t *testing.T) string
 		needsUser bool // permission bits bind only a user other than root
 		want      ownerSighting
 		wantFound bool
 	}{
-		{"the pid holds the listener", 7789, func(t *testing.T) string { return writeFdDir(t, fdFixture) }, false, ownerSighting{}, true},
-		{"no socket listens on the port", 8080, func(t *testing.T) string { return writeFdDir(t, fdFixture) }, false,
+		{"the pid holds the listener", 7789, holding, false, ownerSighting{}, true},
+		{"no socket listens on the port", 8080, holding, false,
 			ownerSighting{saw: "/proc lists no socket listening on this port", ruledOut: true}, false},
-		{"every descriptor read, none the listener", 443, func(t *testing.T) string { return writeFdDir(t, fdFixture) }, false,
+		{"every descriptor read, none the listener", 443, holding, false,
 			ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}, false},
-		{"no such process here", 7789, func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") }, false,
+		{"no such process here", 7789, func(t *testing.T) string { return writeProcRoot(t, nil) }, false,
 			ownerSighting{saw: "/proc has no pid 4242"}, false},
 		{"the fd directory cannot be listed", 7789, unlistable, true,
 			ownerSighting{saw: "/proc does not let this user read pid 4242's descriptors", blind: blind}, false},
@@ -160,7 +191,7 @@ func TestProcSightingAccountsForEachMiss(t *testing.T) {
 			if tc.needsUser && os.Geteuid() == 0 {
 				t.Skip("root reads a directory whatever its mode")
 			}
-			found, seen, err := procSighting(tables, tc.fdDir(t), tc.port, 4242, blind)
+			found, seen, err := procSighting(tables, tc.procRoot(t), tc.port, 4242, blind)
 			if err != nil || found != tc.wantFound || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want %v, %+v, no error", found, seen, err, tc.wantFound, tc.want)
 			}
@@ -175,16 +206,19 @@ func TestProcSightingAccountsForEachMiss(t *testing.T) {
 func TestProcSightingOfAnFdPathThatIsNoDirectory(t *testing.T) {
 	dir := t.TempDir()
 	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), writeTable(t, dir, "tcp6", procNetTCP6Fixture)}
-	notDir := filepath.Join(dir, "fd")
-	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
+	root := writeProcRoot(t, nil)
+	if err := os.Mkdir(filepath.Join(root, "4242"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	found, seen, err := procSighting(tables, notDir, 7789, 4242, "the blind spot")
+	if err := os.WriteFile(procFdDir(root, 4242), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, seen, err := procSighting(tables, root, 7789, 4242, "the blind spot")
 	if err != nil || found || seen.ruledOut || !strings.HasPrefix(seen.saw, "/proc could not list pid 4242's descriptors (") {
 		t.Errorf("got %v, %+v, %v; want a miss naming the listing error", found, seen, err)
 	}
 	absent := filepath.Join(dir, "absent")
-	if _, _, err := procSighting([]string{absent, absent}, writeFdDir(t, fdFixture), 7789, 4242, "the blind spot"); err == nil {
+	if _, _, err := procSighting([]string{absent, absent}, writeProcRoot(t, map[int]map[string]string{4242: fdFixture}), 7789, 4242, "the blind spot"); err == nil {
 		t.Error("with neither table readable there is no answer, and that is an error")
 	}
 }
@@ -196,7 +230,7 @@ func TestProcSightingOfAnFdPathThatIsNoDirectory(t *testing.T) {
 func TestProcSightingDoesNotRuleOutOverATableItCouldNotRead(t *testing.T) {
 	dir := t.TempDir()
 	tables := []string{writeTable(t, dir, "tcp", procNetTCPFixture), t.TempDir()}
-	fdDir := writeFdDir(t, fdFixture)
+	root := writeProcRoot(t, map[int]map[string]string{4242: fdFixture})
 	for _, tc := range []struct {
 		name      string
 		port      int
@@ -208,14 +242,14 @@ func TestProcSightingDoesNotRuleOutOverATableItCouldNotRead(t *testing.T) {
 			ownerSighting{saw: "/proc lists no socket listening on this port in the socket tables it could read"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			found, seen, err := procSighting(tables, fdDir, tc.port, 4242, "the blind spot")
+			found, seen, err := procSighting(tables, root, tc.port, 4242, "the blind spot")
 			if err != nil || found != tc.wantFound || seen != tc.want {
 				t.Errorf("got %v, %+v, %v; want %v, %+v, no error", found, seen, err, tc.wantFound, tc.want)
 			}
 		})
 	}
 	t.Run("the pid's descriptors read, and none is a listener read", func(t *testing.T) {
-		noListener := writeFdDir(t, map[string]string{"0": "/dev/null", "3": "socket:[11111]"})
+		noListener := writeProcRoot(t, map[int]map[string]string{4242: {"0": "/dev/null", "3": "socket:[11111]"}})
 		want := ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port in the socket tables it could read"}
 		if found, seen, err := procSighting(tables, noListener, 7789, 4242, "the blind spot"); err != nil || found || seen != want {
 			t.Errorf("got %v, %+v, %v; want false, %+v, no error", found, seen, err, want)

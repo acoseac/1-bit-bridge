@@ -96,7 +96,7 @@ var lsofAccountCases = []lsofAccountCase{
 // user: the uid arm's ok, with lsof's account in place of a cause.
 func requireOwnedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase) {
 	t.Helper()
-	withPortOwner(t, true, nil)
+	withHiddenListener(t, true, nil)
 	c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
 	want := fmt.Sprintf("in use by a process running as this user (uid %d; %s)", os.Getuid(), tc.account)
 	if c.Status != OK || c.Summary != want {
@@ -110,7 +110,7 @@ func requireOwnedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase) {
 // and gives the advice that account leaves.
 func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase) {
 	t.Helper()
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	c := checkPort(t.Context(), "port-test", bindPort(t), pidFile)
 	if c.Status != Warn {
 		t.Fatalf("got %v (%s / %s), want warn", c.Status, c.Summary, c.Hint)
@@ -130,7 +130,7 @@ func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase)
 // than blaming a capability, and warns.
 func TestLivenessArmWithoutLsofGivesTheHostsAccount(t *testing.T) {
 	withoutLsof(t)
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	ppid := os.Getppid()
 	c := checkPort(t.Context(), "port-test", bindPort(t), writePIDFile(t, ppid))
 	if want := unseenVerdict(runtime.GOOS == "linux"); c.Status != want {
@@ -162,7 +162,7 @@ func TestLivenessArmWithoutLsofGivesTheHostsAccount(t *testing.T) {
 func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 	withLsofAnswering(t, "", 1)
 	withPIDAlive(t, true)
-	withPortOwner(t, false, nil)
+	withHiddenListener(t, false, nil)
 	pidFile := writePIDFile(t, 4242)
 	c := checkChosenPort(t.Context(), "port-test", bindPort(t), pidFile)
 	if c.Status != Fail {
@@ -246,7 +246,7 @@ func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, p procAnswer, a
 	withLsofAnswering(t, a.stdout, a.code)
 	withProcAnswering(t, p.found, p.seen, nil)
 	withPIDAlive(t, alive)
-	withPortOwner(t, owned, nil)
+	withHiddenListener(t, owned, nil)
 	listed, failed := a.name == "recorded pid listed", a.code == 2
 	missed := !listed && !failed
 	found := listed || (missed && p.found)
