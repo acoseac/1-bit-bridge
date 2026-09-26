@@ -15885,3 +15885,215 @@ group, or a user namespace also hides a same-uid process's links.
   mattered, in every other shape.
 - NC1's first run failed to build, which is "control invalid", never a
   pass. It was rerun to a build before it counted.
+
+## 2026-09-26 — doctor FAILs a port the owner probe rules its live bridge out of (#1029)
+
+#1028's Out of scope recorded row L4: `checkPort`'s liveness arm answered ok
+for a port another process of this user holds, so the runbook's
+validate-before-restart run passed an edit to such a port and the restart
+could not bind. It said `ruledOut` "already says the recorded bridge does not
+hold the port", and the chip (task_7a0b2c20) listed lsof naming other pids
+among the ruled-out cases. Both held only for the image without lsof: #1028's
+own review round 1 had made lsof never rule a pid out, so in the lsof image
+L4's sighting was not ruled out and a verdict keyed on `ruledOut` alone would
+have left it passing.
+
+### What was measured
+
+- **The mechanism.** The liveness arm (#640) is reached when the recorded
+  pid is alive and the owner probe ran cleanly without naming it. On Linux
+  it then asks `portOwnedByThisUser`, the `uid` column of
+  `/proc/net/tcp{,6}`, and answers ok if ANY listener on the port runs as
+  this uid, whatever the probe saw. On main `ruledOut` came from Windows'
+  listener table and from `/proc` where no lsof resolved, never from lsof.
+- **`ruledOut` alone would split the images.** With the verdict keyed on it
+  and no `/proc` after lsof (NC3 below), the L4 unit test
+  (`TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf`) FAILed the port in
+  the no-lsof image and passed it in the lsof image: one set of facts, two
+  verdicts, chosen by a tool (#1021's rule).
+- **End to end, main (`01422e0c`) and the fix (`474512c1`).** dido
+  (Ubuntu 26.04, Docker 29.1.3): `attrword/nolsof:1.26.6` and
+  `attrword/lsof:1.26.6`, every bridge built from the tree under test, doctor
+  as uid 1000 unless noted (`~/attrword/e2e/verdict.sh`). **Both images gave
+  the same verdict in every row, on main and on the fix:**
+
+  | row | shape | main | fix |
+  |---|---|---|---|
+  | L1 | plain bridge, doctor as its user | ok, exit 0 | same |
+  | L2 | bridge with `cap_net_bind_service=ep` (its fds denied to uid 1000) | ok (uid arm) | same |
+  | R2 | L2, doctor as root in the container | warn | same |
+  | L3 | bridge as uid 1001, doctor as uid 1000 | warn | same |
+  | L4 | bridge live on 7790, config edited to 7788, which a uid-1000 holder has | ok, exit 0 | FAIL, exit 1: "our bridge (pid 318) is still running, but lsof lists pid 342 listening on this port, and /proc shows no descriptor of pid 318 listening on this port: stop the process that holds the port, or change the address in bridge.yaml" (no lsof: "…this host has no lsof, and /proc shows no descriptor of pid 330…") |
+  | R4 | L4, doctor as root in the container | warn | same |
+  | L4r | L4, then the bridge restarted | `listen tcp :7788: bind: address already in use` | the same: the consequence the check now catches |
+  | L4i | L4, then `bridge init --yes --force` (writes `:7788` / `127.0.0.1:7789`) | exit 0, config saved with `:7788` | exit 1, port-api FAIL, config untouched |
+  | L5 | as L4, holder uid 1001 | warn, exit 0 | FAIL, exit 1 |
+  | L6 | L4 over a capability-bound bridge | ok | ok (Out of scope) |
+
+  R2 and R4 are root without CAP_SYS_PTRACE, which Docker drops: `/proc`
+  lists the directory (CAP_DAC_OVERRIDE) and every readlink of uid 1000's
+  links is refused, so nothing is ruled out and the uid arm (uid 0) does not
+  match.
+
+  The Mac (macOS 27, uid 501), main's and the fix's binaries: M1 (root's
+  Tailscale extension recorded, its 127.0.0.1:50062), M2 (a `sleep`
+  recorded, 1Password's 127.0.0.1:39127), ML1 (a live bridge over its own
+  config) and ML4 (that bridge, its config edited to 1Password's port) gave
+  the same verdict on both: warn, warn, ok, warn. M1 and M2 read exactly as
+  #1028 recorded. Nothing on macOS rules a pid out.
+
+  home-pc (Windows 11, Go 1.27.1, the elevated SSH session): W1 (sshd's pid
+  4380 recorded, 127.0.0.1:7788 held by a PowerShell `TcpListener`) warn,
+  exit 0 on main, and FAIL, exit 1 on the fix; WL1 (a live bridge over its
+  own config) ok on both; WL4 (that bridge, its config edited to the
+  PowerShell listener's port) warn on main, FAIL on the fix, the hint
+  "Windows' TCP listener table lists pid 6496 on this port: stop the process
+  that holds the port…".
+- **A zombie's `/proc/<pid>/fd` is root-owned, not absent.** On dido a
+  zombie of uid 1000 has it `root:root 0500`: EACCES to uid 1000, an empty
+  listing to root. So `procSighting` leaves a zombie possible for its own
+  user and rules it out for root.
+- **The fd walk's cost.** ReadDir plus a Readlink per descriptor, in the
+  image: 2.6–4.4 ms over 1,000 descriptors, 173–228 ms over 50,000.
+
+### Decisions
+
+- **FAIL, not warn.** A warn does not fix the defect: `bridge doctor`
+  exits 1 only on a FAIL (warns print "all clear." and exit 0), and `bridge
+  init`'s preflight refuses only on a FAIL, which L4i measured. It is also
+  the fact the branch below already FAILs. With no live pid of ours the
+  port is "another process's", and a live pid the probe ruled out holds no
+  listener on the port on any address, since `listenerSockets` takes every
+  LISTEN row on the port whatever its address. Liveness excused a held port
+  only because attribution was impossible, and here it succeeded. And
+  `checkChosenPort` already refused a ruled-out pid.
+- **Ahead of the uid arm.** The uid arm is where L4's ok came from, and it
+  cannot tell the capability-bound bridge from another process of the same
+  user. It now answers only where the probe could not rule the bridge out,
+  which is the case it exists for.
+- **`/proc` after a CLEAN lsof miss, not in lsof's place.** `/proc` reads the
+  recorded pid's own descriptors under the kernel check lsof's readlinks
+  meet (`proc_fd_access_allowed`, ptrace's read check), so it adds no reading
+  lsof lacked, only the one question lsof does not ask. A match is a match.
+  A ruling-out is joined to lsof's account, keeping the pids lsof named and
+  dropping the blind spot. Anything else leaves lsof's account as it was. A
+  failed or timed-out lsof asks nothing more, so the wedged-mount path, and
+  `checkPort`'s warn for a broken probe, are unchanged. `/proc` first on
+  Linux stays its own change (task_e8a63349); this does close #1028's L5
+  gap as a side effect, since L5 now reads the same in both images.
+- **Windows' liveness picks only the hint now.** Its listener table rules
+  out every pid it does not name, so a held port FAILs whether or not the
+  recorded pid is alive. `pidAlive`'s docblock said erring towards alive
+  "costs a hint", as the reason a terminated-but-openable process was
+  acceptable, and that is now the whole of it.
+- **The tests stop depending on the host.** `procOwnerFunc` indirects the
+  `/proc` attribution, as `ownerProbeFunc` does the probe. Tests that record
+  pid 4242 on Linux were asking the host about a pid that may be a readable
+  process of the test's user, which `/proc` rules out. And Windows' table
+  rules 4242 out, so the liveness-arm unit tests were grading a different
+  arm there. `withLsofAnswering` sets a `/proc` answer that adds nothing, and
+  those unit tests force an unattributed miss (`withUnattributedMiss`).
+- **The seam table's name.** `…PortVerdictsIgnoreTheSighting` became
+  `TestPortVerdictsReadOnlyRuledOutFromTheSighting`, since one verdict now
+  reads the sighting. #1028's entry keeps the old name with its prefix
+  elided.
+
+### Tests and controls
+
+- `liveness_account_test.go`: `TestPortCheckFailsAPortTheLiveBridgeIsRuledOutOf`
+  is L4 with the real probe and the REAL uid arm. The test's parent is
+  recorded, and on Linux a precondition asserts that the uid scan sees this
+  process's listener as this user's. FAIL where the platform's probe rules
+  the parent out, warn where it cannot.
+  `TestLivenessArmNamesTheListenerThePlatformProbeSaw` and
+  `TestChosenPortRefusalOfAPortTheProbeSawAnotherHold` take the joined
+  account on Linux with lsof. `TestPortVerdictsReadOnlyRuledOutFromTheSighting`
+  has two ruled-out accounts in different words and two hedged ones (24 rows).
+- `liveness_account_notwindows_test.go`: `TestPortVerdictsDoNotDependOnTheAccount`
+  gains a `/proc` dimension, 5 lsof answers × 3 `/proc` answers × alive ×
+  owned (60 rows). `TestLsofMissAsksProcForASecondOpinion` pins when `/proc`
+  is asked (after a clean miss, never after a match or a failure) and what
+  each answer does. `TestProcSecondOpinionOnAnLsofMiss` (`sighting_test.go`)
+  covers the pure merge on every platform.
+- `nolsof_notwindows_test.go`: `TestPortCheckWithoutLsofStillAnswersALiveRecordedPID`
+  forces `/proc`'s answer and gains the two ruled-out rows. `chosen_port_test.go`
+  gains a ruled-out row, (Fail, Fail).
+- **Red first.** On the Mac, main plus the new tests and the
+  behaviour-neutral seam failed 35 subtests in five tests: exactly the rows
+  where the account rules the pid out or `/proc` sees it after lsof missed.
+  On dido the same tree also failed the real-probe tests:
+  `…PlatformProbeSaw`, `…RuledOutOf` ("got ok (in use by a process running
+  as this user (uid 1000; this host has no lsof, and /proc shows no
+  descriptor of pid 1 …)), want fail") and
+  `TestLivenessArmWithoutLsofGivesTheHostsAccount` in both images, and
+  `…AnotherHold` in the lsof image. On home-pc it failed `…PlatformProbeSaw`
+  and `…RuledOutOf`.
+- Negative controls against `474512c1`, each restored and the tree checked
+  clean before the next; every one built:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | the ruled-out FAIL disabled (`if false && seen.ruledOut`) | 13 subtests red in four tests: every alive ruled-out row |
+  | NC2 | the uid arm asked BEFORE the ruling-out | exactly the 7 ruled-out rows whose listener runs as this user; on dido `…RuledOutOf` too, in both images |
+  | NC3 | no `/proc` second opinion | `TestLsofMissAsksProcForASecondOpinion` and the lsof table's `/proc` rows; on dido the three real-probe tests in the lsof image only |
+  | NC4 | a failed lsof falls through to `/proc` | `TestLsofMissAsksProcForASecondOpinion`, the lsof table, and `TestChosenPortFailsWhenTheOwnerProbeFails` |
+  | NC5 | a `/proc` match not taken | `TestProcSecondOpinionOnAnLsofMiss`, `TestLsofMissAsksProcForASecondOpinion`, the lsof table |
+  | NC6 | the joined account keeps lsof's blind spot | `TestProcSecondOpinionOnAnLsofMiss`, `TestLsofMissAsksProcForASecondOpinion` |
+  | NC7 | `/proc`'s error ignored | `TestProcSecondOpinionOnAnLsofMiss` |
+  | NC9 | the no-lsof path bypasses the seam | `TestPortCheckWithoutLsofStillAnswersALiveRecordedPID` |
+  | NC10 | the second opinion bypasses the seam | `TestLsofMissAsksProcForASecondOpinion`, the lsof table |
+  | NC-W | home-pc: NC1 | `…PlatformProbeSaw`, `…RuledOutOf`, the chosen-port row, the seam table |
+
+  NC8 was planned as `withLsofAnswering` without its neutral `/proc` answer.
+  It was not run: it passes on every host where pid 4242 is not a readable
+  process of the test user, so it cannot show red, and what the seam buys
+  is recorded above instead.
+- Gate at `474512c1`: vet 0, `make test` 50 ok (the doctor package re-run
+  `-count=1`), build-all 0. `go test -race -count=1 ./internal/doctor/
+  ./cmd/bridge/` in both dido images as uid 1000: ok. `go test -count=1
+  ./internal/doctor/` on home-pc: ok.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the design before
+code, with `checkPort`, the probe and the #1028 entry attached. It agreed on
+FAIL, on the second opinion (lsof and `/proc` readlink meet the same check),
+and on a `/proc` match after an lsof miss being a match; and that a healthy
+bridge grading its own config's port cannot be ruled out when doctor shares
+its pid and network namespaces. Two suggestions were declined, both on
+measurement. It proposed reading a missing `/proc/<pid>/fd` as ruled out
+because a zombie's is missing, but a zombie's is root-owned, and "no such
+pid here" is also what a `/proc` of another pid namespace says. It proposed
+bounding the walk with the context, and the walk costs 173–228 ms over
+50,000 descriptors, has run unbounded without lsof since #1027, and reads no
+filesystem.
+
+### Out of scope
+
+- **L6: L4 over a capability-bound bridge stays ok**, and it is the NUC's
+  shape. `/proc` cannot read a dumpable=0 bridge, so nothing rules it out,
+  and the uid arm answers for the holder lsof named. Closing it needs the
+  uid arm to answer only for a listener no process this user can read
+  holds, or lsof's named holders to account for every listener on the port.
+- **macOS: L4 stays a warn, exit 0** (ML4). lsof there sees every process
+  of this user, so its miss about a same-user recorded pid could rule the
+  pid out, given the pid's uid (`kern.proc.pid`). `netstat -anv` (#1028's
+  Out of scope) would answer it too.
+- **A re-init that changes a port now FAILs the OLD one** when a live
+  bridge's config names a port another process holds, since the preflight
+  grades the install's current ports. The stopped-bridge twin already did.
+  It is the class #1027 recorded, the preflight grading ports init will not
+  write (task_95e50ccb).
+
+### Process notes
+
+- The chip's premise was one review round stale: it listed lsof among the
+  ruled-out cases, which #1028's round 1 had removed. Reading the merged
+  code before designing is what showed that keying on `ruledOut` alone
+  would have fixed L4 in one image and not the other.
+- W1's first run FAILed on main AND on the fix, which reads like a working
+  fix if only the fix's column is read. The row disagreed with #1028's
+  record for main (warn), and the harness was the cause: its `Set-Content`
+  wrote no pid file, so both ran the no-pid branch. **When the control
+  column disagrees with the recorded baseline, suspect the harness before
+  the product.**

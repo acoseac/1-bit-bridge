@@ -2135,16 +2135,18 @@ what it claimed**, and none of it had a failing test.
   unchanged one was already graded correctly.
 - **The "is it us?" fallback must NOT reach a port the run is choosing.**
   `checkPort` answers ok or warn — never fail — whenever the pid in
-  `OwnPIDFile` is alive: an unattributable port warns, and one merely owned
-  by this uid is reported **ok** (the capability-bound `:443` case it exists
-  for). A live bridge binds what ITS config says, so it cannot legitimately
-  own a port absent from it; left set, an occupied NEW port read as "our
-  bridge is still running", `HasFail` stayed false, and the config saved
-  anyway — the check passing because the thing it guards is absent, one
-  level in from the defect the pass exists for. Clear `OwnPIDFile` for a
-  changed port, except where no config says which ports the running bridge
-  binds: there it stays, confined to attribution (`OwnPIDPortsUnknown`,
-  the "…over a config that is there and does not load" bullet below).
+  `OwnPIDFile` is alive and the owner probe could not rule it out (one it
+  rules out FAILs: the #1029 bullet below): an unattributable port warns,
+  and one merely owned by this uid is reported **ok** (the capability-bound
+  `:443` case it exists for). A live bridge binds what ITS config says, so
+  it cannot legitimately own a port absent from it; left set, an occupied
+  NEW port read as "our bridge is still running", `HasFail` stayed false,
+  and the config saved anyway — the check passing because the thing it
+  guards is absent, one level in from the defect the pass exists for.
+  Clear `OwnPIDFile` for a changed port, except where no config says which
+  ports the running bridge binds: there it stays, confined to attribution
+  (`OwnPIDPortsUnknown`, the "…over a config that is there and does not
+  load" bullet below).
   `RunPortChecks` takes WHICH ports to grade, because port 0 is a legal
   value with its own verdict and cannot double as "skip this one".
 - **…and clearing it did nothing on a host without lsof, because the
@@ -2300,22 +2302,60 @@ what it claimed**, and none of it had a failing test.
   summary gives the account. Both hints say to stop the holder when the
   pid is ruled out, and keep the hedge and the blind spot when it is not;
   the zero `ruledOut` is the hedge, the safe fallback for a probe that sets
-  nothing. **The verdicts are untouched, and pinned apart from the text**:
-  `TestPortVerdictsDoNotDependOnTheAccount` walks both ladders over every
-  lsof answer and passed on main before the accounts existed, and
-  `TestPortVerdictsReadOnlyRuledOutFromTheSighting` feeds every kind of account through
+  nothing. **#1028 left the verdicts untouched, and pinned them apart from
+  the text**: `TestPortVerdictsDoNotDependOnTheAccount` walks both ladders
+  over every lsof answer and passed on main before the accounts existed,
+  and `TestPortVerdictsReadOnlyRuledOutFromTheSighting` (then
+  `…IgnoreTheSighting`) feeds every kind of account through
   `ownerProbeFunc`, a ruled-out one included. Only Windows and Linux make
   one for real, so without the seam a verdict keyed on it passed every
-  test on a Mac (NC6). #1021's rule, that
-  a missing tool may explain a verdict and never decides one, has a
+  test on a Mac (NC6). Since #1029 one verdict reads the sighting, and the
+  two tests pin that it reads `ruledOut` and nothing else. #1021's rule,
+  that a missing tool may explain a verdict and never decides one, has a
   second half: **the explanation is the one the probe established.** Root
   gets no blind spot, because inside a Docker container it lacks
-  CAP_SYS_PTRACE and "root sees everything" is false too. **One ok is
-  wrong, and left for its own change**: a bridge live on its old port,
-  with the config edited to a port another process of this user holds,
-  gets the uid arm's ok, so the runbook's validate-before-restart run
-  passes and the restart cannot bind. The line now says lsof names that
-  process.
+  CAP_SYS_PTRACE and "root sees everything" is false too. #1028 found one
+  ok wrong and left it for its own change, which is the next bullet.
+- **…and a live recorded bridge the probe RULES OUT is not ours on that
+  port, so the port FAILs** (#1029). The uid arm (#640) answered ok on
+  Linux for a held port whose listener runs as this user, whenever the
+  recorded pid was alive and the probe had not named it. It exists for the
+  capability-bound bridge, whose descriptors no unprivileged probe can
+  read, and it answered the same way for a port ANOTHER process of this
+  user holds. #1028's row L4 is that shape: a bridge still running on its
+  old ports, with its config edited to a port something else holds. It
+  read ok, `bridge doctor --config` exited 0, and the restart could not
+  bind, which is #970's defect in the ordinary ladder. The sighting
+  already says when what the probe saw excludes the pid (`ruledOut`):
+  `/proc` read every one of its descriptors and none is a listener on the
+  port, or Windows' table names every listener and the pid is not among
+  them. Such a pid holds no listener on that port on any address, so
+  `checkPort` FAILs it, AHEAD of the uid arm. That is the fact the
+  no-live-pid branch below it already FAILs, and `checkChosenPort` already
+  refused a ruled-out pid. **FAIL, not warn**: `bridge doctor` exits 1
+  only on a FAIL (a warn prints "all clear." and exits 0), and `bridge
+  init`'s preflight refuses only on one. A warn would have fixed the
+  wording and not the defect. On main, the re-init over L4 saved the held
+  `:7788`. **A missing tool must not decide it, so on Linux the probe asks
+  `/proc` after lsof** (`procSecondOpinion`). lsof lists only the
+  processes this user may inspect, so its miss never rules a pid out, and
+  keyed on `ruledOut` alone (NC3) L4 FAILed where lsof is absent and
+  passed where it is installed. After a CLEAN lsof miss the probe reads the
+  recorded pid's descriptors through `/proc`, under the kernel check
+  lsof's readlinks meet. A match is a match, a ruling-out is joined to
+  lsof's account, and anything else leaves lsof's account as it was. A
+  failed lsof asks nothing more. On dido, L4 and L5 now FAIL in both
+  images where main let both through (an ok and a warn, both exit 0), the
+  capability-bound L2 keeps its ok,
+  and root in a container (no CAP_SYS_PTRACE) rules nothing out. **Two
+  shapes stay open.** One is L4 over a capability-bound bridge, the NUC's
+  shape: `/proc` cannot read that bridge, so the uid arm still answers
+  for the holder lsof named. The other is L4 on macOS, where lsof would
+  see a same-user pid but nothing reads the pid's uid. **A test that
+  records a pid of its own choosing forces what the probe says about it**
+  (`procOwnerFunc`, `withUnattributedMiss`). On Linux, pid 4242 may be a
+  readable process of the test's own user, and Windows' table rules it
+  out, so a test left to the host was grading a different arm.
 - **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
   can be DIALED, and they differ on exactly port 0.** `config.validatePort`
   accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
