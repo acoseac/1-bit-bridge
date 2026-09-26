@@ -47,6 +47,11 @@ func pidListensOnPort(ctx context.Context, port, pid int) (bool, ownerSighting, 
 	if lsofPath == "" {
 		return false, ownerSighting{saw: nothingElseMatches}, nil
 	}
+	// Linux's guard: no pid of a process is <= 0, and `-p 0` would ask about
+	// kernel_task.
+	if pid <= 0 {
+		return false, ownerSighting{saw: fmt.Sprintf("there is no pid %d to ask lsof about", pid)}, nil
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	out, err := lsofCommand(probeCtx, lsofPath, "-nP", "-a", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:LISTEN", "-F", "n").Output()

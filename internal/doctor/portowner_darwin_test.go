@@ -175,6 +175,28 @@ func TestOwnListenersRunsReadWhatLsofAnswered(t *testing.T) {
 	}
 }
 
+// TestOwnListenersAsksNothingAboutNoPID: no process has a pid <= 0, and
+// `-p 0` would ask lsof about kernel_task, so the look answers without
+// running lsof, as Linux's does without reading /proc. The stand-in lists a
+// record for the pid it is asked about, which would rule it out were it run.
+func TestOwnListenersAsksNothingAboutNoPID(t *testing.T) {
+	for _, pid := range []int{0, -1} {
+		ran := false
+		withLsofAnswering(t, fmt.Sprintf("p%d\nf4\nn127.0.0.1:7890\n", pid), 0)
+		orig := lsofCommand
+		lsofCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			ran = true
+			return orig(ctx, name, args...)
+		}
+		found, seen, err := pidListensOnPort(t.Context(), 7788, pid)
+		lsofCommand = orig
+		if ran || err != nil || found || seen.ruledOut {
+			t.Errorf("pid %d: lsof run %v; got %v, %+v, %v; want nothing asked, neither found nor ruled out",
+				pid, ran, found, seen, err)
+		}
+	}
+}
+
 // TestOwnListenersRunHonoursTheCallersContext: the second look runs lsof
 // again, and lsof stat()s mount points before it reads any process, so a
 // wedged network mount holds this run as it holds the first. The caller's
