@@ -15270,3 +15270,189 @@ returned would run the parent's half inside the child).
   package at `-race -count=20 -shuffle=on`, under 24 `yes` burners on 12
   cores, passed in 40 s and left no shell. CI: 20 of 20 checks passed,
   `test (windows-latest)` among them.
+
+## 2026-09-26 — the TCP-and-UDP port draw takes random numbers (#1026)
+
+`TestServeShutdownDrainsTheTailnetBesideTheLAN` failed once on CI's
+`test (windows-latest)` leg, gate run 36223471924 attempt 1 (PR #1025, head
+`d700e95b`, a docs-only commit; the code had passed on the previous head, and
+attempt 2 passed): `no loopback port free on both TCP and UDP in 20 draws`, in
+0.01 s. Of the last 45 gate runs it is the only one that failed: 37 passed
+first time and 7 were cancelled by a newer push. The helper,
+`freeLoopbackTCPAndUDPAddr` (#1010), drew a TCP port on `127.0.0.1:0`, bound
+the same number on UDP while the listener was open, and on a refusal drew
+again; the UDP error was swallowed, so the log did not say why twenty draws in
+a row had failed. Measured on a Windows 11 host (`<HOMEPC-SSH>`), on macOS,
+on Linux (dido) and on seven GitHub Windows runners, then fixed by drawing
+random numbers from a range no allocator uses.
+
+### What was measured
+
+- **Allocation order.** `net.Listen("tcp", "127.0.0.1:0")` and
+  `net.ListenPacket("udp", "127.0.0.1:0")`, thirty of each:
+  - Windows 11 25H2 (build 26200): TCP 52526, 52527, … and UDP 65236,
+    65237, …, sequential, each protocol from a cursor of its own. Holding
+    the listeners open changes nothing (52556, 52557, …).
+  - The runner (Windows Server 2025, image `windows-2025-vs2026`
+    20260922.246.2): TCP 50049, 50050, … and UDP 59109, 59110, …, the same.
+  - macOS 27.0 (portrange 49152–65535): TCP sequential (50103, 50104, …),
+    UDP random.
+  - Linux 7.0 on dido (`ip_local_port_range` 32768–60999): both random.
+  So on Windows twenty TCP draws are twenty consecutive numbers, each then
+  tested on UDP.
+- **The hypothesis that Windows refuses a UDP bind while the same-numbered
+  TCP listener is open is false.** With the listener open, 2000 of 2000 UDP
+  binds succeeded on Windows 11. On the runner 1998 of 2000 did, and with
+  the listener closed the binds were refused just as often and with the same
+  two errors (one WSAEADDRINUSE, one WSAEACCES).
+- **TIME_WAIT does not block a listen.** 200 client connections closed first
+  (the client ends in TIME_WAIT): a later `net.Listen` on each of those
+  numbers succeeded 200 of 200, and a UDP bind 200 of 200, on both Windows
+  hosts. Measured because a UDP-first draw would bind TCP on numbers the TCP
+  cursor had recently handed out.
+- **A full bind sweep, 1024–65535, each protocol.** Windows 11: 11 UDP and 17
+  TCP numbers refused, the longest run 6 (the RPC endpoints 49664–49669, TCP).
+  The runner: UDP refused 208, 200 of them the run **56163–56362, all
+  WSAEACCES (10013), every one of which TCP binds**; TCP refused 226, among
+  them **49698–49897, all WSAEACCES, every one of which UDP binds**, and the
+  RPC endpoints 49664–49668. `netsh int ipv4 show excludedportrange` names
+  both blocks, as two 100-port ranges each, not administered (so reserved by
+  a service, not by `netsh add`): TCP 80, 5985, 5986, 47001, 49698–49797,
+  49798–49897; UDP 56163–56262, 56263–56362. `docker`, `hns`, `vmcompute`,
+  `vmms` and `winnat` were running. On the Windows 11 host the only
+  exclusion in the dynamic range is an administered 50000–50059 on both
+  protocols, and an explicit bind there succeeds.
+- **Where the blocks land.** Seven runners in seven regions (the full probe
+  and two matrix runs of three): the TCP block was 49698–49897 on six of
+  seven; the UDP block started at 56163, 58047, 55179, 49509, 58788 and 54656
+  on those six, always 200 long (on eastus2 its 49509–49708 overlaps the TCP
+  block by eleven numbers). The seventh VM, in northcentralus, had neither.
+- **The failure, reproduced on the runner.** The probe drew on one cursor
+  until its next twenty numbers all lay inside the other protocol's block,
+  then ran a draw from that cursor. On three runners of three the shipped
+  TCP-first draw was refused twenty times, every one WSAEACCES, and a
+  UDP-first draw in front of the TCP block was refused twenty times the same
+  way. The first matrix run parked the cursor three numbers short of the
+  block, so each draw's first number lay outside it and succeeded; that
+  clean pass said nothing, and the second run parked it inside.
+- **Under the suite.** One runner ran `go test -timeout 30m ./...`, the
+  gate's command, with a probe calling both draws every ~130 ms and sweeping
+  UDP every 10 s. The UDP block stood the whole run with no socket holding
+  it. Outside one burst the TCP cursor moved about 14 numbers a second; in
+  the burst it went from 54684 to 49231, through the wrap, in 9.3 s (about
+  1,170 a second), across the UDP block. All 3,674 probe iterations, a TCP-first and a UDP-first draw each,
+  succeeded: no call landed while the cursor stood in front of the block.
+  The UDP cursor wrapped once in 10 s (about 13,500 binds). The suite
+  passed.
+- **The odds.** A call fails when the TCP cursor's next twenty numbers lie in
+  the block: 181 of 16,384 positions, 1.1% of calls on a VM that has one. The
+  Windows leg calls the helper three times, so about 3% of runs, against 1 in
+  40 observed.
+- **Random numbers from 20000–32767**, each bound on both protocols at once:
+  5,000 calls on each of six runners rejected no draw; 5,000 on the Windows
+  11 host rejected one draw and failed none; 5,000 on macOS rejected none.
+
+### Decisions
+
+- **Random numbers from 20000–32767, bound on TCP and UDP at once.** Random
+  numbers are independent draws, so a refused run costs only the draws that
+  land in it, where a cursor spends every draw inside it. The range lies
+  below every target platform's ephemeral range (Linux hands ports out from
+  32768, Windows and macOS from 49152), so no allocator can hand the number
+  to anything between the draw and serve's bind: the gap `freeLoopbackPort`
+  leaves narrows to explicit binds of the same number. The floor of 20000 is
+  arbitrary: a number something already holds costs one draw.
+- **Weighed and declined:**
+  - **Draw UDP first.** The runner reserves a TCP-only block too, and a
+    UDP-first draw in front of it failed twenty times on three runners of
+    three. It moves the failure; it does not remove it.
+  - **Alternate the two cursors.** Both cursors would have to sit in front
+    of the other protocol's block at once, which is rarer, not
+    independent. And a UDP-drawn number lies anywhere ahead of the TCP
+    cursor, which moved about 1,170 numbers a second in a burst, so it can
+    be handed out before serve binds it.
+  - **More draws.** The block is 200 long, so any count below 201 still
+    fails when the cursor starts at its front, and a longer block defeats a
+    larger count. The draws were never random, so raising the count is not
+    the fix.
+  - **Skip the ranges `netsh` excludes.** Windows-only, parses a localized
+    tool's text, and misses a run of sockets something holds, which is the
+    same shape to a cursor.
+  - **Random numbers from the ephemeral range.** Independent too, but a
+    number ahead of a cursor can be handed to another process before serve
+    binds it, for the reason given against alternating.
+- **The failure names every address it tried and the error each got.** The
+  old message said only "20 draws", which is why the cause took a probe on
+  the runner to find.
+- **The helper moved to its own file**, `loopback_tcp_udp_port_test.go`,
+  beside its tests; `lan_http3_shutdown_test.go` keeps its consumers.
+
+### Tests and controls
+
+- `TestTheTCPAndUDPPortDrawSurvivesARunOfRefusedUDPNumbers` holds UDP on the
+  200 numbers after the TCP cursor, requires the next TCP draw to land among
+  them (else skips: Linux draws at random, so no run can sit in its path),
+  then requires the draw to find an address that binds on both.
+  `TestTheTCPAndUDPPortDrawsAreIndependent` holds the bottom third of a
+  60-number range and draws twenty numbers from it: a walk up from the
+  bottom fails every time, independent draws about once in 3.5 billion.
+  `TestTheTCPAndUDPPortDrawNamesEveryRefusal` holds a four-number range whole
+  and requires a failure naming six refused binds, all in the range.
+- **Red first**, `3d1b5223`: the helper made error-returning, its algorithm
+  unchanged. The first test failed 5 of 5 on macOS and 3 of 3 on the Windows
+  11 host, each naming twenty consecutive refused numbers, in 0.00 s and
+  0.01 s.
+- Controls, each applied to `b0394ada` in a scratch worktree and restored
+  (tree `aa86a9cb`, clean after each), `-count=3`:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | numbers from the TCP cursor, the old draw | the run test and the message test, 3 of 3, on macOS and on Windows 11 |
+  | NC2 | a walk up the range from its bottom | the independence test, 3 of 3 |
+  | NC3 | the failure no longer lists the draws | the message test, 3 of 3 |
+  | NC4 | UDP never bound | the message test 3 of 3, the independence test 1 of 3 |
+
+- On the final tree each of the three tests passes 50 of 50 on Windows 11
+  and 20 of 20 on macOS, and the helper's three consumers
+  (`TestServeShutdownIsBoundedByALANHTTP3HandlerThatIgnoresItsContext`,
+  `TestServeErrorExitIsBoundedByALANHTTP3HandlerThatIgnoresItsContext`,
+  `TestServeShutdownDrainsTheTailnetBesideTheLAN`) pass twice each on both.
+
+### Consult
+
+`consult.py` (gemini-3.8-flash) over the helper, the measurements and three
+questions. No change followed. It knew of no Windows mechanism that reserves
+numbers in 20000–32767 by default: Hyper-V, WinNAT, HNS and WSL2 take their
+blocks from the dynamic range unless an administrator lowers its start. It
+saw no prompt or privilege hazard in binding loopback numbers there, and it
+ranked alternating cursors, parsing the exclusions, and handing serve
+pre-bound sockets below the random draw (the last needs a production API
+change for a test helper). Declined, with the evidence: "Go sets
+`SO_EXCLUSIVEADDRUSE` on Windows listeners". Go 1.26.6's
+`setDefaultListenerSockopts` in `net/sockopt_windows.go` sets nothing ("Windows
+will reuse recently-used addresses by default"), which is also why a listen
+on a number with a client end in TIME_WAIT succeeded above.
+
+### Out of scope
+
+- **serve's own LAN UDP bind** takes the configured port. On a Windows host
+  whose WinNAT has reserved that number for UDP alone it logs `Failed to bind
+  LAN UDP socket, running HTTP/2 only` and serves HTTP/2. The reservations
+  fall in the dynamic range, so only a port chosen there is exposed; the
+  default 7788 is not.
+- **`freeLoopbackPort`** draws one protocol and binds that protocol, so the
+  sequential cursor costs it nothing.
+- **The probe** was a throwaway workflow on the `probe/windows-port-draws`
+  branch, never merged; the branch is deleted, and its runs (36225107676,
+  36225714153, 36225791068) are the record above.
+
+### Process notes
+
+- **A probe that passes has to be shown able to fail.** The first
+  reproduction on the runner passed on every VM because the cursor was
+  parked three numbers short of the block (What was measured). A pass says
+  nothing until the parked position is compared with the block's first
+  number.
+- **zsh does not word-split an unquoted variable**, so `$S cmd` with
+  `S="ssh -S … host"` runs a command named by the whole string; a wrapper
+  script carried the multiplexed connection instead.
