@@ -2,6 +2,11 @@
 
 package doctor
 
+import (
+	"fmt"
+	"os"
+)
+
 // portOwnedByThisUser is the non-Linux stub for checkPort's last-resort
 // port attribution. It always answers "don't know" so the caller falls
 // through to its Warn.
@@ -27,5 +32,23 @@ func portOwnedByThisUser(int) (bool, error) { return false, nil }
 // (GetExtendedTcpTable, doctor_windows.go) and never calls it.
 //
 // (false, nil) is "asked and got no match", lsof's own answer for a port it
-// cannot attribute.
-func pidListensOnPort(int, int) (bool, error) { return false, nil }
+// cannot attribute. The sighting says nothing looked, which leaves the
+// recorded bridge possible; the caller puts the missing lsof in front of it.
+func pidListensOnPort(int, int) (bool, ownerSighting, error) {
+	return false, ownerSighting{saw: "nothing else here matches a process to a port"}, nil
+}
+
+// blindSpot is what lsof cannot see off Linux, for the account of a port it
+// did not attribute (ownerSighting.blind): run by anyone but root, macOS's
+// lsof lists only that user's processes, since the kernel gives a process's
+// descriptors to its own user and to root. Measured 2026-09-26 on macOS 27:
+// `lsof -iTCP -sTCP:LISTEN` run as a user leaves out the listeners of root's
+// launchd and kdc, which `netstat -anv` shows. Windows compiles this and
+// never calls it: its probe has no blind spot (listenerTableSighting).
+func blindSpot() string {
+	uid := os.Geteuid()
+	if uid == 0 {
+		return ""
+	}
+	return fmt.Sprintf("lsof run as uid %d rather than root sees only that user's processes", uid)
+}

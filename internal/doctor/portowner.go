@@ -2,8 +2,10 @@ package doctor
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -177,27 +179,40 @@ func listenerSockets(paths []string, port int) (map[string]bool, error) {
 }
 
 // fdDirHoldsSocket reports whether any descriptor in fdDir, a process's
-// /proc/<pid>/fd, links to one of sockets.
+// /proc/<pid>/fd, links to one of sockets (held), and when none does,
+// whether every descriptor could be read (readAll).
 //
 // An inode names one socket, so a match proves the process holds that
 // listener; it cannot come from another process's socket. A directory that
-// cannot be listed answers false, as lsof's "ran, matched nothing" does:
-// the process is gone, or belongs to another user, or runs with dumpable=0
-// (a binary granted cap_net_bind_service), and the kernel denies its fd
-// table to an unprivileged observer. That is the case checkPort's liveness
-// arm exists for, so it must reach that arm rather than read as a broken
-// probe. A descriptor closed between the listing and its readlink is
-// skipped for the same reason.
-func fdDirHoldsSocket(fdDir string, sockets map[string]bool) bool {
+// cannot be listed returns its error and no match, as lsof's "ran, matched
+// nothing" does: the process is gone, or belongs to another user, or runs
+// with dumpable=0 (a binary granted cap_net_bind_service), and the kernel
+// denies its fd table to an unprivileged observer. procSighting tells those
+// apart for the account and never passes the error on, because that is the
+// case checkPort's liveness arm exists for, and it must reach that arm
+// rather than read as a broken probe.
+//
+// A directory can list and still refuse its links: listing takes the
+// process's uid, and a readlink the kernel's full ptrace read check, which
+// also compares the groups. Such a descriptor clears readAll, since the
+// socket may be behind it. One closed between the listing and its readlink
+// does not: it is no longer a socket the process holds.
+func fdDirHoldsSocket(fdDir string, sockets map[string]bool) (held, readAll bool, err error) {
 	entries, err := os.ReadDir(fdDir)
 	if err != nil {
-		return false
+		return false, false, err
 	}
+	readAll = true
 	for _, e := range entries {
 		link, err := os.Readlink(filepath.Join(fdDir, e.Name()))
-		if err == nil && sockets[link] {
-			return true
+		switch {
+		case err == nil:
+			if sockets[link] {
+				return true, readAll, nil
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			readAll = false
 		}
 	}
-	return false
+	return false, readAll, nil
 }
