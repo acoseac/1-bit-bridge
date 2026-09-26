@@ -211,18 +211,28 @@ func TestOrphanSidecarSweeperWalksTheLiveVariantsDir(t *testing.T) {
 }
 
 // TestOrphanSidecarSweeperRefusesAnEmptyRoot — a live provider can answer
-// "" (cmd/bridge's returns it on a nil config snapshot), and WalkDir("")
-// walks the process working directory. The rule every directory reaper in
-// this tree follows: an empty root is a refusal, never a walk.
+// "" (cmd/bridge's returns it on a nil config snapshot), a nil one answers
+// nothing, and neither may sweep the working directory. The reason this
+// used to give, that WalkDir("") walks the working directory, is false: it
+// visits "" with an lstat ENOENT (measured with go1.26.6 on macOS, Linux
+// and Windows). So the test passed with the refusal deleted, from a working
+// directory with no sidecar in it. The hazard is a root RESOLVED before the
+// walk, as #959 made the CLI sweeps do (resolveSidecarRoot), since
+// filepath.EvalSymlinks("") is ".". So the working directory here holds a
+// sidecar-shaped orphan past its grace, which such a sweep would unlink.
 func TestOrphanSidecarSweeperRefusesAnEmptyRoot(t *testing.T) {
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow("/nowhere")}, staticDir(""), time.Hour)
-	s.gracePeriodForTest = 1 * time.Nanosecond
-	if n := s.tick(context.Background()); n != 0 {
-		t.Fatalf("tick with no root unlinked %d, want 0", n)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	orphan := seedTestSidecarTree(t, cwd, "t", 1)[0]
+	for name, provider := range map[string]func() string{"an empty answer": staticDir(""), "a nil provider": nil} {
+		s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow("/nowhere")}, provider, time.Hour)
+		s.gracePeriodForTest = 1 * time.Nanosecond
+		if n := s.tick(context.Background()); n != 0 {
+			t.Errorf("%s: tick unlinked %d, want 0", name, n)
+		}
 	}
-	s2 := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow("/nowhere")}, nil, time.Hour)
-	if n := s2.tick(context.Background()); n != 0 {
-		t.Fatalf("tick with a nil provider unlinked %d, want 0", n)
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("a sidecar-shaped file in the working directory was unlinked: %v", err)
 	}
 }
 

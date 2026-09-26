@@ -233,6 +233,8 @@ func resolveSidecarRoot(dir string) (string, error) {
 // not evidence the sidecars are gone.
 func TreeHoldsVariantSidecars(dir string) (bool, error) {
 	if dir == "" {
+		// Refused before resolveSidecarRoot: filepath.EvalSymlinks("") is
+		// ".", so an unguarded "" would walk the working directory.
 		return false, errors.New("integrity: no variants directory")
 	}
 	root, err := resolveSidecarRoot(dir)

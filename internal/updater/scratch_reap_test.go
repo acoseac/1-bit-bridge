@@ -72,14 +72,25 @@ func TestReapScratchDirs(t *testing.T) {
 	}
 }
 
-// TestReapScratchDirsRefusesEmptyRoot is the fail-closed guard.
-// os.ReadDir("") reads the process working directory, and this function
-// deletes what it matches there — so a misconfigured or unset DataDir
-// must be a no-op, not a sweep of wherever the bridge happens to run.
-// Same shape as backup.ReapOrphans' empty-root refusal.
+// TestReapScratchDirsRefusesEmptyRoot pins that an unset DataDir never
+// sweeps the working directory. It used to give the reason as
+// os.ReadDir("") reading the working directory, which is false (it fails
+// with ENOENT, measured with go1.26.6 on macOS, Linux and Windows). It
+// asserted only the count, from a working directory with nothing in it to
+// reap, so it passed with the guard deleted and would have passed a sweep
+// of the working directory as well. The real hazard is a root resolved
+// before the listing: filepath.Clean("") is ".", and filepath.Abs("") is
+// the working directory. So the working directory here holds an abandoned
+// install scratch dir, which such a sweep would remove.
 func TestReapScratchDirsRefusesEmptyRoot(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	stale := mkScratch(t, cwd, scratchDirPrefix+"abandoned", 3*time.Hour)
 	if got := ReapScratchDirs("", time.Now()); got != 0 {
 		t.Errorf("ReapScratchDirs(\"\") = %d, want 0", got)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("an abandoned scratch dir in the working directory was swept: %v", err)
 	}
 }
 
