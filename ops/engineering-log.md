@@ -17326,9 +17326,10 @@ latent; nothing had failed.
   been through a collection, on every platform, rather than only a test
   held past two minutes on a platform whose startup collected. A child
   that drops its listener then fails every test that uses it at once (NC1:
-  six tests on macOS; NC2: four on Linux). It is unconditional rather than
-  a knob the regression tests set, so every kernel test is a guard too; the
-  cost is one collection per child, 0.3 ms of clock in the trace above.
+  four tests on macOS; NC2: seven on Linux, five as uid 1000 and five as
+  root). It is unconditional rather than a knob the regression tests set,
+  so every kernel test is a guard too; the cost is one collection per
+  child, 0.3 ms of clock in the trace above.
 - **`collectAndFinalize` waits by the runtime's own counts**
   (`runtime/metrics`: `/gc/finalizers/{queued,executed}` and
   `/gc/cleanups/{queued,executed}`) until it has run as many as it queued.
@@ -17371,15 +17372,15 @@ kept), `runPortCheck` (holds nothing) and `internal/proctest`'s
 - Runs: macOS, go1.26.6, the new and affected tests. dido, go1.26.6: the
   whole `internal/doctor` package, plain and `-race`, as uid 1000 and as
   root, in the stock image and the lsof one: all eight ok. dido's host, as
-  root (the cgroup and uid rows, which a container cannot run), plain and
-  `-race`: pass.
+  root, plain and `-race`, the kernel tests of the undumpable child: pass,
+  the cgroup row among them, which a container cannot run.
 - Negative controls against `f376993a`, each restored and the tree checked
   clean before the next:
 
   | | mutation | result |
   |---|---|---|
-  | NC1 | `runListeningChild`'s KeepAlive deleted (macOS) | red: the new test ("port … binds again"), `TestPortCheckFailsAPortTheLiveBridgeListensBeside` (warn, want fail) and `TestOwnListenersOnTheKernel`'s four listening subtests |
-  | NC2 | `runUndumpable`'s KeepAlive deleted (dido, uid 1000) | red: the new test, `TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK` ("free"), `TestHiddenListenerOfThisUserOnTheKernel`, `TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries`; the idle-child tests stay green. Its first form left the `runtime` import behind and did not build: rerun with it removed |
+  | NC1 | `runListeningChild`'s KeepAlive deleted (macOS, the whole package) | red: the new test ("port … binds again"), `TestPortCheckFailsAPortTheLiveBridgeListensBeside` (warn, want fail), `TestOwnListenersOnTheKernel`'s four listening subtests and `TestABlindedLsofRulesNoBridgeOut`'s own-port subtest |
+  | NC2 | `runUndumpable`'s KeepAlive deleted (dido, the whole package) | red as uid 1000: the new test, `TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK` ("free"), `TestHiddenListenerOfThisUserOnTheKernel`, `TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries`, `TestAHiddenBridgesCgroupReadsWhereItsDescriptorsDoNot`. Red as root on the host: the new test, the status and cgroup-read tests, `TestPortCheckFailsAPortAnotherUIDHoldsBesideAHiddenBridge` (L7: "got ok (free …), want fail") and `TestPortCheckFailsAPortAHiddenHolderInAnotherCgroupHolds`' other-cgroup subtest. The idle-child tests stay green. Its first form left the `runtime` import behind and did not build: rerun with it removed |
   | NC3 | `collectAndFinalize` a no-op | red: the premise test. With NC1 as well, the listening child's test is **green**, which is what the premise test is for |
   | NC4 | one `runtime.GC()`, no wait; with NC1 | the child's test red 200/200, the premise test green 200/200, at GOMAXPROCS 12 and 1 |
   | NC5 | two `runtime.GC()`s, no wait; with NC1 | the same |
