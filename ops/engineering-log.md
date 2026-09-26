@@ -17266,5 +17266,7 @@ list, so only the observations are recorded.
   2", without `-a` or an add: the amend changed only the message, the
   push carried round 1 alone, and #1034 merged that way. It surfaced only
   when `gh pr merge` refused to check out main over the uncommitted file.
-  Before pushing a commit whose message names its content, read `git show
-  --stat` against the message.
+  `git show --stat` would not have caught it either: the log was already
+  in the commit, with round 1. What catches it is what was left behind:
+  `git diff HEAD --stat` must be empty before the push (CodeRabbit on
+  #1035, correcting this note's first form, which prescribed `git show`).
