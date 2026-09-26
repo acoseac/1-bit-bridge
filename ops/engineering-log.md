@@ -17270,3 +17270,128 @@ list, so only the observations are recorded.
   in the commit, with round 1. What catches it is what was left behind:
   `git diff HEAD --stat` must be empty before the push (CodeRabbit on
   #1035, correcting this note's first form, which prescribed `git show`).
+
+## 2026-09-26 — the undumpable test child keeps its listener reachable (#1036)
+
+`runUndumpable` (`hidden_bridge_linux_test.go`), the child side of
+`startUndumpable` behind the Linux kernel tests of #1030, #1032 and #1033,
+held its listener only in a local nothing read after the port. net closes
+a listener nothing references from a finalizer (`net/fd_posix.go`:
+`runtime.SetFinalizer(fd, (*netFD).Close)`), so a collection while the
+child waited would have freed the port a test records as the hidden
+bridge's or the holder's, and the test would have graded a free port.
+`runListeningChild` (#1034) had the KeepAlive from the start. Reported as
+latent; nothing had failed.
+
+### What was measured
+
+- **The runtime forces a collection two minutes after the last one only
+  once one has run.** `gcTrigger.test`'s time arm is
+  `lastgc != 0 && t.now-lastgc > forcegcperiod` (`runtime/mgc.go`,
+  go1.26.6), and sysmon, which checks it, sleeps up to
+  `forcegcperiod / 2` while every P is idle. The report's premise ("at
+  least every 2 minutes") holds only after a first collection.
+- **Collections the child runs before it says it is ready**, from
+  `GODEBUG=gctrace=1` on the doctor test binary run as the child
+  (go1.26.6):
+
+  | host | build | GOGC=100 | 75 | 50 | 25 |
+  |---|---|---|---|---|---|
+  | macOS 27, arm64 (listening child) | plain | 1 | | | |
+  | macOS 27, arm64 (listening child) | `-race` | 2 | | | |
+  | Linux, dido, container, amd64 (undumpable child) | plain | 0 | 0 | 0 | 2 |
+  | Linux, dido, container, amd64 (undumpable child) | `-race` | 0 | 0 | 1 | 3 |
+
+  At the default GOGC the Linux child waits with no collection behind it,
+  so no forced one ever comes: the unfixed child, probed every 10 s for
+  240 s, held its port throughout, and its gctrace was empty. Its startup
+  heap sits between the 1 and 4 MB first goals, so a heavier init, a
+  lower GOGC, or any collection by another cause arms it. The macOS
+  startup collects, so there the forced collection was live, which the
+  listening child's KeepAlive already covered.
+- **End to end**, the `-race` child at GOGC=50 (one startup collection),
+  probed every 10 s from a second process in the same container:
+
+  | tree | gctrace | port |
+  |---|---|---|
+  | unfixed (main `53aab556`) | `gc 1 @0.006s`, then `GC forced`, `gc 2 @120.026s` | held to 110 s, **free at 120 s** |
+  | fixed (`f376993a`) | `gc 1`, `gc 2 @0.012s (forced)` (the collection before ready), then `GC forced`, `gc 3 @121.017s` | held at every probe to 240 s |
+
+### Decisions
+
+- **The fix is `runListeningChild`'s shape**: `var l net.Listener` before
+  the `if`, `runtime.KeepAlive(l)` after the `io.Copy`.
+- **Both children collect before they say they are ready**
+  (`collectBeforeReady`), so every test grades a listener that has already
+  been through a collection, on every platform, rather than only a test
+  held past two minutes on a platform whose startup collected. A child
+  that drops its listener then fails every test that uses it at once (NC1:
+  six tests on macOS; NC2: four on Linux). It is unconditional rather than
+  a knob the regression tests set, so every kernel test is a guard too; the
+  cost is one collection per child, 0.3 ms of clock in the trace above.
+- **`collectAndFinalize` waits by the runtime's own counts**
+  (`runtime/metrics`: `/gc/finalizers/{queued,executed}` and
+  `/gc/cleanups/{queued,executed}`) until it has run as many as it queued.
+  `runtime.GC` returns once the collection has queued its finalizers, not
+  once they have run. A sentinel finalizer of its own cannot say when the
+  listener's has run: one goroutine runs finalizers a batch at a time, and
+  each batch newest first (`runtime/mfinal.go`), so a sentinel queued in
+  the same batch runs ahead of it. And cleanups, which `fd_posix.go`'s TODO
+  proposes for the netFD, run on goroutines of their own. **In practice a
+  bare `runtime.GC()` was enough**: with the KeepAlive gone, one collection
+  and no wait closed the listener before the parent's bind 200 times in
+  200 on macOS, at GOMAXPROCS 12 and 1 (NC4); its sweep loop `Gosched`s,
+  and the finalizer goroutine it readied takes the P's `runnext`. The wait
+  turns that into the counts' guarantee, at one `metrics.Read` when the
+  finalizers have already run.
+- **The premise is its own test**, in the test process:
+  `TestACollectionClosesAListenerNothingReferences` listens in a function
+  of its own (`//go:noinline`, so no variable of the caller's holds the
+  listener), keeps the port, collects, and binds the port. Without it a
+  collection that stopped closing a dropped listener would leave both
+  regression tests green over nothing (NC3).
+
+### The sweep
+
+An AST scan of the tree listed every assignment from `net.Listen*`,
+`ListenPacket`, `net.Dial*` and `tls.Listen` (76 sites) with the later uses
+of the assigned name. Every other listener is kept by a `defer`, a
+`t.Cleanup` closure that names it, a server's `Serve`, or a struct it is
+stored in, or is closed on purpose (the free-port helpers). `runUndumpable`
+was the one held by a local nothing read again while its process waited.
+The other re-executed test children: `runListeningChild` (#1034, already
+kept), `runPortCheck` (holds nothing) and `internal/proctest`'s
+`holdAsChild` (its `cmd` is referenced by the goroutine that reaps it).
+
+### Tests and controls
+
+- New: `TestAnUndumpableChildKeepsItsPortThroughACollection` (Linux),
+  `TestAListeningChildKeepsItsPortThroughACollection` and
+  `TestACollectionClosesAListenerNothingReferences` (every platform).
+- Runs: macOS, go1.26.6, the new and affected tests. dido, go1.26.6: the
+  whole `internal/doctor` package, plain and `-race`, as uid 1000 and as
+  root, in the stock image and the lsof one: all eight ok. dido's host, as
+  root (the cgroup and uid rows, which a container cannot run), plain and
+  `-race`: pass.
+- Negative controls against `f376993a`, each restored and the tree checked
+  clean before the next:
+
+  | | mutation | result |
+  |---|---|---|
+  | NC1 | `runListeningChild`'s KeepAlive deleted (macOS) | red: the new test ("port … binds again"), `TestPortCheckFailsAPortTheLiveBridgeListensBeside` (warn, want fail) and `TestOwnListenersOnTheKernel`'s four listening subtests |
+  | NC2 | `runUndumpable`'s KeepAlive deleted (dido, uid 1000) | red: the new test, `TestPortCheckKeepsAHiddenBridgeOnItsOwnPortOK` ("free"), `TestHiddenListenerOfThisUserOnTheKernel`, `TestAHiddenBridgesStatusShowsTheUIDItsListenerCarries`; the idle-child tests stay green. Its first form left the `runtime` import behind and did not build: rerun with it removed |
+  | NC3 | `collectAndFinalize` a no-op | red: the premise test. With NC1 as well, the listening child's test is **green**, which is what the premise test is for |
+  | NC4 | one `runtime.GC()`, no wait; with NC1 | the child's test red 200/200, the premise test green 200/200, at GOMAXPROCS 12 and 1 |
+  | NC5 | two `runtime.GC()`s, no wait; with NC1 | the same |
+
+### Process notes
+
+- **A timer in a premise is a claim about the runtime, and it had a
+  precondition.** "The runtime forces a GC every two minutes" is what
+  `forcegcperiod`'s comment says; `gcTrigger.test` adds "once one has
+  run". A 240-second probe of the unfixed child answered it before any
+  reasoning about the fix did.
+- **A control that does not build proves nothing.** NC2's first form
+  deleted the KeepAlive and left its import, CLAUDE.md's "most 'just
+  disable this branch' edits delete a variable's only use" in its import
+  form.
