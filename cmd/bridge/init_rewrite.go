@@ -227,6 +227,13 @@ const keptFromHeading = "kept from the config this run replaces:"
 // none, the custom endpoints. An operator who rewrote a config should not
 // have to diff it to learn that these stayed, and the common rewrite, of an
 // install init made, prints nothing.
+//
+// Both sides of the data dir comparison are absolute, so it compares
+// directories and not spellings: initCmd makes cfgDir absolute before it
+// derives initDataDir from it, and a kept data dir is readPriorInstall's,
+// which resolves the file's value against the config's directory.
+// NormalizeAndValidate resolves no path. (Gemini on #1040, twice, assumed a
+// relative cfgDir.)
 func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, endpointsKept bool) {
 	var lines [][2]string
 	add := func(key string, values ...string) {
