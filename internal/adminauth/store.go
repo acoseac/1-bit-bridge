@@ -195,6 +195,28 @@ const sessionFlushInterval = 30 * time.Second
 // Store is the concurrent-safe credentials + session manager.
 // One mutex guards both — the contention is low (admin login flow
 // only) and a single lock keeps the invariants obvious.
+//
+// The mutex is per PROCESS, and the file is not. `bridge serve` holds a
+// Store for its whole life while `bridge admin reset-password`, `bridge
+// admin login-link` and `bridge init` each open another on the same file,
+// so two rules keep one process from undoing another's write:
+//
+//   - The CREDENTIAL is the file's. Every decision about it (a login, a
+//     ticket's account, whether an account exists) and every write of the
+//     file re-reads it first (refreshCredentialLocked), and a file that
+//     cannot be read decides nothing and is written over by nothing. This
+//     process's copy is never ahead of the file, because every credential
+//     write here is synchronous and adopted only once it has landed, so
+//     "the file's" needs no timestamp to be the newer one.
+//   - The SESSIONS are the serving bridge's, the only process that makes
+//     or ends them, so a session write puts down the set held in memory;
+//     a credential write puts down the set it finds in the file at the
+//     write, never the one it read at open.
+//
+// Before these rules, `persist()` wrote this process's copy of both, so a
+// running bridge's next session write (a login, the 30 s activity flush,
+// a logout, the shutdown flush) put back the password hash
+// reset-password had just rotated away.
 type Store struct {
 	path string
 
@@ -226,9 +248,11 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-// IsInitialised reports whether the on-disk credentials file
-// exists. Used by the bridge serve startup path to refuse-to-start
-// in public mode when no admin has been minted yet.
+// IsInitialised reports whether the credentials file held an account
+// at the last read: the open, or since then a login attempt or a
+// write. Every caller asks straight after OpenStore. Used by the
+// bridge serve startup path to refuse-to-start in public mode when no
+// admin has been minted yet.
 func (s *Store) IsInitialised() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,6 +262,11 @@ func (s *Store) IsInitialised() bool {
 // Username returns the configured admin username, or "" if not
 // initialised. Used by the login form to pre-fill the field
 // (single-user system, no risk in exposing the username).
+//
+// It answers from the last read rather than reading the file, since
+// the form is served to anyone who asks. A pre-fill that lags an
+// account replaced elsewhere costs one failed login, and that login
+// attempt is itself a read.
 func (s *Store) Username() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -273,29 +302,56 @@ func (s *Store) MintInitial(username string) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.user != nil {
-		return "", ErrAlreadyInitialised
-	}
-	now := s.now()
-	s.user = &userRecord{
-		Username:          username,
-		PasswordHash:      string(hash),
-		CreatedAt:         now,
-		PasswordChangedAt: now,
-	}
-	if err := s.persist(); err != nil {
-		s.user = nil
+	if err := s.installInitialLocked(username, string(hash)); err != nil {
 		return "", err
 	}
 	return plaintext, nil
 }
 
+// installInitialLocked writes the store's first credential. Whether there
+// already is one is the FILE's answer at the write, not this process's
+// copy: two processes that both opened an empty store (`bridge init` and a
+// bridge seeding from its environment, say) would otherwise both mint, and
+// the second would replace the password the first one printed. The file's
+// sessions are carried over as they are. Caller holds s.mu.
+//
+// The credential is adopted only once the write has landed, so a failed
+// write leaves this process with no credential, as the file has none, and
+// never one the next restart would not have.
+func (s *Store) installInitialLocked(username, hash string) error {
+	cur, err := readStoreFile(s.path)
+	if err != nil {
+		return err
+	}
+	s.adoptCredentialLocked(cur.user)
+	if cur.user != nil {
+		return ErrAlreadyInitialised
+	}
+	now := s.now()
+	next := &userRecord{
+		Username:          username,
+		PasswordHash:      hash,
+		CreatedAt:         now,
+		PasswordChangedAt: now,
+	}
+	if err := s.writeStoreLocked(next, cur.sessions); err != nil {
+		return err
+	}
+	s.user = next
+	return nil
+}
+
 // ResetPassword overwrites the existing credentials with a new
-// bcrypt hash. Called by `bridge admin reset-password`. Active
-// sessions are NOT invalidated by this — operator who wants
-// sessions revoked too must restart the bridge (cheap, and the
-// hard-cap is 7d so a stale session can't outlive a normal release
-// cycle).
+// bcrypt hash. Called by `bridge admin reset-password`, usually in a
+// process of its own beside a running bridge, which re-reads the file
+// at its next login attempt and at every write, so the rotation takes
+// there with no restart.
+//
+// Active sessions are NOT ended by this, and a restart does not end
+// them either: sessions persist in this same file (PR #800), and the
+// rotation writes back the set it finds there. This docblock said a
+// restart revoked them until 2026-09-27, which stopped being true
+// when sessions began to persist.
 func (s *Store) ResetPassword(username, newPassword string) error {
 	if newPassword == "" {
 		return errors.New("adminauth: new password must not be empty")
@@ -312,44 +368,39 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.user != nil && s.user.Username != username {
+	// Decide from the file, and write back the sessions IT holds: the
+	// running bridge signs sessions in and out while this process waits at
+	// its password prompt, and the copy read at open would drop the new ones
+	// and put back the ones signed out.
+	cur, err := readStoreFile(s.path)
+	if err != nil {
+		return err
+	}
+	s.adoptCredentialLocked(cur.user)
+	if cur.user != nil && cur.user.Username != username {
 		return ErrUsernameMismatch
 	}
 	now := s.now()
-	// Build a FRESH userRecord pointer rather than mutating the
-	// existing one in place. Two reasons (CodeRabbit Critical +
-	// Major review post-PR-#292):
-	//
-	//  1. **Verify race**: Verify grabs `user := s.user` under
-	//     the lock then releases it for the (slow) bcrypt
-	//     compare. Pre-fix, ResetPassword mutating
-	//     `s.user.PasswordHash` raced the bcrypt read of the
-	//     same string. Pointer-swap is atomic at the language
-	//     level so the captured-and-released pointer in Verify
-	//     keeps observing the OLD record consistently.
-	//  2. **Persist-failure rollback**: pre-fix, a persist()
-	//     error returned with in-memory state already mutated
-	//     to the new hash but disk still carrying the old —
-	//     login would succeed against the new password until
-	//     the next restart silently reverted everything.
-	//     Now: snapshot prev, swap to fresh, persist; restore
-	//     prev on persist error.
-	prev := s.user
+	// A FRESH userRecord pointer, never a mutation in place (CodeRabbit
+	// Critical + Major review post-PR-#292). Verify takes `user := s.user`
+	// under the lock and releases it for the slow bcrypt compare, so a
+	// mutation would race that read. And it is swapped in only once the
+	// write has landed, so a failed write leaves this process on the
+	// credential the file still holds, where an early swap let the new
+	// password log in until the next restart reverted it.
 	next := &userRecord{
 		Username:          username,
 		PasswordHash:      string(hash),
+		CreatedAt:         now,
 		PasswordChangedAt: now,
 	}
-	if prev != nil {
-		next.CreatedAt = prev.CreatedAt
-	} else {
-		next.CreatedAt = now
+	if cur.user != nil {
+		next.CreatedAt = cur.user.CreatedAt
 	}
-	s.user = next
-	if err := s.persist(); err != nil {
-		s.user = prev // restore in-memory to match disk
+	if err := s.writeStoreLocked(next, cur.sessions); err != nil {
 		return err
 	}
+	s.user = next
 	return nil
 }
 
@@ -360,10 +411,22 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 // Constant-time username compare is unnecessary (username is not
 // secret); bcrypt.CompareHashAndPassword is constant-time on the
 // hash side.
+//
+// It checks against the credential in the FILE, re-read for every
+// attempt, so a rotation made by another process takes at this
+// process's next login. A file it cannot read is a refusal: this
+// process's copy is the credential as it was, which after a rotation
+// is the one rotated away from. The read is small beside the bcrypt
+// compare that follows it, and a login attempt is already rate-limited.
 func (s *Store) Verify(username, password string) error {
 	s.mu.Lock()
+	err := s.refreshCredentialLocked()
 	user := s.user
 	s.mu.Unlock()
+	if err != nil {
+		logger.Error("could not read the admin credential; refusing the login", "err", err)
+		return err
+	}
 	if user == nil {
 		return ErrNotInitialised
 	}
@@ -421,10 +484,10 @@ func (s *Store) CreateSession(username string) (string, error) {
 	// validate has a window where it is not.
 	//
 	// A write failure does NOT fail the login. The session is live in
-	// this process and works; it simply will not survive a restart,
-	// which is the behaviour every session had before persistence
-	// existed. Refusing a valid login because the disk hiccuped would
-	// be the worse trade.
+	// this process and works, and it stays pending (the dirty flag), so a
+	// later activity write or the shutdown flush lands it. Refusing a
+	// valid login because the disk hiccuped would be the worse trade.
+	s.sessionsDirty = true
 	if err := s.persistSessionsLocked(now); err != nil {
 		logger.Error("persist session on login", "err", err)
 	}
@@ -547,40 +610,49 @@ func (s *Store) SetInitialPassword(username, password string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.user != nil {
-		return ErrAlreadyInitialised
-	}
-	now := s.now()
-	s.user = &userRecord{
-		Username:          username,
-		PasswordHash:      string(hash),
-		CreatedAt:         now,
-		PasswordChangedAt: now,
-	}
-	if err := s.persist(); err != nil {
-		// Roll back so an unpersisted credential is never live in
-		// memory: the next restart would not have it, and an operator
-		// would be locked out by a bridge that had just accepted them.
-		s.user = nil
-		return err
-	}
-	return nil
+	// installInitialLocked adopts the credential only once it is on disk,
+	// so an unpersisted one is never live in memory: the next restart
+	// would not have it, and an operator would be locked out by a bridge
+	// that had just accepted them.
+	return s.installInitialLocked(username, string(hash))
 }
 
-// persistSessionsLocked writes the store and clears the dirty flag.
-// Caller MUST hold s.mu. No-op when there is no credential to write
-// alongside — loopback installs never mint sessions, and persist()
-// refuses a nil user.
+// persistSessionsLocked writes this process's sessions beside the
+// credential the FILE holds, and clears the dirty flag once they are
+// down. Caller MUST hold s.mu. Every session write goes through here:
+// a login, the debounced activity write, a logout, the shutdown flush.
+//
+// The credential is re-read first and never taken from memory: writing
+// this process's copy is how a running bridge put a rotated-away
+// password back on disk. A file that cannot be read is not written
+// over, since it may hold a credential newer than this process has
+// seen; the change stays pending (dirty) for the next attempt.
+//
+// Every attempt starts the next debounce window, a failed one too.
+// Otherwise every authenticated request after a failure is "due", and
+// a file that stays unreadable costs a read and an error line per
+// console request.
+//
+// No-op when the file holds no credential to write beside: a store
+// that was never initialised, or a file that is gone, which a session
+// write must not recreate with the credential it replaced.
 func (s *Store) persistSessionsLocked(now time.Time) error {
+	s.lastSessionFlush = now
+	if err := s.refreshCredentialLocked(); err != nil {
+		return fmt.Errorf("sessions not written, the credential could not be re-read first: %w", err)
+	}
 	if s.user == nil {
 		s.sessionsDirty = false
 		return nil
 	}
-	if err := s.persist(); err != nil {
+	sessions := make(map[string]*Session, len(s.sessions))
+	for digest, sess := range s.sessions {
+		sessions[hex.EncodeToString(digest[:])] = sess
+	}
+	if err := s.writeStoreLocked(s.user, sessions); err != nil {
 		return err
 	}
 	s.sessionsDirty = false
-	s.lastSessionFlush = now
 	return nil
 }
 
@@ -700,7 +772,11 @@ func (s *Store) DeleteSession(raw string) {
 	// Synchronous, and this is the one that matters most: a revocation
 	// left in the debounce window would be UNDONE by a restart, so a
 	// logout would silently not be a logout. Logged at Error for the
-	// same reason.
+	// same reason, and marked pending first, so a write that fails is
+	// retried by the next one and at the latest by the shutdown flush.
+	// Before, a failed write left nothing pending, and with no other
+	// session active the flush found nothing to land.
+	s.sessionsDirty = true
 	if err := s.persistSessionsLocked(s.now()); err != nil {
 		logger.Error("persist session revocation", "err", err)
 	}
@@ -721,46 +797,14 @@ func (s *Store) SessionCount() int {
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	raw, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		s.user = nil
-		return nil
-	}
+	c, err := readStoreFile(s.path)
 	if err != nil {
-		return fmt.Errorf("read adminauth store: %w", err)
+		return err
 	}
-	if len(raw) == 0 {
-		s.user = nil
-		return nil
-	}
-	// Two shapes. The envelope is current; a bare userRecord is what
-	// every install before sessions were persisted has on disk. The
-	// discriminator is a top-level "passwordHash", which only the
-	// legacy shape has — checked rather than guessed from a failed
-	// unmarshal, because encoding/json ignores unknown fields and would
-	// happily decode the legacy file into an all-nil envelope.
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return fmt.Errorf("parse adminauth store: %w", err)
-	}
-	if _, legacy := probe["passwordHash"]; legacy {
-		var rec userRecord
-		if err := json.Unmarshal(raw, &rec); err != nil {
-			return fmt.Errorf("parse adminauth store: %w", err)
-		}
-		s.user = &rec
-		// No sessions to restore, and the next write upgrades the file
-		// in place. Nothing to migrate explicitly.
-		return nil
-	}
-	var f storeFile
-	if err := json.Unmarshal(raw, &f); err != nil {
-		return fmt.Errorf("parse adminauth store: %w", err)
-	}
-	s.user = f.User
-	s.sessions = make(map[[sha256.Size]byte]*Session, len(f.Sessions))
+	s.user = c.user
+	s.sessions = make(map[[sha256.Size]byte]*Session, len(c.sessions))
 	now := s.now()
-	for hexKey, sess := range f.Sessions {
+	for hexKey, sess := range c.sessions {
 		if sess == nil {
 			continue
 		}
@@ -790,20 +834,99 @@ func (s *Store) load() error {
 	return nil
 }
 
-// persist atomically rewrites the credentials file. 0o700 dir +
-// 0o600 file, same hardening as auth.Store. Caller MUST hold the
-// mutex.
-func (s *Store) persist() error {
-	if s.user == nil {
+// storeContents is what one read of the store file found. sessions is
+// keyed by the hex digest and holds exactly what the file held,
+// expired and malformed entries included, so a credential write can
+// carry them over untouched.
+type storeContents struct {
+	user     *userRecord
+	sessions map[string]*Session
+}
+
+// readStoreFile reads and parses the store at path. A missing or empty
+// file is an empty store, not an error. Anything else that stops the
+// read or the parse is an error, and a caller holding one must neither
+// decide from the file nor write over it: it may hold a credential newer
+// than any this process has seen.
+func readStoreFile(path string) (storeContents, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return storeContents{}, nil
+	}
+	if err != nil {
+		return storeContents{}, fmt.Errorf("read adminauth store: %w", err)
+	}
+	if len(raw) == 0 {
+		return storeContents{}, nil
+	}
+	// Two shapes. The envelope is current; a bare userRecord is what
+	// every install before sessions were persisted has on disk. The
+	// discriminator is a top-level "passwordHash", which only the
+	// legacy shape has — checked rather than guessed from a failed
+	// unmarshal, because encoding/json ignores unknown fields and would
+	// happily decode the legacy file into an all-nil envelope.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
+	}
+	if _, legacy := probe["passwordHash"]; legacy {
+		var rec userRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
+		}
+		// No sessions to restore, and the next write upgrades the file
+		// in place. Nothing to migrate explicitly.
+		return storeContents{user: &rec}, nil
+	}
+	var f storeFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
+	}
+	return storeContents{user: f.User, sessions: f.Sessions}, nil
+}
+
+// refreshCredentialLocked re-reads the credential from the file and
+// adopts it, whatever this process held: see the Store docblock for
+// why the file's is always the one to use. On an error nothing
+// changes, and the caller must neither decide from the credential nor
+// write the file. Caller MUST hold s.mu.
+func (s *Store) refreshCredentialLocked() error {
+	c, err := readStoreFile(s.path)
+	if err != nil {
+		return err
+	}
+	s.adoptCredentialLocked(c.user)
+	return nil
+}
+
+// adoptCredentialLocked makes u the credential this process decides
+// from, and logs when that is a change another process made, which is
+// the line that tells an operator the running bridge took a rotation.
+// Caller MUST hold s.mu.
+func (s *Store) adoptCredentialLocked(u *userRecord) {
+	switch {
+	case u == nil && s.user != nil:
+		logger.Warn("the admin credential file is gone; logins are refused until one is set",
+			"path", s.path)
+	case u != nil && (s.user == nil || u.Username != s.user.Username || u.PasswordHash != s.user.PasswordHash):
+		logger.Info("the admin credential changed on disk; using it from now on",
+			"username", u.Username, "passwordChangedAt", u.PasswordChangedAt)
+	}
+	s.user = u
+}
+
+// writeStoreLocked atomically replaces the credentials file with user
+// and sessions. 0o700 dir + 0o600 file, same hardening as auth.Store.
+// Caller MUST hold the mutex, and decides which sessions to write: its
+// own set for a session write, the file's for a credential write.
+func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session) error {
+	if user == nil {
 		return errors.New("adminauth: cannot persist nil user record")
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("mkdir adminauth store: %w", err)
 	}
-	f := storeFile{User: s.user, Sessions: make(map[string]*Session, len(s.sessions))}
-	for digest, sess := range s.sessions {
-		f.Sessions[hex.EncodeToString(digest[:])] = sess
-	}
+	f := storeFile{User: user, Sessions: sessions}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err

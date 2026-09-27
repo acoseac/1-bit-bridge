@@ -92,6 +92,11 @@ func (s *Store) MintLoginTicketTTL(username string, ttl time.Duration) (string, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The account is the FILE's (the Store docblock's first rule), so read
+	// it rather than trust what was there when this process opened.
+	if err := s.refreshCredentialLocked(); err != nil {
+		return "", err
+	}
 	if s.user == nil || s.user.Username != username {
 		// Refuse to mint for an account that does not exist, so a ticket can
 		// never authenticate as someone the store has never heard of.
@@ -146,6 +151,16 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 		}
 		return "", ErrTicketInvalid
 	}
+	// The account check below reads the credential from the FILE: the process
+	// that replaces an account is never the one redeeming, and this one's copy
+	// is the account as it was at start. Read here, on the hit path only, so a
+	// bogus ticket still costs one file read, and before the ticket is spent,
+	// so a credential this process cannot read establishes nothing about the
+	// ticket and leaves it on disk, as a ticket file that cannot be written
+	// does.
+	if err := s.refreshCredentialLocked(); err != nil {
+		return "", err
+	}
 	// Delete before judging: a ticket presented once is used up either way, so a
 	// caller cannot probe one repeatedly while waiting for a clock edge.
 	delete(live, key)
@@ -155,11 +170,12 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 	if now.After(time.Unix(0, t.ExpiresAt)) {
 		return "", ErrTicketInvalid
 	}
-	// Re-assert the account under the lock we already hold. MintLoginTicket
-	// checks this, but the two happen in different PROCESSES with up to
-	// LoginTicketTTL between them, and CreateSession validates nothing — so
-	// a rename inside the window would otherwise mint a fully-privileged
-	// session for a username the store no longer has.
+	// Re-assert the account under the lock we already hold, against the file
+	// read above. MintLoginTicket checks this, but the two happen in
+	// different PROCESSES with up to LoginTicketTTL between them, and
+	// CreateSession validates nothing — so an account replaced inside the
+	// window would otherwise mint a fully-privileged session for a username
+	// the store no longer has.
 	if s.user == nil || s.user.Username != t.Username {
 		return "", ErrTicketInvalid
 	}

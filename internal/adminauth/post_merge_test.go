@@ -3,6 +3,7 @@ package adminauth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,65 +45,131 @@ func TestRateLimiterStopIsSafeUnderConcurrentCallers(t *testing.T) {
 }
 
 // TestResetPasswordRollsBackOnPersistFailure pins CodeRabbit's
-// Major rollback finding on PR #292: persist() failure must
-// leave in-memory state matching disk. Drive a persist failure
-// by pointing the store at a path whose parent is a regular
-// file (not a directory) — os.MkdirAll in persist() fails with
-// `not a directory`. Verify the in-memory user record reverts
-// to the pre-PATCH state instead of carrying the new hash.
+// Major rollback finding on PR #292: a failed rotation must leave
+// in-memory state matching disk, or the new password logs in until
+// the next restart silently reverts it. ResetPassword reads the file
+// before it writes it (the cross-process rule in the Store
+// docblock), so there are two places to fail, one subtest each.
+//
+// The original fixture, a store path under a regular file, is used
+// by neither: it now fails at the read, and on Windows that read
+// answers ERROR_PATH_NOT_FOUND, which is os.ErrNotExist there, so it
+// reads as "no store" rather than as an error. A damaged file fails
+// the read on every platform.
 func TestResetPasswordRollsBackOnPersistFailure(t *testing.T) {
-	dir := t.TempDir()
-	originalPath := filepath.Join(dir, "adminauth.json")
-	s, err := OpenStore(originalPath)
-	if err != nil {
-		t.Fatal(err)
+	const original, rotated = "the original password", "new-password-XYZ"
+	setup := func(t *testing.T) (s *Store, dir string, before userRecord) {
+		t.Helper()
+		dir = t.TempDir()
+		s, err := OpenStore(filepath.Join(dir, "adminauth.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetInitialPassword("admin", original); err != nil {
+			t.Fatal(err)
+		}
+		return s, dir, *s.user
 	}
-	if _, err := s.MintInitial("admin"); err != nil {
-		t.Fatal(err)
-	}
-	originalHash := s.user.PasswordHash
-	originalChangedAt := s.user.PasswordChangedAt
-	originalCreatedAt := s.user.CreatedAt
-
-	// Sabotage persist: redirect the store path to a child of a
-	// regular file. os.MkdirAll inside persist sees the parent
-	// is a file and fails with `not a directory`.
-	conflictFile := filepath.Join(dir, "blocker")
-	if err := os.WriteFile(conflictFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s.path = filepath.Join(conflictFile, "adminauth.json")
-
-	if err := s.ResetPassword("admin", "new-password-XYZ"); err == nil {
-		t.Fatal("expected persist failure (parent is a file, not a dir), got nil")
-	}
-
-	// In-memory state must reflect the ORIGINAL record, not the
-	// (failed) new one.
-	if s.user == nil {
-		t.Fatal("s.user is nil after rollback — should have restored prev")
-	}
-	if s.user.PasswordHash != originalHash {
-		t.Errorf("PasswordHash leaked through persist failure: got %q, want original %q",
-			s.user.PasswordHash, originalHash)
-	}
-	if !s.user.PasswordChangedAt.Equal(originalChangedAt) {
-		t.Errorf("PasswordChangedAt diverged: got %v, want %v",
-			s.user.PasswordChangedAt, originalChangedAt)
-	}
-	if !s.user.CreatedAt.Equal(originalCreatedAt) {
-		t.Errorf("CreatedAt diverged: got %v, want %v",
-			s.user.CreatedAt, originalCreatedAt)
+	requireUnchanged := func(t *testing.T, s *Store, before userRecord) {
+		t.Helper()
+		// In-memory state must reflect the ORIGINAL record, not the
+		// (failed) new one.
+		if s.user == nil {
+			t.Fatal("s.user is nil after the failed rotation — it should be the original")
+		}
+		if s.user.PasswordHash != before.PasswordHash {
+			t.Errorf("PasswordHash leaked through the failure: got %q, want the original %q",
+				s.user.PasswordHash, before.PasswordHash)
+		}
+		if !s.user.PasswordChangedAt.Equal(before.PasswordChangedAt) {
+			t.Errorf("PasswordChangedAt diverged: got %v, want %v",
+				s.user.PasswordChangedAt, before.PasswordChangedAt)
+		}
+		if !s.user.CreatedAt.Equal(before.CreatedAt) {
+			t.Errorf("CreatedAt diverged: got %v, want %v",
+				s.user.CreatedAt, before.CreatedAt)
+		}
 	}
 
-	// Verify against the ORIGINAL password — must still work
-	// because the rollback put back the original hash. (We don't
-	// know the random plaintext from MintInitial; use bcrypt
-	// against the in-memory hash to confirm it's the original
-	// not the new one. Indirect: verify the new password is
-	// REJECTED.)
-	if err := s.Verify("admin", "new-password-XYZ"); err == nil {
-		t.Error("new password should be rejected after rollback — the swap was undone")
+	t.Run("the read fails", func(t *testing.T) {
+		s, _, before := setup(t)
+		damaged := []byte(`{"user": `)
+		if err := os.WriteFile(s.path, damaged, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ResetPassword("admin", rotated); err == nil {
+			t.Fatal("expected a failure (the file does not parse), got nil")
+		}
+		requireUnchanged(t, s, before)
+		// Nor is a file it could not read written over: it may hold a
+		// credential newer than any this process has seen.
+		if got, _ := os.ReadFile(s.path); string(got) != string(damaged) {
+			t.Errorf("a rotation that could not read the store wrote over it:\n%s", got)
+		}
+	})
+
+	t.Run("the write fails", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows ignores a directory's read-only attribute when creating a file in it")
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("root creates files in a directory whatever its mode")
+		}
+		s, dir, before := setup(t)
+		// Readable, so the read succeeds, and not writable, so staging
+		// the new file fails.
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		if err := s.ResetPassword("admin", rotated); err == nil {
+			t.Fatal("expected a write failure (directory not writable), got nil")
+		}
+		requireUnchanged(t, s, before)
+		if err := s.Verify("admin", rotated); err == nil {
+			t.Error("the new password verifies after a rotation that never reached the file")
+		}
+		if err := s.Verify("admin", original); err != nil {
+			t.Errorf("the original password no longer verifies: %v", err)
+		}
+	})
+}
+
+// TestAnInitialCredentialWhoseWriteFailsIsNotLive is the rollback pin
+// for the first credential. A credential that never reached the file
+// must not be live in memory: the next restart would not have it, so an
+// operator would be locked out by a bridge that had just accepted them.
+func TestAnInitialCredentialWhoseWriteFailsIsNotLive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ignores a directory's read-only attribute when creating a file in it")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root creates files in a directory whatever its mode")
+	}
+	for _, tc := range []struct {
+		name string
+		mint func(s *Store) error
+	}{
+		{"SetInitialPassword", func(s *Store) error { return s.SetInitialPassword("admin", "an initial password") }},
+		{"MintInitial", func(s *Store) error { _, err := s.MintInitial("admin"); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := OpenStore(filepath.Join(dir, "adminauth.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			if err := tc.mint(s); err == nil {
+				t.Fatal("expected a write failure (directory not writable), got nil")
+			}
+			if s.IsInitialised() {
+				t.Error("a credential that never reached the file is live in memory")
+			}
+		})
 	}
 }
 
