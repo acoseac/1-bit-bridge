@@ -4045,6 +4045,18 @@ its twin.** The top list is older, shorter, and read first.
 
 ### Build, CI, and test discipline
 
+- **SonarCloud's `go:S2077` follows a named const to its concatenation.** A
+  query argument stays quiet only as ONE string literal, or as a function
+  parameter; a const assembled with `+` is flagged even behind a name. `main`
+  carries about 30 open S2077s of exactly that shape, and several comments in
+  `internal/manifest` say a named const is enough: they are wrong. Measured on
+  #1053 / #1054 (2026-09-27): a two-statement fix built from a shared SELECT
+  was flagged, while one literal statement (`freshDSDPeaksSQL`) and helpers that
+  take the statement as a parameter (`listRenditionCandidates`,
+  `countRenditionCandidates`) were not. **Prefer one literal statement;** when
+  a statement must share predicate constants, run it through such a helper.
+  SonarCloud is not a required check, but a MEDIUM "vulnerability" on a
+  constant query is noise that buries a real one.
 - **A `needs` entry only makes a job WAIT; something has to READ its
   result.** `gate`'s `needs` listed six jobs and its verification step
   checked five, so with `if: always()` a failing `dsd-measure` produced a
