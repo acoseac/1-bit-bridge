@@ -960,6 +960,11 @@ func (s *Store) refreshCredentialLocked() error {
 // from, and logs when that is a change another process made, which is
 // the line that tells an operator the running bridge took a rotation.
 // Caller MUST hold s.mu.
+//
+// Nothing from the record but the username reaches the log. The line's
+// own timestamp says when this process took the change, and CodeQL's
+// clear-text-logging query reads any field named for a password as a
+// secret, PasswordChangedAt included (#1039).
 func (s *Store) adoptCredentialLocked(u *userRecord) {
 	switch {
 	case u == nil && s.user != nil:
@@ -967,7 +972,7 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 			"path", s.path)
 	case u != nil && !sameCredential(u, s.user):
 		logger.Info("the admin credential changed on disk; using it from now on",
-			"username", u.Username, "passwordChangedAt", u.PasswordChangedAt)
+			"username", u.Username)
 	}
 	s.user = u
 }
