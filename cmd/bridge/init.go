@@ -261,22 +261,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// takes: it offered the host's name over an install with one of its own
 	// until 2026-09-27, so an operator who pressed Enter through a rewrite
 	// replaced the name.
+	//
+	// Every name is trimmed as the app's pairing parser trims it
+	// (config.TrimLibraryName), and one that is blank once trimmed is no
+	// name: --name "  " is --name "", as an answer of spaces at the prompt
+	// is an empty one. The flag was saved as given until 2026-09-27, and
+	// Load served it so, padding and all, in /v1/health and in every
+	// pairing QR, which the app refuses when the name is empty or padded.
 	firstName := firstInstallName()
 	defaultName := firstName
-	if prior != nil && strings.TrimSpace(prior.LibraryName) != "" {
-		defaultName = prior.LibraryName
+	if prior != nil {
+		if kept := config.TrimLibraryName(prior.LibraryName); kept != "" {
+			defaultName = kept
+		}
 	}
-	name := *libraryName
+	name := config.TrimLibraryName(*libraryName)
+	if name == "" && !*nonInteractive {
+		name = config.TrimLibraryName(ask(in, stdout, "Library display name", defaultName))
+	}
 	nameKept := false
 	if name == "" {
-		if *nonInteractive {
-			name = defaultName
-			// printKept lists a kept name a first install would not have
-			// taken. An interactive run showed it at the prompt.
-			nameKept = name != firstName
-		} else {
-			name = ask(in, stdout, "Library display name", defaultName)
-		}
+		name = defaultName
+		// printKept lists a kept name a first install would not have taken.
+		// An interactive run showed it at the prompt.
+		nameKept = *nonInteractive && name != firstName
 	}
 
 	// Write or refresh the config file. Preserve the existing file if the

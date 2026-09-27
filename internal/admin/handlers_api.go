@@ -2346,11 +2346,26 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
+			v := config.TrimLibraryName(*p.LibraryName)
+			// A blank name is REFUSED, never stored. Stored, it was served
+			// as "" live (in /v1/health, and in the name= of every pairing
+			// QR, which the app then refuses) and as DefaultLibraryName
+			// after a restart, which is what Load serves a config without
+			// one: one field, two values (measured 2026-09-27). Taking it as
+			// that default here would keep the halves together and replace
+			// the operator's name with one nobody chose, and the console
+			// sends this field on every Save, so a cleared box is a mistake
+			// to report rather than a name to guess.
+			if v == "" {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate",
+					msg: "libraryName: must not be blank (devices show this bridge under it, " +
+						"and a pairing code without one does not pair)"}
+			}
 			// Compare before assigning: the write is idempotent either
-			// way (TrimSpace of the stored value is the stored value),
-			// but without the compare a same-value submit could not be
-			// reported as `unchanged`.
-			if v := strings.TrimSpace(*p.LibraryName); v != next.LibraryName {
+			// way (the stored value is already trimmed), but without the
+			// compare a same-value submit could not be reported as
+			// `unchanged`.
+			if v != next.LibraryName {
 				next.LibraryName = v
 				// Library name reaches iOS via /v1/health, which reads the live
 				// cfg each request — no restart needed.

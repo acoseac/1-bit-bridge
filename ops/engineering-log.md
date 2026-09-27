@@ -18328,6 +18328,150 @@ that gives no name, above. Taken.
 - **The name prompt comes before "Overwrite?"**, so an interactive run that
   answers no, or that is then refused, answered the name for nothing.
 
+## 2026-09-27 — a blank library name is refused, and never stored or served (#1042)
+
+#1041's entry left this under Out of scope ("The console saves an empty
+name"). Measured again on main, and wider than filed: the PATCH was one of
+three writers that stored a name `Load` would serve differently, and the
+padded names reached the pairing QR too, which the app refuses.
+
+### What was measured
+
+- **End to end, the real binary, darwin/arm64** (host `Macbook.local`),
+  main at `a2a72f1b` and the fix at `bece6a7e`, each on a throwaway loopback
+  bridge (`bridge init --yes --no-service --skip-doctor`, then `bridge
+  serve` with mDNS and Tailscale off by env). The name is read from the
+  unauthenticated `/v1/health` and from the `name=` of a pairing URL minted
+  by `POST /api/tokens`:
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | B1 | PATCH `{"libraryName":""}` over `My Library` | 200, `live`; health `""`; QR `name=` empty; bridge.yaml `libraryName: ""`; after a restart `1-bit Bridge` | 400 `validate`, "libraryName: must not be blank (…)"; `My Library` live, in the file and after a restart |
+  | B2 | PATCH `"   "` | as B1: trimmed to `""` | as B1 |
+  | B3 | `init --name "  "` | file `'  '`, health and QR `"  "` | `Macbook.local`, the host's, as with no `--name` |
+  | B4 | `init --name " Padded "` | file, health and QR `" Padded "` | `Padded` |
+  | B5 | B3's config (written by main) served by the fix | | starts; `1-bit Bridge` |
+  | B6 | B4's config served by the fix | | `Padded` |
+  | B7 | `BRIDGE_LIBRARY_NAME='   '` over B1's config | `"   "` | `1-bit Bridge` |
+
+- **What the app does with those**, read from `BridgePairingURL.parseResult`
+  in the iOS repo and probed in Swift: an empty `name` is "Pairing code is
+  missing the name field.", and a value its `.whitespacesAndNewlines` trim
+  changes is "Pairing code has extra spaces in the name field." So the QRs
+  of B1–B4 on main did not pair at all. `/v1/health`'s `libraryName` is
+  non-optional in the app's Codable, and the editor saves it as `shareName`.
+- **The two whitespace sets.** Every scalar 0…0x10FFFF, Go's
+  `strings.TrimSpace` on the one-scalar string against Swift's
+  `CharacterSet.whitespacesAndNewlines.contains`: 25 against 26, differing
+  only by U+200B ZERO WIDTH SPACE, which Foundation counts. The app's own
+  check, probed: `"\u{200B}My Library"`, `"My Library\u{200B}"` and
+  `"\u{200B}"` refused; `"My\u{200B}Library"` and a leading U+FEFF accepted.
+- **The console, in a browser**, the fix's fixture, a real click on Save:
+  an empty box is blocked ("Please fill out this field.", focus to the
+  field, no PATCH sent); spaces are blocked ("Please match the requested
+  format.", no PATCH); a zero-width space alone passes the pattern (JS `\S`
+  matches U+200B) and the server's 400 shows as "Save failed: libraryName:
+  must not be blank (…)"; `"  New Name  "` saves as `New Name`, "Saved.".
+
+### Decisions
+
+- **The default moved from `applyDefaults` to `Normalize`.** `applyDefaults`
+  runs only in `Load`, only caught `""`, and runs before the `BRIDGE_*`
+  overrides (B7). `Normalize` runs after the overrides and in
+  `NormalizeAndValidate`, which every writer runs before it saves (`Load`,
+  the settings PATCH, init, serve's auto-init), so no writer can store a
+  name `Load` would serve differently. Infallible and idempotent, as
+  `Normalize`'s contract requires (`TrimLibraryName(DefaultLibraryName)` is
+  itself).
+- **Not a `Validate` refusal.** That would stop a bridge from starting after
+  an update over a display name, where B7's env var starts today.
+- **The PATCH refuses a blank name rather than defaulting it.** Defaulting
+  would keep the halves together (the controls below show `Normalize` does
+  that on its own) and replace the operator's name with one nobody chose;
+  the console sends the field on every Save, so a cleared box is a mistake
+  to report. Same shape as `tailscaleMode`'s empty-payload refusal in the
+  same handler. Nothing is written.
+- **init treats a blank `--name` as none**, the kept or the host's name, as
+  `--name ""` (which the flag package cannot tell from absent) and an empty
+  answer at the prompt already were. Refusing it would need `flag.Visit` to
+  refuse `--name ""` as well, which a script passing `--name "$NAME"` with
+  NAME empty relies on. The asymmetry with the PATCH: refuse where the
+  operator typed a value that would replace their name, default where the
+  fallback loses nothing.
+- **`config.TrimLibraryName`** is `unicode.IsSpace` plus U+200B, one
+  definition for `Normalize`, the PATCH and init (its prompt answer and a
+  prior config's name too). `strings.TrimSpace` alone lets through a name
+  the app refuses.
+- **The form** gets `required`, `pattern=".*\S.*"` and a `title`, which
+  becomes the input's accessible description; its name stays the label's
+  ("Library name", checked through the element's `labels`).
+- **The matrix row** notes the refusal, and `differentValueFor` gained
+  `libraryName`: the matrix test and the settings-page badge test had
+  skipped the row for want of a value.
+
+### Tests and controls
+
+- `internal/admin/settings_library_name_test.go`:
+  `TestSettingsPatchLibraryNameIsWhatARestartServes` drives the real
+  handler with `"Renamed"`, a padded name, `""`, spaces, a tab and newline,
+  U+200B alone and U+200B-padded: the status, the live name, and `config.Load`
+  of the saved file equal to the live name; a refusal names the field and
+  leaves bridge.yaml byte-identical. `TestSettingsFormRequiresALibraryName`
+  renders `/settings` and compiles the input's pattern anchored, as the
+  browser does.
+- `internal/config/library_name_test.go`:
+  `TestLoadServesATrimmedLibraryNameAndNeverABlankOne` (no name, `""`,
+  spaces, tab and newline, padded, U+200B alone and padded, and
+  `BRIDGE_LIBRARY_NAME` of spaces and padded) and
+  `TestNormalizeGivesABlankLibraryNameTheDefault` (in memory, two passes).
+- `cmd/bridge/init_rewrite_keeps_test.go`: `TestInitTrimsTheNameItIsGiven`
+  (first install, and a rewrite in both postures, reading the name from the
+  file and through `Load`, and the kept list); a U+200B row in
+  `TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed` and in
+  `TestInitInteractiveRewriteOffersTheInstallsName`. The #1041 blank row's
+  premise moved from `served: "  "` to `DefaultLibraryName`.
+- **Red first** against main: every new row that names a blank or padded
+  name, and the form test.
+- Negative controls against `bece6a7e`, in a scratch worktree, each checked
+  to apply once, run with `-count=1`, and restored with the tree checked
+  clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the PATCH's refusal removed | the four blank PATCH rows (200 where 400); live then equals the restart's value, `1-bit Bridge`, from `Normalize` alone |
+  | NC2a | `Normalize`'s default removed, the trim kept | every blank `Load` row and the in-memory test; the admin tests stay green, since the refusal comes first |
+  | NC2b | main's rule: `applyDefaults`' `== ""`, nothing in `Normalize` | spaces, tab-newline, padded, U+200B and both env rows |
+  | NC2c | a trim-aware default in `applyDefaults`, `Normalize` trimming only | the env row of spaces and the in-memory test: the placement |
+  | NC3 | `TrimLibraryName` without U+200B | the U+200B rows in config, admin and init |
+  | NC4 | init's `--name` not trimmed | the `"  "` rows, first install and both rewrites (`1-bit Bridge` saved); the padded rows stay green, `Normalize` trims them |
+  | NC5 | init's prompt answer not trimmed | the interactive U+200B row |
+  | NC6 | a prior name kept by the old `strings.TrimSpace` check | the U+200B prior row, both postures: `1-bit Bridge` saved and listed as kept |
+  | NC7 | `required` removed from the template | the form test |
+  | NC8 | the pattern removed | the form test |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on init's blank
+`--name` as none against the PATCH's refusal, and on a default in
+`Normalize` against a `Validate` refusal: agreed with both. It named the
+U+200B gap in the HTML pattern (known, and measured above: the server
+refuses it) and the `title`'s accessible-name role (a description, as
+checked). Nothing to take.
+
+### Out of scope
+
+- **The QR writes a space in `name=` as `+`**: `buildPairURL` uses
+  `url.Values.Encode` (`name=My+Library`), and Foundation's
+  `URLComponents` does not decode `+` (probed: `"My+Library"`), so a name
+  with a space pre-fills the app's pairing sheet with a `+` for each, the
+  default `1-bit Bridge` as `1-bit+Bridge`. A literal `+` is `%2B`, so the
+  bridge can write `%20`. Filed as its own task.
+- **The app refuses a name over 256 Characters** (`maxNameLength`); the
+  bridge takes any length. Filed with the above.
+- `internal/mdns` keeps a literal `"1-bit Bridge"` for an instance name that
+  sanitizes to nothing (dots or control characters alone), a copy of the
+  default that would drift from `DefaultLibraryName`.
+
 ## 2026-09-27 — every console signed out: reset-password by default, `sign-out-everywhere`, and a console button (#1044)
 
 #1039's entry recorded it under Out of scope: "Nothing can end another

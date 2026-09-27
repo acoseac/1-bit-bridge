@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -2584,9 +2585,8 @@ func (c *Config) applyDefaults() {
 	if c.ScanIntervalSec == 0 {
 		c.ScanIntervalSec = DefaultScanIntervalSec
 	}
-	if c.LibraryName == "" {
-		c.LibraryName = DefaultLibraryName
-	}
+	// LibraryName's default is Normalize's, not this function's: it has to
+	// follow the env overrides and a trim (see the comment there).
 	if c.Scanner.DeleteAfterMissingScans <= 0 {
 		c.Scanner.DeleteAfterMissingScans = DefaultDeleteAfterMissingScans
 	}
@@ -2691,12 +2691,30 @@ const (
 	maxIntervalHours   = 365 * 24        // one year, in hours
 )
 
+// TrimLibraryName trims a library name the way the app's pairing parser
+// does before it accepts one: every rune strings.TrimSpace removes, and U+200B
+// ZERO WIDTH SPACE, which Foundation's `.whitespacesAndNewlines` counts as
+// whitespace and Go's unicode.IsSpace does not. Enumerated over every scalar
+// on 2026-09-27, the two sets differ by that one. The parser refuses a
+// pairing code whose name does not come back from its trim unchanged ("extra
+// spaces in the name field") or is empty ("missing the name field"), so a
+// name this returns unchanged and non-empty is one it takes.
+//
+// One definition for every place that stores a name: Normalize, the
+// console's settings PATCH, and `bridge init`.
+func TrimLibraryName(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '\u200b'
+	})
+}
+
 // Normalize rewrites the fields whose canonical on-disk form differs from
 // what an operator might reasonably type: the two enrich base URLs (trim
-// whitespace + trailing slash), the public-mode autocert domain (trim), and
+// whitespace + trailing slash), the public-mode autocert domain (trim),
 // customEndpoints (prune-and-warn to the entries that survive
-// ValidateCustomEndpoints). Idempotent — running it twice produces the same
-// Config as running it once.
+// ValidateCustomEndpoints), and the library name (TrimLibraryName, and
+// DefaultLibraryName for a blank one). Idempotent — running it twice
+// produces the same Config as running it once.
 //
 // It returns an error only for the malformed-input cases normalizeBaseURL
 // rejects; every other rewrite is infallible. Validate re-checks those same
@@ -2748,6 +2766,26 @@ func (c *Config) Normalize() error {
 	// mode error separately, exactly as before.
 	if c.IsPublic() {
 		c.Autocert.Domain = strings.TrimSpace(c.Autocert.Domain)
+	}
+
+	// libraryName: trimmed, and a blank one served as DefaultLibraryName.
+	// The name reaches /v1/health (to a caller with no token too), the
+	// Bonjour record and the name= of every pairing QR, and the app's
+	// pairing parser refuses a code whose name is empty or carries leading
+	// or trailing whitespace (TrimLibraryName says which).
+	//
+	// HERE rather than in applyDefaults, which gave the default only to a
+	// name that was exactly "" (so a config written by `bridge init --name
+	// "  "` was served as spaces) and which Load runs BEFORE the BRIDGE_*
+	// overrides (so a BRIDGE_LIBRARY_NAME of spaces was too). And every
+	// writer that is not Load (the console's settings PATCH, init) saves
+	// what this leaves, so none can store a name Load would serve
+	// differently after a restart. The PATCH refuses a blank name before it
+	// gets here: taking it as the default would replace the operator's name
+	// with one nobody chose.
+	c.LibraryName = TrimLibraryName(c.LibraryName)
+	if c.LibraryName == "" {
+		c.LibraryName = DefaultLibraryName
 	}
 
 	// CustomEndpoints: prune-and-warn. Accept HTTPS URLs only. We
