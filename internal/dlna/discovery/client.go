@@ -277,9 +277,9 @@ type SSDPDiscoveryClient struct {
 // value config + a nil interface is rejected by `NewSSDPDiscoveryClient`.
 type DiscoveryConfig struct {
 	// Interface is the LAN-eligible network interface to write
-	// M-SEARCH packets out on. Caller resolves via
-	// `internal/dlna.PickLANEligibleInterface` (the same picker
-	// the server-side advertiser uses).
+	// M-SEARCH packets out on. cmd/bridge starts one client per
+	// member of `internal/dlna.PickAllLANEligibleInterfaces`, the
+	// set the server-side SSDP advertisers are drawn from.
 	Interface *net.Interface
 
 	// MSearchInterval is the cadence for sending fresh M-SEARCH

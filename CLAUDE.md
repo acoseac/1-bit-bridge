@@ -770,7 +770,9 @@ lost my library."
   reported the cut case; measuring it found the rest). **A browse that finds
   nothing is a finding only once a short-named control is found**: on the
   dev Mac the responder bound a link-local `utun0` tunnel ahead of `en0`, so
-  even "Probe Short Name" was invisible there (filed separately).
+  even "Probe Short Name" was invisible there, until the picker learned to
+  prefer a real LAN (the selection bullet under DLNA, UPnP and discovery,
+  2026-09-27).
 - **A shape documented in PROTOCOL.md is a Mirror-PR obligation.** The two specs
   are byte-identical by rule, and both directions are guarded
   (`TestEveryDocumentedEndpointIsRouted` / `TestEveryRoutedEndpointIsDocumented`).
@@ -1890,6 +1892,45 @@ no failing test — which is the shape to expect in this area.
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+- **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
+  admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
+  returned the FIRST eligible interface, and macOS enumerates system utuns
+  ahead of `en0`: on the dev Mac that was `utun0` (`UP,POINTOPOINT,RUNNING,
+  MULTICAST`, one fe80 address), which the zero-config arm admits. The mDNS
+  responder pinned itself there, its IPv4 listen failed without a word
+  (hashicorp/mdns drops that error, and utun0 has no IPv4), and neither
+  hashicorp/mdns's client on `en0` nor `dns-sd -B` found the bridge, while
+  the NUC's bridge on the same LAN was found. The picker now ranks what
+  eligibility admits (`lanPreference`): not point-to-point first, then a
+  private IPv4, then any other usable address (a ULA, the opted-in tsnet
+  interface), then link-local only, and enumeration order among equals, so
+  a host whose first eligible interface already ranks best keeps it (dido
+  measured: `enp1s0f0` and the same five-member set as before).
+  `PickAllLANEligibleInterfaces` keeps its members and order but leaves out
+  a point-to-point interface whose only addresses are link-local whenever
+  anything else is eligible: six such utuns sat in the dev Mac's set, and
+  the renderer and UPnP-upstream discovery clients start one SSDP client per
+  member, while an IPv4 multicast send pinned to such a tunnel fails
+  (`sendto: can't assign requested address`, hashicorp/mdns's client on
+  utun0). **Don't fold the preference into `IsLANEligibleInterface`**:
+  dropping every point-to-point interface, or the zero-config arm, from
+  ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
+  and the bullet above says why each arm is there. **Don't reduce the key
+  to either half**: the flag alone misses Windows' Wintun adapter
+  (Tailscale, WireGuard; `IF_TYPE_PROP_VIRTUAL`, which Go gives no
+  point-to-point flag) and a Mac's `bridge0` holding a self-assigned
+  address, and the class alone ties a WireGuard tunnel's private 10.x with
+  `en0` and lets enumeration order pick the tunnel (each half turns rows
+  red that the other leaves green). One case moves the other way: a host
+  whose LAN is zero-config (169.254 / fe80 only) beside a private-IPv4
+  bridge (`docker0`, a VM's) now binds the bridge, where the first eligible
+  used to win if it came first. The tables drive `pickLANInterface` and
+  `pickAllLANInterfaces`, the seam both exported pickers call
+  (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
+  `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel`), and
+  `TestTheExportedPickersRunTheSelection` compares the exported pair with it
+  on the host, which can fail only where the first eligible interface does
+  not rank best (the dev Mac, not a typical Linux runner).
 
 - **A folder's children sort by `RelativePath`, with `AbsolutePath` only
   as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`
