@@ -76,10 +76,34 @@ func (d *HTTPClientDispatcher) Do(ctx context.Context, req *http.Request) (*http
 // Caller (typically `SSDPDiscoveryClient`) logs the failure at
 // `.notice` level and skips populating the cache entry — the next
 // M-SEARCH cycle gets another chance to fetch.
+//
+// The description is read as DISCOVERED (SourceDiscovered, the strict
+// default): its service URLs must stay on url's host. Both SSDP clients
+// call this; the operator-configured manual upstream calls
+// FetchDeviceDescriptionWithSource with SourceUserChosen.
+//
+// Redirects are the dispatcher's business, and every production
+// dispatcher refuses them (`CheckRedirect: ErrUseLastResponse`, set where
+// each one builds its client: this package's SSDP client in client.go,
+// internal/upnp's discovery client, and its manual poller): a 3xx comes
+// back as a non-200, so the bridge follows no redirect at all. That is
+// stricter than the iOS app, which follows one to the same host.
 func FetchDeviceDescription(
 	ctx context.Context,
 	dispatcher SOAPDispatcher,
 	url string,
+) (DeviceDescription, error) {
+	return FetchDeviceDescriptionWithSource(ctx, dispatcher, url, SourceDiscovered)
+}
+
+// FetchDeviceDescriptionWithSource is FetchDeviceDescription for a
+// description URL that came from source, which decides how far its service
+// URLs are trusted (see DescriptionSource and ParseDeviceDescriptionWithSource).
+func FetchDeviceDescriptionWithSource(
+	ctx context.Context,
+	dispatcher SOAPDispatcher,
+	url string,
+	source DescriptionSource,
 ) (DeviceDescription, error) {
 	// Defensive nil-guards per CodeRabbit MAJOR round-1 on PR
 	// #305 — production wiring always passes a non-nil dispatcher
@@ -133,7 +157,7 @@ func FetchDeviceDescription(
 	// all upstream-server discovery. The renderer caller ignores desc on
 	// error, so the structural sentinel still drives its no-retry stub.
 	// (CodeRabbit MAJOR on PR #361.)
-	desc, err := ParseDeviceDescription(body, url)
+	desc, err := ParseDeviceDescriptionWithSource(body, url, source)
 	if err != nil {
 		return desc, fmt.Errorf("parse description %s: %w: %w", url, err, errStructuralDescription)
 	}
