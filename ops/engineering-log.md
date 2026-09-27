@@ -18765,12 +18765,16 @@ label.
   keeps and offers the name as `Load` serves it.
 - **Not UTF-8, folded in**: the same class (a stored name the app refuses),
   one call in the repair and one check.
-- **`maxlength` in the console**, fed from the Go constant by a template func:
-  UTF-16 units, never fewer than runes, so never looser than the handler.
+- **No `maxlength` in the console** (added in the first round, removed on
+  review): it counts UTF-16 units, so it stopped names the handler takes (129
+  emoji), and it cut a paste without a word, a name nobody typed. The
+  handler's 400 is what the page shows (C2 below).
 - **The Bonjour instance is cut at 63 bytes** in `sanitizeInstance`, on a rune
   boundary, a trailing space trimmed, the cut logged at INFO beside the TXT
-  caps' lines. The test imports miekg/dns to pack the answer, so it moved from
-  an indirect requirement to a direct one, same version.
+  caps' lines. After the cut, and after the TXT caps, every backslash is
+  written `\\` (the review section below). The test imports miekg/dns to
+  pack the answer, so it moved from an indirect requirement to a direct one,
+  same version.
 - **PROTOCOL.md** now states the encoding and the name's four limits. They
   lived only in the Swift parser, which #1042 and this change both had to
   read to learn them. Mirror PR in the iOS repo; no code change there.
@@ -18786,8 +18790,8 @@ label.
   handlers with the fixture's name and the default; and every name a PATCH
   leaves live comes out of the next QR as a name the app takes.
 - The PATCH table gained 256 / 257 runes, padded to 256, 256 / 257 two-byte
-  and 256 four-byte runes; the form test requires `maxlength` equal to the
-  constant. `TestSafeQueryRoundTripsEncodeURIComponent` encodes with
+  and 256 four-byte runes; the form test pins that the box has no
+  `maxlength`. `TestSafeQueryRoundTripsEncodeURIComponent` encodes with
   `urlquery.Escape`, the CLI's escaper, and `enrichment misses` has its own
   test of the query it sends.
 - `internal/config`: `Load` rows over the cap, a cut ending on a space, an
@@ -18799,9 +18803,11 @@ label.
   (no config dir) and on a rewrite (bridge.yaml byte-identical), 256 `é`
   saved; the prompt asking again; a rewrite keeping, listing and offering the
   name `Load` serves a config over the cap or not UTF-8.
-- `internal/mdns`: the instance for seven names, including 63, 64 and 256
-  bytes, 32 × `é`, 22 CJK characters and a cut after a space, packs as the
-  answer to a browse.
+- `internal/mdns`: the instance for eleven names, including 63, 64 and 256
+  bytes, 32 × `é`, 22 CJK characters, a cut after a space and four with
+  backslashes, packs as the answer to a browse, and its label as packed is a
+  prefix of the name; the TXT `library=` as packed is the name, backslashes
+  included, across the 240-byte cap.
 - **Red first** against the pre-fix code: every new test and row above that
   names a space, a cap or a name that is not UTF-8.
 - Negative controls, each applied once against the committed fix, `-count=1`,
@@ -18824,7 +18830,7 @@ label.
   | NC13 | init's `--name` check removed | init's refusal |
   | NC14 | the prompt takes any answer | the ask-again test |
   | NC15 | init keeps the file's name | only the Enter subtests (the offer): with `--yes`, `Normalize` repairs it at save |
-  | NC16 | `maxlength` removed | the form test |
+  | NC16 | `maxlength` removed (first round) | the form test, which then required it; inverted on review (NC22) |
   | NC17 | no instance cap | the mDNS test |
   | NC18 | the cap at 64 | the mDNS test (64-byte names do not pack) |
   | NC19 | no trim after the instance cut | the mDNS test |
@@ -18839,6 +18845,45 @@ all five. It proposed the repair order `ToValidUTF8` → cut → trim → defaul
 against the cap) and a guard against an instance cut to nothing (already
 unreachable: the instance is trimmed before the cut, so its first rune stays,
 and an empty one falls back to the default name).
+
+### Review (round 1)
+
+Gemini: no comments. Sonar: gate passed. CodeQL: `go/log-injection` on the
+`Normalize` warning, the known false positive (every value a structured slog
+attribute); a probe driving the real `Normalize` with forged JSON and text
+records after CR/LF gave one line under both handlers, escaped inside
+`served=`, and alert 128 was dismissed on that. CodeRabbit (plan limit
+reached; the free on-demand run) posted two findings, both verified and
+taken:
+
+- **A cut that leaves a backslash breaks the instance.** Wider than reported:
+  hashicorp/mdns joins the instance into `<instance>._onebit-bridge._tcp.local.`
+  and miekg/dns packs that string as presentation format, reading `\X` as X
+  and `\DDD` as a byte, so EVERY backslash was an escape. Measured through the
+  pack path: `AC\DC Live` went out as `ACDC Live`, `\065` as `A`, a name
+  ending in a backslash as `Ends in a backslash._onebit-bridge` (the
+  service label swallowed), and 62 × `a` + `\suffix` did not pack. The TXT
+  strings go through the same packer (`packTxtString`, which also drops a
+  lone trailing backslash): library=`ACDC Live`, before and after the
+  instance fix. `sanitizeInstance` and `buildTXTRecords` now write each
+  backslash `\\`, after the cut and the caps, which count wire bytes.
+- **`maxlength` refused names the handler takes** (above).
+
+On dido's LAN (hashicorp/mdns's client, the control first):
+
+| | name | before review | after |
+|---|---|---|---|
+| B1 | 62 × `a` + `\suffix` | not found | found; instance 62 × `a` + `\` |
+| B2 | `AC\DC Live` | found as `ACDC Live`, library=`ACDC Live` | instance and library= `AC\DC Live` |
+| C2 | console, 298 characters typed, Save (no `maxlength`) | | "Save failed: libraryName: must be at most 256 characters, and this one has 298 (…)"; `My Library` still live and in bridge.yaml |
+
+| | mutation | red |
+|---|---|---|
+| NC20 | no escaping in the instance | the instance test: the four backslash names |
+| NC21 | the instance escaped BEFORE the cut | the cut-after-a-backslash name: the cut splits `\\` and leaves one |
+| NC22 | `maxlength` back in the template | the form test |
+| NC23 | no escaping in the TXT strings | the TXT test: four of its five names |
+| NC24 | `library=` escaped before its cap | the TXT test's name whose 240-byte cap lands after a backslash |
 
 ### Out of scope
 

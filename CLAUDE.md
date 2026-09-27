@@ -717,7 +717,14 @@ lost my library."
   INFO line per query ("[ERR] mdns: Failed to handle query"). 64 ASCII
   characters, or 22 CJK ones, were enough (measured on a Linux LAN).
   `sanitizeInstance` cuts it to `maxInstanceLen` bytes on a rune boundary;
-  TXT `library=` carries up to 240 bytes of the name. **A browse that finds
+  TXT `library=` carries up to 240 bytes of the name. **The instance and
+  every TXT string are DNS presentation format to miekg/dns**, where a
+  backslash escapes what follows it (`\X` is X, `\DDD` a byte): each is
+  written `\\` AFTER the cut or cap, which count the bytes on the wire.
+  Unescaped, `AC\DC Live` was browsed as instance and `library=` "ACDC
+  Live", and a trailing backslash (a name's own, or one a cut left) merged
+  the instance into the service label or vanished from the TXT (CodeRabbit
+  reported the cut case; measuring it found the rest). **A browse that finds
   nothing is a finding only once a short-named control is found**: on the
   dev Mac the responder bound a link-local `utun0` tunnel ahead of `en0`, so
   even "Probe Short Name" was invisible there (filed separately).
@@ -1902,8 +1909,11 @@ no failing test — which is the shape to expect in this area.
   stop a bridge from starting over a display name. init keeps and offers an
   install's name AS LOAD SERVES IT, or its prompt would offer a name it then
   refuses. Don't cut in the PATCH instead: that stores a name nobody typed.
-  The console's box has `maxlength` 256, which counts UTF-16 units, never
-  fewer than runes.
+  **Nor in the console**: the name box has NO `maxlength`. It counts UTF-16
+  units, so it stopped names the handler takes (129 emoji), and it cut a
+  paste without a word; the handler's 400 is what the page shows ("Save
+  failed: libraryName: must be at most 256 characters, …"). Added in #1046's
+  first round, removed on review (CodeRabbit).
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true
