@@ -3145,10 +3145,11 @@ its twin.** The top list is older, shorter, and read first.
   never "the newer passwordChangedAt"**: every credential write is synchronous
   and adopted only once its rename lands, so memory is never ahead of the file,
   and a timestamp would keep memory over a restored backup. A session write puts
-  down the set in memory; a credential write puts down the set it finds in the
-  file AT THE WRITE, never the one read at open, since reset-password waits at a
-  prompt in between. **One re-read is not enough**: staging costs a write and an
-  fsync (milliseconds, tens on a cloud disk), so EVERY write goes through
+  down the set in memory; a credential write that keeps the sessions puts down
+  the set it finds in the file AT THE WRITE, never the one read at open, since
+  reset-password waits at a prompt in between. **One re-read is not enough**:
+  staging costs a write and an fsync (milliseconds, tens on a cloud disk), so
+  EVERY write goes through
   `commitLocked`, which re-reads the file just before its rename and rebuilds
   from a fresh read if it changed at all, byte for byte. Comparing the
   credential alone covered the running bridge's writes and missed
@@ -3157,9 +3158,52 @@ its twin.** The top list is older, shorter, and read first.
   Windows, with its retries) is what remains. A kernel lock (flock / LockFileEx)
   would close that, and the "stale lockfile" reason this file gives for
   declining interprocess locks is about lockFILES: the kernel drops those locks
-  with the process. **A rotation does not end sessions, and neither does a
-  restart** (they persist, #800); reset-password said a restart ended them until
-  2026-09-27.
+  with the process. **A rotation ends the sessions by default, and a restart
+  does not** (they persist, #800): the next bullet. reset-password said a
+  restart ended them until 2026-09-27.
+- **A sign-out reaches the running bridge as a MARKER in `adminauth.json`,
+  never as an emptied session set** (2026-09-27). The running bridge holds the
+  sessions in memory and writes them back (a login, the 30 s activity flush, a
+  logout, the shutdown flush), so a file that merely lost them ends nothing.
+  Until this change nothing could end a session another browser held: a
+  rotation kept them (a test pinned that as operator-friendly), a restart
+  reloaded them, and a console signed in with a leaked password outlived the
+  rotation for up to the 7-day cap, while 1-bit.app's troubleshooting page said
+  a reset invalidated sessions immediately. Now `bridge admin reset-password`
+  signs every console out by default (`--keep-sessions` keeps them), `bridge
+  admin sign-out-everywhere` does it with the password kept, and the Devices
+  page's "Sign out all other sessions" (public mode) keeps the browser that
+  asked; that one runs in the process holding the sessions and needs no
+  marker. A process ending sessions it does not hold moves `sessionsRevokedAt`
+  in the same CAS write, and **every writer carries the file's marker over**,
+  the `--keep-sessions` rotation included. **The marker is an EVENT, never a
+  filter on `IssuedAt`**: a store that reads a marker it has not taken ends
+  every session it holds, BEFORE it builds anything it writes
+  (`persistSessionsLocked` builds its set inside the commit closure for exactly
+  this), and keeps every session made after that read whatever the clocks say.
+  A filter would end every login after a clock stepped back until the clock
+  passed the marker; and a session held at the read predates the sign-out even
+  with a later `IssuedAt`, since its login read the file before the marker
+  landed. `load()` takes the file's marker as already taken, or every start
+  after a sign-out signs its own sessions out at its first read. **Every
+  sign-out MOVES the marker** (`nextSignOut`, one nanosecond past the last when
+  the clock does not put now after it): two sign-outs inside one tick of a
+  coarse clock, or across a clock stepped back, otherwise end nothing on a
+  bridge that took the first. **A session check reads the file whenever a
+  stat says it changed** (`refreshIfChangedLocked`: size, mtime AND
+  `os.SameFile`, since every write here is a rename and so a new inode whatever
+  its size; a commit records its own file's stamp so the bridge never reads
+  back its own write), so a signed-out console is refused at its NEXT REQUEST,
+  not at the bridge's next write. Measured: 2 µs, against a 22 µs read at one
+  session and 1.75 ms at the 1,024 cap. **A check that cannot read the file
+  REFUSES** (`ErrStoreUnreadable`, a 503 from the middleware), keeps the
+  session, records no stamp (a chmod or chown that fixes the file changes none
+  of the three), and logs at most once a `sessionFlushInterval`: the middleware
+  adds no line of its own, #1039's debounce concern. A MISSING file still ends
+  nothing. Open: a bridge still running the OLD binary drops the unknown field
+  and writes its sessions back, so restart first, then sign out; and `sudo
+  bridge admin reset-password` leaves a root-owned file the service cannot
+  read, which now refuses every console request until it is chowned.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it
