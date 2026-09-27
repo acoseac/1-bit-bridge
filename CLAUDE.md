@@ -84,7 +84,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 - **No server-side transcoding, ever.** 1-bit is bit-exact by mission. `/v1/download` serves the file as-is via `http.ServeContent`; never introduce a transcoding path. Renditions — the `upscaled-` / `optimized-` PCM families and, since PR #863, the DSD `optimized-dsd-` / `pcm-` tiers — are OFFLINE sidecar files built by the job pool and served through `serveVariant`, i.e. the same `http.ServeContent` over a file that already exists; the rule is about the serving path, and a rendition never substitutes for the bit-exact source when the client asked for the source.
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
-- **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design.
+- **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the `cmd/bridge` bullet on what a rewrite keeps).
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what `bridge.ars.md` actually runs; this bullet omitted that until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
@@ -209,23 +209,27 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Seven claims in this list have been wrong and been corrected** — the
+**Eight claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
 falsified two days earlier by wiring `integrity.LocateWaveform` into
 `analysisStoreAdapter`, (2026-09-25) "a broken existing config cannot block
 the re-init that replaces it", which held for config-file and not for the port
-checks, and (2026-09-26) "`os.ReadDir("")` reads the process working
-directory". The first five cost a later session real time; the fourth was
-written **after** the PR that falsified it, by a session that had this very
-warning in front of it, and the fifth sent `bridge doctor` on telling
-operators to run `bridge analyze --force` — hours of decoding to recover
-curves the next request rebinds for free. The sixth was found by measuring
+checks, (2026-09-26) "`os.ReadDir("")` reads the process working
+directory", and (2026-09-27) "init never prompts for `customEndpoints`, so
+the old value survives the rewrite". The first five cost a later session real
+time; the fourth was written **after** the PR that falsified it, by a session
+that had this very warning in front of it, and the fifth sent `bridge doctor`
+on telling operators to run `bridge analyze --force` — hours of decoding to
+recover curves the next request rebinds for free. The sixth was found by measuring
 the re-init rather than reading the bullet. The seventh was never true: a
 bot's finding on #531, accepted without a probe, it spread to six code
 comments and three test docblocks, two of whose tests passed with the
-refusal deleted, and a bot on #1030 quoted it back as a rule.
+refusal deleted, and a bot on #1030 quoted it back as a rule. The eighth
+was the premise a preflight judgement rested on, and no rewrite had ever
+kept the value: measured, the same run also minted a new TLS pair over an
+install that named its own.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -2610,21 +2614,57 @@ what it claimed**, and none of it had a failing test.
   for a password that was never made. The store (`openInitAdminAuth`) and
   the TLS pair (`LoadOrGenerateWithOptions`) are both READ before `Save`,
   and each refusal says the config was NOT changed. The preflight's
-  tls-cert FAIL covers a broken pair only when it runs, and only for the
-  pair it grades, the existing config's (`resolveCertPaths`), not the
-  `DefaultPaths(dataDir)` pair init loads. A new check init can refuse on
-  goes before `Save` too; after it, only the mint's own write and the
-  service install may fail. **The pair kept is the data dir's only**: a
-  config naming another (`tlsCertPath`) loses it to a `--force` rewrite,
-  which mints a new pair at the default path and changes the fingerprint
-  every device pinned, an open defect measured in #1038's log entry, not a
-  rule. `TestInitPublicReinitKeepsTheAdminCredentials`
+  tls-cert FAIL covers a broken pair only when it runs. A new check init
+  can refuse on goes before `Save` too; after it, only the mint's own write
+  and the service install may fail. **Which pair is kept, and what else a
+  rewrite keeps, is the next bullet's**: this one said "the data dir's
+  only" until 2026-09-27, an open defect #1038 measured and left.
+  `TestInitPublicReinitKeepsTheAdminCredentials`
   compares every file byte for byte and verifies the first run's password,
   because an exit-code test also passes a "fix" that rotates. The other
   defect found there: `box()` cuts a line longer than its 51-column body in
   the middle, and the "shown ONCE" box printed `The plai... is not stored
   anywhere.` on every public install
   (`TestAdminCredentialBoxesAreNotTruncated`).
+- **A rewrite replaces the SETTINGS, never the INSTALL.** `bridge init
+  --force` (or "Overwrite? y") keeps `dataDir`, `tlsCertPath` and
+  `tlsKeyPath` always, a loopback install's `customEndpoints` on a loopback
+  rewrite, and `libraryRoots` when the run names no `--library` (#1040). It
+  built `bridge.yaml` from `baseConfig` and the flags and kept nothing.
+  Measured with the real binary: a config naming its pair outside the data
+  dir lost it, init minted a new one there and printed it as "Stable across
+  restarts", and `bridge serve` then presented `13:BE:B2:…` to devices that
+  had pinned `04:AF:CB:…` (read off the socket); a config naming another
+  `dataDir` was pointed back at `<dir>/data`, stranding its `tokens.json`; a
+  config with a misspelt key lost its pair the same way; `customEndpoints`
+  vanished, and iOS replaces its alternates with `/v1/health`'s on every
+  fetch (`BridgeEndpointSelector.update`), so every device lost that route;
+  a public rewrite without `--library` wrote `libraryRoots: []`. **The rule
+  is who could give a value back.** The pin and the tokens only a re-pair
+  restores, so they are kept always. The endpoints and roots, which init
+  never asks for, are kept where the run writes nothing in their place: a
+  `--public` rewrite writes the domain's endpoint (a posture change starts
+  from the new posture's, since the old list names the other posture's
+  addresses), and a `--library` replaces the roots. The rest (features,
+  cadences, the ports, which #970 GRADES rather than keeps, the name) is the
+  documented overwrite. **Read what is kept from the FILE
+  (`readPriorInstall`), never through `config.Load`**: Load applies
+  `BRIDGE_*`, so keeping its values writes the caller's environment into the
+  YAML (`writeAutoInitConfig`'s rule), and its unknown-key refusal would cost
+  a misspelt-key config (#1027's row C) the pair it names. init LOADS the
+  pair the saved config names through `resolveCertPaths`, which serve now
+  calls too, so the fingerprint it prints is the one serve presents; over a
+  config that does not load, the preflight grades that pair as well.
+  **Refused before anything is written**: a config this user cannot read;
+  one that does not parse when the rewrite would MINT (no pair in init's
+  data dir: the file may name the pinned pair anywhere); and one setting
+  `demo.enabled` or `deployment.managed*`, postures init never writes, whose
+  rewrite dropped the demo's pinned token from every shipped app or handed a
+  tenant's withheld controls to its console. A fresh start is moving
+  `bridge.yaml` aside, never `--force`.
+  `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
+  real initCmd twice over one `--dir` and assert the exit code, the saved
+  config and the fingerprint at the paths `resolveCertPaths` finds.
 
 
 The largest package in the repo — 52 production files, ~19k lines, `main.go`
@@ -2911,12 +2951,18 @@ mentions across the four `ops/audit-*.md` files.
   built `doctor.Deps` from its prompts alone — so the cert checks graded
   `<cfgDir>/data/server.{crt,key}` rather than `cfg.TLSCertPath`, and
   `tls-cert-sans` skipped itself, a nil `CertSANs` being a silent ok. Both are
-  wired from a config readable at the TARGET path
-  (`withExistingInstallCertDeps`); a first install keeps the skip, because a
+  wired from a config readable at the TARGET path (`withExistingInstallDeps`,
+  #963's name for it, which this bullet gave as `withExistingInstallCertDeps`
+  until 2026-09-27); a first install keeps the skip, because a
   narrower want-set than `bridge serve` builds would be a comparison presented
   as authoritative that nobody made. Grading the PRE-init state is the point,
-  not a compromise: the cert on disk IS the cert, and init never prompts for
-  `customEndpoints`, so the old value survives the rewrite. **The warn printing
+  not a compromise: the cert on disk is the pair a rewrite keeps, and a
+  loopback rewrite of a loopback install keeps `customEndpoints`, so there
+  the old want-set IS the new one. **This bullet said every rewrite kept
+  them until 2026-09-27, and none did** (the bullet on what a rewrite keeps):
+  a `--public` rewrite writes the domain's and a posture change starts over,
+  so for those two the pre-init grade is about the list being replaced, and
+  `bridge doctor` after the run grades the saved one. **The warn printing
   is what makes any of it reach an operator** — every verdict these two checks
   give about that state is warn-level by design (neither is a reason to refuse
   to initialise), and `ensureDoctorClean` printed only on a FAIL, so a check

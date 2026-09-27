@@ -150,10 +150,10 @@ func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *pri
 		for _, m := range prior.madeElsewhere() {
 			keys, costs = append(keys, m.key), append(costs, m.cost)
 		}
-		fmt.Fprintf(stderr, "the config at %s sets %s, which bridge init never writes: the tooling that runs this bridge does.\n",
+		fmt.Fprintf(stderr, "the config at %s sets %s, a posture bridge init never writes.\n",
 			cfgPath, strings.Join(keys, " and "))
 		fmt.Fprintf(stderr, "a rewrite would make it an ordinary bridge: %s.\n", strings.Join(costs, ", and "))
-		fmt.Fprintln(stderr, "change it with the tooling that wrote it, or by hand.")
+		fmt.Fprintln(stderr, "change it by hand, or with the tooling that manages this bridge.")
 	default:
 		return false
 	}

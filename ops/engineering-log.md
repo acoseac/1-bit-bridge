@@ -17869,3 +17869,217 @@ LockFileEx lock with the process.
   seeding from its environment) are last-writer-wins inside their own write
   windows. The check-at-the-write closes the realistic case, a writer
   that read an empty store before another initialised it.
+
+## 2026-09-27 — a `--force` rewrite keeps the install's data dir, TLS pair and endpoints (#1040)
+
+#1038's entry recorded it under Out of scope: "A `--force` rewrite carries
+nothing over from the config it replaces … a pin break for every paired
+device. The same rewrite drops `customEndpoints`, which
+`withExistingInstallDeps`' docblock and CLAUDE.md's 'preflight grades the
+install that is THERE' bullet both say 'survives the rewrite'."
+
+### What was measured
+
+- **The mechanism.** initCmd built the new config from `baseConfig(roots,
+  name, <dir>/data)` plus its flags, and loaded or minted the pair at
+  `servertls.DefaultPaths(dataDir)`. Nothing from the file it replaced
+  reached either.
+- **End to end, the real binary, darwin/arm64**, main at `daf8e6b5` and the
+  fix at `7b956a19`, each scenario a first `bridge init --yes --no-service
+  --skip-doctor`, an edit, then `bridge init --yes --force` (the harness,
+  `measure.sh` and `measure2.sh`, lived in the session scratchpad).
+  Fingerprints are `bridge cert info` before and after:
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | S1 | the pair moved to `x/c.{crt,key}`, `tlsCertPath` / `tlsKeyPath` added, nothing left in `data/` | exit 0, no `tlsCertPath` saved, a new pair minted in `data/`, `04:AF:CB:4C:6A…` → `13:BE:B2:12:5E…` | exit 0, both paths saved, `data/` empty, `6C:63:42:04:F7…` unchanged |
+  | S2 | `customEndpoints: [https://music.example.net:8443]` | dropped | kept |
+  | S3 | `data/` moved to `elsewhere/` (with a `tokens.json`), `dataDir` edited | `dataDir` back at `<dir>/data`, a new pair there, `5A:00:FE:F7:28…` → `AD:33:1B:3C:88…`, the tokens left behind | `dataDir` kept, no `data/` beside the config, `E1:B1:7C:7D:21…` unchanged |
+  | S4 | S1, then `libraryNmae: typo` (the config no longer loads) | `99:FA:22:5F:A7…` → `AF:49:CE:21:F1…` | `83:0F:A7:2F:0A…` unchanged |
+  | S5 | S1's move, then a tab-indented line (the file no longer parses) | exit 0, rewritten, a pair minted in `data/` | exit 1, config unchanged, nothing minted |
+  | S6 | `demo: {enabled: true, tokenSHA256: …}` | exit 0, the demo block gone | exit 1, config unchanged |
+  | S7 | a public install, a root added as the console saves it, re-inited without `--library` | `libraryRoots: []` | the root kept |
+
+- **What `bridge serve` presents**, read off the socket (`openssl s_client`
+  against a real `serve` on the rewritten S1 install, with mDNS, Tailscale
+  and HTTP/3 off by env): main `13:BE:B2:12:5E…`, the new pair; the fix
+  `6C:63:42:04:F7…`, the one devices pinned. On main the fingerprint box
+  printed the new one under "Pin this on the iOS side. Stable across
+  restarts".
+- **What dropping `customEndpoints` costs a device.** The iOS app replaces
+  its alternates with `/v1/health`'s `endpoints` on every successful fetch
+  (`BridgeEndpointSelector.update`, `all = newURLs`; the 1-bit repo at
+  `09330d34`), so a dropped entry left every paired device without that
+  route at its next health check. On home-pc that is the WAN endpoint the
+  setup script adds after init.
+- **What emptying `libraryRoots` costs.** `Scan` refuses zero roots ("no
+  library roots configured"), so no row is reaped; every track stays in the
+  manifest and none resolves to a file.
+- **No tooling runs `bridge init` over a demo or managed config.** The
+  conductor renders tenant configs from its template (`render_config` in
+  `host/bin/bridge-tenant`, conductor at `5347fe8`), and the demo was
+  provisioned by hand (its `ops/azure-migration.md`), so refusing those
+  configs breaks nothing that exists.
+
+### Decisions
+
+- **A rewrite replaces the settings and keeps the install, by who could
+  give a value back.** Kept always: `dataDir`, `tlsCertPath`, `tlsKeyPath`.
+  The data dir holds `tokens.json`, the database, a public install's admin
+  account and the default pair, and the pair is every device's pin; only a
+  re-pair restores either. Kept where the run writes nothing in their place:
+  a loopback install's `customEndpoints` on a loopback rewrite, and
+  `libraryRoots` when the run names no `--library` (a public run; a
+  loopback one always names one). A `--public` rewrite writes the domain's
+  endpoint as it always did, and a rewrite that changes posture starts from
+  the new posture's: the old list names the addresses the other posture
+  listened on (a public `https://<domain>` on a loopback bridge on :7788 is
+  a dead URL in every device's rotation). Everything else is the documented
+  overwrite, including the ports, which #970 grades rather than keeps, and
+  the library name.
+- **Read from the file as written** (`readPriorInstall`): no `BRIDGE_*`
+  overrides, which `config.Load` applies and which the serve auto-init
+  already refuses to bake into the YAML (`writeAutoInitConfig`); no
+  unknown-key refusal, so S4's misspelt-key config, #1027's row C, still
+  gives up its pair; and into a struct of its own, so a type error in a
+  field it does not keep cannot cost the ones it does. A decode error on a
+  kept field is "cannot read", never a silent default. Its keys and types
+  are `config.Config`'s (`TestPriorInstallTagsAreConfigs`), and relative
+  paths resolve against the config's directory through
+  `config.ResolvePath`, exported from Load's own `resolvePath` for this.
+- **init loads the pair the saved config names** (`resolveCertPaths(cfg)`),
+  and serve now calls the same helper instead of an inline copy of it. So
+  the printed fingerprint is the served one, a broken named pair is refused
+  before `Save`, and no stray pair is minted in the data dir.
+- **The data dir follows from the start of the run**: the header's "Data
+  dir:" line, the preflight, the credential store (so #1038's "kept"
+  account is the install's, not a new one beside the config), the pair, and
+  the service's working directory, on the keep path too.
+- **Refused before anything is written**, directories included: a config
+  this user cannot read (`fs.ErrPermission`; the bridge's own user reads it
+  at every start); one that does not parse when the rewrite would MINT (no
+  pair in init's own data dir, where it falls back to, as #1027 does for
+  the pid file); one setting `demo.enabled` or `deployment.managed*`,
+  postures init never writes. The keep path writes nothing and is not
+  refused. An unparseable config with the pair in init's data dir proceeds
+  and says which pair it keeps.
+- **The run lists what it kept** when it differs from a first install, so
+  the common rewrite of an install init made prints nothing new.
+- **The preflight over a config that does not load grades the pair the
+  file names** (`withExistingInstallDeps` reads it with `readPriorInstall`).
+  It graded the default pair in init's data dir, and over S4's config
+  answered ok, "absent (init will mint)", about a pair nothing serves.
+- **The two false claims are corrected** in `withExistingInstallDeps`'
+  docblock (whose "init does not mint a new one over a live install" was
+  false too, S1), the CLAUDE.md preflight bullet (which also still named
+  the helper by its pre-#963 name) and a comment in
+  `TestInitPreflightGradesTheInstalledCertificate`. They were true of no
+  rewrite; they are true now of a loopback rewrite of a loopback install,
+  and the docblock says which rewrites grade a want-set being replaced.
+
+### Tests and controls
+
+- `cmd/bridge/init_rewrite_keeps_test.go`. The end-to-end tests drive the
+  real `initCmd` twice over one `--dir` and assert the exit code, the saved
+  config (through `config.Load`, or raw where the environment is the
+  subject) and `servedFingerprint`, the fingerprint at the paths
+  `resolveCertPaths` finds (a pair that is not there reads "(minted)"):
+  - `TestInitRewriteKeepsTheTLSPairItsConfigNames` (S1) and
+    `TestInitRewriteKeepsTheDataDirItsConfigNames` (S3), each in both
+    postures, the public one with the preflight on; the loopback run also
+    requires the printed fingerprint to be the served one, and the public
+    data-dir run the "kept" admin account from the moved data dir.
+  - `TestInitRewriteKeepsThePairOfAConfigThatDoesNotLoad` (S4) and
+    `TestInitPreflightGradesThePairABrokenConfigNames`.
+  - `TestInitRewriteOverAConfigItCannotParse`: refused with no pair in the
+    data dir, kept with one.
+  - `TestInitRewriteKeepsALoopbackInstallsCustomEndpoints`: loopback over
+    loopback kept, public over loopback the domain's, loopback over public
+    none.
+  - `TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed`: kept, and
+    replaced by a `--library`.
+  - `TestInitRewriteKeepsTheFileNotTheEnvironment`: `BRIDGE_DATA_DIR` and
+    `BRIDGE_CUSTOM_ENDPOINTS` set during the rewrite reach neither the file
+    nor the disk.
+  - `TestInitRewriteOfTheDefaultLayoutWritesWhatItAlwaysDid`, the positive
+    control: no `tlsCertPath`, `tlsKeyPath` or `customEndpoints` written,
+    the fingerprint kept, nothing listed as kept.
+  - `TestInitRefusesToRewriteAConfigItDoesNotMake` (demo, managed controls,
+    managed settings; the keep path still exits 0) and
+    `TestInitRefusesToRewriteAConfigThisUserCannotRead` (skipped on Windows
+    and as root).
+  - `TestPriorInstallReadsWhatLoadReads` (relative paths, from another
+    working directory) and `TestPriorInstallTagsAreConfigs`.
+- **Red first on the Mac** against main's `init.go`, the three new
+  identifiers stubbed in a throwaway test file: every end-to-end test above
+  failed on the measured defect, and the five positive controls passed, as
+  they must: the parseable-pair row, public over loopback, loopback over
+  public, a `--library` replacing roots, and the default-layout test.
+- Negative controls against the committed fix (`7b956a19`), each restored
+  from HEAD and the tree checked clean before the next, none failing to
+  build (the harness reported only subtests where a subtest failed at
+  first, hiding top-level tests failing beside them; re-run listing every
+  failing leaf):
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | init loads `DefaultPaths(dataDir)` again | the S1 pair test (both postures) and the S4 test |
+  | NC2 | the TLS paths not carried | the same three |
+  | NC3 | the data dir not carried | the S3 test, both postures |
+  | NC4a | endpoints carried whatever the old posture | loopback over public |
+  | NC4b | endpoints carried into a public rewrite | public over loopback |
+  | NC5 | endpoints never carried | loopback over loopback, the environment test |
+  | NC6 | roots never carried | the roots test's "kept" row |
+  | NC7 | the kept values taken from `config.Load` | the environment test |
+  | NC8 | a strict decode (unknown keys refused) | every carry test, since every real config holds keys the narrow struct lacks |
+  | NC8b | only a config that loads gives up what it keeps | the S4 test, the broken-config preflight test (and the parity test's second half) |
+  | NC9 | no refusal when an unparseable rewrite would mint | its "refused" row |
+  | NC10 | an unparseable config always refused | its "kept" row |
+  | NC11 | no permission branch | the unreadable-config test |
+  | NC12 | demo / managed configs not refused | all three rows |
+  | NC13 | those refused on the keep path too | all three rows, on the keep path |
+  | NC14 | the broken-config preflight grades the default pair | its test |
+  | NC15 | relative paths resolved against the working directory | the parity test |
+  | NC16 | a yaml key renamed | the tags test, the parity test, the S3 test (both), the broken-config preflight test |
+  | NC17 | the kept list never printed | S1 (both), loopback over loopback |
+  | NC18 | the kept list printed for a default install | the default-layout test |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with `init.go`,
+on the decision set. It agreed with keeping `dataDir` rather than refusing
+a mismatch (init has no `--data-dir` flag, so a refusal would make
+`--force` unusable on such an install), with the `customEndpoints` rule and
+its posture split, and with anchoring relative paths to the config's
+directory. Two points were taken: refuse demo and managed configs in this
+change rather than record them (checked first against the conductor and
+the demo, above), and make the preflight's broken-config branch grade the
+pair the file names. One was declined: refusing a carried data dir that is
+not there. init creates its own data dir when it is missing, and a
+missing one is either state deleted on purpose, where a fresh pair is
+inevitable, or an unmounted volume (Out of scope). Its warning about a type
+error silently defaulting a kept field was already met: any decode error is
+"cannot read".
+
+### Out of scope
+
+- **A `--public` or posture-changing rewrite grades a SAN want-set being
+  replaced.** The preflight runs before the keep-or-overwrite decision, and
+  the domain's endpoint replaces the old list after it. A second pass over
+  the saved want-set, like #970's port pass, is not added; `bridge doctor`
+  after the run grades the saved one.
+- **A carried data dir that is not there is created**, as init creates its
+  own. Over an unmounted volume whose mount point this user may write,
+  init's pair and directories land under the mount point and are shadowed
+  once it is mounted; one it may not write refuses at `mkdir` before `Save`.
+- **Reset, unmeasured here**: a custom `autocert.cacheDir` (the next start
+  asks Let's Encrypt again), a custom `upscale.variantsDir` (renditions are
+  recorded by absolute path; new ones would go to the default), and the
+  library name, which becomes the hostname without `--name`. A public
+  install needing `autocert.external443Mapping` cannot be rewritten at all:
+  validation refuses the config init builds, before `Save` (measured: a
+  first install with `--listen-address 127.0.0.1:18443` and autocert fails
+  the same way).
+- **`BRIDGE_DATA_DIR` in init's own environment**: the preflight grades the
+  environment's data dir (`config.Load`) while the rewrite keeps the
+  file's.
