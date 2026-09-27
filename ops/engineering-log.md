@@ -18847,7 +18847,12 @@ evidence:
   NC10, NC12, NC13), re-run against the split test (1d57caa4), turn the same
   rows red.
 - **CodeRabbit** paused on its plan limit before its first pass; asked, the
-  user chose the free on-demand run, ticked once the fixes above were pushed.
+  user chose the free on-demand run, ticked once the fixes above were pushed:
+  no actionable comments on 7fa0919a, merge risk minimal.
+- **Gemini's app hit its daily quota** before a fresh pass over 1d57caa4 and
+  7fa0919a. A direct consult over exactly that diff stood in: no findings,
+  and the split test asserts what it did before, plus the post-mend Warn's
+  count, which the old code checked only while unreadable (a tightening).
 
 ### Out of scope
 
