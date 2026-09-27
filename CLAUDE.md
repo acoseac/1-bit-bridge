@@ -2645,7 +2645,10 @@ what it claimed**, and none of it had a failing test.
   never asks for, are kept where the run writes nothing in their place: a
   `--public` rewrite writes the domain's endpoint (a posture change starts
   from the new posture's, since the old list names the other posture's
-  addresses), and a `--library` replaces the roots. The rest (features,
+  addresses), and a `--library` replaces the roots. The preflight grades
+  only a root the run names: a kept public root may be a mount that is not
+  up, `checkLibraryRoots` FAILs a missing one, and public init must not
+  need the mount (init's public-mode note). The rest (features,
   cadences, the ports, which #970 GRADES rather than keeps, the name) is the
   documented overwrite. **Read what is kept from the FILE
   (`readPriorInstall`), never through `config.Load`**: Load applies

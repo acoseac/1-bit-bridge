@@ -17965,6 +17965,16 @@ install that is THERE' bullet both say 'survives the rewrite'."
   and says which pair it keeps.
 - **The run lists what it kept** when it differs from a first install, so
   the common rewrite of an install init made prints nothing new.
+- **The preflight grades only a root the run names**, as it did before the
+  roots were kept. A kept public root may be a mount that is not up, which
+  public-mode serve tolerates and init's public-mode note says init must
+  not demand ("Either order should work"), and `checkLibraryRoots` FAILs a
+  missing root. The first version of this change graded the kept roots and
+  so refused a public rewrite whenever its mount was down; found reviewing
+  the change before the PR (`a4f0bfa1`, NC19). Measured with the real
+  binary, S7 with the root's directory removed and the preflight on:
+  `7b956a19` exit 1 on `[FAIL] library-roots`, `a4f0bfa1` exit 0 with the
+  root kept (main exits 0 and empties the roots, S7).
 - **The preflight over a config that does not load grades the pair the
   file names** (`withExistingInstallDeps` reads it with `readPriorInstall`).
   It graded the default pair in init's data dir, and over S4's config
@@ -17996,8 +18006,9 @@ install that is THERE' bullet both say 'survives the rewrite'."
   - `TestInitRewriteKeepsALoopbackInstallsCustomEndpoints`: loopback over
     loopback kept, public over loopback the domain's, loopback over public
     none.
-  - `TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed`: kept, and
-    replaced by a `--library`.
+  - `TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed`: kept, kept
+    with the root's directory gone and the preflight on (red on `68acff25`,
+    exit 1 on `[FAIL] library-roots`), and replaced by a `--library`.
   - `TestInitRewriteKeepsTheFileNotTheEnvironment`: `BRIDGE_DATA_DIR` and
     `BRIDGE_CUSTOM_ENDPOINTS` set during the rewrite reach neither the file
     nor the disk.
@@ -18015,11 +18026,14 @@ install that is THERE' bullet both say 'survives the rewrite'."
   failed on the measured defect, and the five positive controls passed, as
   they must: the parseable-pair row, public over loopback, loopback over
   public, a `--library` replacing roots, and the default-layout test.
-- Negative controls against the committed fix (`7b956a19`), each restored
-  from HEAD and the tree checked clean before the next, none failing to
-  build (the harness reported only subtests where a subtest failed at
-  first, hiding top-level tests failing beside them; re-run listing every
-  failing leaf):
+- Negative controls against the committed fix (`7b956a19`, NC19 against
+  `a4f0bfa1`), each restored from HEAD and the tree checked clean before
+  the next. The harness reported only subtests where a subtest failed at
+  first, hiding top-level tests failing beside them; it was re-run listing
+  every failing leaf, and the whole set re-run against `a4f0bfa1` with the
+  same result. NC19's first form deleted `namedRoots`' only use and did not
+  build (CLAUDE.md's trap); it keeps the variable and grades the kept roots
+  through it. None of the rows below failed to build:
 
   | | mutation | red |
   |---|---|---|
@@ -18029,7 +18043,7 @@ install that is THERE' bullet both say 'survives the rewrite'."
   | NC4a | endpoints carried whatever the old posture | loopback over public |
   | NC4b | endpoints carried into a public rewrite | public over loopback |
   | NC5 | endpoints never carried | loopback over loopback, the environment test |
-  | NC6 | roots never carried | the roots test's "kept" row |
+  | NC6 | roots never carried | both of the roots test's "kept" rows |
   | NC7 | the kept values taken from `config.Load` | the environment test |
   | NC8 | a strict decode (unknown keys refused) | every carry test, since every real config holds keys the narrow struct lacks |
   | NC8b | only a config that loads gives up what it keeps | the S4 test, the broken-config preflight test (and the parity test's second half) |
@@ -18043,6 +18057,7 @@ install that is THERE' bullet both say 'survives the rewrite'."
   | NC16 | a yaml key renamed | the tags test, the parity test, the S3 test (both), the broken-config preflight test |
   | NC17 | the kept list never printed | S1 (both), loopback over loopback |
   | NC18 | the kept list printed for a default install | the default-layout test |
+  | NC19 | the preflight grades the kept roots | the roots test's mount-down row |
 
 ### Consult
 
