@@ -346,16 +346,26 @@ func TestInitRewriteKeepsALoopbackInstallsCustomEndpoints(t *testing.T) {
 // --library. So a public rewrite without one wrote `libraryRoots: []`, and
 // every track on every device stopped playing. A --library still replaces
 // them.
+//
+// The preflight grades only a root the run names. A kept root may be a
+// mount that is not up, which public-mode serve tolerates, and
+// checkLibraryRoots FAILs a missing root, so grading the kept ones refused
+// the rewrite whenever the mount was down.
 func TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		extra func(other string) []string
-		want  func(root, other string) []string
+		name string
+		// unmounted removes the kept root before the rewrite.
+		unmounted bool
+		extra     func(other string) []string
+		want      func(root, other string) []string
 	}{
-		{"no --library: kept",
+		{"no --library: kept", false,
 			func(string) []string { return nil },
 			func(root, _ string) []string { return []string{root} }},
-		{"--library: replaced",
+		{"no --library, its mount down: kept", true,
+			func(string) []string { return nil },
+			func(root, _ string) []string { return []string{root} }},
+		{"--library: replaced", false,
 			func(other string) []string { return []string{"--library", other} },
 			func(_, other string) []string { return []string{other} }},
 	} {
@@ -369,6 +379,11 @@ func TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed(t *testing.T) {
 			root, other := testLibrary(t), testLibrary(t)
 			// What the console's POST /api/roots saves.
 			setConfigKey(t, cfgDir, "libraryRoots", "libraryRoots:\n    - "+root)
+			if tc.unmounted {
+				if err := os.Remove(root); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			code, out := publicInit(t, cfgDir, ports, "Rewritten", append([]string{"--force"}, tc.extra(other)...)...)
 			defer logRunOnFailure(t, out)

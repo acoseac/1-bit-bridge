@@ -189,15 +189,20 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		abs = a
 	}
-	// The roots this run saves, which the preflight grades. A run that names
-	// no library, which only a public run may, keeps the install's: a public
-	// install takes its roots later, in the console, and a rewrite that
-	// emptied them left every track unplayable.
-	var roots []string
+	// The roots this run saves. A run that names no library, which only a
+	// public run may, keeps the install's: a public install takes its roots
+	// later, in the console, and a rewrite that emptied them left every track
+	// unplayable. The preflight grades only a root the run names, as it
+	// always has. A kept public root may be a mount that is not up yet, which
+	// public-mode serve tolerates, and the note above says why init must not
+	// demand it: checkLibraryRoots FAILs a missing root, so grading the kept
+	// ones refused a public rewrite whenever its mount was down.
+	var roots, namedRoots []string
 	rootsKept := false
 	switch {
 	case abs != "":
 		roots = []string{abs}
+		namedRoots = roots
 	case prior != nil && len(prior.LibraryRoots) > 0:
 		roots, rootsKept = prior.LibraryRoots, true
 	}
@@ -225,7 +230,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		d := doctor.Deps{
 			ConfigDir:    cfgDir,
 			DataDir:      dataDir,
-			LibraryRoots: roots,
+			LibraryRoots: namedRoots,
 			APIPort:      7788,
 			AdminPort:    7789,
 		}
