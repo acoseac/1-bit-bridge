@@ -129,8 +129,12 @@ func (p *priorInstallFile) loopback() bool {
 //     tenant an unmanaged one, handing the controls its operator withholds to
 //     whoever holds a console session.
 func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *priorInstallFile, priorErr error) bool {
+	var postures []postureKey
+	if prior != nil {
+		postures = prior.madeElsewhere()
+	}
 	switch {
-	case priorErr != nil && errors.Is(priorErr, fs.ErrPermission):
+	case errors.Is(priorErr, fs.ErrPermission):
 		fmt.Fprintf(stderr, "%v\n", priorErr)
 		fmt.Fprintf(stderr, "this user cannot read the config at %s, so init cannot tell which data dir and TLS pair a rewrite would keep.\n", cfgPath)
 		fmt.Fprintln(stderr, "run init as the user the bridge runs as.")
@@ -145,9 +149,9 @@ func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *pri
 		fmt.Fprintf(stderr, "init cannot tell which TLS pair this install serves, and there is none at %s.\n", certPath)
 		fmt.Fprintln(stderr, "a rewrite would mint a new one, and every device paired with this install would have to pair again.")
 		fmt.Fprintln(stderr, "fix the YAML, or move bridge.yaml aside to set this install up from scratch.")
-	case prior != nil && len(prior.madeElsewhere()) > 0:
+	case len(postures) > 0:
 		var keys, costs []string
-		for _, m := range prior.madeElsewhere() {
+		for _, m := range postures {
 			keys, costs = append(keys, m.key), append(costs, m.cost)
 		}
 		fmt.Fprintf(stderr, "the config at %s sets %s, a posture bridge init never writes.\n",
@@ -187,8 +191,9 @@ func (p *priorInstallFile) madeElsewhere() []postureKey {
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
 // reached it already: the TLS pair, and a loopback install's custom
 // endpoints on a loopback rewrite. The data dir and the roots reach cfg
-// through baseConfig, because the header and the preflight use them first.
-// It reports whether it kept the endpoints, for printKept.
+// through baseConfig, since initCmd decides both before the preflight, which
+// uses the data dir. It reports whether it kept the endpoints, for
+// printKept.
 func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept bool) {
 	if prior == nil {
 		return false
