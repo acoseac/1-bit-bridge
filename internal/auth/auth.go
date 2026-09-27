@@ -586,7 +586,7 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 					beforeValidatePersistHook()
 				}
 				// Cross-process safety: a sibling `bridge pair` /
-				// `bridge revoke` may have rewritten tokens.json since
+				// `bridge token revoke` may have rewritten tokens.json since
 				// the top-of-method reloadIfStale ran — s.mu is
 				// process-local and does NOT serialize another PROCESS's
 				// write. This reload takes such a write in before the
@@ -640,8 +640,8 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 // shutdown so a just-before-exit validate doesn't lose its timestamp.
 // persist() itself updates `lastUsedFlush`, so nothing else to do here.
 //
-// Cross-process safety: a sibling `bridge pair` / `bridge revoke` may
-// have rewritten tokens.json since this process last loaded it. If no
+// Cross-process safety: a sibling `bridge pair` / `bridge token revoke`
+// may have rewritten tokens.json since this process last loaded it. If no
 // authenticated request followed (Validate is what triggers the routine
 // reloadIfStale), the in-memory slice is stale, and writing it at
 // shutdown silently deleted the freshly-minted token (or resurrected a
@@ -725,7 +725,7 @@ func (s *Store) RecordClientVersion(id, ver string) {
 		// doc. FlushLastUsed on shutdown lands any deferred update.
 		if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
 			// Cross-process safety: a concurrent `bridge pair` /
-			// `bridge revoke` may have written tokens.json since
+			// `bridge token revoke` may have written tokens.json since
 			// the in-memory snapshot was last loaded. Writing our
 			// slice back would resurrect a revoked token or drop a
 			// freshly-paired one: this reloadIfStale takes such a

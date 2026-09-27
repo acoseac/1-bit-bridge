@@ -1890,8 +1890,37 @@ no failing test — which is the shape to expect in this area.
   `WriteBytes`**, which silently drops e.g. the auth store's belt-and-braces
   `Chmod(0o600)`.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
-  otherwise rewrites `tokens.json` from a stale in-memory slice and deletes a
-  sibling `bridge pair` mint. A reload failure ABORTS the flush.
+  rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
+  `bridge pair` mint. A reload failure ABORTS the flush.
+- **…and a reload before the staging is not enough: every `tokens.json` write
+  re-reads the file just before its rename** (#1043), adminauth's #1039 rule
+  (under Auth, pairing, TLS) on the bearer-token store. All seven writers (the
+  debounced Validate and RecordClientVersion writes, the shutdown flush, and
+  Mint, Revoke, Rotate, SetExpiry) reloaded, then staged (a temp file, a write,
+  an fsync: a median of 0.6 ms on ext4 and 2.3 to 3.8 ms on APFS) and renamed
+  with no further check. A `bridge pair` or `bridge token revoke|rotate|expire`
+  committing inside the staging was renamed over: the paired device's token
+  vanished (401 from then on) or the revoked one came back, on disk and in the
+  running bridge. Measured with two processes and no test seams, against a
+  writer every 20 ms: 24 of 200 mints lost and 30 of 200 revokes undone on APFS
+  (16 and 11 on ext4), and 1 and 2 after the fix (2 and 1). `commitLocked`
+  builds from the last read, stages, compares the file's BYTES with what that
+  read or this process's last write saw (`Store.raw`), and on a change reloads
+  (whose per-token merge keeps unwritten LastUsedAt and client-version bumps),
+  rebuilds and restages, up to three attempts. A re-read or reload that fails
+  ends the write with nothing written. **Bytes, not mtime+size**: a write is
+  rare enough to afford the read, and a same-size sibling write in the same
+  mtime tick passes a stat. A write adopts its list only once its rename lands,
+  and a Rotate or SetExpiry of a token revoked meanwhile answers ErrNotFound
+  rather than writing it back. **What a write records as its file is the STAGED
+  file's stat**, after its Close and before the rename: RenameWithRetry fsyncs
+  the directory after renaming (0.5 ms ext4, 2.8 ms APFS), and a stat of the
+  path after that took a sibling's commit in the fsync for this process's own,
+  so Validate refused a device paired there until the next write. What remains
+  is the rename itself (a median of 50 µs on ext4 and 170 µs on APFS from the
+  re-read to the rename's return; 2 of 1,600 mints lost against a 10 Hz writer)
+  and, on Windows, its retries. A kernel lock would close it, as for
+  adminauth.json, and is not taken.
 - **`logging.Component` resolves `slog.Default()` at LOG time, not construction.**
   Package-level `var logger = logging.Component(...)` runs during package init,
   before `main()` calls `logging.Init()` — a captured-handler shape would lock
@@ -3159,7 +3188,10 @@ its twin.** The top list is older, shorter, and read first.
   declining interprocess locks is about lockFILES: the kernel drops those locks
   with the process. **A rotation does not end sessions, and neither does a
   restart** (they persist, #800); reset-password said a restart ended them until
-  2026-09-27.
+  2026-09-27. **`tokens.json` had the same window** (a `bridge pair` beside a
+  running bridge) and closes it the same way, #1043, under Config, settings and
+  process lifecycle. A new file that more than one process writes needs the
+  re-read before its rename from the start.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it
