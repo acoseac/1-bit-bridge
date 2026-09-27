@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -109,7 +111,7 @@ func TestWriteResolveError_TypedSentinelsReturnStableMessages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
-			if !writeResolveError(rr, req, tc.err) {
+			if !writeResolveError(rr, req, "Music/x.flac", tc.err) {
 				t.Fatal("writeResolveError returned false for non-nil err")
 			}
 			if rr.Code != tc.wantStatus {
@@ -137,7 +139,7 @@ func TestWriteResolveError_DefaultBranchSanitizes(t *testing.T) {
 	leaky := errors.New("readonly: /Users/operator/Music/private-stash refused")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
-	if !writeResolveError(rr, req, leaky) {
+	if !writeResolveError(rr, req, "Music/private-stash", leaky) {
 		t.Fatal("returned false for non-nil err")
 	}
 	if rr.Code != http.StatusInternalServerError {
@@ -155,10 +157,41 @@ func TestWriteResolveError_DefaultBranchSanitizes(t *testing.T) {
 	}
 }
 
+// TestWriteResolveError_LogsTheLibraryPathNotTheAbsoluteOne is the shape a
+// real failure takes: os.Stat's *os.PathError, naming the absolute path. The
+// log line carries the library-relative path the client asked for and the
+// error without its path, as the privacy page promises for error lines.
+func TestWriteResolveError_LogsTheLibraryPathNotTheAbsoluteOne(t *testing.T) {
+	prev := slog.Default()
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	statErr := &os.PathError{Op: "stat", Path: "/Users/operator/Music/Artist/Album/01.flac", Err: syscall.EACCES}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/stat", nil)
+	if !writeResolveError(rr, req, "Music/Artist/Album/01.flac", statErr) {
+		t.Fatal("returned false for non-nil err")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "/Users/operator") {
+		t.Errorf("the absolute path reached the log: %q", logged)
+	}
+	if !strings.Contains(logged, "path=Music/Artist/Album/01.flac") {
+		t.Errorf("the log does not name the library-relative path: %q", logged)
+	}
+	if !strings.Contains(logged, "stat: permission denied") {
+		t.Errorf("the log lost what failed: %q", logged)
+	}
+}
+
 func TestWriteResolveError_NilIsNoOp(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
-	if writeResolveError(rr, req, nil) {
+	if writeResolveError(rr, req, "Music/x.flac", nil) {
 		t.Error("writeResolveError should return false for nil err")
 	}
 	if rr.Code != http.StatusOK {

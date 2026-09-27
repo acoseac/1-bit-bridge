@@ -112,7 +112,7 @@ func (s *Server) lyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
+	if ok := writeResolveError(w, r, clientPath, err); ok {
 		return
 	}
 	if info.IsDir() {

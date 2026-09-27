@@ -2656,6 +2656,26 @@ func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, use
 	writeError(w, status, code, userMsg)
 }
 
+// writeFileErrorLog is writeErrorLog for a failure on a library file the
+// client named: it logs the library-relative path the client asked for, and
+// the error without the absolute path an *os.PathError embeds (redactWalkErr).
+// The bridge's privacy page promises that paths into the library appear
+// library-relative, and only in error lines; os.Stat and os.Open errors put
+// the absolute path in the journal beside a request that named the file
+// relatively.
+func writeFileErrorLog(w http.ResponseWriter, r *http.Request, status int, code, userMsg, libraryPath string, err error) {
+	if err != nil {
+		l := LoggerFromContext(r.Context())
+		attrs := []any{"code", code, "status", status, "path", libraryPath, "err", redactWalkErr(err)}
+		if status >= 500 {
+			l.Error("request failed", attrs...)
+		} else {
+			l.Warn("request failed", attrs...)
+		}
+	}
+	writeError(w, status, code, userMsg)
+}
+
 // nilIfZeroTime is what makes `omitempty` mean what it says on a time field.
 //
 // encoding/json does not treat a zero time.Time as empty — it is a struct —

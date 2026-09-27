@@ -1177,12 +1177,16 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// the job once: `end` holds one outcome, where the old per-exit
 		// tails had counted before the panic and the recover counted again.
 		if r := recover(); r != nil {
+			// Redacted like sox's stderr: a panic value can quote any path
+			// the job had in hand, and this message reaches the batch row
+			// the app reads (GET /v1/upscale/batches) as well as the log.
+			panicMsg := redactSoxErr(fmt.Sprint(r), job.spec)
 			logger.Error("pool: recovered panic in job",
 				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
-				"panic", r)
+				"panic", panicMsg)
 			if !p.closed.Load() {
-				end = failedEnd(fmt.Sprintf("panic recovered in worker: %v", r))
+				end = failedEnd("panic recovered in worker: " + panicMsg)
 			}
 		}
 		p.finishJob(workerID, job, end.outcome)
@@ -1233,10 +1237,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			// Logged distinctly so operators can tell a hung-sox kill from
 			// an internal sox failure.
 			end = failedEnd("sox timed out after " + timeout.String())
+			// Redacted: on the ffmpeg routes the error carries ffmpeg's
+			// stderr, which names the input by its absolute path.
 			logger.Warn("pool: sox timed out",
 				"path", job.spec.SourceLibraryRel,
 				"timeout", timeout,
-				"err", err)
+				"err", redactSoxErr(err.Error(), job.spec))
 			return
 		}
 		// The REDACTED message, for the log line as for the row and the
@@ -1296,8 +1302,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		if p.closed.Load() {
 			return
 		}
-		end = failedEnd("fsync sidecar: " + err.Error())
-		logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
+		// The error names the sidecar by its absolute path, under the
+		// variants directory. Redacted before it reaches the batch row the
+		// app reads (GET /v1/upscale/batches), the SSE frame and the log.
+		fsyncMsg := redactSoxErr(err.Error(), job.spec)
+		end = failedEnd("fsync sidecar: " + fsyncMsg)
+		logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", fsyncMsg)
 		_ = os.Remove(sidecarPath)
 		return
 	}
@@ -1369,8 +1379,9 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// Surface store-side failures to the Coordinator too — the admin
 		// Jobs page distinguishes them from sox failures via the errMsg
 		// prefix.
-		end = failedEnd("store variant: " + err.Error())
-		logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
+		storeMsg := redactSoxErr(err.Error(), job.spec)
+		end = failedEnd("store variant: " + storeMsg)
+		logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", storeMsg)
 		// Best-effort: remove the orphan sidecar so a retry from a clean
 		// slate succeeds — before the release, for the fsync exit's reason.
 		_ = os.Remove(row.SidecarPath)
@@ -1455,8 +1466,11 @@ func redactSoxErr(s string, spec JobSpec) string {
 		s = strings.ReplaceAll(s, spec.SourceAbsPath, spec.SourceLibraryRel)
 	}
 	// Pass 2: scrub OutputDir prefix from sidecar paths. We strip
-	// the directory prefix only — the sidecar basename is opaque
-	// hash + variant ID, no operator-identifying information.
+	// the directory prefix only. What is left mirrors the source's
+	// library-relative path (the sidecar layout has mirrored the library
+	// since #241; this comment called the name an opaque hash until
+	// 2026-09-27), which is the form the privacy page allows in an error
+	// line.
 	//
 	// TrimRight first: sox's real path comes from SidecarPath(), which
 	// builds with filepath.Join and therefore Cleans, so an OutputDir
