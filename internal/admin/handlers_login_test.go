@@ -16,6 +16,14 @@ import (
 // AdminAuth store seeded with a known password.
 func newPublicTestServer(t *testing.T, password string) (*Server, *adminauth.Store, *adminauth.RateLimiter) {
 	t.Helper()
+	srv, store, limiter, _ := newPublicTestServerAt(t, password)
+	return srv, store, limiter
+}
+
+// newPublicTestServerAt is newPublicTestServer that also returns the path
+// of the store's file, for a test that changes the file under the console.
+func newPublicTestServerAt(t *testing.T, password string) (*Server, *adminauth.Store, *adminauth.RateLimiter, string) {
+	t.Helper()
 	srv, cfg, _ := newTestServer(t)
 
 	// Flip to public mode in the live config. The Server reads the
@@ -26,14 +34,15 @@ func newPublicTestServer(t *testing.T, password string) (*Server, *adminauth.Sto
 	cfg.Autocert.Domain = "bridge.example.com"
 	srv.deps.CfgHolder.Store(cfg)
 
-	store, err := adminauth.OpenStore(t.TempDir() + "/adminauth.json")
+	path := t.TempDir() + "/adminauth.json"
+	store, err := adminauth.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MintInitial("admin"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ResetPassword("admin", password); err != nil {
+	if err := store.ResetPassword("admin", password, adminauth.KeepSessions); err != nil {
 		t.Fatal(err)
 	}
 	limiter := adminauth.NewRateLimiter()
@@ -41,7 +50,7 @@ func newPublicTestServer(t *testing.T, password string) (*Server, *adminauth.Sto
 
 	srv.deps.AdminAuth = store
 	srv.deps.LoginLimiter = limiter
-	return srv, store, limiter
+	return srv, store, limiter, path
 }
 
 // TestLoopbackModeIsUnauthenticated regression-guards the

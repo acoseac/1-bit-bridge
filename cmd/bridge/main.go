@@ -4319,7 +4319,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var adminAuthStore *adminauth.Store
 	var loginLimiter *adminauth.RateLimiter
 	if cfg.IsPublic() {
-		adminAuthPath := filepath.Join(cfg.DataDir, "adminauth.json")
+		adminAuthPath := filepath.Join(cfg.DataDir, adminauth.FileName)
 		adminAuthStore, err = adminauth.OpenStore(adminAuthPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "adminauth: open %s: %v\n", adminAuthPath, err)

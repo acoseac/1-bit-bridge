@@ -504,7 +504,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// install that is there.
 	var adminAuth *adminauth.Store
 	if *publicMode {
-		store, ok := openInitAdminAuth(filepath.Join(dataDir, "adminauth.json"), stderr)
+		store, ok := openInitAdminAuth(filepath.Join(dataDir, adminauth.FileName), stderr)
 		if !ok {
 			return 1
 		}

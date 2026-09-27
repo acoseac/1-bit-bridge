@@ -162,6 +162,19 @@ var renameBackoff = []time.Duration{
 	400 * time.Millisecond,
 }
 
+// RenameRetryBudget is the longest RenameWithRetry sleeps between its
+// attempts: the time a writer can hold a staged file after deciding to
+// rename it, before the rename lands. adminauth waits this long (and a
+// margin) before confirming a write another process might have renamed
+// over.
+func RenameRetryBudget() time.Duration {
+	var total time.Duration
+	for _, d := range renameBackoff {
+		total += d
+	}
+	return total
+}
+
 // RenameWithRetry retries `os.Rename` to absorb the transient
 // "Access is denied" / sharing-violation Windows produces under
 // the tmp-file-then-rename pattern. Concurrent scanner workers
