@@ -368,6 +368,13 @@ type storeFailure struct {
 	fail       func(t *testing.T, f *commitFixture) (mend func())
 }
 
+// The two report lines, as TestAStoreThatCannotBeReadIsReportedOnce reads
+// them from the log.
+const (
+	unreadableReport = "token store unreadable; checking devices against the tokens last read"
+	readableReport   = "token store readable again"
+)
+
 // TestAStoreThatCannotBeReadIsReportedOnce: while the running bridge cannot
 // read tokens.json it checks devices against the tokens it last read, so a
 // device `bridge pair` paired since is refused and one `bridge token revoke`
@@ -406,23 +413,9 @@ func TestAStoreThatCannotBeReadIsReportedOnce(t *testing.T) {
 // unreadableStoreReportedOnce is one row of
 // TestAStoreThatCannotBeReadIsReportedOnce.
 func unreadableStoreReportedOnce(t *testing.T, tc storeFailure) {
-	const (
-		unreadable = "token store unreadable; checking devices against the tokens last read"
-		readable   = "token store readable again"
-		requests   = 10
-	)
+	const requests = 10
 	f := newCommitFixture(t)
-	pairedRaw, _, err := f.sibling.Mint("external-pair")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Two revoked, so the store read after the mend holds two tokens where
-	// the one last read holds three.
-	for _, id := range []string{f.victim.ID, f.other.ID} {
-		if err := f.sibling.Revoke(id); err != nil {
-			t.Fatal(err)
-		}
-	}
+	pairedRaw := pairOneAndRevokeTwo(t, f)
 	mend := tc.fail(t, f)
 	rec := loggingtest.Record(t)
 
@@ -432,41 +425,59 @@ func unreadableStoreReportedOnce(t *testing.T, tc storeFailure) {
 	for range requests {
 		requireVerdicts(t, "while the store cannot be read", f.running, own, revoked, paired)
 	}
-	lines := rec.Lines(unreadable)
-	if len(lines) != 1 {
-		t.Errorf("%d requests logged %d lines saying the store cannot be read, want 1:\n%s",
-			requests, len(lines), strings.Join(lines, "\n"))
+	if line := requireOneLine(t, rec, unreadableReport, 3); line != "" {
+		requireReport(t, line, f.path, tc.permission)
 	}
-	if len(lines) > 0 {
-		requireReport(t, lines[0], f.path, tc.permission)
-		if got := tokensIn(lines[0]); got != 3 {
-			t.Errorf("the line gives %d tokens, want the 3 last read:\n%s", got, lines[0])
-		}
-	}
-	if got := rec.Lines(readable); len(got) != 0 {
+	if got := rec.Lines(readableReport); len(got) != 0 {
 		t.Errorf("reported readable while it was not:\n%s", strings.Join(got, "\n"))
 	}
 
 	mend()
-	revoked.accept, paired.accept = false, !tc.removed
-	own.accept = !tc.removed
-	fresh := 2
-	if tc.removed {
-		fresh = 0
-	}
+	own.accept, revoked.accept, paired.accept = !tc.removed, false, !tc.removed
 	for range requests {
 		requireVerdicts(t, "once the store can be read again", f.running, own, revoked, paired)
 	}
-	back := rec.Lines(readable)
-	if len(back) != 1 {
-		t.Errorf("%d lines saying the store is readable again, want 1:\n%s", len(back), strings.Join(back, "\n"))
+	after := 2
+	if tc.removed {
+		after = 0
 	}
-	if len(back) > 0 && tokensIn(back[0]) != fresh {
-		t.Errorf("the line gives %d tokens, want the %d now read:\n%s", tokensIn(back[0]), fresh, back[0])
+	requireOneLine(t, rec, readableReport, after)
+	requireOneLine(t, rec, unreadableReport, 3)
+}
+
+// pairOneAndRevokeTwo makes the sibling's writes the running bridge has not
+// read: one device paired, and two revoked, so the store read after the
+// mend holds two tokens where the one last read holds three. It returns the
+// paired device's raw token.
+func pairOneAndRevokeTwo(t *testing.T, f *commitFixture) string {
+	t.Helper()
+	raw, _, err := f.sibling.Mint("external-pair")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Lines(unreadable); len(got) != 1 {
-		t.Errorf("%d lines saying the store cannot be read in all, want 1:\n%s", len(got), strings.Join(got, "\n"))
+	for _, id := range []string{f.victim.ID, f.other.ID} {
+		if err := f.sibling.Revoke(id); err != nil {
+			t.Fatal(err)
+		}
 	}
+	return raw
+}
+
+// requireOneLine checks that rec holds exactly one line saying msg, giving
+// tokens as the count the bridge answers from, and returns it ("" if none).
+func requireOneLine(t *testing.T, rec *loggingtest.Recorder, msg string, tokens int) string {
+	t.Helper()
+	lines := rec.Lines(msg)
+	if len(lines) != 1 {
+		t.Errorf("%d lines saying %q, want 1:\n%s", len(lines), msg, strings.Join(lines, "\n"))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if got := tokensIn(lines[0]); got != tokens {
+		t.Errorf("the line gives %d tokens, want %d:\n%s", got, tokens, lines[0])
+	}
+	return lines[0]
 }
 
 // requireReport checks the line saying the store cannot be read: a Warn
