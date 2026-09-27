@@ -19081,6 +19081,24 @@ On dido's LAN (hashicorp/mdns's client, the control first):
 | NC23 | no escaping in the TXT strings | the TXT test: four of its five names |
 | NC24 | `library=` escaped before its cap | the TXT test's name whose 240-byte cap lands after a backslash |
 
+### Review (round 2)
+
+CodeRabbit (the free on-demand run again) on the review round and the merge
+of main: no actionable comments, merge risk minimal, both threads verified
+and resolved. The Gemini app did not answer `/gemini review` (its daily
+quota, which it reported on the iOS mirror the same hour), so a direct
+consult on the round's diff stood in. No defect. It confirmed escaping after
+the cut and the caps, that the escaped strings stay under miekg/dns's
+presentation-length guards, and that escaping also lets hashicorp/mdns match
+SRV and TXT questions for such an instance. Its suggestion to escape interior
+dots rests on a premise the code does not have (`sanitizeInstance` strips
+every dot, which `TestSanitizeInstanceStripsDotsAndControlChars` pins), and
+its "vacuous assertion" names a function the test does not have. The test
+packs every record `Records` returns for the service's PTR question, and
+NC17, NC18 and NC20 go red through it. The `len(label) > 63` case it called
+dead is redundant after `err != nil`, since miekg/dns refuses such a label.
+It stays, stating the property.
+
 ### Out of scope
 
 - **The dev Mac's mDNS binds `utun0`** (above), and the DLNA single-interface
