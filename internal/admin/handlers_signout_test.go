@@ -117,7 +117,10 @@ func TestSignOutOtherSessionsNeedsASession(t *testing.T) {
 // check that cannot read the store refuses the request (the file may hold a
 // sign-out), and the store logs that at most once a window. The middleware
 // adds no line of its own, or every console request would add one while the
-// file stays unreadable.
+// file stays unreadable. An /api request gets the JSON envelope the console's
+// errorFromResponse reads, as the 401 beside it does, and a page the text a
+// browser shows (CodeRabbit on #1044: plain text lost the code and the
+// message to the console).
 func TestAnUnreadableCredentialStoreRefusesWithoutALinePerRequest(t *testing.T) {
 	srv, store, _, path := newPublicTestServerAt(t, "test-password-123")
 	ts := httptest.NewServer(srv.Handler())
@@ -130,12 +133,18 @@ func TestAnUnreadableCredentialStoreRefusesWithoutALinePerRequest(t *testing.T) 
 	}
 	for i := 0; i < 3; i++ {
 		status, body := consoleRequest(t, ts, publicOrigin, http.MethodGet, "/api/stats", signedIn)
-		if status != http.StatusServiceUnavailable || !strings.Contains(body, msgStoreUnreadable) {
-			t.Fatalf("request %d with the store unreadable = %d %q, want 503 naming the store", i, status, body)
+		var envelope struct{ Error, Message string }
+		if status != http.StatusServiceUnavailable || json.Unmarshal([]byte(body), &envelope) != nil ||
+			envelope.Error != "store_unreadable" || envelope.Message != msgStoreUnreadable {
+			t.Fatalf("API request %d with the store unreadable = %d %q, want 503 with the store_unreadable envelope", i, status, body)
 		}
 	}
+	if status, body := consoleRequest(t, ts, publicOrigin, http.MethodGet, "/devices", signedIn); status != http.StatusServiceUnavailable ||
+		!strings.Contains(body, "admin refused: "+msgStoreUnreadable) {
+		t.Errorf("a page with the store unreadable = %d %q, want 503 naming the store", status, body)
+	}
 	if got := rec.Failures(); len(got) != 1 {
-		t.Errorf("three refused requests logged %d lines at Warn or above, want the store's one:\n%s",
+		t.Errorf("four refused requests logged %d lines at Warn or above, want the store's one:\n%s",
 			len(got), strings.Join(got, "\n"))
 	}
 }

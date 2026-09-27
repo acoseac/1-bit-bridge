@@ -18894,7 +18894,15 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
   fails the write with a file that changes under every commit, on every
   platform; the handler's test uses a read-only directory, POSIX and not
   root). NC24 and NC25 in the table above.
-- **CodeRabbit** was paused by its plan limit on the first head.
+- **CodeRabbit** was paused by its plan limit on the first head; once the
+  notice's own wait had passed, `@coderabbitai review` ran the included
+  review on the second. **One finding (Minor), real**: the unreadable-store
+  branch answered `/api/` in plain text, so the console's
+  `errorFromResponse` fell back to "503 Service Unavailable" and lost the
+  `store_unreadable` code and the message. It now sends the JSON envelope
+  to `/api/` and text to a page, as the 401 branch beside it does. The test
+  asserts both shapes; tightened first, it was red on the old code ("503
+  \"admin refused: …\\n\", want … the store_unreadable envelope").
 - **SonarCloud**'s quality gate passed, with one new issue (go:S1192): the
   command made `"adminauth.json"` the third copy of the literal in
   `cmd/bridge/admin.go`. It had five spellings across `cmd/bridge` (serve,

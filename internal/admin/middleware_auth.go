@@ -136,7 +136,13 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			// and kept for when the file reads again. No line here: the
 			// store logs the read at most once a window, and one per
 			// console request would bury the journal while it stays
-			// unreadable.
+			// unreadable. /api/* gets the JSON envelope the console's
+			// errorFromResponse reads, as the 401 below does; a page gets
+			// text (CodeRabbit on #1044).
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeError(w, http.StatusServiceUnavailable, "store_unreadable", msgStoreUnreadable)
+				return
+			}
 			http.Error(w, "admin refused: "+msgStoreUnreadable, http.StatusServiceUnavailable)
 			return
 		} else if !errors.Is(err, adminauth.ErrSessionNotFound) && !errors.Is(err, adminauth.ErrSessionExpired) {
