@@ -604,20 +604,28 @@ func TestInitTrimsTheNameItIsGiven(t *testing.T) {
 			{" Jazz Archive ", "Jazz Archive", false},
 		} {
 			t.Run(posture.name+"/rewrite/"+strconv.Quote(tc.sent), func(t *testing.T) {
-				cfgDir := filepath.Join(t.TempDir(), "cfg")
-				rewrite := posture.install(t, cfgDir, "My Library")
-				code, out := rewrite(tc.sent)
-				defer logRunOnFailure(t, out)
-				if code != 0 {
-					t.Fatalf("the rewrite exited %d", code)
-				}
-				assertSavedLibraryName(t, cfgDir, tc.want)
-				listed, ok := keptValue(out, "libraryName")
-				if ok != tc.listed || (ok && listed != tc.want) {
-					t.Errorf("the run lists libraryName as %q (listed %v), want listed %v", listed, ok, tc.listed)
-				}
+				assertRewriteSavesName(t, posture, tc.sent, tc.want, tc.listed)
 			})
 		}
+	}
+}
+
+// assertRewriteSavesName installs "My Library" in posture, rewrites it with
+// --name sent, and fails unless the saved name is want and the run lists it
+// among what it kept exactly when listed says so.
+func assertRewriteSavesName(t *testing.T, posture rewritePosture, sent, want string, listed bool) {
+	t.Helper()
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
+	rewrite := posture.install(t, cfgDir, "My Library")
+	code, out := rewrite(sent)
+	defer logRunOnFailure(t, out)
+	if code != 0 {
+		t.Fatalf("the rewrite exited %d", code)
+	}
+	assertSavedLibraryName(t, cfgDir, want)
+	got, ok := keptValue(out, "libraryName")
+	if ok != listed || (ok && got != want) {
+		t.Errorf("the run lists libraryName as %q (listed %v), want listed %v", got, ok, listed)
 	}
 }
 

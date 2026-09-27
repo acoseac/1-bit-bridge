@@ -49,15 +49,7 @@ func TestSettingsPatchLibraryNameIsWhatARestartServes(t *testing.T) {
 		{"\u200bZW\u200b", http.StatusOK, "ZW"},
 	} {
 		t.Run(fmt.Sprintf("%q", tc.sent), func(t *testing.T) {
-			srv, _, cfgPath := newTestServer(t)
-			if got := srv.deps.CfgHolder.Load().LibraryName; got != fixtureName {
-				t.Fatalf("premise: the fixture is named %q, want %q", got, fixtureName)
-			}
-			fileBefore, err := os.ReadFile(cfgPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			srv, cfgPath, fileBefore := libraryNameFixture(t, fixtureName)
 			var body map[string]any
 			code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
 				map[string]any{"libraryName": tc.sent}, &body)
@@ -65,34 +57,63 @@ func TestSettingsPatchLibraryNameIsWhatARestartServes(t *testing.T) {
 				t.Errorf("PATCH libraryName=%q: %d %v, want %d", tc.sent, code, body, tc.wantStatus)
 			}
 			if code == http.StatusBadRequest {
-				if body["error"] != "validate" {
-					t.Errorf("error code = %v, want %q", body["error"], "validate")
-				}
-				if msg, _ := body["message"].(string); !strings.Contains(msg, "libraryName") {
-					t.Errorf("the refusal %q does not name the field", msg)
-				}
-				fileAfter, err := os.ReadFile(cfgPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if string(fileAfter) != string(fileBefore) {
-					t.Errorf("a refused PATCH rewrote bridge.yaml:\n%s", fileAfter)
-				}
+				assertRefusalWroteNothing(t, body, cfgPath, fileBefore)
 			}
-
-			live := srv.deps.CfgHolder.Load().LibraryName
-			if live != tc.want {
-				t.Errorf("the running bridge serves %q, want %q", live, tc.want)
-			}
-			reloaded, err := config.Load(cfgPath)
-			if err != nil {
-				t.Fatalf("load the saved config: %v", err)
-			}
-			if reloaded.LibraryName != live {
-				t.Errorf("after a restart the bridge would serve %q; it serves %q now",
-					reloaded.LibraryName, live)
-			}
+			assertNameSurvivesARestart(t, srv, cfgPath, tc.want)
 		})
+	}
+}
+
+// libraryNameFixture is newTestServer, checked to be named name, with its
+// bridge.yaml as it was before the test sent anything.
+func libraryNameFixture(t *testing.T, name string) (*Server, string, []byte) {
+	t.Helper()
+	srv, _, cfgPath := newTestServer(t)
+	if got := srv.deps.CfgHolder.Load().LibraryName; got != name {
+		t.Fatalf("premise: the fixture is named %q, want %q", got, name)
+	}
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, cfgPath, before
+}
+
+// assertRefusalWroteNothing fails unless body is the handler's `validate`
+// refusal, naming libraryName, and bridge.yaml still holds exactly before.
+func assertRefusalWroteNothing(t *testing.T, body map[string]any, cfgPath string, before []byte) {
+	t.Helper()
+	if body["error"] != "validate" {
+		t.Errorf("error code = %v, want %q", body["error"], "validate")
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "libraryName") {
+		t.Errorf("the refusal %q does not name the field", msg)
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("a refused PATCH rewrote bridge.yaml:\n%s", after)
+	}
+}
+
+// assertNameSurvivesARestart fails unless the running bridge serves want and
+// config.Load serves the saved bridge.yaml under the same name, which is
+// what a restart would serve.
+func assertNameSurvivesARestart(t *testing.T, srv *Server, cfgPath, want string) {
+	t.Helper()
+	live := srv.deps.CfgHolder.Load().LibraryName
+	if live != want {
+		t.Errorf("the running bridge serves %q, want %q", live, want)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load the saved config: %v", err)
+	}
+	if reloaded.LibraryName != live {
+		t.Errorf("after a restart the bridge would serve %q; it serves %q now",
+			reloaded.LibraryName, live)
 	}
 }
 
