@@ -554,3 +554,51 @@ func TestASiblingWriteRightAfterACommitIsNotTakenForIt(t *testing.T) {
 		})
 	}
 }
+
+// TestAWriteRecordsTheFileItPutDown: the mtime and size a write records
+// (from the staged file, before its rename) are the ones a stat of the
+// path reads afterwards, so the next reloadIfStale does not mistake this
+// process's own write for a sibling's and reread it. writeLocked's
+// comment rests on a rename leaving both unchanged; this checks it on
+// each platform the suite runs on.
+func TestAWriteRecordsTheFileItPutDown(t *testing.T) {
+	s, path := newTmpStore(t)
+	raw, tok, err := s.Mint("device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		name string
+		do   func() error
+	}{
+		{"Mint", func() error { _, _, err := s.Mint("second"); return err }},
+		{"Validate's debounced write", func() error {
+			s.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+			if _, ok := s.Validate(raw); !ok {
+				return errors.New("validate miss")
+			}
+			return nil
+		}},
+		{"SetExpiry", func() error {
+			exp := time.Now().Add(time.Hour)
+			_, err := s.SetExpiry(tok.ID, &exp)
+			return err
+		}},
+		{"FlushLastUsed", s.FlushLastUsed},
+	} {
+		if err := step.do(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		loaded, size := s.loaded, s.lastSize
+		s.mu.Unlock()
+		if !info.ModTime().Equal(loaded) || info.Size() != size {
+			t.Errorf("after %s the store recorded mtime %v, size %d; the file has %v, %d",
+				step.name, loaded, size, info.ModTime(), info.Size())
+		}
+	}
+}

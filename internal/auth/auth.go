@@ -444,6 +444,19 @@ func (s *Store) writeLocked(tokens []Token) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
+	// What this write records as the file it put down is the staged
+	// file's own mtime and size, which the rename leaves as they are,
+	// never a stat of the path afterwards: RenameWithRetry fsyncs the
+	// directory after renaming (a median of 0.5 ms on ext4 and 2.8 ms on
+	// APFS, measured), and a sibling's commit landing in that fsync was
+	// recorded as this process's own file, so reloadIfStale saw nothing
+	// new and Validate refused a device paired there until this process
+	// next wrote. Taken after the Close: Windows may settle a file's last
+	// write time only when its last writing handle closes.
+	staged, err := os.Stat(tmpName)
+	if err != nil {
+		return fmt.Errorf("stat tmp: %w", err)
+	}
 	if err := s.unchangedSinceReadLocked(); err != nil {
 		return err
 	}
@@ -452,11 +465,9 @@ func (s *Store) writeLocked(tokens []Token) error {
 	}
 	tmpName = "" // suppress defer cleanup
 	s.raw = data
-	if info, err := os.Stat(s.path); err == nil {
-		s.loaded = info.ModTime()
-		s.lastSize = info.Size()
-		s.isEmpty = false
-	}
+	s.loaded = staged.ModTime()
+	s.lastSize = staged.Size()
+	s.isEmpty = false
 	// Every successful write resets the LastUsedAt debounce clock —
 	// whether the write was driven by Validate, Mint, Revoke, or
 	// FlushLastUsed — so callers don't have to remember to stamp it
