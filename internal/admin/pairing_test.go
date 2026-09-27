@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"net/url"
 	"strings"
 	"testing"
 
@@ -33,17 +32,9 @@ func TestBuildPairURLEmitsUrlsWhenAlternatesPresent(t *testing.T) {
 	if !strings.Contains(out, "urls=") {
 		t.Fatalf("urls= missing: %s", out)
 	}
-	// Parse the query and confirm every alternate round-trips through
-	// newline-joined encoding.
-	u, err := url.Parse(out)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	got := u.Query().Get("urls")
-	want := strings.Join(alts, "\n")
-	if got != want {
-		t.Errorf("urls = %q, want %q", got, want)
-	}
+	// Read the query as the app does and confirm every alternate
+	// round-trips through newline-joined encoding.
+	assertAppReads(t, appQueryItems(t, out), "urls", strings.Join(alts, "\n"))
 }
 
 func TestBuildPairURLPrimaryStaysFirst(t *testing.T) {
@@ -54,13 +45,7 @@ func TestBuildPairURLPrimaryStaysFirst(t *testing.T) {
 	// whatever advertise.URLs returned first.
 	out := buildPairURL("https://pick-me:7788", "tok", "AB:CD", "Home",
 		[]string{"https://otherhost:7788", "https://pick-me:7788"})
-	u, err := url.Parse(out)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if got := u.Query().Get("url"); got != "https://pick-me:7788" {
-		t.Errorf("url= = %q, want https://pick-me:7788", got)
-	}
+	assertAppReads(t, appQueryItems(t, out), "url", "https://pick-me:7788")
 }
 
 func TestPairAlternatesPrependsPrimary(t *testing.T) {
