@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1497,18 +1498,31 @@ func redactSoxErr(s string, spec JobSpec) string {
 	// is an absolute HOST path that lands in sox's argv as Stage A's output
 	// and Stage B/C's input, so a failing stage names it in stderr and a
 	// mkdir failure names it in the PathError. The scratch basename is an
-	// opaque token, so the prefix goes and the name stays; the bare
-	// directory (a mkdir error) becomes a placeholder rather than a hole in
-	// the sentence. Then the configured tempDir itself, for a MkdirAll that
-	// failed on the parent. Longest first, so the scratch subdirectory is
-	// consumed before its parent could match inside it. A no-op for every
+	// opaque token, so the prefix goes and the name stays. A no-op for every
 	// PCM job — nothing in a sox-direct run mentions the directory.
 	scratch := strings.TrimRight(renderScratchDir(spec.TempDir), `/\`)
 	s = strings.ReplaceAll(s, scratch+"/", "")
 	s = strings.ReplaceAll(s, scratch+`\`, "")
-	s = strings.ReplaceAll(s, scratch, "<render-scratch>")
-	if tmp := strings.TrimRight(spec.TempDir, `/\`); tmp != "" {
-		s = strings.ReplaceAll(s, tmp, "<tempDir>")
+	// Pass 2c: the bare directories, each a placeholder rather than a hole
+	// in the sentence. A mkdir failure names the scratch directory or the
+	// configured tempDir bare, and a root-level source's sidecar sits
+	// directly in the variants directory, so a failed parent-directory
+	// fsync names that directory with no separator after it for Pass 2 to
+	// match (CodeRabbit on #1055). Longest first, so a directory is consumed
+	// before a shorter one can match inside it: the scratch sits below
+	// tempDir, and the variants directory and tempDir can nest either way
+	// or share a string prefix (`/srv/v` and `/srv/v-tmp`).
+	type bareDir struct{ dir, placeholder string }
+	bare := []bareDir{
+		{scratch, "<render-scratch>"},
+		{strings.TrimRight(spec.TempDir, `/\`), "<tempDir>"},
+		{strings.TrimRight(spec.OutputDir, `/\`), "<variantsDir>"},
+	}
+	slices.SortStableFunc(bare, func(a, b bareDir) int { return len(b.dir) - len(a.dir) })
+	for _, b := range bare {
+		if b.dir != "" {
+			s = strings.ReplaceAll(s, b.dir, b.placeholder)
+		}
 	}
 	// Pass 3: drop leading prefixes the sox runner / exec wrapper
 	// adds.

@@ -1371,7 +1371,13 @@ no failing test — which is the shape to expect in this area.
   sidecar's absolute path on the batch row `GET /v1/upscale/batches` serves,
   and the store exit, a recovered panic and the timeout warning (ffmpeg's
   stderr) could do the same. A new exit that builds a message from an error
-  redacts it here.
+  redacts it here. **And a bare directory is a path too**: a root-level
+  source's sidecar sits directly in the variants directory, so a failed
+  parent-directory fsync names that directory with no separator after it,
+  which the prefix strip cannot see (CodeRabbit on #1055). Pass 2c turns
+  each bare directory (the render scratch, tempDir, the variants
+  directory) into a placeholder, longest first, because the variants
+  directory and tempDir can nest either way or share a string prefix.
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to
@@ -3407,7 +3413,7 @@ mentions across the four `ops/audit-*.md` files.
   The tailnet server, whose listener yields `*tls.Conn`, takes
   `handshakelog.ErrorLog()`. `TestEveryServeHTTPServerRedactsPeerAddresses`
   requires every `http.Server` in `cmd/bridge` to get its `ErrorLog` from
-  handshakelog. **A test that finds a log line by its peer address passes
+  handshakelog, and an assigned one before the server is first served. **A test that finds a log line by its peer address passes
   vacuously once the address is redacted**: the probe tests find the
   filtered server's line by the placeholder as well.
 

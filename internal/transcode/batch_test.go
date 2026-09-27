@@ -767,3 +767,59 @@ func TestRedactSoxErr_ScrubsRenderScratchDir(t *testing.T) {
 		t.Errorf("OS temp dir scratch leaked: %q", got)
 	}
 }
+
+// TestRedactSoxErr_BareDirectoriesBecomePlaceholders pins Pass 2c. A
+// root-level source's sidecar sits directly in the variants directory, so a
+// failed parent-directory fsync names that directory with no separator after
+// it, and Pass 2's prefix strip cannot see it (CodeRabbit on #1055). Each
+// bare directory becomes its placeholder, the longest first: the variants
+// directory and tempDir can nest either way or share a string prefix, and a
+// shorter one replaced first would leave the rest of a longer one behind.
+func TestRedactSoxErr_BareDirectoriesBecomePlaceholders(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		outDir, tempDir string
+		in, want        string
+	}{
+		{
+			name:   "a root-level source's parent-directory fsync",
+			outDir: "/mnt/ssd/variants",
+			in:     `fsync parent dir: open dir "/mnt/ssd/variants": open /mnt/ssd/variants: permission denied`,
+			want:   `fsync parent dir: open dir "<variantsDir>": open <variantsDir>: permission denied`,
+		},
+		{
+			name:   "a trailing separator on the configured directory",
+			outDir: "/mnt/ssd/variants/",
+			in:     "mkdir /mnt/ssd/variants: read-only file system",
+			want:   "mkdir <variantsDir>: read-only file system",
+		},
+		{
+			name:    "the variants directory inside tempDir",
+			outDir:  "/data/variants",
+			tempDir: "/data",
+			in:      "mkdir /data/variants: permission denied",
+			want:    "mkdir <variantsDir>: permission denied",
+		},
+		{
+			// Pass 2 runs first, so a directory below the variants
+			// directory reads relative to it, as a sidecar does.
+			name:    "tempDir inside the variants directory",
+			outDir:  "/data",
+			tempDir: "/data/tmp",
+			in:      "mkdir /data/tmp: permission denied",
+			want:    "mkdir tmp: permission denied",
+		},
+		{
+			name:    "a tempDir sharing the variants directory's string prefix",
+			outDir:  "/srv/v",
+			tempDir: "/srv/v-tmp",
+			in:      "mkdir /srv/v-tmp: permission denied",
+			want:    "mkdir <tempDir>: permission denied",
+		},
+	} {
+		got := redactSoxErr(tc.in, JobSpec{OutputDir: tc.outDir, TempDir: tc.tempDir})
+		if got != tc.want {
+			t.Errorf("%s: redactSoxErr(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
