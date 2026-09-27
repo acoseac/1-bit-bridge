@@ -616,6 +616,7 @@ func runUpscaleWorker(
 			// rendition serves `appliedGainDB` like one the pool made.
 			AppliedGainDB: res.AppliedGainDB,
 			TruePeakDBTP:  res.TruePeakDBTP,
+			PeakProfile:   res.PeakProfile,
 			CreatedAt:     transcode.CreatedAtNow(),
 		}
 		if err := store.UpsertVariant(ctx, row); err != nil {

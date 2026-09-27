@@ -2086,6 +2086,26 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 47,
+		name:    "dsd_peaks (a DSD track's true peak per render profile, for the album-level gain)",
+		// See dsd_peaks.go. Keyed (path, profile) because a peak is a fact
+		// about one Stage A intermediate, and the two tiers decode to
+		// different ones. CASCADE rides the tracks PK like track_variants:
+		// a rename inserts a new path and the old peak goes with the old row.
+		// The post() seed is INSERT OR IGNORE, so re-running it after a
+		// failed boot is harmless.
+		sql: `CREATE TABLE IF NOT EXISTS dsd_peaks (
+			source_path     TEXT    NOT NULL REFERENCES tracks(path) ON DELETE CASCADE,
+			profile         TEXT    NOT NULL,
+			true_peak_dbtp  REAL,
+			source_mtime_ns INTEGER NOT NULL,
+			source_size     INTEGER NOT NULL,
+			measured_at     INTEGER NOT NULL,
+			PRIMARY KEY (source_path, profile)
+		);`,
+		post: seedDSDPeaksFromVariants,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -7718,7 +7738,12 @@ type VariantRow struct {
 	// is a real, stored 0).
 	AppliedGainDB *float64
 	TruePeakDBTP  *float64
-	CreatedAt     int64
+	// PeakProfile is the transcode.DSDPeakProfile TruePeakDBTP was measured
+	// on. Set on a DSD rendition, it makes UpsertVariant record the peak in
+	// dsd_peaks in the same transaction, which is how every render feeds
+	// the album-level gain without a second write path. Empty on PCM rows.
+	PeakProfile string
+	CreatedAt   int64
 }
 
 // nullFloat maps an optional gain fact onto its SQL bind: nil → NULL.
@@ -7778,6 +7803,15 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt,
 		nullFloat(v.AppliedGainDB), nullFloat(v.TruePeakDBTP)); err != nil {
 		return err
+	}
+	// The render's Stage B peak, for the album-level gain (dsd_peaks.go).
+	// Only a DSD rendition carries both facts; its measured TruePeakDBTP is
+	// nil exactly when the source is silent, which the row records as such.
+	if v.PeakProfile != "" && v.AppliedGainDB != nil {
+		if _, err := tx.ExecContext(ctx, upsertDSDPeakSQL, v.SourcePath, v.PeakProfile,
+			nullFloat(v.TruePeakDBTP), v.SourceMTimeNS, v.SourceSize, v.CreatedAt); err != nil {
+			return err
+		}
 	}
 	// Parent indexed_at bump. UPDATE on a missing parent is a no-op
 	// (RowsAffected=0) but the FK on track_variants.source_path with
