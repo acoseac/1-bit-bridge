@@ -3058,6 +3058,38 @@ its twin.** The top list is older, shorter, and read first.
   out-of-lock** — otherwise a concurrent poll hands iOS a token the revoke then
   destroys. Revoke-then-delete with bounded retry; `Delete` refuses an
   Expired-with-token row so the revoke lifecycle stays owned by `onTimer`.
+- **`adminauth.json` is shared by PROCESSES, so the CREDENTIAL is the file's and
+  the SESSIONS are the serving bridge's** (#1039). `bridge admin reset-password`
+  beside a running public bridge was silently undone: the bridge kept verifying
+  the password it loaded at start, and its next write of the file (a login, the
+  30 s activity flush, a logout, the shutdown flush) put the old hash back,
+  because `persist()` wrote this process's copy of the whole file. The restart
+  the command advised was one such write, and the hosted control plane's
+  `bridge-tenant passwd` restarts the tenant straight after the reset. Every
+  decision about the credential (a login, a ticket's account at mint and at
+  redeem, "is there an account", the reset's username check) and every write now
+  re-reads the file (`readStoreFile`). A file that cannot be READ decides
+  nothing (Verify refuses: this process's copy is the password rotated away
+  from) and is written over by nothing, the change staying pending; a MISSING
+  file is no credential, and a session write does not recreate it. **The file's,
+  never "the newer passwordChangedAt"**: every credential write is synchronous
+  and adopted only once its rename lands, so memory is never ahead of the file,
+  and a timestamp would keep memory over a restored backup. A session write puts
+  down the set in memory; a credential write puts down the set it finds in the
+  file AT THE WRITE, never the one read at open, since reset-password waits at a
+  prompt in between. **One re-read is not enough**: staging costs a write and an
+  fsync (milliseconds, tens on a cloud disk), so EVERY write goes through
+  `commitLocked`, which re-reads the file just before its rename and rebuilds
+  from a fresh read if it changed at all, byte for byte. Comparing the
+  credential alone covered the running bridge's writes and missed
+  reset-password's, whose rename dropped a login or brought back a logout
+  committed while it staged (CodeRabbit on #1039). The rename itself (on
+  Windows, with its retries) is what remains. A kernel lock (flock / LockFileEx)
+  would close that, and the "stale lockfile" reason this file gives for
+  declining interprocess locks is about lockFILES: the kernel drops those locks
+  with the process. **A rotation does not end sessions, and neither does a
+  restart** (they persist, #800); reset-password said a restart ended them until
+  2026-09-27.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it

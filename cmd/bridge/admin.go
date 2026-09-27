@@ -44,8 +44,12 @@ func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // a TTY (no echo) so a typo doesn't lock the operator out; supports
 // --from-stdin for scripts (single read, no echo suppression).
 //
-// Active sessions are NOT invalidated — operator who wants existing
-// sessions revoked too should restart the bridge afterwards.
+// A running bridge re-reads the file at its next login attempt, so the
+// rotation takes there with no restart. Active sessions are NOT ended,
+// by this or by a restart: they persist in the same file. This said a
+// restart revoked them until 2026-09-27, and the running bridge then
+// wrote the old password back at its next write of the file, the
+// shutdown flush of that restart included.
 func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("admin reset-password", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -112,7 +116,8 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "reset password: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Admin password updated for %q. Restart the bridge to invalidate existing sessions.\n", *username)
+	fmt.Fprintf(stdout, "Admin password updated for %q. A running bridge takes it at its next sign-in, with no restart.\n", *username)
+	fmt.Fprintln(stdout, "Consoles already signed in stay signed in, and a restart does not sign them out.")
 	return 0
 }
 

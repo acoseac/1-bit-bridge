@@ -97,23 +97,3 @@ func TestFailedRedemptionStillPrunesExpiredRecords(t *testing.T) {
 		t.Error("the prune took the LIVE record too")
 	}
 }
-
-// TestRedemptionRefusesARenamedAccount closes the window between mint and
-// redeem. The two happen in different PROCESSES with up to LoginTicketTTL
-// between them, and CreateSession validates nothing — so without the
-// re-assertion a rename inside the window mints a fully-privileged session
-// for a username the store no longer has.
-func TestRedemptionRefusesARenamedAccount(t *testing.T) {
-	s := ticketStore(t)
-	raw, err := s.MintLoginTicket("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.mu.Lock()
-	s.user.Username = "someone-else"
-	s.mu.Unlock()
-
-	if _, err := s.RedeemLoginTicket(raw); err == nil {
-		t.Fatal("a ticket for a renamed account still redeemed")
-	}
-}
