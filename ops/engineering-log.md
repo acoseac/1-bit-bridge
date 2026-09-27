@@ -17411,6 +17411,22 @@ kept), `runPortCheck` (holds nothing) and `internal/proctest`'s
   `runtime.GC()` instead of calling `collectAndFinalize`. It exists to
   show that the function the children run closes a dropped listener, and
   a test of another wait would show nothing about it.
+- **Round 2**, on `bde92928`. CI passed on all 20 checks, and SonarCloud
+  reported 0 new issues. CodeRabbit's pause notice moved to this head and
+  offered a free on-demand review; the user chose it, and it was clean
+  ("No actionable comments were generated", merge risk "Minimal"). Gemini's
+  app stayed over quota. Merged as `55810ba7`.
+- **The consult was wrong about one fact it said could be checked.** It
+  gave "Go's `net` package sets `SO_REUSEADDR` by default on Windows
+  listeners (checkable in `sockopt_windows.go`)" as a reason the rebind
+  works there. That file's `setDefaultListenerSockopts` sets nothing, and
+  says `SO_REUSEADDR` must not be used because it lets a socket take a port
+  another socket holds. The conclusion it supported stands for its other
+  reason (a listener that never accepted leaves no TIME_WAIT), but had the
+  claim been true, `requirePortHeld`'s refused bind could not have shown a
+  held port on Windows. `TestIsAddrInUseMatchesRealBindConflict` pins the
+  refusal there. "Checkable in X" names a file to read, and reading it is
+  the check.
 
 ### Process notes
 
