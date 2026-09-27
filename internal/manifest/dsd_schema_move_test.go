@@ -131,6 +131,22 @@ func TestVariantsListTheNewestRenditionFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	order, gains := manifestVariantOrder(tracks)
+	if got := strings.Join(order["D/a.dsf"], ","); got != "optimized-dsd-v2-44100-16,pcm-v1-176400-24,optimized-dsd-v1-44100-16" {
+		t.Errorf("order %s, want newest first", got)
+	}
+	firstCompact := firstWithPrefix(order["D/a.dsf"], VariantKindPrefixOptimizedDSD+"-")
+	if firstCompact != "optimized-dsd-v2-44100-16" || gains["optimized-dsd-v1-44100-16@D/a.dsf"] != 5.5 {
+		t.Errorf("a prefix-first client picks %q; the v1 row must keep its own gain (got %v)", firstCompact, gains)
+	}
+	if got := strings.Join(order["D/tie.dsf"], ","); got != "optimized-dsd-v2-44100-16,optimized-dsd-v1-44100-16" {
+		t.Errorf("tie order %s, want the id to break it (v2 first)", got)
+	}
+}
+
+// manifestVariantOrder is each track's variant ids in manifest order, and
+// every variant's gain keyed "<id>@<path>".
+func manifestVariantOrder(tracks []Track) (map[string][]string, map[string]float64) {
 	order := map[string][]string{}
 	gains := map[string]float64{}
 	for _, tr := range tracks {
@@ -141,20 +157,15 @@ func TestVariantsListTheNewestRenditionFirst(t *testing.T) {
 			}
 		}
 	}
-	if got := strings.Join(order["D/a.dsf"], ","); got != "optimized-dsd-v2-44100-16,pcm-v1-176400-24,optimized-dsd-v1-44100-16" {
-		t.Errorf("order %s, want newest first", got)
-	}
-	var firstCompact string
-	for _, id := range order["D/a.dsf"] {
-		if strings.HasPrefix(id, VariantKindPrefixOptimizedDSD+"-") {
-			firstCompact = id
-			break
+	return order, gains
+}
+
+// firstWithPrefix is what a prefix-first client (iOS) resolves a family to.
+func firstWithPrefix(ids []string, prefix string) string {
+	for _, id := range ids {
+		if strings.HasPrefix(id, prefix) {
+			return id
 		}
 	}
-	if firstCompact != "optimized-dsd-v2-44100-16" || gains["optimized-dsd-v1-44100-16@D/a.dsf"] != 5.5 {
-		t.Errorf("a prefix-first client picks %q; the v1 row must keep its own gain (got %v)", firstCompact, gains)
-	}
-	if got := strings.Join(order["D/tie.dsf"], ","); got != "optimized-dsd-v2-44100-16,optimized-dsd-v1-44100-16" {
-		t.Errorf("tie order %s, want the id to break it (v2 first)", got)
-	}
+	return ""
 }

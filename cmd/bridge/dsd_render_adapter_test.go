@@ -287,22 +287,7 @@ func TestAlbumMateSpecMeasuresOnTheRendersProfile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", like.Kind, err)
 		}
-		if got, want := spec.DSDPeakProfile(), like.DSDPeakProfile(); got != want {
-			t.Errorf("%s: the mate is measured on %q, the render's profile is %q", like.Kind, got, want)
-		}
-		if spec.SourceLibraryRel != mate.Path || spec.SourceAbsPath != filepath.Join(f.libDir, mate.Path) {
-			t.Errorf("%s: source %q / %q, want the mate", like.Kind, spec.SourceLibraryRel, spec.SourceAbsPath)
-		}
-		if spec.OutputDir != "/out" || spec.TempDir != "/job-scratch" || spec.Quality != transcode.QualityHigh {
-			t.Errorf("%s: dirs/quality %q/%q/%q, want the render's", like.Kind, spec.OutputDir, spec.TempDir, spec.Quality)
-		}
-		if spec.SourceMTimeNS != mate.ModTime.UnixNano() || spec.SourceSize != mate.Size {
-			t.Errorf("%s: source facts %d/%d, want the row's %d/%d", like.Kind, spec.SourceMTimeNS, spec.SourceSize,
-				mate.ModTime.UnixNano(), mate.Size)
-		}
-		if spec.SourceDurationSec != 240 || spec.SourceChannels != 2 {
-			t.Errorf("%s: duration/channels %v/%d, want the row's 240/2", like.Kind, spec.SourceDurationSec, spec.SourceChannels)
-		}
+		checkMateSpec(t, like, spec, mate, filepath.Join(f.libDir, mate.Path))
 	}
 	like := transcode.JobSpec{Kind: transcode.JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16}
 	if _, err := f.a.albumMateSpec(ctx, "A/DSD/03.dff", like); !errors.Is(err, api.ErrUpscaleIneligible) {
@@ -310,5 +295,28 @@ func TestAlbumMateSpecMeasuresOnTheRendersProfile(t *testing.T) {
 	}
 	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); err == nil {
 		t.Error("a mate with no row must not be measured")
+	}
+}
+
+// checkMateSpec asserts an album-mate's measuring spec against the render it
+// serves: the render's peak profile, quality and directories, and the mate's
+// own path and track-row facts (240 s, stereo, in these fixtures).
+func checkMateSpec(t *testing.T, like, spec transcode.JobSpec, mate *manifest.Track, abs string) {
+	t.Helper()
+	if got, want := spec.DSDPeakProfile(), like.DSDPeakProfile(); got != want {
+		t.Errorf("%s: the mate is measured on %q, the render's profile is %q", like.Kind, got, want)
+	}
+	if spec.SourceLibraryRel != mate.Path || spec.SourceAbsPath != abs {
+		t.Errorf("%s: source %q / %q, want the mate", like.Kind, spec.SourceLibraryRel, spec.SourceAbsPath)
+	}
+	if spec.OutputDir != like.OutputDir || spec.TempDir != like.TempDir || spec.Quality != like.Quality {
+		t.Errorf("%s: dirs/quality %q/%q/%q, want the render's", like.Kind, spec.OutputDir, spec.TempDir, spec.Quality)
+	}
+	if spec.SourceMTimeNS != mate.ModTime.UnixNano() || spec.SourceSize != mate.Size {
+		t.Errorf("%s: source facts %d/%d, want the row's %d/%d", like.Kind, spec.SourceMTimeNS, spec.SourceSize,
+			mate.ModTime.UnixNano(), mate.Size)
+	}
+	if spec.SourceDurationSec != 240 || spec.SourceChannels != 2 {
+		t.Errorf("%s: duration/channels %v/%d, want the row's 240/2", like.Kind, spec.SourceDurationSec, spec.SourceChannels)
 	}
 }

@@ -196,10 +196,11 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		MinFreeBytes: sw.minFreeBytes(),
 		FreeBytes:    freeBytes,
 	}
-	if aborted := sw.drainCandidates(ctx, cands, transcode.JobKindOptimize, outputDir, freeBytes, scratchFree, counts); aborted {
+	// A drain reports true when the context was cancelled mid-drain.
+	if sw.drainCandidates(ctx, cands, transcode.JobKindOptimize, outputDir, freeBytes, scratchFree, counts) {
 		return nil
 	}
-	if aborted := sw.drainSupersededPCMRenditions(ctx, outputDir, freeBytes, scratchFree, counts); aborted {
+	if sw.drainSupersededPCMRenditions(ctx, outputDir, freeBytes, scratchFree, counts) {
 		return nil
 	}
 

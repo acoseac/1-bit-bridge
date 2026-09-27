@@ -716,6 +716,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 		fmt.Fprintf(stderr, "album gain: %v\n", err)
 		return 1
 	}
+	attachAlbumGain(candidates, albumGains)
 
 	// Worker pool. SoX is single-threaded per invocation; we run
 	// `workers` parallel sox processes and let the OS scheduler
@@ -739,9 +740,6 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// until a worker drains a job, defeating prompt shutdown.
 producerLoop:
 	for _, c := range candidates {
-		if c.spec.SourceIsDSD {
-			c.spec.AlbumGain = albumGains
-		}
 		select {
 		case jobsCh <- c:
 		case <-ctx.Done():
@@ -768,6 +766,17 @@ producerLoop:
 		return 1
 	}
 	return 0
+}
+
+// attachAlbumGain gives every DSD candidate the run's album-level gain
+// decider. There is no pool here to inject it when a job runs, so it rides the
+// spec, as the pool would have set it.
+func attachAlbumGain(candidates []upscaleCandidate, g transcode.AlbumGainer) {
+	for i := range candidates {
+		if candidates[i].spec.SourceIsDSD {
+			candidates[i].spec.AlbumGain = g
+		}
+	}
 }
 
 // newCLIAlbumGainer is the CLI's album-level gain decider, the one the serve
