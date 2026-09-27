@@ -19620,6 +19620,372 @@ closes the part of it that is one file replaced by one write.
   data dir) is not warned about: the case needs a shared-group layout nobody
   runs here.
 
+## 2026-09-27 — the LAN interface pickers prefer a real LAN over a link-local tunnel (this PR)
+
+#1046's entry filed it: on the dev Mac, `dlna.PickLANEligibleInterface`
+returned `18 utun0`, so the mDNS responder listened on a tunnel and even a
+short-named control bridge was invisible from `en0`. The picker returned the
+FIRST interface `IsLANEligibleInterface` accepts, and macOS enumerates its
+system utuns ahead of `en0`.
+
+### What was measured
+
+- **The dev Mac's enumeration** (darwin/arm64, Darwin 27, Go 1.27.1; the
+  interface code is identical in 1.26.6). `ifconfig -l` and `net.Interfaces()`
+  agree: `… bridge0 utun0 ap1 en0 awdl0 llw0 utun1 nan0 utun3 utun4 utun5
+  utun6 … utun12 anri0 en12`. The eligible ones, as Go reports them:
+
+  | interface | flags | addresses |
+  |---|---|---|
+  | utun0, utun1, utun3–6 | up, pointtopoint, multicast, running | one fe80 each |
+  | en0 | up, broadcast, multicast, running | fe80, a private IPv4 |
+  | awdl0, llw0, anri0 | up, broadcast, multicast, running | one fe80 each |
+  | utun12 (Tailscale) | up, pointtopoint, multicast, running | fe80, a 100.64/10 address, an fd7a:115c:a1e0::/48 ULA |
+  | en12 | up, broadcast, multicast, running | fe80, a 169.254/16 address |
+
+  `ifconfig utun0` gives `flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST>`: the
+  zero-config arm (`hasLinkLocal && !hasPublic`) admits it.
+- **Go's point-to-point flag per platform.** macOS: every utun on this Mac
+  (above). Linux: dido's `tailscale0` (kernel 7.0, a TUN device) is `up,
+  pointtopoint, multicast, running` to Go, `<POINTOPOINT,MULTICAST,NOARP,UP,
+  LOWER_UP>` to `ip link`; that WireGuard's `wg` and `ppp` carry
+  `IFF_POINTOPOINT` too is from the kernel source, not measured. Windows:
+  `interface_windows.go` maps only `IF_TYPE_PPP` and `IF_TYPE_TUNNEL` (and
+  ATM) to it, and Wintun, which Tailscale and WireGuard use, is
+  `IF_TYPE_PROP_VIRTUAL` (Tailscale's own `netmon` and `netns` code test for
+  that type), so it gets no such flag.
+- **The pickers and a probe bridge, before and after**, on this Mac. A
+  throwaway program printed what both pickers return; the probe was `bridge
+  init --yes --no-service --skip-doctor` with an empty library, then `bridge
+  serve` on 127.0.0.1:17788 / :17789 with mDNS on and Tailscale and HTTP/3
+  off, browsed with hashicorp/mdns's own client pinned to `en0` (3 queries of
+  3 s) and with `dns-sd -B` (6 s):
+
+  | | main (`50e3dd03`) | fix |
+  |---|---|---|
+  | `PickLANEligibleInterface` | `18 utun0` | `14 en0` |
+  | `PickAllLANEligibleInterfaces` | 12: utun0 en0 awdl0 llw0 utun1 utun3 utun4 utun5 utun6 utun12 anri0 en12 | 6: en0 awdl0 llw0 utun12 anri0 en12 |
+  | the probe's UDP sockets (`lsof`) | one, IPv6 `*:5353` | two, IPv4 and IPv6 `*:5353` |
+  | hashicorp/mdns client on en0 | "Probe B5" not found; the NUC's bridge (the control) found | "Probe B5" found in the first query: A en0's IPv4, AAAA en0's fe80, TXT `ips=` en0's IPv4 |
+  | `dns-sd -B _onebit-bridge._tcp` | the NUC's bridge only | "Probe B5" and the NUC's bridge, both on if 14 (en0) |
+  | the same client pinned to utun0 | `write udp4 0.0.0.0:…->224.0.0.251:5353: sendto: can't assign requested address` | (a property of utun0, not measured again) |
+
+  The IPv4 listener is the one hashicorp/mdns cannot open on utun0
+  (`ListenMulticastUDP` needs an IPv4 address on the interface) and drops the
+  error of, so main's responder answered IPv6 queries on a tunnel and nothing
+  else.
+- **dido with the fix** (read-only; the binary removed after): the single
+  pick is `enp1s0f0`, the first eligible interface, and the set is the five
+  members the old rule gave (enp1s0f0, docker0, a docker bridge, tailscale0,
+  a veth).
+
+### Decisions
+
+- **Eligibility is unchanged** (#471's predicate). It is the allowlist of what
+  an unauthenticated DLNA endpoint may bind at all; which of the admitted
+  interfaces is the LAN is a separate question. `lanPreference` answers it:
+  not point-to-point first, then the best address class (a private IPv4, then
+  any other usable address: a ULA or the opted-in tsnet interface, then
+  link-local only), and enumeration order among equals.
+- **Rejected: changing `IsLANEligibleInterface`**, whether by refusing
+  point-to-point interfaces or by narrowing the zero-config arm. That turns a
+  selection problem into a change of what may be bound at all: an opted-in
+  tunnel and a direct-cable renderer on 169.254 are both legitimate, and the
+  arms are there for the reasons #471 recorded.
+- **Rejected: either half of the key alone.** The flag alone misses Wintun
+  and a Mac's `bridge0` with a self-assigned address (NC6); the class alone
+  ties a WireGuard tunnel's private 10.x with `en0` and lets order pick the
+  tunnel (NC5). The class-only form would have fixed this Mac, whose utun0
+  has no private address, which is why it looks sufficient.
+- **The multicast set drops only a point-to-point interface whose addresses
+  are all link-local, and only when anything else is eligible.** Rejected:
+  dropping every link-local-only interface, which would take the direct-cable
+  case (NC7); and dropping them unconditionally, which empties the set on a
+  host that has only tunnels (NC8).
+- **Ties keep enumeration order**, so a host whose first eligible interface
+  already ranks best keeps it: dido, and any host whose LAN adapter comes
+  first. One case moves the other way, accepted with the design: a
+  zero-config LAN beside a private-IPv4 bridge (`docker0`, a VM's) now binds
+  the bridge.
+- **One seam** (`pickLANInterface`, `pickAllLANInterfaces`) over a given
+  enumeration and address lookup; the exported pickers call it and nothing
+  else. The single pick is a copy (it retains nothing); the set keeps #328's
+  element pointers.
+- **`internal/mdns`'s `ipsForAdvertise` left alone.** It collects every up
+  interface's addresses, utuns and Tailscale's 100.x included, but
+  `rebuildLocked` narrows the A/AAAA set to the pinned interface
+  (`filterIPsToInterface`). So main advertised utun0's fe80 alone, and the
+  fix advertises en0's two addresses (the TXT `ips=` above is built from the
+  narrowed set, and holds no 100.x). The unfiltered set only drives the
+  rebind loop's change detection and the no-interface fallback: a tunnel
+  coming or going rebuilds the responder, which costs a rebuild and answers
+  nothing wrongly.
+- The renderer discovery client's `Interface` doc named the single picker;
+  cmd/bridge starts one client per member of the set, so it now says so.
+
+### Tests and controls
+
+- `internal/dlna/interfaces_pick_test.go`, on synthetic interfaces
+  (`fakeHost`: an enumeration and an address lookup, handed to the seam),
+  whose `macos_*` rows copy the measured shapes and none of the measured
+  addresses, since the repo is public:
+  `TestLANPreferenceOfRanksWhatTheInterfaceCarries` (11 rows: this Mac's
+  utun0, en0 and Tailscale utun, a dual-stack LAN, a ULA before and after a
+  private IPv4, a self-assigned IPv4, a private WireGuard tunnel, the tsnet
+  opt-in with and without an address),
+  `TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4` (17 rows) and
+  `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel` (7 rows). Every row of
+  both picker tables also requires the single pick to be a member of the set.
+  `TestTheExportedPickersRunTheSelection` compares the exported pair with the
+  seam over this host's own enumeration, and fails only on a difference that
+  survives five tries (an interface can come or go between the calls); it
+  can fail at all only where the first eligible interface does not rank
+  best.
+  `Test_PickAllLANEligibleInterfaces_Coherent` gained the same membership
+  clause on the host.
+- **Red first**, the seam in place with the old rule in both pickers
+  (measured before the new rule was written, and again on the final tests):
+  10 of the 17 single-pick rows and 2 of the 7 set rows. The other rows are
+  guards of behaviour that must not change (zero-config alone, a dual-stack
+  LAN, equals in order, tunnels alone, the opt-in alone, unreadable
+  addresses, nothing eligible, a direct cable, a private tunnel, and the
+  opted-in tsnet tunnel with only a CGNAT address, a row added before the
+  controls). The key table tests the new function and has no old form.
+- **Negative controls**, each applied once to the committed fix, `-count=1`,
+  restored with `git checkout --` and checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the single pick is the first eligible again (the seam kept) | the same 10 single-pick rows; 2 set rows through the membership check; `Test_PickAllLANEligibleInterfaces_Coherent` on this Mac |
+  | NC2 | the set drops nothing | `macos_host`, `tunnel_dropped_beside_a_zero_config_lan` |
+  | NC3 | the exported single picker bypasses the seam (the old loop) | `TestTheExportedPickersRunTheSelection` ("chose utun0, the selection chooses en0") and the host coherence test, on this Mac; the tables stay green |
+  | NC4 | the exported set picker bypasses the seam | `TestTheExportedPickersRunTheSelection` (12 members against 6), on this Mac |
+  | NC5 | the key compares the class alone | `private_tunnel_before_en0`, `zero_config_lan_after_a_tunnel`, `non_tunnel_link_local_beats_private_tunnel`, and one set row through membership; `macos_utun0_before_en0` stays green |
+  | NC6 | the key compares the flag alone | `self_assigned_bridge0_before_en0`, `dual_stack_home_lan_after_a_link_local_adapter`, `ula_beats_link_local_only`, `private_ipv4_beats_ula`, `windows_tailscale_adapter_before_ethernet` |
+  | NC7 | the set drops every link-local-only interface | `macos_host` (awdl0 and en12 gone), `direct_cable_kept_beside_en0`, `tunnel_dropped_beside_a_zero_config_lan`, and one single-pick row through membership |
+  | NC8 | the set drops the tunnels even when nothing else is eligible | `tunnels_alone_are_kept`, and `tunnels_alone_keep_os_order` through membership |
+  | NC9 | no tsnet arm in `lanPreferenceOf` | the two opt-in key rows, `opted_in_tsnet_tunnel_kept` |
+  | NC10 | a ULA counts as a private IPv4 | `ula_only`, `macos_tailscale_utun`, `private_ipv4_beats_ula`, `windows_tailscale_adapter_before_ethernet` |
+  | NC11 | a later ULA demotes an earlier private IPv4 | `private_v4_before_a_ula` |
+
+  NC3 and NC4 depend on the host: on one whose first eligible interface
+  already ranks best, a picker that skips the seam answers the same.
+- `go test -race -count=1 ./internal/dlna/... ./internal/mdns/... ./cmd/bridge/`,
+  `go vet ./...`, and the pinned 1.26.6 `gofmt -l` over the changed files.
+  All pass but `TestSendMSearchStreakResetsOnRestart`
+  (`internal/dlna/discovery`), which failed in both full race runs (the
+  package runs beside cmd/bridge's, so the host is loaded), 1 of 8 when
+  rerun beside that load, and passed 30 of 30 alone. Its package imports
+  `internal/logging` and nothing of `internal/dlna`, and this change touches
+  it only in a comment; the test drives a client on a synthetic interface.
+  The mechanism, read from the code (the Warn it would print lands in an
+  earlier test's buffer, below, so the output cannot show it): the loop's
+  first M-SEARCH, sent as soon as `Start` spawns it, can take
+  `snapshotConn()` just before the test's `Stop` closes the socket and then
+  write to the closed socket; that failure sets the streak to 1, and the
+  test's own failure makes it 2, which logs nothing. Left for its own change
+  (next section).
+
+### Out of scope
+
+- **That flake**, and its product half: a send that fails because `Stop`
+  closed the socket is counted as a send failure, so a tick that coincides
+  with a shutdown logs "M-SEARCH send failed". Beside it, `captureLogs` in
+  that package restores slog's default logger but not `log`'s output (Go's
+  `slog.SetDefault` leaves `log.SetOutput` alone for a logger with the
+  default handler), so after the first capture every later default-handler
+  line in the test binary goes into that test's buffer.
+- **Link-local-only members that are not point-to-point** (awdl0, llw0 and
+  anri0 on this Mac, fe80 only) stay in the set, as designed for the
+  direct-cable case. An SSDP client there cannot send IPv4 either; whether a
+  member with no IPv4 at all should start one (SSDP here is IPv4-only) is its
+  own decision.
+
+## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3)
+
+The external audit of 2026-09-23 filed M3, "a discovered UPnP device's URLs
+are its own say-so". The iOS app closed it on its own SSDP path (#1911) and for
+the renderers a bridge relays (#1977). The bridge took a discovered device's
+service URLs as given: `resolveServiceURL` resolved any `<controlURL>` /
+`<eventSubURL>` against the description URL with no scheme or host rule, so a
+`file:`, `ftp:` or host-less URL, or a service on ANOTHER host, was accepted.
+One parse (`FetchDeviceDescription` → `ParseDeviceDescription`) serves three
+callers: renderer discovery (`internal/dlna/discovery`, SSDP), upstream
+MediaServer discovery (`internal/upnp/discovery.go`, SSDP) and the
+operator-configured manual upstream (`internal/upnp/manual.go`).
+
+### What was measured
+
+- **The upstream half, end to end.** `LiveHost`
+  (`cmd/bridge/upnp_upstream_wiring.go`, `serverCacheHostResolver`) returns the
+  host:port of the cached ContentDirectory control URL, and `upnpproxy`'s
+  `buildProxyURL` puts every stored `<res>` URL's path and query onto it, with
+  the scheme forced to http. A throwaway probe cached a control URL on an
+  httptest "console" at `127.0.0.1:<port>` and served a routing row whose
+  stored `<res>` was `http://192.0.2.7:8200/api/diagnostics?x=1`: `LiveHost`
+  answered `127.0.0.1:<port>`, and `Proxy.Serve` returned the console's 200 and
+  its body for `GET /api/diagnostics?x=1`. The route there on main:
+  `TestAMovedServerCannotSteerTheCachedControlURLToAnotherHost` against the
+  pre-fix parse, a server known at 192.0.2.7 re-announcing its UDN from
+  192.0.2.99 with a description naming `http://127.0.0.1:7789/api/stats`,
+  left `ContentDirectoryControlURL = "http://127.0.0.1:7789/api/stats"` in the
+  cache. The move detector re-fetches on any new Location host, so a spoofer
+  needed only the server's UDN, which any LAN peer learns from the server's
+  own announcements or an M-SEARCH of its own.
+- **The renderer half.** Against the pre-fix parse, a first-time renderer whose
+  ConnectionManager control URL named `192.0.2.200:7789` got the bridge's own
+  `POST http://192.0.2.200:7789/api/cm` (GetProtocolInfo), and its off-host
+  event and RenderingControl URLs reached the `/v1/renderers` snapshot.
+- **Redirects.** All three description fetches use their package's default
+  dispatcher (cmd/bridge passes none), and each sets `CheckRedirect:
+  ErrUseLastResponse`, pinned by `TestDefaultDetailFetchClientRefusesRedirects`
+  (both packages) and `TestManualPollerDefaultDispatcherRelaysRedirects`. A 3xx
+  comes back as a non-200 and fails the fetch: the bridge follows no redirect,
+  stricter than the app's "only to the same host".
+- **What Go's client does with the refused shapes** (a probe, `http.Client.Do`):
+  `file:` and `ftp:` fail ("unsupported protocol scheme") and `http:///x`
+  fails ("no Host in request URL"), so on main those cost a fetch goroutine,
+  a semaphore slot, a transient cache stub and a lastLocations record per
+  announcement, not a file read. **A port with no host is different**:
+  `http://:<port>/api/stats` has `Host ":<port>"` and an empty `Hostname()`,
+  and Go DIALS it on the local host (the GET reached a listener on
+  127.0.0.1). On main that shape reached the bridge's own console three
+  ways: as a LOCATION, as a ConnectionManager URL, and as a ContentDirectory
+  control URL, which `hostPortFromURL` (it tests `Host != ""`) turned into
+  `LiveHost ":7789"`. The fix reads the host with `Hostname()`, so it is
+  refused for both sources.
+- **No render/re-parse differential.** `resolveServiceURL` judges a parsed
+  `*url.URL` and returns its `String()`, which every consumer parses again
+  (`http.NewRequest`, `hostPortFromURL`, the app's `URL(string:)`). A
+  throwaway fuzz property (the accepted string re-parses as http(s) on the
+  description's host) ran 6.2M executions in 60 s with no counterexample, so
+  no second parse was added. The two changed parsers' own targets ran 60 s
+  each afterwards: `FuzzParseSSDPHeaders` 7.19M executions,
+  `FuzzParseDeviceDescription` 5.19M, no crash.
+
+### Decisions
+
+- **The iOS rules, verbatim** (`UPnPURLPolicy.isFetchable` /
+  `sharesHost`, `DeviceDescriptionParser.resolveServiceURL`): http or https in
+  any case, a non-empty host (`url.URL.Hostname`, so `http://:8080/` has none),
+  and for a discovered description the same host, case-insensitive, port
+  ignored. **Hosts, not origins**: an origin compare (NC8) turned six existing
+  upnp tests red, the fixtures that serve the ContentDirectory on `:9000` of
+  the host whose description is on `:8200`, which is ordinary UPnP. Hosts are
+  compared as strings, as in the app: a textual variant of one address
+  (`192.168.001.042`) fails closed, and no device has been seen doing that.
+- **`DescriptionSource`, strict by default.** `SourceDiscovered` is the zero
+  value; every value but `SourceUserChosen` is strict (NC6), the
+  default-deny shape of `ShouldEnableDLNA`. The existing
+  `ParseDeviceDescription` / `FetchDeviceDescription` keep their signatures and
+  are the strict forms; `...WithSource` (the stdlib's `NewRequestWithContext`
+  idiom) takes a source, and only the manual poller passes `SourceUserChosen`.
+  A new caller that names no source gets the safe answer, as in the app.
+- **User-chosen keeps another host, never another scheme.** An `ftp://`
+  control URL looks harmless in Go, which speaks no ftp, but `LiveHost` reads
+  only its host:port and `upnpproxy` forces http, so `ftp://127.0.0.1:7789/`
+  from a manual description would have reached the console.
+- **Refused control URL: the service goes, as an unparseable one always
+  did.** For AVTransport that is the existing "no AVTransport" parse error,
+  which the renderer client classes as structural (a stub that never ages out,
+  so no retry storm), and the message is unchanged. A refused eventSubURL is
+  dropped alone. Both refusals log at Debug with the raw URL, the description
+  URL and the reason (`errServiceURLNotFetchable` / `errServiceURLOffHost`).
+  For an upstream, a refused ContentDirectory writes nothing, so on a move
+  re-fetch the cache keeps the previous control URL.
+- **The LOCATION rule lives in `ParseSSDPHeaders`**, where the app's
+  `SSDPResponseParser` puts it: a value that is not http(s) with a host reads
+  as absent, which both handlers already treat as "nothing to fetch" (a known
+  UDN is refreshed, an unknown one skipped). Refusing inside
+  `FetchDeviceDescription` instead was declined: the renderer client would
+  class it as structural and keep an immortal stub per spoofed UDN. The
+  manual URL does not pass through the SSDP parser and is left to Go's client
+  as before.
+- **No wire change.** `/v1/renderers` keeps its shape, `ProtocolVersion` stays
+  1, PROTOCOL.md is untouched: fewer renderers or fewer optional URLs are
+  values the shipped app already handles.
+
+### Tests and controls
+
+- `internal/dlna/discovery/service_url_policy_test.go`: the iOS cases
+  (`file:` / `ftp:` / host-less / `data:` / `gopher:` control URLs refused for
+  both sources; an optional URL on another host dropped while the renderer
+  stays; the same host on another port kept), plus an off-host AVTransport
+  refused through the default, the strict and an unknown source (including
+  the loopback console, a network-path reference and a userinfo that looks
+  like the host); the user-chosen keep; case-insensitive hosts and schemes;
+  IPv6 literals with and without a zone; a non-http eventSubURL dropped
+  alone; the LOCATION table; and three through the real handler
+  (`handlePacket` → `fetchAndCacheDetails`): no GetProtocolInfo POST to an
+  off-host ConnectionManager (a recording dispatcher sees one GET), no
+  renderer served for an off-host AVTransport (`Snapshot`, what
+  `/v1/renderers` serialises), and no request for a bad LOCATION.
+- `internal/upnp/service_url_policy_test.go`: a first-time server naming the
+  console is not cached; the move attack above; a bad LOCATION is never
+  fetched; the manual poller keeps a cross-host ContentDirectory and refuses
+  `file:`, `ftp://127.0.0.1:7789/` and a host-less one.
+- `TestParseDeviceDescription_ResolvesRelativeURLs` asserted that an absolute
+  control URL on ANOTHER host is kept, the defect written down as intended
+  behaviour. It now keeps one on another port of the description's host; the
+  app's twin (`test_makeRenderer_userChosen_keepsAnAbsoluteControlURLOnAnotherHost`)
+  was reworded the same way, and its docblock says so.
+- **Red first**, `-count=1`, against the pre-fix behaviour with only the new
+  API surface compiled in: every new test failed on its assertions, except
+  the two keep-guards (user-chosen cross-host, same host on another port),
+  green before and after, which the controls below turn red.
+- Negative controls against the committed fix, each applied once, run over
+  both packages with `-count=1`, restored with `git checkout --` and checked
+  clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no same-host check | the off-host parse tests (3), both handler tests of the renderer client, both upnp SSDP tests |
+  | NC2 | no scheme check | the parser's scheme rows, the LOCATION table, both never-fetched tests, the manual refusal |
+  | NC3 | no host-presence check | the same five, only on the user-chosen rows and the LOCATION: for a discovered description `sharesHost` already refuses an empty host |
+  | NC4 | the manual poller fetches as discovered | the manual keep-guard only |
+  | NC5a | `ParseDeviceDescription` defaults to user-chosen | the three parser tests that use the default |
+  | NC5b | `FetchDeviceDescription` defaults to user-chosen | the four tests through the SSDP handlers |
+  | NC6 | only `SourceDiscovered` is strict | the unknown-source rows |
+  | NC7 | `ParseSSDPHeaders` keeps any LOCATION | the LOCATION table and both never-fetched tests |
+  | NC8 | compare host:port (the origin) | same-host-another-port, IPv6, the rewritten relative-URL test, and six existing upnp split-port tests |
+  | NC9 | case-sensitive hosts | same-host-another-port, IPv6 |
+  | NC10 | eventSubURL resolved as user-chosen | the drop-alone test, the no-POST test (its event URL) |
+  | NC11 | a refused control URL fails the whole description | the drop-alone tests, and the refusal tests on their wording |
+
+- `go test -race -count=1` over `internal/dlna/...`, `internal/upnp/...`,
+  `internal/upnpproxy/...`, `internal/upnpingest/...` (every package that
+  imports the two changed ones) and `cmd/bridge` (182 s), `go vet ./...` and
+  `make build-all`, on Go 1.27.1; the changed Go files are clean under Go
+  1.26.6's gofmt. The controls ran against the code commit before two
+  amends that changed comments and nothing else (checked: no non-comment
+  line differs).
+
+### Out of scope
+
+- **An SSDP LOCATION on loopback, or on any host other than the packet's
+  source address, is still fetched.** The same-host rule bounds what a
+  description can name to the host that served it; nothing yet bounds which
+  host that is. A loopback-only service on the bridge's host that answers a
+  real description would pass. A Location-versus-source check is the next
+  bound; the app has none either.
+- **`LiveHost`'s `hostPortFromURL` still tests `Host != ""`**, so it would
+  take a port-only control URL (`:7789`) and the proxy would dial the local
+  host. Nothing can put one in the cache now (both writers go through
+  `resolveServiceURL`), so this is defence in depth, one line and a test.
+- **A user-chosen description may name a loopback control URL.** A manual
+  upstream on the bridge's own host is legitimate, so refusing loopback
+  outright is wrong; refusing it only when the description URL is not
+  loopback would bound it.
+- **A server configured by both UDN and manual URL whose control URL is on
+  another host** shares one cache key between the SSDP client and the manual
+  poller. The strict SSDP fetch never succeeds for it, so no Location is
+  recorded and the move check compares each announcement with the manual
+  entry's cross-host control URL: one extra description GET per
+  announcement, the entry itself unchanged.
+- The Build section says four fuzz targets carry PROPERTY assertions; the
+  lyrics targets carry properties too, so the count was already stale.
+  `FuzzParseDeviceDescription` could carry this change's policy as one.
+
 ## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential (#1049)
 
 The 2026-09-23 external audit's H3, bridge half. Turning off the app's
