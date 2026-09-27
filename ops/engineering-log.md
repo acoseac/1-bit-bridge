@@ -19519,3 +19519,188 @@ tags from local files by the same rule.
   stamped.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
+
+## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3)
+
+The external audit of 2026-09-23 filed M3, "a discovered UPnP device's URLs
+are its own say-so". The iOS app closed it on its own SSDP path (#1911) and for
+the renderers a bridge relays (#1977). The bridge took a discovered device's
+service URLs as given: `resolveServiceURL` resolved any `<controlURL>` /
+`<eventSubURL>` against the description URL with no scheme or host rule, so a
+`file:`, `ftp:` or host-less URL, or a service on ANOTHER host, was accepted.
+One parse (`FetchDeviceDescription` → `ParseDeviceDescription`) serves three
+callers: renderer discovery (`internal/dlna/discovery`, SSDP), upstream
+MediaServer discovery (`internal/upnp/discovery.go`, SSDP) and the
+operator-configured manual upstream (`internal/upnp/manual.go`).
+
+### What was measured
+
+- **The upstream half, end to end.** `LiveHost`
+  (`cmd/bridge/upnp_upstream_wiring.go`, `serverCacheHostResolver`) returns the
+  host:port of the cached ContentDirectory control URL, and `upnpproxy`'s
+  `buildProxyURL` puts every stored `<res>` URL's path and query onto it, with
+  the scheme forced to http. A throwaway probe cached a control URL on an
+  httptest "console" at `127.0.0.1:<port>` and served a routing row whose
+  stored `<res>` was `http://192.0.2.7:8200/api/diagnostics?x=1`: `LiveHost`
+  answered `127.0.0.1:<port>`, and `Proxy.Serve` returned the console's 200 and
+  its body for `GET /api/diagnostics?x=1`. The route there on main:
+  `TestAMovedServerCannotSteerTheCachedControlURLToAnotherHost` against the
+  pre-fix parse, a server known at 192.0.2.7 re-announcing its UDN from
+  192.0.2.99 with a description naming `http://127.0.0.1:7789/api/stats`,
+  left `ContentDirectoryControlURL = "http://127.0.0.1:7789/api/stats"` in the
+  cache. The move detector re-fetches on any new Location host, so a spoofer
+  needed only the server's UDN, which any LAN peer learns from the server's
+  own announcements or an M-SEARCH of its own.
+- **The renderer half.** Against the pre-fix parse, a first-time renderer whose
+  ConnectionManager control URL named `192.0.2.200:7789` got the bridge's own
+  `POST http://192.0.2.200:7789/api/cm` (GetProtocolInfo), and its off-host
+  event and RenderingControl URLs reached the `/v1/renderers` snapshot.
+- **Redirects.** All three description fetches use their package's default
+  dispatcher (cmd/bridge passes none), and each sets `CheckRedirect:
+  ErrUseLastResponse`, pinned by `TestDefaultDetailFetchClientRefusesRedirects`
+  (both packages) and `TestManualPollerDefaultDispatcherRelaysRedirects`. A 3xx
+  comes back as a non-200 and fails the fetch: the bridge follows no redirect,
+  stricter than the app's "only to the same host".
+- **What Go's client does with the refused shapes** (a probe, `http.Client.Do`):
+  `file:` and `ftp:` fail ("unsupported protocol scheme") and `http:///x`
+  fails ("no Host in request URL"), so on main those cost a fetch goroutine,
+  a semaphore slot, a transient cache stub and a lastLocations record per
+  announcement, not a file read. **A port with no host is different**:
+  `http://:<port>/api/stats` has `Host ":<port>"` and an empty `Hostname()`,
+  and Go DIALS it on the local host (the GET reached a listener on
+  127.0.0.1). On main that shape reached the bridge's own console three
+  ways: as a LOCATION, as a ConnectionManager URL, and as a ContentDirectory
+  control URL, which `hostPortFromURL` (it tests `Host != ""`) turned into
+  `LiveHost ":7789"`. The fix reads the host with `Hostname()`, so it is
+  refused for both sources.
+- **No render/re-parse differential.** `resolveServiceURL` judges a parsed
+  `*url.URL` and returns its `String()`, which every consumer parses again
+  (`http.NewRequest`, `hostPortFromURL`, the app's `URL(string:)`). A
+  throwaway fuzz property (the accepted string re-parses as http(s) on the
+  description's host) ran 6.2M executions in 60 s with no counterexample, so
+  no second parse was added. The two changed parsers' own targets ran 60 s
+  each afterwards: `FuzzParseSSDPHeaders` 7.19M executions,
+  `FuzzParseDeviceDescription` 5.19M, no crash.
+
+### Decisions
+
+- **The iOS rules, verbatim** (`UPnPURLPolicy.isFetchable` /
+  `sharesHost`, `DeviceDescriptionParser.resolveServiceURL`): http or https in
+  any case, a non-empty host (`url.URL.Hostname`, so `http://:8080/` has none),
+  and for a discovered description the same host, case-insensitive, port
+  ignored. **Hosts, not origins**: an origin compare (NC8) turned six existing
+  upnp tests red, the fixtures that serve the ContentDirectory on `:9000` of
+  the host whose description is on `:8200`, which is ordinary UPnP. Hosts are
+  compared as strings, as in the app: a textual variant of one address
+  (`192.168.001.042`) fails closed, and no device has been seen doing that.
+- **`DescriptionSource`, strict by default.** `SourceDiscovered` is the zero
+  value; every value but `SourceUserChosen` is strict (NC6), the
+  default-deny shape of `ShouldEnableDLNA`. The existing
+  `ParseDeviceDescription` / `FetchDeviceDescription` keep their signatures and
+  are the strict forms; `...WithSource` (the stdlib's `NewRequestWithContext`
+  idiom) takes a source, and only the manual poller passes `SourceUserChosen`.
+  A new caller that names no source gets the safe answer, as in the app.
+- **User-chosen keeps another host, never another scheme.** An `ftp://`
+  control URL looks harmless in Go, which speaks no ftp, but `LiveHost` reads
+  only its host:port and `upnpproxy` forces http, so `ftp://127.0.0.1:7789/`
+  from a manual description would have reached the console.
+- **Refused control URL: the service goes, as an unparseable one always
+  did.** For AVTransport that is the existing "no AVTransport" parse error,
+  which the renderer client classes as structural (a stub that never ages out,
+  so no retry storm), and the message is unchanged. A refused eventSubURL is
+  dropped alone. Both refusals log at Debug with the raw URL, the description
+  URL and the reason (`errServiceURLNotFetchable` / `errServiceURLOffHost`).
+  For an upstream, a refused ContentDirectory writes nothing, so on a move
+  re-fetch the cache keeps the previous control URL.
+- **The LOCATION rule lives in `ParseSSDPHeaders`**, where the app's
+  `SSDPResponseParser` puts it: a value that is not http(s) with a host reads
+  as absent, which both handlers already treat as "nothing to fetch" (a known
+  UDN is refreshed, an unknown one skipped). Refusing inside
+  `FetchDeviceDescription` instead was declined: the renderer client would
+  class it as structural and keep an immortal stub per spoofed UDN. The
+  manual URL does not pass through the SSDP parser and is left to Go's client
+  as before.
+- **No wire change.** `/v1/renderers` keeps its shape, `ProtocolVersion` stays
+  1, PROTOCOL.md is untouched: fewer renderers or fewer optional URLs are
+  values the shipped app already handles.
+
+### Tests and controls
+
+- `internal/dlna/discovery/service_url_policy_test.go`: the iOS cases
+  (`file:` / `ftp:` / host-less / `data:` / `gopher:` control URLs refused for
+  both sources; an optional URL on another host dropped while the renderer
+  stays; the same host on another port kept), plus an off-host AVTransport
+  refused through the default, the strict and an unknown source (including
+  the loopback console, a network-path reference and a userinfo that looks
+  like the host); the user-chosen keep; case-insensitive hosts and schemes;
+  IPv6 literals with and without a zone; a non-http eventSubURL dropped
+  alone; the LOCATION table; and three through the real handler
+  (`handlePacket` → `fetchAndCacheDetails`): no GetProtocolInfo POST to an
+  off-host ConnectionManager (a recording dispatcher sees one GET), no
+  renderer served for an off-host AVTransport (`Snapshot`, what
+  `/v1/renderers` serialises), and no request for a bad LOCATION.
+- `internal/upnp/service_url_policy_test.go`: a first-time server naming the
+  console is not cached; the move attack above; a bad LOCATION is never
+  fetched; the manual poller keeps a cross-host ContentDirectory and refuses
+  `file:`, `ftp://127.0.0.1:7789/` and a host-less one.
+- `TestParseDeviceDescription_ResolvesRelativeURLs` asserted that an absolute
+  control URL on ANOTHER host is kept, the defect written down as intended
+  behaviour. It now keeps one on another port of the description's host; the
+  app's twin (`test_makeRenderer_userChosen_keepsAnAbsoluteControlURLOnAnotherHost`)
+  was reworded the same way, and its docblock says so.
+- **Red first**, `-count=1`, against the pre-fix behaviour with only the new
+  API surface compiled in: every new test failed on its assertions, except
+  the two keep-guards (user-chosen cross-host, same host on another port),
+  green before and after, which the controls below turn red.
+- Negative controls against the committed fix, each applied once, run over
+  both packages with `-count=1`, restored with `git checkout --` and checked
+  clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no same-host check | the off-host parse tests (3), both handler tests of the renderer client, both upnp SSDP tests |
+  | NC2 | no scheme check | the parser's scheme rows, the LOCATION table, both never-fetched tests, the manual refusal |
+  | NC3 | no host-presence check | the same five, only on the user-chosen rows and the LOCATION: for a discovered description `sharesHost` already refuses an empty host |
+  | NC4 | the manual poller fetches as discovered | the manual keep-guard only |
+  | NC5a | `ParseDeviceDescription` defaults to user-chosen | the three parser tests that use the default |
+  | NC5b | `FetchDeviceDescription` defaults to user-chosen | the four tests through the SSDP handlers |
+  | NC6 | only `SourceDiscovered` is strict | the unknown-source rows |
+  | NC7 | `ParseSSDPHeaders` keeps any LOCATION | the LOCATION table and both never-fetched tests |
+  | NC8 | compare host:port (the origin) | same-host-another-port, IPv6, the rewritten relative-URL test, and six existing upnp split-port tests |
+  | NC9 | case-sensitive hosts | same-host-another-port, IPv6 |
+  | NC10 | eventSubURL resolved as user-chosen | the drop-alone test, the no-POST test (its event URL) |
+  | NC11 | a refused control URL fails the whole description | the drop-alone tests, and the refusal tests on their wording |
+
+- `go test -race -count=1` over `internal/dlna/...`, `internal/upnp/...`,
+  `internal/upnpproxy/...`, `internal/upnpingest/...` (every package that
+  imports the two changed ones) and `cmd/bridge` (182 s), `go vet ./...` and
+  `make build-all`, on Go 1.27.1; the changed Go files are clean under Go
+  1.26.6's gofmt. The controls ran against the code commit before two
+  amends that changed comments and nothing else (checked: no non-comment
+  line differs).
+
+### Out of scope
+
+- **An SSDP LOCATION on loopback, or on any host other than the packet's
+  source address, is still fetched.** The same-host rule bounds what a
+  description can name to the host that served it; nothing yet bounds which
+  host that is. A loopback-only service on the bridge's host that answers a
+  real description would pass. A Location-versus-source check is the next
+  bound; the app has none either.
+- **`LiveHost`'s `hostPortFromURL` still tests `Host != ""`**, so it would
+  take a port-only control URL (`:7789`) and the proxy would dial the local
+  host. Nothing can put one in the cache now (both writers go through
+  `resolveServiceURL`), so this is defence in depth, one line and a test.
+- **A user-chosen description may name a loopback control URL.** A manual
+  upstream on the bridge's own host is legitimate, so refusing loopback
+  outright is wrong; refusing it only when the description URL is not
+  loopback would bound it.
+- **A server configured by both UDN and manual URL whose control URL is on
+  another host** shares one cache key between the SSDP client and the manual
+  poller. The strict SSDP fetch never succeeds for it, so no Location is
+  recorded and the move check compares each announcement with the manual
+  entry's cross-host control URL: one extra description GET per
+  announcement, the entry itself unchanged.
+- The Build section says four fuzz targets carry PROPERTY assertions; the
+  lyrics targets carry properties too, so the count was already stale.
+  `FuzzParseDeviceDescription` could carry this change's policy as one.
