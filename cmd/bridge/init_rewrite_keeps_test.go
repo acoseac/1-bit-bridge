@@ -661,6 +661,9 @@ func TestInitInteractiveRewriteOffersTheInstallsName(t *testing.T) {
 	}{
 		{"Enter keeps the install's name", "My Library", "", "My Library", "My Library"},
 		{"a typed name replaces it", "My Library", "Jazz Archive", "My Library", "Jazz Archive"},
+		// Blank to the app's trim (config.TrimLibraryName), which the
+		// prompt's own strings.TrimSpace does not see as blank.
+		{"an answer blank once trimmed is Enter", "My Library", "​", "My Library", "My Library"},
 		{"a first install is offered the host's", "", "", host, host},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
