@@ -19519,3 +19519,90 @@ tags from local files by the same rule.
   stamped.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
+
+## 2026-09-27 — a pairing link's one-time code replaces the token it carries (audit H1, #1052)
+
+The 2026-09-23 external audit's H1: the admin console's pairing QR and its
+`bridge://pair` deep link carried the device's long-lived bearer token. The
+link travels through surfaces the bridge does not control (a photo of the
+screen, the clipboard, a link opened on the device, a preview), and anything
+that kept a copy held the device's credential until the operator revoked it.
+The iOS half of H1 (never persisting the link, redacting it from logs) had
+shipped; this is the bridge half, in v0.2.1 at the user's request, with the
+iOS redemption as the Mirror-PR twin.
+
+### Decisions
+
+- **Token AND code, not a code alone.** Every shipped app refuses a link
+  without `token=` (`BridgePairingURL` throws `missingField("token")`), and it
+  ignores unknown parameters. A code-only link would stop every installed app
+  from pairing. So the link keeps `token` for those apps and gains `code`,
+  and an app that understands the code redeems it and never stores the
+  link's token. The user chose this shape (2026-09-27) over a short-lived
+  link token, which would still be a bearer in the link.
+- **Redeeming ROTATES the token the code names** (`auth.Store.Rotate`), not
+  a mint. The device keeps the record the operator made (its name, ID and
+  any expiry, and the Devices row), and the link's token stops validating in
+  the same commit. So once the real device has paired, a copy of the link is
+  worth nothing. If a copy is redeemed first, the real device's redemption
+  fails where the user sees it, rather than both devices sharing a token.
+- **In memory, in the serving process.** The console issues and the v1 API
+  redeems, both in `bridge serve`, so nothing crosses a process. A restart
+  ends every code, which costs the operator one fresh QR; the login ticket's
+  sidecar file (a cross-process design) was not needed. `bridge pair` issues
+  no code, because nothing in the serving process could redeem it.
+- **One live code per token.** Issuing drops the token's previous code, so a
+  console rotation leaves the old QR nothing to redeem, just as the old token
+  has nothing left to use. At most 64 codes are held, the oldest evicted
+  first, which bounds memory against a script minting in a loop.
+- **Take before judging**, the login ticket's rule: the code is deleted
+  before its age is read, so it is accepted at most once whatever the
+  answer.
+- **One refusal.** Unknown, used, expired, and a token revoked or expired
+  since are all `410 pairing_code_invalid`, so the endpoint answers nothing
+  about which codes exist. Shape is checked before the store (43 characters
+  of base64url, `400`). The route is unauthenticated, like
+  `POST /v1/pairing/requests`, and shares its per-IP limiter (burst 5, one
+  per 5 s). It is `rateNone`, so it goes in the mutating-route exemption list
+  with its reason. The code is 256 bits, so the limiter bounds the load, not
+  the odds of guessing one.
+- **An expired token is refused.** `Rotate` keeps `ExpiresAt` and `Validate`
+  refuses a token past it, so handing over the fresh secret would pair a
+  device that 401s on its first request.
+- **No fallback on a refusal** (PROTOCOL.md, and the iOS half): a client that
+  understands `code` shows the refusal and does not pair with the link's
+  token. A copy redeemed first has already killed it, and a device paired
+  with it would keep exactly the secret the exchange exists to replace.
+- **Additive.** No `ProtocolVersion` bump. The route, the optional `code`
+  row in the pairing URL table and the client rule are in PROTOCOL.md; the
+  iOS repo's `docs/BridgeProtocol.md` mirrors it.
+
+### Tests and controls
+
+- `internal/pairingcode`: the issued shape, single use, the TTL boundary to
+  the nanosecond (plus a clock stepped back, which must not revive an
+  expired code), one live code per token, the 64-code bound, and
+  `ValidShape`.
+- `internal/api/pairing_redeem_test.go`: the swap (the same record ID, a
+  fresh token that validates, the link's token dead), single use, every
+  refusal (not wired `404`; not JSON, no code, a short or non-base64url code
+  `400`; never issued, token expired since, token revoked since `410`, the
+  last consuming the code), and the per-IP limiter.
+- `internal/admin/pairing_code_test.go`: the link carries `code` only when
+  one is issued, read the way the app reads a query; mint and rotate issue
+  codes bound to the token they pair, and the rotation's code replaces the
+  mint's; a nil store or a failing issue leaves the old shape, still with
+  its token.
+- `cmd/bridge/serve_pairing_code_test.go`
+  (`TestServeRedeemsThePairingLinksCode`): the real serve. It mints through
+  the console, reads `token` and `code` from the link as the app does,
+  redeems over TLS, checks that the redeemed token answers `GET /v1/list`
+  200 and the link's 401, and that a second redemption is `410`.
+- Fourteen negative controls on the committed tree, each `-count=1`, each
+  restored with `git checkout`. Every one turned the tests it targets red:
+  Take keeping the code; deleting after judging (only the clock-back
+  assertion); Issue keeping the token's old code; no eviction; minting
+  instead of rotating; no expiry check; a revoked token answering 500; no
+  shape check; no limiter; the console never issuing; the link dropping the
+  code; serve wiring two stores (only the boot test); serve leaving the API
+  unwired (only the boot test); rotate issuing no code.
