@@ -18669,3 +18669,184 @@ list stay consistent). Leave Windows' retries as the residual.
   (read from the code).
 - **A bridge still running the old binary** keeps both windows until it
   restarts.
+
+## 2026-09-27 — the pairing QR writes a space as `%20`, and every stored library name is one a pairing code carries (#1045)
+
+#1042's entry left two items under Out of scope: the QR's `+` for a space, and
+the app's 256-Character cap on `name=`. Both measured real, and three more of
+the same kind turned up while measuring: a name that is not UTF-8, the same `+`
+in `bridge enrichment misses --path`, and a Bonjour instance longer than a DNS
+label.
+
+### What was measured
+
+- **The real binaries**, darwin/arm64 (host `Macbook.local`): main at
+  `3214aa17` and the fix, each on a throwaway loopback bridge (`bridge init
+  --yes --no-service --skip-doctor`, then `bridge serve` on 127.0.0.1:17788 /
+  :17789 with mDNS, Tailscale and HTTP/3 off and the enricher pointed at a
+  dead address). The fix was measured at its third commit, before a
+  comment-only amend and a conflict-free rebase onto #1043.
+- **The app's parser**: `BridgePairingURL.swift` from the iOS repo's main
+  (`97e7fddf`), compiled with swiftc (Swift 6.4, Xcode 27.0) into a CLI that
+  parses each URL and prints the verdict and the name it yields. Every "app"
+  column below is that parser fed the URL `POST /api/tokens` returned.
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | P1 | QR of `My Library` | `name=My+Library`, app reads "My+Library" | `name=My%20Library`, "My Library" |
+  | P2 | QR of `1-bit Bridge` (the default) | "1-bit+Bridge" | "1-bit Bridge" |
+  | P3 | QR of `C++ & Friends` | `C%2B%2B+%26+Friends`, "C+++&+Friends" | "C++ & Friends" |
+  | L1 | PATCH 256 × `a` | 200, pairs | 200, pairs |
+  | L2 | PATCH 257 × `a` | 200 `live`; QR refused, "Pairing code's name field is too long." | 400 `validate`, "libraryName: must be at most 256 characters, and this one has 257 (…)"; the live name and bridge.yaml unchanged; QR pairs |
+  | L3 | PATCH 256 × `é`, 256 × 🎧 | | 200; the app counts 256 |
+  | L4 | PATCH 36 family emoji (252 scalars) | | 200; the app counts 36 |
+  | L5 | PATCH 37 family emoji (259 scalars) | | 400, though the app would count 37: the rune cap's conservative direction |
+  | L6 | bridge.yaml edited to 300 × `a`, then serve | served 300; QR refused | starts; one WARN; served 256; QR pairs; the file keeps 300 until the next Save, which writes 256 |
+  | U1 | `init --name $'Caf\xe9 Tunes'` | exit 0; `libraryName: !!binary Q2Fm6SBUdW5lcw==`; health `"Caf\uFFFD Tunes"`; QR `name=Caf%E9+Tunes`, refused: "Pairing code is missing the name field." | exit 2, "--name must be valid UTF-8 (…)"; no config dir |
+  | U2 | U1's config (written by main) served by the fix | | one WARN; health `"Caf\uFFFD Tunes"`; QR `name=Caf%EF%BF%BD%20Tunes`, which the app takes |
+  | I1 | `init --name` 257 × `a` | exit 0, saved | exit 2; no config dir |
+  | E1 | `enrichment misses --path "Meridian Glass"` against a running bridge | `path: "Meridian+Glass"`, scanned 0, missing 0 | `"Meridian Glass"`, 5 of 5 |
+  | E2 | the same GET by hand | `%20`: 5 of 5; `+`: 0 of 0 | |
+  | C1 | console, 284 characters typed into the name, Save | | the box holds 256; "Saved."; QR pairs |
+
+- **mDNS, the Records-then-Pack path** hashicorp/mdns takes to answer a
+  browse (a Go probe): an instance of 63 bytes packs, 64 fails with `dns: bad
+  rdata`, 42 bytes of `é` packs and 64 does not.
+- **mDNS on a real LAN, on dido** (Linux, `enp1s0f0`), browsed with
+  hashicorp/mdns's own client from the same host. The control, main with
+  `Probe Short Name`, was found. Main with 22 CJK characters (66 bytes) or 64
+  × `a` was not, and logged `[ERR] mdns: Failed to handle query: mdns: error
+  sending multicast response: dns: bad rdata` at INFO per query, after
+  "mDNS: advertising as …". The fix was found for both: instance cut to 63
+  bytes (21 characters; 63 × `a`), TXT `library=` the whole name.
+- **Why not the dev Mac for discovery**: `dlna.PickLANEligibleInterface`
+  returned `18 utun0`, a point-to-point tunnel with only an fe80:: address,
+  enumerated before `en0`, so the responder listened there, and neither
+  `dns-sd -B` nor hashicorp/mdns's client on `en0` found even the control.
+  Filed as its own task.
+- **The app's whitespace check on an old bridge's `+`** (the parser):
+  `name=+Padded+` is accepted as "+Padded+", `name=%20Padded%20` is refused,
+  "Pairing code has extra spaces in the name field."
+
+### Decisions
+
+- **Fix the producer; no app change.** The app reads the query as RFC 3986
+  says; the bridge wrote form encoding. The bridge fix is backward compatible
+  with every shipped app. An app that also read `+` as a space would help only
+  QRs from bridges up to v0.2.0 (every release since the console landed in
+  April), whose pre-fill is editable and which their next update fixes, and
+  read naively it refuses codes that pair today: a pre-#1042 bridge whose name
+  was stored with a trailing space writes `name=X+`, taken now as "X+", then
+  "extra spaces". A clean form (read `percentEncodedQueryItems`, turn `+` into
+  `%20`, then decode) would still read a hand-built literal `+` as a space, in
+  a parser any app on the device can feed.
+- **One escaper, `internal/urlquery`** (`Escape`, `Encode`), for both
+  queries: `strings.ReplaceAll(url.QueryEscape(s), "+", "%20")`. Lossless,
+  since `QueryEscape` writes a literal `+` as `%2B`, and its output holds only
+  unreserved characters and escapes, which form and RFC 3986 readers decode
+  alike. A sweep of every `QueryEscape` / `Values.Encode` in cmd/bridge and
+  internal/admin found no third query bound for such a reader: the retired
+  inspector's `/folders?path=` redirect is read by the player's
+  `URLSearchParams`, a form reader, and the login ticket is base64url.
+- **The tests read a pairing URL as the app does** (`appQueryItems`: split,
+  `url.PathUnescape`, a value that is not UTF-8 dropped as Foundation drops
+  it). Every existing pairing test decoded with `u.Query()`, and used `Home`,
+  a name without a space.
+- **256 runes**, not Characters: a Character is at least one scalar, and Go's
+  standard library cannot segment graphemes the app's way (which depends on
+  the device's Unicode version). L4/L5 show the cost.
+- **Refuse what is typed, repair what is stored.** The PATCH refuses with 400
+  and writes nothing, `--name` exits 2 before anything is written, the prompt
+  asks again (bounded at `maxLibraryPrompts`; Enter takes the offered name
+  unchecked). `Normalize` repairs a name from a config or `BRIDGE_LIBRARY_NAME`
+  (`RepairLibraryName`: `strings.ToValidUTF8` with U+FFFD, trim, cut to 256
+  runes, trim again) and warns once per `Load`; a trim alone stays silent.
+  `Load` must not refuse a bridge over a display name (#1042's reason). init
+  keeps and offers the name as `Load` serves it.
+- **Not UTF-8, folded in**: the same class (a stored name the app refuses),
+  one call in the repair and one check.
+- **`maxlength` in the console**, fed from the Go constant by a template func:
+  UTF-16 units, never fewer than runes, so never looser than the handler.
+- **The Bonjour instance is cut at 63 bytes** in `sanitizeInstance`, on a rune
+  boundary, a trailing space trimmed, the cut logged at INFO beside the TXT
+  caps' lines. The test imports miekg/dns to pack the answer, so it moved from
+  an indirect requirement to a direct one, same version.
+- **PROTOCOL.md** now states the encoding and the name's four limits. They
+  lived only in the Swift parser, which #1042 and this change both had to
+  read to learn them. Mirror PR in the iOS repo; no code change there.
+
+### Tests and controls
+
+- `internal/urlquery`: both readers get back what `Escape` and `Encode` wrote
+  (every sample, keys with spaces, a key with two values), and a premise test
+  on `url.QueryEscape` itself.
+- `internal/admin/pairing_name_test.go`: `buildPairURL` for ten names (space,
+  `+`, `%`, `&`, `=`, `#`, CJK, emoji, a tab), every field read as the app
+  reads it and no raw `+` in the query; mint and rotate through the real
+  handlers with the fixture's name and the default; and every name a PATCH
+  leaves live comes out of the next QR as a name the app takes.
+- The PATCH table gained 256 / 257 runes, padded to 256, 256 / 257 two-byte
+  and 256 four-byte runes; the form test requires `maxlength` equal to the
+  constant. `TestSafeQueryRoundTripsEncodeURIComponent` encodes with
+  `urlquery.Escape`, the CLI's escaper, and `enrichment misses` has its own
+  test of the query it sends.
+- `internal/config`: `Load` rows over the cap, a cut ending on a space, an
+  override over the cap, the `!!binary` config main's init wrote, and an
+  override that is not UTF-8; `Normalize` in memory, twice, ending in a name
+  the parser takes; `CheckLibraryName`'s table; the warning, and silence for
+  a trim.
+- `cmd/bridge/init_name_limits_test.go`: `--name` refused on a first install
+  (no config dir) and on a rewrite (bridge.yaml byte-identical), 256 `é`
+  saved; the prompt asking again; a rewrite keeping, listing and offering the
+  name `Load` serves a config over the cap or not UTF-8.
+- `internal/mdns`: the instance for seven names, including 63, 64 and 256
+  bytes, 32 × `é`, 22 CJK characters and a cut after a space, packs as the
+  answer to a browse.
+- **Red first** against the pre-fix code: every new test and row above that
+  names a space, a cap or a name that is not UTF-8.
+- Negative controls, each applied once against the committed fix, `-count=1`,
+  restored and checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | `buildPairURL` back to `q.Encode()` | both pairing tests |
+  | NC2 | the CLI writes a space as `+` again | the misses test |
+  | NC3 | `Escape` without its rewrite | Escape's round trip, the safeQuery round trip, the misses test |
+  | NC4 | `Encode` without its rewrite | Encode's round trip, both pairing tests |
+  | NC5 | NC1, and the test reader decodes as a form | the mint/rotate test goes GREEN, the old tests' blind spot; the unit test stays red on its raw-`+` check alone (7 names, 0 name mismatches) |
+  | NC6 | the PATCH's length refusal removed | the PATCH table (257 rows); the pairing invariant stays green, since `Normalize` cuts to 256 |
+  | NC7 | `RepairLibraryName` never cuts | `Load`, `Normalize` and warning tests; init's kept name; admin green (the PATCH refuses first) |
+  | NC8 | the repair without `ToValidUTF8` | the UTF-8 rows, the warning test, init's kept name |
+  | NC9 | no trim after the cut | the cut-on-a-space rows |
+  | NC10 | the warning removed | the warning test |
+  | NC11 | `CheckLibraryName` without its UTF-8 check | its table, init's refusal |
+  | NC12 | the cap counts bytes | `Normalize` (🎧), the check, the PATCH's 256 two- and four-byte rows, init's 256 `é` |
+  | NC13 | init's `--name` check removed | init's refusal |
+  | NC14 | the prompt takes any answer | the ask-again test |
+  | NC15 | init keeps the file's name | only the Enter subtests (the offer): with `--yes`, `Normalize` repairs it at save |
+  | NC16 | `maxlength` removed | the form test |
+  | NC17 | no instance cap | the mDNS test |
+  | NC18 | the cap at 64 | the mDNS test (64-byte names do not pack) |
+  | NC19 | no trim after the instance cut | the mDNS test |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) on the escaper's
+losslessness, skipping the app-side tolerance, the rune cap with
+truncate-and-warn at load, `maxlength`, and the 63-byte instance: agreed with
+all five. It proposed the repair order `ToValidUTF8` → cut → trim → default
+(taken, with the trim first as well, since a leading run must not count
+against the cap) and a guard against an instance cut to nothing (already
+unreachable: the instance is trimmed before the cut, so its first rune stays,
+and an empty one falls back to the default name).
+
+### Out of scope
+
+- **The dev Mac's mDNS binds `utun0`** (above), and the DLNA single-interface
+  advertiser shares the picker. Filed as its own task.
+- `internal/mdns` still carries a literal `"1-bit Bridge"` fallback, #1042's
+  item, and mdns_lifecycle.go a second one.
+- **A comment that was already false**: `TrimLibraryName`'s docblock said a
+  name it returns unchanged and non-empty "is one it takes", which the two new
+  refusals falsified from the day it was written. Corrected to name
+  `CheckLibraryName` beside it.
