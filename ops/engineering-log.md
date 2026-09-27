@@ -20069,3 +20069,32 @@ found predates v0.2.0, which the v0.2.0 audit had not seen.
   `writeErrorLog`; `trackLogPath` returning the absolute path; the subtree
   line logging `abs`.
 
+### Review round (CodeRabbit)
+
+- **A bare variants directory leaked.** A root-level source's sidecar sits
+  directly in the variants directory (`VariantSidecarPath` joins no
+  subdirectory for a `Dir` of "."), so a failed parent-directory fsync reads
+  `fsync parent dir: open dir "<dir>": open <dir>: …` with no separator after
+  the directory, and Pass 2 strips only `dir/` and `dir\`. The absolute path
+  reached the log, the batch row and the SSE frame. Pass 2c now turns each
+  bare directory into a placeholder (`<render-scratch>`, `<tempDir>`,
+  `<variantsDir>`), longest first: the variants directory and tempDir can
+  nest either way or share a string prefix, and the shorter one replaced
+  first leaves the rest of the longer behind (`<tempDir>/variants`). A
+  directory below the variants directory still reads relative to it, as a
+  sidecar does, because Pass 2 runs first. The pool test's parent-directory
+  case skips on Windows, where `syncDir` is a no-op and the failure cannot
+  happen; there `%q` would also double the backslashes the bare replacement
+  looks for.
+- **The ErrorLog sweep accepted an assignment after the server served.** It
+  now requires the handshakelog assignment before the first `Serve`,
+  `ServeTLS`, `ListenAndServe` or `ListenAndServeTLS` call on that server
+  (a call inside a goroutine's closure counts at its place in the source).
+- Both tests were split into helpers for Sonar's cognitive-complexity notes.
+- Three more controls, each turning exactly its predicted tests red: the
+  variants directory dropped from Pass 2c (the placeholder test and the pool
+  test); the bare directories replaced shortest first (the placeholder test
+  alone, through the nesting case); and the LAN `ErrorLog` assignment moved
+  after `ServeTLS` (the sweep alone, which passed that shape before this
+  round).
+
