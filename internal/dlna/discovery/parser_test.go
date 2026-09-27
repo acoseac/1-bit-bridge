@@ -382,7 +382,11 @@ func TestParseDeviceDescription_RejectsEmptyAVTransportControlURL(t *testing.T) 
 
 func TestParseDeviceDescription_ResolvesRelativeURLs(t *testing.T) {
 	// Absolute URLs in serviceList should pass through unchanged;
-	// relative URLs should be resolved against the base.
+	// relative URLs should be resolved against the base. The absolute one
+	// sits on the description's HOST (another port): until the M3 fix
+	// (external audit 2026-09-23) this test kept one on ANOTHER host,
+	// which a discovered description may no longer name — see
+	// TestParseDeviceDescription_DiscoveredRefusesAControlURLOnAnotherHost.
 	xml := `<?xml version="1.0"?>
 <root><device>
   <friendlyName>Mix</friendlyName>
@@ -390,7 +394,7 @@ func TestParseDeviceDescription_ResolvesRelativeURLs(t *testing.T) {
   <serviceList>
     <service>
       <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
-      <controlURL>http://other.host:9000/abs/control</controlURL>
+      <controlURL>http://192.168.1.42:9000/abs/control</controlURL>
       <eventSubURL>/rel/event</eventSubURL>
     </service>
   </serviceList>
@@ -400,7 +404,7 @@ func TestParseDeviceDescription_ResolvesRelativeURLs(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	av := desc.Services[ServiceAVTransport]
-	if av.ControlURL != "http://other.host:9000/abs/control" {
+	if av.ControlURL != "http://192.168.1.42:9000/abs/control" {
 		t.Errorf("absolute URL not preserved: %q", av.ControlURL)
 	}
 	if av.EventSubURL != "http://192.168.1.42:8080/rel/event" {

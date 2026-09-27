@@ -171,7 +171,12 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	fetchCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	desc, err := discovery.FetchDeviceDescription(fetchCtx, p.dispatcher, url)
+	// SourceUserChosen, because the operator configured this URL: that
+	// choice is the approval the SSDP path's same-host rule stands in for,
+	// so a ContentDirectory on another host is kept (the escape hatch for a
+	// real server that spans hosts). A control URL that is not http(s)
+	// with a host is still refused (external audit 2026-09-23, M3).
+	desc, err := discovery.FetchDeviceDescriptionWithSource(fetchCtx, p.dispatcher, url, discovery.SourceUserChosen)
 	// FetchDeviceDescription returns a "no AVTransport service" error for
 	// any non-renderer device — which every MediaServer is — while still
 	// populating desc.Services. Tolerate that specific shape and let the
