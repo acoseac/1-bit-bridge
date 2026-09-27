@@ -19196,6 +19196,15 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
     it needs a bridge write stalled across two separate rotations, each a
     read, a staged write and an fsync, which is #1039's recorded
     last-writer-wins case for two credential writers at once.
+- **CodeRabbit's on-demand pass on the round-3 head** (the user chose it
+  again): no actionable comments, `coveredCommitId` the head. SonarCloud then
+  flagged the in-flight test's cognitive complexity (go:S3776, 20 against
+  15); the per-row check became a row field and the log assertions a helper,
+  and NC30 and NC31 were re-run against the refactored test, still red.
+- **Merged with #1047**, whose `tokens.json` rule goes the other way on an
+  unreadable store (devices go on from the tokens last read, since refusing
+  would unpair every device over a permissions mistake). Both hold; CLAUDE.md
+  now says so beside this rule, so neither gets "fixed" to match the other.
 - **The in-process note stands as a limit**: while a confirmation sleeps with
   the mutex released, a same-process reader that finds the undone file
   adopts it until the redo. Only the CLI calls these, in a process that
