@@ -333,28 +333,32 @@ func TestAWriteThatKeepsTheSessionsCarriesTheSignOut(t *testing.T) {
 }
 
 // TestTheSessionCheckReadsTheStoreOnlyWhenItChanged: the check runs on every
-// console request, so it reads the file only when a stat says the file is not
-// the one it last read, and then once.
+// console request, so it reads the file only when a stat says another process
+// changed it, and then once. What this process wrote itself is not read back:
+// a commit records the stamp of the file it put in place.
 func TestTheSessionCheckReadsTheStoreOnlyWhenItChanged(t *testing.T) {
 	a, path, first, clock := runningBridge(t)
 	reads := 0
 	readStoreHook = func() { reads++ }
 	t.Cleanup(func() { readStoreHook = nil })
 
-	// The login's own write replaced the file after its read, so one read
-	// settles the stamp.
-	if _, err := a.ValidateSession(first); err != nil {
-		t.Fatal(err)
-	}
-	reads = 0
+	// runningBridge's login wrote the file last.
 	for i := 0; i < 50; i++ {
 		clock.t = clock.t.Add(100 * time.Millisecond) // inside the debounce: no write of its own
 		if _, err := a.ValidateSession(first); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// Past the debounce the check's own activity write lands, and the check
+	// after it has nothing new to read either.
+	clock.t = clock.t.Add(sessionFlushInterval)
+	for i := 0; i < 2; i++ {
+		if _, err := a.ValidateSession(first); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if reads != 0 {
-		t.Errorf("50 session checks of an unchanged store read it %d times, want 0", reads)
+		t.Errorf("52 session checks of a store only this process wrote read it %d times, want 0", reads)
 	}
 
 	signOutElsewhere(t, path)
@@ -509,13 +513,11 @@ func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// stale idles past the timeout while the caller stays active, so it is
-	// already signed out and must not be counted.
+	// stale idles past the timeout while the others stay active, so it is
+	// already signed out and must not be counted. The others are made
+	// before it expires: a login sweeps expired sessions, and one made after
+	// would sweep stale before EndOtherSessions could count it.
 	clock.t = clock.t.Add(SessionIdleTimeout - time.Hour)
-	if _, err := a.ValidateSession(caller); err != nil {
-		t.Fatal(err)
-	}
-	clock.t = clock.t.Add(2 * time.Hour)
 	var others []string
 	for i := 0; i < 2; i++ {
 		raw, err := a.CreateSession("admin")
@@ -524,6 +526,10 @@ func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 		}
 		others = append(others, raw)
 	}
+	if _, err := a.ValidateSession(caller); err != nil {
+		t.Fatal(err)
+	}
+	clock.t = clock.t.Add(2 * time.Hour)
 	if got := a.LiveSessionCount(); got != 3 {
 		t.Fatalf("LiveSessionCount = %d, want 3 (the caller and two others; one expired)", got)
 	}

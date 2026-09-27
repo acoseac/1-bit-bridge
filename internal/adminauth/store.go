@@ -812,6 +812,11 @@ func (s *Store) persistSessionsLocked(now time.Time) error {
 // ends the write; a file with no User writes nothing and returns a zero
 // storeFile and a nil error. A read that fails writes nothing and returns
 // its error.
+//
+// A commit records the stamp of the file it put in place, so the session
+// check's stat gate does not read back what this process just wrote
+// (Gemini's review, 2026-09-27): each session write would otherwise cost
+// the next console request a full read.
 func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (storeFile, error) {
 	for attempt := 1; ; attempt++ {
 		cur, err := readStoreFile(s.path)
@@ -823,12 +828,15 @@ func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (
 		if err != nil || next.User == nil {
 			return storeFile{}, err
 		}
-		err = s.writeStoreLocked(next, s.unchangedSince(cur))
+		written, err := s.writeStoreLocked(next, s.unchangedSince(cur))
 		if errors.Is(err, errStoreMoved) && attempt < maxCommitAttempts {
 			continue
 		}
 		if err != nil {
 			return storeFile{}, err
+		}
+		if written != nil {
+			s.seen = fileStamp{known: true, info: written}
 		}
 		return next, nil
 	}
@@ -1393,27 +1401,32 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 // beforeCommit, when not nil, runs once the new file is staged (written,
 // synced and closed) and before it replaces the old one; an error from
 // it abandons the write and is returned.
-func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) error {
+//
+// It returns the stat of the file it renamed into place, taken once its
+// bytes were synced (the rename keeps the inode, the size and the
+// modification time), or nil when that stat failed. commitLocked records
+// it for the session check's stat gate.
+func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) (os.FileInfo, error) {
 	if f.User == nil {
-		return errors.New("adminauth: cannot persist nil user record")
+		return nil, errors.New("adminauth: cannot persist nil user record")
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("mkdir adminauth store: %w", err)
+		return nil, fmt.Errorf("mkdir adminauth store: %w", err)
 	}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data = append(data, '\n')
 	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".adminauth-*.json")
 	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
+		return nil, fmt.Errorf("temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("chmod tmp: %w", err)
+		return nil, fmt.Errorf("chmod tmp: %w", err)
 	}
 	defer func() {
 		if tmpName != "" {
@@ -1423,25 +1436,30 @@ func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) error {
 	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write tmp: %w", err)
+		return nil, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("sync tmp: %w", err)
+		return nil, fmt.Errorf("sync tmp: %w", err)
+	}
+	// A failed stat costs the gate one read, never the write.
+	staged, statErr := tmp.Stat()
+	if statErr != nil {
+		staged = nil
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close tmp: %w", err)
+		return nil, fmt.Errorf("close tmp: %w", err)
 	}
 	if beforeCommit != nil {
 		if err := beforeCommit(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
-		return fmt.Errorf("rename adminauth store: %w", err)
+		return nil, fmt.Errorf("rename adminauth store: %w", err)
 	}
 	tmpName = "" // success — suppress the cleanup defer
-	return nil
+	return staged, nil
 }
 
 // passwordAlphabet excludes the most confusable glyphs — the digits
