@@ -580,9 +580,21 @@ func (s *Store) commitAndConfirm(
 			s.mu.Unlock()
 			return errWrittenOver
 		}
+		// Take the undone state quietly before writing over it again. It is
+		// this command's own write undone, not news from elsewhere: adopting
+		// it through commitLocked would log a credential change and a
+		// sign-out that never happened, and end sessions made since the
+		// first commit (Gemini on #1044).
+		s.user, s.revokedAt = cur.user, cur.revokedAt
+		logger.Warn(msgRedoLog)
 		next, _, err = s.commitLocked(build)
 		if err == nil {
-			took(next)
+			// What this write changed, and no more: sessions made since the
+			// first commit came after the change, so they are kept.
+			s.user = next.User
+			if next.SessionsRevokedAt != nil {
+				s.revokedAt = *next.SessionsRevokedAt
+			}
 		}
 		s.mu.Unlock()
 		if err != nil {
@@ -609,6 +621,10 @@ var errWrittenOver = errors.New("adminauth: another process kept writing the sto
 // each confirmation read: where a test lands the running bridge's
 // in-flight write.
 var beforeConfirmHook func()
+
+// msgRedoLog is commitAndConfirm's line for a write it found undone and
+// makes again.
+const msgRedoLog = "a running bridge wrote the admin credential store back over this change; writing it again"
 
 // msgUnconfirmedLog is commitAndConfirm's line for a confirmation read that
 // failed.
@@ -1485,9 +1501,15 @@ func (s *Store) adoptSignOutLocked(at time.Time) {
 	s.revokedAt = at
 	n := len(s.sessions)
 	clear(s.sessions)
-	logger.Info("the admin credential store records a sign-out everywhere; ending the console sessions this bridge held",
-		"sessions", n)
+	logger.Info(msgSignOutTakenLog, "sessions", n)
 }
+
+// msgCredentialAdoptedLog and msgSignOutTakenLog are the lines a store logs
+// when it takes a credential change or a sign-out another process wrote.
+const (
+	msgCredentialAdoptedLog = "the admin credential changed on disk; using it from now on"
+	msgSignOutTakenLog      = "the admin credential store records a sign-out everywhere; ending the console sessions this bridge held"
+)
 
 // adoptCredentialLocked makes u the credential this process decides
 // from, and logs when that is a change another process made, which is
@@ -1504,8 +1526,7 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 		logger.Warn("the admin credential file is gone; logins are refused until one is set",
 			"path", s.path)
 	case u != nil && !sameCredential(u, s.user):
-		logger.Info("the admin credential changed on disk; using it from now on",
-			"username", u.Username)
+		logger.Info(msgCredentialAdoptedLog, "username", u.Username)
 	}
 	s.user = u
 }
