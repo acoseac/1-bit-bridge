@@ -18835,6 +18835,8 @@ console.
   | NC27 | a rotation redoes whenever the file is not its own credential (round 2) | the supersede test, `TestResetPasswordBuildsNewPointer` (concurrent rotations then undo each other until they give up) |
   | NC28 | a store that keeps coming back is not reported (round 2) | the keeps-coming-back test |
   | NC29 | the unreadable-store branch answers `/api` in plain text (round 2) | the 503 test |
+  | NC30 | a confirmation's redo adopts its own undone write as news (round 3) | the in-flight reset row (it logs "the admin credential changed on disk" about its own write) |
+  | NC31 | a redo says nothing (round 3) | both in-flight rows |
 
 - **The whole set was re-run on the final head** (after both review
   rounds), each pattern checked to match once before anything was written:
@@ -18965,6 +18967,43 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
   runs a second rotation inside the first's settle;
   `TestAStoreThatKeepsComingBackIsReported`. `TestMain` sets the settle to
   zero. NC26 to NC28 in the table.
+
+### Review round 3
+
+- **CodeRabbit's included pass** on the confirmation (after the notice's own
+  wait, `@coderabbitai review`): one Minor, real. A confirmation read that
+  failed returned success with nothing said, so nobody learned the check
+  had not run. It is still no error (the write landed), and it now logs a
+  warning with the path and the error, as the store's other lines do.
+  `TestAConfirmationThatCannotReadIsLogged`; tightened first, it was red on
+  the silent code (0 warnings).
+- **Gemini's app was out of its daily quota**, so the same review ran by API
+  (`consult.py`) on the confirmation diff. **Taken**: a redo adopted the
+  reverted file through `commitLocked`, so the command logged a credential
+  change (and, after an earlier sign-out, a sign-out taken) that was its own
+  write being undone, and in-process it would have ended sessions made since
+  the first commit. The redo now takes that state quietly, logs one line of
+  its own, and updates only what its write changed (NC30, NC31; the reset
+  row of the in-flight test was red first on the misleading line).
+  **Declined**, each on the code:
+  - "`renameBackoff` sums to 938 ms, fix the comment": the schedule is
+    `{0, 50, 100, 200, 400}`, 750 ms, and `RenameRetryBudget` sums the real
+    slice. The consult invented a ten-step schedule.
+  - "Update `replaced` on a redo": the redo replaced the stale write's
+    content, which carries the same credential and marker as the original
+    `replaced` by construction, so the predicate is the same either way.
+  - "Retry the confirmation read on Windows sharing violations": Go's
+    `os.Open` shares read and write there (`syscall.Open`'s `sharemode`), a
+    scanner's handle shares read, and #1039 declined the same retry for
+    `Verify`. A failed read is logged now in any case.
+  - "A three-writer interleaving leaves the store at the oldest password":
+    it needs a bridge write stalled across two separate rotations, each a
+    read, a staged write and an fsync, which is #1039's recorded
+    last-writer-wins case for two credential writers at once.
+- **The in-process note stands as a limit**: while a confirmation sleeps with
+  the mutex released, a same-process reader that finds the undone file
+  adopts it until the redo. Only the CLI calls these, in a process that
+  serves nothing.
 
 ### Out of scope
 
