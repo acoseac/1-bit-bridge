@@ -321,6 +321,60 @@ func wireInstanceLabel(instance string) (string, error) {
 	return string(buf[1 : 1+int(buf[0])]), nil
 }
 
+// TestTXTCarriesTheLibraryNameAsWritten: the TXT record's library= is the
+// name the app's discovery picker shows, and hashicorp/mdns hands its strings
+// to miekg/dns as presentation format, the instance's trap in a second place:
+// a backslash escapes what follows it (`\X` is X, `\DDD` a byte) and a lone
+// one at the end is dropped. Measured on 2026-09-27 on a Linux LAN: a bridge
+// named "AC\DC Live" was browsed with library="ACDC Live", before and after
+// the instance's own fix. Every TXT string is escaped after its cap, which
+// counts the bytes the record carries, so a cut can leave a backslash too.
+func TestTXTCarriesTheLibraryNameAsWritten(t *testing.T) {
+	a239 := strings.Repeat("a", 239)
+	for _, tc := range []struct{ name, want string }{
+		{`AC\DC Live`, `AC\DC Live`},
+		{`Ends in a backslash\`, `Ends in a backslash\`},
+		{`\065`, `\065`},
+		{a239 + `\x`, a239 + `\`}, // the 240-byte cap lands after the backslash
+		{"My Music", "My Music"},
+	} {
+		strs, err := wireTXT(buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: tc.name}, nil))
+		if err != nil {
+			t.Errorf("the TXT record for %q does not pack: %v", tc.name, err)
+			continue
+		}
+		got, found := "", false
+		for _, s := range strs {
+			if v, ok := strings.CutPrefix(s, "library="); ok {
+				got, found = v, true
+			}
+		}
+		if !found || got != tc.want {
+			t.Errorf("the TXT record for %q carries library=%q (found %v), want %q", tc.name, got, found, tc.want)
+		}
+	}
+}
+
+// wireTXT is entries as a TXT record carries them, packed as miekg/dns packs
+// the strings hashicorp/mdns hands it: the character-strings of its RDATA,
+// after a root owner name (one byte) and the type, class, TTL and RDLENGTH
+// (ten).
+func wireTXT(entries []string) ([]string, error) {
+	rr := &dns.TXT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeTXT, Class: dns.ClassINET}, Txt: entries}
+	buf := make([]byte, 8192)
+	n, err := dns.PackRR(rr, buf, 0, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for rdata := buf[11:n]; len(rdata) > 0; {
+		l := int(rdata[0])
+		out = append(out, string(rdata[1:1+l]))
+		rdata = rdata[1+l:]
+	}
+	return out, nil
+}
+
 // TestAdvertiseStartsAndStops spins up a real mDNS server on a high
 // port and immediately shuts it down. On CI runners without multicast
 // access this might error — in that case we skip rather than flake.

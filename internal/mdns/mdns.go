@@ -481,6 +481,15 @@ func buildTXTRecords(cfg Config, ips []net.IP) []string {
 			logger.Info("mdns: ips= TXT truncated to fit", "dropped", dropped)
 		}
 	}
+	// Each string is DNS presentation format to miekg/dns, which packs it:
+	// a backslash escapes what follows it (`\X` is X, `\DDD` a byte) and a
+	// lone one at the end is dropped. So a backslash is written `\\`, after
+	// the caps above, which count the bytes the record carries. Unescaped, a
+	// library named "AC\DC Live" was browsed as library="ACDC Live"
+	// (measured 2026-09-27); sanitizeInstance does the same for the instance.
+	for i := range out {
+		out[i] = strings.ReplaceAll(out[i], `\`, `\\`)
+	}
 	return out
 }
 
