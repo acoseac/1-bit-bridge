@@ -269,14 +269,17 @@ type MediaServerDiscoveryClient struct {
 	// ParseDeviceDescription resolves <controlURL> through
 	// base.ResolveReference, which returns an ABSOLUTE control URL
 	// verbatim — so a device that advertises its control endpoint on a
-	// different host:port than its description endpoint compared as
-	// "moved" on EVERY announcement. That branch re-fetches and returns,
-	// so the entry's LastSeenAt advanced only when the description fetch
+	// different port than its description endpoint compared as "moved"
+	// on EVERY announcement. That branch re-fetches and returns, so the
+	// entry's LastSeenAt advanced only when the description fetch
 	// succeeded: a description endpoint flaky for longer than ServerTTL
 	// evicted a live, M-SEARCH-answering server, after which
 	// ResolveControlURL returns "" and every play of its tracks 503s.
 	// Steady-state it also meant one description GET per announcement,
-	// forever.
+	// forever. (A different HOST no longer reaches the cache from SSDP
+	// at all: a discovered description's service URLs must stay on its
+	// own host, external audit 2026-09-23, M3. Only the manual poller's
+	// user-chosen entries can still carry one.)
 	//
 	// Deliberately a client-side map rather than a ServerInfo field: that
 	// struct is the shape the admin/API surfaces render, and this is
@@ -710,7 +713,12 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 	if ctrlURL == "" {
 		// Device advertises MediaServer:1 in SSDP but its description
 		// carries no ContentDirectory — silently skip (the entry will
-		// expire via the staleness window).
+		// expire via the staleness window). A ContentDirectory whose
+		// control URL the parser REFUSED lands here too (not http(s)
+		// with a host, or on another host than this description; the
+		// discovery package logs which at Debug). On a move re-fetch that
+		// keeps the entry's previous control URL: a re-announcement from
+		// a new address cannot point LiveHost at a third host.
 		return
 	}
 	c.cache.Upsert(ServerInfo{

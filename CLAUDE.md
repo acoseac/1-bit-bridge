@@ -1753,6 +1753,46 @@ no failing test — which is the shape to expect in this area.
   a `<res>` fetch at the bridge's own no-auth loopback admin API, reachable
   unauthenticated. A caller needing a different Content-Type wraps the writer;
   don't change the package.
+- **A DISCOVERED description's service URLs stay on its own host** (external
+  audit 2026-09-23, M3). `resolveServiceURL`
+  (`internal/dlna/discovery/url_policy.go`) is the one home: every
+  `<controlURL>` and `<eventSubURL>` must be http(s) with a host, and in a
+  description found through SSDP (`SourceDiscovered`, the zero value and the
+  default of `ParseDeviceDescription` / `FetchDeviceDescription`) it must be on
+  the description URL's host, compared case-insensitively with the port
+  ignored (`url.URL.Hostname`, so an IPv6 literal compares by address).
+  **Read the host with `Hostname()`, never `Host`**: `http://:7789/x` has
+  `Host ":7789"` and no hostname, and Go's client dials it on the local host,
+  the bridge's own console (measured). The
+  manual upstream parses with `SourceUserChosen`: the operator's URL is the
+  approval the host rule stands in for, so another host is kept, another
+  scheme never. A refused AVTransport control URL drops the renderer (it reads
+  as "no AVTransport"); a refused optional URL (ConnectionManager,
+  RenderingControl, any eventSubURL) is dropped alone, so GetProtocolInfo is
+  POSTed only to a ConnectionManager URL that passed. An SSDP LOCATION that is
+  not http(s) with a host reads as absent in `ParseSSDPHeaders` and is never
+  fetched. **The upstream half matters most**: `LiveHost` derives every routed
+  byte fetch's host:port from the cached ContentDirectory control URL and
+  `upnpproxy` rewrites each stored `<res>` onto it, so a server that
+  re-announced its UDN from a new address with a control URL on the loopback
+  console steered `/v1/download` and `/dlna/file/{trackID}` there, with a path
+  chosen at ingest (measured: the proxy relayed the console's 200).
+  `TestAMovedServerCannotSteerTheCachedControlURLToAnotherHost` pins the
+  cache half, through the real SSDP handler. **The HOST, not the origin**: an
+  origin compare turned six existing upnp tests red, since serving control
+  endpoints on another port of the description's host is ordinary. **A
+  bound, not authentication**: a spoofer can still aim a
+  server's fetches at the host that served the description, its own; the rule
+  removes a THIRD host. It mirrors the app's `UPnPURLPolicy` /
+  `DeviceDescriptionParser.resolveServiceURL` (iOS #1911); the app's check on
+  relayed renderers (#1977) can compare only against the control URL, since
+  `/v1/renderers` carries no description URL, so refusing a device that points
+  EVERY service at one other host is the bridge's job. No description fetch
+  follows a redirect (each dispatcher sets `ErrUseLastResponse`), stricter
+  than the app's same-host redirect rule. A real device whose description
+  names another host (a hostname where its LOCATION has an IP, say) drops out
+  of discovery; a manual upstream URL is the escape hatch, and a renderer has
+  none on the bridge.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
