@@ -45,6 +45,20 @@ var logger = logging.Component("auth")
 // per lastUsedFlushInterval per token), negligible.
 var beforeValidatePersistHook func()
 
+// beforeCommitHook is a test-only seam (nil in production), fired in
+// every write between the staging of the file and its rename: the window
+// a sibling process's write lands in. Same convention as
+// beforeValidatePersistHook, and as adminauth's beforeCommitHook.
+var beforeCommitHook func()
+
+// errStoreMoved is a write finding the file changed between the read it
+// was built from and its commit.
+var errStoreMoved = errors.New("auth: the token store changed while it was being written; nothing written")
+
+// maxCommitAttempts bounds how often a write rebuilds for a file that
+// keeps changing under it.
+const maxCommitAttempts = 3
+
 const (
 	// rawTokenBytes is the number of random bytes per minted token.
 	// 32 bytes → 256 bits → 43 base64url chars (no padding).
@@ -353,6 +367,9 @@ func (s *Store) persist() error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
+	}
+	if beforeCommitHook != nil {
+		beforeCommitHook()
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename: %w", err)
