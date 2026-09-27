@@ -19,6 +19,14 @@ import (
 type ParsedSSDPHeaders struct {
 	// Location — URL to the device description XML. Required for
 	// us to populate the renderer; a packet without it is dropped.
+	//
+	// Empty ALSO when the header is present but is not an http(s) URL
+	// with a host (fetchableLocation). The discovery clients GET
+	// whatever it names on an unauthenticated LAN peer's say-so, and
+	// both already treat an empty Location as "nothing to fetch", so a
+	// `file:`, `ftp:` or host-less value costs no request, no fetch
+	// goroutine and no cache stub (external audit 2026-09-23, M3; the
+	// iOS app's SSDPResponseParser reads such a LOCATION as nil too).
 	Location string
 
 	// USN — Unique Service Name carrying the UDN.
@@ -95,7 +103,7 @@ func ParseSSDPHeaders(raw []byte) (ParsedSSDPHeaders, error) {
 		val = strings.TrimRight(val, "\r")
 		switch key {
 		case "location":
-			out.Location = val
+			out.Location = fetchableLocation(val)
 		case "usn":
 			out.USN = val
 		case "st":
@@ -240,16 +248,36 @@ type rawService struct {
 // service entries; absolute is what the SOAP / GENA dispatcher
 // actually dials.
 //
+// It treats the description as DISCOVERED, the strict source: a
+// service URL must be http(s) with a host and on baseURL's host (any
+// port), and one that is not is refused (resolveServiceURL). A
+// description the operator chose goes through
+// ParseDeviceDescriptionWithSource instead. The strict default is
+// deliberate, as in the iOS app's DeviceDescriptionParser: a new
+// caller that names no source gets the safe behaviour.
+//
 // Returns an error when the XML is malformed, when no AVTransport
 // service is present, OR when the AVTransport service has no control
 // URL (a renderer that can't be SetAVTransportURI-driven can't be an
-// audio target — surfacing it would mislead the user). The partial
+// audio target — surfacing it would mislead the user). A REFUSED
+// AVTransport control URL drops the service, so it reads as the first
+// of those: no renderer, since routing SOAP anywhere else is worse. A
+// refused OPTIONAL URL (ConnectionManager or RenderingControl control,
+// any eventSubURL) is dropped on its own. The partial
 // `desc` is returned WITH the error so a caller that tolerates "not a
 // renderer" (upstream MediaServer discovery) can still read
 // desc.Services. ConnectionManager / RenderingControl absence is
 // non-fatal (Sink list resolution would silently degrade, but
 // the renderer is still SetAVTransportURI-drivable).
 func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, error) {
+	return ParseDeviceDescriptionWithSource(body, baseURL, SourceDiscovered)
+}
+
+// ParseDeviceDescriptionWithSource is ParseDeviceDescription for a
+// description whose URL came from source. SourceUserChosen keeps a
+// service URL on another host than baseURL; nothing keeps one that is
+// not http(s) with a host. Every other source value is the strict one.
+func ParseDeviceDescriptionWithSource(body []byte, baseURL string, source DescriptionSource) (DeviceDescription, error) {
 	var raw rawDeviceDescription
 	if err := xml.Unmarshal(body, &raw); err != nil {
 		return DeviceDescription{}, fmt.Errorf("parse XML: %w", err)
@@ -274,18 +302,27 @@ func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, err
 		// Fold AVTransport:2 / RenderingControl:3 / ... back to the ":1"
 		// lookup keys so a modern renderer isn't marked "no AVTransport".
 		stype = canonicalServiceType(stype)
-		ctrl, ctrlErr := resolveServiceURL(base, s.ControlURL)
+		ctrl, ctrlErr := resolveServiceURL(base, s.ControlURL, source)
 		if ctrlErr != nil {
 			// Silently dropping the service marks an otherwise-usable renderer
 			// structurally broken with no breadcrumb. Log it so a malformed
 			// controlURL (e.g. unescaped spaces from older hardware) is
-			// diagnosable. (external review r3 — observability only; no
-			// speculative sanitization here.)
-			packageLogger.Debug("discovery: dropping service with unresolvable controlURL",
-				"serviceType", stype, "controlURL", s.ControlURL, "err", ctrlErr.Error())
+			// diagnosable, and so is a REFUSED one, whose err says why.
+			// (external review r3 — observability only; no speculative
+			// sanitization here.)
+			packageLogger.Debug("discovery: dropping service with unusable controlURL",
+				"serviceType", stype, "controlURL", s.ControlURL,
+				"description", baseURL, "err", ctrlErr.Error())
 			continue
 		}
-		ev, _ := resolveServiceURL(base, s.EventSubURL) // eventSubURL is optional; ignore error
+		// eventSubURL is optional: one that fails is dropped on its own and
+		// the service stays.
+		ev, evErr := resolveServiceURL(base, s.EventSubURL, source)
+		if evErr != nil {
+			packageLogger.Debug("discovery: dropping unusable eventSubURL",
+				"serviceType", stype, "eventSubURL", s.EventSubURL,
+				"description", baseURL, "err", evErr.Error())
+		}
 		desc.Services[stype] = ServiceURLs{
 			ControlURL:  ctrl,
 			EventSubURL: ev,
@@ -306,24 +343,6 @@ func ParseDeviceDescription(body []byte, baseURL string) (DeviceDescription, err
 		return desc, fmt.Errorf("device %q AVTransport service has no control URL", desc.FriendlyName)
 	}
 	return desc, nil
-}
-
-// resolveServiceURL turns a possibly-relative service URL into an
-// absolute one by resolving against the device description's base.
-// `relativeRef` may be "" (e.g. eventSubURL absent on a renderer
-// that doesn't surface event subscriptions) — handled by returning
-// "" + nil so the caller writes the empty value into the map.
-func resolveServiceURL(base *url.URL, relativeRef string) (string, error) {
-	ref := strings.TrimSpace(relativeRef)
-	if ref == "" {
-		return "", nil
-	}
-	resolved, err := url.Parse(ref)
-	if err != nil {
-		return "", err
-	}
-	abs := base.ResolveReference(resolved)
-	return abs.String(), nil
 }
 
 type rawSOAPEnvelope struct {
