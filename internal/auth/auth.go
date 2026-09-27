@@ -530,9 +530,7 @@ func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
 		return "", Token{}, err
 	}
 	if err := s.commitLocked(func(cur []Token) ([]Token, error) {
-		next := make([]Token, 0, len(cur)+1)
-		next = append(next, cur...)
-		return append(next, tok), nil
+		return append(slices.Clone(cur), tok), nil
 	}); err != nil {
 		return "", Token{}, err
 	}
@@ -798,27 +796,20 @@ func (s *Store) Revoke(id string) error {
 		if i < 0 {
 			return nil, ErrNotFound
 		}
-		// A FRESH backing array: an in-place `append(cur[:i],
-		// cur[i+1:]...)` would shift the list memory still holds, and a
-		// write that fails must leave memory as it was (reloadIfStale
-		// won't resync — the failed write didn't change the file's mtime
-		// or size — so a still-valid token would be rejected until
-		// restart). Adopting `next` on success also releases the removed
-		// Token (+ its ExpiresAt pointer) for GC.
-		next := make([]Token, 0, len(cur)-1)
-		next = append(next, cur[:i]...)
-		return append(next, cur[i+1:]...), nil
+		// Delete from a CLONE: deleting from cur would shift the list
+		// memory still holds, and a write that fails must leave memory as
+		// it was (reloadIfStale won't resync — the failed write didn't
+		// change the file's mtime or size — so a still-valid token would
+		// be rejected until restart). Delete zeroes the slot it vacates,
+		// so adopting the result on success releases the removed Token
+		// (+ its ExpiresAt pointer) for GC.
+		return slices.Delete(slices.Clone(cur), i, i+1), nil
 	})
 }
 
 // indexOfToken returns the index of the token with id in tokens, or -1.
 func indexOfToken(tokens []Token, id string) int {
-	for i := range tokens {
-		if tokens[i].ID == id {
-			return i
-		}
-	}
-	return -1
+	return slices.IndexFunc(tokens, func(t Token) bool { return t.ID == id })
 }
 
 // Rotate replaces the raw bytes of an existing token, returning the
