@@ -17858,7 +17858,8 @@ LockFileEx lock with the process.
 - **`auth.Store` has the fsync window this change closed here.** Its
   debounced persists run `reloadIfStale` and then a write, an fsync and a
   rename, so a `bridge pair` mint that lands in between is lost from
-  `tokens.json`. Measured nowhere yet.
+  `tokens.json`. Measured nowhere yet. (Measured and closed by #1043, below,
+  for all seven of its writers, not only the debounced ones.)
 - **A kernel lock would close the rename window** that remains here. Not
   taken: it would be the repo's first interprocess lock, with platform code
   (flock / LockFileEx on a stable lock file, since the store is replaced by
@@ -18471,6 +18472,205 @@ checked). Nothing to take.
 - `internal/mdns` keeps a literal `"1-bit Bridge"` for an instance name that
   sanitizes to nothing (dots or control characters alone), a copy of the
   default that would drift from `DefaultLibraryName`.
+
+## 2026-09-27 — every `tokens.json` write re-reads the file just before its rename (#1043)
+
+#1039's entry recorded it under Out of scope: "`auth.Store` has the fsync
+window this change closed here … Measured nowhere yet."
+
+### What was measured
+
+- **The mechanism, on main with no production change.** A throwaway test
+  (…MeasureWindow, not committed) landed a sibling store's write inside the
+  running store's write through `atomicwrite.SetRenameFuncForTest`, just
+  before the rename. Five writers (Validate's debounced write,
+  RecordClientVersion's, FlushLastUsed, Mint, Revoke) against two siblings
+  (`bridge pair`'s Mint, `bridge token revoke`): every row lost the mint or
+  brought the revoked token back. `persist()` read the file (`reloadIfStale`
+  or `reload`) and then staged and renamed with no further check, so the
+  window was in `persist()` itself and every writer had it, not only the
+  three debounced ones the report named.
+- **The window**, persist's staging (MkdirAll, CreateTemp, Chmod, Write,
+  Sync, Close) timed up to the rename, 50 writes per size: on this Mac (APFS,
+  where Go's `File.Sync` is `F_FULLFSYNC`) a median of 3.7 ms at 3 tokens,
+  3.8 ms at 10 and 2.3 ms at 40, max 4.9 ms; on dido's ext4 (LVM) 0.64, 0.62
+  and 0.73 ms, max 1.15 ms. "Tens of ms on a cloud disk" is the report's
+  figure, not measured here.
+- **Two real processes, no test seams** (a throwaway `_probe/tokenrace`, not
+  committed): a flusher calling `FlushLastUsed` in a loop (`reloadIfStale`
+  then a write, the debounced write's shape) beside a minter (200 Mints) or a
+  revoker (200 Revokes over tokens seeded with no flusher running). Lost mints
+  and undone revokes, of 200:
+
+  | flusher cadence | main, APFS | main, ext4 | fix, APFS | fix, ext4 |
+  |---|---|---|---|---|
+  | back to back | 200 / 200 | 200 / 200 | 4 / 0 | 6 / 8 |
+  | every 20 ms | 24 / 30 | 16 / 11 | 1 / 2 | 2 / 1 |
+  | every 100 ms | 6 / 4 | 4 / 2 | 1 / 1 | 1 / 0 |
+
+  Eight more trials of the fix at 100 ms on APFS: 2 of 1,600 mints lost and 4
+  of 1,600 revokes undone, at scattered indices (130, 134; 78, 111, 121, 175),
+  so no start-up or shutdown effect. On main the rate tracks the staging over
+  the flusher's period (4 ms in 24 ms is 17%; in 104 ms, 4%). The running
+  bridge writes at most once per 30 s while requests arrive, plus on console
+  actions. On main a sibling commit was lost in either window, the staging
+  or the directory fsync after the rename (next bullet), about 6.5 ms per
+  write on APFS and 1.1 ms on ext4, so a `bridge pair` beside a busy bridge
+  was lost about once in 5,000 pairs on APFS and 25,000 on ext4, and once in
+  several hundred on a cloud disk at the report's figure. Rare, silent and
+  permanent: the device 401s until it is paired again, and a revoke undone
+  that way leaves the revoked device working with nothing in the log.
+- **A second window as wide, after the rename.** RenameWithRetry fsyncs the
+  parent directory after renaming (a median of 2.8 ms on APFS and 0.5 ms on
+  ext4, max 4.4 and 1.7 ms), and persist then stat'd the path to record
+  `loaded` and `lastSize`. A sibling commit landing in that fsync was recorded
+  as this process's own write, so `reloadIfStale` saw nothing new: the running
+  bridge refused a device paired there and accepted one revoked there until
+  its next write (which, on main, also wrote over it). Found by reading the
+  fix's own bookkeeping and measured red on the staging-window fix alone, all
+  four siblings, in memory only
+  (`TestASiblingWriteRightAfterACommitIsNotTakenForIt`).
+- **What remains with the fix**: from the start of the re-read to the
+  rename's return, a median of 165 to 180 µs on APFS at any file size (the
+  rename syscall dominates) and 48 to 59 µs on ext4, against 0.6 to 3.8 ms of
+  staging plus the directory fsync before. A sibling write injected inside
+  the rename call itself, after the re-read, is still lost (the throwaway
+  measurement against the fix: all ten rows).
+
+### Decisions
+
+- **Every write goes through one `commitLocked(build)`**, adminauth's shape:
+  build from the last read, stage, re-read just before the rename, commit
+  only if the file still holds exactly the bytes it was built from, else
+  reload, rebuild and restage, up to three attempts. All seven writers, since
+  Mint, Revoke, Rotate and SetExpiry `reload()` and then staged the same way.
+- **Bytes, not mtime and size** (the report offered either).
+  `reloadIfStale` stays a stat, since it runs on every authenticated request.
+  A write is debounced or operator-driven, so one ReadFile of a 1 to 15 KB
+  file costs nothing there, and a coarse-mtime filesystem (FAT32 2 s, several
+  NAS exports 1 s) hides a same-size sibling write in the same tick from a
+  stat. The Store docblock's "known limitation" (a same-size re-rotation)
+  now bounds only what a read sees; the next write catches it.
+- **The rebuild is `reload()`**, whose per-token merge already keeps this
+  process's unwritten LastUsedAt and client-version bumps; there is no second
+  merge. A reload that fails ends the write with nothing written, as a failed
+  reload before the staging already did (FlushLastUsed's rule, now at both
+  points), and so does a re-read that fails: the file may hold a token this
+  process has never seen (EACCES after a `sudo bridge pair` leaves a
+  root-owned 0600 file).
+- **A write adopts its list only once its rename lands.** build returns a new
+  slice and `commitLocked` assigns it on success, which replaces the
+  rollbacks in Mint, Revoke, Rotate and SetExpiry: memory is never touched
+  before the write lands. The existing rollback tests pin it (NC8 below).
+- **A Rotate or SetExpiry of a token revoked during its write answers
+  ErrNotFound**: rebuilt from the file, it finds nothing to change. On main
+  it wrote the token back with a new hash or expiry, a revoke undone by the
+  console's own action. Revoke of a token revoked meanwhile answers
+  ErrNotFound too, the package's existing contract for an unknown ID.
+- **The staged file's stat, not the path's after the rename**: `os.Stat` of
+  the temp file after its Close and before the rename. A rename leaves mtime
+  and size alone (POSIX, and NTFS keeps `$STANDARD_INFORMATION`'s last write
+  time across MoveFileEx; tunneling restores only creation time), and a
+  filesystem where they differ (rclone over an object store, an SMB client
+  cache) costs one reload, the safe direction.
+  `TestAWriteRecordsTheFileItPutDown` checks the premise on each CI platform.
+  After the Close, because Windows may settle a file's last write time only
+  when its last writing handle closes.
+- **`persist()` keeps its name** as "write the in-memory list as it stands"
+  (`commitLocked(nil)`), so its three callers and the comments naming it stay
+  put.
+- **A missing file and an empty one compare equal** (`bytes.Equal(nil,
+  []byte{})`), which the consult flagged. Kept: both hold no tokens, no writer
+  here makes an empty file, and adminauth's `unchangedSince` compares the same
+  way. The docblock says so.
+- **Not taken: a kernel lock** (flock / LockFileEx on a stable lock file),
+  for #1039's reasons (the repo's first interprocess lock, platform code, and
+  a bounded wait so a hung holder cannot wedge `s.mu`). **Not taken: a
+  re-check before each Windows rename retry**, which would need a predicate
+  in the shared `atomicwrite` package for one caller while the POSIX residual
+  stays the same; the consult agreed.
+
+### Comments the fix made false
+
+Validate's, RecordClientVersion's and FlushLastUsed's comments said that
+without their reload before the write, `persist()` "would write our stale
+slice back"; with the fix the commit's re-read refuses that write and
+rebuilds it. The Store's `loaded` / `lastSize` comment said an mtime-only
+check drops a same-tick sibling's token "on the next persist". All four now
+say what is true: the early reload saves a staging wasted on a stale list,
+and the stat keeps READS current.
+
+### Tests and controls
+
+- `internal/auth/auth_commit_window_test.go`, through a new seam,
+  `beforeCommitHook` (between the staging and the re-read), and atomicwrite's
+  rename seam for the window after the rename.
+  `TestASiblingWriteDuringACommitIsNotUndone` crosses the seven writers with
+  four siblings (`bridge pair`, `bridge token revoke|rotate|expire`) and
+  checks both writes on disk and in the running bridge's memory.
+  `TestAWriteDoesNotBringBackATokenRevokedDuringIt` (Rotate, SetExpiry),
+  `TestAWriteGivesUpOnAFileThatKeepsChanging` (the bound),
+  `TestAWriteThatCannotReReadTheFileDoesNotCommit` (FlushLastUsed, Mint),
+  `TestAWriteDoesNotRebuildFromAFileItCannotParse`,
+  `TestAnUncontendedWriteStagesOnce` (the baseline is the file last read or
+  written, a deletion included), `TestASiblingWriteRightAfterACommitIsNotTakenForIt`
+  and `TestAWriteRecordsTheFileItPutDown`.
+- **Red first.** 4e2b900a adds only the seam and the tests: all 28 table rows
+  fail on disk and in memory, and so do both same-token rows, the bound, the
+  unreadable-file and the damaged-file tests. `TestAnUncontendedWriteStagesOnce`
+  passes there by design; it guards the fix's baseline, not the defect.
+  c8679038's post-rename test fails on a072c0d8 (the staging-window fix) on
+  all four rows, in memory only.
+- Negative controls against fa00e4c5, each restored from HEAD and the tree
+  checked clean before the next (a harness in the scratchpad); none failed to
+  build:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no re-read before the commit | the table (28), same-token (2), the bound, unreadable (2), damaged |
+  | NC2 | a re-read but no rebuild (one attempt) | the table, on the running bridge's own write not landing, and same-token (errStoreMoved, not ErrNotFound); the bound stays green, since it counts against the constant |
+  | NC3 | the rebuild refreshes the baseline and keeps the stale list | the table, same-token, damaged; the bound stays green (a sibling in every window keeps the check refusing) |
+  | NC4 | reload's per-token merge removed | the twelve debounced-writer rows (the bump lost in the rebuild), and the existing `TestReloadPreservesNewerInMemoryLastUsed` |
+  | NC5 | a re-read that fails commits | unreadable |
+  | NC6 | a rebuild reload that fails carries on | damaged, on "staged 3 times": the byte comparison still refuses each commit, so the file survives, which is why the test counts stagings |
+  | NC7 | unbounded rebuilds | the bound |
+  | NC8 | the list adopted before the write lands | the existing `TestAtomicPersistNoPartialState` and `TestRevokeRollsBackOnPersistFailure` |
+  | NC9 | the list never adopted | eleven tests |
+  | NC10 | the baseline not moved to a write | stages-once (Validate's write staged twice) |
+  | NC11 | `reloadIfStale`'s missing-file branch keeps the old baseline | stages-once |
+  | NC12 | `reload` does not move the baseline | ten tests |
+  | NC13 | the stat of the path after the rename (the old bookkeeping) | the post-rename test, all four rows |
+  | NC14 | the staged stat taken before the bytes are written | `TestAWriteRecordsTheFileItPutDown` alone: a wrong identity costs a reload, so nothing functional notices, the safe direction the design relies on |
+
+- The whole auth suite ran on dido (Linux, ext4) as a cross-compiled test
+  binary; `GOOS=windows go test -c` builds, and the Windows CI leg runs the
+  identity premise.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with the diff, six
+questions. The staged identity across NTFS, POSIX, FUSE and SMB: sound, a
+mismatch benign, and a spurious match needs a coarse-resolution filesystem
+and a same-size write in one tick, the existing read-side limitation. It
+flagged the missing/empty equivalence, kept above. No other losing
+interleaving (it checked `reload`'s stat-then-read split: the bytes and the
+list stay consistent). Leave Windows' retries as the residual.
+
+### Out of scope
+
+- **The rename itself and Windows' rename retries**, above.
+- **A tokens.json the running bridge cannot read logs an Error on every
+  authenticated request.** Validate's debounce clock moves only on a
+  successful write, so while the file is unreadable (a `sudo bridge pair`
+  beside a service install leaves a root-owned 0600 file) every request past
+  the 30 s window re-enters the write branch, fails its reload and logs:
+  measured with two stores on one file, 10 requests after the window gave 10
+  ERROR lines. adminauth fixed the same shape in #1039 (every attempt starts
+  the next window). Filed as its own task. The device that `sudo bridge pair`
+  paired 401s there as well, since Validate's own reload fails the same way
+  (read from the code).
+- **A bridge still running the old binary** keeps both windows until it
+  restarts.
 
 ## 2026-09-27 — every console signed out: reset-password by default, `sign-out-everywhere`, and a console button (#1044)
 
