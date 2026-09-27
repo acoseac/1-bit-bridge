@@ -720,14 +720,14 @@ func (s *Store) unchangedSince(read storeContents) func() error {
 		if beforeCommitHook != nil {
 			beforeCommitHook()
 		}
-		now, err := os.ReadFile(s.path)
+		latest, err := os.ReadFile(s.path)
 		if errors.Is(err, os.ErrNotExist) {
-			now, err = nil, nil
+			latest, err = nil, nil
 		}
 		if err != nil {
 			return fmt.Errorf("re-read adminauth store before the commit: %w", err)
 		}
-		if !bytes.Equal(now, read.raw) {
+		if !bytes.Equal(latest, read.raw) {
 			return errStoreMoved
 		}
 		return nil
