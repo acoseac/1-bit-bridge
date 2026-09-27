@@ -1392,8 +1392,8 @@ func TestValidateDLNAListenAddress(t *testing.T) {
 // is Cleaned (not stored verbatim), while an empty value stays empty rather
 // than collapsing to ".".
 func TestResolvePathCleansAbsolute(t *testing.T) {
-	if got := resolvePath("/base", ""); got != "" {
-		t.Errorf("resolvePath(_, %q) = %q, want empty", "", got)
+	if got := ResolvePath("/base", ""); got != "" {
+		t.Errorf("ResolvePath(_, %q) = %q, want empty", "", got)
 	}
 	// Build an absolute path with an un-cleaned ".." segment by concatenation
 	// (filepath.Join would pre-clean it and make the assertion trivial).
@@ -1403,12 +1403,12 @@ func TestResolvePathCleansAbsolute(t *testing.T) {
 	if cleaned == absDirty {
 		t.Fatalf("test setup: %q was already clean", absDirty)
 	}
-	if got := resolvePath("", absDirty); got != cleaned {
-		t.Errorf("resolvePath(abs) = %q, want %q", got, cleaned)
+	if got := ResolvePath("", absDirty); got != cleaned {
+		t.Errorf("ResolvePath(abs) = %q, want %q", got, cleaned)
 	}
 	rel := filepath.Join("sub", "x")
-	if got, want := resolvePath("/base", rel), filepath.Join("/base", rel); got != want {
-		t.Errorf("resolvePath(rel) = %q, want %q", got, want)
+	if got, want := ResolvePath("/base", rel), filepath.Join("/base", rel); got != want {
+		t.Errorf("ResolvePath(rel) = %q, want %q", got, want)
 	}
 }
 

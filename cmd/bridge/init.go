@@ -50,17 +50,19 @@ func baseConfig(roots []string, name, dataDir string) *config.Config {
 // and prints the admin console URL so they can open it and pair.
 //
 // Idempotent: re-running on a populated config dir offers to keep or
-// rewrite the existing bridge.yaml. The TLS cert is always preserved —
-// rotating it breaks every paired client's pin — and so is a public
-// install's admin account, which `bridge admin reset-password` rotates.
-// Every refusal is decided before bridge.yaml is written.
+// rewrite the existing bridge.yaml. A rewrite replaces the settings, not
+// the install: it keeps the data dir and the TLS pair the config names —
+// rotating the pair breaks every paired client's pin — and so a public
+// install's admin account, which `bridge admin reset-password` rotates
+// (init_rewrite.go says what else it keeps, and what it refuses to
+// rewrite). Every refusal is decided before bridge.yaml is written.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgDirFlag := fs.String("dir", "", "config directory (default per-OS standard)")
 	nonInteractive := fs.Bool("yes", false, "accept all defaults without prompting")
 	fs.BoolVar(nonInteractive, "y", *nonInteractive, "alias for --yes")
-	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber)")
+	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir and TLS pair are kept")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
 	libraryName := fs.String("name", "", "library display name (default: hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
@@ -121,7 +123,16 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
-	dataDir := filepath.Join(cfgDir, "data")
+	// The install already at cfgPath, as its file says (priorInstallFile). A
+	// rewrite keeps its data dir, which the header, the preflight, the
+	// credential store, the TLS pair and the service all use from here on.
+	// With no config, or one init cannot read, the data dir is init's own.
+	prior, priorErr := readPriorInstall(cfgPath)
+	initDataDir := filepath.Join(cfgDir, "data")
+	dataDir := initDataDir
+	if prior != nil {
+		dataDir = prior.DataDir
+	}
 
 	fmt.Fprintf(stdout, "1-bit-bridge — first-time setup\n\n")
 	fmt.Fprintf(stdout, "  Config dir:  %s\n", cfgDir)
@@ -179,6 +190,23 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		abs = a
 	}
+	// The roots this run saves. A run that names no library, which only a
+	// public run may, keeps the install's: a public install takes its roots
+	// later, in the console, and a rewrite that emptied them left every track
+	// unplayable. The preflight grades only a root the run names, as it
+	// always has. A kept public root may be a mount that is not up yet, which
+	// public-mode serve tolerates, and the note above says why init must not
+	// demand it: checkLibraryRoots FAILs a missing root, so grading the kept
+	// ones refused a public rewrite whenever its mount was down.
+	var roots, namedRoots []string
+	rootsKept := false
+	switch {
+	case abs != "":
+		roots = []string{abs}
+		namedRoots = roots
+	case prior != nil && len(prior.LibraryRoots) > 0:
+		roots, rootsKept = prior.LibraryRoots, true
+	}
 
 	// Preflight. Run after library-path resolution so doctor sees the
 	// real path the user chose, not a default. --skip-doctor bypasses
@@ -200,14 +228,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// to overwrite the config may be about to save different ones.
 	var preflightDeps doctor.Deps
 	if !*skipDoctor {
-		var roots []string
-		if abs != "" {
-			roots = []string{abs}
-		}
 		d := doctor.Deps{
 			ConfigDir:    cfgDir,
 			DataDir:      dataDir,
-			LibraryRoots: roots,
+			LibraryRoots: namedRoots,
 			APIPort:      7788,
 			AdminPort:    7789,
 		}
@@ -264,6 +288,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Whether this run may overwrite the config at all, before anything is
+	// written, the directories included: refuseRewrite.
+	if refuseRewrite(stderr, cfgPath, prior, priorErr) {
+		return 1
+	}
+
 	// 0o700 because both dirs hold private material: bridge.yaml
 	// (TLS fingerprint, library paths), data/cert.key (TLS private
 	// key), data/tokens.json (bearer-token hashes), data/bridge.db.
@@ -293,10 +323,6 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "warning: chmod data dir: %v\n", err)
 	}
 
-	var roots []string
-	if abs != "" {
-		roots = []string{abs}
-	}
 	cfg := baseConfig(roots, name, dataDir)
 	if *publicMode {
 		// Public-mode YAML shape (PR 5). Defaults:
@@ -357,6 +383,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			cfg.Autocert.Email = *publicEmail
 		}
 	}
+	// The TLS pair the install serves, and a loopback install's custom
+	// endpoints. The data dir and the roots are in cfg already.
+	endpointsKept := keepFromPrior(cfg, prior)
 	if err := cfg.NormalizeAndValidate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
@@ -443,8 +472,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// as it is (LoadOrGenerate never rewrites one): rotating it breaks every
 	// paired client's pin. One that is there and does not load, a cert with
 	// no key beside it say, is a refusal. The preflight's tls-cert check
-	// FAILs it as well, but only when the preflight runs, and only for the
-	// pair it grades: the existing config's, which need not be this one.
+	// FAILs it as well, but only when the preflight runs.
+	//
+	// The pair is the one the saved config names, resolved as `bridge serve`
+	// resolves it (resolveCertPaths), so the fingerprint printed below is the
+	// one serve presents. It was DefaultPaths(dataDir) until 2026-09-27:
+	// over a config naming its pair elsewhere, init minted a second pair in
+	// the data dir and printed that one to pin.
 	//
 	// A first install's mint therefore lands before its config does. A Save
 	// that then fails leaves a pair nothing has pinned, which the next run
@@ -455,7 +489,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// existing cert emits the SAN-stale warning if the operator's
 	// CustomEndpoints changed, which `bridge doctor`'s tls-cert-sans check
 	// reports from the same gather.
-	certPath, keyPath := servertls.DefaultPaths(dataDir)
+	certPath, keyPath := resolveCertPaths(cfg)
 	_, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, certSANOptions(cfg))
 	if err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
@@ -467,6 +501,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
+	printKept(stdout, cfg, initDataDir, rootsKept, endpointsKept)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
@@ -1046,16 +1081,24 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 // JUDGEMENT CALL — this grades the PRE-init state, deliberately. The
 // preflight runs before init writes the config, so the values here are
 // the ones on disk NOW, not the ones init is about to save. For the
-// cert that is the only coherent reading: the cert being graded is the
-// one on disk, and init does not mint a new one over a live install.
-// For the SAN want-set it is also right rather than merely tolerable,
-// because `customEndpoints` is the one input that moves the answer and
-// init never prompts for it — it survives the rewrite verbatim, so the
-// old value IS the new value. A first install has no config to read and
-// keeps the existing skip: nothing is stale on a host whose first mint
-// has not happened yet, and grading a narrower want-set than `bridge
-// serve` builds would be a comparison presented as authoritative that
-// was never made.
+// cert that is the only coherent reading: the pair graded is the one the
+// install serves, and a rewrite keeps it, and the data dir it may live in
+// (init_rewrite.go), and loads it rather than minting one. That was true only of a pair in init's own
+// data dir until 2026-09-27: a rewrite dropped the config's tlsCertPath,
+// tlsKeyPath and dataDir, and minted a new pair.
+// For the SAN want-set it is right wherever the rewrite keeps
+// `customEndpoints`, the one input that moves the answer: init never
+// prompts for them, and a loopback rewrite of a loopback install keeps
+// them, so there the old value IS the new value. Until 2026-09-27 this
+// paragraph said they survived every rewrite, and they survived none. A
+// --public rewrite writes the domain's endpoint in their place, and a
+// rewrite that changes posture starts from the new posture's, so for
+// those two the want-set graded here is the one being replaced, and
+// `bridge doctor` after the run grades the saved one. A first install
+// has no config to read and keeps the existing skip: nothing is stale on
+// a host whose first mint has not happened yet, and grading a narrower
+// want-set than `bridge serve` builds would be a comparison presented as
+// authoritative that was never made.
 //
 // Everything both checks say about this state is warn-level by design
 // (neither a stale SAN set nor a clock-skewed NotBefore is a reason to
@@ -1063,17 +1106,21 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 //
 // A config that is there and does not load (a misspelt key, say) is the
 // re-init that exists to replace it, often while the install's bridge is
-// still serving. Nothing in it can be read, so the preflight grades init's
-// defaults, as for a first install. But the ports are not the only fact
-// here: init always writes the data dir d.DataDir names, and `bridge serve`
-// records its pid there, so the bridge this run replaces is known without
-// the config, wherever the data dir did not move. Without it, that
-// bridge's own listeners read as another process's, both port checks
-// FAILed, and the re-init refused (measured on 2026-09-25, #1022's log
-// entry). Its ports are unknown, though, so only the probe seeing it listen
-// on a port excuses that port (doctor's checkChosenPort), never its being
-// alive: an install that had moved off the defaults has a live bridge on
-// its own ports while another process may hold the one init writes.
+// still serving. config.Load cannot read it, so the preflight grades init's
+// default ports, as for a first install, and the pair the file names as
+// written (readPriorInstall), the one the rewrite keeps. It graded the
+// default pair in init's data dir until 2026-09-27, and over a config
+// naming its own answered ok, "absent (init will mint)". But the ports are
+// not the only fact here: `bridge serve` records its pid in the data dir,
+// the one d.DataDir names (the file's, which the rewrite keeps, or init's
+// own where the file cannot be read), so the bridge this run replaces is
+// known without the config. Without it, that bridge's own listeners read
+// as another process's, both port checks FAILed, and the re-init refused
+// (measured on 2026-09-25, #1022's log entry). Its ports are unknown,
+// though, so only the probe seeing it listen on a port excuses that port
+// (doctor's checkChosenPort), never its being alive: an install that had
+// moved off the defaults has a live bridge on its own ports while another
+// process may hold the one init writes.
 func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -1082,6 +1129,10 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 		if !errors.Is(err, fs.ErrNotExist) && d.DataDir != "" {
 			d.OwnPIDFile = filepath.Join(d.DataDir, serverPIDFileName)
 			d.OwnPIDPortsUnknown = true
+			if prior, perr := readPriorInstall(cfgPath); perr == nil && prior != nil &&
+				prior.TLSCertPath != "" && prior.TLSKeyPath != "" {
+				d.TLSCertPath, d.TLSKeyPath = prior.TLSCertPath, prior.TLSKeyPath
+			}
 		}
 		return
 	}

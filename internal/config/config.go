@@ -2613,14 +2613,14 @@ func (c *Config) resolvePaths(baseDir string) {
 	// filepath.Join (which also Cleans). An ABSOLUTE path used to be stored
 	// verbatim — so a literal "/music/../private" survived intact, a poor
 	// basis for the prefix/containment checks the fs resolver + variantsDir
-	// guard rely on. resolvePath Cleans the absolute branch too so both
+	// guard rely on. ResolvePath Cleans the absolute branch too so both
 	// forms land canonicalised.
 	for i, r := range c.LibraryRoots {
-		c.LibraryRoots[i] = resolvePath(baseDir, r)
+		c.LibraryRoots[i] = ResolvePath(baseDir, r)
 	}
-	c.DataDir = resolvePath(baseDir, c.DataDir)
-	c.TLSCertPath = resolvePath(baseDir, c.TLSCertPath)
-	c.TLSKeyPath = resolvePath(baseDir, c.TLSKeyPath)
+	c.DataDir = ResolvePath(baseDir, c.DataDir)
+	c.TLSCertPath = ResolvePath(baseDir, c.TLSCertPath)
+	c.TLSKeyPath = ResolvePath(baseDir, c.TLSKeyPath)
 	// Autocert cache dir follows the same config-relative path
 	// contract as the other on-disk paths above. Without this,
 	// a relative `autocert.cacheDir: "acme-cache"` would resolve
@@ -2628,7 +2628,7 @@ func (c *Config) resolvePaths(baseDir string) {
 	// ACME cache location every time the bridge is launched
 	// from a different shell, and (b) forces LE to re-issue
 	// against rate-limit quota (CodeRabbit Major on PR #293).
-	c.Autocert.CacheDir = resolvePath(baseDir, c.Autocert.CacheDir)
+	c.Autocert.CacheDir = ResolvePath(baseDir, c.Autocert.CacheDir)
 	// Variants dir was the one on-disk path field left uncanonicalised,
 	// so a trailing separator survived into JobSpec.OutputDir. Sidecar
 	// paths are built with filepath.Join (which Cleans), so the
@@ -2637,16 +2637,18 @@ func (c *Config) resolvePaths(baseDir string) {
 	// error and the SSE payload. Cleaning here fixes it at the source;
 	// redactSoxErr also trims defensively, since the admin hot-patch
 	// route can set this field without going through Load().
-	c.Upscale.VariantsDir = resolvePath(baseDir, c.Upscale.VariantsDir)
-	c.Upscale.TempDir = resolvePath(baseDir, c.Upscale.TempDir)
+	c.Upscale.VariantsDir = ResolvePath(baseDir, c.Upscale.VariantsDir)
+	c.Upscale.TempDir = ResolvePath(baseDir, c.Upscale.TempDir)
 }
 
-// resolvePath canonicalises a single config path against baseDir: an empty
+// ResolvePath canonicalises a single config path against baseDir: an empty
 // value stays empty (it must NOT become ".", which filepath.Clean("") would
 // return), an absolute path is Cleaned in place, and a relative path resolves
 // against baseDir via filepath.Join (which Cleans). Shared by resolvePaths so
-// every scalar on-disk path field gets identical treatment.
-func resolvePath(baseDir, p string) string {
+// every scalar on-disk path field gets identical treatment, and exported for
+// `bridge init`'s rewrite, which reads the paths it keeps from the file as
+// written and must resolve them as Load does.
+func ResolvePath(baseDir, p string) string {
 	if p == "" {
 		return ""
 	}

@@ -231,7 +231,9 @@ mode). iOS never talks to the admin listener.
   User-Agent identifies the app per MB's TOS. Negative-cache MB errors so one
   failing album doesn't spin-loop sibling tracks.
 - **TLS fingerprint is captured once at pairing**; rotating the cert requires
-  re-pairing. `LoadOrGenerate` is sticky by design.
+  re-pairing. `LoadOrGenerate` is sticky by design, and a `bridge init`
+  rewrite keeps the pair the config names and the data dir (CLAUDE.md, the
+  `cmd/bridge` bullet on what a rewrite keeps).
 - **`enriched_at` monotonicity**: upsert resets it to 0 on track change; the
   enricher sets it on completion. The only other sanctioned writers are the
   operator-triggered "retry missing" resets. `WHERE enriched_at = 0` drives
