@@ -18670,7 +18670,7 @@ list stay consistent). Leave Windows' retries as the residual.
 - **A bridge still running the old binary** keeps both windows until it
   restarts.
 
-## 2026-09-27 — the pairing QR writes a space as `%20`, and every stored library name is one a pairing code carries (#1045)
+## 2026-09-27 — the pairing QR writes a space as `%20`, and every stored library name is one a pairing code carries (#1046)
 
 #1042's entry left two items under Out of scope: the QR's `+` for a space, and
 the app's 256-Character cap on `name=`. Both measured real, and three more of

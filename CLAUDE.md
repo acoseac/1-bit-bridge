@@ -658,7 +658,7 @@ lost my library."
   never `URLSearchParams` (which form-encodes a space back to `+`).
 - **…and a query the bridge WRITES for such a reader goes through
   `internal/urlquery`, never `url.QueryEscape` or `url.Values.Encode`**
-  (#1045). Both write a space as `+`, and two readers keep `+` as a plus:
+  (#1046). Both write a space as `+`, and two readers keep `+` as a plus:
   Foundation's `URLComponents.queryItems`, which the app reads the pairing QR
   with, and `safeQuery`. So from April to September the QR named a library
   `My Library` as `My+Library` (the default as `1-bit+Bridge`), which the app
@@ -710,7 +710,7 @@ lost my library."
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
   already cover. Never emit `host=.local` — fall back to `localhost.local`.
 - **The Bonjour instance name is ONE DNS label, 63 bytes, and hashicorp/mdns
-  does not check it** (#1045). The instance is the library name:
+  does not check it** (#1046). The instance is the library name:
   `NewMDNSService` takes a longer one, `Advertise` succeeds, serve prints
   "mDNS: advertising as", and every answer to a browse then fails to pack
   (`dns: bad rdata`), so the bridge is never discovered; the one trace is an
@@ -1880,7 +1880,7 @@ no failing test — which is the shape to expect in this area.
   `applyDefaults`, and don't turn it into a `Validate` refusal: a
   `BRIDGE_LIBRARY_NAME` of spaces would then stop a bridge from starting
   after an update, over a display name.
-- **…and every stored name is one a pairing code can CARRY** (#1045). The
+- **…and every stored name is one a pairing code can CARRY** (#1046). The
   app also refuses a `name=` over 256 Characters ("Pairing code's name field
   is too long.") and one that is not UTF-8 (Foundation leaves the item with
   no value: "missing the name field"). The console took any length (257
