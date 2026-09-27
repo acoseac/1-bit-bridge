@@ -566,7 +566,7 @@ func oneLineFrom(t *testing.T, logs *handshaketest.Buffer, peer string) string {
 	return got[0]
 }
 
-var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]):\d+`)
+var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[^\]\s]+\]):\d+`)
 
 // shape is a line with its addresses, and the placeholder that replaces a
 // peer's, blanked: two servers on different ports, probed from different
