@@ -2090,7 +2090,7 @@ no failing test — which is the shape to expect in this area.
   re-owning the file, was the runbook's "always as the service user" rule
   alone until the next bullet fixed it for this file.
 - **A CLI write run as root keeps the owner of the file it replaces**
-  (2026-09-27). `sudo bridge pair`, `sudo bridge admin reset-password`,
+  (#1048). `sudo bridge pair`, `sudo bridge admin reset-password`,
   `sign-out-everywhere` or `login-link`, `sudo bridge cert rotate`, `sudo
   bridge update` and a `sudo bridge init --force` rewrite beside a service
   install staged their file as root, 0600, and the bridge running as the
@@ -3452,7 +3452,7 @@ its twin.** The top list is older, shorter, and read first.
   running the OLD binary drops the unknown field and writes its sessions
   back, so restart first, then sign out. A `sudo bridge admin
   reset-password` left a root-owned file the service could not read, which
-  refused every console request until it was chowned; since 2026-09-27 the
+  refused every console request until it was chowned; since #1048 the
   write keeps the file's owner (the KeepOwner bullet under Config, settings
   and process lifecycle).
 - **A console login ticket is PERSISTED, because the two halves are different

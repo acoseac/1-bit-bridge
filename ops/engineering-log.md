@@ -19520,7 +19520,7 @@ tags from local files by the same rule.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
 
-## 2026-09-27 — a CLI write run as root keeps the owner of the file it replaces
+## 2026-09-27 — a CLI write run as root keeps the owner of the file it replaces (#1048)
 
 The realistic way to run `bridge pair` or `bridge admin reset-password` on a
 service install is with sudo: `bridge init` makes the data dir 0700 and the
