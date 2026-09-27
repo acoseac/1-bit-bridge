@@ -778,7 +778,7 @@ lost my library."
   heading or a bold `METHOD /path` lead-in, because prose-mention is the state
   six live endpoints were already in.
 - **`DELETE /v1/atlas-harvest/credential` forgets the harvest credential,
-  and a demo bridge refuses it** (2026-09-27). Switching the app's library
+  and a demo bridge refuses it** (#1049). Switching the app's library
   harvest off stopped only the app's renewals: the `bulk_harvest`
   credential the bridge held stayed usable until it expired (the audit's
   H3). The route calls the store's `Clear()`, which drops the token and its

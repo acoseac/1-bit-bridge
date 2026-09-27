@@ -19520,7 +19520,7 @@ tags from local files by the same rule.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
 
-## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential
+## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential (#1049)
 
 The 2026-09-23 external audit's H3, bridge half. Turning off the app's
 "Bulk-harvest the whole library" stopped only the app's renewals; the
