@@ -139,8 +139,19 @@ func TestAWriteByTheRunningBridgeKeepsARotationMadeElsewhere(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, path, session, clock := runningBridge(t)
 			rotateElsewhere(t, path)
+			rotated, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			tc.write(t, a, session, clock)
 			requireRotationOnDisk(t, path, tc.name)
+			// And the write itself landed. A write that only refused to
+			// commit would keep the rotation too, while the running
+			// bridge's sessions never reached the file again.
+			if got, _ := os.ReadFile(path); bytes.Equal(got, rotated) {
+				t.Errorf("after %s, the file is exactly what the rotation wrote: the running "+
+					"bridge's write never landed", tc.name)
+			}
 		})
 	}
 }
