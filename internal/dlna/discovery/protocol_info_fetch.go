@@ -83,8 +83,9 @@ func (d *HTTPClientDispatcher) Do(ctx context.Context, req *http.Request) (*http
 // FetchDeviceDescriptionWithSource with SourceUserChosen.
 //
 // Redirects are the dispatcher's business, and every production
-// dispatcher refuses them (`CheckRedirect: ErrUseLastResponse`, here, in
-// internal/upnp's discovery client and in its manual poller): a 3xx comes
+// dispatcher refuses them (`CheckRedirect: ErrUseLastResponse`, set where
+// each one builds its client: this package's SSDP client in client.go,
+// internal/upnp's discovery client, and its manual poller): a 3xx comes
 // back as a non-200, so the bridge follows no redirect at all. That is
 // stricter than the iOS app, which follows one to the same host.
 func FetchDeviceDescription(
