@@ -10,10 +10,13 @@
 // The store is concurrent-safe within a single process, and survives out-of-
 // process writes (e.g. `bridge pair` running while `bridge serve` is up): on
 // each Validate, Store stats the tokens file and reloads if the mtime has
-// advanced. Writes use atomic rename so a reader never sees a torn file.
+// advanced. Writes use atomic rename so a reader never sees a torn file, and
+// re-read the file just before that rename so they never replace a sibling's
+// write they were not built from (commitLocked).
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -24,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,24 @@ var logger = logging.Component("auth")
 // scanner: production cost is one nil-check per persist (at most once
 // per lastUsedFlushInterval per token), negligible.
 var beforeValidatePersistHook func()
+
+// beforeCommitHook is a test-only seam (nil in production), fired in
+// every write between the staging of the file and the re-read that gates
+// its commit: the window a sibling process's write lands in. Same
+// convention as beforeValidatePersistHook, and as adminauth's
+// beforeCommitHook.
+var beforeCommitHook func()
+
+// errStoreMoved is a write finding the file changed between the read it
+// was built from and its commit.
+var errStoreMoved = errors.New("the token store changed while it was being written; nothing written")
+
+// maxCommitAttempts bounds how often a write rebuilds for a file that
+// keeps changing under it. Each attempt costs a staging and an fsync, and
+// a file another process rewrites inside three of them in a row is not a
+// `bridge pair` anyone is running by hand. A debounced write stays in
+// memory for the next one; a Mint, Revoke, Rotate or SetExpiry fails.
+const maxCommitAttempts = 3
 
 const (
 	// rawTokenBytes is the number of random bytes per minted token.
@@ -120,8 +142,10 @@ type Store struct {
 	// mtime to 1 s, so a sibling process (`bridge pair` writing while
 	// `bridge serve` is running) can land a write within the same tick
 	// our last persist captured. In that scenario `info.ModTime() ==
-	// s.loaded` and reloadIfStale's mtime-only check skips the reload,
-	// silently dropping the new token on the next persist. Using size
+	// s.loaded` and an mtime-only check skips the reload, so Validate
+	// refuses the new token until the file changes again or this
+	// process next writes (whose pre-commit re-read reloads it; before
+	// that re-read existed, the write dropped the token). Using size
 	// as a tiebreaker catches the realistic same-tick scenarios:
 	//   - Mint (size grows by one token's JSON shape)
 	//   - Revoke (size shrinks by one token's JSON shape)
@@ -141,13 +165,21 @@ type Store struct {
 	// request and reading the file (or hashing it) on the hot path
 	// is too costly. The narrowness of the residual race
 	// (operator-initiated double-rotation, sub-1s apart, byte-
-	// equal serialization) makes the trade favour the cheap check;
-	// a follow-up "the writer just changed the file, force a
-	// reload" affordance can close it for callers that care.
+	// equal serialization) makes the trade favour the cheap check.
+	// It bounds only what a READ sees: a write compares the file's
+	// bytes (raw) before it commits, so it never replaces such a
+	// rotation, and rebuilding around it reloads the file.
 	loaded        time.Time
 	lastSize      int64
 	isEmpty       bool      // tokens file didn't exist when we last looked
 	lastUsedFlush time.Time // last persist() driven by a LastUsedAt update
+
+	// raw is the file's bytes as of the read s.tokens was last built
+	// from (reload) or the write that last put it down (writeLocked);
+	// nil for a file that was missing. A write commits only while the
+	// file still holds exactly these bytes. Not a hot-path cost: it is
+	// compared once per write, and writes are debounced.
+	raw []byte
 
 	// staticHash / staticTok hold the config-seeded demo token
 	// (SetStaticToken), nil/zero unless one was installed. Held OUTSIDE
@@ -212,6 +244,7 @@ func (s *Store) reload() error {
 		s.isEmpty = true
 		s.loaded = time.Time{}
 		s.lastSize = 0
+		s.raw = nil
 		return nil
 	}
 	if err != nil {
@@ -272,6 +305,7 @@ func (s *Store) reload() error {
 	s.isEmpty = false
 	s.loaded = info.ModTime()
 	s.lastSize = info.Size()
+	s.raw = raw
 	return nil
 }
 
@@ -287,6 +321,7 @@ func (s *Store) reloadIfStale() error {
 			s.isEmpty = true
 			s.loaded = time.Time{}
 			s.lastSize = 0
+			s.raw = nil
 		}
 		return nil
 	}
@@ -299,15 +334,70 @@ func (s *Store) reloadIfStale() error {
 	return nil
 }
 
-// persist writes the current tokens to disk atomically (tmp + rename).
-// Caller must hold mu.
+// persist writes the in-memory token list as it stands: the write of the
+// debounced LastUsedAt and client-version observations and of the
+// shutdown flush, whose change is already in memory. Caller must hold mu.
 func (s *Store) persist() error {
+	return s.commitLocked(nil)
+}
+
+// commitLocked writes the token list build returns and adopts it into
+// memory once the write has landed, so a write that fails leaves memory
+// as it was. Every write of the store goes through here. Caller must hold
+// mu, and has read the file (reload or reloadIfStale) first.
+//
+// build is handed the list as last read and returns the list to write, or
+// an error that ends the write with nothing written (ErrNotFound for a
+// token that is no longer there). It may run more than once and must not
+// modify the list it is handed. A nil build writes the list as it stands.
+//
+// Staging the file costs a temp file, a write and an fsync (a median of
+// 0.6 to 0.7 ms on ext4 and 2.3 to 3.8 ms on APFS, measured; tens on a
+// cloud disk), in which a sibling process (`bridge pair`, `bridge token
+// revoke`) can commit. Renaming over that commit dropped the token it
+// minted or brought back the one it revoked. So the file is read once
+// more just before the rename (unchangedSinceReadLocked), and a change
+// starts the write again from a fresh read: reload, whose per-token merge
+// keeps this process's unwritten LastUsedAt and client-version
+// observations, then build again, up to maxCommitAttempts. A re-read or
+// a reload that fails ends the write with nothing written, as a failed
+// reload before the first staging does. What remains is the rename
+// itself, and on Windows its retries: see adminauth's commitLocked, which
+// closes the same window the same way.
+func (s *Store) commitLocked(build func(cur []Token) ([]Token, error)) error {
+	for attempt := 1; ; attempt++ {
+		next := s.tokens
+		if build != nil {
+			var err error
+			if next, err = build(s.tokens); err != nil {
+				return err
+			}
+		}
+		err := s.writeLocked(next)
+		if err == nil {
+			s.tokens = next
+			return nil
+		}
+		if !errors.Is(err, errStoreMoved) || attempt == maxCommitAttempts {
+			return err
+		}
+		if err := s.reload(); err != nil {
+			return fmt.Errorf("re-read the token store, which changed while it was being written; nothing written: %w", err)
+		}
+	}
+}
+
+// writeLocked stages tokens beside the store and renames them over it,
+// provided the file is still the one they were built from
+// (unchangedSinceReadLocked); otherwise it answers errStoreMoved, or the
+// re-read's error, having written nothing. Caller must hold mu.
+func (s *Store) writeLocked(tokens []Token) error {
 	// 0o700 on the parent dir matches the 0o600 file mode — keeps the
 	// whole token store inaccessible on multi-user hosts.
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("mkdir token store: %w", err)
 	}
-	data, err := json.MarshalIndent(s.tokens, "", "  ")
+	data, err := json.MarshalIndent(tokens, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -354,20 +444,61 @@ func (s *Store) persist() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
+	// What this write records as the file it put down is the staged
+	// file's own mtime and size, which the rename leaves as they are,
+	// never a stat of the path afterwards: RenameWithRetry fsyncs the
+	// directory after renaming (a median of 0.5 ms on ext4 and 2.8 ms on
+	// APFS, measured), and a sibling's commit landing in that fsync was
+	// recorded as this process's own file, so reloadIfStale saw nothing
+	// new and Validate refused a device paired there until this process
+	// next wrote. Taken after the Close: Windows may settle a file's last
+	// write time only when its last writing handle closes.
+	staged, err := os.Stat(tmpName)
+	if err != nil {
+		return fmt.Errorf("stat tmp: %w", err)
+	}
+	if err := s.unchangedSinceReadLocked(); err != nil {
+		return err
+	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 	tmpName = "" // suppress defer cleanup
-	if info, err := os.Stat(s.path); err == nil {
-		s.loaded = info.ModTime()
-		s.lastSize = info.Size()
-		s.isEmpty = false
-	}
-	// Every successful persist resets the LastUsedAt debounce clock —
-	// whether the persist was driven by Validate, Mint, Revoke, or
+	s.raw = data
+	s.loaded = staged.ModTime()
+	s.lastSize = staged.Size()
+	s.isEmpty = false
+	// Every successful write resets the LastUsedAt debounce clock —
+	// whether the write was driven by Validate, Mint, Revoke, or
 	// FlushLastUsed — so callers don't have to remember to stamp it
 	// themselves and Mint/Revoke also get the debounce benefit for free.
 	s.lastUsedFlush = time.Now()
+	return nil
+}
+
+// unchangedSinceReadLocked is the check a write makes between its staging
+// and its rename. It answers errStoreMoved when the file no longer holds,
+// byte for byte, what s.raw records, and an error when the file cannot be
+// read: a file this process cannot see may hold a token it has never seen,
+// so neither commits. A missing file reads as nil, as in reload, so it
+// compares equal to an empty one; both hold no tokens, and no writer here
+// makes an empty file. Split out of writeLocked for SonarCloud's go:S3776
+// (cognitive complexity), as adminauth's unchangedSince is. Caller must
+// hold mu.
+func (s *Store) unchangedSinceReadLocked() error {
+	if beforeCommitHook != nil {
+		beforeCommitHook()
+	}
+	latest, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		latest, err = nil, nil
+	}
+	if err != nil {
+		return fmt.Errorf("re-read the token store before the commit; nothing written: %w", err)
+	}
+	if !bytes.Equal(latest, s.raw) {
+		return errStoreMoved
+	}
 	return nil
 }
 
@@ -398,11 +529,9 @@ func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
 	if err := s.reload(); err != nil {
 		return "", Token{}, err
 	}
-	s.tokens = append(s.tokens, tok)
-	if err := s.persist(); err != nil {
-		// Roll back in-memory state so a failed write doesn't leave us
-		// inconsistent with disk.
-		s.tokens = s.tokens[:len(s.tokens)-1]
+	if err := s.commitLocked(func(cur []Token) ([]Token, error) {
+		return append(slices.Clone(cur), tok), nil
+	}); err != nil {
 		return "", Token{}, err
 	}
 	return rawToken, tok, nil
@@ -455,14 +584,17 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 					beforeValidatePersistHook()
 				}
 				// Cross-process safety: a sibling `bridge pair` /
-				// `bridge revoke` may have rewritten tokens.json since
+				// `bridge token revoke` may have rewritten tokens.json since
 				// the top-of-method reloadIfStale ran — s.mu is
 				// process-local and does NOT serialize another PROCESS's
-				// write. Without this reload, persist() would write our
-				// stale slice back and silently drop a freshly-minted
-				// sibling token (or resurrect a revoked one). reload's
-				// per-token merge preserves the LastUsedAt bump above, so
-				// the reload can't lose it. Mirrors RecordClientVersion.
+				// write. This reload takes such a write in before the
+				// staging. One that lands DURING the staging is
+				// commitLocked's: it re-reads the file before its rename
+				// and rebuilds around a change, and it would also catch
+				// this one, after a staging wasted on the stale list.
+				// reload's per-token merge preserves the LastUsedAt bump
+				// above, so neither read can lose it. Mirrors
+				// RecordClientVersion.
 				//
 				// A FAILED reload must ABORT the persist, on FlushLastUsed's
 				// rationale: dropping a debounced timestamp is recoverable
@@ -475,8 +607,9 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 				// process's ReadFile an ERROR_SHARING_VIOLATION inside the
 				// AV / indexer scan-on-close window — the exact window
 				// atomicwrite.RenameWithRetry exists for. Ignoring the
-				// error there erased the just-paired device's token and
-				// 401'd it from the next reload on.
+				// error there, before commitLocked re-read the file,
+				// erased the just-paired device's token and 401'd it from
+				// the next reload on.
 				if err := s.reloadIfStale(); err != nil {
 					logger.Error("reload before persisting LastUsedAt; skipping persist to avoid clobbering a sibling write", "err", err)
 				} else if err := s.persist(); err != nil {
@@ -505,16 +638,18 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 // shutdown so a just-before-exit validate doesn't lose its timestamp.
 // persist() itself updates `lastUsedFlush`, so nothing else to do here.
 //
-// Cross-process safety: a sibling `bridge pair` / `bridge revoke` may
-// have rewritten tokens.json since this process last loaded it. If no
+// Cross-process safety: a sibling `bridge pair` / `bridge token revoke`
+// may have rewritten tokens.json since this process last loaded it. If no
 // authenticated request followed (Validate is what triggers the routine
-// reloadIfStale), persisting the stale in-memory slice here would
-// silently delete the freshly-minted token (or resurrect a revoked
-// one) at shutdown. reload's per-token merge preserves the in-memory
-// LastUsedAt / LastClientVersion bumps this flush exists to land, so
-// the reload can't lose them. A reload failure aborts the flush —
-// dropping a debounced timestamp is recoverable; an overwrite that
-// deletes a sibling's token is not.
+// reloadIfStale), the in-memory slice is stale, and writing it at
+// shutdown silently deleted the freshly-minted token (or resurrected a
+// revoked one). The reload takes that write in before the staging;
+// commitLocked's re-read before the rename covers one landing during
+// it. reload's per-token merge preserves the in-memory LastUsedAt /
+// LastClientVersion bumps this flush exists to land, so the reload can't
+// lose them. A reload failure aborts the flush — dropping a debounced
+// timestamp is recoverable; an overwrite that deletes a sibling's token
+// is not.
 func (s *Store) FlushLastUsed() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -588,14 +723,15 @@ func (s *Store) RecordClientVersion(id, ver string) {
 		// doc. FlushLastUsed on shutdown lands any deferred update.
 		if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
 			// Cross-process safety: a concurrent `bridge pair` /
-			// `bridge revoke` may have written tokens.json since
-			// the in-memory snapshot was last loaded. Without this
-			// reloadIfStale, persist() would write back our slice
-			// and either resurrect a revoked token or drop a
-			// freshly-paired one. The reload's per-token merge
-			// (above) preserves our in-memory LastClientVersion
-			// bump, so a successful reload still ends up writing
-			// the new value.
+			// `bridge token revoke` may have written tokens.json since
+			// the in-memory snapshot was last loaded. Writing our
+			// slice back would resurrect a revoked token or drop a
+			// freshly-paired one: this reloadIfStale takes such a
+			// write in before the staging, and commitLocked's
+			// re-read before the rename covers one that lands
+			// during it. The reload's per-token merge (above)
+			// preserves our in-memory LastClientVersion bump, so a
+			// successful reload still ends up writing the new value.
 			//
 			// A FAILED reload ABORTS the persist — same contract as
 			// Validate and FlushLastUsed. The in-memory bump above
@@ -655,32 +791,25 @@ func (s *Store) Revoke(id string) error {
 	if err := s.reload(); err != nil {
 		return err
 	}
-	for i, tok := range s.tokens {
-		if tok.ID == id {
-			// Build the post-delete slice in a FRESH backing array so
-			// `orig` stays a valid rollback snapshot. An in-place
-			// `append(s.tokens[:i], s.tokens[i+1:]...)` shifts the shared
-			// backing array out from under `orig` and corrupts it — so a
-			// persist failure could not be rolled back cleanly. Same
-			// snapshot-and-rollback contract as Mint/Rotate/SetExpiry: a
-			// failed write must not leave memory diverged from disk
-			// (reloadIfStale won't resync — the failed persist didn't
-			// change the file mtime/size — so a still-valid token would be
-			// rejected until restart). Dropping `orig` on success also
-			// releases the removed Token (+ its ExpiresAt pointer) for GC.
-			orig := s.tokens
-			next := make([]Token, 0, len(orig)-1)
-			next = append(next, orig[:i]...)
-			next = append(next, orig[i+1:]...)
-			s.tokens = next
-			if err := s.persist(); err != nil {
-				s.tokens = orig
-				return err
-			}
-			return nil
+	return s.commitLocked(func(cur []Token) ([]Token, error) {
+		i := indexOfToken(cur, id)
+		if i < 0 {
+			return nil, ErrNotFound
 		}
-	}
-	return ErrNotFound
+		// Delete from a CLONE: deleting from cur would shift the list
+		// memory still holds, and a write that fails must leave memory as
+		// it was (reloadIfStale won't resync — the failed write didn't
+		// change the file's mtime or size — so a still-valid token would
+		// be rejected until restart). Delete zeroes the slot it vacates,
+		// so adopting the result on success releases the removed Token
+		// (+ its ExpiresAt pointer) for GC.
+		return slices.Delete(slices.Clone(cur), i, i+1), nil
+	})
+}
+
+// indexOfToken returns the index of the token with id in tokens, or -1.
+func indexOfToken(tokens []Token, id string) int {
+	return slices.IndexFunc(tokens, func(t Token) bool { return t.ID == id })
 }
 
 // Rotate replaces the raw bytes of an existing token, returning the
@@ -704,26 +833,28 @@ func (s *Store) Rotate(id string) (rawToken string, tok Token, err error) {
 	hashBytes := sha256.Sum256([]byte(rawToken))
 	hashHex := hex.EncodeToString(hashBytes[:])
 
+	rotatedAt := time.Now().UTC()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.reload(); err != nil {
 		return "", Token{}, err
 	}
-	for i := range s.tokens {
-		if s.tokens[i].ID == id {
-			// Snapshot in case persist fails — we roll back the
-			// in-memory mutation so disk and memory stay in sync.
-			old := s.tokens[i]
-			s.tokens[i].Hash = hashHex
-			s.tokens[i].RotatedAt = time.Now().UTC()
-			if err := s.persist(); err != nil {
-				s.tokens[i] = old
-				return "", Token{}, err
-			}
-			return rawToken, s.tokens[i], nil
+	err = s.commitLocked(func(cur []Token) ([]Token, error) {
+		i := indexOfToken(cur, id)
+		if i < 0 {
+			return nil, ErrNotFound
 		}
+		next := slices.Clone(cur)
+		next[i].Hash = hashHex
+		next[i].RotatedAt = rotatedAt
+		tok = next[i]
+		return next, nil
+	})
+	if err != nil {
+		return "", Token{}, err
 	}
-	return "", Token{}, ErrNotFound
+	return rawToken, tok, nil
 }
 
 // SetExpiry installs (or clears) the ExpiresAt field for an
@@ -736,28 +867,31 @@ func (s *Store) Rotate(id string) (rawToken string, tok Token, err error) {
 // flag that resolves to `time.Now().Add(d)`; admin UI can pass
 // any wall-clock RFC3339.
 func (s *Store) SetExpiry(id string, expiresAt *time.Time) (Token, error) {
+	var set *time.Time
+	if expiresAt != nil {
+		utc := expiresAt.UTC()
+		set = &utc
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.reload(); err != nil {
 		return Token{}, err
 	}
-	for i := range s.tokens {
-		if s.tokens[i].ID == id {
-			old := s.tokens[i].ExpiresAt
-			if expiresAt == nil {
-				s.tokens[i].ExpiresAt = nil
-			} else {
-				utc := expiresAt.UTC()
-				s.tokens[i].ExpiresAt = &utc
-			}
-			if err := s.persist(); err != nil {
-				s.tokens[i].ExpiresAt = old
-				return Token{}, err
-			}
-			return s.tokens[i], nil
+	var tok Token
+	if err := s.commitLocked(func(cur []Token) ([]Token, error) {
+		i := indexOfToken(cur, id)
+		if i < 0 {
+			return nil, ErrNotFound
 		}
+		next := slices.Clone(cur)
+		next[i].ExpiresAt = set
+		tok = next[i]
+		return next, nil
+	}); err != nil {
+		return Token{}, err
 	}
-	return Token{}, ErrNotFound
+	return tok, nil
 }
 
 // ErrNotFound is returned by Revoke / Rotate / SetExpiry when the
