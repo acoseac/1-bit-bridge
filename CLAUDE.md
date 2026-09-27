@@ -3259,10 +3259,21 @@ its twin.** The top list is older, shorter, and read first.
   session, records no stamp (a chmod or chown that fixes the file changes none
   of the three), and logs at most once a `sessionFlushInterval`: the middleware
   adds no line of its own, #1039's debounce concern. A MISSING file still ends
-  nothing. Open: a bridge still running the OLD binary drops the unknown field
-  and writes its sessions back, so restart first, then sign out; and `sudo
-  bridge admin reset-password` leaves a root-owned file the service cannot
-  read, which now refuses every console request until it is chowned.
+  nothing. **A rotation or sign-out CONFIRMS its write** (`commitAndConfirm`,
+  CodeRabbit on #1044): a running bridge's write that passed its own check
+  just before the command's rename lands after it, carrying back exactly the
+  credential and marker the command replaced (within `RenameWithRetry`'s
+  750 ms budget on Windows, where a scanner forces the retries). The command
+  re-reads after that budget and a margin (about a second), and commits
+  again only when the file is back to exactly what it replaced: a newer
+  write carries something else, and the naive "not what I wrote" rule makes
+  two concurrent rotations undo each other until they give up. Only a writer
+  stalled past the settle between its check and its rename gets through; a
+  kernel lock would close that, and #1039 declined one. Open: a bridge still
+  running the OLD binary drops the unknown field and writes its sessions
+  back, so restart first, then sign out; and `sudo bridge admin
+  reset-password` leaves a root-owned file the service cannot read, which now
+  refuses every console request until it is chowned.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it

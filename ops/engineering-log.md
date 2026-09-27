@@ -18831,6 +18831,9 @@ console.
   | NC23 | a commit does not record its own file's stamp | the read-count test |
   | NC24 | `EndOtherSessions` swallows a write that fails (round 1) | both not-saved tests |
   | NC25 | the handler answers a not-saved end as a failure (round 1) | the handler's not-saved test |
+  | NC26 | no confirmation: the command returns once its commit lands (round 2) | all four confirmation tests |
+  | NC27 | a rotation redoes whenever the file is not its own credential (round 2) | the supersede test, `TestResetPasswordBuildsNewPointer` (concurrent rotations then undo each other until they give up) |
+  | NC28 | a store that keeps coming back is not reported (round 2) | the keeps-coming-back test |
 
 - **Two controls came back green, and each was the test's fault.** NC13 at
   first: the fixture signed its other sessions in after the stale one
@@ -18910,6 +18913,53 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
   store beside the real one, so the fix is one `adminauth.FileName`, used
   at all five, rather than a constant local to the file. No CodeQL alerts;
   all 20 checks green on the first head.
+
+### Review round 2
+
+- **CodeRabbit's on-demand pass** (the user chose it over merging without
+  one), on the head with the round-1 fixes, found one thing outside the diff
+  (Major): **`unchangedSince` can pass before a sign-out renames, and the
+  stale writer then renames over it**, bringing back the sessions and the
+  marker it replaced. That is the rename window #1039 recorded and left
+  open, with a kernel lock declined, and a sign-out inherits it with a
+  sharper consequence: the command has printed that every console is signed
+  out, the bridge never sees the marker, and its later writes carry the old
+  state on. On POSIX the window is the few µs between a check and a rename;
+  **on Windows it is `RenameWithRetry`'s 750 ms budget**, and Defender or
+  the Search Indexer holding a freshly written file is what forces those
+  retries.
+- **Closed from the side that makes the promise, not with a lock.** A
+  rotation or sign-out now confirms its write (`commitAndConfirm`): after the
+  rename retry budget and a 250 ms margin (`atomicwrite.RenameRetryBudget`
+  is exported for it, so the two cannot drift), with the store's mutex
+  released, it reads the file again, and commits once more only when the
+  file is back to EXACTLY what it replaced, the credential for a rotation or
+  the marker for a sign-out. A stale write carries precisely that, being
+  built from the file before the command's; any newer write was built from
+  the command's file and carries something else, so it is left alone. The
+  naive rule, redo whenever the file is not what the command wrote, fails
+  here: two rotations run together each see the other's credential and undo
+  it until both give up (NC27, which `TestResetPasswordBuildsNewPointer`
+  catches). Three redos, then `errWrittenOver`. The commands take about a
+  second longer. This also closes #1039's window for a rotation's credential.
+- **What remains**: a writer stalled for longer than the settle between its
+  check and its rename (SIGSTOP, a paused VM). The kernel lock CodeRabbit
+  proposed would close that too, and it stays declined here for the reasons
+  #1039 gave, sharpened by this change: it would be the repo's first
+  interprocess lock, in the bridge's own write path (every login, logout and
+  activity flush), with a lock file a `sudo` run would leave root-owned (the
+  failure the store file itself already has, under Out of scope) and `flock`
+  not honoured on every network filesystem. The confirmation adds no new
+  failure mode to the bridge. The reverse direction (a command's rename over
+  a bridge write) needs nothing: the bridge's memory puts its state back at
+  its next write, and after a sign-out it ends those sessions at its next
+  read anyway.
+- Tests: `TestASignOutIsNotLostToAWriteTheBridgeHadInFlight` (both commands)
+  and `TestARotationIsNotLostToAWriteTheBridgeHadInFlight` land the stale
+  write through `beforeConfirmHook`; `TestAWriteThatSupersedesASignOutIsLeftAlone`
+  runs a second rotation inside the first's settle;
+  `TestAStoreThatKeepsComingBackIsReported`. `TestMain` sets the settle to
+  zero. NC26 to NC28 in the table.
 
 ### Out of scope
 
