@@ -256,6 +256,9 @@ func (s *survey) pass(ctx context.Context) ([]*claim, error) {
 	if err != nil {
 		return nil, fmt.Errorf("album gain: read peaks: %w", err)
 	}
+	if fresh == nil {
+		fresh = map[string]manifest.DSDPeak{} // measureClaimed writes into it
+	}
 	s.fresh = fresh
 	var waits []*claim
 	for _, m := range s.mates {
