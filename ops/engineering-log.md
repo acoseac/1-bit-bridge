@@ -18811,7 +18811,7 @@ console.
   | NC3 | a session write builds its set before the read | the three writer rows, the during-a-write test |
   | NC4 | a sign-out writes the clock's time without moving past the last marker | the frozen-instant test |
   | NC5 | the marker is a filter on `IssuedAt` at every read | the made-after test |
-  | NC6 | a `--keep-sessions` rotation drops the marker | the carry test |
+  | NC6 | a `--keep-sessions` rotation drops the marker | the carry test, the supersede test (round 2) |
   | NC7 | a session write drops the marker | the carry test, the frozen-instant test (with no marker in the file the second sign-out wrote the first one's time again) |
   | NC8 | the gate compares size and time only | the same-size test |
   | NC9 | no gate: every check reads | the read-count test |
@@ -18822,7 +18822,7 @@ console.
   | NC14 | `EndOtherSessions` ends them in memory only | its test, both not-saved tests (round 1) |
   | NC15 | reset-password keeps the sessions by default | the reset e2e |
   | NC16 | the route is not registered | both handler tests, the sign-out e2e |
-  | NC17 | a rotation that ends them writes the file's set back | the flipped test, the reset row |
+  | NC17 | a rotation that ends them writes the file's set back | the flipped test, the reset row, the in-flight reset row (round 2) |
   | NC18 | `SignOutEverywhere` only empties the file's set | the command rows, the writer rows, the carry, gate and frozen-instant tests, the sign-out e2e |
   | NC19 | `load()` does not take the marker as seen | the made-after test's restart |
   | NC20 | the signing-out process keeps its own sessions | the flipped test |
@@ -18834,7 +18834,12 @@ console.
   | NC26 | no confirmation: the command returns once its commit lands (round 2) | all four confirmation tests |
   | NC27 | a rotation redoes whenever the file is not its own credential (round 2) | the supersede test, `TestResetPasswordBuildsNewPointer` (concurrent rotations then undo each other until they give up) |
   | NC28 | a store that keeps coming back is not reported (round 2) | the keeps-coming-back test |
+  | NC29 | the unreadable-store branch answers `/api` in plain text (round 2) | the 503 test |
 
+- **The whole set was re-run on the final head** (after both review
+  rounds), each pattern checked to match once before anything was written:
+  three patterns had moved with the code (NC3, NC12, NC18) and the harness
+  refused them rather than mutate the wrong text; updated, all 29 are red.
 - **Two controls came back green, and each was the test's fault.** NC13 at
   first: the fixture signed its other sessions in after the stale one
   expired, and a login sweeps expired sessions, so the count never saw it.
