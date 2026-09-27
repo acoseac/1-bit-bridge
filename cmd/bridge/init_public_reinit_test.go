@@ -275,17 +275,20 @@ func pickPublicInitPorts(t *testing.T) publicInitPorts {
 }
 
 // publicInit runs `bridge init --yes --no-service --public` over cfgDir, on
-// the given ports, as the report ran it, with any extra flags. It returns
-// the exit code and both streams.
+// the given ports, as the report ran it, named name (no --name when it is
+// empty), with any extra flags. It returns the exit code and both streams.
 func publicInit(t *testing.T, cfgDir string, ports publicInitPorts, name string, extra ...string) (int, string) {
 	t.Helper()
-	args := append([]string{
-		"--yes", "--no-service",
-		"--dir", cfgDir, "--name", name,
+	args := []string{
+		"--yes", "--no-service", "--dir", cfgDir,
 		"--public", "--domain", "localhost", "--admin-tls-proxy",
 		"--listen-address", "127.0.0.1:" + strconv.Itoa(ports.api),
 		"--admin-address", "127.0.0.1:" + strconv.Itoa(ports.admin),
-	}, extra...)
+	}
+	if name != "" {
+		args = append(args, "--name", name)
+	}
+	args = append(args, extra...)
 	var out, errOut bytes.Buffer
 	code := initCmd(args, strings.NewReader(""), &out, &errOut)
 	return code, stripANSI("--- stdout ---\n" + out.String() + "\n--- stderr ---\n" + errOut.String())
