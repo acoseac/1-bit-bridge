@@ -214,12 +214,19 @@ func TestASessionMadeAfterASignOutIsKept(t *testing.T) {
 	if err := a.FlushSessions(); err != nil {
 		t.Fatal(err)
 	}
+	// The next start: it opens the file, marker and all, and reads it again
+	// at its first login attempt. It must take the marker it opened with as
+	// one already taken, or that first read signs out every session it
+	// loaded, at every start after a sign-out.
 	c, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := c.Verify("admin", leakedPassword); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.ValidateSession(after); err != nil {
-		t.Errorf("a session made after the sign-out is not in the file for the next start: %v", err)
+		t.Errorf("a session made after the sign-out does not survive the next start: %v", err)
 	}
 }
 
