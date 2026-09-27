@@ -17439,3 +17439,180 @@ kept), `runPortCheck` (holds nothing) and `internal/proctest`'s
   deleted the KeepAlive and left its import, CLAUDE.md's "most 'just
   disable this branch' edits delete a variable's only use" in its import
   form.
+
+## 2026-09-27 — a public re-init keeps the admin account, and init refuses before it writes (#1038)
+
+#1027's entry recorded it under Out of scope: "A public re-init over an
+existing public install exits 1 after saving the config: `store.MintInitial`
+refuses because `adminauth.json` exists … Row C shows it on main's
+successful paths too; it is not about ports."
+
+### What was measured
+
+- **The mechanism.** initCmd ran `cfg.Save`, then the TLS
+  load-or-generate, then `adminauth.OpenStore` and `MintInitial("admin")`,
+  which returns `ErrAlreadyInitialised` for a store that holds an account.
+  The run then printed `adminauth: adminauth: store already has
+  credentials; use reset-password to rotate` and exited 1. Every public
+  re-init that overwrites the config reached it (`--force`, or "Overwrite?
+  y"), not only row C, and stdout showed nothing past the header: no
+  service install, no footer.
+- **The same order held two more refusals after `Save`.** `OpenStore` on a
+  store that does not load, and `LoadOrGenerateWithOptions` on a pair that
+  does not load (a cert without its key). The second is reachable only
+  with `--skip-doctor` (the preflight FAILs it, "partial state", before
+  `Save`), or where the existing config names another pair: the preflight
+  grades `resolveCertPaths(cfg)`, init loads `DefaultPaths(dataDir)`.
+- **End to end**, on the Mac (darwin/arm64) and on dido (Ubuntu 26.04, the
+  stock `golang:1.26.6` image, uid 1000, no lsof), trees `615d41c6` (main)
+  and `7250f1ea` (the fix), dido's harness in
+  `~/attrword/reinit-{main,fix}/_reinit/e2e.sh`. The flags are the
+  report's (`--public --domain localhost --admin-tls-proxy --admin-address
+  127.0.0.1:7793 --listen-address 127.0.0.1:7794`); every re-init adds
+  `--force` and `--name`. The three data files are `adminauth.json`,
+  `server.crt` and `server.key`, hashed together. dido ran all eight
+  cells; the Mac ran R and E on both trees and C and D on the fix (main's
+  D through the red test below), and agreed with dido on each:
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | R | the reported re-init | exit 1, `bridge.yaml` rewritten, data files identical | exit 0, `bridge.yaml` rewritten, data files identical, the "kept" box, the footer |
+  | C | #1027's row C: the public bridge live on 7794 / 7793, its config broken (`libraryNmae: typo`), the re-init on the same ports | exit 1, rewritten | exit 0, typo gone, data files identical, the "kept" box |
+  | D | `adminauth.json` cut off mid-JSON | exit 1, rewritten | exit 1, nothing changed, "the config was NOT changed" |
+  | E | `server.key` removed, the re-init with `--skip-doctor` | exit 1, rewritten | exit 1, nothing changed, "the config was NOT changed" |
+
+  C ran the real `bridge serve`. Its config does not load, so the second
+  port pass grades 7794 / 7793 by attribution alone (#1027), and it passed
+  both, which in that mode means the probe saw the recorded pid listening
+  (lsof on the Mac, `/proc` on dido).
+- **A second defect in the same box.** `box()`'s body is 51 columns
+  (`frameWidth - 4`), and the "shown ONCE" box opened with a 53-column
+  line, so every public install printed `Save these now. The plai... is
+  not stored anywhere.` A sweep of every `box()` literal in `cmd/bridge`
+  found no other line over the budget.
+
+### Decisions
+
+- **Keep the account, and say so.** Re-running init is not a request to
+  rotate the password, as it is not one to rotate the TLS cert, which init
+  has always kept; `bridge admin reset-password` rotates. So
+  `keepOrMintAdminCredentials` leaves `adminauth.json` untouched and prints
+  a "kept" box naming the account. Refusing before `Save` was rejected: no
+  public re-init could then succeed without deleting the credentials.
+  Rotating was rejected because it locks out whoever holds the current
+  password, and keeping silently because an operator who expects the
+  "shown ONCE" box would go looking for a password that was never made.
+- **What is kept is an account, not a file.** A store with none in it (no
+  file, or an empty one, which `load()` reads as uninitialised) is minted
+  into, as on a first install. That is also the remedy the damaged-store
+  refusal names.
+- **A store that does not load is a refusal, not an empty store.** Minting
+  over it destroys whatever the file still holds, and `bridge serve`
+  refuses the same file. The message names the remedy by cause: restore or
+  move aside for a damaged file, "run init as the user the bridge runs as"
+  for `os.ErrPermission`, which reaches through `OpenStore`'s `%w`.
+- **Both reads move before `Save`, the TLS load included.** A new refusal
+  goes there too. After `Save`, only the mint's own write and the service
+  install can fail, and neither is a verdict about the install that is
+  there. The cost is on a first install: the pair is minted before the
+  config is saved, so a `Save` that then fails leaves a pair nobody has
+  pinned, which the next run loads, with the first run's SANs (the
+  consult's point below; tls-cert-sans warns if they no longer match).
+- **The username comes from the store.** The "kept" box names
+  `store.Username()`, since an environment-seeded store can hold another
+  name, and the minted box reads it back after the mint.
+- **The rotate hint is unchanged**: `bridge admin reset-password`, with no
+  `--config`, as the minted box and serve's refusal have it (Out of scope).
+
+### Tests and controls
+
+- `cmd/bridge/init_public_reinit_test.go`. Each end-to-end test drives the
+  real `initCmd` twice over one `--dir`, the second run as the report ran
+  it; the keep test and the two refusals read `bridge.yaml`,
+  `adminauth.json`, `server.crt` and `server.key` byte for byte:
+  - `TestInitPublicReinitKeepsTheAdminCredentials`: exit 0, the config is
+    the one asked for, the three data files are identical, the first run's
+    password still verifies, the "kept" box names the account, no password
+    is printed, and the footer is reached.
+  - `TestInitPublicReinitRefusesADamagedCredentialStoreBeforeWriting` and
+    `TestInitReinitRefusesAnIncompleteCertPairBeforeWriting`: a non-zero
+    exit, all four files unchanged, and "the config was NOT changed".
+  - `TestInitPublicReinitMintsIntoAStoreWithNoAccount`, the positive
+    control, for no file and an empty one.
+  - `TestInitNamesTheRemedyForCredentialsThisUserCannotRead` calls
+    `openInitAdminAuth` on a mode-000 file (skipped on Windows and as root).
+  - `TestAdminCredentialBoxesAreNotTruncated` renders both boxes and
+    refuses `truncateMid`'s `...`.
+- **Red first on the Mac** against main's `init.go`: the keep test (exit 1,
+  no "kept" box, no footer) and both refusal tests (the config rewritten).
+  The positive control passed, as it must. The box test failed on the old
+  line before the fix was committed.
+- Negative controls against the committed fix (`7250f1ea`), each restored
+  from HEAD and the tree checked clean before the next, on the Mac. None
+  failed to build, and each turned red only the tests listed:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the old step: mint unconditionally, exit 1 on an account | the keep test |
+  | NC2 | "keep" by rotating: `ResetPassword` and show the new one | the keep test, on four assertions: the store changed, the old password fails, no "kept" box, a password printed |
+  | NC3 | keep, silently | the keep test, on the two "says so" assertions alone |
+  | NC4 | the store read moved back after `Save` | the damaged-store test |
+  | NC5 | the TLS load moved back after `Save` | the cert-pair test |
+  | NC6 | "kept" whenever a config was there before the run | the positive control, both rows |
+  | NC7 | a damaged store removed and minted over | the damaged-store test |
+  | NC8 | no permission branch | the remedy test |
+  | NC9 | the 53-column line back | the box test |
+
+- On dido, the new tests and the whole `cmd/bridge` package passed in the
+  stock image as uid 1000, where the mode-000 test runs.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with the diff and
+`init.go`, on the three decisions. It agreed on all three: keep and say so
+(whoever can write `adminauth.json` can write `bridge.yaml` and the key, so
+a planted store survives nothing a rotation would stop, and the "kept" box
+names the account either way); the TLS load before `Save` (the call reads
+only paths and the in-memory config); and no ordering hazard between the
+read and the mint. It named two facts as the ones to check, and both were
+already pinned: `OpenStore` wraps its read error with `%w` (NC8), and a
+missing file loads as an empty store (the positive control's "no file"
+row). It added the first-install consequence recorded above.
+
+### Out of scope
+
+- **`bridge admin reset-password` does not survive a running public
+  bridge.** Measured with a throwaway two-store probe in
+  `internal/adminauth`: after one store rotates, the other (the running
+  bridge) still verifies the old password, and its next session write
+  (login, the 30 s activity debounce, logout, the shutdown flush) writes
+  the old hash back, since `persist()` writes `s.user` from memory and
+  never re-reads the file. After it, a fresh store verifies the old
+  password and refuses the new one. The `auth.Store` class CLAUDE.md
+  records under `FlushLastUsed`, on the admin credential. Filed as its own
+  task.
+- **A `--force` rewrite carries nothing over from the config it replaces.**
+  A loopback install serving a custom `tlsCertPath` / `tlsKeyPath` (its
+  pair moved out of the data dir) re-inited with `--force`: exit 0, a
+  config without the paths, a new pair minted at `DefaultPaths(dataDir)`,
+  and `bridge cert info` went from `E9:52:21:…` to `03:49:6C:…`, a pin
+  break for every paired device. The same rewrite drops `customEndpoints`,
+  which `withExistingInstallDeps`' docblock and CLAUDE.md's "preflight
+  grades the install that is THERE" bullet both say "survives the
+  rewrite". Measured, left for its own change with the decision about what
+  a `--force` rewrite keeps, and filed as a task. The CLAUDE.md rule this
+  change adds scopes the kept pair to the data dir's for that reason.
+- **The rotate hint names no `--config`.** For an install made with
+  `--dir X`, a bare `bridge admin reset-password` resolves `./bridge.yaml`
+  and then the platform config, so on a host with two installs (the VPS
+  runs the operator's bridge and the demo) it can reach the other one.
+  The minted box, the "kept" box and serve's refusal all print it bare.
+- **With `server.crt` present and `server.key` missing**, the preflight's
+  tls-cert-sans says "no certificate yet — the first mint covers the
+  current endpoints" beside tls-cert's "partial state" (measured running E
+  without `--skip-doctor`). The FAIL is right, and the SAN line reads as a
+  first install.
+- **The keep-config branch** (`--yes` without `--force`, or "Overwrite? n")
+  never reaches the credential step, so a public install whose store has
+  no account stays without one until an overwriting run or `bridge admin
+  reset-password`. serve's refusal names both. Pre-existing.

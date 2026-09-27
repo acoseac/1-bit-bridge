@@ -51,7 +51,9 @@ func baseConfig(roots []string, name, dataDir string) *config.Config {
 //
 // Idempotent: re-running on a populated config dir offers to keep or
 // rewrite the existing bridge.yaml. The TLS cert is always preserved —
-// rotating it breaks every paired client's pin.
+// rotating it breaks every paired client's pin — and so is a public
+// install's admin account, which `bridge admin reset-password` rotates.
+// Every refusal is decided before bridge.yaml is written.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -417,27 +419,56 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			printWarnings(stdout, report)
 		}
 	}
+	// Every refusal is decided BEFORE Save, so a refusal leaves the install
+	// as the run found it. Two of them are about files already in the data
+	// dir, which an install keeps across a re-init: a public install's admin
+	// credentials and every install's TLS pair. Both were asked AFTER Save,
+	// so a store or a pair that could not be kept had the config rewritten
+	// and then exited 1 about it, and a public re-init over an install with
+	// an admin account exited 1 there on every run (row C of #1027's log
+	// entry). What can still fail after Save is the credential mint's own
+	// write and the service install, and neither is a verdict about the
+	// install that is there.
+	var adminAuth *adminauth.Store
+	if *publicMode {
+		store, ok := openInitAdminAuth(filepath.Join(dataDir, "adminauth.json"), stderr)
+		if !ok {
+			return 1
+		}
+		adminAuth = store
+	}
+
+	// Load the TLS pair, or on a first install mint it, so the fingerprint
+	// is stable from the first serve onwards. A pair that is there is kept
+	// as it is (LoadOrGenerate never rewrites one): rotating it breaks every
+	// paired client's pin. One that is there and does not load, a cert with
+	// no key beside it say, is a refusal. The preflight's tls-cert check
+	// FAILs it as well, but only when the preflight runs, and only for the
+	// pair it grades: the existing config's, which need not be this one.
+	//
+	// A first install's mint therefore lands before its config does. A Save
+	// that then fails leaves a pair nothing has pinned, which the next run
+	// loads.
+	//
+	// The mint picks up the broader SAN set so the cert covers every URL the
+	// bridge will advertise from the very first serve. A re-init against an
+	// existing cert emits the SAN-stale warning if the operator's
+	// CustomEndpoints changed, which `bridge doctor`'s tls-cert-sans check
+	// reports from the same gather.
+	certPath, keyPath := servertls.DefaultPaths(dataDir)
+	_, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, certSANOptions(cfg))
+	if err != nil {
+		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
+		fmt.Fprintln(stderr, "the config was NOT changed.")
+		return 1
+	}
+
 	if err := cfg.Save(cfgPath); err != nil {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
 
-	// Mint the TLS cert up-front so the fingerprint is stable from the
-	// first serve onwards. If the cert already exists (re-init case),
-	// LoadOrGenerate preserves it.
-	certPath, keyPath := servertls.DefaultPaths(dataDir)
-	// First-mint at `bridge init` time picks up the broader SAN set
-	// so the cert covers every URL the bridge will advertise from
-	// the very first serve. Re-init against an existing cert leaves
-	// the on-disk cert untouched (LoadOrGenerate path) and emits the
-	// SAN-stale warning if the operator's CustomEndpoints changed —
-	// which `bridge doctor`'s tls-cert-sans check reports from the
-	// same gather.
-	opts := certSANOptions(cfg)
-	if _, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, opts); err != nil {
-		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
-		return 1
-	} else if !*publicMode {
+	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
 		// init narration. Operators have to copy this exact string
 		// to the iOS side at pairing time; framing it makes the
@@ -462,40 +493,101 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}))
 	}
 
-	// PR 5: public-mode admin credentials. Mint the initial
-	// password + display it ONCE in a framed box. The
-	// adminauth.Store persists only the bcrypt hash; the
-	// plaintext is reachable nowhere else after this banner
-	// scrolls off-screen.
 	if *publicMode {
-		storePath := filepath.Join(dataDir, "adminauth.json")
-		store, err := adminauth.OpenStore(storePath)
-		if err != nil {
-			fmt.Fprintf(stderr, "adminauth: %v\n", err)
-			return 1
+		if code := keepOrMintAdminCredentials(adminAuth, stdout, stderr); code != 0 {
+			return code
 		}
-		plaintext, err := store.MintInitial("admin")
-		if err != nil {
-			// ErrAlreadyInitialised: the operator re-ran init
-			// against an existing store. Tell them how to
-			// recover rather than continuing with stale creds.
-			fmt.Fprintf(stderr, "adminauth: %v\n", err)
-			fmt.Fprintf(stderr, "  (existing admin credentials found at %s; run `bridge admin reset-password` to rotate)\n", storePath)
-			return 1
-		}
-		fmt.Fprint(stdout, "\n")
-		fmt.Fprint(stdout, box("Admin credentials — shown ONCE", []string{
-			"Save these now. The plaintext is not stored anywhere.",
-			"",
-			"  Username:  admin",
-			"  Password:  " + plaintext,
-			"",
-			"Rotate with:  bridge admin reset-password",
-		}))
 	}
 
 	choice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 	return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, choice)
+}
+
+// openInitAdminAuth reads a public install's admin credential store for
+// `bridge init`, which must happen before the run writes anything.
+//
+// A store that is there and does not load is a refusal. Minting over it
+// would destroy whatever the file still holds, and it cannot be kept, so
+// init stops, as `bridge serve` does on the same file. A store this user
+// cannot read is the same refusal with a different remedy: the bridge's
+// own user can read it.
+func openInitAdminAuth(storePath string, stderr io.Writer) (*adminauth.Store, bool) {
+	store, err := adminauth.OpenStore(storePath)
+	if err == nil {
+		return store, true
+	}
+	fmt.Fprintf(stderr, "adminauth: %v\n", err)
+	if errors.Is(err, os.ErrPermission) {
+		fmt.Fprintf(stderr, "this user cannot read the admin credentials at %s, which init keeps.\n", storePath)
+		fmt.Fprintln(stderr, "run init as the user the bridge runs as.")
+	} else {
+		fmt.Fprintf(stderr, "the admin credentials at %s do not load, and init keeps an install's credentials rather than replacing them.\n", storePath)
+		fmt.Fprintln(stderr, "restore that file from a backup, or move it aside and run this init again to mint new ones.")
+	}
+	fmt.Fprintln(stderr, "the config was NOT changed.")
+	return nil, false
+}
+
+// keepOrMintAdminCredentials gives a public install its admin account, or
+// keeps the one it has. The store was read before Save and nothing has
+// written it since.
+//
+// Re-running init is not a request to rotate the password, any more than it
+// is one to rotate the TLS cert, which init also keeps: `bridge admin
+// reset-password` is the command for that. So an account that is there is
+// kept, and the run says so and names it. Silence would leave an operator
+// who expects the "shown ONCE" box looking for a password that was never
+// made. MintInitial refuses a store that holds an account, and until
+// 2026-09-27 that refusal ended every public re-init with exit 1, after the
+// config had been rewritten.
+//
+// What is kept is an ACCOUNT, not a file: a store with none in it, no file
+// or an empty one, is minted into, as on a first install.
+func keepOrMintAdminCredentials(store *adminauth.Store, stdout, stderr io.Writer) int {
+	if store.IsInitialised() {
+		fmt.Fprint(stdout, "\n")
+		fmt.Fprint(stdout, keptAdminCredentialsBox(store.Username()))
+		return 0
+	}
+	// The mint's only failures are its own writes (a full disk, say), with
+	// the config already saved. The same init run again finds the store
+	// still empty and mints into it.
+	plaintext, err := store.MintInitial("admin")
+	if err != nil {
+		fmt.Fprintf(stderr, "adminauth: %v\n", err)
+		return 1
+	}
+	// The adminauth.Store persists only the bcrypt hash, so the plaintext
+	// is reachable nowhere else once this box scrolls off-screen.
+	fmt.Fprint(stdout, "\n")
+	fmt.Fprint(stdout, mintedAdminCredentialsBox(store.Username(), plaintext))
+	return 0
+}
+
+// mintedAdminCredentialsBox is the box a public init prints the password it
+// minted in, the only time that password is shown.
+func mintedAdminCredentialsBox(username, plaintext string) string {
+	return box("Admin credentials — shown ONCE", []string{
+		"Save these now. The plaintext is stored nowhere.",
+		"",
+		"  Username:  " + username,
+		"  Password:  " + plaintext,
+		"",
+		"Rotate with:  bridge admin reset-password",
+	})
+}
+
+// keptAdminCredentialsBox is the box a public re-init prints in place of
+// minted credentials, when the install already has an account.
+func keptAdminCredentialsBox(username string) string {
+	return box("Admin credentials — kept", []string{
+		"This install already has an admin account, and",
+		"re-running init leaves it as it is.",
+		"",
+		"  Username:  " + username,
+		"",
+		"Rotate with:  bridge admin reset-password",
+	})
 }
 
 // launchChoice bundles the three orthogonal knobs that control how
