@@ -207,6 +207,19 @@ type Track struct {
 	// as present; only absence drops to nil).
 	OriginalYear *int `json:"originalYear,omitempty"`
 
+	// Compilation is the file's own "part of a compilation" flag: ID3v2
+	// TCMP, MP4 `cpil`, Vorbis COMPILATION, set to "1". Tag-sourced and
+	// persisted in tags_json like Composer; set by populateFromTagMetadata,
+	// the same read that has long synthesized AlbumArtist "Various Artists"
+	// for a flagged file with no album artist. iOS uses it to tell a
+	// compilation whose album artist is NOT a Various-Artists marker (a DJ
+	// mix, a label sampler) from an ordinary album, so the performers who
+	// appear only on compilations can be kept out of its Artists list.
+	// Only true is meaningful: absence (an unflagged file, or a bridge
+	// from before the field) makes no claim. Additive + omitempty;
+	// ProtocolVersion stays 1.
+	Compilation bool `json:"compilation,omitempty"`
+
 	// BPM (beats per minute). Tag-sourced (dhowden picks up TBPM / BPM /
 	// tmpo); when the source has no BPM tag, the offline analyzer's
 	// estimated tempo is spliced in (tag-absent-only, like

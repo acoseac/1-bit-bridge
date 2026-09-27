@@ -543,6 +543,20 @@ lost my library."
   Audio refuses that file) where this masks it, as it always has. **Don't stop
   after one tag, don't drop the cap, and don't change one side's walk without
   the other.**
+- **`Track.Compilation` puts the file's TCMP / `cpil` / COMPILATION flag on the
+  wire** (ExtractorVersion 17, for the iOS app's "hide artists who appear only on
+  compilations"). It is set by the SAME `stringOf(raw, "tcmp", "cpil",
+  "compilation") == "1"` read that fills AlbumArtist "Various Artists" for a
+  flagged file with no album artist, so the flag and that fill can never
+  disagree about which files are compilations; the iOS enrichers apply the same
+  "only 1 counts" rule to local files. The fill's condition did not change — a
+  flagged file with a TAGGED album artist (a DJ mix, a label sampler) keeps it,
+  and was indistinguishable from an ordinary album on iOS until v17. **Don't make
+  it a `*bool` or emit `false`**: `omitempty` keeps every unflagged row
+  byte-identical to its pre-v17 form, which is what limits the v17 re-extract's
+  delta to the flagged files. Those take the full-upsert leg, so their
+  enrichment is re-queued once (`mergePostScanFields` keeps their MBIDs and art
+  meanwhile).
 - **`Track.Enriched` allocates per row; don't reintroduce package-level singleton
   bool pointers.** `Track` is exported, so a shared pointer lets any downstream
   write clobber every subsequent read for the process lifetime. The cost is

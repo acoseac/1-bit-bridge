@@ -1033,6 +1033,9 @@ func TestCompilationSynthesizesVariousArtistsWhenAlbumArtistMissing(t *testing.T
 		t.Errorf("AlbumArtist: got %q, want %q (synthesized from COMPILATION=1)",
 			tr.AlbumArtist, "Various Artists")
 	}
+	if !tr.Compilation {
+		t.Errorf("Compilation = false, want true: the synth and the wire flag come from one read")
+	}
 }
 
 // TestCompilationDoesNotOverrideExplicitAlbumArtist — a tagger that

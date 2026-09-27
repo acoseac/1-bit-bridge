@@ -18669,3 +18669,48 @@ list stay consistent). Leave Windows' retries as the residual.
   (read from the code).
 - **A bridge still running the old binary** keeps both windows until it
   restarts.
+
+## 2026-09-27 — the manifest carries the file's compilation flag (ExtractorVersion 17)
+
+A user asked the iOS app to keep performers who appear only on Various Artists
+compilations out of its Artists list, detected "by either the COMPILATION tag
+and/or an Album Artist of 'Various Artists', 'VA' etc." The bridge had read the
+tag since #166, but only to fill `AlbumArtist = "Various Artists"` for a
+flagged file with NO album artist. A flagged file whose album artist is tagged
+(a DJ mix, a label sampler such as "Ministry of Sound") reached iOS looking like
+an ordinary album. Mirror-PR pair with the iOS app, which reads the same three
+tags from local files by the same rule.
+
+### Decisions
+
+- **Same read, same test.** `Track.Compilation` is set inside the existing
+  `stringOf(raw, "tcmp", "cpil", "compilation") == "1"` branch, and the synth
+  moved under it unchanged, so the flag and the fill can never disagree. Only
+  "1" counts: `0`, `true` and `01` stay unflagged on both sides. Neither side
+  reads `TXXX:COMPILATION` (what ffmpeg writes for MP3; dhowden files a TXXX as
+  a `*tag.Comm` under `TXXX`, which `stringOf` cannot coerce) or the ID3v2.2
+  `TCP`.
+- **`bool` + `omitempty`, never `*bool` or an explicit false.** Only true is
+  meaningful; absence is an unflagged file OR a pre-v17 bridge, and iOS reads
+  both as unflagged. The payoff is the delta: every unflagged row re-extracts
+  byte-identical to its stored form and rides the version-stamp leg, so the
+  v17 bump's iOS delta is exactly the flagged files.
+- **Persisted in `tags_json`, not a column.** It is extractor-owned (no
+  post-scan writer), so it needs no `mergePostScanFields` arm and no migration.
+- **Flagged rows take the full-upsert leg**, whose `enriched_at = 0`
+  re-queues their enrichment once; `mergePostScanFields` keeps their MBIDs and
+  art meanwhile, so no grey-tile window. The same one-wave cost as v2 / v4 /
+  v15.
+
+### Tests and controls
+
+- `internal/manifest/extractors_compilation_test.go`: a flagged FLAC with a
+  tagged album artist keeps it and reports the flag; the "only 1" truth table
+  (`1`, ` 1 `, `0`, `true`, absent); ID3v2 TCMP through a DSF's trailing tag
+  and an MP3's head; MP4 `cpil` 1 and 0 as the int atom dhowden surfaces; the
+  wire shape (no key unless true); and the v17 upgrade end to end — rows munged
+  back to v16 (stamp 16, `json_remove` of the key), a re-scan, the flagged row
+  gaining the key with `indexed_at` advancing and the unflagged sibling only
+  stamped.
+- The existing synth test now also asserts the flag.
+- `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
