@@ -1944,6 +1944,43 @@ no failing test — which is the shape to expect in this area.
   and 170 µs on APFS from the re-read to the rename's return; 2 of 1,600 mints
   lost against a 10 Hz writer) and, on Windows, its retries. A kernel lock would
   close it, as for adminauth.json, and is not taken.
+- **…and a debounced write that FAILS starts the next window too, and a store
+  the running bridge cannot read is reported once each way** (#1047).
+  Validate's and RecordClientVersion's debounced write started the next 30 s
+  window only when it LANDED (`writeLocked` stamped `lastUsedFlush`), so while
+  it could not land every request past the window re-entered the write: 10
+  requests gave 10 ERROR lines with tokens.json unreadable (a `sudo bridge
+  pair` beside a service install leaves it root's 0600), damaged, or on a full
+  disk, and a write failing at its commit paid its staging per request under
+  `s.mu`, which every authenticated request takes. With the rename refusing
+  (RenameWithRetry's 750 ms of retries), 40 concurrent requests took 30.4 s,
+  the worst 6.8 s; with the fix 0.76 s and one ERROR. **`flushDueLocked(now)`
+  is the one gate, and it starts the window at the ATTEMPT**, adminauth's #1039
+  rule; never gate a debounced write on the interval without starting the
+  window in the same step. A failed reload still ABORTS the write, the
+  observations stay in memory for the attempt a window later or the shutdown
+  flush, and `FlushLastUsed` asks nothing of the window. The write side still
+  logs once per window: that bounds the flood rather than silencing it, and it
+  is the only report of a file made unreadable IN PLACE (a chmod changes no
+  mtime or size, so `reloadIfStale` has nothing to reload). **While
+  `reloadIfStale` cannot read the file, devices are checked against the tokens
+  last read, deliberately**: a device `sudo bridge pair` paired is refused and
+  one `sudo bridge token revoke` removed is still accepted. Fail-closed was
+  rejected: the content is unknown, so the only refusal left is every paired
+  device, over a permissions mistake. What was missing was the SAYING: a 401 is
+  not logged, and the only other line was the write side's, about a
+  timestamp, from a device the bridge already knew, so a first `sudo bridge
+  pair` on a fresh install 401'd in silence. `noteReadLocked` logs one Warn
+  when the store first cannot be read (the path, the error, and on POSIX for a
+  permission error the uid and the chown remedy) and one Info when a request
+  can read it again, with no restart. Both give the token count the bridge
+  answers from: `tokens=0` after the file is deleted to mend it, which unpairs
+  every device, where "readable again" alone read as all clear. **A test that
+  asserts only the FILE can no longer see the abort**, since #1043's re-read
+  before the commit refuses the same write: the skip-persist tests passed with
+  the abort removed, and count stagings now. The cause, a CLI run as root
+  re-owning the file, is the runbook's "always as the service user" rule, and
+  is not fixed in code.
 - **`logging.Component` resolves `slog.Default()` at LOG time, not construction.**
   Package-level `var logger = logging.Component(...)` runs during package init,
   before `main()` calls `logging.Init()` — a captured-handler shape would lock

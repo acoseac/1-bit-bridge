@@ -18669,3 +18669,199 @@ list stay consistent). Leave Windows' retries as the residual.
   (read from the code).
 - **A bridge still running the old binary** keeps both windows until it
   restarts.
+
+## 2026-09-27 — a failed debounced `tokens.json` write starts the next window, and an unreadable store is reported once (#1047)
+
+#1043's entry recorded it under Out of scope: "A tokens.json the running
+bridge cannot read logs an Error on every authenticated request … Filed as
+its own task. The device that `sudo bridge pair` paired 401s there as well,
+since Validate's own reload fails the same way (read from the code)."
+
+### What was measured
+
+- **The flood, on main.** a2139c2d adds only the tests; against 44a897b0's
+  `auth.go`, ten requests past the window gave ten ERROR lines for both
+  debounced writers (Validate, RecordClientVersion) and four ways of failing:
+  tokens.json unreadable after a sibling's pair (the reload fails, `read token
+  store: open …: permission denied`), made unreadable IN PLACE with no write
+  (the stat finds nothing to reload, and the commit's re-read fails, `re-read
+  the token store before the commit; nothing written: … permission denied`),
+  damaged (`parse token store: unexpected end of JSON input`), and a rename
+  that refuses. The two that fail at the commit also staged the file ten
+  times: a temp file, a write and an fsync per request.
+- **The cost under the mutex** (a throwaway `zz_measure_test.go` behind
+  `-tags measure`, not committed): with the rename refusing, 8 goroutines × 5
+  requests past the window took **30.4 s** wall on main, the worst request
+  **6.8 s** (waiting on `s.mu` behind the others' 760 ms of RenameWithRetry
+  backoff), 40 ERRORs and 40 stagings; with the fix **0.76 s**, the worst
+  0.76 s, one ERROR, one staging.
+- **A full disk, for real**: a 2 MB HFS+ image (`hdiutil`), filled with a
+  file until ENOSPC. On main ten requests gave ten ERRORs (`persist LastUsedAt
+  err=temp file: open <vol>/.tokens-….json: no space left on device`), in
+  0.5 ms all told: cheap per request, one line per request. Each line names a
+  different temp file, so no filter deduplicating by text would have caught
+  them. The fix: one. On HFS+ nothing is staged, since CreateTemp itself
+  fails; other filesystems were not measured.
+- **The silent 401, on main**: with tokens.json unreadable after a sibling
+  paired one device and revoked another, the running bridge refused the paired
+  device and accepted the revoked one ten times over with no line at any
+  level; once the file was readable again the next request saw both changes,
+  with no restart. The damaged file reads the same. A device rotated since
+  still answers to its old token (read from the code, not tested). On a fresh
+  install where the device `sudo bridge pair` paired is the only one in use,
+  nothing at all reached the log: a refused device never reaches the
+  debounced write (only a device the bridge already knew can), and the ten
+  refusals above logged nothing.
+
+### Decisions
+
+- **Start the window at the attempt, through one gate.** `flushDueLocked(now)`
+  answers "due" and stamps `lastUsedFlush` in the same step, so a debounced
+  writer cannot gate on the interval and forget the stamp; both writers use it
+  (NC11: RecordClientVersion's rows alone go red on the old gate). `writeLocked`
+  still stamps on a landed write, since any write that lands (Mint, Revoke,
+  Rotate, SetExpiry, FlushLastUsed) puts down every observation in memory.
+  adminauth's `persistSessionsLocked` has stamped at its top since #1039. A
+  one-off failure now defers the next attempt by a window rather than to the
+  next request; the data is an observation the debounce already quantizes to
+  30 s, and the shutdown flush lands it.
+- **The abort stays**: a failed reload ends the write before its staging, and
+  the in-memory bump survives (reload mutates nothing on its error paths).
+- **`FlushLastUsed` stays ungated**: it is the shutdown write, and an attempt
+  that failed a moment before must not make it skip (NC4).
+- **The write side still logs once per window** while the failure lasts: at
+  most 2,880 lines a day with a known device active. The fix bounds the flood
+  rather than silencing it. Not taken: skipping the attempt while the read
+  side knows the store is unreadable (NC5). The write side reports a different
+  fact (the observations are not being written), and it is the only report of
+  a file made unreadable in place, where `reloadIfStale`'s stat sees no change
+  and nothing on the read side fails.
+- **Fail-open, said once.** While `reloadIfStale` cannot read the file,
+  Validate answers from the tokens last read. Fail-closed (refuse every token
+  while the file cannot be read, as adminauth's Verify refuses a login) was
+  considered and rejected: the content is unknown, so the only refusal
+  available is every paired device, an outage from a permissions mistake;
+  adminauth's existing sessions, likewise, keep working in the same state.
+  What was missing was a line. `noteReadLocked`, called from a deferred
+  closure over `reloadIfStale`'s named result so that every caller reports
+  (Validate, List, Get, the debounced writers' pre-persist reload, the
+  shutdown flush), logs one Warn on the change to failing (the path, the
+  error, a note on the consequence, and on POSIX for a permission error the
+  uid and a hint naming the sudo'd CLI and chown) and one Info on the change
+  back. Both give the number of tokens the bridge answers from: an operator
+  who mends the file by deleting it has unpaired every device, and a line
+  saying only "readable again" reads as all clear, where `tokens=0` does not.
+  Not from `reload()`: its callers (OpenStore, Mint, Revoke, Rotate,
+  SetExpiry, the commit's rebuild) return the error to someone who reports
+  it, and OpenStore reporting would add a Warn to every failed CLI run.
+- **The uid and the hint are POSIX's.** Windows has no uid to name and no
+  chown; there the error text stands alone.
+
+### Tests and controls
+
+- `internal/auth/auth_reload_failure_test.go`.
+  `TestAFailedDebouncedWriteStartsTheNextWindow` crosses the two writers with
+  the four failures: ten requests past the window log one ERROR and cost the
+  stagings of one attempt (none when the reload fails, one when the commit
+  does); a window later, one more of each; with the failure mended,
+  FlushLastUsed lands the last observation, and the sibling's token, on disk.
+  `TestAStoreThatCannotBeReadIsReportedOnce` (unreadable, damaged,
+  unreadable then deleted) pins the verdicts while the store cannot be read
+  and after, one Warn carrying the path, the cause and the 3 tokens last read
+  (and, for the permission rows, the uid and the hint), and one Info with the
+  tokens now read: 2, or 0 once the file was deleted, when every device is
+  refused. The sibling revokes two devices so that the two counts differ.
+- **The skip-persist tests could no longer see the abort.** With it removed
+  (NC6), `TestValidateSkipsPersistWhenPreflightReloadFails` and
+  `TestRecordClientVersionSkipsPersistWhenPreflightReloadFails` both passed:
+  since #1043 the commit's re-read before the rename refuses the same write,
+  so the sibling's token survives on disk with or without the abort. The
+  #1039 lesson again, "a control can pass because a second layer caught it".
+  Both now also count the stagings after the failed reload (none), and go red
+  under NC6.
+- **Red first.** a2139c2d's tests fail on 44a897b0's `auth.go`: all eight
+  window rows (ten ERRORs where one is wanted, and ten stagings in the rows
+  that fail at the commit) and both of its report rows (no line, while every
+  verdict holds). The final test file, re-run there in a scratch worktree,
+  fails on all eleven of its rows (the report test gained the deleted row);
+  the two strengthened skip-persist tests pass there, as main has the abort.
+- Negative controls against 60224f99 (NC6 re-run against da21ebf5; NC7 to
+  NC13 against 720b20d2, whose report test has the deleted row), each
+  restored from HEAD and the tree checked clean before the next, by a harness
+  in the scratchpad that matched every pattern exactly once before opening
+  the file for writing. None failed to build:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | `flushDueLocked` does not stamp (main's rule: only a landed write starts the window) | all eight window rows |
+  | NC2 | a failed commit does not start the window, a failed reload does | the four commit rows (in place, rename), on ten ERRORs and ten stagings |
+  | NC3 | a failed reload does not start the window, a failed commit does | the four reload rows |
+  | NC4 | FlushLastUsed asks the window | all eight window rows at the flush, eleven of #1043's commit-window rows, `TestValidateDebouncesLastUsedPersist`, `TestRecordClientVersionUpdatesInMemoryAndFlushPersists` |
+  | NC5 | no attempt while the read side knows the store is unreadable | the four reload rows (0 or 1 ERRORs where 1 and 2 are wanted) |
+  | NC6 | a failed reload does not abort the write | the four reload rows, on "staged 1 times, want 0"; the two skip-persist tests only once they count stagings |
+  | NC7 | `reloadIfStale` reports nothing | all three report rows |
+  | NC8 | every failed read is reported | all three report rows |
+  | NC9 | no report when the store can be read again | all three report rows |
+  | NC10 | the uid and hint for any error | the damaged row |
+  | NC11 | RecordClientVersion keeps the old gate | its four window rows |
+  | NC12 | the recovery line gives no token count | all three report rows |
+  | NC13 | the Warn gives no token count | all three report rows |
+
+- The package under `-race`; `GOOS=windows` and `GOOS=linux go test -c`
+  build. The unreadable rows skip on Windows and as root; the damaged and
+  rename rows run everywhere, so the Windows CI leg runs the window rule too.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with main's
+`auth.go` and the diff, five questions. It agreed on stamping at the attempt,
+on fail-open with one Warn over fail-closed, on keeping the per-window
+write-side ERROR, and that a chmod with no content change is seen only by the
+write side (a stat needs no read permission on the file). Declined, on
+evidence:
+
+- "The second `reloadIfStale` in Validate is redundant under the same lock":
+  `s.mu` is process-local, and a sibling PROCESS's write between the two calls
+  is the reason the pre-persist reload exists (pre-existing; #1043 kept it to
+  spare a staging wasted on a stale list).
+- A Windows read retry for `ERROR_SHARING_VIOLATION`, so that a sibling's
+  write does not produce a Warn+Info pair: unmeasured whether Go's open (read
+  and write sharing) meets one on a read at all; the cost is two true lines
+  per CLI write, not a flood; a retry would sleep under `s.mu` on the hot
+  path; and #1039 declined the same retry for adminauth's Verify.
+- Its "pitfall" that a future `:=` inside a block would shadow the named
+  result and break the report: an explicit `return x` assigns the result
+  whatever is shadowed, and a bare `return` under a shadowed result does not
+  compile.
+
+### Review round 1
+
+- **Gemini** (on 23bc3575), one finding, taken: the permission hint gave
+  `os.Getuid()`, and an `open(2)` is checked against the effective uid (on
+  Linux the filesystem uid, which follows it, since nothing in the bridge
+  calls `setfsuid`). It gives `os.Geteuid()` now. The two differ only for a
+  setuid process, which the bridge is not, so no deployed line changes.
+- **SonarCloud**: one `go:S3776` (cognitive complexity 16 against 15) in the
+  report test's row, `unreadableStoreReportedOnce`, now split into
+  `pairOneAndRevokeTwo` and `requireOneLine`. The report-side controls (NC7 to
+  NC10, NC12, NC13), re-run against the split test (1d57caa4), turn the same
+  rows red.
+- **CodeRabbit** paused on its plan limit before its first pass; asked, the
+  user chose the free on-demand run, ticked once the fixes above were pushed:
+  no actionable comments on 7fa0919a, merge risk minimal.
+- **Gemini's app hit its daily quota** before a fresh pass over 1d57caa4 and
+  7fa0919a. A direct consult over exactly that diff stood in: no findings,
+  and the split test asserts what it did before, plus the post-mend Warn's
+  count, which the old code checked only while unreadable (a tightening).
+
+### Out of scope
+
+- **The cause.** A CLI run as root re-owns tokens.json (and adminauth.json,
+  and anything else a CLI writes under the data dir) by replacing it; the
+  deployment runbook already says to run every CLI as the service user, after
+  an incident on 2026-08-18. A CLI running as root could give the staged file
+  the existing file's owner before the rename, or refuse to replace a file it
+  does not own. Either covers every CLI writer, is POSIX-only and needs root
+  to test, so it is left for its own change.
+- **A bridge still running the old binary** keeps the per-request lines until
+  it restarts.
