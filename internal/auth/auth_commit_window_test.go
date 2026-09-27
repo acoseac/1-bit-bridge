@@ -122,93 +122,14 @@ type commitWrite struct {
 // runningBridgeWrites are the running bridge's writes: the three that put
 // down its observations of the devices, and the console's four.
 func runningBridgeWrites() []commitWrite {
-	lastUsedFrom := func(f *commitFixture, before time.Time) func(*Store) string {
-		return func(s *Store) string {
-			if got := tokenIn(s, f.own.ID).LastUsedAt; got.Before(before) {
-				return fmt.Sprintf("the LastUsedAt the running bridge wrote is not there (%v, want at or after %v)", got, before)
-			}
-			return ""
-		}
-	}
 	return []commitWrite{
-		{"Validate's debounced write", func(t *testing.T, f *commitFixture) func(*Store) string {
-			f.running.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
-			before := time.Now()
-			if _, ok := f.running.Validate(f.ownRaw); !ok {
-				t.Fatal("the running bridge refused its own device")
-			}
-			return lastUsedFrom(f, before)
-		}},
-		{"RecordClientVersion's debounced write", func(t *testing.T, f *commitFixture) func(*Store) string {
-			f.running.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
-			f.running.RecordClientVersion(f.own.ID, "9.9.9")
-			return func(s *Store) string {
-				if got := tokenIn(s, f.own.ID).LastClientVersion; got != "9.9.9" {
-					return fmt.Sprintf("the client version the running bridge wrote is not there (%q)", got)
-				}
-				return ""
-			}
-		}},
-		{"FlushLastUsed", func(t *testing.T, f *commitFixture) func(*Store) string {
-			// Inside the debounce, so the Validate writes nothing itself
-			// and the flush is the write.
-			f.running.setLastUsedFlushForTest(time.Now())
-			before := time.Now()
-			if _, ok := f.running.Validate(f.ownRaw); !ok {
-				t.Fatal("the running bridge refused its own device")
-			}
-			if err := f.running.FlushLastUsed(); err != nil {
-				t.Errorf("FlushLastUsed: %v", err)
-			}
-			return lastUsedFrom(f, before)
-		}},
-		{"Mint", func(t *testing.T, f *commitFixture) func(*Store) string {
-			raw, _, err := f.running.Mint("console-pair")
-			if err != nil {
-				t.Errorf("Mint: %v", err)
-			}
-			return func(s *Store) string {
-				if !holdsRaw(s, raw) {
-					return "the token the running bridge minted is not there"
-				}
-				return ""
-			}
-		}},
-		{"Revoke", func(t *testing.T, f *commitFixture) func(*Store) string {
-			if err := f.running.Revoke(f.other.ID); err != nil {
-				t.Errorf("Revoke: %v", err)
-			}
-			return func(s *Store) string {
-				if holdsRaw(s, f.otherRaw) {
-					return "the token the running bridge revoked is back"
-				}
-				return ""
-			}
-		}},
-		{"Rotate", func(t *testing.T, f *commitFixture) func(*Store) string {
-			raw, _, err := f.running.Rotate(f.other.ID)
-			if err != nil {
-				t.Errorf("Rotate: %v", err)
-			}
-			return func(s *Store) string {
-				if !holdsRaw(s, raw) || holdsRaw(s, f.otherRaw) {
-					return "the rotation the running bridge made is not there"
-				}
-				return ""
-			}
-		}},
-		{"SetExpiry", func(t *testing.T, f *commitFixture) func(*Store) string {
-			exp := time.Now().Add(time.Hour).UTC()
-			if _, err := f.running.SetExpiry(f.other.ID, &exp); err != nil {
-				t.Errorf("SetExpiry: %v", err)
-			}
-			return func(s *Store) string {
-				if got := tokenIn(s, f.other.ID).ExpiresAt; got == nil || !got.Equal(exp) {
-					return fmt.Sprintf("the expiry the running bridge set is not there (%v)", got)
-				}
-				return ""
-			}
-		}},
+		{"Validate's debounced write", validateWrites},
+		{"RecordClientVersion's debounced write", recordClientVersionWrites},
+		{"FlushLastUsed", flushLastUsedWrites},
+		{"Mint", consoleMints},
+		{"Revoke", consoleRevokes},
+		{"Rotate", consoleRotates},
+		{"SetExpiry", consoleSetsExpiry},
 	}
 }
 
@@ -216,53 +137,157 @@ func runningBridgeWrites() []commitWrite {
 // on the victim device except the pairing.
 func siblingWrites() []commitWrite {
 	return []commitWrite{
-		{"bridge pair", func(t *testing.T, f *commitFixture) func(*Store) string {
-			raw, _, err := f.sibling.Mint("external-pair")
-			if err != nil {
-				t.Errorf("sibling Mint: %v", err)
-			}
-			return func(s *Store) string {
-				if !holdsRaw(s, raw) {
-					return "the token `bridge pair` minted is gone"
-				}
-				return ""
-			}
-		}},
-		{"bridge token revoke", func(t *testing.T, f *commitFixture) func(*Store) string {
-			if err := f.sibling.Revoke(f.victim.ID); err != nil {
-				t.Errorf("sibling Revoke: %v", err)
-			}
-			return func(s *Store) string {
-				if holdsRaw(s, f.victimRaw) {
-					return "the token `bridge token revoke` removed is back"
-				}
-				return ""
-			}
-		}},
-		{"bridge token rotate", func(t *testing.T, f *commitFixture) func(*Store) string {
-			raw, _, err := f.sibling.Rotate(f.victim.ID)
-			if err != nil {
-				t.Errorf("sibling Rotate: %v", err)
-			}
-			return func(s *Store) string {
-				if !holdsRaw(s, raw) || holdsRaw(s, f.victimRaw) {
-					return "the rotation `bridge token rotate` made is undone"
-				}
-				return ""
-			}
-		}},
-		{"bridge token expire", func(t *testing.T, f *commitFixture) func(*Store) string {
-			past := time.Now().Add(-time.Minute).UTC()
-			if _, err := f.sibling.SetExpiry(f.victim.ID, &past); err != nil {
-				t.Errorf("sibling SetExpiry: %v", err)
-			}
-			return func(s *Store) string {
-				if got := tokenIn(s, f.victim.ID).ExpiresAt; got == nil || !got.Equal(past) {
-					return fmt.Sprintf("the expiry `bridge token expire` set is gone (%v)", got)
-				}
-				return ""
-			}
-		}},
+		{"bridge pair", siblingPairs},
+		{"bridge token revoke", siblingRevokes},
+		{"bridge token rotate", siblingRotates},
+		{"bridge token expire", siblingExpires},
+	}
+}
+
+// failUnless answers "" when ok holds and msg when it does not: the shape
+// of every commitWrite check.
+func failUnless(ok bool, msg string) string {
+	if ok {
+		return ""
+	}
+	return msg
+}
+
+// lastUsedSince checks that the running bridge's device carries a
+// LastUsedAt at or after before: the write the bump rode on landed.
+func lastUsedSince(f *commitFixture, before time.Time) func(*Store) string {
+	return func(s *Store) string {
+		got := tokenIn(s, f.own.ID).LastUsedAt
+		return failUnless(!got.Before(before),
+			fmt.Sprintf("the LastUsedAt the running bridge wrote is not there (%v, want at or after %v)", got, before))
+	}
+}
+
+func validateWrites(t *testing.T, f *commitFixture) func(*Store) string {
+	f.running.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+	before := time.Now()
+	if _, ok := f.running.Validate(f.ownRaw); !ok {
+		t.Fatal("the running bridge refused its own device")
+	}
+	return lastUsedSince(f, before)
+}
+
+func recordClientVersionWrites(_ *testing.T, f *commitFixture) func(*Store) string {
+	f.running.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+	f.running.RecordClientVersion(f.own.ID, "9.9.9")
+	return func(s *Store) string {
+		got := tokenIn(s, f.own.ID).LastClientVersion
+		return failUnless(got == "9.9.9",
+			fmt.Sprintf("the client version the running bridge wrote is not there (%q)", got))
+	}
+}
+
+func flushLastUsedWrites(t *testing.T, f *commitFixture) func(*Store) string {
+	// Inside the debounce, so the Validate writes nothing itself and the
+	// flush is the write.
+	f.running.setLastUsedFlushForTest(time.Now())
+	before := time.Now()
+	if _, ok := f.running.Validate(f.ownRaw); !ok {
+		t.Fatal("the running bridge refused its own device")
+	}
+	if err := f.running.FlushLastUsed(); err != nil {
+		t.Errorf("FlushLastUsed: %v", err)
+	}
+	return lastUsedSince(f, before)
+}
+
+func consoleMints(t *testing.T, f *commitFixture) func(*Store) string {
+	raw, _, err := f.running.Mint("console-pair")
+	if err != nil {
+		t.Errorf("Mint: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(holdsRaw(s, raw), "the token the running bridge minted is not there")
+	}
+}
+
+func consoleRevokes(t *testing.T, f *commitFixture) func(*Store) string {
+	if err := f.running.Revoke(f.other.ID); err != nil {
+		t.Errorf("Revoke: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(!holdsRaw(s, f.otherRaw), "the token the running bridge revoked is back")
+	}
+}
+
+func consoleRotates(t *testing.T, f *commitFixture) func(*Store) string {
+	raw, _, err := f.running.Rotate(f.other.ID)
+	if err != nil {
+		t.Errorf("Rotate: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(holdsRaw(s, raw) && !holdsRaw(s, f.otherRaw),
+			"the rotation the running bridge made is not there")
+	}
+}
+
+func consoleSetsExpiry(t *testing.T, f *commitFixture) func(*Store) string {
+	exp := time.Now().Add(time.Hour).UTC()
+	if _, err := f.running.SetExpiry(f.other.ID, &exp); err != nil {
+		t.Errorf("SetExpiry: %v", err)
+	}
+	return expiresAt(f.other.ID, exp, "the expiry the running bridge set is not there")
+}
+
+// expiresAt checks that the token with id carries the expiry exp.
+func expiresAt(id string, exp time.Time, msg string) func(*Store) string {
+	return func(s *Store) string {
+		got := tokenIn(s, id).ExpiresAt
+		return failUnless(got != nil && got.Equal(exp), fmt.Sprintf("%s (%v)", msg, got))
+	}
+}
+
+func siblingPairs(t *testing.T, f *commitFixture) func(*Store) string {
+	raw, _, err := f.sibling.Mint("external-pair")
+	if err != nil {
+		t.Errorf("sibling Mint: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(holdsRaw(s, raw), "the token `bridge pair` minted is gone")
+	}
+}
+
+func siblingRevokes(t *testing.T, f *commitFixture) func(*Store) string {
+	if err := f.sibling.Revoke(f.victim.ID); err != nil {
+		t.Errorf("sibling Revoke: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(!holdsRaw(s, f.victimRaw), "the token `bridge token revoke` removed is back")
+	}
+}
+
+func siblingRotates(t *testing.T, f *commitFixture) func(*Store) string {
+	raw, _, err := f.sibling.Rotate(f.victim.ID)
+	if err != nil {
+		t.Errorf("sibling Rotate: %v", err)
+	}
+	return func(s *Store) string {
+		return failUnless(holdsRaw(s, raw) && !holdsRaw(s, f.victimRaw),
+			"the rotation `bridge token rotate` made is undone")
+	}
+}
+
+func siblingExpires(t *testing.T, f *commitFixture) func(*Store) string {
+	past := time.Now().Add(-time.Minute).UTC()
+	if _, err := f.sibling.SetExpiry(f.victim.ID, &past); err != nil {
+		t.Errorf("sibling SetExpiry: %v", err)
+	}
+	return expiresAt(f.victim.ID, past, "the expiry `bridge token expire` set is gone")
+}
+
+// requireLanded reports each check that does not find its write in s,
+// which is where names ("on disk", "in the running bridge").
+func requireLanded(t *testing.T, where string, s *Store, checks ...func(*Store) string) {
+	t.Helper()
+	for _, check := range checks {
+		if msg := check(s); msg != "" {
+			t.Errorf("%s: %s", where, msg)
+		}
 	}
 }
 
@@ -275,31 +300,24 @@ func siblingWrites() []commitWrite {
 func TestASiblingWriteDuringACommitIsNotUndone(t *testing.T) {
 	for _, w := range runningBridgeWrites() {
 		for _, sb := range siblingWrites() {
-			t.Run(w.name+"/"+sb.name, func(t *testing.T) {
-				f := newCommitFixture(t)
-				var siblingLanded func(*Store) string
-				_, ran := inCommitWindow(t, 1, func() { siblingLanded = sb.do(t, f) })
-				landed := w.do(t, f)
-				if ran() == 0 {
-					t.Fatal("the sibling never ran: the write did not reach its commit")
-				}
-				for _, where := range []struct {
-					name string
-					s    *Store
-				}{
-					{"on disk", reopenStore(t, f.path)},
-					{"in the running bridge", f.running},
-				} {
-					if msg := siblingLanded(where.s); msg != "" {
-						t.Errorf("%s: %s", where.name, msg)
-					}
-					if msg := landed(where.s); msg != "" {
-						t.Errorf("%s: %s", where.name, msg)
-					}
-				}
-			})
+			t.Run(w.name+"/"+sb.name, func(t *testing.T) { siblingDuringCommit(t, w, sb) })
 		}
 	}
+}
+
+// siblingDuringCommit is one row of
+// TestASiblingWriteDuringACommitIsNotUndone: the running bridge makes w,
+// sib lands inside its commit window, and both must be there after.
+func siblingDuringCommit(t *testing.T, w, sib commitWrite) {
+	f := newCommitFixture(t)
+	var siblingLanded func(*Store) string
+	_, ran := inCommitWindow(t, 1, func() { siblingLanded = sib.do(t, f) })
+	landed := w.do(t, f)
+	if ran() == 0 {
+		t.Fatal("the sibling never ran: the write did not reach its commit")
+	}
+	requireLanded(t, "on disk", reopenStore(t, f.path), siblingLanded, landed)
+	requireLanded(t, "in the running bridge", f.running, siblingLanded, landed)
 }
 
 // TestAWriteDoesNotBringBackATokenRevokedDuringIt: a rotation or an expiry
@@ -545,12 +563,8 @@ func TestASiblingWriteRightAfterACommitIsNotTakenForIt(t *testing.T) {
 			if !fired {
 				t.Fatal("the sibling never ran: the flush did not rename")
 			}
-			if msg := siblingLanded(reopenStore(t, f.path)); msg != "" {
-				t.Errorf("on disk: %s", msg)
-			}
-			if msg := siblingLanded(f.running); msg != "" {
-				t.Errorf("in the running bridge: %s", msg)
-			}
+			requireLanded(t, "on disk", reopenStore(t, f.path), siblingLanded)
+			requireLanded(t, "in the running bridge", f.running, siblingLanded)
 		})
 	}
 }
