@@ -386,7 +386,8 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 
 - **Only `true` is meaningful.** The field is `omitempty`, so an unflagged track and a track from a bridge that predates the field look the same. Absence makes no claim; a client combines the flag with its other signals, such as a Various-Artists `albumArtist`, rather than reading absence as proof of an ordinary album.
 - The iOS app uses it, with Various-Artists `albumArtist` markers, to keep artists who appear only on compilations out of its Artists list.
-- A bridge upgraded to ExtractorVersion 17 re-extracts every file once. Flagged tracks gain the key and advance `indexed_at`, so a delta sync pulls exactly them; every other track re-extracts byte-identical and stays out of the delta. `ProtocolVersion` stays `1`.
+- A bridge upgraded to ExtractorVersion 17 re-extracts every file once. Flagged tracks gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
+- An app that predates the field consumes that delta without it. The iOS app therefore reaches back to a fixed date, once per bridge, on its first sync after gaining the field, so the flag arrives whichever side updated first.
 
 #### DSD specifics
 

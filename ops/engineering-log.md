@@ -18866,7 +18866,7 @@ evidence:
 - **A bridge still running the old binary** keeps the per-request lines until
   it restarts.
 
-## 2026-09-27 — the manifest carries the file's compilation flag (ExtractorVersion 17)
+## 2026-09-27 — the manifest carries the file's compilation flag (ExtractorVersion 17, #1045)
 
 A user asked the iOS app to keep performers who appear only on Various Artists
 compilations out of its Artists list, detected "by either the COMPILATION tag
@@ -18896,7 +18896,13 @@ tags from local files by the same rule.
 - **Flagged rows take the full-upsert leg**, whose `enriched_at = 0`
   re-queues their enrichment once; `mergePostScanFields` keeps their MBIDs and
   art meanwhile, so no grey-tile window. The same one-wave cost as v2 / v4 /
-  v15.
+  v15. SACD ISO virtual rows re-expand too, as on every bump
+  (`processSACDISO` has no diff-guard); iOS absorbs them unchanged.
+- **Update order.** An iOS build older than the field pulls the v17 delta and
+  drops `compilation`, and its cursor then moves past those rows. The iOS
+  reader (acoseac/1-bit#1974) makes each bridge share's first sync under the
+  new build reach back to 2026-09-27, so the flag arrives whichever side
+  updated first. Found by an independent review of the pair.
 
 ### Tests and controls
 

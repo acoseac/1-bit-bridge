@@ -385,9 +385,11 @@ var Ext = map[string]bool{
 // The field is omitempty, so only FLAGGED files change: they gain
 // `"compilation":true` in tags_json, take the full-upsert leg (which
 // re-queues their enrichment once; mergePostScanFields keeps their MBIDs
-// and art meanwhile), and are exactly the iOS delta. Every other row
-// re-extracts byte-identical and rides the version-stamp leg. No other
-// field of any file changes — the synth's condition is unchanged.
+// and art meanwhile), and are the iOS delta. Every other non-ISO row
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO
+// virtual rows re-expand as on every bump (processSACDISO has no diff-guard),
+// which the client's diff-before-write absorbs. No other field of any file
+// changes — the synth's condition is unchanged.
 const ExtractorVersion = 17
 
 // Extract reads as much metadata as it can from the file at absPath and

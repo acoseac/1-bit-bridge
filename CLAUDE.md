@@ -554,9 +554,11 @@ lost my library."
   and was indistinguishable from an ordinary album on iOS until v17. **Don't make
   it a `*bool` or emit `false`**: `omitempty` keeps every unflagged row
   byte-identical to its pre-v17 form, which is what limits the v17 re-extract's
-  delta to the flagged files. Those take the full-upsert leg, so their
-  enrichment is re-queued once (`mergePostScanFields` keeps their MBIDs and art
-  meanwhile).
+  delta to the flagged files (plus the SACD ISO rows every bump re-expands).
+  Those take the full-upsert leg, so their enrichment is re-queued once
+  (`mergePostScanFields` keeps their MBIDs and art meanwhile). An app older than
+  the field consumes that delta and drops it, so the iOS app's first sync after
+  it gains the field reaches back to 2026-09-27, once per bridge.
 - **`Track.Enriched` allocates per row; don't reintroduce package-level singleton
   bool pointers.** `Track` is exported, so a shared pointer lets any downstream
   write clobber every subsequent read for the process lifetime. The cost is
