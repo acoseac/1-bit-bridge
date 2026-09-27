@@ -2504,11 +2504,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
-	// via cfg.TLSCertPath / cfg.TLSKeyPath).
-	certPath, keyPath := cfg.TLSCertPath, cfg.TLSKeyPath
-	if certPath == "" || keyPath == "" {
-		certPath, keyPath = servertls.DefaultPaths(cfg.DataDir)
-	}
+	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`
+	// loads its pair with, so init prints the fingerprint serve presents.
+	certPath, keyPath := resolveCertPaths(cfg)
 	// Serve loads the existing cert if any; the SAN-stale check
 	// inside LoadOrGenerateWithOptions warns at startup when the
 	// on-disk cert's SANs don't cover the currently-advertised

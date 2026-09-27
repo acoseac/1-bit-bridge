@@ -54,8 +54,10 @@ func TestInitPreflightGradesTheInstalledCertificate(t *testing.T) {
 	// customEndpoints is the one SAN input an operator sets by hand, so
 	// it is the one a test can pin without depending on what interfaces
 	// the host has — and it is the field that makes grading the
-	// PRE-init config the right call: init never prompts for it, so the
-	// old value survives the rewrite verbatim.
+	// PRE-init config the right call: init never prompts for it, and a
+	// loopback rewrite of a loopback install, this fixture's shape, keeps
+	// it (keepFromPrior). This comment said every rewrite kept it until
+	// 2026-09-27, when none did.
 	body := "libraryRoots:\n  - " + lib + "\n" +
 		"dataDir: " + filepath.Join(cfgDir, "data") + "\n" +
 		"tlsCertPath: " + certPath + "\ntlsKeyPath: " + keyPath + "\n" +
