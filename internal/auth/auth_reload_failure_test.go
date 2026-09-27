@@ -1,10 +1,16 @@
 package auth
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // makeTokenFileUnreadable renders path unreadable while leaving it
@@ -152,5 +158,304 @@ func TestRecordClientVersionSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	}
 	if !got["serve-process"] {
 		t.Error("lost the pre-existing token")
+	}
+}
+
+// debouncedWriter is one of the two writes lastUsedFlushInterval debounces:
+// failures are the Error lines a failed attempt logs, and observe makes the
+// i-th request's observation and returns what must be on disk once a write
+// has landed it.
+type debouncedWriter struct {
+	name     string
+	failures []string
+	observe  func(t *testing.T, f *commitFixture, i int) (landed func(*Store) string)
+}
+
+func debouncedWriters() []debouncedWriter {
+	return []debouncedWriter{
+		{"Validate", []string{
+			"reload before persisting LastUsedAt; skipping persist to avoid clobbering a sibling write",
+			"persist LastUsedAt",
+		}, func(t *testing.T, f *commitFixture, _ int) func(*Store) string {
+			before := time.Now()
+			if _, ok := f.running.Validate(f.ownRaw); !ok {
+				t.Fatal("the running bridge refused its own device")
+			}
+			return lastUsedSince(f, before)
+		}},
+		{"RecordClientVersion", []string{
+			"reload before persisting client-version; skipping persist to avoid clobbering a sibling write",
+			"persist client-version",
+		}, func(_ *testing.T, f *commitFixture, i int) func(*Store) string {
+			// A version per request, as a client rotating its header sends:
+			// the same one again returns before the debounce is consulted.
+			ver := fmt.Sprintf("2.0.%d", i)
+			f.running.RecordClientVersion(f.own.ID, ver)
+			return func(s *Store) string {
+				got := tokenIn(s, f.own.ID).LastClientVersion
+				return failUnless(got == ver, fmt.Sprintf("the client version %q is not there (%q)", ver, got))
+			}
+		}},
+	}
+}
+
+// writeFailure makes the running bridge's debounced write fail. staged is
+// how often one failed attempt stages the file: never when the reload ahead
+// of the write fails, once when the write itself does. fail returns what
+// undoes the failure, and a check of what must be on disk once it is undone
+// (nil for none).
+type writeFailure struct {
+	name   string
+	staged int
+	fail   func(t *testing.T, f *commitFixture) (mend func(), landed func(*Store) string)
+}
+
+// errRenameRefused is the rename writeFailures' last row refuses with.
+var errRenameRefused = errors.New("rename refused by the test")
+
+func writeFailures() []writeFailure {
+	return []writeFailure{
+		{"a sibling's pair leaves tokens.json unreadable", 0,
+			func(t *testing.T, f *commitFixture) (func(), func(*Store) string) {
+				// `sudo bridge pair` beside a service install: the new
+				// file is root's, 0600.
+				landed := siblingPairs(t, f)
+				makeTokenFileUnreadable(t, f.path)
+				return func() { restoreTokenFileMode(t, f.path) }, landed
+			}},
+		{"tokens.json turns unreadable in place", 1,
+			func(t *testing.T, f *commitFixture) (func(), func(*Store) string) {
+				// No write, so the reload finds nothing to read and the
+				// write's own re-read before its commit is what fails.
+				makeTokenFileUnreadable(t, f.path)
+				return func() { restoreTokenFileMode(t, f.path) }, nil
+			}},
+		{"tokens.json is damaged", 0,
+			func(t *testing.T, f *commitFixture) (func(), func(*Store) string) {
+				good, err := os.ReadFile(f.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(f.path, []byte("[{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := os.WriteFile(f.path, good, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}, nil
+			}},
+		{"the rename fails", 1,
+			func(t *testing.T, _ *commitFixture) (func(), func(*Store) string) {
+				prev := atomicwrite.SetRenameFuncForTest(func(string, string) error { return errRenameRefused })
+				mend := func() { atomicwrite.SetRenameFuncForTest(prev) }
+				t.Cleanup(mend)
+				return mend, nil
+			}},
+	}
+}
+
+// restoreTokenFileMode undoes makeTokenFileUnreadable.
+func restoreTokenFileMode(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("restore mode: %v", err)
+	}
+}
+
+// TestAFailedDebouncedWriteStartsTheNextWindow: once the window has passed,
+// a debounced write that fails still starts the next one, so ten requests
+// in a row make one attempt, one Error line and at most one staging, not
+// ten. Only a successful write used to start it, so while the write could
+// not succeed (a tokens.json the running bridge cannot read, since a `sudo
+// bridge pair` beside a service install leaves it root's; a damaged file; a
+// write that cannot land) every authenticated request re-read the file and
+// logged an Error, and one whose write failed after its staging paid an
+// fsync too, under the mutex every request takes. The observations stay in
+// memory: a window later the next request tries again, and the shutdown
+// flush, which asks nothing of the window, lands them once the failure is
+// gone.
+func TestAFailedDebouncedWriteStartsTheNextWindow(t *testing.T) {
+	for _, w := range debouncedWriters() {
+		for _, fl := range writeFailures() {
+			t.Run(w.name+"/"+fl.name, func(t *testing.T) { failedWriteStartsTheWindow(t, w, fl) })
+		}
+	}
+}
+
+// failedWriteStartsTheWindow is one row of
+// TestAFailedDebouncedWriteStartsTheNextWindow.
+func failedWriteStartsTheWindow(t *testing.T, w debouncedWriter, fl writeFailure) {
+	const requests = 10
+	f := newCommitFixture(t)
+	mend, siblingLanded := fl.fail(t, f)
+	rec := loggingtest.Record(t)
+	staged, _ := inCommitWindow(t, 0, func() {})
+	past := time.Now().Add(-2 * lastUsedFlushInterval)
+
+	f.running.setLastUsedFlushForTest(past)
+	var landed func(*Store) string
+	for i := range requests {
+		landed = w.observe(t, f, i)
+	}
+	if got := rec.Failures(w.failures...); len(got) != 1 {
+		t.Errorf("%d requests past the window logged %d failed writes, want 1:\n%s",
+			requests, len(got), strings.Join(got, "\n"))
+	}
+	if got := staged(); got != fl.staged {
+		t.Errorf("%d requests past the window staged the file %d times, want %d", requests, got, fl.staged)
+	}
+
+	// A window later, the next request tries again.
+	f.running.setLastUsedFlushForTest(past)
+	landed = w.observe(t, f, requests)
+	if got := rec.Failures(w.failures...); len(got) != 2 {
+		t.Errorf("the request a window later: %d failed writes logged in all, want 2", len(got))
+	}
+	if got := staged(); got != 2*fl.staged {
+		t.Errorf("the request a window later: %d stagings in all, want %d", got, 2*fl.staged)
+	}
+
+	// The failure gone, the shutdown flush lands what the failed attempts
+	// left in memory, inside the window the last of them started.
+	mend()
+	if err := f.running.FlushLastUsed(); err != nil {
+		t.Fatalf("FlushLastUsed: %v", err)
+	}
+	checks := []func(*Store) string{landed}
+	if siblingLanded != nil {
+		checks = append(checks, siblingLanded)
+	}
+	requireLanded(t, "on disk", reopenStore(t, f.path), checks...)
+}
+
+// storeFailure makes the running bridge's store unreadable to it, and
+// returns what undoes that. permission says the failure is a permission
+// error, which the report names the uid and the remedy for.
+type storeFailure struct {
+	name       string
+	permission bool
+	fail       func(t *testing.T, f *commitFixture) (mend func())
+}
+
+// TestAStoreThatCannotBeReadIsReportedOnce: while the running bridge cannot
+// read tokens.json it checks devices against the tokens it last read, so a
+// device `bridge pair` paired since is refused and one `bridge token revoke`
+// removed since is still accepted, and until this was reported nothing said
+// so. A 401 is not logged, and the Error a failed debounced write logs names
+// a timestamp, and only a device the bridge already knew makes it. One Warn
+// when the store first cannot be read, naming the file and the error, and
+// for a permission error the uid and the remedy; one Info once it can be
+// read again, which the next request does, with no restart.
+func TestAStoreThatCannotBeReadIsReportedOnce(t *testing.T) {
+	for _, tc := range []storeFailure{
+		{"unreadable", true, func(t *testing.T, f *commitFixture) func() {
+			makeTokenFileUnreadable(t, f.path)
+			return func() { restoreTokenFileMode(t, f.path) }
+		}},
+		{"damaged", false, func(t *testing.T, f *commitFixture) func() {
+			good, err := os.ReadFile(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.path, []byte("[{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return func() {
+				if err := os.WriteFile(f.path, good, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { unreadableStoreReportedOnce(t, tc) })
+	}
+}
+
+// unreadableStoreReportedOnce is one row of
+// TestAStoreThatCannotBeReadIsReportedOnce.
+func unreadableStoreReportedOnce(t *testing.T, tc storeFailure) {
+	const (
+		unreadable = "token store unreadable; checking devices against the tokens last read"
+		readable   = "token store readable again"
+		requests   = 10
+	)
+	f := newCommitFixture(t)
+	pairedRaw, _, err := f.sibling.Mint("external-pair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sibling.Revoke(f.victim.ID); err != nil {
+		t.Fatal(err)
+	}
+	mend := tc.fail(t, f)
+	rec := loggingtest.Record(t)
+
+	own := verdict{"the running bridge's own device", f.ownRaw, true}
+	revoked := verdict{"the device `bridge token revoke` removed", f.victimRaw, true}
+	paired := verdict{"the device `bridge pair` paired", pairedRaw, false}
+	for range requests {
+		requireVerdicts(t, "while the store cannot be read", f.running, own, revoked, paired)
+	}
+	lines := rec.Lines(unreadable)
+	if len(lines) != 1 {
+		t.Errorf("%d requests logged %d lines saying the store cannot be read, want 1:\n%s",
+			requests, len(lines), strings.Join(lines, "\n"))
+	}
+	if len(lines) > 0 {
+		requireReport(t, lines[0], f.path, tc.permission)
+	}
+	if got := rec.Lines(readable); len(got) != 0 {
+		t.Errorf("reported readable while it was not:\n%s", strings.Join(got, "\n"))
+	}
+
+	mend()
+	revoked.accept, paired.accept = false, true
+	for range requests {
+		requireVerdicts(t, "once the store can be read again", f.running, own, revoked, paired)
+	}
+	if got := rec.Lines(readable); len(got) != 1 {
+		t.Errorf("%d lines saying the store is readable again, want 1:\n%s", len(got), strings.Join(got, "\n"))
+	}
+	if got := rec.Lines(unreadable); len(got) != 1 {
+		t.Errorf("%d lines saying the store cannot be read in all, want 1:\n%s", len(got), strings.Join(got, "\n"))
+	}
+}
+
+// requireReport checks the line saying the store cannot be read: a Warn
+// naming the file and the cause, and the uid and the remedy only for a
+// permission error, since a chown mends nothing else.
+func requireReport(t *testing.T, line, path string, permission bool) {
+	t.Helper()
+	cause := "parse token store"
+	if permission {
+		cause = "permission denied"
+	}
+	for _, want := range []string{"WARN ", " path=" + path + " ", cause} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the line does not carry %q:\n%s", want, line)
+		}
+	}
+	for _, attr := range []string{" uid=", " hint="} {
+		if got := strings.Contains(line, attr); got != permission {
+			t.Errorf("the line carries %q: %v, want %v:\n%s", attr, got, permission, line)
+		}
+	}
+}
+
+// verdict is what Validate must answer for one device's raw token.
+type verdict struct {
+	device string
+	raw    string
+	accept bool
+}
+
+// requireVerdicts reports each device s does not answer as its verdict says.
+func requireVerdicts(t *testing.T, when string, s *Store, want ...verdict) {
+	t.Helper()
+	for _, v := range want {
+		if _, ok := s.Validate(v.raw); ok != v.accept {
+			t.Errorf("%s: Validate = %v for %s, want %v", when, ok, v.device, v.accept)
+		}
 	}
 }
