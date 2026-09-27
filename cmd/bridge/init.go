@@ -44,6 +44,16 @@ func baseConfig(roots []string, name, dataDir string) *config.Config {
 	}
 }
 
+// firstInstallName is the library name init gives an install that has none
+// to keep, when the run names none: the host's name, or DefaultLibraryName
+// on a host without one.
+func firstInstallName() string {
+	if h, _ := os.Hostname(); h != "" {
+		return h
+	}
+	return config.DefaultLibraryName
+}
+
 // initCmd walks a first-time operator through the minimum answers needed
 // to get a running bridge: config dir, library root, then writes
 // bridge.yaml, mints the TLS cert, installs a launchd/systemd user unit,
@@ -64,7 +74,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.BoolVar(nonInteractive, "y", *nonInteractive, "alias for --yes")
 	force := fs.Bool("force", false, "with --yes: overwrite an existing config (by default, --yes refuses to clobber); its data dir and TLS pair are kept")
 	libraryRoot := fs.String("library", "", "library root path (required with --yes)")
-	libraryName := fs.String("name", "", "library display name (default: hostname)")
+	libraryName := fs.String("name", "", "library display name (default: the existing config's, or the hostname)")
 	skipService := fs.Bool("no-service", false, "skip launchd/systemd install; run `bridge serve` yourself")
 	skipDoctor := fs.Bool("skip-doctor", false, "don't run `bridge doctor` preflight before init (not recommended)")
 	windowsService := fs.Bool("service", false, "Windows only: install as a Windows Service (requires admin); default is a Startup-folder launcher")
@@ -244,21 +254,28 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Library name — prompt on interactive, hostname fallback otherwise.
+	// The library name this run saves. --name names it. A run that names
+	// none keeps the name the install's config gives (init_rewrite.go), and a
+	// first install, or one whose config gives none, takes the host's.
+	// Interactively the prompt offers that name as its default, which Enter
+	// takes: it offered the host's name over an install with one of its own
+	// until 2026-09-27, so an operator who pressed Enter through a rewrite
+	// replaced the name.
+	firstName := firstInstallName()
+	defaultName := firstName
+	if prior != nil && strings.TrimSpace(prior.LibraryName) != "" {
+		defaultName = prior.LibraryName
+	}
 	name := *libraryName
+	nameKept := false
 	if name == "" {
 		if *nonInteractive {
-			h, _ := os.Hostname()
-			if h == "" {
-				h = "1-bit Bridge"
-			}
-			name = h
+			name = defaultName
+			// printKept lists a kept name a first install would not have
+			// taken. An interactive run showed it at the prompt.
+			nameKept = name != firstName
 		} else {
-			h, _ := os.Hostname()
-			name = ask(in, stdout, "Library display name", h)
-			if name == "" {
-				name = h
-			}
+			name = ask(in, stdout, "Library display name", defaultName)
 		}
 	}
 
@@ -501,7 +518,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
-	printKept(stdout, cfg, initDataDir, rootsKept, endpointsKept)
+	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding

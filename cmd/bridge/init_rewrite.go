@@ -40,10 +40,20 @@ import (
 //   - libraryRoots, when the run names no --library, which only a public run
 //     may do: a public install takes its roots later, in the console, and a
 //     rewrite that emptied them left every track unplayable.
+//   - libraryName, when the run names no --name, in either posture, since a
+//     name, unlike an endpoint, names no address. It is the name the install
+//     is served under: /v1/health gives it to a caller with no token too, and
+//     every pairing QR carries it as the name a newly paired device takes for
+//     its own. The rewrite gave it the host's name, the guess init makes for
+//     a first install, which has nothing better to go on, and the prompt
+//     offered that guess as its default. A config that gives no name, or a
+//     blank one, has none to keep, and the run takes the host's as a first
+//     install does: DefaultLibraryName, which Load serves such a config, is
+//     a fallback nobody chose.
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features, cadences, the ports (init grades the ports
-// it saves rather than keeping the old ones), the library name.
+// it saves rather than keeping the old ones).
 
 // priorInstallFile is what the config already at init's path says about the
 // install it describes: the fields a rewrite keeps, and those that decide
@@ -64,6 +74,7 @@ type priorInstallFile struct {
 	TLSCertPath     string                  `yaml:"tlsCertPath"`
 	TLSKeyPath      string                  `yaml:"tlsKeyPath"`
 	LibraryRoots    []string                `yaml:"libraryRoots"`
+	LibraryName     string                  `yaml:"libraryName"`
 	CustomEndpoints []string                `yaml:"customEndpoints"`
 	Deployment      config.DeploymentConfig `yaml:"deployment"`
 	Demo            config.DemoConfig       `yaml:"demo"`
@@ -71,8 +82,10 @@ type priorInstallFile struct {
 
 // readPriorInstall reads the config at cfgPath as priorInstallFile, with its
 // paths resolved as config.Load resolves them: against the file's directory,
-// dataDir defaulting to the one beside it. A config that is not there is no
-// install, and answers nil and no error.
+// dataDir defaulting to the one beside it. The name is as written, with no
+// default: a rewrite keeps a name the config gives, and DefaultLibraryName,
+// which Load serves a config that gives none, is a fallback nobody chose. A
+// config that is not there is no install, and answers nil and no error.
 func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 	raw, err := os.ReadFile(cfgPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -197,10 +210,10 @@ func (p *priorInstallFile) madeElsewhere() []postureKey {
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
 // reached it already: the TLS pair, and a loopback install's custom
-// endpoints on a loopback rewrite. The data dir and the roots reach cfg
-// through baseConfig, since initCmd decides both before the preflight, which
-// uses the data dir. It reports whether it kept the endpoints, for
-// printKept.
+// endpoints on a loopback rewrite. The data dir, the roots and the name reach
+// cfg through baseConfig: initCmd decides the first two before the
+// preflight, which uses the data dir, and the name at its prompt. It reports
+// whether it kept the endpoints, for printKept.
 func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept bool) {
 	if prior == nil {
 		return false
@@ -219,9 +232,10 @@ const keptFromHeading = "kept from the config this run replaces:"
 // printKept lists, after the rewrite is saved, what it kept that a first
 // install would not have: a data dir other than initDataDir (init's own,
 // beside the config), a pair the config names, the roots when the run named
-// none, the custom endpoints. An operator who rewrote a config should not
-// have to diff it to learn that these stayed, and the common rewrite, of an
-// install init made, prints nothing.
+// none, the name when it named none and a first install would have taken
+// another (nameKept), the custom endpoints. An operator who rewrote a config
+// should not have to diff it to learn that these stayed, and a rewrite that
+// gives an install init made the answers it was made with prints nothing.
 //
 // Both sides of the data dir comparison are absolute, so it compares
 // directories and not spellings: initCmd makes cfgDir absolute before it
@@ -229,7 +243,7 @@ const keptFromHeading = "kept from the config this run replaces:"
 // which resolves the file's value against the config's directory.
 // NormalizeAndValidate resolves no path. (Gemini on #1040, twice, assumed a
 // relative cfgDir.)
-func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, endpointsKept bool) {
+func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, nameKept, endpointsKept bool) {
 	var lines [][2]string
 	add := func(key string, values ...string) {
 		for i, v := range values {
@@ -250,6 +264,9 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, e
 	}
 	if rootsKept {
 		add("libraryRoots", cfg.LibraryRoots...)
+	}
+	if nameKept {
+		add("libraryName", cfg.LibraryName)
 	}
 	if endpointsKept {
 		add("customEndpoints", cfg.CustomEndpoints...)

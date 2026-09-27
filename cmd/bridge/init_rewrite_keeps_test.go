@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -480,23 +481,159 @@ func TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed(t *testing.T) {
 	}
 }
 
+// TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed: the name an install is
+// served under, in /v1/health (to a caller with no token too), its Bonjour
+// record and the name= of every pairing QR, which a newly paired device takes
+// for its own. A rewrite that named none replaced it with the host's name, the
+// guess a first install takes: measured on 2026-09-27 with the real binary,
+// `My Library` became `Macbook.local` in both postures, in the file and in
+// what /v1/health and a new pairing URL said, and the run did not mention it.
+// A --name still replaces it.
+//
+// A config that gives no name, or a blank one, has none to keep, and the
+// rewrite takes the host's as a first install does, as it always has. The
+// DefaultLibraryName config.Load serves such a config is a fallback nobody
+// chose, and a rewrite that kept it would list it as kept from a config that
+// never held it (Gemini, consulted on the first draft, which did). The run
+// lists a kept name only where a first install would have taken another, so
+// the rewrite of an install named for its host says nothing.
+func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skipf("premise: this host has a name, which a first install takes (%v)", err)
+	}
+	for _, posture := range rewritePostures {
+		for _, tc := range []struct {
+			name string
+			// first names the first init. nameLine, when set, then replaces
+			// the line naming it in its config (a hand-written config may give
+			// no name, or a blank one), and served is what config.Load then
+			// serves.
+			first, nameLine, served string
+			// rewrite names the rewrite; empty passes no --name.
+			rewrite string
+			want    string
+			// listed says the run lists the name among what it kept.
+			listed bool
+		}{
+			{name: "no --name: kept",
+				first: "My Library", want: "My Library", listed: true},
+			{name: "--name: replaced",
+				first: "My Library", rewrite: "Jazz Archive", want: "Jazz Archive"},
+			{name: "a config giving no name: the host's, as a first install takes",
+				first: "My Library", nameLine: "# no libraryName", served: config.DefaultLibraryName, want: host},
+			{name: "a config giving a blank one: the host's too",
+				first: "My Library", nameLine: `libraryName: "  "`, served: "  ", want: host},
+			{name: "named for its host: kept, with nothing to say",
+				want: host},
+		} {
+			t.Run(posture.name+"/"+tc.name, func(t *testing.T) {
+				cfgDir := filepath.Join(t.TempDir(), "cfg")
+				rewrite := posture.install(t, cfgDir, tc.first)
+				if tc.nameLine != "" {
+					setConfigKey(t, cfgDir, "libraryName", tc.nameLine)
+					if got := loadInstallConfig(t, cfgDir).LibraryName; got != tc.served {
+						t.Fatalf("premise: the edited config is served as %q, want %q", got, tc.served)
+					}
+				}
+
+				code, out := rewrite(tc.rewrite)
+				defer logRunOnFailure(t, out)
+
+				if code != 0 {
+					t.Fatalf("the rewrite exited %d", code)
+				}
+				if got := loadInstallConfig(t, cfgDir).LibraryName; got != tc.want {
+					t.Errorf("libraryName = %q, want %q", got, tc.want)
+				}
+				listed, ok := keptValue(out, "libraryName")
+				switch {
+				case tc.listed && (!ok || listed != tc.want):
+					t.Errorf("the run lists libraryName as %q (listed %v), want %q", listed, ok, tc.want)
+				case !tc.listed && strings.Contains(out, keptFromHeading):
+					t.Error("the run lists what it kept, and it kept nothing a first install would not have written")
+				}
+			})
+		}
+	}
+}
+
+// TestInitInteractiveRewriteOffersTheInstallsName: the name prompt's default
+// is what Enter takes, and over an install with a name of its own it offered
+// the host's, so an operator who pressed Enter through a rewrite replaced the
+// name (measured: `Library display name [Macbook.local]` over `My Library`).
+// It offers the install's name, which a typed one still replaces. A first
+// install has no name to keep and is offered the host's, as before.
+func TestInitInteractiveRewriteOffersTheInstallsName(t *testing.T) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal, where init would offer to start the bridge after the run")
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skipf("premise: this host has a name, which a first install is offered (%v)", err)
+	}
+	for _, tc := range []struct {
+		name string
+		// first names an install the run rewrites; empty runs a first install.
+		first string
+		typed string
+		offer string
+		want  string
+	}{
+		{"Enter keeps the install's name", "My Library", "", "My Library", "My Library"},
+		{"a typed name replaces it", "My Library", "Jazz Archive", "My Library", "Jazz Archive"},
+		{"a first install is offered the host's", "", "", host, host},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			lib := testLibrary(t)
+			// The library, the name, and "Overwrite?" where there is a config.
+			answers := lib + "\n" + tc.typed + "\n"
+			if tc.first != "" {
+				if code, out := loopbackInit(t, cfgDir, lib, tc.first); code != 0 {
+					t.Fatalf("the first init exited %d:\n%s", code, out)
+				}
+				answers += "y\n"
+			}
+
+			var stdout, stderr strings.Builder
+			code := initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir},
+				strings.NewReader(answers), &stdout, &stderr)
+			out := stripANSI("--- stdout ---\n" + stdout.String() + "\n--- stderr ---\n" + stderr.String())
+			defer logRunOnFailure(t, out)
+
+			if code != 0 {
+				t.Fatalf("the run exited %d", code)
+			}
+			if want := "Library display name [" + tc.offer + "]"; !strings.Contains(out, want) {
+				t.Errorf("the prompt does not offer %q", want)
+			}
+			if got := loadInstallConfig(t, cfgDir).LibraryName; got != tc.want {
+				t.Errorf("libraryName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestInitRewriteKeepsTheFileNotTheEnvironment: what a rewrite keeps comes
 // from the file as written. config.Load applies BRIDGE_* overrides, and a
 // rewrite that kept Load's values would write the environment of whoever ran
 // init into the file, which the serve auto-init refuses to do for the same
 // reason (writeAutoInitConfig): the next change to that environment would
-// then not reach the bridge.
+// then not reach the bridge. The rewrite names no name, so the name is one of
+// the values it keeps.
 func TestInitRewriteKeepsTheFileNotTheEnvironment(t *testing.T) {
 	tmp := t.TempDir()
 	cfgDir := filepath.Join(tmp, "cfg")
-	rewrite := rewritePostures[0].setUp(t, cfgDir)
+	rewrite := rewritePostures[0].install(t, cfgDir, "First")
 	const endpoint = "https://music.example.net:8443"
 	appendToConfig(t, cfgDir, "customEndpoints:\n    - "+endpoint+"\n")
 	envData := filepath.Join(tmp, "env-data")
 	t.Setenv("BRIDGE_DATA_DIR", envData)
 	t.Setenv("BRIDGE_CUSTOM_ENDPOINTS", "https://env.example.test:9443")
+	t.Setenv("BRIDGE_LIBRARY_NAME", "Env Name")
 
-	code, out := rewrite()
+	code, out := rewrite("")
 	defer logRunOnFailure(t, out)
 
 	if code != 0 {
@@ -505,6 +642,7 @@ func TestInitRewriteKeepsTheFileNotTheEnvironment(t *testing.T) {
 	var written struct {
 		DataDir         string   `yaml:"dataDir"`
 		CustomEndpoints []string `yaml:"customEndpoints"`
+		LibraryName     string   `yaml:"libraryName"`
 	}
 	if err := yaml.Unmarshal([]byte(readConfigFile(t, cfgDir)), &written); err != nil {
 		t.Fatal(err)
@@ -514,6 +652,9 @@ func TestInitRewriteKeepsTheFileNotTheEnvironment(t *testing.T) {
 	}
 	if !slices.Equal(written.CustomEndpoints, []string{endpoint}) {
 		t.Errorf("the file says customEndpoints %q, want [%s]", written.CustomEndpoints, endpoint)
+	}
+	if written.LibraryName != "First" {
+		t.Errorf("the file says libraryName %q, want %q", written.LibraryName, "First")
 	}
 	if _, err := os.Stat(envData); err == nil {
 		t.Error("the rewrite wrote into the environment's data dir")
@@ -636,13 +777,13 @@ func TestInitRefusesToRewriteAConfigThisUserCannotRead(t *testing.T) {
 }
 
 // TestPriorInstallReadsWhatLoadReads pins readPriorInstall to config.Load for
-// a config that loads: the same data dir, pair, roots and endpoints, with the
-// relative paths resolved against the config's directory, not the working
-// directory. The fields come from a struct of their own, so a yaml tag
-// renamed on config.Config would otherwise leave it reading a key nothing
+// a config that loads: the same data dir, pair, roots, endpoints and name,
+// with the relative paths resolved against the config's directory, not the
+// working directory. The fields come from a struct of their own, so a yaml
+// tag renamed on config.Config would otherwise leave it reading a key nothing
 // writes.
 func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
-	for _, env := range []string{"BRIDGE_DATA_DIR", "BRIDGE_LIBRARY_ROOTS", "BRIDGE_CUSTOM_ENDPOINTS"} {
+	for _, env := range []string{"BRIDGE_DATA_DIR", "BRIDGE_LIBRARY_ROOTS", "BRIDGE_CUSTOM_ENDPOINTS", "BRIDGE_LIBRARY_NAME"} {
 		t.Setenv(env, "")
 	}
 	dir := t.TempDir()
@@ -650,6 +791,7 @@ func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
 	body := "libraryRoots:\n    - music\n" +
 		"dataDir: state\n" +
 		"tlsCertPath: pki/bridge.crt\ntlsKeyPath: pki/bridge.key\n" +
+		"libraryName: Jazz Archive\n" +
 		"customEndpoints:\n    - https://music.example.net:8443\n" +
 		"deployment:\n    managedSettings:\n        - libraryName\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
@@ -673,6 +815,7 @@ func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
 		{"tlsCertPath", prior.TLSCertPath, loaded.TLSCertPath},
 		{"tlsKeyPath", prior.TLSKeyPath, loaded.TLSKeyPath},
 		{"libraryRoots", prior.LibraryRoots, loaded.LibraryRoots},
+		{"libraryName", prior.LibraryName, loaded.LibraryName},
 		{"customEndpoints", prior.CustomEndpoints, loaded.CustomEndpoints},
 		{"deployment.managedSettings", prior.Deployment.ManagedSettings, loaded.Deployment.ManagedSettings},
 	} {
@@ -724,11 +867,22 @@ func TestPriorInstallTagsAreConfigs(t *testing.T) {
 // rewritePosture runs the two inits of a rewrite test in one posture.
 type rewritePosture struct {
 	name string
-	// setUp runs the first init over cfgDir and returns the second: the
-	// same install's init again, with --force and any extra flags.
-	setUp func(t *testing.T, cfgDir string) func(extra ...string) (int, string)
+	// install runs the first init over cfgDir, named name, and returns the
+	// second: the same install's init again, with --force, the name it is
+	// given and any extra flags. An empty name passes no --name.
+	install func(t *testing.T, cfgDir, name string) func(name string, extra ...string) (int, string)
 	// printsFingerprint says whether the run shows the fingerprint to pin.
 	printsFingerprint bool
+}
+
+// setUp is install named First, with a rewrite named Rewritten, for the
+// tests of what a rewrite keeps other than the name.
+func (p rewritePosture) setUp(t *testing.T, cfgDir string) func(extra ...string) (int, string) {
+	t.Helper()
+	rewrite := p.install(t, cfgDir, "First")
+	return func(extra ...string) (int, string) {
+		return rewrite("Rewritten", extra...)
+	}
 }
 
 // rewritePostures are the two installs init makes. The loopback one runs
@@ -737,42 +891,46 @@ type rewritePosture struct {
 var rewritePostures = []rewritePosture{
 	{
 		name: "loopback",
-		setUp: func(t *testing.T, cfgDir string) func(...string) (int, string) {
+		install: func(t *testing.T, cfgDir, name string) func(string, ...string) (int, string) {
 			t.Helper()
 			lib := testLibrary(t)
-			if code, out := loopbackInit(t, cfgDir, lib, "First"); code != 0 {
+			if code, out := loopbackInit(t, cfgDir, lib, name); code != 0 {
 				t.Fatalf("the first init exited %d:\n%s", code, out)
 			}
-			return func(extra ...string) (int, string) {
-				return loopbackInit(t, cfgDir, lib, "Rewritten", append([]string{"--force"}, extra...)...)
+			return func(name string, extra ...string) (int, string) {
+				return loopbackInit(t, cfgDir, lib, name, append([]string{"--force"}, extra...)...)
 			}
 		},
 		printsFingerprint: true,
 	},
 	{
 		name: "public, with the preflight",
-		setUp: func(t *testing.T, cfgDir string) func(...string) (int, string) {
+		install: func(t *testing.T, cfgDir, name string) func(string, ...string) (int, string) {
 			t.Helper()
 			ports := pickPublicInitPorts(t)
-			if code, out := publicInit(t, cfgDir, ports, "First", "--skip-doctor"); code != 0 {
+			if code, out := publicInit(t, cfgDir, ports, name, "--skip-doctor"); code != 0 {
 				t.Fatalf("the first init exited %d:\n%s", code, out)
 			}
-			return func(extra ...string) (int, string) {
-				return publicInit(t, cfgDir, ports, "Rewritten", append([]string{"--force"}, extra...)...)
+			return func(name string, extra ...string) (int, string) {
+				return publicInit(t, cfgDir, ports, name, append([]string{"--force"}, extra...)...)
 			}
 		},
 	},
 }
 
 // loopbackInit runs `bridge init --yes --no-service --skip-doctor` over
-// cfgDir with the given library and name, and any extra flags. It returns
-// the exit code and both streams.
+// cfgDir with the given library and name (no --name when it is empty), and
+// any extra flags. It returns the exit code and both streams.
 func loopbackInit(t *testing.T, cfgDir, lib, name string, extra ...string) (int, string) {
 	t.Helper()
-	args := append([]string{
+	args := []string{
 		"--yes", "--no-service", "--skip-doctor",
-		"--dir", cfgDir, "--library", lib, "--name", name,
-	}, extra...)
+		"--dir", cfgDir, "--library", lib,
+	}
+	if name != "" {
+		args = append(args, "--name", name)
+	}
+	args = append(args, extra...)
 	var out, errOut strings.Builder
 	code := initCmd(args, strings.NewReader(""), &out, &errOut)
 	return code, stripANSI("--- stdout ---\n" + out.String() + "\n--- stderr ---\n" + errOut.String())
@@ -807,6 +965,25 @@ func servedFingerprint(t *testing.T, cfgDir string) string {
 		t.Fatal(err)
 	}
 	return info.Fingerprint
+}
+
+// keptValue returns the value the run's list of what it kept gives key, and
+// whether the list has key at all. A key with several values gives the first.
+func keptValue(out, key string) (string, bool) {
+	_, list, ok := strings.Cut(out, keptFromHeading+"\n")
+	if !ok {
+		return "", false
+	}
+	for _, line := range strings.Split(list, "\n") {
+		entry, ok := strings.CutPrefix(line, "  ")
+		if !ok {
+			break
+		}
+		if value, ok := strings.CutPrefix(entry, key+" "); ok {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
 }
 
 // assertPrintedFingerprint fails unless the run's fingerprint box shows
