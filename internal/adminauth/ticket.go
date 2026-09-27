@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // LoginTicketTTL is the DEFAULT lifetime of a one-time console login ticket.
@@ -273,6 +274,12 @@ func (s *Store) writeTicketsLocked(tickets map[string]persistedTicket) error {
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("chmod login tickets: %w", err)
+	}
+	// `sudo bridge admin login-link` stages this file as root, and the
+	// serving bridge must still read it to redeem the ticket.
+	if err := fsutil.KeepOwner(tmp, path); err != nil {
+		tmp.Close()
+		return fmt.Errorf("keep the login tickets' owner: %w", err)
 	}
 	if _, err := tmp.Write(body); err != nil {
 		tmp.Close()
