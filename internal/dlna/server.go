@@ -780,10 +780,17 @@ func initialNotifyBody(service string) string {
 	}
 }
 
-// PickLANEligibleInterface walks the host's interfaces and returns
-// the first one that passes `IsLANEligibleInterface`. Pure helper
-// for cmd/bridge/main.go (PR 1 task #12) so the wiring code doesn't
-// have to reimplement the interface-walk pattern.
+// PickLANEligibleInterface walks the host's interfaces and returns the
+// one of those passing `IsLANEligibleInterface` that is most likely the
+// LAN: not point-to-point first, then one with a private IPv4, then one
+// with any other usable address, then link-local only, and the first in
+// OS enumeration order among equals (pickLANInterface). The mDNS
+// responder and the DLNA server's single-advertiser fallback bind it.
+//
+// It returned the FIRST eligible interface until 2026-09-27, and on a
+// Mac that is utun0, a system tunnel with only an fe80 address that
+// macOS enumerates ahead of en0: the responder listened there and the
+// bridge could not be discovered from the LAN.
 //
 // Returns nil + error if no eligible interface found (caller can
 // fall back to "OS-pick" with nil interface or refuse to start
@@ -793,26 +800,19 @@ func PickLANEligibleInterface(opts EligibilityOpts) (*net.Interface, error) {
 	if err != nil {
 		return nil, fmt.Errorf("net.Interfaces: %w", err)
 	}
-	for i := range ifaces {
-		iface := ifaces[i]
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		if IsLANEligibleInterface(iface, addrs, opts) {
-			return &iface, nil
-		}
-	}
-	return nil, errors.New("no LAN-eligible interface found")
+	return pickLANInterface(ifaces, hostInterfaceAddrs, opts)
 }
 
 // PickAllLANEligibleInterfaces walks the host's interfaces and returns
 // EVERY one that passes `IsLANEligibleInterface`, in OS enumeration
-// order. This is the multi-interface counterpart to
-// PickLANEligibleInterface: on a host with both Ethernet and Wi-Fi (or a
-// bridged setup) renderers on each subnet need an advertiser bound to
-// their interface, otherwise the unselected adapter's renderers never
-// see the server.
+// order, except a point-to-point interface with only link-local
+// addresses whenever anything else is eligible (pickAllLANInterfaces).
+// This is the multi-interface counterpart to PickLANEligibleInterface:
+// on a host with both Ethernet and Wi-Fi (or a bridged setup) renderers
+// on each subnet need an advertiser bound to their interface, otherwise
+// the unselected adapter's renderers never see the server. The tunnels
+// it leaves out are macOS's system utuns, where an SSDP client reaches
+// nothing and cannot send IPv4 at all.
 //
 // Returns an empty slice (never errors) when no eligible interface
 // exists — the caller decides whether to fall back to an OS-pick / single
@@ -822,21 +822,5 @@ func PickAllLANEligibleInterfaces(opts EligibilityOpts) []*net.Interface {
 	if err != nil {
 		return nil
 	}
-	var out []*net.Interface
-	for i := range ifaces {
-		iface := ifaces[i]
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		if IsLANEligibleInterface(iface, addrs, opts) {
-			// Append the address of the slice element (not &iface, the
-			// loop-local copy) to avoid a per-eligible-interface heap
-			// escape. `ifaces` outlives this function via the returned
-			// pointers, so element addresses stay valid. Per
-			// gemini-code-assist on PR #328.
-			out = append(out, &ifaces[i])
-		}
-	}
-	return out
+	return pickAllLANInterfaces(ifaces, hostInterfaceAddrs, opts)
 }
