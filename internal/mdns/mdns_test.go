@@ -7,7 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
+
+	hcmdns "github.com/hashicorp/mdns"
+	"github.com/miekg/dns"
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
@@ -239,6 +243,59 @@ func TestAdvertisedHostNeverBareLocal(t *testing.T) {
 	// Trailing dot stripped.
 	if got := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
 		t.Errorf("advertisedHost(host.) = %q, want host.local", got)
+	}
+}
+
+// TestInstanceNameFitsADNSLabel: the Bonjour instance name is the library
+// name, and it is one DNS label, which holds 63 bytes (RFC 6763 4.1.1).
+// hashicorp/mdns does not check it: NewMDNSService takes a longer one,
+// Advertise succeeds and `bridge serve` says "mDNS: advertising as", and
+// then every answer to a browse fails to pack, with "dns: bad rdata", so
+// the bridge is never discovered. Measured on 2026-09-27 (main at 3214aa17)
+// through the Records-then-Pack path below, which is the one the server
+// takes to answer: 63 bytes packed, 64 did not, and 22 CJK characters are
+// 66. The same two names, served on a Linux LAN and browsed with
+// hashicorp/mdns's client, were not found; each query logged "[ERR] mdns:
+// Failed to handle query: ... dns: bad rdata" at INFO. The library name may
+// be 256 runes, so the instance is cut to fit, on a rune boundary and with
+// no space left at its end; the TXT record's library= carries the rest.
+func TestInstanceNameFitsADNSLabel(t *testing.T) {
+	for _, name := range []string{
+		strings.Repeat("a", 63),
+		strings.Repeat("a", 64),
+		strings.Repeat("a", 256),
+		strings.Repeat("é", 32), // 64 bytes; byte 63 is inside a rune
+		"東京の音楽ライブラリ・ハイレゾコレクション集",                                  // 22 runes, 66 bytes
+		strings.Repeat("a", 62) + " b",                            // the cut lands after a space
+		"Living Room NAS: Hi-Res FLAC and DSD Archive (Synology)", // 55 bytes, kept whole
+	} {
+		instance := sanitizeInstance(name)
+		switch {
+		case len(instance) > 63:
+			t.Errorf("sanitizeInstance(%d bytes) = %d bytes, more than a DNS label holds", len(name), len(instance))
+		case !utf8.ValidString(instance):
+			t.Errorf("sanitizeInstance(%q) = %q, which is not UTF-8", name, instance)
+		case instance == "" || !strings.HasPrefix(name, instance):
+			t.Errorf("sanitizeInstance(%q) = %q, want a non-empty prefix of the name", name, instance)
+		case strings.TrimRightFunc(instance, unicode.IsSpace) != instance:
+			t.Errorf("sanitizeInstance(%q) = %q, which ends in a space", name, instance)
+		case len(name) <= 63 && instance != name:
+			t.Errorf("sanitizeInstance(%q) = %q, want a name that fits kept whole", name, instance)
+		}
+		svc, err := hcmdns.NewMDNSService(instance, Service, "", "host.local.", 7788,
+			[]net.IP{net.ParseIP("192.0.2.1")}, buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: name}, nil))
+		if err != nil {
+			t.Fatalf("NewMDNSService(%q): %v", instance, err)
+		}
+		answer := new(dns.Msg)
+		answer.Response = true
+		answer.Answer = svc.Records(dns.Question{Name: Service + ".local.", Qtype: dns.TypePTR, Qclass: dns.ClassINET})
+		if len(answer.Answer) == 0 {
+			t.Fatalf("premise: a browse for %s has no answer", Service)
+		}
+		if _, err := answer.Pack(); err != nil {
+			t.Errorf("the answer to a browse for a bridge named %d bytes does not pack: %v", len(name), err)
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -496,6 +497,7 @@ const maxTXTValueLen = 240
 // String decode would mangle). Returns the (possibly truncated) value +
 // the number of bytes dropped (0 = untouched) so the caller can log
 // truncation with the same cap-and-log pattern the ips= field uses.
+// sanitizeInstance cuts the instance label with it too.
 func cappedTXTValue(value string, maxLen int) (string, int) {
 	if len(value) <= maxLen {
 		return value, 0
@@ -577,11 +579,26 @@ func (cfg Config) advertisedHost() string {
 	return host + ".local"
 }
 
-// sanitizeInstance strips characters Bonjour can't handle in the
-// instance name. Dots confuse the label-splitting, control chars cause
-// encoding errors.
+// maxInstanceLen caps the Bonjour instance name, in BYTES: it is one DNS
+// label, and a label holds 63 (RFC 1035 2.3.4, and RFC 6763 4.1.1 says so of
+// the instance). hashicorp/mdns does not check it: NewMDNSService takes a
+// longer one, Advertise succeeds and serve prints "mDNS: advertising as",
+// and every answer to a browse then fails to pack with "dns: bad rdata", so
+// the bridge is never discovered. The one trace is an INFO line per query,
+// the library's own "[ERR] mdns: Failed to handle query: ... dns: bad
+// rdata". Measured 2026-09-27 on a Linux LAN with hashicorp/mdns's client:
+// 63 bytes packed, and a bridge named with 64 ASCII characters, or 22 CJK
+// ones (66 bytes), was not found until this cut. The library name it comes
+// from can be 256 runes; the TXT record's library= carries up to
+// maxTXTValueLen bytes of it.
+const maxInstanceLen = 63
+
+// sanitizeInstance makes the library name a Bonjour instance name. It strips
+// the characters Bonjour can't handle (dots confuse the label-splitting,
+// control chars cause encoding errors), then cuts what is left to the
+// maxInstanceLen bytes a DNS label holds, on a rune boundary, with no space
+// left at its end, and logs the cut.
 func sanitizeInstance(s string) string {
-	s = strings.TrimSpace(s)
 	var b strings.Builder
 	for _, r := range s {
 		if r < 0x20 || r == 0x7F || r == '.' {
@@ -589,7 +606,12 @@ func sanitizeInstance(s string) string {
 		}
 		b.WriteRune(r)
 	}
-	return b.String()
+	instance, dropped := cappedTXTValue(strings.TrimSpace(b.String()), maxInstanceLen)
+	if dropped > 0 {
+		instance = strings.TrimRightFunc(instance, unicode.IsSpace)
+		logger.Info("mdns: instance name cut to fit a DNS label", "instance", instance, "dropped", dropped)
+	}
+	return instance
 }
 
 // ipsForAdvertise returns the non-loopback IPv4/IPv6 addresses to
