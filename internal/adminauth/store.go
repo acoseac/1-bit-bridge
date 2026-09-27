@@ -50,6 +50,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -1573,6 +1574,14 @@ func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) (os.Fil
 		}
 	}()
 	defer func() { _ = tmp.Close() }()
+	// A `sudo bridge admin reset-password` beside a service install stages
+	// this file as root; without this the replacement is root-owned 0600,
+	// and the running bridge, which re-reads it for every credential
+	// decision, answers 503 to every console request.
+	if err := fsutil.KeepOwner(tmp, s.path); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("keep the adminauth store's owner: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return nil, fmt.Errorf("write tmp: %w", err)

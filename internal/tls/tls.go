@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -527,6 +528,12 @@ func stagePEM(path, blockType string, der []byte, mode os.FileMode) (tmpName str
 		}
 	}()
 	if err = tmp.Chmod(mode); err != nil {
+		return "", err
+	}
+	// A `sudo bridge cert rotate` beside a service install stages the
+	// pair as root; without this the key is root-owned 0600 and the
+	// service cannot load its pair at the next start.
+	if err = fsutil.KeepOwner(tmp, path); err != nil {
 		return "", err
 	}
 	if err = pem.Encode(tmp, &pem.Block{Type: blockType, Bytes: der}); err != nil {

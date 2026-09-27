@@ -494,6 +494,13 @@ func (s *Store) writeLocked(tokens []Token) error {
 	// FIRST (LIFO), freeing the FD before Remove tries to unlink
 	// (Windows holds an open file from being removed).
 	defer func() { _ = tmp.Close() }()
+	// A `sudo bridge pair` beside a service install stages this file as
+	// root; without this the replacement is root-owned 0600 and the
+	// service can no longer read the tokens it validates against.
+	if err := fsutil.KeepOwner(tmp, s.path); err != nil {
+		tmp.Close()
+		return fmt.Errorf("keep the token store's owner: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)

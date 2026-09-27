@@ -19520,6 +19520,106 @@ tags from local files by the same rule.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
 
+## 2026-09-27 — a CLI write run as root keeps the owner of the file it replaces (#1048)
+
+The realistic way to run `bridge pair` or `bridge admin reset-password` on a
+service install is with sudo: `bridge init` makes the data dir 0700 and the
+service user owns it. #1039, #1043 and #1044 made "run the CLI beside a running
+bridge" a supported workflow, which made the sudo form sharper. Every CLI writer
+of those files stages a temp file with `os.CreateTemp` and renames it into
+place, so run as root the replacement was root-owned, 0600, and the bridge
+running as the service user could no longer read the file it had just been told
+about. #1044's entry recorded the consequence for adminauth.json (a 503 on every
+console request, a restart that cannot open the store); #1047's recorded
+tokens.json (devices checked against a stale list) and left the cause "not fixed
+in code". Two backlog chips named it (the #1044 and #1047 sessions); this entry
+closes the part of it that is one file replaced by one write.
+
+### Measured
+
+- The real CLI, as root in `golang:1.26.6` on dido, over a public install
+  handed to uid 4242 (`TestCLIRunAsRootKeepsTheInstallOwner`): `bridge pair`,
+  `bridge admin reset-password --from-stdin`, `bridge admin login-link`,
+  `bridge admin sign-out-everywhere`, `bridge cert rotate --yes` and a
+  `bridge init --force` rewrite. On main, exactly six entries came back root's:
+  `bridge.yaml data/adminauth-tickets.json data/adminauth.json data/server.crt
+  data/server.key data/tokens.json`. With the fix, none.
+- An enumeration of every `os.CreateTemp` / `RenameWithRetry` / `WriteBytes` /
+  `os.WriteFile` site (25 files). Reachable from a CLI and replacing one small
+  file in the data dir or beside the config: the six above plus the updater's
+  `update-state.json` (`bridge update`). The rest are serve-only (uploads, trash,
+  covers, booklets, the pid file, harvest state) or job output (the scanner's
+  artwork, analysis waveforms, variants, backups).
+
+### Decisions
+
+- **Keep the owner, don't refuse root.** The chips posed both. A refusal needs
+  a proxy for "who reads this install", and the obvious one, the data dir's
+  owner, turns away a setup that works: a container run as root over a bind
+  mount another uid owns, whose files the root service created itself. The
+  replaced file's own owner is the evidence of who reads it, and keeping it
+  changes nothing for a process that is not root (it cannot give a file away,
+  and what it creates is already its own). It also fixes the sudo command
+  rather than telling the operator to type it again.
+- **The owner of the ENTRY, by `os.Lstat`; for a new file, its directory's, by
+  `os.Stat`.** A symlink at the destination is what the rename replaces, so its
+  own owner is kept, never its target's (a symlink planted in a service-owned
+  directory must not hand root's choice of owner to its target). The directory
+  is stat'ed because the file is created where the path resolves.
+- **Existing file first, then directory**, as the chips proposed. The directory
+  would heal a file an earlier root run left root's; the file keeps what is
+  there, which is least surprise, and #1047's Warn already names the chown for
+  the leftover.
+- **On the open staged file, before the rename, at each site.** `fchown` on the
+  descriptor (`os.File.Chown`), never a path chown, and as one more of the
+  site's own steps: CLAUDE.md's Atomic-writes rule keeps each site's Chmod /
+  Sync / parent-dir fsync its own, so the helper decides and chowns and the
+  sites stay whole. Not inside `atomicwrite.RenameWithRetry`: that would chown
+  by path, after the staged file is closed, for every caller including ones
+  this change did not look at.
+- **A chown that fails abandons the write.** Root on root_squash NFS creates
+  files owned by nobody and cannot chown them; renaming such a file over the
+  service's would reproduce the defect. A filesystem that reports one owner for
+  every file (vfat, exFAT mounted for one uid) never reaches the chown, because
+  the staged file already reports the owner wanted, so the first draft's
+  "refused but already right" branch was unreachable and was dropped.
+- **Windows does nothing**: a file there takes its directory's ACL.
+
+### Tests and controls
+
+- `internal/fsutil`: `TestTargetOwnerIsTheReplacedEntryThenItsDirectory` (the
+  precedence, over injected stat functions); `TestKeepOwnerDecision` (not root
+  changes nothing; root chowns to the target's owner; a matching owner is left
+  alone; a refused chown and a failed lookup are errors), both through the
+  package's seams on every host; `TestKeepOwnerAsRoot` (real chowns: an
+  existing file, a new file, a symlink) as root only.
+- One wiring test per writer through `fsutil.SimulateRootForTest`, on every
+  POSIX host: `TestAWriteAsRootKeepsTheTokenStoreOwner`,
+  `TestAWriteAsRootKeepsTheAdminStoreOwners` (adminauth.json and the tickets),
+  `TestSaveAsRootKeepsTheConfigOwner`, `TestGenerateAsRootKeepsThePairOwner`
+  (cert and key), `TestSaveStateAsRootKeepsTheMarkerOwner`. All five red on
+  main before the fix.
+- `TestCLIRunAsRootKeepsTheInstallOwner` (above), root only.
+- Controls, as root on dido: the six writers reverted to main (helper and
+  tests kept) turn the five wiring tests and the end-to-end test red, the
+  latter naming exactly the six files; `os.Stat` in place of `os.Lstat` turns
+  `TestKeepOwnerAsRoot`'s symlink case red (4243 where 4245 was owed).
+- CI runs non-root, so the two root tests skip there; the wiring tests carry
+  the rule on every leg.
+
+### Out of scope
+
+- **The job and database CLIs** (`scan`, `upscale` / `optimize` / `render` /
+  `analyze`, `artwork`, `backup` / `restore`, `manifest`, an offline `library`
+  change) create directories and sidecars, and open the database, as root:
+  the runbook's 2026-08-18 observation (root-owned `data/transcoded/` subdirs,
+  and the auto-optimize sweeper failing every job) is theirs. Covering them
+  means an owner-keeping `MkdirAll` and a rule for SQLite's `-wal` / `-shm`,
+  or a refusal for those commands alone; left in the backlog (B4's remainder).
+- A non-root writer that cannot keep another user's owner (a group-writable
+  data dir) is not warned about: the case needs a shared-group layout nobody
+  runs here.
+
 ## 2026-09-27 — a pairing link's one-time code replaces the token it carries (audit H1, #1052)
 
 The 2026-09-23 external audit's H1: the admin console's pairing QR and its

@@ -3781,6 +3781,12 @@ func (c *Config) Save(path string) error {
 	// Remove can unlink. See internal/auth/auth.go for the rationale
 	// in detail; pattern repeats across every atomic-write helper.
 	defer func() { _ = tmp.Close() }()
+	// A `sudo bridge library add` beside a service install stages this
+	// file as root; the service reads it at its next start.
+	if err := fsutil.KeepOwner(tmp, path); err != nil {
+		tmp.Close()
+		return fmt.Errorf("keep the config's owner: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)
