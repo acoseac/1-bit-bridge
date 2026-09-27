@@ -18895,7 +18895,13 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
   platform; the handler's test uses a read-only directory, POSIX and not
   root). NC24 and NC25 in the table above.
 - **CodeRabbit** was paused by its plan limit on the first head.
-- **SonarCloud**'s quality gate passed; no CodeQL alerts.
+- **SonarCloud**'s quality gate passed, with one new issue (go:S1192): the
+  command made `"adminauth.json"` the third copy of the literal in
+  `cmd/bridge/admin.go`. It had five spellings across `cmd/bridge` (serve,
+  init and the admin family), and a copy that drifted would open an empty
+  store beside the real one, so the fix is one `adminauth.FileName`, used
+  at all five, rather than a constant local to the file. No CodeQL alerts;
+  all 20 checks green on the first head.
 
 ### Out of scope
 

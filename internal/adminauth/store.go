@@ -56,6 +56,12 @@ import (
 
 var logger = logging.Component("adminauth")
 
+// FileName is the credential store's name in the data directory, where
+// every command that opens it looks: `bridge serve`, `bridge init` and the
+// `bridge admin` family. One definition, since a second spelling that
+// drifted would open an empty store beside the real one.
+const FileName = "adminauth.json"
+
 // adminBcryptCost is the bcrypt work factor. 12 is a deliberate
 // sweet spot (~250 ms on the slowest supported target — Windows
 // arm64). Lower would weaken brute-force resistance; higher would

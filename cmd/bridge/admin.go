@@ -93,7 +93,7 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 		return 1
 	}
 
-	storePath := filepath.Join(cfg.DataDir, "adminauth.json")
+	storePath := filepath.Join(cfg.DataDir, adminauth.FileName)
 	store, err := adminauth.OpenStore(storePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open adminauth store: %v\n", err)
@@ -171,7 +171,7 @@ func adminSignOutEverywhereCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	storePath := filepath.Join(cfg.DataDir, "adminauth.json")
+	storePath := filepath.Join(cfg.DataDir, adminauth.FileName)
 	store, err := adminauth.OpenStore(storePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open adminauth store: %v\n", err)
@@ -269,7 +269,7 @@ func adminLoginLink(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
-	store, err := adminauth.OpenStore(filepath.Join(cfg.DataDir, "adminauth.json"))
+	store, err := adminauth.OpenStore(filepath.Join(cfg.DataDir, adminauth.FileName))
 	if err != nil {
 		fmt.Fprintf(stderr, "open adminauth store: %v\n", err)
 		return 1
