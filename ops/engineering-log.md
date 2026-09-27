@@ -18819,7 +18819,7 @@ console.
   | NC11 | the unreadable line is not throttled | the same two, on the line count |
   | NC12 | the middleware has no branch for it (a 500 and a line per request) | the 503 test |
   | NC13 | `EndOtherSessions` counts expired sessions | its test |
-  | NC14 | `EndOtherSessions` ends them in memory only | its test |
+  | NC14 | `EndOtherSessions` ends them in memory only | its test, both not-saved tests (round 1) |
   | NC15 | reset-password keeps the sessions by default | the reset e2e |
   | NC16 | the route is not registered | both handler tests, the sign-out e2e |
   | NC17 | a rotation that ends them writes the file's set back | the flipped test, the reset row |
@@ -18829,6 +18829,8 @@ console.
   | NC21 | the lookup is made before the stat-gated read | both sign-out rows, the marker, carry, gate and same-size tests, both e2e |
   | NC22 | the Devices page is not given the count | the Devices test |
   | NC23 | a commit does not record its own file's stamp | the read-count test |
+  | NC24 | `EndOtherSessions` swallows a write that fails (round 1) | both not-saved tests |
+  | NC25 | the handler answers a not-saved end as a failure (round 1) | the handler's not-saved test |
 
 - **Two controls came back green, and each was the test's fault.** NC13 at
   first: the fixture signed its other sessions in after the stale one
@@ -18875,6 +18877,25 @@ stamp of the file a commit wrote (above). Declined, each on evidence:
   the stat until the cache expires or the next session write reads the file
   (at most 30 s while requests come). A data dir on NFS is unusual; SQLite
   beside it is the bigger problem there.
+
+### Review round 1
+
+- **Gemini (medium): a failed write after "Sign out all other sessions" was
+  only logged**, so the page reported a clean sign-out that a restart would
+  undo. Real: logout's precedent (log, stay pending) suits a user leaving,
+  not an operator ending a stranger's session. Its suggested fix, returning
+  the write's error, was not taken as written: the handler would answer
+  500 and the page "could not sign the other browsers out" about sessions
+  that are already refused. `EndOtherSessions` returns
+  `ErrSessionsNotSaved` BESIDE the count, the handler answers `200` with
+  `saved: false` and an Error line, and the page says a restart before the
+  bridge's next write would sign them back in. The change stays pending,
+  so that next write lands it (`TestEndOtherSessionsReportsAnEndItCouldNotSave`
+  fails the write with a file that changes under every commit, on every
+  platform; the handler's test uses a read-only directory, POSIX and not
+  root). NC24 and NC25 in the table above.
+- **CodeRabbit** was paused by its plan limit on the first head.
+- **SonarCloud**'s quality gate passed; no CodeQL alerts.
 
 ### Out of scope
 

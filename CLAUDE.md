@@ -3231,7 +3231,9 @@ its twin.** The top list is older, shorter, and read first.
   admin sign-out-everywhere` does it with the password kept, and the Devices
   page's "Sign out all other sessions" (public mode) keeps the browser that
   asked; that one runs in the process holding the sessions and needs no
-  marker. A process ending sessions it does not hold moves `sessionsRevokedAt`
+  marker, and a write of it that fails is REPORTED (`saved: false`, not a
+  failure: the sessions are refused already, and a restart before the next
+  write would sign them back in). A process ending sessions it does not hold moves `sessionsRevokedAt`
   in the same CAS write, and **every writer carries the file's marker over**,
   the `--keep-sessions` rotation included. **The marker is an EVENT, never a
   filter on `IssuedAt`**: a store that reads a marker it has not taken ends
