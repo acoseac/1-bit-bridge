@@ -1,6 +1,7 @@
 package pairingcode
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -97,6 +98,33 @@ func TestATokenHasOneLiveCode(t *testing.T) {
 	}
 	if id, ok := s.Take(other); !ok || id != "tok-b" {
 		t.Fatalf("another token's code = (%q, %v), want (tok-b, true)", id, ok)
+	}
+}
+
+// failingReader is a random source whose every read fails.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+// TestAFailedIssueStillEndsTheTokensPreviousCode pins the order inside Issue:
+// the token's previous code is dropped before the new one is drawn. The
+// console issues after a rotation has already replaced the token, so an
+// Issue that failed and left the old QR's code live would let that code
+// rotate the token again for whoever holds the old QR.
+func TestAFailedIssueStillEndsTheTokensPreviousCode(t *testing.T) {
+	s, _ := newTestStore()
+	old := mustIssue(t, s, "tok-a")
+	other := mustIssue(t, s, "tok-b")
+
+	s.random = failingReader{}
+	if code, err := s.Issue("tok-a"); err == nil {
+		t.Fatalf("Issue with a failing random source returned %q, want an error", code)
+	}
+	if _, ok := s.Take(old); ok {
+		t.Fatal("a failed Issue left the token's previous code redeemable")
+	}
+	if id, ok := s.Take(other); !ok || id != "tok-b" {
+		t.Fatalf("a failed Issue for tok-a touched tok-b's code: (%q, %v)", id, ok)
 	}
 }
 

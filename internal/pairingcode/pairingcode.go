@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
@@ -54,6 +55,9 @@ type Store struct {
 	mu    sync.Mutex
 	codes map[[sha256.Size]byte]entry
 	now   func() time.Time
+	// random is where codes come from: crypto/rand in production, a
+	// failing reader in the test that pins what a failed Issue leaves.
+	random io.Reader
 }
 
 type entry struct {
@@ -63,21 +67,20 @@ type entry struct {
 
 // New returns an empty Store.
 func New() *Store {
-	return &Store{codes: make(map[[sha256.Size]byte]entry), now: time.Now}
+	return &Store{codes: make(map[[sha256.Size]byte]entry), now: time.Now, random: rand.Reader}
 }
 
 // Issue returns a fresh code bound to tokenID. Any code already bound to that
 // token is dropped: a token has at most one live code, so rotating a token in
 // the console (which issues a new code) leaves the old QR's code nothing to
 // redeem. Expired codes are dropped on the way.
+//
+// The drop comes BEFORE the new code is drawn, so an Issue that fails still
+// ends the token's previous code. The console calls Issue after a rotation
+// has already replaced the token; left in place, the old QR's code would
+// still redeem, and redeeming it rotates the token again and hands the
+// holder of that old QR a working secret (CodeRabbit on #1052).
 func (s *Store) Issue(tokenID string) (string, error) {
-	var buf [codeBytes]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", fmt.Errorf("pairing code: random: %w", err)
-	}
-	code := base64.RawURLEncoding.EncodeToString(buf[:])
-	key := sha256.Sum256([]byte(code))
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -86,6 +89,14 @@ func (s *Store) Issue(tokenID string) (string, error) {
 			delete(s.codes, k)
 		}
 	}
+
+	var buf [codeBytes]byte
+	if _, err := io.ReadFull(s.random, buf[:]); err != nil {
+		return "", fmt.Errorf("pairing code: random: %w", err)
+	}
+	code := base64.RawURLEncoding.EncodeToString(buf[:])
+	key := sha256.Sum256([]byte(code))
+
 	for len(s.codes) >= maxLive {
 		s.evictOldestLocked()
 	}
