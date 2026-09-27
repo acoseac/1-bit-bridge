@@ -699,22 +699,7 @@ func (s *Store) commitLocked(build func(cur storeContents) (*userRecord, map[str
 		if err != nil || user == nil {
 			return nil, err
 		}
-		err = s.writeStoreLocked(user, sessions, func() error {
-			if beforeCommitHook != nil {
-				beforeCommitHook()
-			}
-			now, err := os.ReadFile(s.path)
-			if errors.Is(err, os.ErrNotExist) {
-				now, err = nil, nil
-			}
-			if err != nil {
-				return fmt.Errorf("re-read adminauth store before the commit: %w", err)
-			}
-			if !bytes.Equal(now, cur.raw) {
-				return errStoreMoved
-			}
-			return nil
-		})
+		err = s.writeStoreLocked(user, sessions, s.unchangedSince(cur))
 		if errors.Is(err, errStoreMoved) && attempt < maxCommitAttempts {
 			continue
 		}
@@ -722,6 +707,30 @@ func (s *Store) commitLocked(build func(cur storeContents) (*userRecord, map[str
 			return nil, err
 		}
 		return user, nil
+	}
+}
+
+// unchangedSince is the beforeCommit of a write built from read: it lets
+// the staged file replace the store only while the store is still, byte
+// for byte, the file read was taken from, and answers errStoreMoved
+// otherwise. A missing file reads as nil, as it does in read. Split out of
+// commitLocked for SonarCloud's go:S3776 (cognitive complexity) on #1039.
+func (s *Store) unchangedSince(read storeContents) func() error {
+	return func() error {
+		if beforeCommitHook != nil {
+			beforeCommitHook()
+		}
+		now, err := os.ReadFile(s.path)
+		if errors.Is(err, os.ErrNotExist) {
+			now, err = nil, nil
+		}
+		if err != nil {
+			return fmt.Errorf("re-read adminauth store before the commit: %w", err)
+		}
+		if !bytes.Equal(now, read.raw) {
+			return errStoreMoved
+		}
+		return nil
 	}
 }
 
