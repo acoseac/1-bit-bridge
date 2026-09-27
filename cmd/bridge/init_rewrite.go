@@ -133,7 +133,7 @@ func (p *priorInstallFile) loopback() bool {
 //     ordinary bridge, dropping the token every shipped app carries, and a
 //     tenant an unmanaged one, handing the controls its operator withholds to
 //     whoever holds a console session.
-func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *priorInstallFile, priorErr error) bool {
+func refuseRewrite(stderr io.Writer, cfgPath, dataDir string, prior *priorInstallFile, priorErr error) bool {
 	var postures []postureKey
 	if prior != nil {
 		postures = prior.madeElsewhere()
@@ -146,8 +146,9 @@ func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *pri
 	case priorErr != nil:
 		certPath, keyPath := servertls.DefaultPaths(dataDir)
 		if pathExists(certPath) || pathExists(keyPath) {
-			fmt.Fprintf(stdout, "%v\n", priorErr)
-			fmt.Fprintf(stdout, "the file names nothing this rewrite can read, so it keeps the TLS pair in %s, where init keeps it.\n", dataDir)
+			// Not a refusal, so a warning, where init prints its others.
+			fmt.Fprintf(stderr, "warning: %v\n", priorErr)
+			fmt.Fprintf(stderr, "warning: the file names nothing this rewrite can read, so it keeps the TLS pair in %s, where init keeps it.\n", dataDir)
 			return false
 		}
 		fmt.Fprintf(stderr, "%v\n", priorErr)

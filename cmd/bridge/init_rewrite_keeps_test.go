@@ -324,6 +324,9 @@ func TestInitRewriteOverAConfigItCannotParse(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("the rewrite exited %d over an unparseable config with its pair in the data dir", code)
 		}
+		if !strings.Contains(out, "warning: the file names nothing this rewrite can read") {
+			t.Error("the rewrite does not say which pair it kept over a config it cannot read")
+		}
 		if got := servedFingerprint(t, cfgDir); got != pinned {
 			t.Errorf("serve would present %s, and every paired device pinned %s", got, pinned)
 		}
