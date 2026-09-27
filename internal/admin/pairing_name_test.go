@@ -124,3 +124,61 @@ func TestMintAndRotateCarryTheLibraryNameTheAppReads(t *testing.T) {
 		})
 	}
 }
+
+// appNameRefusal is the reason the app's pairing parser refuses name as a
+// pairing code's name=, or "" when it takes it, following
+// BridgePairingURL.parseResult: an empty value is a missing field, one its
+// .whitespacesAndNewlines trim changes has "extra spaces" (TrimLibraryName
+// is that trim, enumerated over every scalar in #1042), and one over 256
+// Characters is too long. Runes stand in for Characters: a Character is one
+// or more of them, so a name this takes, the app takes.
+func appNameRefusal(name string) string {
+	switch {
+	case name == "":
+		return "missing the name field"
+	case config.TrimLibraryName(name) != name:
+		return "extra spaces in the name field"
+	case utf8.RuneCountInString(name) > 256:
+		return "name field is too long"
+	}
+	return ""
+}
+
+// TestEveryNameThePatchLeavesLivePairs: whatever the console sends, the name
+// the bridge is left serving comes out of the next pairing QR as a name the
+// app takes, and as that name. The console is the one writer that takes a
+// name while the bridge runs, so this drives it, then the mint, through the
+// real handlers. On 2026-09-27 (main at 3214aa17) a 257-character name went
+// live and the QR minted after it did not pair.
+func TestEveryNameThePatchLeavesLivePairs(t *testing.T) {
+	a256 := strings.Repeat("a", 256)
+	for _, tc := range []struct{ label, sent string }{
+		{"plain", "Renamed"},
+		{"a space and a plus", "C++ & Friends"},
+		{"padded", "  Padded  "},
+		{"zero-width padded", "\u200bZW\u200b"},
+		{"256 runes", a256},
+		{"256 runes once trimmed", "  " + a256 + "  "},
+		{"257 runes", a256 + "b"},
+		{"256 two-byte runes", strings.Repeat("é", 256)},
+		{"256 four-byte runes", strings.Repeat("🎧", 256)},
+		{"blank", "   "},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			h := srv.Handler()
+			var body map[string]any
+			doJSON(t, h, "PATCH", "/api/settings", map[string]any{"libraryName": tc.sent}, &body)
+			live := srv.deps.CfgHolder.Load().LibraryName
+
+			var mint pairResult
+			if code := doJSON(t, h, "POST", "/api/tokens", map[string]string{"name": "iPhone"}, &mint); code != http.StatusCreated {
+				t.Fatalf("mint: %d", code)
+			}
+			assertAppReads(t, appQueryItems(t, mint.PairURL), "name", live)
+			if why := appNameRefusal(live); why != "" {
+				t.Errorf("the bridge serves a name of %d runes that the app refuses: %s", utf8.RuneCountInString(live), why)
+			}
+		})
+	}
+}

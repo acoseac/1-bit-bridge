@@ -79,9 +79,15 @@
           before app.js sees the submit. The PATCH refuses a name that is
           blank once trimmed (TrimLibraryName in internal/config), and the
           pattern catches spaces alone, which `required` lets through.
+
+          maxlength is the PATCH's other refusal, a name over
+          config.MaxLibraryNameLength, which a pairing code cannot carry.
+          The browser counts UTF-16 code units and the handler runes, and a
+          rune is one or two units, so the box stops typing at or before
+          the cap and never lets a name through that the handler refuses.
         */}}
         <label>Library name
-          <input name="libraryName" type="text" value="{{.Data.LibraryName}}" required pattern=".*\S.*" title="Devices show this bridge under this name, so it cannot be blank.">
+          <input name="libraryName" type="text" value="{{.Data.LibraryName}}" required pattern=".*\S.*" maxlength="{{libraryNameMaxLength}}" title="Devices show this bridge under this name, so it cannot be blank.">
         </label>
         <small class="hint">Shown in the iOS pairing UI and mDNS TXT records.</small>
       </div>

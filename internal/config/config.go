@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -2697,8 +2698,10 @@ const (
 // whitespace and Go's unicode.IsSpace does not. Enumerated over every scalar
 // on 2026-09-27, the two sets differ by that one. The parser refuses a
 // pairing code whose name does not come back from its trim unchanged ("extra
-// spaces in the name field") or is empty ("missing the name field"), so a
-// name this returns unchanged and non-empty is one it takes.
+// spaces in the name field") or is empty ("missing the name field"). Those
+// are two of its four refusals: CheckLibraryName has the other two, so a name
+// this returns unchanged and non-empty, and CheckLibraryName passes, is one
+// it takes.
 //
 // One definition for every place that stores a name: Normalize, the
 // console's settings PATCH, and `bridge init`.
@@ -2708,11 +2711,64 @@ func TrimLibraryName(s string) string {
 	})
 }
 
+// MaxLibraryNameLength is the longest library name the bridge stores, in
+// runes. The app's pairing parser refuses a pairing code whose name= is over
+// 256 Characters (BridgePairingURL.maxNameLength: "Pairing code's name field
+// is too long."), so a longer name gave a QR that did not pair. A Character
+// is a grapheme cluster of one or more Unicode scalars, so 256 runes is at
+// most 256 Characters on every iOS version, whatever Unicode tables it
+// segments by; Go's standard library cannot count the app's way. A name of
+// multi-scalar Characters (a flag is two, a family emoji seven) is capped
+// sooner than the app would cap it, which is the direction that pairs.
+const MaxLibraryNameLength = 256
+
+// CheckLibraryName says why the app's pairing parser would refuse name, a name
+// TrimLibraryName has already trimmed and that is not blank, or returns nil
+// for one it takes. It refuses a name that is not valid UTF-8, which
+// Foundation's URLComponents does not decode, so the app reports the field
+// missing, and one over MaxLibraryNameLength runes.
+//
+// A name the operator TYPES is refused by it (the settings PATCH, `bridge
+// init --name` and init's prompt). A name a config or the environment
+// already holds is repaired instead (RepairLibraryName, in Normalize), since
+// refusing it would stop a bridge from starting over a display name.
+func CheckLibraryName(name string) error {
+	if !utf8.ValidString(name) {
+		return errors.New("must be valid UTF-8 (a pairing code with a name that is not does not pair)")
+	}
+	if n := utf8.RuneCountInString(name); n > MaxLibraryNameLength {
+		return fmt.Errorf("must be at most %d characters, and this one has %d "+
+			"(a pairing code with a longer name does not pair)", MaxLibraryNameLength, n)
+	}
+	return nil
+}
+
+// RepairLibraryName returns name as Normalize stores and serves it, but for
+// the default: valid UTF-8, with U+FFFD for each run of bytes that are not;
+// trimmed (TrimLibraryName); and, when longer than MaxLibraryNameLength runes,
+// cut to that many and trimmed again, since a cut can end on a space. "" is a
+// name that is blank once trimmed, which Normalize serves as
+// DefaultLibraryName and `bridge init` treats as no name at all.
+//
+// What CheckLibraryName refuses a typed name for, this repairs in a name that
+// is already stored, so what it returns always passes CheckLibraryName.
+func RepairLibraryName(name string) string {
+	name = TrimLibraryName(strings.ToValidUTF8(name, "\ufffd"))
+	runes := 0
+	for i := range name {
+		if runes == MaxLibraryNameLength {
+			return TrimLibraryName(name[:i])
+		}
+		runes++
+	}
+	return name
+}
+
 // Normalize rewrites the fields whose canonical on-disk form differs from
 // what an operator might reasonably type: the two enrich base URLs (trim
 // whitespace + trailing slash), the public-mode autocert domain (trim),
 // customEndpoints (prune-and-warn to the entries that survive
-// ValidateCustomEndpoints), and the library name (TrimLibraryName, and
+// ValidateCustomEndpoints), and the library name (RepairLibraryName, and
 // DefaultLibraryName for a blank one). Idempotent — running it twice
 // produces the same Config as running it once.
 //
@@ -2783,10 +2839,25 @@ func (c *Config) Normalize() error {
 	// differently after a restart. The PATCH refuses a blank name before it
 	// gets here: taking it as the default would replace the operator's name
 	// with one nobody chose.
-	c.LibraryName = TrimLibraryName(c.LibraryName)
-	if c.LibraryName == "" {
-		c.LibraryName = DefaultLibraryName
+	//
+	// And repaired (RepairLibraryName), since 2026-09-27: the parser also
+	// refuses a name over 256 Characters and one that is not UTF-8, and a
+	// config written before the cap, a hand edit, `bridge init --name` from a
+	// Latin-1 terminal (saved as `!!binary`) or a BRIDGE_LIBRARY_NAME could
+	// hold either. The PATCH and init refuse such a name when it is typed;
+	// here, refusing would stop a bridge from starting over a display name,
+	// so the name is cut or its bytes replaced, and the log says so, since
+	// the operator did not choose the result.
+	name := RepairLibraryName(c.LibraryName)
+	if name != TrimLibraryName(c.LibraryName) {
+		validateLogger.Warn("libraryName is longer than a pairing code carries, or not UTF-8; serving it repaired",
+			"served", name, "runes", utf8.RuneCountInString(c.LibraryName),
+			"validUTF8", utf8.ValidString(c.LibraryName), "max", MaxLibraryNameLength)
 	}
+	if name == "" {
+		name = DefaultLibraryName
+	}
+	c.LibraryName = name
 
 	// CustomEndpoints: prune-and-warn. Accept HTTPS URLs only. We
 	// silently drop malformed / non-HTTPS entries because cert SAN

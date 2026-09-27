@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -23,6 +24,9 @@ var tmplFuncs = template.FuncMap{
 	"timeAgoPtr":  timeAgoPtr,
 	"formatTime":  func(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") },
 	"basename":    filepath.Base,
+	// libraryNameMaxLength is the settings form's maxlength for the name,
+	// the handler's cap, so the two cannot disagree.
+	"libraryNameMaxLength": func() int { return config.MaxLibraryNameLength },
 	// json embeds a value as a JSON literal inside a <script
 	// type="application/json"> block for client-side hydration. Returns
 	// template.JS so html/template inserts it verbatim; json.Marshal
