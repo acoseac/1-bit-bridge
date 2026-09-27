@@ -558,6 +558,10 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	// skipping the fields it was written for.
 	case "updateQuietHours":
 		return "02:00-04:00", true
+	// libraryName had no case, so its matrix row was never driven. Any
+	// name that is not blank once trimmed will do; a blank one is refused.
+	case "libraryName":
+		return "Matrix Probe", true
 	case "fingerprintApiKey":
 		// Non-blank: a blank submit is the documented no-op and reports
 		// `unchanged`, which the caller treats as "proves nothing".

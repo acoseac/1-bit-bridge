@@ -523,7 +523,12 @@ func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
 			{name: "a config giving no name: the host's, as a first install takes",
 				first: "My Library", nameLine: "# no libraryName", served: config.DefaultLibraryName, want: host},
 			{name: "a config giving a blank one: the host's too",
-				first: "My Library", nameLine: `libraryName: "  "`, served: "  ", want: host},
+				first: "My Library", nameLine: `libraryName: "  "`, served: config.DefaultLibraryName, want: host},
+			// Blank to the app's trim (config.TrimLibraryName), not to
+			// strings.TrimSpace's: taken as a name to keep, it was saved as
+			// DefaultLibraryName, and listed as kept.
+			{name: "a config giving a zero-width space alone: the host's too",
+				first: "My Library", nameLine: `libraryName: "​"`, served: config.DefaultLibraryName, want: host},
 			{name: "named for its host: kept, with nothing to say",
 				want: host},
 		} {
@@ -558,6 +563,88 @@ func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
 	}
 }
 
+// TestInitTrimsTheNameItIsGiven: init saved --name as given. Measured on
+// 2026-09-27 with the real binary (main at a2a72f1b): `--name "  "` wrote
+// `libraryName: '  '` and `--name " Padded "` kept its spaces, and Load
+// served both as written, in /v1/health and in the name= of every pairing
+// QR, which the app refuses when the name is empty or padded ("extra spaces
+// in the name field").
+//
+// The name is trimmed, as the console's settings PATCH and the name prompt
+// trim it, and a --name that is blank once trimmed is no name, as --name ""
+// and an empty answer at the prompt are: a first install takes the host's,
+// and a rewrite keeps the install's and lists it. config.Load would serve a
+// blank name as DefaultLibraryName, which is neither.
+func TestInitTrimsTheNameItIsGiven(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skipf("premise: this host has a name, which a first install takes (%v)", err)
+	}
+	for _, tc := range []struct{ sent, want string }{
+		{"  ", host},
+		{" Padded Name ", "Padded Name"},
+	} {
+		t.Run("first install/"+strconv.Quote(tc.sent), func(t *testing.T) {
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			code, out := loopbackInit(t, cfgDir, testLibrary(t), tc.sent)
+			defer logRunOnFailure(t, out)
+			if code != 0 {
+				t.Fatalf("the init exited %d", code)
+			}
+			assertSavedLibraryName(t, cfgDir, tc.want)
+		})
+	}
+	for _, posture := range rewritePostures {
+		for _, tc := range []struct {
+			sent, want string
+			// listed says the run lists the name among what it kept.
+			listed bool
+		}{
+			{"  ", "My Library", true},
+			{" Jazz Archive ", "Jazz Archive", false},
+		} {
+			t.Run(posture.name+"/rewrite/"+strconv.Quote(tc.sent), func(t *testing.T) {
+				assertRewriteSavesName(t, posture, tc.sent, tc.want, tc.listed)
+			})
+		}
+	}
+}
+
+// assertRewriteSavesName installs "My Library" in posture, rewrites it with
+// --name sent, and fails unless the saved name is want and the run lists it
+// among what it kept exactly when listed says so.
+func assertRewriteSavesName(t *testing.T, posture rewritePosture, sent, want string, listed bool) {
+	t.Helper()
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
+	rewrite := posture.install(t, cfgDir, "My Library")
+	code, out := rewrite(sent)
+	defer logRunOnFailure(t, out)
+	if code != 0 {
+		t.Fatalf("the rewrite exited %d", code)
+	}
+	assertSavedLibraryName(t, cfgDir, want)
+	got, ok := keptValue(out, "libraryName")
+	if ok != listed || (ok && got != want) {
+		t.Errorf("the run lists libraryName as %q (listed %v), want listed %v", got, ok, listed)
+	}
+}
+
+// assertSavedLibraryName fails unless the config at cfgDir gives want as its
+// libraryName, as written in the file and as config.Load serves it.
+func assertSavedLibraryName(t *testing.T, cfgDir, want string) {
+	t.Helper()
+	written, err := readPriorInstall(filepath.Join(cfgDir, "bridge.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.LibraryName != want {
+		t.Errorf("bridge.yaml says libraryName %q, want %q", written.LibraryName, want)
+	}
+	if got := loadInstallConfig(t, cfgDir).LibraryName; got != want {
+		t.Errorf("config.Load serves libraryName %q, want %q", got, want)
+	}
+}
+
 // TestInitInteractiveRewriteOffersTheInstallsName: the name prompt's default
 // is what Enter takes, and over an install with a name of its own it offered
 // the host's, so an operator who pressed Enter through a rewrite replaced the
@@ -582,6 +669,9 @@ func TestInitInteractiveRewriteOffersTheInstallsName(t *testing.T) {
 	}{
 		{"Enter keeps the install's name", "My Library", "", "My Library", "My Library"},
 		{"a typed name replaces it", "My Library", "Jazz Archive", "My Library", "Jazz Archive"},
+		// Blank to the app's trim (config.TrimLibraryName), which the
+		// prompt's own strings.TrimSpace does not see as blank.
+		{"an answer blank once trimmed is Enter", "My Library", "​", "My Library", "My Library"},
 		{"a first install is offered the host's", "", "", host, host},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
