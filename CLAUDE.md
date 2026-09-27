@@ -1973,11 +1973,14 @@ no failing test — which is the shape to expect in this area.
   pair` on a fresh install 401'd in silence. `noteReadLocked` logs one Warn
   when the store first cannot be read (the path, the error, and on POSIX for a
   permission error the uid and the chown remedy) and one Info when a request
-  can read it again, with no restart. **A test that asserts only the FILE can
-  no longer see the abort**, since #1043's re-read before the commit refuses
-  the same write: the skip-persist tests passed with the abort removed, and
-  count stagings now. The cause, a CLI run as root re-owning the file, is the
-  runbook's "always as the service user" rule, and is not fixed in code.
+  can read it again, with no restart. Both give the token count the bridge
+  answers from: `tokens=0` after the file is deleted to mend it, which unpairs
+  every device, where "readable again" alone read as all clear. **A test that
+  asserts only the FILE can no longer see the abort**, since #1043's re-read
+  before the commit refuses the same write: the skip-persist tests passed with
+  the abort removed, and count stagings now. The cause, a CLI run as root
+  re-owning the file, is the runbook's "always as the service user" rule, and
+  is not fixed in code.
 - **`logging.Component` resolves `slog.Default()` at LOG time, not construction.**
   Package-level `var logger = logging.Component(...)` runs during package init,
   before `main()` calls `logging.Init()` — a captured-handler shape would lock

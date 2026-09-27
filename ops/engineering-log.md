@@ -18748,7 +18748,10 @@ since Validate's own reload fails the same way (read from the code)."
   shutdown flush), logs one Warn on the change to failing (the path, the
   error, a note on the consequence, and on POSIX for a permission error the
   uid and a hint naming the sudo'd CLI and chown) and one Info on the change
-  back. Not from `reload()`: its callers (OpenStore, Mint, Revoke, Rotate,
+  back. Both give the number of tokens the bridge answers from: an operator
+  who mends the file by deleting it has unpaired every device, and a line
+  saying only "readable again" reads as all clear, where `tokens=0` does not.
+  Not from `reload()`: its callers (OpenStore, Mint, Revoke, Rotate,
   SetExpiry, the commit's rebuild) return the error to someone who reports
   it, and OpenStore reporting would add a Warn to every failed CLI run.
 - **The uid and the hint are POSIX's.** Windows has no uid to name and no
@@ -18762,10 +18765,12 @@ since Validate's own reload fails the same way (read from the code)."
   stagings of one attempt (none when the reload fails, one when the commit
   does); a window later, one more of each; with the failure mended,
   FlushLastUsed lands the last observation, and the sibling's token, on disk.
-  `TestAStoreThatCannotBeReadIsReportedOnce` (unreadable, damaged) pins the
-  verdicts while the store cannot be read and after, one Warn carrying the
-  path and the cause (and, for the permission row only, the uid and the hint),
-  and one Info.
+  `TestAStoreThatCannotBeReadIsReportedOnce` (unreadable, damaged,
+  unreadable then deleted) pins the verdicts while the store cannot be read
+  and after, one Warn carrying the path, the cause and the 3 tokens last read
+  (and, for the permission rows, the uid and the hint), and one Info with the
+  tokens now read: 2, or 0 once the file was deleted, when every device is
+  refused. The sibling revokes two devices so that the two counts differ.
 - **The skip-persist tests could no longer see the abort.** With it removed
   (NC6), `TestValidateSkipsPersistWhenPreflightReloadFails` and
   `TestRecordClientVersionSkipsPersistWhenPreflightReloadFails` both passed:
@@ -18776,11 +18781,12 @@ since Validate's own reload fails the same way (read from the code)."
   under NC6.
 - **Red first.** a2139c2d's tests fail on 44a897b0's `auth.go`: all eight
   window rows (ten ERRORs where one is wanted, and ten stagings in the rows
-  that fail at the commit) and both report rows (no line, while every verdict
-  holds). The final test file, re-run there in a scratch worktree, fails on
-  the same ten rows; the two strengthened skip-persist tests pass there, as
-  main has the abort.
-- Negative controls against 60224f99 (NC6 re-run against da21ebf5), each
+  that fail at the commit) and both of its report rows (no line, while every
+  verdict holds). The final test file, re-run there in a scratch worktree,
+  fails on all eleven of its rows (the report test gained the deleted row);
+  the two strengthened skip-persist tests pass there, as main has the abort.
+- Negative controls against 60224f99 (NC6 re-run against da21ebf5; NC7 to
+  NC13 against 720b20d2, whose report test has the deleted row), each
   restored from HEAD and the tree checked clean before the next, by a harness
   in the scratchpad that matched every pattern exactly once before opening
   the file for writing. None failed to build:
@@ -18793,11 +18799,13 @@ since Validate's own reload fails the same way (read from the code)."
   | NC4 | FlushLastUsed asks the window | all eight window rows at the flush, eleven of #1043's commit-window rows, `TestValidateDebouncesLastUsedPersist`, `TestRecordClientVersionUpdatesInMemoryAndFlushPersists` |
   | NC5 | no attempt while the read side knows the store is unreadable | the four reload rows (0 or 1 ERRORs where 1 and 2 are wanted) |
   | NC6 | a failed reload does not abort the write | the four reload rows, on "staged 1 times, want 0"; the two skip-persist tests only once they count stagings |
-  | NC7 | `reloadIfStale` reports nothing | both report rows |
-  | NC8 | every failed read is reported | both report rows |
-  | NC9 | no report when the store can be read again | both report rows |
+  | NC7 | `reloadIfStale` reports nothing | all three report rows |
+  | NC8 | every failed read is reported | all three report rows |
+  | NC9 | no report when the store can be read again | all three report rows |
   | NC10 | the uid and hint for any error | the damaged row |
   | NC11 | RecordClientVersion keeps the old gate | its four window rows |
+  | NC12 | the recovery line gives no token count | all three report rows |
+  | NC13 | the Warn gives no token count | all three report rows |
 
 - The package under `-race`; `GOOS=windows` and `GOOS=linux go test -c`
   build. The unreadable rows skip on Windows and as root; the damaged and
