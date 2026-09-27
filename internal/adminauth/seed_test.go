@@ -53,7 +53,7 @@ func TestSeedFromEnvDoesNotResetAConfiguredStore(t *testing.T) {
 	if err := s.SetInitialPassword("admin", "the-original-secret"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ResetPassword("admin", "the-rotated-secret"); err != nil {
+	if err := s.ResetPassword("admin", "the-rotated-secret", EndSessions); err != nil {
 		t.Fatal(err)
 	}
 

@@ -1817,6 +1817,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /login/ticket", s.apiRedeemLoginTicket)
 	mux.HandleFunc("POST /login", s.apiLogin)
 	mux.HandleFunc("POST /logout", s.apiLogout)
+	// Behind the session gate, as every /api route is: the caller's
+	// session is the one it keeps.
+	mux.HandleFunc("POST /api/console-sessions/sign-out-others", s.apiSignOutOtherSessions)
 
 	// Layer order (outer → inner):
 	//   1. boundaryMiddleware — applies loopbackOnly in loopback

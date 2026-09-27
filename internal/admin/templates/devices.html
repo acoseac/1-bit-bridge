@@ -52,6 +52,23 @@
     </table>
   </div>
 
+  {{- /* Console sign-ins: public mode only, the one mode with sessions. The
+       count is the store's live sessions, this browser's included, and the
+       button ends every other one (POST /api/console-sessions/sign-out-
+       others); app.js redraws the count from its answer. `with` skips the
+       panel when no count was passed, so it cannot render against a page
+       that has no store. */ -}}
+  {{if .IsPublic}}{{with $n := .Data.ConsoleSessions}}
+  <div class="panel" id="console-sessions-panel">
+    <div class="panel-head">
+      <h2>Console sign-ins</h2>
+      <button type="button" id="sign-out-others" class="btn danger"{{if le $n 1}} disabled{{end}}>Sign out all other sessions</button>
+    </div>
+    <p class="muted" id="console-sessions-count">{{if gt $n 1}}{{$n}} browsers are signed in to this console, this one included.{{else}}Only this browser is signed in to this console.{{end}}</p>
+    <p class="muted">A browser signed out here is refused at its next request, and the password stays as it is. To change it and sign out every browser, this one included, run <code>bridge admin reset-password</code> on the bridge host.</p>
+  </div>
+  {{end}}{{end}}
+
   {{- /* UPnP upstream MediaServers moved to /upnp (Bridge PR-pending —
        admin discovery + CRUD). The dedicated page has its own three-
        section layout (Configured / Discovered / Add manually) plus an

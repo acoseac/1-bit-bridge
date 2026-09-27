@@ -17689,10 +17689,12 @@ file."
   the copy read at open: reset-password waits at a prompt between the two,
   so the copy would drop a session signed in meanwhile and bring back one
   signed out (`TestARotationCarriesTheRunningBridgesSessions`).
-- **A rotation still does not end sessions**, `TestSessionSurvivesResetPassword`'s
-  existing, deliberate contract. Only the false claim went: the message now
-  says a running bridge takes the password at its next sign-in with no
-  restart, and that signed-in consoles stay signed in across a restart.
+- **A rotation still does not end sessions**, `…SessionSurvivesResetPassword`'s
+  existing, deliberate contract (that test was flipped into
+  `TestResetPasswordEndsSessionsUnlessKept` on the same day, below). Only the
+  false claim went: the message now says a running bridge takes the password
+  at its next sign-in with no restart, and that signed-in consoles stay
+  signed in across a restart.
 - **A failed login or logout write stays pending** (`sessionsDirty` set
   before the write). A failed logout used to leave nothing pending, so with
   no other session active the shutdown flush landed nothing and the restart
@@ -18865,6 +18867,363 @@ evidence:
   to test, so it is left for its own change.
 - **A bridge still running the old binary** keeps the per-request lines until
   it restarts.
+
+## 2026-09-27 — every console signed out: reset-password by default, `sign-out-everywhere`, and a console button (#1044)
+
+#1039's entry recorded it under Out of scope: "Nothing can end another
+console session. A rotation does not, a restart does not (#800), a running
+bridge writes its sessions back beside a new credential file, and logout ends
+only the caller's own." What to do about it was the user's call, asked before
+anything was built: `bridge admin reset-password` signs every console out by
+default with `--keep-sessions` to opt out, plus `bridge admin
+sign-out-everywhere` and a "Sign out all other sessions" button in the
+console.
+
+### What was measured
+
+- **The gap, on main.** #1039's own e2e asserted that the console signed in
+  with the leaked password still answered `200` after the rotation and after
+  the restart ("The rotation and the restart both leave a signed-in console
+  signed in"). The session is loaded from `adminauth.json` at every start,
+  and the running bridge puts its in-memory set back at every session write,
+  so deleting rows by hand ended nothing, and neither did deleting the file.
+- **1-bit.app said the opposite.** The troubleshooting page's "Lost the admin
+  password" answer says "Active login sessions are invalidated immediately.
+  No bridge restart required.", false until now and true for the default
+  from this change. Its features and privacy pages still say sessions are
+  "kept in memory only and cleared on restart", false since #800 (filed for
+  the 1bitapp repo, not changed here).
+- **The hot path** (a throwaway benchmark, darwin/arm64, the file as the
+  store writes it): `os.Stat` 1.7 to 2.5 µs at any size, and the same with
+  `os.SameFile`; a full read and parse 22 µs at one session, 27 µs at five,
+  91 µs at 50 and 1.75 ms at the 1,024 cap. An authenticated `/api/stats` is
+  ~280 µs (the figure in `prunedTickets`' docblock), so a read per request
+  would have added 8 % at one session and six times the request at the cap.
+- **On the real binary**, a public-mode fixture (the recipe in CLAUDE.md's
+  `## Local test fixture`) with a browser in the console and two sessions
+  signed in by `curl`: the button answered "Signed out 2 other browsers" and
+  both `curl` sessions got `401` while the browser kept `200`; `bridge admin
+  sign-out-everywhere` then took the browser's next request to `401` with no
+  restart, and the journal said `the admin credential store records a
+  sign-out everywhere; ending the console sessions this bridge held
+  sessions=1`. The file held the marker and no sessions. After a restart,
+  the two sessions signed in since were still in. The page renders at
+  375 px in light and dark with no horizontal scroll.
+
+### Decisions
+
+- **A marker, not an emptied set.** A process that ends sessions it does not
+  hold writes the credential, no sessions and a new `sessionsRevokedAt` in
+  one CAS write (`SignOutEverywhere`, and `ResetPassword` with
+  `EndSessions`). The running bridge ends every session it holds when it
+  reads a marker it has not taken (`adoptSignOutLocked`), wherever it reads
+  the file: every write's read in `commitLocked`, a login's credential read,
+  a ticket's, and a session check's.
+- **An event, never a filter on `IssuedAt`.** The marker is compared only
+  with the last one taken, never with a session's time. A session made after
+  the read is kept whatever the clocks say, where a filter ends every login
+  after a clock stepped back until the clock passes the marker; and a
+  session held at the read predates the sign-out even with a later
+  `IssuedAt`, since its login read the file (and checked the credential)
+  before the marker landed. `load()` takes the file's marker as already
+  taken. A missing marker, or a missing file, changes nothing and does not
+  reset the one taken.
+- **Every sign-out moves the marker** (`nextSignOut`): one nanosecond past
+  the last when the clock does not put now after it. Detection is `!Equal`,
+  so a marker that did not move would end nothing on a bridge that took the
+  first one.
+- **Every writer carries the marker over**, the `--keep-sessions` rotation
+  and `installInitialLocked` included, and **a session write builds its set
+  inside the commit closure**, after the read adopted a marker. Built before
+  it (as it was), the set wrote the signed-out sessions back into the file
+  the sign-out had emptied, and the next restart signed them in again.
+- **A session check reads the file only when a stat says it changed**
+  (`refreshIfChangedLocked`): size, modification time and `os.SameFile`,
+  against the stat of the file the last read OPENED (taken before its bytes
+  are read, so it describes the file they came from). Every writer here
+  renames a new file into place, so a write is a new inode whatever its size
+  and time; size and time catch a rewrite in place. What all three miss (an
+  in-place rewrite of the same size inside one tick, or two renames that
+  recycle an inode between two checks) is read at the next session write,
+  which comes at least every 30 s while requests do.
+- **A commit records the stamp of the file it wrote** (from Gemini's review,
+  below), taken from the staged file after its fsync: the rename keeps the
+  inode, the size and the time. Without it every session write cost the next
+  console request a full read of what its own process had just written.
+- **A check that cannot read the file fails CLOSED**: `ErrStoreUnreadable`,
+  a 503 from the middleware. The file may hold a sign-out, as #1039 already
+  answered for a login. The session is kept, so it works again once the file
+  reads, and no stamp is recorded, since a chmod or chown that fixes the file
+  changes none of the three. The store logs at most once per
+  `sessionFlushInterval` and the middleware adds no line of its own: every
+  console request makes a check, and #1039 bounded exactly this per-request
+  line for a failed write. `TestAFailedSessionWriteWaitsOutTheDebounce` used
+  an unreadable file to fail the write, which now fails the check first; it
+  fails the write with a file that changes under every commit attempt
+  instead, which also runs on Windows.
+- **The console button needs no marker.** It runs in the serving bridge,
+  which holds the sessions: `EndOtherSessions` deletes every session but the
+  caller's and writes at once, as a logout does. Expired sessions are swept
+  first so the count is of browsers actually signed out.
+- **`ResetPassword` takes a `SessionAction`**, and every caller says which.
+  `EndSessions` is the zero value, the secure default for one that says
+  nothing.
+
+### Tests and controls
+
+- `internal/adminauth/signoutelsewhere_test.go` (a running store and the
+  CLI's store on one file, #1039's pattern): the sign-out reaching the
+  running bridge at its next request, with the command and with a rotation;
+  each writer as the first act after it (a login, a logout, the shutdown
+  flush); a session made after it kept through a restart with the clock an
+  hour behind the marker; two sign-outs at one frozen instant; a sign-out
+  landing inside a session write; a `--keep-sessions` rotation carrying the
+  marker; the stat gate's read count and a replacement matched in size and
+  time; the unreadable check and its log bound; the refusals; and
+  `EndOtherSessions`. `…SessionSurvivesResetPassword` became
+  `TestResetPasswordEndsSessionsUnlessKept`, deliberately, one row each way.
+- `internal/admin/handlers_signout_test.go` drives the button, the 503 and
+  the Devices panel through `Server.Handler()`.
+- `cmd/bridge`: the live `TestResetPasswordTakesOnARunningPublicBridge` now
+  rotates with `--keep-sessions` first (so the shutdown flush still has
+  activity to land) and with the default second, requiring the consoles
+  signed in before it to answer `401` at their next request and the file to
+  hold none of them after the stop. `TestSignOutEverywhereOnARunningPublicBridge`
+  drives the button and the command against a real `serve`.
+  `TestSignOutEverywhereRefusesAnInstallWithNoConsole` covers a loopback
+  install.
+- **No red on main as such**: the tests use API main does not have, as #1039's
+  seam test did. Its red is the controls, and NC18 is main's shape (a
+  sign-out that only empties the file's set). Negative controls against the
+  committed fix, through a harness that computes each mutation and checks
+  every pattern matches exactly once before writing anything, checks the
+  mutation builds, runs the three packages with `-count=1`, restores from
+  HEAD and requires a clean tree before the next:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the session check does not read the file | both sign-out rows, the marker, carry, gate, same-size, unreadable and 503 tests, both e2e |
+  | NC2 | a new marker is taken without ending the sessions | every cross-process sign-out test, both e2e |
+  | NC3 | a session write builds its set before the read | the three writer rows, the during-a-write test |
+  | NC4 | a sign-out writes the clock's time without moving past the last marker | the frozen-instant test |
+  | NC5 | the marker is a filter on `IssuedAt` at every read | the made-after test |
+  | NC6 | a `--keep-sessions` rotation drops the marker | the carry test, the supersede test (round 2) |
+  | NC7 | a session write drops the marker | the carry test, the frozen-instant test (with no marker in the file the second sign-out wrote the first one's time again) |
+  | NC8 | the gate compares size and time only | the same-size test |
+  | NC9 | no gate: every check reads | the read-count test |
+  | NC10 | a check that cannot read lets the session through | the unreadable test, the 503 test |
+  | NC11 | the unreadable line is not throttled | the same two, on the line count |
+  | NC12 | the middleware has no branch for it (a 500 and a line per request) | the 503 test |
+  | NC13 | `EndOtherSessions` counts expired sessions | its test |
+  | NC14 | `EndOtherSessions` ends them in memory only | its test, both not-saved tests (round 1) |
+  | NC15 | reset-password keeps the sessions by default | the reset e2e |
+  | NC16 | the route is not registered | both handler tests, the sign-out e2e |
+  | NC17 | a rotation that ends them writes the file's set back | the flipped test, the reset row, the in-flight reset row (round 2) |
+  | NC18 | `SignOutEverywhere` only empties the file's set | the command rows, the writer rows, the carry, gate and frozen-instant tests, the sign-out e2e |
+  | NC19 | `load()` does not take the marker as seen | the made-after test's restart |
+  | NC20 | the signing-out process keeps its own sessions | the flipped test |
+  | NC21 | the lookup is made before the stat-gated read | both sign-out rows, the marker, carry, gate and same-size tests, both e2e |
+  | NC22 | the Devices page is not given the count | the Devices test |
+  | NC23 | a commit does not record its own file's stamp | the read-count test |
+  | NC24 | `EndOtherSessions` swallows a write that fails (round 1) | both not-saved tests |
+  | NC25 | the handler answers a not-saved end as a failure (round 1) | the handler's not-saved test |
+  | NC26 | no confirmation: the command returns once its commit lands (round 2) | all four confirmation tests |
+  | NC27 | a rotation redoes whenever the file is not its own credential (round 2) | the supersede test, `TestResetPasswordBuildsNewPointer` (concurrent rotations then undo each other until they give up) |
+  | NC28 | a store that keeps coming back is not reported (round 2) | the keeps-coming-back test |
+  | NC29 | the unreadable-store branch answers `/api` in plain text (round 2) | the 503 test |
+  | NC30 | a confirmation's redo adopts its own undone write as news (round 3) | the in-flight reset row (it logs "the admin credential changed on disk" about its own write) |
+  | NC31 | a redo says nothing (round 3) | both in-flight rows |
+
+- **The whole set was re-run on the final head** (after both review
+  rounds), each pattern checked to match once before anything was written:
+  three patterns had moved with the code (NC3, NC12, NC18) and the harness
+  refused them rather than mutate the wrong text; updated, all 29 are red.
+- **Two controls came back green, and each was the test's fault.** NC13 at
+  first: the fixture signed its other sessions in after the stale one
+  expired, and a login sweeps expired sessions, so the count never saw it.
+  Moving those logins before the expiry fixed that and turned NC14 green: the
+  caller's next check then fell past the debounce and its own write landed
+  what the control had stopped `EndOtherSessions` from writing. The test now
+  reads the file before anything else writes it. **A later write can land the
+  change a control removed**, the same shape as #1039's "a test step can mark
+  the thing it tests".
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with the store, the
+production diff and the new tests, on four questions. It agreed with the
+event semantics, including ending a login whose credential check read the file
+just before the marker landed, and with failing closed. Taken: record the
+stamp of the file a commit wrote (above). Declined, each on evidence:
+
+- **A retry around the stat on Windows sharing errors.** Go 1.26.6's
+  `os.Stat` already falls back to `FindFirstFile` on
+  `ERROR_SHARING_VIOLATION` (`os/stat_windows.go`), and `sameFile` answers
+  false, not an error, when it cannot load a file ID (`os/types_windows.go`),
+  which costs a read rather than a 503. The reader's `os.Open` shares read
+  and write (`syscall.Open`'s `sharemode`), and no writer here holds the
+  store open: each renames a closed temp file.
+- **"`os.SameFile` returns false on FAT, where both file indexes are 0".**
+  `sameFile` has no such case: it compares volume and both indexes, and FAT
+  derives a file index from the entry's directory position. The limit there
+  is real in the other direction: a rename can land on the same position,
+  and FAT's clock ticks in 2 s, so a replacement can match all three terms
+  until the next full read.
+- **Clearing `sessionsDirty` when a marker is taken.** It saves at most one
+  write of an already empty set, and that write is the one that would clean
+  a file still holding ended sessions (a restored copy, say).
+- **A millisecond step in `nextSignOut`** against external tools truncating
+  nanoseconds: the marker's own time already carries nanoseconds, so the step
+  does not decide what a truncating tool changes, and a tool rewriting the
+  file must copy the field as it must copy the hash.
+- **`Retry-After` on the 503**: the realistic causes, a root-owned file after
+  `sudo` or a damaged one, need an operator, and a retry hint would promise
+  what nothing delivers.
+- Its NFS point stands as a limit: attribute caching can hide a sign-out from
+  the stat until the cache expires or the next session write reads the file
+  (at most 30 s while requests come). A data dir on NFS is unusual; SQLite
+  beside it is the bigger problem there.
+
+### Review round 1
+
+- **Gemini (medium): a failed write after "Sign out all other sessions" was
+  only logged**, so the page reported a clean sign-out that a restart would
+  undo. Real: logout's precedent (log, stay pending) suits a user leaving,
+  not an operator ending a stranger's session. Its suggested fix, returning
+  the write's error, was not taken as written: the handler would answer
+  500 and the page "could not sign the other browsers out" about sessions
+  that are already refused. `EndOtherSessions` returns
+  `ErrSessionsNotSaved` BESIDE the count, the handler answers `200` with
+  `saved: false` and an Error line, and the page says a restart before the
+  bridge's next write would sign them back in. The change stays pending,
+  so that next write lands it (`TestEndOtherSessionsReportsAnEndItCouldNotSave`
+  fails the write with a file that changes under every commit, on every
+  platform; the handler's test uses a read-only directory, POSIX and not
+  root). NC24 and NC25 in the table above.
+- **CodeRabbit** was paused by its plan limit on the first head; once the
+  notice's own wait had passed, `@coderabbitai review` ran the included
+  review on the second. **One finding (Minor), real**: the unreadable-store
+  branch answered `/api/` in plain text, so the console's
+  `errorFromResponse` fell back to "503 Service Unavailable" and lost the
+  `store_unreadable` code and the message. It now sends the JSON envelope
+  to `/api/` and text to a page, as the 401 branch beside it does. The test
+  asserts both shapes; tightened first, it was red on the old code ("503
+  \"admin refused: …\\n\", want … the store_unreadable envelope").
+- **SonarCloud**'s quality gate passed, with one new issue (go:S1192): the
+  command made `"adminauth.json"` the third copy of the literal in
+  `cmd/bridge/admin.go`. It had five spellings across `cmd/bridge` (serve,
+  init and the admin family), and a copy that drifted would open an empty
+  store beside the real one, so the fix is one `adminauth.FileName`, used
+  at all five, rather than a constant local to the file. No CodeQL alerts;
+  all 20 checks green on the first head.
+
+### Review round 2
+
+- **CodeRabbit's on-demand pass** (the user chose it over merging without
+  one), on the head with the round-1 fixes, found one thing outside the diff
+  (Major): **`unchangedSince` can pass before a sign-out renames, and the
+  stale writer then renames over it**, bringing back the sessions and the
+  marker it replaced. That is the rename window #1039 recorded and left
+  open, with a kernel lock declined, and a sign-out inherits it with a
+  sharper consequence: the command has printed that every console is signed
+  out, the bridge never sees the marker, and its later writes carry the old
+  state on. On POSIX the window is the few µs between a check and a rename;
+  **on Windows it is `RenameWithRetry`'s 750 ms budget**, and Defender or
+  the Search Indexer holding a freshly written file is what forces those
+  retries.
+- **Closed from the side that makes the promise, not with a lock.** A
+  rotation or sign-out now confirms its write (`commitAndConfirm`): after the
+  rename retry budget and a 250 ms margin (`atomicwrite.RenameRetryBudget`
+  is exported for it, so the two cannot drift), with the store's mutex
+  released, it reads the file again, and commits once more only when the
+  file is back to EXACTLY what it replaced, the credential for a rotation or
+  the marker for a sign-out. A stale write carries precisely that, being
+  built from the file before the command's; any newer write was built from
+  the command's file and carries something else, so it is left alone. The
+  naive rule, redo whenever the file is not what the command wrote, fails
+  here: two rotations run together each see the other's credential and undo
+  it until both give up (NC27, which `TestResetPasswordBuildsNewPointer`
+  catches). Three redos, then `errWrittenOver`. The commands take about a
+  second longer. This also closes #1039's window for a rotation's credential.
+- **What remains**: a writer stalled for longer than the settle between its
+  check and its rename (SIGSTOP, a paused VM). The kernel lock CodeRabbit
+  proposed would close that too, and it stays declined here for the reasons
+  #1039 gave, sharpened by this change: it would be the repo's first
+  interprocess lock, in the bridge's own write path (every login, logout and
+  activity flush), with a lock file a `sudo` run would leave root-owned (the
+  failure the store file itself already has, under Out of scope) and `flock`
+  not honoured on every network filesystem. The confirmation adds no new
+  failure mode to the bridge. The reverse direction (a command's rename over
+  a bridge write) needs nothing: the bridge's memory puts its state back at
+  its next write, and after a sign-out it ends those sessions at its next
+  read anyway.
+- Tests: `TestASignOutIsNotLostToAWriteTheBridgeHadInFlight` (both commands)
+  and `TestARotationIsNotLostToAWriteTheBridgeHadInFlight` land the stale
+  write through `beforeConfirmHook`; `TestAWriteThatSupersedesASignOutIsLeftAlone`
+  runs a second rotation inside the first's settle;
+  `TestAStoreThatKeepsComingBackIsReported`. `TestMain` sets the settle to
+  zero. NC26 to NC28 in the table.
+
+### Review round 3
+
+- **CodeRabbit's included pass** on the confirmation (after the notice's own
+  wait, `@coderabbitai review`): one Minor, real. A confirmation read that
+  failed returned success with nothing said, so nobody learned the check
+  had not run. It is still no error (the write landed), and it now logs a
+  warning with the path and the error, as the store's other lines do.
+  `TestAConfirmationThatCannotReadIsLogged`; tightened first, it was red on
+  the silent code (0 warnings).
+- **Gemini's app was out of its daily quota**, so the same review ran by API
+  (`consult.py`) on the confirmation diff. **Taken**: a redo adopted the
+  reverted file through `commitLocked`, so the command logged a credential
+  change (and, after an earlier sign-out, a sign-out taken) that was its own
+  write being undone, and in-process it would have ended sessions made since
+  the first commit. The redo now takes that state quietly, logs one line of
+  its own, and updates only what its write changed (NC30, NC31; the reset
+  row of the in-flight test was red first on the misleading line).
+  **Declined**, each on the code:
+  - "`renameBackoff` sums to 938 ms, fix the comment": the schedule is
+    `{0, 50, 100, 200, 400}`, 750 ms, and `RenameRetryBudget` sums the real
+    slice. The consult invented a ten-step schedule.
+  - "Update `replaced` on a redo": the redo replaced the stale write's
+    content, which carries the same credential and marker as the original
+    `replaced` by construction, so the predicate is the same either way.
+  - "Retry the confirmation read on Windows sharing violations": Go's
+    `os.Open` shares read and write there (`syscall.Open`'s `sharemode`), a
+    scanner's handle shares read, and #1039 declined the same retry for
+    `Verify`. A failed read is logged now in any case.
+  - "A three-writer interleaving leaves the store at the oldest password":
+    it needs a bridge write stalled across two separate rotations, each a
+    read, a staged write and an fsync, which is #1039's recorded
+    last-writer-wins case for two credential writers at once.
+- **CodeRabbit's on-demand pass on the round-3 head** (the user chose it
+  again): no actionable comments, `coveredCommitId` the head. SonarCloud then
+  flagged the in-flight test's cognitive complexity (go:S3776, 20 against
+  15); the per-row check became a row field and the log assertions a helper,
+  and NC30 and NC31 were re-run against the refactored test, still red.
+- **Merged with #1047**, whose `tokens.json` rule goes the other way on an
+  unreadable store (devices go on from the tokens last read, since refusing
+  would unpair every device over a permissions mistake). Both hold; CLAUDE.md
+  now says so beside this rule, so neither gets "fixed" to match the other.
+- **The in-process note stands as a limit**: while a confirmation sleeps with
+  the mutex released, a same-process reader that finds the undone file
+  adopts it until the redo. Only the CLI calls these, in a process that
+  serves nothing.
+
+### Out of scope
+
+- **1-bit.app**: the features and privacy pages say sessions live only in
+  memory and end at a restart, false since #800; the troubleshooting answer
+  is now true for the default. Another repo.
+- **`sudo bridge admin reset-password`** (or `sign-out-everywhere`) on a
+  service install leaves a root-owned 0600 file the service cannot read.
+  #1039 made logins refuse there; now every console request refuses too,
+  until it is chowned. A writer that kept the file's owner would close it.
+- **A bridge still running the old binary** (after `bridge update`, before
+  its restart) drops the unknown field and writes its sessions back, as it
+  writes the old password back (#1039's note). Restart first, then sign out.
+- **A session list** (device, address, last use) with per-session sign-out:
+  the sessions record none of that today.
 
 ## 2026-09-27 — the manifest carries the file's compilation flag (ExtractorVersion 17, #1045)
 

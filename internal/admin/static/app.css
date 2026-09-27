@@ -594,6 +594,15 @@ code {
   word-break: break-all;
 }
 
+/* The Devices page's console sign-ins note names a command in running
+   prose, and the rule above broke it mid-word at phone width
+   ("reset-passwor" / "d"). This breaks it only where it would overflow,
+   the `dl dd code` rule's reasoning. */
+#console-sessions-panel code {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
 /* ===========================================================
    App shell — the sidebar rail
    ===========================================================
