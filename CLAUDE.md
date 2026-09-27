@@ -2659,8 +2659,11 @@ what it claimed**, and none of it had a failing test.
   calls too, so the fingerprint it prints is the one serve presents; over a
   config that does not load, the preflight grades that pair as well.
   **Refused before anything is written**: a config this user cannot read;
-  one that does not parse when the rewrite would MINT (no pair in init's
-  data dir: the file may name the pinned pair anywhere); one naming half a
+  one that does not parse, from which nothing a rewrite keeps can be read
+  (**never "proceed when init's data dir holds a pair"**, #1040's first
+  version: that pair being there does not make it the one the install
+  serves; moving the file aside is the remedy, and init then keeps a pair it
+  finds there as on a first install); one naming half a
   TLS pair (**never "keep the paths only when both are set"**, a bot's fix
   on #1040: dropping the half a config names serves the data dir's pair or
   mints one, the same pin break); and one setting

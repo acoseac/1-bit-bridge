@@ -17957,12 +17957,12 @@ install that is THERE' bullet both say 'survives the rewrite'."
   the service's working directory, on the keep path too.
 - **Refused before anything is written**, directories included: a config
   this user cannot read (`fs.ErrPermission`; the bridge's own user reads it
-  at every start); one that does not parse when the rewrite would MINT (no
-  pair in init's own data dir, where it falls back to, as #1027 does for
-  the pid file); one setting `demo.enabled` or `deployment.managed*`,
-  postures init never writes. The keep path writes nothing and is not
-  refused. An unparseable config with the pair in init's data dir proceeds
-  and says which pair it keeps.
+  at every start); one that does not parse, from which nothing the rewrite
+  keeps can be read (the first version refused it only when the rewrite
+  would MINT, and proceeded when init's own data dir held a pair, until
+  review round 5); one naming half a TLS pair (review round 1); one setting
+  `demo.enabled` or `deployment.managed*`, postures init never writes. The
+  keep path writes nothing and is not refused.
 - **The run lists what it kept** when it differs from a first install, so
   the common rewrite of an install init made prints nothing new.
 - **The preflight grades only a root the run names**, as it did before the
@@ -18001,8 +18001,10 @@ install that is THERE' bullet both say 'survives the rewrite'."
     data-dir run the "kept" admin account from the moved data dir.
   - `TestInitRewriteKeepsThePairOfAConfigThatDoesNotLoad` (S4) and
     `TestInitPreflightGradesThePairABrokenConfigNames`.
-  - `TestInitRewriteOverAConfigItCannotParse`: refused with no pair in the
-    data dir, kept with one.
+  - `TestInitRewriteOverAConfigItCannotParse`: refused with the pair moved
+    out of the data dir and with one in it, and the remedy the refusal names
+    (moving the file aside) keeps the data dir's pair (review round 5; it
+    first read "kept" for a pair in the data dir).
   - `TestInitRewriteKeepsALoopbackInstallsCustomEndpoints`: loopback over
     loopback kept, public over loopback the domain's, loopback over public
     none.
@@ -18116,6 +18118,52 @@ error silently defaulting a kept field was already met: any decode error is
   refusal runs before it. A control of a bot's patch has to apply the
   patch to the code the bot reviewed, not to the code after the reply to
   it.
+
+### Review rounds 2 to 5
+
+- **CodeRabbit withdrew its round-1 finding** after the reply ("My
+  suggested change could instead select or mint a different pair. I
+  withdraw the finding.") and resolved the thread.
+- **Gemini raised round 1's premise again**, against `printKept`'s new
+  comparison. It still cannot arise, and the contract is now stated in
+  `printKept`'s docblock (`4dc7db3a`): a finding that returns twice says the
+  code did not show it.
+- **CodeRabbit was paused by its plan limit twice**, its hour's included
+  review spent on round 1. Both times the user chose the free on-demand
+  review (the walkthrough's checkbox, bound to the head it was ticked on).
+  The first covered `4dc7db3a` with no actionable comments; the second,
+  `54d8d285`, is round 5 below.
+- **Gemini, round 3**: `defer logRunOnFailure(t, out)` in
+  `TestInitRefusesToRewriteAConfigItDoesNotMake` captured the refused run's
+  output, and `out` was then reassigned by the keep-path run. Right; its
+  closure would have moved the staleness the other way, printing the
+  keep-path run when the refusal assertions fail. The keep-path run has its
+  own variables now (`a849fbeb`).
+- **Gemini, round 4**: the fallback note for an unparseable config went to
+  stdout. init prints its other non-fatal warnings to stderr, so it went
+  there with the `warning:` prefix, through the injected writer rather than
+  the literal `os.Stderr` the suggestion used (`54d8d285`). Round 5 then
+  removed the fallback it announced.
+- **CodeRabbit, round 5 (Major, outside the diff), taken**: over an
+  unparseable config the rewrite still proceeded when init's own data dir
+  held a pair, and that pair being there does not make it the one the
+  install serves. Nor can the data dir, the endpoints or the roots be read
+  from such a file, so proceeding reset all four, the defect this change
+  exists for. I had weighed the edge in the first version and accepted it
+  as rare; the second argument decides it. Every rewrite over an
+  unparseable config is refused now (`72ce6fdc`), naming the remedy: fix
+  the YAML, or move the file aside, after which init runs as on a first
+  install and keeps a pair it finds in its data dir. A misspelt-key config
+  still parses, so #1027's row C still rewrites. Controls against
+  `72ce6fdc`, which replace NC9 and NC10 above:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC9 | no refusal for an unparseable config | both refusal rows |
+  | NC10 | the old fallback: proceed when init's data dir holds a pair | the "refused too" row |
+
+- Gemini's pass on `54d8d285` had no comments ("no review comments, so I
+  have no feedback"), and all 20 checks passed there.
 
 ### Out of scope
 
