@@ -1263,6 +1263,12 @@ no failing test — which is the shape to expect in this area.
   - A waiter whose claim resolved without a peak measures that mate itself,
     because the holder's failure may have been transient. Only the waiter's OWN
     failed measurement leaves the mate out of the album.
+  - **A survey reads the store again after it takes a claim, and before it
+    measures.** Its pass's read can be minutes old by then, because it
+    measures mates one after another, and another survey may have measured,
+    recorded and released that mate in between. A measurement records before
+    it releases, so the second read sees it. **Don't drop the re-read:**
+    without it the mate is decoded twice (`TestASurveyRereadsThePeakUnderItsClaim`).
   - **Membership is the admin catalog's album identity** over served, local
     DSD rows. `StreamDSDCatalogRefs` shares `StreamCatalogRefs`'s scan, and
     `TestIndexGroupsLikeTheAdminCatalog` pins the grouping against

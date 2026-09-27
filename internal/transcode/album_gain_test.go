@@ -138,6 +138,15 @@ func dsdToneSpec(src, outDir, tempDir string, kind JobKind, rate, bits int) JobS
 	}
 }
 
+// albumGainCase is one render of TestRunDSD_AlbumGain_RealToolchain.
+type albumGainCase struct {
+	name      string
+	gainer    *fakeGainer
+	wantGain  float64
+	wantScope string
+	wantRMS   float64
+}
+
 // TestRunDSD_AlbumGain_RealToolchain: Stage C applies the album's boost —
 // measured in the published file's level, not just the reported number —
 // bounded by the track's own guard, and the render hands the gainer its own
@@ -146,13 +155,7 @@ func TestRunDSD_AlbumGain_RealToolchain(t *testing.T) {
 	requireDSDToolchain(t)
 	root := t.TempDir()
 	src := mintTone(t, filepath.Join(root, "lib", "Album"), "tone-m20.dsf", -20)
-	for i, tc := range []struct {
-		name      string
-		gainer    *fakeGainer
-		wantGain  float64
-		wantScope string
-		wantRMS   float64
-	}{
+	for i, tc := range []albumGainCase{
 		{"the album's boost below the track's guard", &fakeGainer{gain: 2.0, ok: true}, 2.0, GainScopeAlbum, -21.01},
 		{"an album figure above the guard is bounded by it", &fakeGainer{gain: 9.0, ok: true}, 6.0, GainScopeAlbum, -17.01},
 		{"no album keeps the track's guard", &fakeGainer{ok: false}, 6.0, GainScopeTrack, -17.01},
@@ -165,31 +168,8 @@ func TestRunDSD_AlbumGain_RealToolchain(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if r.AppliedGainDB == nil {
-				t.Fatal("a DSD rendition must report its applied gain")
-			}
-			if *r.AppliedGainDB != tc.wantGain {
-				t.Fatalf("applied gain %.1f, want %.1f", *r.AppliedGainDB, tc.wantGain)
-			}
-			if _, rms := soxStats(t, spec.SidecarPath()); math.Abs(rms-tc.wantRMS) > 0.05 {
-				t.Errorf("RMS %.2f dB, want %.2f ± 0.05 — the file must carry the applied gain", rms, tc.wantRMS)
-			}
-			v, ok := ParseSoxSettings(r.Settings)
-			if !ok || v.GainScope != tc.wantScope || v.TrackGainDB == nil || *v.TrackGainDB != 6.0 {
-				t.Errorf("settings %+v: want scope %q and the track's own guard 6.0", v, tc.wantScope)
-			}
-			if r.PeakProfile != "a1|compact|44100|-v" {
-				t.Errorf("PeakProfile %q", r.PeakProfile)
-			}
-			g := tc.gainer
-			if g.claims != 1 || len(g.resolves) != 1 || g.resolves[0].err != nil || g.resolves[0].tp == nil ||
-				r.TruePeakDBTP == nil || *g.resolves[0].tp != *r.TruePeakDBTP {
-				t.Errorf("claim: %d claims, resolutions %+v; want one, resolved with the render's own peak %v",
-					g.claims, g.resolves, r.TruePeakDBTP)
-			}
-			if len(g.seenOwn) != 1 || g.seenOwn[0] == nil || *g.seenOwn[0] != *r.TruePeakDBTP {
-				t.Errorf("AlbumGainDB saw %v, want the render's own peak once", g.seenOwn)
-			}
+			checkAlbumGainRender(t, spec, r, tc)
+			checkGainerSawTheRendersPeak(t, tc.gainer, r)
 		})
 	}
 
@@ -205,6 +185,43 @@ func TestRunDSD_AlbumGain_RealToolchain(t *testing.T) {
 	})
 	if entries, err := os.ReadDir(renderScratchDir(filepath.Join(root, "tmp"))); err != nil || len(entries) != 0 {
 		t.Errorf("scratch left behind: %v (err=%v)", entries, err)
+	}
+}
+
+// checkAlbumGainRender asserts what one render published and reported: the
+// applied gain, the file's level carrying it, the scope and the track's own
+// guard in the settings, and the peak profile.
+func checkAlbumGainRender(t *testing.T, spec JobSpec, r RunResult, tc albumGainCase) {
+	t.Helper()
+	if r.AppliedGainDB == nil {
+		t.Fatal("a DSD rendition must report its applied gain")
+	}
+	if *r.AppliedGainDB != tc.wantGain {
+		t.Fatalf("applied gain %.1f, want %.1f", *r.AppliedGainDB, tc.wantGain)
+	}
+	if _, rms := soxStats(t, spec.SidecarPath()); math.Abs(rms-tc.wantRMS) > 0.05 {
+		t.Errorf("RMS %.2f dB, want %.2f ± 0.05 — the file must carry the applied gain", rms, tc.wantRMS)
+	}
+	v, ok := ParseSoxSettings(r.Settings)
+	if !ok || v.GainScope != tc.wantScope || v.TrackGainDB == nil || *v.TrackGainDB != 6.0 {
+		t.Errorf("settings %+v: want scope %q and the track's own guard 6.0", v, tc.wantScope)
+	}
+	if r.PeakProfile != "a1|compact|44100|-v" {
+		t.Errorf("PeakProfile %q", r.PeakProfile)
+	}
+}
+
+// checkGainerSawTheRendersPeak: the render claimed its track once, resolved
+// the claim with its own Stage B peak, and handed the gainer that peak once.
+func checkGainerSawTheRendersPeak(t *testing.T, g *fakeGainer, r RunResult) {
+	t.Helper()
+	if g.claims != 1 || len(g.resolves) != 1 || g.resolves[0].err != nil || g.resolves[0].tp == nil ||
+		r.TruePeakDBTP == nil || *g.resolves[0].tp != *r.TruePeakDBTP {
+		t.Errorf("claim: %d claims, resolutions %+v; want one, resolved with the render's own peak %v",
+			g.claims, g.resolves, r.TruePeakDBTP)
+	}
+	if len(g.seenOwn) != 1 || g.seenOwn[0] == nil || r.TruePeakDBTP == nil || *g.seenOwn[0] != *r.TruePeakDBTP {
+		t.Errorf("AlbumGainDB saw %v, want the render's own peak once", g.seenOwn)
 	}
 }
 

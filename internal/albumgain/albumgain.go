@@ -42,8 +42,9 @@ import (
 
 var logger = logging.Component("albumgain")
 
-// Catalog streams the served DSD rows (manifest.Store.StreamDSDCatalogRefs).
-type Catalog interface {
+// CatalogStreamer streams the served DSD rows
+// (manifest.Store.StreamDSDCatalogRefs).
+type CatalogStreamer interface {
 	StreamDSDCatalogRefs(ctx context.Context, fn func(manifest.CatalogRef) error) error
 }
 
@@ -62,7 +63,7 @@ type Measurer func(ctx context.Context, j transcode.JobSpec) (*float64, error)
 
 // Config wires a Resolver.
 type Config struct {
-	Catalog Catalog
+	Catalog CatalogStreamer
 	Peaks   PeakStore
 	SpecFor SpecFor
 	// Measure defaults to transcode.MeasureDSDPeak.
@@ -173,7 +174,10 @@ func measureBudget(sec float64) time.Duration {
 func (r *Resolver) Claim(ctx context.Context, j transcode.JobSpec) func(*float64, error) {
 	profile := j.DSDPeakProfile()
 	if profile == "" {
-		return func(*float64, error) {}
+		return func(*float64, error) {
+			// Not a DSD render: there is no peak to record and no claim to
+			// release.
+		}
 	}
 	key := claimKey{path: j.SourceLibraryRel, profile: profile}
 	// Another render's survey may already be measuring this track; this
@@ -209,66 +213,138 @@ func (r *Resolver) AlbumGainDB(ctx context.Context, j transcode.JobSpec, own *fl
 	if len(mates) == 0 {
 		return 0, false, nil
 	}
-	paths := pathsOf(mates)
-	// Kept per call, whether or not the store accepted the row, so a mate
-	// is measured at most once here even if its peak cannot be recorded.
-	measured := map[string]*float64{}
-	gaveUp := map[string]bool{}
+	s := &survey{r: r, j: j, profile: profile, mates: mates, paths: pathsOf(mates),
+		measured: map[string]*float64{}, gaveUp: map[string]bool{}}
 	for {
-		fresh, err := r.cfg.Peaks.FreshDSDPeaks(ctx, profile, paths)
+		waits, err := s.pass(ctx)
 		if err != nil {
-			return 0, false, fmt.Errorf("album gain: read peaks: %w", err)
-		}
-		var waits []*claim
-		for _, m := range mates {
-			if _, ok := fresh[m.path]; ok {
-				continue
-			}
-			if _, ok := measured[m.path]; ok || gaveUp[m.path] {
-				continue
-			}
-			key := claimKey{path: m.path, profile: profile}
-			c, mine := r.tryClaim(key)
-			if !mine {
-				waits = append(waits, c)
-				continue
-			}
-			tp, merr := r.measure(ctx, m.path, j, profile)
-			r.release(key, c)
-			if merr != nil {
-				if ctx.Err() != nil {
-					return 0, false, ctx.Err()
-				}
-				gaveUp[m.path] = true
-				logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
-					"path", j.SourceLibraryRel, "mate", m.path, "err", merr)
-				continue
-			}
-			measured[m.path] = tp
+			return 0, false, err
 		}
 		if len(waits) == 0 {
-			peaks := make([]*float64, 0, len(mates)+1)
-			peaks = append(peaks, own)
-			for _, m := range mates {
-				if p, ok := fresh[m.path]; ok {
-					peaks = append(peaks, p.TruePeakDBTP)
-				} else if tp, ok := measured[m.path]; ok {
-					peaks = append(peaks, tp)
-				}
-			}
-			return transcode.AlbumClipGuardedGainDB(peaks), true, nil
+			return transcode.AlbumClipGuardedGainDB(s.peaks(own)), true, nil
 		}
-		for _, c := range waits {
-			select {
-			case <-c.done:
-			case <-ctx.Done():
-				return 0, false, ctx.Err()
-			}
+		if err := waitForClaims(ctx, waits); err != nil {
+			return 0, false, err
 		}
 		// Read again: a claim can resolve without leaving a peak (its
 		// holder failed or gave up), and the next pass then measures that
 		// mate here.
 	}
+}
+
+// survey is one AlbumGainDB call: the album-mates, the peaks the last
+// pass read from the store, and what this call measured or gave up on.
+// measured and gaveUp are kept per call, whether or not the store accepted
+// a row, so a mate is measured at most once here even if its peak cannot
+// be recorded.
+type survey struct {
+	r        *Resolver
+	j        transcode.JobSpec
+	profile  string
+	mates    []member
+	paths    []string
+	fresh    map[string]manifest.DSDPeak
+	measured map[string]*float64
+	gaveUp   map[string]bool
+}
+
+// pass reads the fresh peaks, measures every unknown mate nobody else is
+// measuring, and returns the claims held by others, to wait on. Only a
+// cancelled context or a failed store read is an error.
+func (s *survey) pass(ctx context.Context) ([]*claim, error) {
+	fresh, err := s.r.cfg.Peaks.FreshDSDPeaks(ctx, s.profile, s.paths)
+	if err != nil {
+		return nil, fmt.Errorf("album gain: read peaks: %w", err)
+	}
+	s.fresh = fresh
+	var waits []*claim
+	for _, m := range s.mates {
+		if !s.unknown(m.path) {
+			continue
+		}
+		key := claimKey{path: m.path, profile: s.profile}
+		c, mine := s.r.tryClaim(key)
+		if !mine {
+			waits = append(waits, c)
+			continue
+		}
+		if err := s.measureClaimed(ctx, m.path, key, c); err != nil {
+			return nil, err
+		}
+	}
+	return waits, nil
+}
+
+// unknown reports whether a mate's peak is still to be found.
+func (s *survey) unknown(path string) bool {
+	if _, ok := s.fresh[path]; ok {
+		return false
+	}
+	if _, ok := s.measured[path]; ok {
+		return false
+	}
+	return !s.gaveUp[path]
+}
+
+// measureClaimed measures a mate this call holds the claim on, and releases
+// the claim before anything else. The store is read again first, under the
+// claim: the pass's read can be minutes old by the time the survey reaches
+// this mate, and another survey may have measured it, recorded the peak and
+// released its claim since. A measurement records before it releases, so
+// this read sees it and the mate is not decoded twice
+// (TestASurveyRereadsThePeakUnderItsClaim). A failed measurement leaves the
+// mate out of the album; only a cancelled context or a failed store read is
+// returned.
+func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, c *claim) error {
+	recorded, err := s.r.cfg.Peaks.FreshDSDPeaks(ctx, s.profile, []string{path})
+	if err != nil {
+		s.r.release(key, c)
+		return fmt.Errorf("album gain: read peaks: %w", err)
+	}
+	if p, ok := recorded[path]; ok {
+		s.r.release(key, c)
+		s.fresh[path] = p
+		return nil
+	}
+	tp, err := s.r.measure(ctx, path, s.j, s.profile)
+	s.r.release(key, c)
+	if err == nil {
+		s.measured[path] = tp
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	s.gaveUp[path] = true
+	logger.Warn("album gain: an album-mate could not be measured, so it does not constrain the album",
+		"path", s.j.SourceLibraryRel, "mate", path, "err", err)
+	return nil
+}
+
+// peaks is own plus every mate's known peak, for AlbumClipGuardedGainDB.
+func (s *survey) peaks(own *float64) []*float64 {
+	peaks := make([]*float64, 0, len(s.mates)+1)
+	peaks = append(peaks, own)
+	for _, m := range s.mates {
+		if p, ok := s.fresh[m.path]; ok {
+			peaks = append(peaks, p.TruePeakDBTP)
+		} else if tp, ok := s.measured[m.path]; ok {
+			peaks = append(peaks, tp)
+		}
+	}
+	return peaks
+}
+
+// waitForClaims waits until every claim resolves, or ctx ends.
+func waitForClaims(ctx context.Context, waits []*claim) error {
+	for _, c := range waits {
+		select {
+		case <-c.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (r *Resolver) measure(ctx context.Context, path string, like transcode.JobSpec, profile string) (*float64, error) {
@@ -410,7 +486,7 @@ func (r *Resolver) currentIndex(ctx context.Context, path string) (*index, error
 	return fresh, nil
 }
 
-func buildIndex(ctx context.Context, c Catalog, now time.Time) (*index, error) {
+func buildIndex(ctx context.Context, c CatalogStreamer, now time.Time) (*index, error) {
 	ix := &index{albumOf: map[string]string{}, members: map[string][]member{}, builtAt: now}
 	err := c.StreamDSDCatalogRefs(ctx, func(ref manifest.CatalogRef) error {
 		if !ref.IsDSD || ref.RoutedUDN != "" || manifest.IsSACDVirtualPath(ref.Path) {

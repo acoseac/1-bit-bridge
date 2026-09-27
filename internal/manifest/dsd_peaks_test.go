@@ -149,6 +149,34 @@ func TestFreshDSDPeaksIgnoresAStaleSource(t *testing.T) {
 	}
 }
 
+// TestFreshDSDPeaksFindsAnIllFormedPath: on Linux a filename is any byte
+// string, and encoding/json rewrites an ill-formed byte, so a path that is
+// not valid UTF-8 would never match inside json_each. It is bound raw, and
+// its peak is found beside a well-formed one in the same call.
+func TestFreshDSDPeaksFindsAnIllFormedPath(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	const profile = "a1|compact|44100|-v"
+	paths := []string{"DSD/\xff\xfe.dsf", "DSD/b.dsf"}
+	for _, p := range paths {
+		seedOptimizeTrack(t, s, p, 2822400, 1, "DSF", true)
+		m, sz := trackRowMTimeAndSize(t, s, p)
+		if err := s.UpsertDSDPeak(ctx, DSDPeak{SourcePath: p, Profile: profile, TruePeakDBTP: fpk(-4), SourceMTimeNS: m, SourceSize: sz, MeasuredAt: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.FreshDSDPeaks(ctx, profile, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		if _, ok := got[p]; !ok {
+			t.Errorf("no fresh peak for %q; got %v", p, got)
+		}
+	}
+}
+
 func TestUpsertDSDPeakRefusesAMissingTrackOrBlankKey(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })

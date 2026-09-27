@@ -3,8 +3,8 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // dsd_peaks (migration v47) records a DSD track's true peak at unity decode
@@ -65,9 +65,30 @@ func (s *Store) UpsertDSDPeak(ctx context.Context, p DSDPeak) error {
 	return err
 }
 
-// freshDSDPeaksChunk bounds one IN list — far below SQLite's variable limit,
-// and an album is a few dozen tracks at most, so one chunk is the norm.
+// freshDSDPeaksChunk bounds one json_each list. An album is a few dozen
+// tracks at most, so one chunk is the norm.
 const freshDSDPeaksChunk = 500
+
+// freshDSDPeaksSelect is the fresh-peak read: a peak whose source facts
+// still match the track row. The two statements below are constants that
+// bind the paths as one json_each argument or one raw path — the
+// VariantsForPaths shape, never an IN list built at the call site.
+const freshDSDPeaksSelect = `
+	SELECT p.source_path, p.true_peak_dbtp, p.source_mtime_ns, p.source_size, p.measured_at
+	  FROM dsd_peaks p
+	  JOIN tracks t ON t.path = p.source_path
+	 WHERE p.profile = ?
+	   AND p.source_mtime_ns = t.mtime_ns
+	   AND p.source_size     = t.size`
+
+// freshDSDPeaksSQL binds (profile, a JSON array of paths).
+const freshDSDPeaksSQL = freshDSDPeaksSelect + `
+	   AND p.source_path IN (SELECT value FROM json_each(?))`
+
+// freshDSDPeakSQL binds (profile, path), for a path encoding/json would
+// rewrite (splitIllFormedUTF8Paths).
+const freshDSDPeakSQL = freshDSDPeaksSelect + `
+	   AND p.source_path = ?`
 
 // FreshDSDPeaks returns the peaks recorded for paths on profile whose
 // source facts still match the track row — the only peaks a render may
@@ -75,42 +96,49 @@ const freshDSDPeaksChunk = 500
 // present with a nil TruePeakDBTP.
 func (s *Store) FreshDSDPeaks(ctx context.Context, profile string, paths []string) (map[string]DSDPeak, error) {
 	out := make(map[string]DSDPeak, len(paths))
-	for start := 0; start < len(paths); start += freshDSDPeaksChunk {
-		chunk := paths[start:min(start+freshDSDPeaksChunk, len(paths))]
-		args := make([]any, 0, len(chunk)+1)
-		args = append(args, profile)
-		for _, p := range chunk {
-			args = append(args, p)
-		}
-		rows, err := s.db.QueryContext(ctx, `
-			SELECT p.source_path, p.true_peak_dbtp, p.source_mtime_ns, p.source_size, p.measured_at
-			  FROM dsd_peaks p
-			  JOIN tracks t ON t.path = p.source_path
-			 WHERE p.profile = ?
-			   AND p.source_path IN (?`+strings.Repeat(",?", len(chunk)-1)+`)
-			   AND p.source_mtime_ns = t.mtime_ns
-			   AND p.source_size     = t.size`, args...)
+	valid, illFormed := splitIllFormedUTF8Paths(paths)
+	for start := 0; start < len(valid); start += freshDSDPeaksChunk {
+		blob, err := json.Marshal(valid[start:min(start+freshDSDPeaksChunk, len(valid))])
 		if err != nil {
-			return nil, fmt.Errorf("fresh dsd peaks: %w", err)
+			return nil, err
 		}
-		for rows.Next() {
-			pk := DSDPeak{Profile: profile}
-			var tp sql.NullFloat64
-			if err := rows.Scan(&pk.SourcePath, &tp, &pk.SourceMTimeNS, &pk.SourceSize, &pk.MeasuredAt); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if tp.Valid {
-				v := tp.Float64
-				pk.TruePeakDBTP = &v
-			}
-			out[pk.SourcePath] = pk
+		rows, err := s.db.QueryContext(ctx, freshDSDPeaksSQL, profile, string(blob))
+		if err := scanFreshDSDPeaks(rows, err, profile, out); err != nil {
+			return nil, err
 		}
-		if err := rows.Close(); err != nil {
+	}
+	// encoding/json replaces an ill-formed byte with U+FFFD, so such a path
+	// would come back out of json_each as a different string: it is bound
+	// raw instead, one at a time (a filename on Linux is any byte string).
+	for _, p := range illFormed {
+		rows, err := s.db.QueryContext(ctx, freshDSDPeakSQL, profile, p)
+		if err := scanFreshDSDPeaks(rows, err, profile, out); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// scanFreshDSDPeaks drains one fresh-peak query into out, reporting the
+// query's own error first.
+func scanFreshDSDPeaks(rows *sql.Rows, qerr error, profile string, out map[string]DSDPeak) error {
+	if qerr != nil {
+		return fmt.Errorf("fresh dsd peaks: %w", qerr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		pk := DSDPeak{Profile: profile}
+		var tp sql.NullFloat64
+		if err := rows.Scan(&pk.SourcePath, &tp, &pk.SourceMTimeNS, &pk.SourceSize, &pk.MeasuredAt); err != nil {
+			return fmt.Errorf("fresh dsd peaks: %w", err)
+		}
+		if tp.Valid {
+			v := tp.Float64
+			pk.TruePeakDBTP = &v
+		}
+		out[pk.SourcePath] = pk
+	}
+	return rows.Err()
 }
 
 // seedDSDPeaksFromVariantsSQL is migration v47's seed: every DSD rendition

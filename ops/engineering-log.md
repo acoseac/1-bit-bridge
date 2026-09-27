@@ -19710,3 +19710,34 @@ set was predicted by name and matched.
 - A survey ignoring other renders' claims: 15 tests, exactly 2 red. The
   concurrent case decoded rendered tracks and measured each unrendered track 3
   times, and the cancellation case returned without waiting.
+
+### Review (round 1)
+
+Gemini was over its daily quota and CodeRabbit paused at its plan limit, so
+SonarCloud was the only reviewer. Its quality gate failed on one `go:S2077`,
+and it raised four smells. All five are fixed, plus a race its fix run found.
+- **`go:S2077`: `FreshDSDPeaks` built its IN list at the call site.** It now
+  binds the paths as one `json_each` argument over constant statements, the
+  `VariantsForPaths` shape. A path that is not valid UTF-8 is bound raw, one at
+  a time, because `encoding/json` rewrites it and it would never match
+  (`splitIllFormedUTF8Paths`; `TestFreshDSDPeaksFindsAnIllFormedPath`). The
+  rewrite also checks `rows.Err()`, which the old loop dropped.
+- `AlbumGainDB` (cognitive complexity 30) is a `survey` now: a pass, a claimed
+  measurement and the list of peaks. The no-op claim resolver says why it is
+  empty, `Catalog` is `CatalogStreamer`, and the real-toolchain test's
+  assertions moved into two helpers.
+- **A race: a mate could be measured twice.** Running the suite beside a full
+  `-race` run failed `TestConcurrentRendersShareOneSurvey` once ("unrendered
+  track 5 measured 2 times"), in code the refactor had not changed. A survey
+  reads the store, then claims each missing mate in turn. Another survey can
+  measure a mate, record it and release its claim in between, and the first
+  survey then finds the mate unclaimed with a stale read. In production the
+  gap is the survey's own earlier measurements, which take minutes, so this
+  would not have been rare. A survey now reads the store again under its
+  claim before it measures; a measurement records before it releases, so that
+  read sees it. `TestASurveyRereadsThePeakUnderItsClaim` holds survey B
+  between its read and its claims while survey A measures the mate, and B
+  must take A's peak.
+- The package's 16 tests pass 100 runs under `-race`.
+
+**Negative controls**, on the committed tree:

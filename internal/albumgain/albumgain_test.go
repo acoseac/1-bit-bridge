@@ -36,18 +36,26 @@ type fakePeaks struct {
 	mu      sync.Mutex
 	rows    map[claimKey]manifest.DSDPeak
 	upserts []manifest.DSDPeak
+	// afterRead, when set, runs after each FreshDSDPeaks read has taken its
+	// snapshot, outside the lock: a test's way to hold a survey between its
+	// read of the store and its claims.
+	afterRead func()
 }
 
 func newFakePeaks() *fakePeaks { return &fakePeaks{rows: map[claimKey]manifest.DSDPeak{}} }
 
 func (f *fakePeaks) FreshDSDPeaks(_ context.Context, profile string, paths []string) (map[string]manifest.DSDPeak, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	out := map[string]manifest.DSDPeak{}
 	for _, p := range paths {
 		if row, ok := f.rows[claimKey{path: p, profile: profile}]; ok {
 			out[p] = row
 		}
+	}
+	hook := f.afterRead
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 	return out, nil
 }
@@ -457,6 +465,55 @@ func TestConcurrentRendersShareOneSurvey(t *testing.T) {
 		if gains[i] != 2.0 {
 			t.Errorf("render %d gain %.1f, want 2.0 (the −3 dBTP track constrains all six)", i, gains[i])
 		}
+	}
+}
+
+// TestASurveyRereadsThePeakUnderItsClaim: survey B reads the store, and
+// before it reaches the one missing mate, survey A measures that mate,
+// records it and releases its claim. B's read is stale and the mate is
+// unclaimed, so without a second read under B's own claim the mate is
+// decoded twice — in production the gap is B's earlier measurements, which
+// take minutes. B must take A's peak instead.
+func TestASurveyRereadsThePeakUnderItsClaim(t *testing.T) {
+	refs := album(3)
+	h := newHarness(t, refs...)
+	ctx := context.Background()
+	profile := compactSpec(refs[0].Path, dsd64).DSDPeakProfile()
+	h.peaks.put(refs[0].Path, profile, fp(-5.0))
+	h.peaks.put(refs[1].Path, profile, fp(-6.0))
+	h.meas.peaks[refs[2].Path] = fp(-3.0)
+
+	read, proceed := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	h.peaks.mu.Lock()
+	h.peaks.afterRead = func() {
+		if first.CompareAndSwap(false, true) {
+			close(read)
+			<-proceed
+		}
+	}
+	h.peaks.mu.Unlock()
+
+	type result struct {
+		gain float64
+		ok   bool
+		err  error
+	}
+	b := make(chan result, 1)
+	go func() {
+		g, ok, err := h.r.AlbumGainDB(ctx, compactSpec(refs[1].Path, dsd64), fp(-6.0))
+		b <- result{g, ok, err}
+	}()
+	<-read // B holds a read that does not have the third track's peak
+	if g, ok, err := h.r.AlbumGainDB(ctx, compactSpec(refs[0].Path, dsd64), fp(-5.0)); err != nil || !ok || g != 2.0 {
+		t.Fatalf("A: gain=%.1f ok=%v err=%v, want 2.0", g, ok, err)
+	}
+	close(proceed)
+	if r := <-b; r.err != nil || !r.ok || r.gain != 2.0 {
+		t.Errorf("B: gain=%.1f ok=%v err=%v, want 2.0 from A's measurement", r.gain, r.ok, r.err)
+	}
+	if n := h.meas.callCount(refs[2].Path); n != 1 {
+		t.Errorf("the missing mate was measured %d times, want exactly 1", n)
 	}
 }
 
