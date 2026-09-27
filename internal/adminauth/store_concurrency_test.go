@@ -22,7 +22,7 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 	}
 
 	pw := func(i int) string { return fmt.Sprintf("strong-pw-%02d-XYZ", i) }
-	if err := s.ResetPassword("admin", pw(0)); err != nil {
+	if err := s.ResetPassword("admin", pw(0), EndSessions); err != nil {
 		t.Fatalf("seed ResetPassword: %v", err)
 	}
 
@@ -56,7 +56,7 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 
 	const rounds = 6
 	for i := 1; i < rounds; i++ {
-		if err := s.ResetPassword("admin", pw(i)); err != nil {
+		if err := s.ResetPassword("admin", pw(i), EndSessions); err != nil {
 			t.Fatalf("ResetPassword round %d: %v", i, err)
 		}
 	}

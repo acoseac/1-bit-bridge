@@ -536,6 +536,52 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// signOutOthersResponse is POST /api/console-sessions/sign-out-others's
+// answer: how many browsers it signed out.
+type signOutOthersResponse struct {
+	Ended int `json:"ended"`
+}
+
+// apiSignOutOtherSessions ends every console session but the caller's: the
+// Devices page's "Sign out all other sessions". It needs no shell, which
+// makes it the only route a hosted tenant has; `bridge admin
+// sign-out-everywhere` ends the caller's too, and `reset-password` does by
+// default.
+//
+// The session middleware has validated the caller's session by the time
+// this runs, so a refusal here is a race with a sign-out from elsewhere.
+// The ended sessions are refused from their next request on.
+func (s *Server) apiSignOutOtherSessions(w http.ResponseWriter, r *http.Request) {
+	if s.deps.AdminAuth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
+		return
+	}
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "session required")
+		return
+	}
+	ended, err := s.deps.AdminAuth.EndOtherSessions(c.Value)
+	switch {
+	case errors.Is(err, adminauth.ErrSessionNotFound):
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "session required")
+		return
+	case errors.Is(err, adminauth.ErrStoreUnreadable):
+		writeError(w, http.StatusServiceUnavailable, "store_unreadable", msgStoreUnreadable)
+		return
+	case err != nil:
+		logger.Error("sign out other console sessions", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not sign the other sessions out")
+		return
+	}
+	logger.Info("signed out every other console session", "ended", ended)
+	writeJSON(w, http.StatusOK, signOutOthersResponse{Ended: ended})
+}
+
+// msgStoreUnreadable is the one wording for a request refused because the
+// credential store cannot be read.
+const msgStoreUnreadable = "the admin credential store cannot be read"
+
 // setSessionCookie writes the session cookie with the production
 // security attributes (HttpOnly, SameSite=Strict, and Secure when
 // the bridge thinks it's being served over HTTPS). HostOnly via no

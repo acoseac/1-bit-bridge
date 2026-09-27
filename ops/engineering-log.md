@@ -17689,10 +17689,12 @@ file."
   the copy read at open: reset-password waits at a prompt between the two,
   so the copy would drop a session signed in meanwhile and bring back one
   signed out (`TestARotationCarriesTheRunningBridgesSessions`).
-- **A rotation still does not end sessions**, `TestSessionSurvivesResetPassword`'s
-  existing, deliberate contract. Only the false claim went: the message now
-  says a running bridge takes the password at its next sign-in with no
-  restart, and that signed-in consoles stay signed in across a restart.
+- **A rotation still does not end sessions**, `…SessionSurvivesResetPassword`'s
+  existing, deliberate contract (that test was flipped into
+  `TestResetPasswordEndsSessionsUnlessKept` on the same day, below). Only the
+  false claim went: the message now says a running bridge takes the password
+  at its next sign-in with no restart, and that signed-in consoles stay
+  signed in across a restart.
 - **A failed login or logout write stays pending** (`sessionsDirty` set
   before the write). A failed logout used to leave nothing pending, so with
   no other session active the shutdown flush landed nothing and the restart

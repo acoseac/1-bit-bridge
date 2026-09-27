@@ -17,15 +17,16 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
-// adminCmd dispatches the `bridge admin <subcommand>` family.
-// Today the only subcommand is `reset-password`; future additions
-// (rotate-session-secret, list-sessions, etc.) plug in here.
+// adminCmd dispatches the `bridge admin <subcommand>` family: the
+// console's credential and its sessions, from a shell on the bridge host.
 func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "bridge admin <subcommand>")
-		fmt.Fprintln(stderr, "  reset-password   Rotate the admin console password")
-		fmt.Fprintln(stderr, "  login-link       Print a one-time URL that logs a browser into the console")
-		fmt.Fprintln(stderr, "                   (--ttl extends its life for a cross-device hand-off)")
+		fmt.Fprintln(stderr, "  reset-password        Rotate the admin console password and sign every console out")
+		fmt.Fprintln(stderr, "                        (--keep-sessions leaves them signed in)")
+		fmt.Fprintln(stderr, "  sign-out-everywhere   Sign every console out, keeping the password")
+		fmt.Fprintln(stderr, "  login-link            Print a one-time URL that logs a browser into the console")
+		fmt.Fprintln(stderr, "                        (--ttl extends its life for a cross-device hand-off)")
 		return 2
 	}
 	switch args[0] {
@@ -33,6 +34,8 @@ func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return adminLoginLink(args[1:], stdout, stderr)
 	case "reset-password":
 		return adminResetPasswordCmd(args[1:], stdin, stdout, stderr)
+	case "sign-out-everywhere":
+		return adminSignOutEverywhereCmd(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand: bridge admin %s\n", args[0])
 		return 2
@@ -45,17 +48,24 @@ func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // --from-stdin for scripts (single read, no echo suppression).
 //
 // A running bridge re-reads the file at its next login attempt, so the
-// rotation takes there with no restart. Active sessions are NOT ended,
-// by this or by a restart: they persist in the same file. This said a
-// restart revoked them until 2026-09-27, and the running bridge then
-// wrote the old password back at its next write of the file, the
-// shutdown flush of that restart included.
+// rotation takes there with no restart. It also signs every console out,
+// unless --keep-sessions: a running bridge refuses those sessions at their
+// next request, and a restart does not bring them back
+// (adminauth.SignOutEverywhere has the mechanism). Kept, they stay signed
+// in through restarts too, since they persist in the same file.
+//
+// Until 2026-09-27 a rotation kept them and nothing else could end them,
+// so a console signed in with a leaked password outlived the rotation for
+// up to the 7-day hard cap. Before 2026-09-27 this said a restart revoked
+// them, and the running bridge wrote the old password back at its next
+// write of the file, the shutdown flush of that restart included.
 func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("admin reset-password", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to bridge.yaml (overrides the default lookup)")
 	username := fs.String("username", "admin", "username to update (single-user system; \"admin\" by default)")
 	fromStdin := fs.Bool("from-stdin", false, "read the new password from a single stdin line (no echo suppression — script-friendly)")
+	keepSessions := fs.Bool("keep-sessions", false, "leave the consoles already signed in signed in (by default every one is signed out)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -112,12 +122,71 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 		password = pw
 	}
 
-	if err := store.ResetPassword(*username, password); err != nil {
+	action := adminauth.EndSessions
+	if *keepSessions {
+		action = adminauth.KeepSessions
+	}
+	if err := store.ResetPassword(*username, password, action); err != nil {
 		fmt.Fprintf(stderr, "reset password: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Admin password updated for %q. A running bridge takes it at its next sign-in, with no restart.\n", *username)
-	fmt.Fprintln(stdout, "Consoles already signed in stay signed in, and a restart does not sign them out.")
+	if *keepSessions {
+		fmt.Fprintln(stdout, "Consoles already signed in stay signed in (--keep-sessions), and a restart does not sign them out.")
+		fmt.Fprintln(stdout, "To sign them out: bridge admin sign-out-everywhere")
+		return 0
+	}
+	fmt.Fprintln(stdout, msgSignedOutEverywhere)
+	return 0
+}
+
+// msgSignedOutEverywhere is what both commands that sign every console out
+// say about it, so the two cannot come to describe one mechanism
+// differently.
+const msgSignedOutEverywhere = "Every console that was signed in is signed out: a running bridge refuses their sessions at their next request, and a restart does not bring them back."
+
+// adminSignOutEverywhereCmd ends every admin console session and leaves the
+// password as it is: for a session that must end while the password need
+// not change (a browser left signed in on a machine that is not the
+// operator's), or after `reset-password --keep-sessions`. A console the
+// operator wants kept signs in again.
+//
+// It writes a sign-out marker into `<dataDir>/adminauth.json`, beside the
+// credential, because the running bridge holds the sessions in memory and
+// would write them back over a file that only lost them;
+// adminauth.SignOutEverywhere has the mechanism.
+func adminSignOutEverywhereCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("admin sign-out-everywhere", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", configFlagUsage)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "all options must be passed as flags")
+		return 2
+	}
+	cfg, _, err := loadCLIConfig(*configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	storePath := filepath.Join(cfg.DataDir, "adminauth.json")
+	store, err := adminauth.OpenStore(storePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "open adminauth store: %v\n", err)
+		return 1
+	}
+	if err := store.SignOutEverywhere(); err != nil {
+		if errors.Is(err, adminauth.ErrNotInitialised) {
+			fmt.Fprintf(stderr, "no admin credentials at %s, so no console to sign out of\n", storePath)
+			return 1
+		}
+		fmt.Fprintf(stderr, "sign out everywhere: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, msgSignedOutEverywhere)
+	fmt.Fprintln(stdout, "The password is unchanged; to change it too: bridge admin reset-password")
 	return 0
 }
 

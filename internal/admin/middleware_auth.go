@@ -131,6 +131,14 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 		if _, err := s.requireSession(r); err == nil {
 			next.ServeHTTP(w, r)
 			return
+		} else if errors.Is(err, adminauth.ErrStoreUnreadable) {
+			// The file may hold a sign-out, so the session is refused,
+			// and kept for when the file reads again. No line here: the
+			// store logs the read at most once a window, and one per
+			// console request would bury the journal while it stays
+			// unreadable.
+			http.Error(w, "admin refused: "+msgStoreUnreadable, http.StatusServiceUnavailable)
+			return
 		} else if !errors.Is(err, adminauth.ErrSessionNotFound) && !errors.Is(err, adminauth.ErrSessionExpired) {
 			// Internal error — surface as 500 so the operator
 			// notices instead of being silently redirected.

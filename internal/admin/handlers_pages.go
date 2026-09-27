@@ -446,6 +446,11 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 		"Tokens":     rows,
 		"DefaultURL": defaultBridgeURL(cfg),
 	}
+	// Console sign-ins, for the "Sign out all other sessions" panel the
+	// template renders in public mode, the one mode with sessions.
+	if s.deps.AdminAuth != nil {
+		data["ConsoleSessions"] = s.deps.AdminAuth.LiveSessionCount()
+	}
 	s.renderPage(w, r, "devices", data)
 }
 

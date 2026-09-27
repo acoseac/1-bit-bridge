@@ -2593,7 +2593,30 @@ async function handlePairingAction(btn, action) {
   renderPendingPairing();
 }
 
+// Console sign-ins (Devices page, public mode). "Sign out all other
+// sessions" ends every console session but this browser's; the count is
+// redrawn from the answer, since the page is not polled. A failure leaves
+// the button enabled and says why in the count's place.
+function initConsoleSessions() {
+  const btn = document.getElementById("sign-out-others");
+  const count = document.getElementById("console-sessions-count");
+  if (!btn || !count) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      const r = await API.post("/api/console-sessions/sign-out-others");
+      const n = r?.ended ?? 0;
+      const ended = n === 1 ? "Signed out 1 other browser." : `Signed out ${n} other browsers.`;
+      count.textContent = `${ended} Only this browser is signed in to this console now.`;
+    } catch (err) {
+      btn.disabled = false;
+      count.textContent = `Could not sign the other browsers out: ${err.message}`;
+    }
+  });
+}
+
 function initDevices() {
+  initConsoleSessions();
   const modal = document.getElementById("pair-modal");
   const openBtn = document.getElementById("pair-open");
   const form = document.getElementById("pair-form");
