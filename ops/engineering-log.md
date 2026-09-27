@@ -19740,4 +19740,8 @@ and it raised four smells. All five are fixed, plus a race its fix run found.
   must take A's peak.
 - The package's 16 tests pass 100 runs under `-race`.
 
-**Negative controls**, on the committed tree:
+**Negative controls**, on the committed tree, both in one run of the two
+packages (944 tests, all accounted for): dropping the re-read under the claim
+turned exactly `TestASurveyRereadsThePeakUnderItsClaim` red ("measured 2
+times, want exactly 1"), and dropping the raw bind for ill-formed paths turned
+exactly `TestFreshDSDPeaksFindsAnIllFormedPath` red.
