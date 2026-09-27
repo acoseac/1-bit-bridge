@@ -2592,6 +2592,39 @@ what it claimed**, and none of it had a failing test.
   legal as `"0"`. `autoStartProbeTarget` is the same question for
   `spawnNowOrWarn` — extracted because the other branch starts a real
   detached process, so the behaviour otherwise has no test at all.
+- **`bridge init` decides every refusal BEFORE it writes `bridge.yaml`, and
+  keeps what an install already has: its TLS pair and a public install's
+  admin ACCOUNT** (#1038). A public `--force` re-init over a public install
+  saved the config, kept the cert, and then exited 1: `MintInitial` refuses
+  a store that holds an account, and initCmd asked the store only after
+  `Save`. So every public re-init that rewrote the config reported a
+  failure about an install it had already changed, and never reached the
+  service install or the footer (#1027's row C). **Re-running init is not
+  a request to rotate**, for the password as for the cert; `bridge admin
+  reset-password` is. So
+  `keepOrMintAdminCredentials` keeps the account and SAYS so, in a box that
+  names it, and mints only into a store with no account (no file, or an
+  empty one). **Don't mint over a store that does not load** (that destroys
+  what the file still holds, and serve refuses the same file), and **don't
+  keep silently**: an operator expecting the "shown ONCE" box goes looking
+  for a password that was never made. The store (`openInitAdminAuth`) and
+  the TLS pair (`LoadOrGenerateWithOptions`) are both READ before `Save`,
+  and each refusal says the config was NOT changed. The preflight's
+  tls-cert FAIL covers a broken pair only when it runs, and only for the
+  pair it grades, the existing config's (`resolveCertPaths`), not the
+  `DefaultPaths(dataDir)` pair init loads. A new check init can refuse on
+  goes before `Save` too; after it, only the mint's own write and the
+  service install may fail. **The pair kept is the data dir's only**: a
+  config naming another (`tlsCertPath`) loses it to a `--force` rewrite,
+  which mints a new pair at the default path and changes the fingerprint
+  every device pinned, an open defect measured in #1038's log entry, not a
+  rule. `TestInitPublicReinitKeepsTheAdminCredentials`
+  compares every file byte for byte and verifies the first run's password,
+  because an exit-code test also passes a "fix" that rotates. The other
+  defect found there: `box()` cuts a line longer than its 51-column body in
+  the middle, and the "shown ONCE" box printed `The plai... is not stored
+  anywhere.` on every public install
+  (`TestAdminCredentialBoxesAreNotTruncated`).
 
 
 The largest package in the repo — 52 production files, ~19k lines, `main.go`
