@@ -287,6 +287,62 @@ of the WAL trap, run a throwaway Go helper in a `_`-prefixed dir that imports
 If the spreads are small, a lighter option (for example, only the console report
 plus a manual re-gain) may be enough. That is the go/no-go.
 
+### Phase 0 results (2026-09-27): GO
+
+**Setup.** The operator's bridge (`v0.2.0-58-gaca8be3`, 2 upscale workers,
+`dsdRender` and `autoOptimize` on). A backup-API snapshot was taken on the host,
+copied off, and analysed with the throwaway `_phase0` helper. Membership is
+exactly the admin catalog's (`StreamCatalogRefs` → `dupes.Resolve` →
+`AlbumIDOf`).
+
+**Scale**
+- 1,758 served DSD tracks. 4 are SACD virtual tracks, which leaves 1,754 local
+  renderable tracks in 149 albums (144 with two or more tracks).
+- DSD rates: DSD64 1,684, DSD256 53, DSD128 17.
+- Renditions: 1,704 `optimized-dsd-v1-44100-16` (44.0 GB) and 3 `pcm-v1-176400-24`
+  (0.2 GB).
+- **`true_peak_dbtp` is exactly the input to the boost.**
+  `ClipGuardedGainDB(true_peak_dbtp)` reproduces the stored `applied_gain_db` on
+  1,707 of 1,707 rows. So seeding D2 from existing rows is sound, and 97 % of the
+  local DSD tracks already have a fresh peak: the survey is free here.
+
+**Per-track boost today (compact)**
+- +6: 507 tracks. [+5, +6): 584. [+3, +5): 549. [+1, +3): 64. 0: none.
+- No track peaks above −1 dBTP at unity, so P0d (the one-sided guard) never binds
+  on this library, and no album would be pulled to +0.
+- Two thirds of the tracks are already mastered hotter than the SACD convention.
+
+**The problem (143 albums with two or more rendered tracks)**
+
+| Spread between the album's highest and lowest per-track boost | Albums |
+|---|---|
+| 0 | 12 |
+| (0, 0.5] dB | 15 |
+| (0.5, 1] dB | 35 |
+| (1, 3] dB | 72 |
+| > 3 dB | 9 |
+
+- Median spread 1.2 dB, p90 2.9 dB, max 4.7 dB. **57 % of albums shift their
+  tracks' relative levels by more than 1 dB.**
+- A segued concept album gets a 3.5 dB level step at track boundaries that were
+  mastered seamless.
+
+**The cost of the fix**
+- 1,407 of 1,699 rendered tracks would lose some boost: mean 0.8 dB, p90 1.8 dB,
+  max 4.7 dB.
+- 496 tracks lose more than 1 dB, and 31 lose more than 3 dB.
+
+**Migration bill on this bridge**
+- The compact sweep renders 25× realtime with 2 workers, and the whole local DSD
+  library is 124 h of audio. So re-rendering the compact tier as `-v2` is about
+  5 h of background work.
+- Disk: +44 GB while `-v1` is kept, against about 296 GB free on the variants
+  volume.
+- The faithful tier is 3 files.
+
+**Conclusion: build it.** The inconsistency is common and audible, the migration
+is a few hours of background work, and the peaks it needs are already on disk.
+
 ## PRs
 
 **PR 1, dark (no audible change):**
