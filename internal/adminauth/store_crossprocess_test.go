@@ -222,13 +222,13 @@ func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 func TestARotationDuringASessionWriteIsNotUndone(t *testing.T) {
 	a, path, _, _ := runningBridge(t)
 	fired := false
-	beforeSessionCommitHook = func() {
+	beforeCommitHook = func() {
 		if !fired {
 			fired = true
 			rotateElsewhere(t, path)
 		}
 	}
-	t.Cleanup(func() { beforeSessionCommitHook = nil })
+	t.Cleanup(func() { beforeCommitHook = nil })
 
 	signedIn, err := a.CreateSession("admin")
 	if err != nil {
@@ -244,6 +244,73 @@ func TestARotationDuringASessionWriteIsNotUndone(t *testing.T) {
 	}
 	if _, err := c.ValidateSession(signedIn); err != nil {
 		t.Errorf("the login whose write was rebuilt is not in the file: %v", err)
+	}
+}
+
+// TestARotationDoesNotCommitOverASessionChangeMadeDuringItsWrite is the same
+// window from the other side (CodeRabbit on #1039). reset-password reads the
+// file's sessions and then stages its write, and the running bridge commits
+// logins and logouts meanwhile; renaming the staged file dropped the login
+// and brought the logout back, and a logout brought back that way returns
+// at the next restart, when nothing in the bridge's memory overrules it.
+// The reset re-reads the file before its rename and rebuilds from it.
+func TestARotationDoesNotCommitOverASessionChangeMadeDuringItsWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// change is the running bridge's session change, made while the
+		// rotation is staging; it returns the session it changed.
+		change func(t *testing.T, a *Store, session string) string
+		// kept reports whether a store opened afterwards shows the change.
+		kept func(c *Store, session string) bool
+	}{
+		{"a logout",
+			func(t *testing.T, a *Store, session string) string {
+				a.DeleteSession(session)
+				return session
+			},
+			func(c *Store, session string) bool {
+				_, err := c.ValidateSession(session)
+				return errors.Is(err, ErrSessionNotFound)
+			}},
+		{"a login",
+			func(t *testing.T, a *Store, _ string) string {
+				raw, err := a.CreateSession("admin")
+				if err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			},
+			func(c *Store, session string) bool {
+				_, err := c.ValidateSession(session)
+				return err == nil
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, path, session, _ := runningBridge(t)
+			var changed string
+			fired := false
+			beforeCommitHook = func() {
+				if !fired {
+					fired = true
+					changed = tc.change(t, a, session)
+				}
+			}
+			t.Cleanup(func() { beforeCommitHook = nil })
+
+			rotateElsewhere(t, path)
+			if !fired {
+				t.Fatal("the session change never ran: the rotation did not reach its commit")
+			}
+			requireRotationOnDisk(t, path, tc.name+" during the rotation's write")
+			c, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.kept(c, changed) {
+				t.Errorf("%s the running bridge committed while the rotation was writing "+
+					"was overwritten by the rotation's commit", tc.name)
+			}
+		})
 	}
 }
 
