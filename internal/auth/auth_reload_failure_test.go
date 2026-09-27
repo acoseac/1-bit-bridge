@@ -75,6 +75,10 @@ func tokenNamesOnDisk(t *testing.T, path string) map[string]bool {
 // bump survives — reload mutates nothing on its error paths — and lands
 // at the next successful flush or at shutdown); an overwrite that
 // deletes a sibling's token is not.
+//
+// Since #1043 the write's own re-read before its rename refuses the same
+// write, so the file survives here with or without the abort. What pins
+// the abort is the count of stagings after the reload failed: none.
 func TestValidateSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	s1, path := newTmpStore(t)
 	rawOwn, _, err := s1.Mint("serve-process")
@@ -92,6 +96,7 @@ func TestValidateSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	s1.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
 
 	fired := false
+	staged := func() int { return 0 }
 	beforeValidatePersistHook = func() {
 		if fired {
 			return
@@ -103,6 +108,8 @@ func TestValidateSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 		}
 		// ...and this process cannot read the result.
 		makeTokenFileUnreadable(t, path)
+		// Counted from here, past the sibling's own staging.
+		staged, _ = inCommitWindow(t, 0, func() {})
 	}
 	defer func() { beforeValidatePersistHook = nil }()
 
@@ -113,6 +120,9 @@ func TestValidateSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	}
 	if !fired {
 		t.Fatal("hook never fired — Validate did not reach the debounced-persist branch")
+	}
+	if n := staged(); n != 0 {
+		t.Errorf("the debounced persist staged the file %d times after its reload failed, want 0", n)
 	}
 
 	got := tokenNamesOnDisk(t, path)
@@ -128,7 +138,8 @@ func TestValidateSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 // RecordClientVersion carries the identical shape — same reload, same
 // debounce, same hazard. It needs no injection hook because it has no
 // top-of-method reload: the only reload it performs is the pre-persist
-// one, so making the file unreadable up front lands squarely on it.
+// one, so making the file unreadable up front lands squarely on it. As
+// there, the staging count is what pins the abort since #1043.
 func TestRecordClientVersionSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	s1, path := newTmpStore(t)
 	_, own, err := s1.Mint("serve-process")
@@ -148,8 +159,12 @@ func TestRecordClientVersionSkipsPersistWhenPreflightReloadFails(t *testing.T) {
 	// it has no way to refresh.
 	makeTokenFileUnreadable(t, path)
 	s1.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+	staged, _ := inCommitWindow(t, 0, func() {})
 
 	s1.RecordClientVersion(own.ID, "1.9.0")
+	if n := staged(); n != 0 {
+		t.Errorf("the debounced client-version persist staged the file %d times after its reload failed, want 0", n)
+	}
 
 	got := tokenNamesOnDisk(t, path)
 	if !got["external-pair"] {
