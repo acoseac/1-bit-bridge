@@ -351,14 +351,16 @@ func (s *Store) reloadIfStale() (err error) {
 // only from a device the bridge already knew. The realistic cause is `sudo
 // bridge pair` beside a service install, which leaves tokens.json owned by
 // root, so a permission error also names the uid and the remedy (POSIX's:
-// Windows has no uid to name, and no chown). Once each way, since the
-// failure lasts until someone mends it and every request would repeat the
-// line. Caller must hold mu.
+// Windows has no uid to name, and no chown). Both lines give the number of
+// tokens the bridge answers from: none once the file was deleted to mend
+// it, which refuses every device and would otherwise read as all clear.
+// Once each way, since the failure lasts until someone mends it and every
+// request would repeat the line. Caller must hold mu.
 func (s *Store) noteReadLocked(err error) {
 	switch {
 	case err != nil && !s.unreadable:
 		s.unreadable = true
-		args := []any{"path", s.path, "err", err,
+		args := []any{"path", s.path, "tokens", len(s.tokens), "err", err,
 			"note", "a device paired since is refused, and one revoked since still accepted, until the file can be read; not logged again until then"}
 		if runtime.GOOS != "windows" && errors.Is(err, fs.ErrPermission) {
 			args = append(args, "uid", os.Getuid(),
@@ -367,7 +369,7 @@ func (s *Store) noteReadLocked(err error) {
 		logger.Warn("token store unreadable; checking devices against the tokens last read", args...)
 	case err == nil && s.unreadable:
 		s.unreadable = false
-		logger.Info("token store readable again", "path", s.path)
+		logger.Info("token store readable again", "path", s.path, "tokens", len(s.tokens))
 	}
 }
 

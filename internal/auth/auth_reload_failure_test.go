@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -357,10 +359,12 @@ func failedWriteStartsTheWindow(t *testing.T, w debouncedWriter, fl writeFailure
 
 // storeFailure makes the running bridge's store unreadable to it, and
 // returns what undoes that. permission says the failure is a permission
-// error, which the report names the uid and the remedy for.
+// error, which the report names the uid and the remedy for; removed says
+// the mend deletes the file, so the store read after it holds no token.
 type storeFailure struct {
 	name       string
 	permission bool
+	removed    bool
 	fail       func(t *testing.T, f *commitFixture) (mend func())
 }
 
@@ -373,15 +377,26 @@ type storeFailure struct {
 // the bridge already knew. One Warn when the store first cannot be read,
 // naming the file and the error, and for a permission error the uid and
 // the remedy; one Info once it can be read again, which the next request
-// does, with no restart.
+// does, with no restart. Both give the number of tokens the bridge answers
+// from, which is none when the operator mends the store by deleting it: a
+// line saying only "readable again" read as all clear while every device
+// was refused.
 func TestAStoreThatCannotBeReadIsReportedOnce(t *testing.T) {
 	for _, tc := range []storeFailure{
-		{"unreadable", true, func(t *testing.T, f *commitFixture) func() {
+		{"unreadable", true, false, func(t *testing.T, f *commitFixture) func() {
 			makeTokenFileUnreadable(t, f.path)
 			return func() { restoreTokenFileMode(t, f.path) }
 		}},
-		{"damaged", false, func(t *testing.T, f *commitFixture) func() {
+		{"damaged", false, false, func(t *testing.T, f *commitFixture) func() {
 			return damageTokenFile(t, f.path)
+		}},
+		{"unreadable, then deleted", true, true, func(t *testing.T, f *commitFixture) func() {
+			makeTokenFileUnreadable(t, f.path)
+			return func() {
+				if err := os.Remove(f.path); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { unreadableStoreReportedOnce(t, tc) })
@@ -401,8 +416,12 @@ func unreadableStoreReportedOnce(t *testing.T, tc storeFailure) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.sibling.Revoke(f.victim.ID); err != nil {
-		t.Fatal(err)
+	// Two revoked, so the store read after the mend holds two tokens where
+	// the one last read holds three.
+	for _, id := range []string{f.victim.ID, f.other.ID} {
+		if err := f.sibling.Revoke(id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	mend := tc.fail(t, f)
 	rec := loggingtest.Record(t)
@@ -420,18 +439,30 @@ func unreadableStoreReportedOnce(t *testing.T, tc storeFailure) {
 	}
 	if len(lines) > 0 {
 		requireReport(t, lines[0], f.path, tc.permission)
+		if got := tokensIn(lines[0]); got != 3 {
+			t.Errorf("the line gives %d tokens, want the 3 last read:\n%s", got, lines[0])
+		}
 	}
 	if got := rec.Lines(readable); len(got) != 0 {
 		t.Errorf("reported readable while it was not:\n%s", strings.Join(got, "\n"))
 	}
 
 	mend()
-	revoked.accept, paired.accept = false, true
+	revoked.accept, paired.accept = false, !tc.removed
+	own.accept = !tc.removed
+	fresh := 2
+	if tc.removed {
+		fresh = 0
+	}
 	for range requests {
 		requireVerdicts(t, "once the store can be read again", f.running, own, revoked, paired)
 	}
-	if got := rec.Lines(readable); len(got) != 1 {
-		t.Errorf("%d lines saying the store is readable again, want 1:\n%s", len(got), strings.Join(got, "\n"))
+	back := rec.Lines(readable)
+	if len(back) != 1 {
+		t.Errorf("%d lines saying the store is readable again, want 1:\n%s", len(back), strings.Join(back, "\n"))
+	}
+	if len(back) > 0 && tokensIn(back[0]) != fresh {
+		t.Errorf("the line gives %d tokens, want the %d now read:\n%s", tokensIn(back[0]), fresh, back[0])
 	}
 	if got := rec.Lines(unreadable); len(got) != 1 {
 		t.Errorf("%d lines saying the store cannot be read in all, want 1:\n%s", len(got), strings.Join(got, "\n"))
@@ -457,6 +488,22 @@ func requireReport(t *testing.T, line, path string, permission bool) {
 			t.Errorf("the line carries %q: %v, want %v:\n%s", attr, got, permission, line)
 		}
 	}
+}
+
+// tokensAttr matches the token count a report line carries.
+var tokensAttr = regexp.MustCompile(` tokens=(\d+)(?:\s|$)`)
+
+// tokensIn returns the token count line carries, or -1 for none.
+func tokensIn(line string) int {
+	m := tokensAttr.FindStringSubmatch(line)
+	if m == nil {
+		return -1
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // verdict is what Validate must answer for one device's raw token.
