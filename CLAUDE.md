@@ -1366,7 +1366,12 @@ no failing test — which is the shape to expect in this area.
   `redactSoxErr(err.Error(), spec)`, not the raw `err` — the raw form put the
   absolute path in the journal beside a `path` attribute that already named the
   file the way the privacy page promises (library-relative). A new absolute
-  path in any job's argv needs a pass here in the same PR.
+  path in any job's argv needs a pass here in the same PR. **And every exit's
+  message goes through it, not only sox's** (#1055): the fsync exit put the
+  sidecar's absolute path on the batch row `GET /v1/upscale/batches` serves,
+  and the store exit, a recovered panic and the timeout warning (ffmpeg's
+  stderr) could do the same. A new exit that builds a message from an error
+  redacts it here.
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to
@@ -3391,6 +3396,20 @@ mentions across the four `ops/audit-*.md` files.
   public-mode TLS branch takes the same pair, since the launcher's
   `probeAdminRunning` and `waitForListen` hit it the same way, and **a new TLS
   listener takes it too.** (#986)
+- **…and the servers' error log keeps no client address** (#1055). net/http
+  prints the peer's address in a failed handshake, a recovered panic and the
+  HTTP/2 connection errors, and the privacy page promises no client IPs for
+  the phone-facing API: a phone with a stale pin, a cancelled endpoint probe
+  and a scanner each left one in the journal. `handshakelog.Wrap`'s logger
+  redacts every line it keeps (`RedactPeers`, anchored on the words net/http
+  prints before a PEER, so a listen address in an accept error stays), and
+  AFTER the silent-probe check, which recognises the probe by that address.
+  The tailnet server, whose listener yields `*tls.Conn`, takes
+  `handshakelog.ErrorLog()`. `TestEveryServeHTTPServerRedactsPeerAddresses`
+  requires every `http.Server` in `cmd/bridge` to get its `ErrorLog` from
+  handshakelog. **A test that finds a log line by its peer address passes
+  vacuously once the address is redacted**: the probe tests find the
+  filtered server's line by the placeholder as well.
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as
@@ -3716,6 +3735,19 @@ its twin.** The top list is older, shorter, and read first.
   catches it.
 - **HSTS is public-mode + TLS only** — pinning it for `localhost` poisons that
   hostname in the operator's browser for every other local service.
+- **A log line names a library file library-relative, and the privacy page
+  says exactly where the code does otherwise** (#1055, the v0.2.1 logging
+  audit). A file-API failure on a library file logs through
+  `writeFileErrorLog` (the client's library-relative path, and the error
+  without the `*os.PathError`'s absolute path), and an extractor names its
+  file with `trackLogPath` (the track's library-relative path, or the base
+  name). The audit found the page promising more than the code did, mostly
+  from before v0.2.0; the leaks were fixed and the rest (the startup banner's
+  roots, the older scanner and extractor error lines, rendition and waveform
+  paths when adopted or removed, the bridge's own files in fault lines, info
+  lines naming a track) is now what the page describes. **A new log line
+  that names a library file uses the relative path; one that cannot is a
+  page change in the same release.**
 - **CodeQL's `go/log-injection` is a false positive BY CONSTRUCTION and will
   regenerate.** Both slog handlers quote the value and escape `\n`/`\r`, every
   flagged site passes a structured attribute, and `internal/` contains no
