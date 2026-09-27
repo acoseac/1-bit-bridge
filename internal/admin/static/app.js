@@ -2596,7 +2596,9 @@ async function handlePairingAction(btn, action) {
 // Console sign-ins (Devices page, public mode). "Sign out all other
 // sessions" ends every console session but this browser's; the count is
 // redrawn from the answer, since the page is not polled. A failure leaves
-// the button enabled and says why in the count's place.
+// the button enabled and says why in the count's place. `saved: false` is
+// neither: the others are refused already, and a restart before the bridge
+// next writes its sessions would sign them back in, which is said as such.
 function initConsoleSessions() {
   const btn = document.getElementById("sign-out-others");
   const count = document.getElementById("console-sessions-count");
@@ -2607,7 +2609,9 @@ function initConsoleSessions() {
       const r = await API.post("/api/console-sessions/sign-out-others");
       const n = r?.ended ?? 0;
       const ended = n === 1 ? "Signed out 1 other browser." : `Signed out ${n} other browsers.`;
-      count.textContent = `${ended} Only this browser is signed in to this console now.`;
+      count.textContent = r?.saved === false
+        ? `${ended} The bridge could not save that yet: a restart before it does would sign them back in.`
+        : `${ended} Only this browser is signed in to this console now.`;
     } catch (err) {
       btn.disabled = false;
       count.textContent = `Could not sign the other browsers out: ${err.message}`;

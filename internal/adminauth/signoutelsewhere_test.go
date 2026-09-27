@@ -576,3 +576,41 @@ func TestEndOtherSessionsNeedsALiveCaller(t *testing.T) {
 		t.Errorf("a refused EndOtherSessions ended a session: %v", err)
 	}
 }
+
+// TestEndOtherSessionsReportsAnEndItCouldNotSave: when the write fails, the
+// other sessions are refused already, and the file still signs them in at
+// the next restart until a later write lands. The operator is told so
+// (ErrSessionsNotSaved, beside the count), where a logout's failed write is
+// only logged; and the change stays pending, so the next write lands it.
+// The write fails because the file changes under every commit attempt, a
+// failure that runs on every platform.
+func TestEndOtherSessionsReportsAnEndItCouldNotSave(t *testing.T) {
+	a, path, caller, _ := runningBridge(t)
+	other, err := a.CreateSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCommitHook = func() { touchInPlace(t, path) }
+	t.Cleanup(func() { beforeCommitHook = nil })
+
+	ended, err := a.EndOtherSessions(caller)
+	if !errors.Is(err, ErrSessionsNotSaved) || ended != 1 {
+		t.Fatalf("EndOtherSessions with a write that fails = (%d, %v), want (1, ErrSessionsNotSaved)", ended, err)
+	}
+	beforeCommitHook = nil
+	if _, err := a.ValidateSession(other); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("the other session on the running bridge = %v, want ErrSessionNotFound: it is ended whether saved or not", err)
+	}
+	c, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ValidateSession(other); err != nil {
+		t.Fatalf("the fixture did not keep the end off the disk (the other session = %v), so it tests nothing", err)
+	}
+
+	if err := a.FlushSessions(); err != nil {
+		t.Fatal(err)
+	}
+	requireEndedOnDisk(t, path, "the next write after an end that was not saved", other)
+}

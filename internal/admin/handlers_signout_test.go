@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -171,5 +173,43 @@ func TestDevicesPageOffersToSignOutTheOtherConsoles(t *testing.T) {
 	defer lts.Close()
 	if _, page := consoleRequest(t, lts, "", http.MethodGet, "/devices", ""); strings.Contains(page, "console-sessions-panel") {
 		t.Errorf("a loopback console's Devices page shows the console sign-ins panel")
+	}
+}
+
+// TestSignOutOtherSessionsSaysWhenItCouldNotSave: a write that fails after
+// the sessions were ended answers 200 with saved false, not a failure: the
+// other browsers are refused already, and the page says a restart before
+// the bridge's next write would sign them back in. The store's directory is
+// made read-only so the write cannot stage its file.
+func TestSignOutOtherSessionsSaysWhenItCouldNotSave(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ignores a directory's read-only attribute when creating a file in it")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root creates files in a directory whatever its mode")
+	}
+	srv, store, _, path := newPublicTestServerAt(t, "test-password-123")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	caller, other := signIn(t, store), signIn(t, store)
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	status, body := consoleRequest(t, ts, publicOrigin, http.MethodPost, "/api/console-sessions/sign-out-others", caller)
+	if status != http.StatusOK {
+		t.Fatalf("sign-out-others with a write that fails = %d, want 200: %s", status, body)
+	}
+	var got signOutOthersResponse
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+	if got.Ended != 1 || got.Saved {
+		t.Errorf("sign-out-others with a write that fails = %+v, want ended 1, saved false", got)
+	}
+	if status, _ := consoleRequest(t, ts, publicOrigin, http.MethodGet, "/api/stats", other); status != http.StatusUnauthorized {
+		t.Errorf("the other browser's next request = %d, want 401: it is signed out whether saved or not", status)
 	}
 }

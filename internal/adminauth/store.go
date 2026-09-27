@@ -156,6 +156,11 @@ var (
 	// session is refused for this request, and kept: the next request reads
 	// again, and a sign-out it then finds ends it.
 	ErrStoreUnreadable = errors.New("adminauth: the credential store cannot be read")
+	// ErrSessionsNotSaved is EndOtherSessions ending sessions that its
+	// write then failed to put on disk: they are refused from now on, and a
+	// restart before a later write lands the change would sign them back
+	// in. The count it returns beside this is still how many it ended.
+	ErrSessionsNotSaved = errors.New("adminauth: the sessions were ended but not yet saved")
 )
 
 // SessionAction says what a password rotation does to the console
@@ -1051,8 +1056,13 @@ const msgStoreUnreadableLog = "could not read the admin credential store; refusi
 // It runs in the serving bridge, which holds the sessions, so it needs no
 // marker: it deletes them from memory and writes the set that is left at
 // once, as a logout does, because an end only in memory comes back at the
-// next restart. A write that fails is logged and stays pending, as a
-// logout's does. A sign-out another process wrote is taken first
+// next restart. A write that fails stays pending, as a logout's does, but
+// unlike a logout it is REPORTED (ErrSessionsNotSaved, with the count): an
+// operator signing a stranger out needs to know that a restart before the
+// next write would sign the stranger back in. Not a plain failure either,
+// since the sessions are already refused (Gemini on #1044 proposed
+// returning the write's error, which a caller would report as "could not
+// sign out"). A sign-out another process wrote is taken first
 // (ErrStoreUnreadable when the file cannot be read, as ValidateSession).
 func (s *Store) EndOtherSessions(raw string) (int, error) {
 	if raw == "" {
@@ -1084,7 +1094,7 @@ func (s *Store) EndOtherSessions(raw string) (int, error) {
 	}
 	s.sessionsDirty = true
 	if err := s.persistSessionsLocked(now); err != nil {
-		logger.Error("persist the end of other console sessions", "err", err)
+		return ended, fmt.Errorf("%w: %w", ErrSessionsNotSaved, err)
 	}
 	return ended, nil
 }

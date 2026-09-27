@@ -537,9 +537,14 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // signOutOthersResponse is POST /api/console-sessions/sign-out-others's
-// answer: how many browsers it signed out.
+// answer: how many browsers it signed out, and whether that is on disk
+// yet. Saved false means they are refused now and a restart before the
+// bridge's next write would sign them back in (adminauth's
+// ErrSessionsNotSaved), which the page says rather than claim either
+// success or failure.
 type signOutOthersResponse struct {
-	Ended int `json:"ended"`
+	Ended int  `json:"ended"`
+	Saved bool `json:"saved"`
 }
 
 // apiSignOutOtherSessions ends every console session but the caller's: the
@@ -569,13 +574,18 @@ func (s *Server) apiSignOutOtherSessions(w http.ResponseWriter, r *http.Request)
 	case errors.Is(err, adminauth.ErrStoreUnreadable):
 		writeError(w, http.StatusServiceUnavailable, "store_unreadable", msgStoreUnreadable)
 		return
+	case errors.Is(err, adminauth.ErrSessionsNotSaved):
+		logger.Error("signed out every other console session, but could not save it; a restart before the next write would sign them back in",
+			"ended", ended, "err", err)
+		writeJSON(w, http.StatusOK, signOutOthersResponse{Ended: ended, Saved: false})
+		return
 	case err != nil:
 		logger.Error("sign out other console sessions", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not sign the other sessions out")
 		return
 	}
 	logger.Info("signed out every other console session", "ended", ended)
-	writeJSON(w, http.StatusOK, signOutOthersResponse{Ended: ended})
+	writeJSON(w, http.StatusOK, signOutOthersResponse{Ended: ended, Saved: true})
 }
 
 // msgStoreUnreadable is the one wording for a request refused because the
