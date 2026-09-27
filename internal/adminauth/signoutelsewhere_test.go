@@ -750,3 +750,25 @@ func TestAStoreThatKeepsComingBackIsReported(t *testing.T) {
 		t.Errorf("SignOutEverywhere against a store written back at every confirmation = %v, want errWrittenOver", err)
 	}
 }
+
+// TestAConfirmationThatCannotReadIsLogged: when the read that confirms a
+// sign-out fails, the sign-out stands (it landed) and the command still
+// succeeds, but it says the confirmation did not run: nothing read showed a
+// running bridge's write had not undone it (CodeRabbit on #1044).
+func TestAConfirmationThatCannotReadIsLogged(t *testing.T) {
+	_, path, _, _ := runningBridge(t)
+	rec := loggingtest.Record(t)
+	beforeConfirmHook = func() { damage(t, path) }
+	t.Cleanup(func() { beforeConfirmHook = nil })
+
+	b, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SignOutEverywhere(); err != nil {
+		t.Fatalf("a sign-out whose confirmation could not read = %v, want nil: the write landed", err)
+	}
+	if got := rec.Failures(msgUnconfirmedLog); len(got) != 1 {
+		t.Errorf("a confirmation that could not read logged %d warnings, want 1", len(got))
+	}
+}

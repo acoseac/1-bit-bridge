@@ -542,8 +542,8 @@ func (s *Store) SignOutEverywhere() error {
 // #1039, for its new failure modes in the bridge's own write path; see
 // ops/engineering-log.md, #1044). CodeRabbit on #1044.
 //
-// The write already landed, so a confirmation read that fails is not
-// reported: nothing shows it was undone.
+// The write already landed, so a confirmation read that fails is not an
+// error; it is logged, since nothing read shows the write held either.
 func (s *Store) commitAndConfirm(
 	build func(cur storeContents) (storeFile, error),
 	took func(next storeFile),
@@ -565,7 +565,14 @@ func (s *Store) commitAndConfirm(
 		}
 		s.mu.Lock()
 		cur, err := readStoreFile(s.path)
-		if err != nil || !reverted(replaced, cur) {
+		if err != nil {
+			s.mu.Unlock()
+			// The write landed, so this is no failure; but nothing read
+			// shows it held either (CodeRabbit on #1044).
+			logger.Warn(msgUnconfirmedLog, "path", s.path, "err", err)
+			return nil
+		}
+		if !reverted(replaced, cur) {
 			s.mu.Unlock()
 			return nil
 		}
@@ -602,6 +609,10 @@ var errWrittenOver = errors.New("adminauth: another process kept writing the sto
 // each confirmation read: where a test lands the running bridge's
 // in-flight write.
 var beforeConfirmHook func()
+
+// msgUnconfirmedLog is commitAndConfirm's line for a confirmation read that
+// failed.
+const msgUnconfirmedLog = "wrote the admin credential store, but could not read it back to confirm a running bridge did not write over it; run the command again if it did not take"
 
 // nextSignOut is the marker a sign-out writes: now, or one nanosecond past
 // the marker the file already holds when the clock does not put now after
