@@ -18077,6 +18077,46 @@ inevitable, or an unmounted volume (Out of scope). Its warning about a type
 error silently defaulting a kept field was already met: any decode error is
 "cannot read".
 
+### Review round 1
+
+- **CodeRabbit's one finding (Minor) was declined as proposed: its patch is
+  the pin break.** It proposed copying the TLS paths only when both are
+  set, so that a config naming one half does not fail the rewrite's
+  validation. Dropping the half a config names makes init load the data
+  dir's pair, or mint one when there is none there, which is the reported
+  layout: measured with the real binary (`a4f0bfa1`), the pair moved out of
+  the data dir and `tlsCertPath` alone, the rewrite was refused at
+  validation with nothing written, and with the patch applied (NC20) it
+  exited 0, rewrote the config and minted a new pair in the data dir. The
+  accurate half was taken: the refusal was a bare `validate: tlsCertPath
+  and tlsKeyPath: must be set together, or both empty`, which says neither
+  what to do nor that nothing changed, so `refuseRewrite` now refuses half
+  a pair by name ("names tlsCertPath without tlsKeyPath", "add
+  tlsKeyPath, or remove tlsCertPath to use the pair in the data dir"),
+  pinned by `TestInitRewriteRefusesHalfATLSPair` (both halves).
+- **Gemini's one finding (Medium) had a premise that cannot arise.** It
+  said `printKept` compares an absolute `dataDir` against a join on a
+  relative `cfgDir`; `initCmd` makes `cfgDir` absolute (`filepath.Abs`)
+  before anything reads it, so both sides are absolute. The accurate half
+  was taken: `printKept` derived init's own data dir a second time, and is
+  now handed the one `initCmd` computes (`initDataDir`). The data-dir test
+  now also requires the kept `dataDir` line (NC22).
+- SonarCloud's quality gate passed, CodeQL reported nothing, and all 20
+  checks passed on `50d8299d`, which CodeRabbit's walkthrough covered.
+- **Controls** against `28231151`, each restored from HEAD and the tree
+  checked clean before the next:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC20 | CodeRabbit's patch on the code it reviewed: both paths or neither, and no half-pair refusal | both rows of the half-pair test: exit 0, the config rewritten, a pair minted in the data dir |
+  | NC21 | no half-pair refusal (validation's refusal alone) | both rows, on the refusal's wording |
+  | NC22 | the kept `dataDir` line never printed | the data-dir test, both postures |
+
+  NC20's first form patched `keepFromPrior` alone and stayed green: the new
+  refusal runs before it. A control of a bot's patch has to apply the
+  patch to the code the bot reviewed, not to the code after the reply to
+  it.
+
 ### Out of scope
 
 - **A `--public` or posture-changing rewrite grades a SAN want-set being

@@ -2660,7 +2660,10 @@ what it claimed**, and none of it had a failing test.
   config that does not load, the preflight grades that pair as well.
   **Refused before anything is written**: a config this user cannot read;
   one that does not parse when the rewrite would MINT (no pair in init's
-  data dir: the file may name the pinned pair anywhere); and one setting
+  data dir: the file may name the pinned pair anywhere); one naming half a
+  TLS pair (**never "keep the paths only when both are set"**, a bot's fix
+  on #1040: dropping the half a config names serves the data dir's pair or
+  mints one, the same pin break); and one setting
   `demo.enabled` or `deployment.managed*`, postures init never writes, whose
   rewrite dropped the demo's pinned token from every shipped app or handed a
   tenant's withheld controls to its console. A fresh start is moving
