@@ -334,7 +334,7 @@ func (s *Store) installInitialLocked(username, hash string) error {
 		CreatedAt:         now,
 		PasswordChangedAt: now,
 	}
-	if err := s.writeStoreLocked(next, cur.sessions); err != nil {
+	if err := s.writeStoreLocked(next, cur.sessions, nil); err != nil {
 		return err
 	}
 	s.user = next
@@ -397,7 +397,7 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 	if cur.user != nil {
 		next.CreatedAt = cur.user.CreatedAt
 	}
-	if err := s.writeStoreLocked(next, cur.sessions); err != nil {
+	if err := s.writeStoreLocked(next, cur.sessions, nil); err != nil {
 		return err
 	}
 	s.user = next
@@ -624,36 +624,93 @@ func (s *Store) SetInitialPassword(username, password string) error {
 //
 // The credential is re-read first and never taken from memory: writing
 // this process's copy is how a running bridge put a rotated-away
-// password back on disk. A file that cannot be read is not written
-// over, since it may hold a credential newer than this process has
-// seen; the change stays pending (dirty) for the next attempt.
+// password back on disk. It is read again after the new file is staged
+// and before it is committed, because the staging's fsync is a window
+// of milliseconds, and a rotation landing in it is rebuilt around. What
+// remains is the commit itself: the rename, and on Windows its retries.
+// A file that cannot be read is not written over, since it may hold a
+// credential newer than this process has seen; the change stays pending
+// (dirty) for the next attempt.
 //
 // Every attempt starts the next debounce window, a failed one too.
 // Otherwise every authenticated request after a failure is "due", and
 // a file that stays unreadable costs a read and an error line per
 // console request.
 //
-// No-op when the file holds no credential to write beside: a store
-// that was never initialised, or a file that is gone, which a session
-// write must not recreate with the credential it replaced.
+// Nothing is written when the file holds no credential to write beside
+// (a store that was never initialised, or a file that is gone, which a
+// session write must not recreate with the credential it replaced), and
+// the sessions stay pending: they are this process's, and go down
+// beside whichever credential the file holds next.
 func (s *Store) persistSessionsLocked(now time.Time) error {
 	s.lastSessionFlush = now
-	if err := s.refreshCredentialLocked(); err != nil {
-		return fmt.Errorf("sessions not written, the credential could not be re-read first: %w", err)
-	}
-	if s.user == nil {
-		s.sessionsDirty = false
-		return nil
-	}
 	sessions := make(map[string]*Session, len(s.sessions))
 	for digest, sess := range s.sessions {
 		sessions[hex.EncodeToString(digest[:])] = sess
 	}
-	if err := s.writeStoreLocked(s.user, sessions); err != nil {
-		return err
+	for attempt := 1; ; attempt++ {
+		if err := s.refreshCredentialLocked(); err != nil {
+			return fmt.Errorf("sessions not written, the credential could not be re-read first: %w", err)
+		}
+		if s.user == nil {
+			// Still pending: these sessions are this process's, so they go
+			// down beside whichever credential the file holds next.
+			return nil
+		}
+		// Staging the file costs a write and an fsync, milliseconds in which
+		// another process can rotate the credential, and renaming a file
+		// built from the credential read before them puts the old one back.
+		// So the credential is read once more after the staging, and the
+		// file is committed only if it is still the one it was built from.
+		built := s.user
+		err := s.writeStoreLocked(built, sessions, func() error {
+			if beforeSessionCommitHook != nil {
+				beforeSessionCommitHook()
+			}
+			c, err := readStoreFile(s.path)
+			if err != nil {
+				return fmt.Errorf("sessions not written, the credential could not be re-read before the commit: %w", err)
+			}
+			if !sameCredential(c.user, built) {
+				return errCredentialMoved
+			}
+			return nil
+		})
+		if errors.Is(err, errCredentialMoved) && attempt < maxSessionCommitAttempts {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		s.sessionsDirty = false
+		return nil
 	}
-	s.sessionsDirty = false
-	return nil
+}
+
+// errCredentialMoved is a session write finding the credential changed
+// between the read it was built from and its commit.
+var errCredentialMoved = errors.New("adminauth: the credential changed while sessions were being written; nothing written")
+
+// maxSessionCommitAttempts bounds how often a session write rebuilds
+// for a credential that keeps changing under it. Each attempt costs an
+// fsync, and a credential that changes three times inside three of them
+// is not a rotation anyone is running by hand. The write stays pending.
+const maxSessionCommitAttempts = 3
+
+// beforeSessionCommitHook is a test-only seam (nil in production),
+// fired inside a session write between the staging of the file and the
+// re-read that gates its commit: the window a rotation by another
+// process lands in. Same convention as auth's beforeValidatePersistHook.
+var beforeSessionCommitHook func()
+
+// sameCredential reports whether two reads of the file hold the same
+// credential. Username and hash are enough: bcrypt salts every hash,
+// so a rotation always changes it, even to the same password.
+func sameCredential(a, b *userRecord) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Username == b.Username && a.PasswordHash == b.PasswordHash
 }
 
 // sessionExpired reports whether a session has crossed its idle
@@ -908,7 +965,7 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 	case u == nil && s.user != nil:
 		logger.Warn("the admin credential file is gone; logins are refused until one is set",
 			"path", s.path)
-	case u != nil && (s.user == nil || u.Username != s.user.Username || u.PasswordHash != s.user.PasswordHash):
+	case u != nil && !sameCredential(u, s.user):
 		logger.Info("the admin credential changed on disk; using it from now on",
 			"username", u.Username, "passwordChangedAt", u.PasswordChangedAt)
 	}
@@ -919,7 +976,11 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 // and sessions. 0o700 dir + 0o600 file, same hardening as auth.Store.
 // Caller MUST hold the mutex, and decides which sessions to write: its
 // own set for a session write, the file's for a credential write.
-func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session) error {
+//
+// beforeCommit, when not nil, runs once the new file is staged (written,
+// synced and closed) and before it replaces the old one; an error from
+// it abandons the write and is returned.
+func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session, beforeCommit func() error) error {
 	if user == nil {
 		return errors.New("adminauth: cannot persist nil user record")
 	}
@@ -958,6 +1019,11 @@ func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			return err
+		}
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename adminauth store: %w", err)

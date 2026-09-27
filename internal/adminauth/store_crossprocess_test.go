@@ -201,6 +201,74 @@ func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 	}
 }
 
+// TestARotationDuringASessionWriteIsNotUndone: re-reading the credential
+// before a session write is not enough on its own, because staging the file
+// costs a write and an fsync, milliseconds (tens of them on a cloud disk) in
+// which reset-password can land its rotation, and committing a file built
+// from the credential read before them puts the old one back. The write
+// reads the credential once more before its commit and rebuilds around a
+// change, keeping the session it was writing.
+func TestARotationDuringASessionWriteIsNotUndone(t *testing.T) {
+	a, path, _, _ := runningBridge(t)
+	fired := false
+	beforeSessionCommitHook = func() {
+		if !fired {
+			fired = true
+			rotateElsewhere(t, path)
+		}
+	}
+	t.Cleanup(func() { beforeSessionCommitHook = nil })
+
+	signedIn, err := a.CreateSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("the rotation never ran: the session write did not reach its commit")
+	}
+	requireRotationOnDisk(t, path, "a rotation landing inside a session write")
+	c, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ValidateSession(signedIn); err != nil {
+		t.Errorf("the login whose write was rebuilt is not in the file: %v", err)
+	}
+}
+
+// TestSessionsHeldWhileTheStoreIsGoneLandOnceItIsBack: with the file gone a
+// session write has no credential to write beside, so it writes nothing, and
+// the sessions stay pending rather than being dropped from the flush: they
+// are the running bridge's, and go down beside the next credential the file
+// holds.
+func TestSessionsHeldWhileTheStoreIsGoneLandOnceItIsBack(t *testing.T) {
+	a, path, session, clock := runningBridge(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	clock.t = clock.t.Add(time.Second)
+	if _, err := a.ValidateSession(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.FlushSessions(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A credential is set again, from another process.
+	rotateElsewhere(t, path)
+	if err := a.FlushSessions(); err != nil {
+		t.Fatal(err)
+	}
+	c, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ValidateSession(session); err != nil {
+		t.Errorf("the running bridge's session never reached the file once a credential was back: %v", err)
+	}
+	requireRotationOnDisk(t, path, "the flush after a credential was set again")
+}
+
 // TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt: a session write that
 // cannot re-read the file writes nothing, because the file may hold a
 // credential newer than the one in memory, and the change it held back lands
@@ -213,7 +281,8 @@ func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 		// write makes the change while the file cannot be read, and returns
 		// the session whose state it changed.
 		write func(t *testing.T, a *Store, session string) string
-		// landed reports whether a store opened afterwards shows the change.
+		// landed reports whether a store shows the change: one opened
+		// afterwards, and the one that made it.
 		landed func(c *Store, session string) bool
 	}{
 		{"a logout",
