@@ -350,12 +350,13 @@ func (s *Store) reloadIfStale() (err error) {
 // the Error a failed debounced write logs, is about a timestamp and comes
 // only from a device the bridge already knew. The realistic cause is `sudo
 // bridge pair` beside a service install, which leaves tokens.json owned by
-// root, so a permission error also names the uid and the remedy (POSIX's:
-// Windows has no uid to name, and no chown). Both lines give the number of
-// tokens the bridge answers from: none once the file was deleted to mend
-// it, which refuses every device and would otherwise read as all clear.
-// Once each way, since the failure lasts until someone mends it and every
-// request would repeat the line. Caller must hold mu.
+// root, so a permission error also names the effective uid, the one an
+// open is checked against, and the remedy (POSIX's: Windows has no uid to
+// name, and no chown). Both lines give the number of tokens the bridge
+// answers from: none once the file was deleted to mend it, which refuses
+// every device and would otherwise read as all clear. Once each way, since
+// the failure lasts until someone mends it and every request would repeat
+// the line. Caller must hold mu.
 func (s *Store) noteReadLocked(err error) {
 	switch {
 	case err != nil && !s.unreadable:
@@ -363,7 +364,7 @@ func (s *Store) noteReadLocked(err error) {
 		args := []any{"path", s.path, "tokens", len(s.tokens), "err", err,
 			"note", "a device paired since is refused, and one revoked since still accepted, until the file can be read; not logged again until then"}
 		if runtime.GOOS != "windows" && errors.Is(err, fs.ErrPermission) {
-			args = append(args, "uid", os.Getuid(),
+			args = append(args, "uid", os.Geteuid(),
 				"hint", "tokens.json must be readable by this uid: a bridge pair or bridge token run with sudo leaves it owned by root, so chown it back and run those as the service user")
 		}
 		logger.Warn("token store unreadable; checking devices against the tokens last read", args...)

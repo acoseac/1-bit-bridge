@@ -18834,6 +18834,21 @@ evidence:
   whatever is shadowed, and a bare `return` under a shadowed result does not
   compile.
 
+### Review round 1
+
+- **Gemini** (on 23bc3575), one finding, taken: the permission hint gave
+  `os.Getuid()`, and an `open(2)` is checked against the effective uid (on
+  Linux the filesystem uid, which follows it, since nothing in the bridge
+  calls `setfsuid`). It gives `os.Geteuid()` now. The two differ only for a
+  setuid process, which the bridge is not, so no deployed line changes.
+- **SonarCloud**: one `go:S3776` (cognitive complexity 16 against 15) in the
+  report test's row, `unreadableStoreReportedOnce`, now split into
+  `pairOneAndRevokeTwo` and `requireOneLine`. The report-side controls (NC7 to
+  NC10, NC12, NC13), re-run against the split test (1d57caa4), turn the same
+  rows red.
+- **CodeRabbit** paused on its plan limit before its first pass; asked, the
+  user chose the free on-demand run, ticked once the fixes above were pushed.
+
 ### Out of scope
 
 - **The cause.** A CLI run as root re-owns tokens.json (and adminauth.json,
