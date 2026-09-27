@@ -267,19 +267,34 @@ func TestInitPreflightGradesThePairABrokenConfigNames(t *testing.T) {
 }
 
 // TestInitRewriteOverAConfigItCannotParse: a file that is not YAML at all
-// names nothing a rewrite can keep, so init falls back to its own layout, as
-// #1027 does for the pid file. That keeps the pair in the data dir when there
-// is one there. When there is none the rewrite would MINT one, and every
-// device paired with an install whose config names its pair somewhere init
-// cannot read would have to pair again, so it refuses, before anything is
-// written.
+// names nothing a rewrite can read, so it cannot keep the data dir, the pair,
+// the endpoints or the roots, and it is refused before anything is written,
+// whatever is in init's own data dir. It proceeded when a pair was there,
+// until CodeRabbit's review of #1040: that pair being there does not make it
+// the one the install serves. The remedy the refusal names, moving the file
+// aside, works: init then runs as on a first install and keeps the pair it
+// finds in its data dir.
 func TestInitRewriteOverAConfigItCannotParse(t *testing.T) {
 	const garbage = "tlsCertPath: [\n\tnot yaml\n"
 	if err := yaml.Unmarshal([]byte(garbage), &map[string]any{}); err == nil {
 		t.Fatal("premise: the fixture parses as YAML")
 	}
+	assertRefused := func(t *testing.T, cfgDir, before, out string, code int) {
+		t.Helper()
+		if code == 0 {
+			t.Error("a rewrite over a config it cannot parse exited 0")
+		}
+		if readConfigFile(t, cfgDir) != before {
+			t.Error("the refused rewrite changed the config")
+		}
+		for _, want := range []string{"the config was NOT changed", "move bridge.yaml aside"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the refusal does not say %q", want)
+			}
+		}
+	}
 
-	t.Run("no pair in the data dir: refused", func(t *testing.T) {
+	t.Run("the pair moved out of the data dir: refused", func(t *testing.T) {
 		tmp := t.TempDir()
 		cfgDir := filepath.Join(tmp, "cfg")
 		rewrite := rewritePostures[0].setUp(t, cfgDir)
@@ -293,39 +308,47 @@ func TestInitRewriteOverAConfigItCannotParse(t *testing.T) {
 		code, out := rewrite()
 		defer logRunOnFailure(t, out)
 
-		if code == 0 {
-			t.Error("a rewrite that would mint a pair over a config it cannot parse exited 0")
-		}
-		if readConfigFile(t, cfgDir) != before {
-			t.Error("the refused rewrite changed the config")
-		}
+		assertRefused(t, cfgDir, before, out, code)
 		if _, err := os.Stat(filepath.Join(cfgDir, "data", servertls.CertFileName)); err == nil {
 			t.Error("the refused rewrite minted a pair")
 		}
 		if readPair(t, certPath, keyPath) != pair {
 			t.Error("the refused rewrite changed the install's pair")
 		}
-		for _, want := range []string{"the config was NOT changed", "move bridge.yaml aside"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("the refusal does not say %q", want)
-			}
+	})
+	t.Run("a pair in the data dir: refused too", func(t *testing.T) {
+		tmp := t.TempDir()
+		cfgDir := filepath.Join(tmp, "cfg")
+		rewrite := rewritePostures[0].setUp(t, cfgDir)
+		certPath, keyPath := servertls.DefaultPaths(filepath.Join(cfgDir, "data"))
+		pair := readPair(t, certPath, keyPath)
+		appendToConfig(t, cfgDir, garbage)
+		before := readConfigFile(t, cfgDir)
+
+		code, out := rewrite()
+		defer logRunOnFailure(t, out)
+
+		assertRefused(t, cfgDir, before, out, code)
+		if readPair(t, certPath, keyPath) != pair {
+			t.Error("the refused rewrite changed the pair in the data dir")
 		}
 	})
-	t.Run("the pair in the data dir: kept", func(t *testing.T) {
+	t.Run("moved aside, as the refusal says: the data dir's pair kept", func(t *testing.T) {
 		tmp := t.TempDir()
 		cfgDir := filepath.Join(tmp, "cfg")
 		rewrite := rewritePostures[0].setUp(t, cfgDir)
 		pinned := servedFingerprint(t, cfgDir)
 		appendToConfig(t, cfgDir, garbage)
+		cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+		if err := os.Rename(cfgPath, cfgPath+".broken"); err != nil {
+			t.Fatal(err)
+		}
 
 		code, out := rewrite()
 		defer logRunOnFailure(t, out)
 
 		if code != 0 {
-			t.Fatalf("the rewrite exited %d over an unparseable config with its pair in the data dir", code)
-		}
-		if !strings.Contains(out, "warning: the file names nothing this rewrite can read") {
-			t.Error("the rewrite does not say which pair it kept over a config it cannot read")
+			t.Fatalf("init exited %d with the broken config moved aside", code)
 		}
 		if got := servedFingerprint(t, cfgDir); got != pinned {
 			t.Errorf("serve would present %s, and every paired device pinned %s", got, pinned)

@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
-	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
 // What `bridge init` keeps when it overwrites a config: with --force, or
@@ -112,17 +111,20 @@ func (p *priorInstallFile) loopback() bool {
 
 // refuseRewrite decides whether this run may overwrite the config at
 // cfgPath, before anything is written, and says why when it may not. prior
-// and priorErr are readPriorInstall's answer for cfgPath, and dataDir is the
-// data dir the run keeps: prior's, or init's own when there is no prior.
+// and priorErr are readPriorInstall's answer for cfgPath.
 //
 //   - A config this user cannot read is read by the bridge's own user at
 //     every start, so this run is the wrong user's, and it cannot tell which
 //     data dir and pair it would keep.
-//   - A file that does not parse names nothing the rewrite can keep, so init
-//     keeps its own layout and the pair in its own data dir, as #1027 assumes
-//     for the pid file. Where there is no pair there, the rewrite would MINT
-//     one, and the config it cannot read may name the pair every device
-//     pinned anywhere, so it refuses.
+//   - A file that does not parse names nothing the rewrite can read, so it
+//     cannot keep the data dir, the pair, the endpoints or the roots: a
+//     rewrite would reset all four, the defect this file exists to stop. It
+//     proceeded when init's own data dir held a pair, until CodeRabbit's
+//     review of #1040: that pair being there does not make it the one the
+//     install serves, and the file may name another. A config that does not
+//     load for a misspelt key does parse, and is kept from as usual. Moving
+//     the file aside is the remedy it names: init then runs as on a first
+//     install, and LoadOrGenerate keeps a pair it finds in the data dir.
 //   - A config naming one half of a TLS pair names a pair nothing can load,
 //     and dropping the half it names would serve the data dir's pair, or mint
 //     one, which no device may have pinned: the reported pin break by another
@@ -133,7 +135,7 @@ func (p *priorInstallFile) loopback() bool {
 //     ordinary bridge, dropping the token every shipped app carries, and a
 //     tenant an unmanaged one, handing the controls its operator withholds to
 //     whoever holds a console session.
-func refuseRewrite(stderr io.Writer, cfgPath, dataDir string, prior *priorInstallFile, priorErr error) bool {
+func refuseRewrite(stderr io.Writer, cfgPath string, prior *priorInstallFile, priorErr error) bool {
 	var postures []postureKey
 	if prior != nil {
 		postures = prior.madeElsewhere()
@@ -144,17 +146,9 @@ func refuseRewrite(stderr io.Writer, cfgPath, dataDir string, prior *priorInstal
 		fmt.Fprintf(stderr, "this user cannot read the config at %s, so init cannot tell which data dir and TLS pair a rewrite would keep.\n", cfgPath)
 		fmt.Fprintln(stderr, "run init as the user the bridge runs as.")
 	case priorErr != nil:
-		certPath, keyPath := servertls.DefaultPaths(dataDir)
-		if pathExists(certPath) || pathExists(keyPath) {
-			// Not a refusal, so a warning, where init prints its others.
-			fmt.Fprintf(stderr, "warning: %v\n", priorErr)
-			fmt.Fprintf(stderr, "warning: the file names nothing this rewrite can read, so it keeps the TLS pair in %s, where init keeps it.\n", dataDir)
-			return false
-		}
 		fmt.Fprintf(stderr, "%v\n", priorErr)
-		fmt.Fprintf(stderr, "init cannot tell which TLS pair this install serves, and there is none at %s.\n", certPath)
-		fmt.Fprintln(stderr, "a rewrite would mint a new one, and every device paired with this install would have to pair again.")
-		fmt.Fprintln(stderr, "fix the YAML, or move bridge.yaml aside to set this install up from scratch.")
+		fmt.Fprintln(stderr, "init cannot tell which data dir and TLS pair this install uses, so a rewrite could not keep them, and every device paired with it could have to pair again.")
+		fmt.Fprintln(stderr, "fix the YAML, or move bridge.yaml aside to set this install up from scratch (init keeps a TLS pair it finds in its data dir).")
 	case prior != nil && (prior.TLSCertPath == "") != (prior.TLSKeyPath == ""):
 		named, missing := "tlsCertPath", "tlsKeyPath"
 		if prior.TLSCertPath == "" {
@@ -269,10 +263,4 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, e
 		fmt.Fprintf(w, "  %-16s %s\n", l[0], l[1])
 	}
 	fmt.Fprintln(w, "every other setting is this run's or the default.")
-}
-
-// pathExists says whether something is at path.
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

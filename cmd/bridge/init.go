@@ -290,7 +290,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Whether this run may overwrite the config at all, before anything is
 	// written, the directories included: refuseRewrite.
-	if refuseRewrite(stderr, cfgPath, dataDir, prior, priorErr) {
+	if refuseRewrite(stderr, cfgPath, prior, priorErr) {
 		return 1
 	}
 
