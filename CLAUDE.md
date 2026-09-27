@@ -656,6 +656,25 @@ lost my library."
   as a space, so a path containing `+` silently resolves to the wrong file — a
   `200 {deletedCount: 0}` no-op. The client half must use `encodeURIComponent`,
   never `URLSearchParams` (which form-encodes a space back to `+`).
+- **…and a query the bridge WRITES for such a reader goes through
+  `internal/urlquery`, never `url.QueryEscape` or `url.Values.Encode`**
+  (#1046). Both write a space as `+`, and two readers keep `+` as a plus:
+  Foundation's `URLComponents.queryItems`, which the app reads the pairing QR
+  with, and `safeQuery`. So from April to September the QR named a library
+  `My Library` as `My+Library` (the default as `1-bit+Bridge`), which the app
+  pre-fills as the name it saves the bridge under, and `bridge enrichment
+  misses --path "Meridian Glass"` asked for `Meridian+Glass` and reported 0
+  misses of 5. `urlquery.Escape` / `Encode` write `%20`, which loses nothing
+  (a literal `+` is always `%2B`) and decodes alike under both kinds of
+  reader. **Read a pairing URL in a test as the app does, never with
+  `u.Query()`**: that is a form decoder, it reads the `+` back as a space,
+  and it is how every pairing test passed (`appQueryItems` in
+  internal/admin; with the old encoder and a form-decoding reader, the
+  mint/rotate test goes green). The bridge's fix is the whole fix: the app
+  parses RFC 3986 correctly, and reading `+` as a space there would refuse
+  codes that pair today (a pre-#1042 name with a trailing space is written
+  `name=X+`, which the app takes as "X+" and would then refuse as "extra
+  spaces").
 - **`/v1/health` withholds `scanState` and the update triple from an
   unauthenticated caller**; the scope was set by reading which iOS Codable
   fields are optional, not by principle — `libraryName`, `libraryRoots`,
@@ -690,6 +709,25 @@ lost my library."
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
   already cover. Never emit `host=.local` — fall back to `localhost.local`.
+- **The Bonjour instance name is ONE DNS label, 63 bytes, and hashicorp/mdns
+  does not check it** (#1046). The instance is the library name:
+  `NewMDNSService` takes a longer one, `Advertise` succeeds, serve prints
+  "mDNS: advertising as", and every answer to a browse then fails to pack
+  (`dns: bad rdata`), so the bridge is never discovered; the one trace is an
+  INFO line per query ("[ERR] mdns: Failed to handle query"). 64 ASCII
+  characters, or 22 CJK ones, were enough (measured on a Linux LAN).
+  `sanitizeInstance` cuts it to `maxInstanceLen` bytes on a rune boundary;
+  TXT `library=` carries up to 240 bytes of the name. **The instance and
+  every TXT string are DNS presentation format to miekg/dns**, where a
+  backslash escapes what follows it (`\X` is X, `\DDD` a byte): each is
+  written `\\` AFTER the cut or cap, which count the bytes on the wire.
+  Unescaped, `AC\DC Live` was browsed as instance and `library=` "ACDC
+  Live", and a trailing backslash (a name's own, or one a cut left) merged
+  the instance into the service label or vanished from the TXT (CodeRabbit
+  reported the cut case; measuring it found the rest). **A browse that finds
+  nothing is a finding only once a short-named control is found**: on the
+  dev Mac the responder bound a link-local `utun0` tunnel ahead of `en0`, so
+  even "Probe Short Name" was invisible there (filed separately).
 - **A shape documented in PROTOCOL.md is a Mirror-PR obligation.** The two specs
   are byte-identical by rule, and both directions are guarded
   (`TestEveryDocumentedEndpointIsRouted` / `TestEveryRoutedEndpointIsDocumented`).
@@ -1849,6 +1887,33 @@ no failing test — which is the shape to expect in this area.
   `applyDefaults`, and don't turn it into a `Validate` refusal: a
   `BRIDGE_LIBRARY_NAME` of spaces would then stop a bridge from starting
   after an update, over a display name.
+- **…and every stored name is one a pairing code can CARRY** (#1046). The
+  app also refuses a `name=` over 256 Characters ("Pairing code's name field
+  is too long.") and one that is not UTF-8 (Foundation leaves the item with
+  no value: "missing the name field"). The console took any length (257
+  characters answered 200 `live`, and the next QR did not pair), and `bridge
+  init --name $'Caf\xe9 Tunes'`, "Café" typed in a Latin-1 terminal, was
+  saved as `!!binary` and served with `name=Caf%E9`. **The cap,
+  `config.MaxLibraryNameLength`, is 256 RUNES**: a Character is one or more
+  scalars, so that is never more than 256 Characters on any iOS version,
+  whatever Unicode tables it segments by, and Go has no grapheme
+  segmentation to count the app's way. It is conservative for multi-scalar
+  Characters (37 family emoji, 259 scalars, are refused; the app counts 37).
+  Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
+  repair what is already stored** (#1042's rule, one step on):
+  `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
+  written) and in init's `--name` (exit 2, before anything is written), and
+  init's prompt asks again; `Normalize` repairs a config's or an override's
+  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8, cut
+  to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
+  stop a bridge from starting over a display name. init keeps and offers an
+  install's name AS LOAD SERVES IT, or its prompt would offer a name it then
+  refuses. Don't cut in the PATCH instead: that stores a name nobody typed.
+  **Nor in the console**: the name box has NO `maxlength`. It counts UTF-16
+  units, so it stopped names the handler takes (129 emoji), and it cut a
+  paste without a word; the handler's 400 is what the page shows ("Save
+  failed: libraryName: must be at most 256 characters, …"). Added in #1046's
+  first round, removed on review (CodeRabbit).
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true

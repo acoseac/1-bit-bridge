@@ -25,7 +25,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/urlquery"
 )
 
 // adminScheme is the transport used to reach the admin API.
@@ -189,7 +189,12 @@ func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, error
 	// that cap would. The CLI does its own --limit trimming at print time.
 	endpoint := adminScheme + addr + "/api/enrichment/misses"
 	if scope != "" {
-		endpoint += "?path=" + url.QueryEscape(scope)
+		// urlquery.Escape, never url.QueryEscape: the handler reads the path
+		// through safeQuery, which keeps a "+" as a plus so a folder named
+		// "A+B" resolves, and QueryEscape writes a space as "+". Until
+		// 2026-09-27 `--path "Meridian Glass"` asked for "Meridian+Glass",
+		// matched nothing, and reported no misses.
+		endpoint += "?path=" + urlquery.Escape(scope)
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()

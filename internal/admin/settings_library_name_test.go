@@ -32,23 +32,42 @@ import (
 // mistake, and taking it as DefaultLibraryName would replace the operator's
 // name with one nobody chose. Every other name is stored trimmed, the way
 // the app's pairing parser requires ("extra spaces in the name field").
+//
+// A name over config.MaxLibraryNameLength runes once trimmed is refused the
+// same way: the app refuses a pairing code whose name is over 256
+// Characters ("Pairing code's name field is too long."), and on 2026-09-27
+// (main at 3214aa17) a PATCH of 257 characters answered 200 `live` and the
+// next QR did not pair. The cap counts runes, as the app counts Characters,
+// so 256 two-byte or four-byte runes still pair.
 func TestSettingsPatchLibraryNameIsWhatARestartServes(t *testing.T) {
 	const fixtureName = "Test Library" // newTestServer's
+	a256 := strings.Repeat("a", 256)
 	for _, tc := range []struct {
+		label      string // the subtest's name; the quoted value when empty
 		sent       string
 		wantStatus int
 		want       string
 	}{
-		{"Renamed", http.StatusOK, "Renamed"},
-		{"  Padded Name  ", http.StatusOK, "Padded Name"},
-		{"", http.StatusBadRequest, fixtureName},
-		{"   ", http.StatusBadRequest, fixtureName},
-		{"\t\n", http.StatusBadRequest, fixtureName},
+		{"", "Renamed", http.StatusOK, "Renamed"},
+		{"", "  Padded Name  ", http.StatusOK, "Padded Name"},
+		{"", "", http.StatusBadRequest, fixtureName},
+		{"", "   ", http.StatusBadRequest, fixtureName},
+		{"", "\t\n", http.StatusBadRequest, fixtureName},
 		// U+200B: the app's trim removes it, strings.TrimSpace does not.
-		{"\u200b", http.StatusBadRequest, fixtureName},
-		{"\u200bZW\u200b", http.StatusOK, "ZW"},
+		{"", "\u200b", http.StatusBadRequest, fixtureName},
+		{"", "\u200bZW\u200b", http.StatusOK, "ZW"},
+		{"256 runes", a256, http.StatusOK, a256},
+		{"257 runes", a256 + "b", http.StatusBadRequest, fixtureName},
+		{"256 runes once trimmed", "  " + a256 + "  ", http.StatusOK, a256},
+		{"256 two-byte runes", strings.Repeat("é", 256), http.StatusOK, strings.Repeat("é", 256)},
+		{"257 two-byte runes", strings.Repeat("é", 257), http.StatusBadRequest, fixtureName},
+		{"256 four-byte runes", strings.Repeat("🎧", 256), http.StatusOK, strings.Repeat("🎧", 256)},
 	} {
-		t.Run(fmt.Sprintf("%q", tc.sent), func(t *testing.T) {
+		label := tc.label
+		if label == "" {
+			label = fmt.Sprintf("%q", tc.sent)
+		}
+		t.Run(label, func(t *testing.T) {
 			srv, cfgPath, fileBefore := libraryNameFixture(t, fixtureName)
 			var body map[string]any
 			code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
@@ -150,6 +169,15 @@ func TestSettingsFormRequiresALibraryName(t *testing.T) {
 	}
 	if !regexp.MustCompile(`\srequired[\s>]`).MatchString(input) {
 		t.Errorf("the libraryName input is not required: %s", input)
+	}
+	// No maxlength: the handler's 400 is what refuses a name over
+	// config.MaxLibraryNameLength, and the console shows it ("Save failed:
+	// libraryName: must be at most 256 characters, ..."). maxlength counts
+	// UTF-16 code units, so it stopped a name of 129 emoji the handler takes
+	// (CodeRabbit on #1046), and it cuts a pasted name without a word, which
+	// stores a name nobody typed: the outcome the handler refuses to produce.
+	if regexp.MustCompile(`\smaxlength=`).MatchString(input) {
+		t.Errorf("the libraryName input has a maxlength, which refuses names the handler takes: %s", input)
 	}
 	m := regexp.MustCompile(`\spattern="([^"]*)"`).FindStringSubmatch(input)
 	if m == nil {

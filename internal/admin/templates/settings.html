@@ -79,6 +79,11 @@
           before app.js sees the submit. The PATCH refuses a name that is
           blank once trimmed (TrimLibraryName in internal/config), and the
           pattern catches spaces alone, which `required` lets through.
+
+          No maxlength: the PATCH refuses a name over
+          config.MaxLibraryNameLength with a 400 the page shows. maxlength
+          counts UTF-16 code units, so it stopped names the handler takes
+          (129 emoji), and it cuts a paste without a word.
         */}}
         <label>Library name
           <input name="libraryName" type="text" value="{{.Data.LibraryName}}" required pattern=".*\S.*" title="Devices show this bridge under this name, so it cannot be blank.">

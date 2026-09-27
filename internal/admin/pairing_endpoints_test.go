@@ -2,7 +2,6 @@ package admin
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -151,14 +150,15 @@ func assertPairCarriesTailscale(t *testing.T, op string, res pairResult, primary
 			t.Errorf("%s: alternates lack the Tailscale endpoint %q: %v", op, u, res.Alternates)
 		}
 	}
-	u, err := url.Parse(res.PairURL)
-	if err != nil {
-		t.Fatalf("%s: parse pairURL: %v", op, err)
-	}
-	if got := u.Query().Get("url"); got != primary {
+	items := appQueryItems(t, res.PairURL)
+	if got := items["url"]; len(got) != 1 || got[0] != primary {
 		t.Errorf("%s: url= %q, want the primary %q", op, got, primary)
 	}
-	baked := strings.Split(u.Query().Get("urls"), "\n")
+	var urls string
+	if got := items["urls"]; len(got) == 1 {
+		urls = got[0]
+	}
+	baked := strings.Split(urls, "\n")
 	if len(baked) == 0 || baked[0] != primary {
 		t.Errorf("%s: urls= does not lead with the primary: %v", op, baked)
 	}
