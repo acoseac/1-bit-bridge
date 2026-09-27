@@ -562,9 +562,10 @@ func TestInitRefusesToRewriteAConfigItDoesNotMake(t *testing.T) {
 			}
 
 			// The keep path: --yes without --force leaves the config as it is.
-			code, out = loopbackInit(t, cfgDir, testLibrary(t), "Kept")
-			if code != 0 {
-				t.Errorf("a run that keeps the config exited %d:\n%s", code, out)
+			// Its own variables: the deferred log above is the refused run's
+			// output, and reusing out would make it this run's instead.
+			if keepCode, keepOut := loopbackInit(t, cfgDir, testLibrary(t), "Kept"); keepCode != 0 {
+				t.Errorf("a run that keeps the config exited %d:\n%s", keepCode, keepOut)
 			}
 		})
 	}
