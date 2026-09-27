@@ -122,7 +122,7 @@ func TestPasswordPersistsAcrossReopen(t *testing.T) {
 func TestResetPasswordChangesHashAndKeepsUsername(t *testing.T) {
 	s := newStore(t)
 	old, _ := s.MintInitial("admin")
-	if err := s.ResetPassword("admin", "new-strong-pw-XYZ"); err != nil {
+	if err := s.ResetPassword("admin", "new-strong-pw-XYZ", EndSessions); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Verify("admin", old); !errors.Is(err, ErrInvalidCredentials) {
@@ -138,7 +138,7 @@ func TestResetPasswordRejectsUsernameMismatch(t *testing.T) {
 	if _, err := s.MintInitial("admin"); err != nil {
 		t.Fatal(err)
 	}
-	err := s.ResetPassword("alice", "new-pw")
+	err := s.ResetPassword("alice", "new-pw", EndSessions)
 	if !errors.Is(err, ErrUsernameMismatch) {
 		t.Errorf("ResetPassword with wrong username: got %v, want ErrUsernameMismatch", err)
 	}
@@ -147,7 +147,7 @@ func TestResetPasswordRejectsUsernameMismatch(t *testing.T) {
 func TestResetPasswordRejectsEmptyPassword(t *testing.T) {
 	s := newStore(t)
 	_, _ = s.MintInitial("admin")
-	if err := s.ResetPassword("admin", ""); err == nil {
+	if err := s.ResetPassword("admin", "", EndSessions); err == nil {
 		t.Error("ResetPassword with empty password: expected error, got nil")
 	}
 }

@@ -25,8 +25,10 @@
 // every live session when it does — and a key stored in this same
 // directory gains nothing over storing the sessions themselves.
 // Writing them into the file that already holds the credential needs
-// no new primitive, no new failure mode, and keeps instant revocation
-// (deleting a row is the whole mechanism).
+// no new primitive, no new failure mode, and keeps instant revocation:
+// deleting a row ends one session in the serving bridge, and a sign-out
+// from another process is one field in the same file (see
+// SignOutEverywhere).
 package adminauth
 
 import (
@@ -38,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +55,12 @@ import (
 )
 
 var logger = logging.Component("adminauth")
+
+// FileName is the credential store's name in the data directory, where
+// every command that opens it looks: `bridge serve`, `bridge init` and the
+// `bridge admin` family. One definition, since a second spelling that
+// drifted would open an empty store beside the real one.
+const FileName = "adminauth.json"
 
 // adminBcryptCost is the bcrypt work factor. 12 is a deliberate
 // sweet spot (~250 ms on the slowest supported target — Windows
@@ -148,6 +157,29 @@ var (
 	ErrAlreadyInitialised = errors.New("adminauth: store already has credentials; use reset-password to rotate")
 	ErrNotInitialised     = errors.New("adminauth: store has no credentials (run `bridge init --public` or `bridge admin reset-password`)")
 	ErrUsernameMismatch   = errors.New("adminauth: username does not match the stored admin account")
+	// ErrStoreUnreadable is a session check that could not read the store
+	// file. The file may hold a sign-out this process has not taken, so the
+	// session is refused for this request, and kept: the next request reads
+	// again, and a sign-out it then finds ends it.
+	ErrStoreUnreadable = errors.New("adminauth: the credential store cannot be read")
+	// ErrSessionsNotSaved is EndOtherSessions ending sessions that its
+	// write then failed to put on disk: they are refused from now on, and a
+	// restart before a later write lands the change would sign them back
+	// in. The count it returns beside this is still how many it ended.
+	ErrSessionsNotSaved = errors.New("adminauth: the sessions were ended but not yet saved")
+)
+
+// SessionAction says what a password rotation does to the console
+// sessions already signed in.
+type SessionAction int
+
+const (
+	// EndSessions signs every console out, in this process and, through
+	// the file, in a running bridge: `bridge admin reset-password`'s
+	// default. The zero value, so a caller that says nothing gets it.
+	EndSessions SessionAction = iota
+	// KeepSessions leaves them signed in (`--keep-sessions`).
+	KeepSessions
 )
 
 // userRecord is the on-disk shape. Single-user only — the file
@@ -171,14 +203,20 @@ type Session struct {
 	LastUsedAt time.Time
 }
 
-// storeFile is the on-disk envelope: the credential plus the live
-// sessions. Sessions are keyed by the HEX of the token digest — the
-// same value the in-memory map keys on, rendered as a string because
-// JSON object keys must be strings. The raw token is never written;
-// only its SHA-256, exactly as in memory.
+// storeFile is the on-disk envelope: the credential, the last sign-out,
+// and the live sessions. Sessions are keyed by the HEX of the token
+// digest — the same value the in-memory map keys on, rendered as a
+// string because JSON object keys must be strings. The raw token is
+// never written; only its SHA-256, exactly as in memory.
 type storeFile struct {
-	User     *userRecord         `json:"user"`
-	Sessions map[string]*Session `json:"sessions,omitempty"`
+	User *userRecord `json:"user"`
+	// SessionsRevokedAt is when every console was last signed out by
+	// another process (a rotation, or `bridge admin sign-out-everywhere`).
+	// It is how a sign-out reaches a running bridge, which holds its
+	// sessions in memory and writes them back (adoptSignOutLocked), so
+	// every write carries it over. Absent until the first sign-out.
+	SessionsRevokedAt *time.Time          `json:"sessionsRevokedAt,omitempty"`
+	Sessions          map[string]*Session `json:"sessions,omitempty"`
 }
 
 // sessionFlushInterval debounces LastUsedAt writes. Every
@@ -210,9 +248,14 @@ const sessionFlushInterval = 30 * time.Second
 //     write here is synchronous and adopted only once it has landed, so
 //     "the file's" needs no timestamp to be the newer one.
 //   - The SESSIONS are the serving bridge's, the only process that makes
-//     or ends them, so a session write puts down the set held in memory;
-//     a credential write puts down the set it finds in the file at the
-//     write, never the one it read at open.
+//     them, so a session write puts down the set held in memory. Another
+//     process ends them only all at once, through the sign-out marker it
+//     writes beside the credential (SignOutEverywhere, and a rotation
+//     that does not keep them): the serving bridge takes it at its next
+//     read of the file, before anything it writes, and a session check
+//     reads the file whenever a stat says it changed. A write that keeps
+//     the sessions puts down the set it finds in the file at the write,
+//     never the one it read at open.
 //
 // And no write replaces a file that changed after the read it was built
 // from (commitLocked): staging costs a write and an fsync, milliseconds in
@@ -222,7 +265,10 @@ const sessionFlushInterval = 30 * time.Second
 // Before these rules, `persist()` wrote this process's copy of both, so a
 // running bridge's next session write (a login, the 30 s activity flush,
 // a logout, the shutdown flush) put back the password hash
-// reset-password had just rotated away.
+// reset-password had just rotated away. And with only the first two, no
+// process could end a session another one held: a rotation kept them, a
+// restart reloaded them, and the running bridge wrote them back beside
+// whatever the file held.
 type Store struct {
 	path string
 
@@ -236,6 +282,15 @@ type Store struct {
 	// mu.
 	sessionsDirty    bool
 	lastSessionFlush time.Time
+
+	// revokedAt is the sign-out marker this process last took from the
+	// file (adoptSignOutLocked), and seen the file that read found, which
+	// a session check's stat is compared with (refreshIfChangedLocked).
+	// lastUnreadableLog throttles that check's line about a file it
+	// cannot read. All guarded by mu.
+	revokedAt         time.Time
+	seen              fileStamp
+	lastUnreadableLog time.Time
 }
 
 // OpenStore loads (or initialises as empty) the store at path. A
@@ -255,10 +310,10 @@ func OpenStore(path string) (*Store, error) {
 }
 
 // IsInitialised reports whether the credentials file held an account
-// at the last read: the open, or since then a login attempt or a
-// write. Every caller asks straight after OpenStore. Used by the
-// bridge serve startup path to refuse-to-start in public mode when no
-// admin has been minted yet.
+// at the last read: the open, or since then a login attempt, a write,
+// or a session check that found the file changed. Every caller asks
+// straight after OpenStore. Used by the bridge serve startup path to
+// refuse-to-start in public mode when no admin has been minted yet.
 func (s *Store) IsInitialised() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,22 +380,26 @@ func (s *Store) MintInitial(username string) (string, error) {
 // write leaves this process with no credential, as the file has none, and
 // never one the next restart would not have.
 func (s *Store) installInitialLocked(username, hash string) error {
-	next, err := s.commitLocked(func(cur storeContents) (*userRecord, map[string]*Session, error) {
+	next, _, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
 		if cur.user != nil {
-			return nil, nil, ErrAlreadyInitialised
+			return storeFile{}, ErrAlreadyInitialised
 		}
 		now := s.now()
-		return &userRecord{
-			Username:          username,
-			PasswordHash:      hash,
-			CreatedAt:         now,
-			PasswordChangedAt: now,
-		}, cur.sessions, nil
+		return storeFile{
+			User: &userRecord{
+				Username:          username,
+				PasswordHash:      hash,
+				CreatedAt:         now,
+				PasswordChangedAt: now,
+			},
+			SessionsRevokedAt: cur.signOut(),
+			Sessions:          cur.sessions,
+		}, nil
 	})
 	if err != nil {
 		return err
 	}
-	s.user = next
+	s.user = next.User
 	return nil
 }
 
@@ -350,12 +409,19 @@ func (s *Store) installInitialLocked(username, hash string) error {
 // at its next login attempt and at every write, so the rotation takes
 // there with no restart.
 //
-// Active sessions are NOT ended by this, and a restart does not end
-// them either: sessions persist in this same file (PR #800), and the
-// rotation writes back the set it finds there. This docblock said a
-// restart revoked them until 2026-09-27, which stopped being true
-// when sessions began to persist.
-func (s *Store) ResetPassword(username, newPassword string) error {
+// With EndSessions, the default, it also signs every console out, in the
+// same write: see SignOutEverywhere for how that reaches a running
+// bridge. The rotation is the moment an operator whose password leaked
+// runs this, and a session signed in with the leaked password is the
+// thing left to end. With KeepSessions it writes back the set it finds
+// in the file, and nothing ends them: not a restart, since they persist
+// in this same file (PR #800). Until 2026-09-27 that was the only
+// behaviour, pinned as operator-friendly, while 1-bit.app's
+// troubleshooting page told operators that a reset invalidated them
+// immediately. Either way the write is confirmed against a running
+// bridge's write in flight at its rename (commitAndConfirm), which would
+// put back the credential this replaced.
+func (s *Store) ResetPassword(username, newPassword string, sessions SessionAction) error {
 	if newPassword == "" {
 		return errors.New("adminauth: new password must not be empty")
 	}
@@ -369,19 +435,17 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 	if err != nil {
 		return fmt.Errorf("bcrypt: %w", err)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Decide from the file, and write back the sessions IT holds: the
-	// running bridge signs sessions in and out while this process waits at
-	// its password prompt, and the copy read at open would drop the new ones
-	// and put back the ones signed out. commitLocked makes that the file as
-	// it is at the rename, not only at the read: a login or logout committed
-	// while this write was staging would otherwise be overwritten, and a
-	// logout overwritten that way comes back at the next restart (CodeRabbit
-	// on #1039).
-	next, err := s.commitLocked(func(cur storeContents) (*userRecord, map[string]*Session, error) {
+	// Decide from the file, and when keeping the sessions write back the
+	// ones IT holds: the running bridge signs sessions in and out while
+	// this process waits at its password prompt, and the copy read at open
+	// would drop the new ones and put back the ones signed out.
+	// commitLocked makes that the file as it is at the rename, not only at
+	// the read: a login or logout committed while this write was staging
+	// would otherwise be overwritten, and a logout overwritten that way
+	// comes back at the next restart (CodeRabbit on #1039).
+	build := func(cur storeContents) (storeFile, error) {
 		if cur.user != nil && cur.user.Username != username {
-			return nil, nil, ErrUsernameMismatch
+			return storeFile{}, ErrUsernameMismatch
 		}
 		now := s.now()
 		// A FRESH userRecord pointer, never a mutation in place (CodeRabbit
@@ -401,13 +465,194 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 		if cur.user != nil {
 			rec.CreatedAt = cur.user.CreatedAt
 		}
-		return rec, cur.sessions, nil
-	})
+		if sessions == KeepSessions {
+			return storeFile{User: rec, SessionsRevokedAt: cur.signOut(), Sessions: cur.sessions}, nil
+		}
+		return storeFile{User: rec, SessionsRevokedAt: nextSignOut(now, cur.revokedAt)}, nil
+	}
+	took := func(next storeFile) {
+		s.user = next.User
+		if sessions != KeepSessions {
+			s.tookOwnSignOutLocked(*next.SessionsRevokedAt)
+		}
+	}
+	// A running bridge's write in flight at the rename carries the
+	// credential this replaced, and with it the marker: see
+	// commitAndConfirm.
+	reverted := func(replaced, cur storeContents) bool {
+		return replaced.user != nil && sameCredential(cur.user, replaced.user)
+	}
+	return s.commitAndConfirm(build, took, reverted)
+}
+
+// SignOutEverywhere ends every console session, with the password left as
+// it is: `bridge admin sign-out-everywhere`, for a session that must end
+// while the password need not change (a cookie left on a shared machine,
+// or a rotation run with --keep-sessions).
+//
+// It runs in a process of its own beside the running bridge, which holds
+// the sessions in memory and writes them back, so emptying the file's set
+// is not enough: the bridge's next write would put its set back. The
+// write therefore also moves the file's sign-out marker, and the running
+// bridge ends every session it holds when it reads a marker it has not
+// seen (adoptSignOutLocked). It reads the file before every write, and a
+// session check reads it whenever a stat says the file changed, so the
+// sessions end at their next request, with no restart. A restart does
+// not bring them back, since the file no longer holds them. The write is
+// confirmed against a running bridge's write in flight at its rename
+// (commitAndConfirm), which would put back the marker this replaced.
+//
+// ErrNotInitialised when the file holds no credential: the marker is
+// written beside one, and a store without one serves no console.
+func (s *Store) SignOutEverywhere() error {
+	build := func(cur storeContents) (storeFile, error) {
+		if cur.user == nil {
+			return storeFile{}, ErrNotInitialised
+		}
+		return storeFile{User: cur.user, SessionsRevokedAt: nextSignOut(s.now(), cur.revokedAt)}, nil
+	}
+	took := func(next storeFile) { s.tookOwnSignOutLocked(*next.SessionsRevokedAt) }
+	// A running bridge's write in flight at the rename carries the marker
+	// this replaced: see commitAndConfirm.
+	reverted := func(replaced, cur storeContents) bool {
+		return cur.user != nil && cur.revokedAt.Equal(replaced.revokedAt)
+	}
+	return s.commitAndConfirm(build, took, reverted)
+}
+
+// commitAndConfirm commits build's file and takes it into this process
+// (took, under s.mu), then confirms it: after confirmSettle, with s.mu
+// released, it reads the file again, and when reverted says the file is
+// back to what the commit replaced it commits once more, up to
+// maxConfirmRedos times.
+//
+// The confirmation closes the one window commitLocked's check cannot:
+// a write the running bridge had checked (its own unchangedSince) but not
+// yet renamed when this commit renamed. That write was built from the file
+// before this one, so it carries back exactly the credential and the
+// sign-out marker this replaced, and once it lands the bridge never sees
+// the marker and its later writes carry the old state on. It lands within
+// RenameWithRetry's retry budget of its check (750 ms on Windows, where
+// a scanner holding a fresh file forces the retries; no retry on POSIX),
+// and its check came before this rename, so after confirmSettle it has
+// landed or never will. A newer write by another process carries a newer
+// credential or marker, which reverted does not match, and is left alone.
+// Only a writer stalled for longer than the settle between its check and
+// its rename gets past this, which a kernel lock would close (declined in
+// #1039, for its new failure modes in the bridge's own write path; see
+// ops/engineering-log.md, #1044). CodeRabbit on #1044.
+//
+// The write already landed, so a confirmation read that fails is not an
+// error; it is logged, since nothing read shows the write held either.
+func (s *Store) commitAndConfirm(
+	build func(cur storeContents) (storeFile, error),
+	took func(next storeFile),
+	reverted func(replaced, cur storeContents) bool,
+) error {
+	s.mu.Lock()
+	next, replaced, err := s.commitLocked(build)
+	if err == nil {
+		took(next)
+	}
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	s.user = next
-	return nil
+	for redo := 0; ; redo++ {
+		time.Sleep(confirmSettle)
+		if beforeConfirmHook != nil {
+			beforeConfirmHook()
+		}
+		s.mu.Lock()
+		cur, err := readStoreFile(s.path)
+		if err != nil {
+			s.mu.Unlock()
+			// The write landed, so this is no failure; but nothing read
+			// shows it held either (CodeRabbit on #1044).
+			logger.Warn(msgUnconfirmedLog, "path", s.path, "err", err)
+			return nil
+		}
+		if !reverted(replaced, cur) {
+			s.mu.Unlock()
+			return nil
+		}
+		if redo == maxConfirmRedos {
+			s.mu.Unlock()
+			return errWrittenOver
+		}
+		// Take the undone state quietly before writing over it again. It is
+		// this command's own write undone, not news from elsewhere: adopting
+		// it through commitLocked would log a credential change and a
+		// sign-out that never happened, and end sessions made since the
+		// first commit (Gemini on #1044).
+		s.user, s.revokedAt = cur.user, cur.revokedAt
+		logger.Warn(msgRedoLog)
+		next, _, err = s.commitLocked(build)
+		if err == nil {
+			// What this write changed, and no more: sessions made since the
+			// first commit came after the change, so they are kept.
+			s.user = next.User
+			if next.SessionsRevokedAt != nil {
+				s.revokedAt = *next.SessionsRevokedAt
+			}
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// confirmSettle is how long commitAndConfirm waits before its read: the
+// rename retry budget, in which a checked write lands, and a margin. A var
+// so this package's tests can run without the wait.
+var confirmSettle = atomicwrite.RenameRetryBudget() + 250*time.Millisecond
+
+// maxConfirmRedos bounds how often commitAndConfirm commits again for a
+// file that keeps coming back: one stale write is the race, three are a
+// writer that is not converging, reported rather than chased.
+const maxConfirmRedos = 3
+
+// errWrittenOver is commitAndConfirm giving up on a file that kept going
+// back to what it replaced.
+var errWrittenOver = errors.New("adminauth: another process kept writing the store back over this change; run the command again")
+
+// beforeConfirmHook is a test-only seam (nil in production), fired before
+// each confirmation read: where a test lands the running bridge's
+// in-flight write.
+var beforeConfirmHook func()
+
+// msgRedoLog is commitAndConfirm's line for a write it found undone and
+// makes again.
+const msgRedoLog = "a running bridge wrote the admin credential store back over this change; writing it again"
+
+// msgUnconfirmedLog is commitAndConfirm's line for a confirmation read that
+// failed.
+const msgUnconfirmedLog = "wrote the admin credential store, but could not read it back to confirm a running bridge did not write over it; run the command again if it did not take"
+
+// nextSignOut is the marker a sign-out writes: now, or one nanosecond past
+// the marker the file already holds when the clock does not put now after
+// it. Every sign-out must CHANGE the marker, because a process that has
+// taken the last one ignores it: a clock stepped back, or two sign-outs
+// inside one tick of a coarse clock (15.6 ms on Windows), would otherwise
+// write a marker a running bridge has seen, and end nothing there.
+func nextSignOut(now, last time.Time) *time.Time {
+	at := now.Round(0) // no monotonic reading: the marker is compared with ones read back from the file
+	if !last.IsZero() && !at.After(last) {
+		at = last.Add(time.Nanosecond)
+	}
+	return &at
+}
+
+// tookOwnSignOutLocked is this process taking the sign-out it has just
+// written: its own sessions end, and the marker is one it has seen, so
+// reading it back ends nothing it holds by then. No log line, unlike a
+// sign-out taken from another process: the command that asked prints its
+// own. Caller MUST hold s.mu.
+func (s *Store) tookOwnSignOutLocked(at time.Time) {
+	s.revokedAt = at
+	clear(s.sessions)
+	s.sessionsDirty = false
 }
 
 // Verify checks the credentials and returns nil on match.
@@ -630,16 +875,18 @@ func (s *Store) SetInitialPassword(username, password string) error {
 //
 // The credential is re-read first and never taken from memory: writing
 // this process's copy is how a running bridge put a rotated-away
-// password back on disk. The write commits only if the file is still the
-// one it was built from (commitLocked), because the staging's fsync is a
-// window of milliseconds, and a rotation landing in it is rebuilt around.
-// A file that cannot be read is not written over, since it may hold a
-// credential newer than this process has seen; the change stays pending
-// (dirty) for the next attempt.
+// password back on disk. So is a sign-out, which ends the sessions it
+// finds before the set to write is built from what is left, and whose
+// marker the write carries over. The write commits only if the file is
+// still the one it was built from (commitLocked), because the staging's
+// fsync is a window of milliseconds, and a rotation or sign-out landing in
+// it is rebuilt around. A file that cannot be read is not written over,
+// since it may hold a credential newer than this process has seen; the
+// change stays pending (dirty) for the next attempt.
 //
 // Every attempt starts the next debounce window, a failed one too.
 // Otherwise every authenticated request after a failure is "due", and
-// a file that stays unreadable costs a read and an error line per
+// a write that keeps failing costs an attempt and an error line per
 // console request.
 //
 // Nothing is written when the file holds no credential to write beside
@@ -649,18 +896,22 @@ func (s *Store) SetInitialPassword(username, password string) error {
 // beside whichever credential the file holds next.
 func (s *Store) persistSessionsLocked(now time.Time) error {
 	s.lastSessionFlush = now
-	sessions := make(map[string]*Session, len(s.sessions))
-	for digest, sess := range s.sessions {
-		sessions[hex.EncodeToString(digest[:])] = sess
-	}
-	written, err := s.commitLocked(func(cur storeContents) (*userRecord, map[string]*Session, error) {
-		// The file's credential, never this process's copy of it.
-		return cur.user, sessions, nil
+	written, _, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+		// The set is built HERE, from memory as it is after commitLocked
+		// took the read: a sign-out found in it has just ended sessions this
+		// process held, and a set built before the read would write them
+		// back into the file the sign-out emptied.
+		sessions := make(map[string]*Session, len(s.sessions))
+		for digest, sess := range s.sessions {
+			sessions[hex.EncodeToString(digest[:])] = sess
+		}
+		// The file's credential and sign-out, never this process's copy.
+		return storeFile{User: cur.user, SessionsRevokedAt: cur.signOut(), Sessions: sessions}, nil
 	})
 	if err != nil {
 		return fmt.Errorf("sessions not written: %w", err)
 	}
-	if written == nil {
+	if written.User == nil {
 		// Still pending: these sessions are this process's, so they go
 		// down beside whichever credential the file holds next.
 		return nil
@@ -669,10 +920,10 @@ func (s *Store) persistSessionsLocked(now time.Time) error {
 	return nil
 }
 
-// commitLocked writes the record and sessions build returns, built from
-// the file as it is now, and commits them only if the file is still, byte
-// for byte, the one they were built from. Every write of the store goes
-// through here. Caller MUST hold s.mu.
+// commitLocked writes the file build returns, built from the file as it is
+// now, and commits it only if the file is still, byte for byte, the one it
+// was built from. Every write of the store goes through here. Caller MUST
+// hold s.mu.
 //
 // Staging costs a write and an fsync, milliseconds (tens on a cloud disk)
 // in which another process can commit. Renaming over that commit would
@@ -683,30 +934,40 @@ func (s *Store) persistSessionsLocked(now time.Time) error {
 // the rename itself, and on Windows its retries (a kernel lock would close
 // that and is not taken here; see ops/engineering-log.md, #1039).
 //
-// Each read adopts the file's credential into this process first, so a
-// build decides from it. build returns the record and sessions to write,
-// or an error that ends the write; a nil record writes nothing and
-// returns (nil, nil). A read that fails writes nothing and returns its
-// error.
-func (s *Store) commitLocked(build func(cur storeContents) (*userRecord, map[string]*Session, error)) (*userRecord, error) {
+// Each read is taken into this process first (adoptLocked), so a build
+// decides from the file's credential and from memory as a sign-out in the
+// file has left it. build returns the file to write, or an error that
+// ends the write; a file with no User writes nothing and returns a zero
+// storeFile and a nil error. A read that fails writes nothing and returns
+// its error. It also returns the contents the written file was built from,
+// which commitAndConfirm compares a later read with.
+//
+// A commit records the stamp of the file it put in place, so the session
+// check's stat gate does not read back what this process just wrote
+// (Gemini's review, 2026-09-27): each session write would otherwise cost
+// the next console request a full read.
+func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (storeFile, storeContents, error) {
 	for attempt := 1; ; attempt++ {
 		cur, err := readStoreFile(s.path)
 		if err != nil {
-			return nil, err
+			return storeFile{}, storeContents{}, err
 		}
-		s.adoptCredentialLocked(cur.user)
-		user, sessions, err := build(cur)
-		if err != nil || user == nil {
-			return nil, err
+		s.adoptLocked(cur)
+		next, err := build(cur)
+		if err != nil || next.User == nil {
+			return storeFile{}, storeContents{}, err
 		}
-		err = s.writeStoreLocked(user, sessions, s.unchangedSince(cur))
+		written, err := s.writeStoreLocked(next, s.unchangedSince(cur))
 		if errors.Is(err, errStoreMoved) && attempt < maxCommitAttempts {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return storeFile{}, storeContents{}, err
 		}
-		return user, nil
+		if written != nil {
+			s.seen = fileStamp{known: true, info: written}
+		}
+		return next, cur, nil
 	}
 }
 
@@ -806,25 +1067,34 @@ func (s *Store) evictOldestSessionLocked() {
 // Expired sessions are eagerly removed from the map so they don't
 // accumulate. ErrSessionExpired vs ErrSessionNotFound are
 // distinguished only for tests; the handler maps both to JSON 401.
+//
+// Before the lookup it takes a sign-out another process wrote into the
+// file, whenever a stat says the file is not the one last read
+// (refreshIfChangedLocked), so a signed-out console is refused at its
+// next request rather than at this process's next write. A file it cannot
+// read is ErrStoreUnreadable: the session is refused and kept.
 func (s *Store) ValidateSession(raw string) (*Session, error) {
 	if raw == "" {
 		return nil, ErrSessionNotFound
 	}
 	digest := sha256.Sum256([]byte(raw))
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if err := s.refreshIfChangedLocked(); err != nil {
+		s.logUnreadableLocked(now, err)
+		return nil, err
+	}
 	sess, ok := s.sessions[digest]
 	if !ok {
-		s.mu.Unlock()
 		return nil, ErrSessionNotFound
 	}
-	now := s.now()
 	if sessionExpired(sess, now) {
 		delete(s.sessions, digest)
 		// An expiry is a real state change and worth landing, but it is
 		// also self-correcting — load() drops expired sessions anyway —
 		// so it rides the debounce rather than forcing a write.
 		s.sessionsDirty = true
-		s.mu.Unlock()
 		return nil, ErrSessionExpired
 	}
 	sess.LastUsedAt = now
@@ -839,8 +1109,133 @@ func (s *Store) ValidateSession(raw string) (*Session, error) {
 			logger.Error("persist session activity", "err", err)
 		}
 	}
-	s.mu.Unlock()
 	return &out, nil
+}
+
+// refreshIfChangedLocked reads the store again when a stat says the file
+// is not the one this process last read, and takes what it finds
+// (adoptLocked): a sign-out another process wrote, and the credential.
+// Caller MUST hold s.mu.
+//
+// It runs on every console request, so an unchanged file must cost little,
+// and it does: a stat, where a read and parse grows with the session count
+// (measured on darwin/arm64: 2 µs against 22 µs at one session and 1.75 ms
+// at maxSessions). The stat misses only a rewrite that keeps the file's
+// identity, size and modification time together (fileStamp). A session
+// write reads the file in full whatever the stat said, and one comes at
+// least every sessionFlushInterval while requests do.
+//
+// An error, the stat's or the read's, is ErrStoreUnreadable, and nothing
+// is recorded, so the next request tries again. Nor is a failure
+// remembered against the stamp: a chmod or chown that makes the file
+// readable again changes none of the three.
+func (s *Store) refreshIfChangedLocked() error {
+	fi, err := os.Stat(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		fi, err = nil, nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrStoreUnreadable, err)
+	}
+	if s.seen.matches(fi) {
+		return nil
+	}
+	if readStoreHook != nil {
+		readStoreHook()
+	}
+	cur, err := readStoreFile(s.path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrStoreUnreadable, err)
+	}
+	s.adoptLocked(cur)
+	return nil
+}
+
+// readStoreHook is a test-only seam (nil in production), fired each time
+// a session check decides to read the file: the count a test of the stat
+// gate asserts on.
+var readStoreHook func()
+
+// logUnreadableLocked logs a session check that could not read the store,
+// at most once a sessionFlushInterval. Every console request makes one
+// while the file stays unreadable, and a line each would bury the journal
+// (the debounce's reason, TestAFailedSessionWriteWaitsOutTheDebounce); the
+// admin middleware leaves the line to this. A clock stepped back logs at
+// once rather than going quiet until it catches up. Caller MUST hold s.mu.
+func (s *Store) logUnreadableLocked(now time.Time, err error) {
+	if since := now.Sub(s.lastUnreadableLog); !s.lastUnreadableLog.IsZero() && since >= 0 && since < sessionFlushInterval {
+		return
+	}
+	s.lastUnreadableLog = now
+	logger.Error(msgStoreUnreadableLog, "path", s.path, "err", err)
+}
+
+// msgStoreUnreadableLog is logUnreadableLocked's line.
+const msgStoreUnreadableLog = "could not read the admin credential store; refusing console sessions until it reads"
+
+// EndOtherSessions ends every console session but the one raw names, and
+// returns how many it ended: the console's "Sign out all other sessions".
+// ErrSessionNotFound when raw names no live session, and nothing is ended.
+//
+// It runs in the serving bridge, which holds the sessions, so it needs no
+// marker: it deletes them from memory and writes the set that is left at
+// once, as a logout does, because an end only in memory comes back at the
+// next restart. A write that fails stays pending, as a logout's does, but
+// unlike a logout it is REPORTED (ErrSessionsNotSaved, with the count): an
+// operator signing a stranger out needs to know that a restart before the
+// next write would sign the stranger back in. Not a plain failure either,
+// since the sessions are already refused (Gemini on #1044 proposed
+// returning the write's error, which a caller would report as "could not
+// sign out"). A sign-out another process wrote is taken first
+// (ErrStoreUnreadable when the file cannot be read, as ValidateSession).
+func (s *Store) EndOtherSessions(raw string) (int, error) {
+	if raw == "" {
+		return 0, ErrSessionNotFound
+	}
+	keep := sha256.Sum256([]byte(raw))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if err := s.refreshIfChangedLocked(); err != nil {
+		s.logUnreadableLocked(now, err)
+		return 0, err
+	}
+	// Expired sessions are no one's to sign out, and counting them would
+	// report browsers that had long been signed out already.
+	s.sweepExpiredSessionsLocked(now)
+	if _, ok := s.sessions[keep]; !ok {
+		return 0, ErrSessionNotFound
+	}
+	ended := 0
+	for digest := range s.sessions {
+		if digest != keep {
+			delete(s.sessions, digest)
+			ended++
+		}
+	}
+	if ended == 0 {
+		return 0, nil
+	}
+	s.sessionsDirty = true
+	if err := s.persistSessionsLocked(now); err != nil {
+		return ended, fmt.Errorf("%w: %w", ErrSessionsNotSaved, err)
+	}
+	return ended, nil
+}
+
+// LiveSessionCount returns how many console sessions are signed in and
+// not yet past a deadline: the Devices page's count.
+func (s *Store) LiveSessionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, sess := range s.sessions {
+		if !sessionExpired(sess, now) {
+			n++
+		}
+	}
+	return n
 }
 
 // FlushSessions writes any debounced LastUsedAt bumps. Call on clean
@@ -907,6 +1302,11 @@ func (s *Store) load() error {
 		return err
 	}
 	s.user = c.user
+	// The marker is taken as SEEN, and the file's sessions all kept: every
+	// writer that leaves the marker in place puts down only sessions made
+	// after it was taken (adoptSignOutLocked), so none of them predates it.
+	s.revokedAt = c.revokedAt
+	s.seen = c.stamp
 	s.sessions = make(map[[sha256.Size]byte]*Session, len(c.sessions))
 	now := s.now()
 	for hexKey, sess := range c.sessions {
@@ -943,11 +1343,53 @@ func (s *Store) load() error {
 // keyed by the hex digest and holds exactly what the file held,
 // expired and malformed entries included, so a credential write can
 // carry them over untouched. raw is the file's bytes, nil for a file
-// that is missing, which commitLocked compares before a rename.
+// that is missing, which commitLocked compares before a rename. revokedAt
+// is the sign-out marker, zero when the file has none, and stamp the
+// stat of the file read.
 type storeContents struct {
-	raw      []byte
-	user     *userRecord
-	sessions map[string]*Session
+	raw       []byte
+	stamp     fileStamp
+	user      *userRecord
+	revokedAt time.Time
+	sessions  map[string]*Session
+}
+
+// signOut is the file's sign-out marker as a writer carries it over, nil
+// for none.
+func (c storeContents) signOut() *time.Time {
+	if c.revokedAt.IsZero() {
+		return nil
+	}
+	at := c.revokedAt
+	return &at
+}
+
+// fileStamp is what a stat says about the store file a read found: enough
+// to tell, with another stat, that the file has been replaced or rewritten
+// since, without reading it (refreshIfChangedLocked).
+type fileStamp struct {
+	known bool        // false before any read: no stat matches it
+	info  os.FileInfo // nil for a file that was not there
+}
+
+// matches reports whether fi, a stat taken now (nil for a file that is not
+// there), describes the file the stamp was taken of, unchanged.
+//
+// os.SameFile is the term every write here trips: each one renames a new
+// file into place, and a new file is a new inode (file ID on Windows)
+// whatever its size and time. Size and modification time catch a rewrite
+// in place, which keeps the inode: a hand edit, a `cp` over the file. What
+// all three miss is an in-place rewrite of the same size within one tick
+// of the filesystem's clock, or two renames between two stats that
+// recycle the first file's inode.
+func (st fileStamp) matches(fi os.FileInfo) bool {
+	if !st.known {
+		return false
+	}
+	if st.info == nil || fi == nil {
+		return st.info == nil && fi == nil
+	}
+	return st.info.Size() == fi.Size() && st.info.ModTime().Equal(fi.ModTime()) && os.SameFile(st.info, fi)
 }
 
 // readStoreFile reads and parses the store at path. A missing or empty
@@ -955,16 +1397,32 @@ type storeContents struct {
 // read or the parse is an error, and a caller holding one must neither
 // decide from the file nor write over it: it may hold a credential newer
 // than any this process has seen.
+//
+// The stamp is the stat of the file OPENED, taken before its bytes are
+// read, so it describes the file the bytes came from: every writer
+// replaces the file by rename, never in place. A stat of the path taken
+// after the read could describe a file renamed in between, whose change
+// the gate would then never see.
 func readStoreFile(path string) (storeContents, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return storeContents{}, nil
+		return storeContents{stamp: fileStamp{known: true}}, nil
 	}
 	if err != nil {
 		return storeContents{}, fmt.Errorf("read adminauth store: %w", err)
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return storeContents{}, fmt.Errorf("read adminauth store: %w", err)
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return storeContents{}, fmt.Errorf("read adminauth store: %w", err)
+	}
+	stamp := fileStamp{known: true, info: info}
 	if len(raw) == 0 {
-		return storeContents{raw: raw}, nil
+		return storeContents{raw: raw, stamp: stamp}, nil
 	}
 	// Two shapes. The envelope is current; a bare userRecord is what
 	// every install before sessions were persisted has on disk. The
@@ -983,28 +1441,75 @@ func readStoreFile(path string) (storeContents, error) {
 		}
 		// No sessions to restore, and the next write upgrades the file
 		// in place. Nothing to migrate explicitly.
-		return storeContents{raw: raw, user: &rec}, nil
+		return storeContents{raw: raw, stamp: stamp, user: &rec}, nil
 	}
-	var f storeFile
-	if err := json.Unmarshal(raw, &f); err != nil {
+	var sf storeFile
+	if err := json.Unmarshal(raw, &sf); err != nil {
 		return storeContents{}, fmt.Errorf("parse adminauth store: %w", err)
 	}
-	return storeContents{raw: raw, user: f.User, sessions: f.Sessions}, nil
+	c := storeContents{raw: raw, stamp: stamp, user: sf.User, sessions: sf.Sessions}
+	if sf.SessionsRevokedAt != nil {
+		c.revokedAt = *sf.SessionsRevokedAt
+	}
+	return c, nil
 }
 
-// refreshCredentialLocked re-reads the credential from the file and
-// adopts it, whatever this process held: see the Store docblock for
-// why the file's is always the one to use. On an error nothing
-// changes, and the caller must neither decide from the credential nor
-// write the file. Caller MUST hold s.mu.
+// refreshCredentialLocked re-reads the file and takes what it holds
+// (adoptLocked): the credential, whatever this process held (see the
+// Store docblock for why the file's is always the one to use), and a
+// sign-out. On an error nothing changes, and the caller must neither
+// decide from the credential nor write the file. Caller MUST hold s.mu.
 func (s *Store) refreshCredentialLocked() error {
 	c, err := readStoreFile(s.path)
 	if err != nil {
 		return err
 	}
-	s.adoptCredentialLocked(c.user)
+	s.adoptLocked(c)
 	return nil
 }
+
+// adoptLocked takes a read of the file into this process: the credential,
+// a sign-out another process wrote, and the stamp a session check's stat
+// is compared with. Every read that decides or writes goes through here,
+// so none of them can build on memory the file has overruled. Caller MUST
+// hold s.mu.
+func (s *Store) adoptLocked(c storeContents) {
+	s.adoptCredentialLocked(c.user)
+	s.adoptSignOutLocked(c.revokedAt)
+	s.seen = c.stamp
+}
+
+// adoptSignOutLocked ends every session this process holds when the file
+// records a sign-out it has not taken (at is not the marker it last
+// took), and takes the marker. Caller MUST hold s.mu.
+//
+// The marker is an EVENT, not a filter: it is never compared with a
+// session's IssuedAt. Every session held when a new marker is read
+// predates the sign-out here, one made after the marker's time included,
+// since its login read the file before the marker landed and was checked
+// against the credential as it was. One made after the read is kept, so a
+// clock stepped back cannot end it, as a comparison would.
+//
+// A file with no marker, or no file, changes nothing, and leaves the
+// marker taken as it was: only a sign-out ends sessions, and the same
+// marker read back later (a restored copy of the file) is still one this
+// process has taken.
+func (s *Store) adoptSignOutLocked(at time.Time) {
+	if at.IsZero() || at.Equal(s.revokedAt) {
+		return
+	}
+	s.revokedAt = at
+	n := len(s.sessions)
+	clear(s.sessions)
+	logger.Info(msgSignOutTakenLog, "sessions", n)
+}
+
+// msgCredentialAdoptedLog and msgSignOutTakenLog are the lines a store logs
+// when it takes a credential change or a sign-out another process wrote.
+const (
+	msgCredentialAdoptedLog = "the admin credential changed on disk; using it from now on"
+	msgSignOutTakenLog      = "the admin credential store records a sign-out everywhere; ending the console sessions this bridge held"
+)
 
 // adoptCredentialLocked makes u the credential this process decides
 // from, and logs when that is a change another process made, which is
@@ -1021,42 +1526,46 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 		logger.Warn("the admin credential file is gone; logins are refused until one is set",
 			"path", s.path)
 	case u != nil && !sameCredential(u, s.user):
-		logger.Info("the admin credential changed on disk; using it from now on",
-			"username", u.Username)
+		logger.Info(msgCredentialAdoptedLog, "username", u.Username)
 	}
 	s.user = u
 }
 
-// writeStoreLocked atomically replaces the credentials file with user
-// and sessions. 0o700 dir + 0o600 file, same hardening as auth.Store.
-// Caller MUST hold the mutex, and decides which sessions to write: its
-// own set for a session write, the file's for a credential write.
+// writeStoreLocked atomically replaces the credentials file with f.
+// 0o700 dir + 0o600 file, same hardening as auth.Store. Caller MUST hold
+// the mutex, and decides what f holds: its own sessions for a session
+// write, the file's for a write that keeps them, none for a sign-out; and
+// the file's sign-out marker unless it is writing a new one.
 //
 // beforeCommit, when not nil, runs once the new file is staged (written,
 // synced and closed) and before it replaces the old one; an error from
 // it abandons the write and is returned.
-func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session, beforeCommit func() error) error {
-	if user == nil {
-		return errors.New("adminauth: cannot persist nil user record")
+//
+// It returns the stat of the file it renamed into place, taken once its
+// bytes were synced (the rename keeps the inode, the size and the
+// modification time), or nil when that stat failed. commitLocked records
+// it for the session check's stat gate.
+func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) (os.FileInfo, error) {
+	if f.User == nil {
+		return nil, errors.New("adminauth: cannot persist nil user record")
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("mkdir adminauth store: %w", err)
+		return nil, fmt.Errorf("mkdir adminauth store: %w", err)
 	}
-	f := storeFile{User: user, Sessions: sessions}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data = append(data, '\n')
 	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".adminauth-*.json")
 	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
+		return nil, fmt.Errorf("temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("chmod tmp: %w", err)
+		return nil, fmt.Errorf("chmod tmp: %w", err)
 	}
 	defer func() {
 		if tmpName != "" {
@@ -1066,25 +1575,30 @@ func (s *Store) writeStoreLocked(user *userRecord, sessions map[string]*Session,
 	defer func() { _ = tmp.Close() }()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write tmp: %w", err)
+		return nil, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("sync tmp: %w", err)
+		return nil, fmt.Errorf("sync tmp: %w", err)
+	}
+	// A failed stat costs the gate one read, never the write.
+	staged, statErr := tmp.Stat()
+	if statErr != nil {
+		staged = nil
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close tmp: %w", err)
+		return nil, fmt.Errorf("close tmp: %w", err)
 	}
 	if beforeCommit != nil {
 		if err := beforeCommit(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
-		return fmt.Errorf("rename adminauth store: %w", err)
+		return nil, fmt.Errorf("rename adminauth store: %w", err)
 	}
 	tmpName = "" // success — suppress the cleanup defer
-	return nil
+	return staged, nil
 }
 
 // passwordAlphabet excludes the most confusable glyphs — the digits

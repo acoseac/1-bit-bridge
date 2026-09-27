@@ -49,15 +49,18 @@ func runningBridge(t *testing.T) (a *Store, path, session string, clock *testClo
 	return a, path, session, clock
 }
 
-// rotateElsewhere is `bridge admin reset-password` run against the file while
-// the bridge runs: a store of its own, opened now, rotating the credential.
+// rotateElsewhere is `bridge admin reset-password --keep-sessions` run against
+// the file while the bridge runs: a store of its own, opened now, rotating the
+// credential. It keeps the sessions because what the tests that use it follow
+// is the credential, and a rotation that ends them leaves those tests nothing
+// of the running bridge's to write; signoutelsewhere_test.go follows the end.
 func rotateElsewhere(t *testing.T, path string) {
 	t.Helper()
 	b, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ResetPassword("admin", rotatedPassword); err != nil {
+	if err := b.ResetPassword("admin", rotatedPassword, KeepSessions); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -172,15 +175,16 @@ func TestTheRunningBridgeVerifiesARotationMadeElsewhere(t *testing.T) {
 	}
 }
 
-// TestARotationCarriesTheRunningBridgesSessions: the rotating process writes
-// the file's session set as it finds it at the write, never the copy it read
-// at open. `bridge admin reset-password` waits at a password prompt between
-// the two, and the bridge goes on signing sessions in and out meanwhile: a
-// session signed in during the prompt was dropped from the file, and one
-// signed OUT during it was written back, a logout undone by the next restart.
+// TestARotationCarriesTheRunningBridgesSessions: a rotation that keeps the
+// sessions (`--keep-sessions`) writes the file's session set as it finds it at
+// the write, never the copy it read at open. `bridge admin reset-password`
+// waits at a password prompt between the two, and the bridge goes on signing
+// sessions in and out meanwhile: a session signed in during the prompt was
+// dropped from the file, and one signed OUT during it was written back, a
+// logout undone by the next restart.
 //
-// Rotating the credential leaves the sessions as they are. Whether it should
-// end them is a separate decision, and the sessions are the running bridge's.
+// A rotation that ends them (the default) writes none, and
+// signoutelsewhere_test.go follows that.
 func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 	a, path, signedOut, _ := runningBridge(t)
 	b, err := OpenStore(path)
@@ -193,7 +197,7 @@ func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.DeleteSession(signedOut)
-	if err := b.ResetPassword("admin", rotatedPassword); err != nil {
+	if err := b.ResetPassword("admin", rotatedPassword, KeepSessions); err != nil {
 		t.Fatal(err)
 	}
 
@@ -422,29 +426,44 @@ func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 
 // TestAFailedSessionWriteWaitsOutTheDebounce: a session write that fails
 // starts the next debounce window as a successful one does. Otherwise every
-// authenticated request after the failure is "due", and a file that stays
-// unreadable costs a read and an error line per console request, which is
+// authenticated request after the failure is "due", and a write that keeps
+// failing costs an attempt and an error line per console request, which is
 // the log flood the debounce exists to bound.
+//
+// The write fails because the file changes under every attempt, so each
+// commit refuses and the last gives up (maxCommitAttempts). Until 2026-09-27
+// the fixture was a file that could not be read, which now fails the session
+// check itself, before the write; that case and its log bound are
+// TestASessionCheckThatCannotReadTheStoreRefusesAndKeepsTheSession. An
+// unwritable directory would fail the write too, on every platform but
+// Windows, which ignores a directory's read-only attribute.
 func TestAFailedSessionWriteWaitsOutTheDebounce(t *testing.T) {
 	a, path, session, clock := runningBridge(t)
-	saved := damage(t, path)
+	attempts := 0
+	beforeCommitHook = func() {
+		attempts++
+		touchInPlace(t, path)
+	}
+	t.Cleanup(func() { beforeCommitHook = nil })
 
 	clock.t = clock.t.Add(sessionFlushInterval + time.Second)
 	if _, err := a.ValidateSession(session); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(path); string(got) != `{"user": ` {
-		t.Fatalf("a due write overwrote a store file it could not read:\n%s", got)
+	if attempts != maxCommitAttempts {
+		t.Fatalf("the due write made %d attempts, want %d: the fixture did not fail it", attempts, maxCommitAttempts)
 	}
-
-	if err := os.WriteFile(path, saved, 0o600); err != nil {
+	beforeCommitHook = nil
+	settled, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	clock.t = clock.t.Add(time.Second)
 	if _, err := a.ValidateSession(session); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(path); !bytes.Equal(got, saved) {
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, settled) {
 		t.Error("the request after a failed write wrote again, inside the debounce window")
 	}
 
@@ -452,8 +471,23 @@ func TestAFailedSessionWriteWaitsOutTheDebounce(t *testing.T) {
 	if _, err := a.ValidateSession(session); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(path); bytes.Equal(got, saved) {
+	if got, _ := os.ReadFile(path); bytes.Equal(got, settled) {
 		t.Error("a request past the next debounce window did not retry the write")
+	}
+}
+
+// touchInPlace rewrites the store file with one more byte of trailing
+// whitespace, which parses as the same store and is a different file to a
+// commit's byte comparison: another process's write, for a test to land
+// inside a commit.
+func touchInPlace(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, ' '), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -534,7 +568,7 @@ func TestAnInitialCredentialIsNotWrittenOverAnother(t *testing.T) {
 	if err := seed.SetInitialPassword("admin", rotatedPassword); !errors.Is(err, ErrAlreadyInitialised) {
 		t.Errorf("SetInitialPassword over a store another process initialised = %v, want ErrAlreadyInitialised", err)
 	}
-	if err := rename.ResetPassword("someone-else", rotatedPassword); !errors.Is(err, ErrUsernameMismatch) {
+	if err := rename.ResetPassword("someone-else", rotatedPassword, EndSessions); !errors.Is(err, ErrUsernameMismatch) {
 		t.Errorf("ResetPassword under another name over a store another process initialised = %v, want ErrUsernameMismatch", err)
 	}
 	c, err := OpenStore(path)

@@ -18,9 +18,13 @@ import (
 
 // TestMain lowers the work factor for this package's suite. Everything here
 // that touches a password pays bcrypt otherwise, which is the reason CI's race
-// job runs for twenty minutes.
+// job runs for twenty minutes. It also drops the settle every rotation and
+// sign-out waits before confirming its write (commitAndConfirm): a second
+// each, and the tests that need the in-flight write land it through
+// beforeConfirmHook rather than wait for it.
 func TestMain(m *testing.M) {
 	SetTestHashCost(bcrypt.MinCost)
+	confirmSettle = 0
 	os.Exit(m.Run())
 }
 

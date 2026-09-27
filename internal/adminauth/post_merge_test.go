@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,7 +98,7 @@ func TestResetPasswordRollsBackOnPersistFailure(t *testing.T) {
 		if err := os.WriteFile(s.path, damaged, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ResetPassword("admin", rotated); err == nil {
+		if err := s.ResetPassword("admin", rotated, EndSessions); err == nil {
 			t.Fatal("expected a failure (the file does not parse), got nil")
 		}
 		requireUnchanged(t, s, before)
@@ -122,7 +123,7 @@ func TestResetPasswordRollsBackOnPersistFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-		if err := s.ResetPassword("admin", rotated); err == nil {
+		if err := s.ResetPassword("admin", rotated, EndSessions); err == nil {
 			t.Fatal("expected a write failure (directory not writable), got nil")
 		}
 		requireUnchanged(t, s, before)
@@ -215,7 +216,7 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			defer resetsDone.Add(1)
-			if err := s.ResetPassword("admin", "newpw-"+pw); err != nil {
+			if err := s.ResetPassword("admin", "newpw-"+pw, EndSessions); err != nil {
 				resetErrs <- err
 			}
 		}()
@@ -254,34 +255,51 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 	}
 }
 
-// TestSessionSurvivesResetPassword: an active session created
-// BEFORE ResetPassword stays valid afterwards. Operator-friendly
-// — rotating credentials from CLI doesn't kick the operator's
-// active admin browser tab. The hard-cap + idle-timeout still
-// govern; ResetPassword does not enumerate-and-invalidate
-// sessions.
+// TestResetPasswordEndsSessionsUnlessKept: a rotation signs out every
+// session made before it, unless the caller keeps them, and a restart
+// does not bring an ended one back.
 //
-// This is the documented contract in store.go's ResetPassword
-// docblock; pinning it here so a future refactor that decides
-// to invalidate-on-reset gets caught.
-func TestSessionSurvivesResetPassword(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "adminauth.json")
-	s, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.MintInitial("admin"); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := s.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ResetPassword("admin", "fresh-password-1234"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ValidateSession(raw); err != nil {
-		t.Errorf("session should survive ResetPassword; got %v", err)
+// It replaced a test pinning the opposite, that a rotation left every
+// session signed in ("operator-friendly: rotating credentials from CLI
+// doesn't kick the operator's active admin browser tab"). That left no way
+// to end a console signed in with a leaked password: sessions persist in
+// the file, so a restart reloads them too. The default flipped on
+// 2026-09-27, and `--keep-sessions` is the old contract.
+func TestResetPasswordEndsSessionsUnlessKept(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		action  SessionAction
+		wantErr error // from ValidateSession, nil for a session kept
+	}{
+		{"EndSessions, the default", EndSessions, ErrSessionNotFound},
+		{"KeepSessions", KeepSessions, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "adminauth.json")
+			s, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.MintInitial("admin"); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := s.CreateSession("admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ResetPassword("admin", "fresh-password-1234", tc.action); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.ValidateSession(raw); !errors.Is(err, tc.wantErr) {
+				t.Errorf("the session after the rotation = %v, want %v", err, tc.wantErr)
+			}
+			restarted, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restarted.ValidateSession(raw); !errors.Is(err, tc.wantErr) {
+				t.Errorf("the session after a restart = %v, want %v", err, tc.wantErr)
+			}
+		})
 	}
 }
