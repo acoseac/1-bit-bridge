@@ -209,7 +209,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Eight claims in this list have been wrong and been corrected** — the
+**Nine claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -217,8 +217,9 @@ falsified two days earlier by wiring `integrity.LocateWaveform` into
 `analysisStoreAdapter`, (2026-09-25) "a broken existing config cannot block
 the re-init that replaces it", which held for config-file and not for the port
 checks, (2026-09-26) "`os.ReadDir("")` reads the process working
-directory", and (2026-09-27) "init never prompts for `customEndpoints`, so
-the old value survives the rewrite". The first five cost a later session real
+directory", (2026-09-27) "init never prompts for `customEndpoints`, so
+the old value survives the rewrite", and (2026-09-27) "`Load` serves a config
+giving a blank name `DefaultLibraryName`". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -229,7 +230,9 @@ comments and three test docblocks, two of whose tests passed with the
 refusal deleted, and a bot on #1030 quoted it back as a rule. The eighth
 was the premise a preflight judgement rested on, and no rewrite had ever
 kept the value: measured, the same run also minted a new TLS pair over an
-install that named its own.
+install that named its own. The ninth sat in a test docblock whose own table
+asserted the opposite (`served: "  "`, as written), and `Load` gave the
+default only to an exactly-empty name until #1042.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -1826,6 +1829,26 @@ no failing test — which is the shape to expect in this area.
   `partial` status — the rule removes the case instead of naming it. The
   field → apply-semantics matrix is **`ops/settings-apply-semantics.md`**, and a
   test drives the real handler for every row in it.
+- **…and a DEFAULT splits the halves too, when a writer can store what `Load`
+  would replace** (#1042). `applyDefaults` runs in `Load` alone, and before
+  the `BRIDGE_*` overrides, so its `if c.LibraryName == ""` reached neither
+  the settings PATCH nor an override: `PATCH {"libraryName":""}` answered
+  `live`, the running bridge served `""` in `/v1/health` and in every pairing
+  QR's `name=` (which the app refuses), and a restart served
+  `DefaultLibraryName`. The default now lives in `Normalize`, which every
+  writer runs before it saves, so no writer can store a name `Load` would
+  serve differently. **Refuse a blank that would replace a name, default one
+  that loses nothing**: the PATCH answers a blank name with 400 `validate`,
+  because defaulting it would replace the operator's name with one nobody
+  chose, while init treats a blank `--name` as none (the kept or host name,
+  as `--name ""` and Enter at the prompt). **Trim with
+  `config.TrimLibraryName`, never `strings.TrimSpace`**: the app's pairing
+  parser refuses a `name=` that its `.whitespacesAndNewlines` trim changes,
+  and that set is `unicode.IsSpace` plus U+200B ZERO WIDTH SPACE (every
+  scalar enumerated on both sides). Don't move the default back into
+  `applyDefaults`, and don't turn it into a `Validate` refusal: a
+  `BRIDGE_LIBRARY_NAME` of spaces would then stop a bridge from starting
+  after an update, over a display name.
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true
@@ -2689,7 +2712,9 @@ what it claimed**, and none of it had a failing test.
   shows it only where a first install would have taken another, so the
   rewrite of an install named for its host prints nothing. **A config
   giving no name, or a blank one, keeps none** and takes the hostname, as
-  before: `Load` serves it `DefaultLibraryName`, a fallback nobody chose,
+  before: `Load` serves it `DefaultLibraryName` (a blank one only since
+  #1042: before it, `Load` served a blank name as written; blank means blank
+  to `config.TrimLibraryName`), a fallback nobody chose,
   and keeping that listed it as kept from a config that never held it (a
   Gemini consult caught the first draft doing so). Don't default the name
   in `readPriorInstall` the way it defaults `dataDir`, whose `Load` default

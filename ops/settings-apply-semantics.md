@@ -128,7 +128,7 @@ Classes describe *how the value is consumed*, not how important it is.
 
 | Field | Class | Status today | Notes |
 |---|---|---|---|
-| `libraryName` | A | `live` | Read per request by `/v1/health`, admin pages, pair URL. The mDNS *instance name* only re-reads on the next `Set(true)`, so a rename does not re-advertise Bonjour until mDNS is toggled. |
+| `libraryName` | A | `live` | Read per request by `/v1/health`, admin pages, pair URL. The mDNS *instance name* only re-reads on the next `Set(true)`, so a rename does not re-advertise Bonjour until mDNS is toggled. Stored trimmed (`config.TrimLibraryName`, the app's pairing-parser trim). A name that is blank once trimmed is **refused**, 400 `validate`, and nothing is written: stored, it was served as `""` live and as `DefaultLibraryName` after a restart, which is what Load serves a config without one (rule 1 above, broken by one field). |
 | `customEndpoints` | A | `live` | Read per request by `advertise.Endpoints()` and `/v1/health`. `customEndpointsText` is the textarea form of the same field and reports under this key — the array form wins when both are sent. Cert SAN coverage for a new host stays operator-driven. |
 | `duplicatesFilter` | A | `live` | Closure over the holder, read per stamping pass; the PATCH nudges `TriggerDuplicatesPass`. |
 | `autoOptimizeEnabled` | A | `live` / `restart`+reason | Shared `enabledFn` read per sweep; nudged in both directions. `restart` with a reason when no sweeper is wired. |
