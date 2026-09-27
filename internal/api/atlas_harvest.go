@@ -14,6 +14,9 @@ import (
 // satisfies it; the api package stays decoupled from the harvest client.
 type AtlasHarvestCredentialSink interface {
 	SetCredential(token, baseURL string, expiresAt time.Time) error
+	// Clear forgets the held credential and keeps the sync position, so a
+	// re-provision of the same library resumes where it stopped.
+	Clear() error
 }
 
 // WithAtlasHarvest wires the credential sink, enabling POST
@@ -158,4 +161,35 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// atlasHarvestCredentialDelete handles DELETE /v1/atlas-harvest/credential:
+// the app's harvest switch going off. Turning the switch off used to stop
+// only the app's renewals, while the credential the bridge held stayed
+// usable until it expired (the 2026-09-23 audit's H3). This forgets it at
+// once: the harvest client finds no credential at its next tick, and the
+// token leaves the state file (the sync position stays, so a re-provision
+// resumes). 204 whether or not a credential was held, so the app can call it
+// on every switch-off without asking first.
+//
+// A demo bridge refuses with 403 demo_read_only. Its bearer is public and
+// its one harvest credential is shared by every demo user, so one user
+// switching harvest off must not stop it for all; the POST's residual (a
+// public bearer can overwrite the token) is not widened into a public
+// off switch.
+func (s *Server) atlasHarvestCredentialDelete(w http.ResponseWriter, r *http.Request) {
+	if s.atlasHarvestCred == nil {
+		writeError(w, http.StatusNotFound, "harvest_not_supported", "this bridge does not accept harvest credentials")
+		return
+	}
+	if s.demoMode {
+		writeError(w, http.StatusForbidden, "demo_read_only",
+			"this demo bridge's harvest credential is shared by every demo user and is not revoked by one")
+		return
+	}
+	if err := s.atlasHarvestCred.Clear(); err != nil {
+		writeErrorLog(w, r, http.StatusInternalServerError, "persist_failed", "failed to clear the harvest credential", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
