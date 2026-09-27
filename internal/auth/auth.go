@@ -478,11 +478,13 @@ func (s *Store) writeLocked(tokens []Token) error {
 
 // unchangedSinceReadLocked is the check a write makes between its staging
 // and its rename. It answers errStoreMoved when the file no longer holds,
-// byte for byte, what s.raw records (a missing file reads as nil, as in
-// reload), and an error when the file cannot be read: a file this process
-// cannot see may hold a token it has never seen, so neither commits.
-// Split out of writeLocked for SonarCloud's go:S3776 (cognitive
-// complexity), as adminauth's unchangedSince is. Caller must hold mu.
+// byte for byte, what s.raw records, and an error when the file cannot be
+// read: a file this process cannot see may hold a token it has never seen,
+// so neither commits. A missing file reads as nil, as in reload, so it
+// compares equal to an empty one; both hold no tokens, and no writer here
+// makes an empty file. Split out of writeLocked for SonarCloud's go:S3776
+// (cognitive complexity), as adminauth's unchangedSince is. Caller must
+// hold mu.
 func (s *Store) unchangedSinceReadLocked() error {
 	if beforeCommitHook != nil {
 		beforeCommitHook()
