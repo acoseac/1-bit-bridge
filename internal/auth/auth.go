@@ -25,8 +25,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -45,8 +47,8 @@ var logger = logging.Component("auth")
 // sibling-process write into the exact window the reload guards, to
 // prove the debounced persist doesn't clobber a concurrent mint.
 // Follows the afterExtractHookForTests convention in the manifest
-// scanner: production cost is one nil-check per persist (at most once
-// per lastUsedFlushInterval per token), negligible.
+// scanner: production cost is one nil-check per debounced attempt (at
+// most one per lastUsedFlushInterval, flushDueLocked), negligible.
 var beforeValidatePersistHook func()
 
 // beforeCommitHook is a test-only seam (nil in production), fired in
@@ -123,10 +125,11 @@ type Token struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
-// lastUsedFlushInterval is the shortest interval between persist() calls
-// driven by LastUsedAt updates. A busy /v1/manifest poll loop otherwise
-// rewrites tokens.json on every request, which is gratuitous disk I/O
-// proportional to request rate.
+// lastUsedFlushInterval is the shortest interval between attempts at the
+// debounced write of LastUsedAt and client-version updates, a failed
+// attempt included (flushDueLocked). A busy /v1/manifest poll loop
+// otherwise rewrites tokens.json on every request, which is gratuitous
+// disk I/O proportional to request rate.
 const lastUsedFlushInterval = 30 * time.Second
 
 // Store is an in-memory view over a JSON-backed token file. Safe for
@@ -172,7 +175,8 @@ type Store struct {
 	loaded        time.Time
 	lastSize      int64
 	isEmpty       bool      // tokens file didn't exist when we last looked
-	lastUsedFlush time.Time // last persist() driven by a LastUsedAt update
+	lastUsedFlush time.Time // when the debounce window started (flushDueLocked, writeLocked)
+	unreadable    bool      // the last reloadIfStale could not read the file (noteReadLocked)
 
 	// raw is the file's bytes as of the read s.tokens was last built
 	// from (reload) or the write that last put it down (writeLocked);
@@ -313,7 +317,10 @@ func (s *Store) reload() error {
 // and reloads if either differs. Called from Validate so a `bridge pair` run
 // picks up automatically in a concurrently-running `bridge serve`. Caller
 // must hold mu. See Store.lastSize for the rationale on the size tiebreaker.
-func (s *Store) reloadIfStale() error {
+// Whether it could read the file is reported when that changes
+// (noteReadLocked).
+func (s *Store) reloadIfStale() (err error) {
+	defer func() { s.noteReadLocked(err) }()
 	info, err := os.Stat(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		if !s.isEmpty {
@@ -332,6 +339,57 @@ func (s *Store) reloadIfStale() error {
 		return s.reload()
 	}
 	return nil
+}
+
+// noteReadLocked reports a change in whether reloadIfStale can read the
+// store: once when it first cannot, and once when it can again. While it
+// cannot, Validate checks devices against the tokens it last read, so a
+// device `bridge pair` paired since is refused and one `bridge token
+// revoke` removed since is still accepted, until a request finds the file
+// readable. Nothing said so: a 401 is not logged, and the only other line,
+// the Error a failed debounced write logs, is about a timestamp and comes
+// only from a device the bridge already knew. The realistic cause is `sudo
+// bridge pair` beside a service install, which leaves tokens.json owned by
+// root, so a permission error also names the uid and the remedy (POSIX's:
+// Windows has no uid to name, and no chown). Once each way, since the
+// failure lasts until someone mends it and every request would repeat the
+// line. Caller must hold mu.
+func (s *Store) noteReadLocked(err error) {
+	switch {
+	case err != nil && !s.unreadable:
+		s.unreadable = true
+		args := []any{"path", s.path, "err", err,
+			"note", "a device paired since is refused, and one revoked since still accepted, until the file can be read; not logged again until then"}
+		if runtime.GOOS != "windows" && errors.Is(err, fs.ErrPermission) {
+			args = append(args, "uid", os.Getuid(),
+				"hint", "tokens.json must be readable by this uid: a bridge pair or bridge token run with sudo leaves it owned by root, so chown it back and run those as the service user")
+		}
+		logger.Warn("token store unreadable; checking devices against the tokens last read", args...)
+	case err == nil && s.unreadable:
+		s.unreadable = false
+		logger.Info("token store readable again", "path", s.path)
+	}
+}
+
+// flushDueLocked reports whether the debounced write of Validate's and
+// RecordClientVersion's observations is due, lastUsedFlushInterval after
+// the last, and when it is, starts the next window at once: every attempt
+// does, a failed one too, as a write that lands does (writeLocked).
+// Otherwise, while the write cannot land (a tokens.json this process
+// cannot read, a damaged one, a disk that refuses the staging), every
+// request past the window is due, and each re-reads the file and logs an
+// Error under mu, which every authenticated request takes. A write that
+// fails after its staging adds an fsync to that, and one whose rename
+// keeps failing the rename's 750 ms of retries. The observations a failed
+// attempt leaves in memory go down at the next attempt, a window later,
+// or at the shutdown flush, which asks nothing of the window. Caller must
+// hold mu.
+func (s *Store) flushDueLocked(now time.Time) bool {
+	if now.Sub(s.lastUsedFlush) < lastUsedFlushInterval {
+		return false
+	}
+	s.lastUsedFlush = now
+	return true
 }
 
 // persist writes the in-memory token list as it stands: the write of the
@@ -468,10 +526,11 @@ func (s *Store) writeLocked(tokens []Token) error {
 	s.loaded = staged.ModTime()
 	s.lastSize = staged.Size()
 	s.isEmpty = false
-	// Every successful write resets the LastUsedAt debounce clock —
-	// whether the write was driven by Validate, Mint, Revoke, or
-	// FlushLastUsed — so callers don't have to remember to stamp it
-	// themselves and Mint/Revoke also get the debounce benefit for free.
+	// Every write that lands restarts the debounce window, since it has
+	// put down every observation held in memory: Mint, Revoke, Rotate,
+	// SetExpiry and FlushLastUsed get the debounce benefit for free. The
+	// debounced writes started it already, at the attempt
+	// (flushDueLocked), so that a failed one waits a window too.
 	s.lastUsedFlush = time.Now()
 	return nil
 }
@@ -542,10 +601,12 @@ func (s *Store) Mint(name string) (rawToken string, tok Token, err error) {
 // comparison.
 //
 // On a hit Validate updates LastUsedAt in memory and persists lazily —
-// at most once per lastUsedFlushInterval — so a busy request path
-// doesn't rewrite tokens.json on every hit. A persist failure is logged
-// and ignored because the primary work (validation) already succeeded;
-// log visibility ensures silent disk issues don't go unnoticed.
+// attempting at most once per lastUsedFlushInterval, a failed attempt
+// included — so a busy request path neither rewrites tokens.json on every
+// hit nor, while the write cannot land, logs on every hit. A persist
+// failure is logged and ignored because the primary work (validation)
+// already succeeded; log visibility ensures silent disk issues don't go
+// unnoticed.
 func (s *Store) Validate(rawToken string) (Token, bool) {
 	if rawToken == "" {
 		return Token{}, false
@@ -555,7 +616,7 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.reloadIfStale() // best-effort
+	_ = s.reloadIfStale() // best-effort; a failure is reported once (noteReadLocked)
 	now := time.Now()
 	for i := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(s.tokens[i].Hash), []byte(hashHex)) == 1 {
@@ -569,8 +630,8 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 				return Token{}, false
 			}
 			// The token struct wants a wall-clock UTC value so the JSON
-			// round-trip is readable; the debounce gate uses `time.Since`
-			// which reads the monotonic clock and so survives NTP jumps.
+			// round-trip is readable; the debounce gate compares `now`
+			// itself, whose monotonic reading survives NTP jumps.
 			s.tokens[i].LastUsedAt = now.UTC()
 			// Capture the matched token BEFORE any reload below. The
 			// pre-persist reloadIfStale can swap s.tokens for a fresh
@@ -579,7 +640,7 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 			// captured copy instead. Value-identical to s.tokens[i] on
 			// the no-reload path.
 			matched := s.tokens[i]
-			if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+			if s.flushDueLocked(now) {
 				if beforeValidatePersistHook != nil {
 					beforeValidatePersistHook()
 				}
@@ -615,9 +676,9 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 				} else if err := s.persist(); err != nil {
 					logger.Error("persist LastUsedAt", "err", err)
 				}
-				// persist() stamps `lastUsedFlush` on success; nothing to
-				// do here on any branch. The validation verdict below is
-				// unaffected either way — it is already decided.
+				// The attempt started the next window (flushDueLocked),
+				// whether it landed or not. The validation verdict below
+				// is unaffected either way — it is already decided.
 			}
 			return matched, true
 		}
@@ -671,9 +732,10 @@ func (s *Store) FlushLastUsed() error {
 // client could rotate its X-Client-Version on every request and force
 // synchronous tokens.json rewrites under the global lock — a DoS
 // vector against every other authenticated request. Bounded to one
-// persist per 30 s, the in-memory state still tracks the latest
-// value (so the updater's compat gate sees fresh data) and the
-// shutdown FlushLastUsed call lands any deferred update on disk.
+// attempt per 30 s, a failed one included (flushDueLocked), the
+// in-memory state still tracks the latest value (so the updater's
+// compat gate sees fresh data) and the shutdown FlushLastUsed call
+// lands any deferred update on disk.
 //
 // id is the token ID returned by Validate. version is the raw header
 // value; whitespace is trimmed and over-long values are truncated to
@@ -717,11 +779,12 @@ func (s *Store) RecordClientVersion(id, ver string) {
 		if s.tokens[i].LastClientVersion == ver {
 			return
 		}
+		now := time.Now()
 		s.tokens[i].LastClientVersion = ver
-		s.tokens[i].LastClientVersionAt = time.Now().UTC()
+		s.tokens[i].LastClientVersionAt = now.UTC()
 		// Same 30-second debounce as LastUsedAt — see method-level
 		// doc. FlushLastUsed on shutdown lands any deferred update.
-		if time.Since(s.lastUsedFlush) >= lastUsedFlushInterval {
+		if s.flushDueLocked(now) {
 			// Cross-process safety: a concurrent `bridge pair` /
 			// `bridge token revoke` may have written tokens.json since
 			// the in-memory snapshot was last loaded. Writing our
@@ -760,7 +823,7 @@ const maxClientVersionLen = 64
 func (s *Store) List() []Token {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.reloadIfStale()
+	_ = s.reloadIfStale() // best-effort; a failure is reported once (noteReadLocked)
 	out := make([]Token, len(s.tokens))
 	copy(out, s.tokens)
 	return out
@@ -774,7 +837,7 @@ func (s *Store) List() []Token {
 func (s *Store) Get(id string) (Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.reloadIfStale()
+	_ = s.reloadIfStale() // best-effort; a failure is reported once (noteReadLocked)
 	for i := range s.tokens {
 		if s.tokens[i].ID == id {
 			return s.tokens[i], nil

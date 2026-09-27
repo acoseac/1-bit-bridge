@@ -171,6 +171,7 @@ type debouncedWriter struct {
 	observe  func(t *testing.T, f *commitFixture, i int) (landed func(*Store) string)
 }
 
+// debouncedWriters are Validate's debounced write and RecordClientVersion's.
 func debouncedWriters() []debouncedWriter {
 	return []debouncedWriter{
 		{"Validate", []string{
@@ -213,6 +214,8 @@ type writeFailure struct {
 // errRenameRefused is the rename writeFailures' last row refuses with.
 var errRenameRefused = errors.New("rename refused by the test")
 
+// writeFailures fail the debounced write two ways at the reload ahead of
+// it and two in the write itself.
 func writeFailures() []writeFailure {
 	return []writeFailure{
 		{"a sibling's pair leaves tokens.json unreadable", 0,
@@ -232,18 +235,7 @@ func writeFailures() []writeFailure {
 			}},
 		{"tokens.json is damaged", 0,
 			func(t *testing.T, f *commitFixture) (func(), func(*Store) string) {
-				good, err := os.ReadFile(f.path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(f.path, []byte("[{"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				return func() {
-					if err := os.WriteFile(f.path, good, 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}, nil
+				return damageTokenFile(t, f.path), nil
 			}},
 		{"the rename fails", 1,
 			func(t *testing.T, _ *commitFixture) (func(), func(*Store) string) {
@@ -260,6 +252,25 @@ func restoreTokenFileMode(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatalf("restore mode: %v", err)
+	}
+}
+
+// damageTokenFile replaces the store with two bytes no reload can parse,
+// and returns what puts the file back as it was. Unlike a permission error
+// it fails the reload on every platform, as root too.
+func damageTokenFile(t *testing.T, path string) (mend func()) {
+	t.Helper()
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.WriteFile(path, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -342,11 +353,12 @@ type storeFailure struct {
 // read tokens.json it checks devices against the tokens it last read, so a
 // device `bridge pair` paired since is refused and one `bridge token revoke`
 // removed since is still accepted, and until this was reported nothing said
-// so. A 401 is not logged, and the Error a failed debounced write logs names
-// a timestamp, and only a device the bridge already knew makes it. One Warn
-// when the store first cannot be read, naming the file and the error, and
-// for a permission error the uid and the remedy; one Info once it can be
-// read again, which the next request does, with no restart.
+// so: a 401 is not logged, and the only other line, the Error a failed
+// debounced write logs, is about a timestamp and comes only from a device
+// the bridge already knew. One Warn when the store first cannot be read,
+// naming the file and the error, and for a permission error the uid and
+// the remedy; one Info once it can be read again, which the next request
+// does, with no restart.
 func TestAStoreThatCannotBeReadIsReportedOnce(t *testing.T) {
 	for _, tc := range []storeFailure{
 		{"unreadable", true, func(t *testing.T, f *commitFixture) func() {
@@ -354,18 +366,7 @@ func TestAStoreThatCannotBeReadIsReportedOnce(t *testing.T) {
 			return func() { restoreTokenFileMode(t, f.path) }
 		}},
 		{"damaged", false, func(t *testing.T, f *commitFixture) func() {
-			good, err := os.ReadFile(f.path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(f.path, []byte("[{"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return func() {
-				if err := os.WriteFile(f.path, good, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
+			return damageTokenFile(t, f.path)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { unreadableStoreReportedOnce(t, tc) })
