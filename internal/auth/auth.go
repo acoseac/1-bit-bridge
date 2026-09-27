@@ -352,8 +352,8 @@ func (s *Store) persist() error {
 // modify the list it is handed. A nil build writes the list as it stands.
 //
 // Staging the file costs a temp file, a write and an fsync (a median of
-// 0.6 ms on ext4 and 2.3 to 3.8 ms on APFS, measured; tens on a cloud
-// disk), in which a sibling process (`bridge pair`, `bridge token
+// 0.6 to 0.7 ms on ext4 and 2.3 to 3.8 ms on APFS, measured; tens on a
+// cloud disk), in which a sibling process (`bridge pair`, `bridge token
 // revoke`) can commit. Renaming over that commit dropped the token it
 // minted or brought back the one it revoked. So the file is read once
 // more just before the rename (unchangedSinceReadLocked), and a change

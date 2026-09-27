@@ -18367,11 +18367,13 @@ window this change closed here … Measured nowhere yet."
   so no start-up or shutdown effect. On main the rate tracks the staging over
   the flusher's period (4 ms in 24 ms is 17%; in 104 ms, 4%). The running
   bridge writes at most once per 30 s while requests arrive, plus on console
-  actions, so a `bridge pair` beside it hit the window about once in 10,000
-  pairs on APFS and 50,000 on ext4, and once in 1,000 on a cloud disk at the
-  report's figure. Rare, silent and permanent: the device 401s until it is
-  paired again, and a revoke undone that way leaves the revoked device
-  working with nothing in the log.
+  actions. On main a sibling commit was lost in either window, the staging
+  or the directory fsync after the rename (next bullet), about 6.5 ms per
+  write on APFS and 1.1 ms on ext4, so a `bridge pair` beside a busy bridge
+  was lost about once in 5,000 pairs on APFS and 25,000 on ext4, and once in
+  several hundred on a cloud disk at the report's figure. Rare, silent and
+  permanent: the device 401s until it is paired again, and a revoke undone
+  that way leaves the revoked device working with nothing in the log.
 - **A second window as wide, after the rename.** RenameWithRetry fsyncs the
   parent directory after renaming (a median of 2.8 ms on APFS and 0.5 ms on
   ext4, max 4.4 and 1.7 ms), and persist then stat'd the path to record
