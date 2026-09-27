@@ -3295,7 +3295,11 @@ its twin.** The top list is older, shorter, and read first.
   REFUSES** (`ErrStoreUnreadable`, a 503 from the middleware), keeps the
   session, records no stamp (a chmod or chown that fixes the file changes none
   of the three), and logs at most once a `sessionFlushInterval`: the middleware
-  adds no line of its own, #1039's debounce concern. A MISSING file still ends
+  adds no line of its own, #1039's debounce concern. **The opposite of
+  `tokens.json`'s choice (#1047), deliberately**: refusing there unpairs every
+  device over a permissions mistake, while here logins already refuse in that
+  state (#1039) and the unread file may hold a sign-out; don't make either
+  match the other. A MISSING file still ends
   nothing. **A rotation or sign-out CONFIRMS its write** (`commitAndConfirm`,
   CodeRabbit on #1044): a running bridge's write that passed its own check
   just before the command's rename lands after it, carrying back exactly the

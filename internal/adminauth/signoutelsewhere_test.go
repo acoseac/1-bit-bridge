@@ -649,9 +649,12 @@ func TestASignOutIsNotLostToAWriteTheBridgeHadInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		signOut func(t *testing.T, path string)
+		// onDisk checks what else the command had to keep, beside the
+		// sign-out.
+		onDisk func(t *testing.T, path, after string)
 	}{
-		{"sign-out-everywhere", signOutElsewhere},
-		{"reset-password", rotateAndSignOutElsewhere},
+		{"sign-out-everywhere", signOutElsewhere, func(*testing.T, string, string) {}},
+		{"reset-password", rotateAndSignOutElsewhere, requireRotationOnDisk},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, path, first, _ := runningBridge(t)
@@ -663,25 +666,30 @@ func TestASignOutIsNotLostToAWriteTheBridgeHadInFlight(t *testing.T) {
 			if *confirms != 2 {
 				t.Errorf("the command read its write back %d times, want 2 (the write undone, then the one after the redo)", *confirms)
 			}
-			// The command says what happened, once, and does not take its own
-			// write being undone for news from elsewhere: a credential change,
-			// or a sign-out ending the sessions it holds (Gemini on #1044).
-			if got := rec.Failures(msgRedoLog); len(got) != 1 {
-				t.Errorf("the redo logged %d lines, want 1", len(got))
-			}
-			for _, msg := range []string{msgCredentialAdoptedLog, msgSignOutTakenLog} {
-				if got := rec.Lines(msg); len(got) != 0 {
-					t.Errorf("the command took its own undone write for news: %s", strings.Join(got, "; "))
-				}
-			}
+			requireRedoSaidOnce(t, rec)
 			if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
 				t.Errorf("after %s and the in-flight write, the running bridge still signs in a session (err=%v)", tc.name, err)
 			}
-			requireEndedOnDisk(t, path, tc.name+" and the in-flight write", first)
-			if tc.name == "reset-password" {
-				requireRotationOnDisk(t, path, tc.name+" and the in-flight write")
-			}
+			after := tc.name + " and the in-flight write"
+			requireEndedOnDisk(t, path, after, first)
+			tc.onDisk(t, path, after)
 		})
+	}
+}
+
+// requireRedoSaidOnce requires that a command that found its write undone
+// said so, once, and did not take its own write being undone for news from
+// elsewhere: a credential change, or a sign-out ending the sessions it holds
+// (Gemini on #1044).
+func requireRedoSaidOnce(t *testing.T, rec *loggingtest.Recorder) {
+	t.Helper()
+	if got := rec.Failures(msgRedoLog); len(got) != 1 {
+		t.Errorf("the redo logged %d lines, want 1", len(got))
+	}
+	for _, msg := range []string{msgCredentialAdoptedLog, msgSignOutTakenLog} {
+		if got := rec.Lines(msg); len(got) != 0 {
+			t.Errorf("the command took its own undone write for news: %s", strings.Join(got, "; "))
+		}
 	}
 }
 
