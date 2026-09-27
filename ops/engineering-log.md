@@ -19553,7 +19553,12 @@ iOS redemption as the Mirror-PR twin.
   no code, because nothing in the serving process could redeem it.
 - **One live code per token.** Issuing drops the token's previous code, so a
   console rotation leaves the old QR nothing to redeem, just as the old token
-  has nothing left to use. At most 64 codes are held, the oldest evicted
+  has nothing left to use. The drop comes BEFORE the new code is drawn
+  (CodeRabbit on #1052): the console issues after the rotation has already
+  replaced the token, and an issue that failed with the old code still live
+  would let that code rotate the token again for whoever holds the old QR.
+  `TestAFailedIssueStillEndsTheTokensPreviousCode` pins it with a failing
+  random source; with the draw first again, it alone goes red. At most 64 codes are held, the oldest evicted
   first, which bounds memory against a script minting in a loop.
 - **Take before judging**, the login ticket's rule: the code is deleted
   before its age is read, so it is accepted at most once whatever the

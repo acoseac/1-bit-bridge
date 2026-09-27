@@ -3505,7 +3505,10 @@ its twin.** The top list is older, shorter, and read first.
   link preview) held the credential until someone revoked it. Every shipped
   app refuses a link without `token=`, so the link keeps it and gains
   `code=` (`internal/pairingcode`: 32 random bytes, single-use, 10 minutes,
-  one live code per token, held as a SHA-256). `POST /v1/pairing/redeem`
+  one live code per token, held as a SHA-256; `Issue` drops the token's old
+  code BEFORE drawing the new one, so a failed issue after a console
+  rotation still ends the old QR's code, which would otherwise rotate the
+  token again for whoever holds that QR). `POST /v1/pairing/redeem`
   trades the code by ROTATING the token it names: a fresh secret for the
   same record, with the link's token dead in the same commit. So a copy of
   the link is dead once the real device has paired, and a copy redeemed
