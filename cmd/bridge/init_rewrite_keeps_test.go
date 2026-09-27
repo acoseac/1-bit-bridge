@@ -524,6 +524,11 @@ func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
 				first: "My Library", nameLine: "# no libraryName", served: config.DefaultLibraryName, want: host},
 			{name: "a config giving a blank one: the host's too",
 				first: "My Library", nameLine: `libraryName: "  "`, served: config.DefaultLibraryName, want: host},
+			// Blank to the app's trim (config.TrimLibraryName), not to
+			// strings.TrimSpace's: taken as a name to keep, it was saved as
+			// DefaultLibraryName, and listed as kept.
+			{name: "a config giving a zero-width space alone: the host's too",
+				first: "My Library", nameLine: `libraryName: "​"`, served: config.DefaultLibraryName, want: host},
 			{name: "named for its host: kept, with nothing to say",
 				want: host},
 		} {
