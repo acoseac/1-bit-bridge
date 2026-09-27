@@ -226,13 +226,14 @@ func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 				return errors.Is(err, ErrSessionNotFound)
 			}},
 		{"a login",
+			// Nothing here may validate the new session: a validate marks
+			// the set pending by itself, which would land the login at the
+			// flush even when the login's own failed write left nothing
+			// pending. The test body validates it after the flush.
 			func(t *testing.T, a *Store, _ string) string {
 				raw, err := a.CreateSession("admin")
 				if err != nil {
 					t.Fatalf("a login failed because the store could not be written: %v", err)
-				}
-				if _, err := a.ValidateSession(raw); err != nil {
-					t.Fatalf("the new session does not work in the process that made it: %v", err)
 				}
 				return raw
 			},
@@ -263,6 +264,10 @@ func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 			if !tc.landed(c, changed) {
 				t.Errorf("%s made while the file could not be read never reached it: "+
 					"the shutdown flush found nothing pending", tc.name)
+			}
+			// And the process that made the change held it all along.
+			if !tc.landed(a, changed) {
+				t.Errorf("%s did not hold in the process that made it", tc.name)
 			}
 		})
 	}
