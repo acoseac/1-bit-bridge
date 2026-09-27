@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// The tests in this file open TWO stores on one adminauth.json, which is how
-// the credential is shared in production. `bridge serve` holds one for its
+// The tests in this file open more than one store on one adminauth.json,
+// which is how the credential is shared in production. `bridge serve` holds one for its
 // whole life (the running bridge, `a` below), and `bridge admin
 // reset-password`, `bridge admin login-link` and `bridge init` each open
 // another in a process of their own. Store.mu serialises neither against the
