@@ -810,9 +810,10 @@ func PickLANEligibleInterface(opts EligibilityOpts) (*net.Interface, error) {
 // This is the multi-interface counterpart to PickLANEligibleInterface:
 // on a host with both Ethernet and Wi-Fi (or a bridged setup) renderers
 // on each subnet need an advertiser bound to their interface, otherwise
-// the unselected adapter's renderers never see the server. The tunnels
-// it leaves out are macOS's system utuns, where an SSDP client reaches
-// nothing and cannot send IPv4 at all.
+// the unselected adapter's renderers never see the server. A tunnel it
+// leaves out reaches nothing on the LAN; on the Mac this was measured on
+// those were the system utuns, each with only an fe80 address, where an
+// SSDP client cannot even send IPv4.
 //
 // Returns an empty slice (never errors) when no eligible interface
 // exists — the caller decides whether to fall back to an OS-pick / single

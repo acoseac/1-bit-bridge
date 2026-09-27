@@ -19672,9 +19672,12 @@ system utuns ahead of `en0`.
   already ranks best, a picker that skips the seam answers the same.
 - `go test -race -count=1 ./internal/dlna/... ./internal/mdns/... ./cmd/bridge/`,
   `go vet ./...`, and the pinned 1.26.6 `gofmt -l` over the changed files.
-  `TestSendMSearchStreakResetsOnRestart` (`internal/dlna/discovery`) failed
-  once in the first race run and 1 in 8 under load, and passed 30 of 30
-  alone. It drives a client on a synthetic interface and never the pickers.
+  All pass but `TestSendMSearchStreakResetsOnRestart`
+  (`internal/dlna/discovery`), which failed in both full race runs (the
+  package runs beside cmd/bridge's, so the host is loaded), 1 of 8 when
+  rerun beside that load, and passed 30 of 30 alone. Its package imports
+  `internal/logging` and nothing of `internal/dlna`, and this change touches
+  it only in a comment; the test drives a client on a synthetic interface.
   The mechanism, read from the code (the Warn it would print lands in an
   earlier test's buffer, below, so the output cannot show it): the loop's
   first M-SEARCH, sent as soon as `Start` spawns it, can take
