@@ -380,7 +380,7 @@ func (s *Store) MintInitial(username string) (string, error) {
 // write leaves this process with no credential, as the file has none, and
 // never one the next restart would not have.
 func (s *Store) installInitialLocked(username, hash string) error {
-	next, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+	next, _, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
 		if cur.user != nil {
 			return storeFile{}, ErrAlreadyInitialised
 		}
@@ -418,7 +418,9 @@ func (s *Store) installInitialLocked(username, hash string) error {
 // in this same file (PR #800). Until 2026-09-27 that was the only
 // behaviour, pinned as operator-friendly, while 1-bit.app's
 // troubleshooting page told operators that a reset invalidated them
-// immediately.
+// immediately. Either way the write is confirmed against a running
+// bridge's write in flight at its rename (commitAndConfirm), which would
+// put back the credential this replaced.
 func (s *Store) ResetPassword(username, newPassword string, sessions SessionAction) error {
 	if newPassword == "" {
 		return errors.New("adminauth: new password must not be empty")
@@ -433,8 +435,6 @@ func (s *Store) ResetPassword(username, newPassword string, sessions SessionActi
 	if err != nil {
 		return fmt.Errorf("bcrypt: %w", err)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Decide from the file, and when keeping the sessions write back the
 	// ones IT holds: the running bridge signs sessions in and out while
 	// this process waits at its password prompt, and the copy read at open
@@ -443,7 +443,7 @@ func (s *Store) ResetPassword(username, newPassword string, sessions SessionActi
 	// the read: a login or logout committed while this write was staging
 	// would otherwise be overwritten, and a logout overwritten that way
 	// comes back at the next restart (CodeRabbit on #1039).
-	next, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+	build := func(cur storeContents) (storeFile, error) {
 		if cur.user != nil && cur.user.Username != username {
 			return storeFile{}, ErrUsernameMismatch
 		}
@@ -469,15 +469,20 @@ func (s *Store) ResetPassword(username, newPassword string, sessions SessionActi
 			return storeFile{User: rec, SessionsRevokedAt: cur.signOut(), Sessions: cur.sessions}, nil
 		}
 		return storeFile{User: rec, SessionsRevokedAt: nextSignOut(now, cur.revokedAt)}, nil
-	})
-	if err != nil {
-		return err
 	}
-	s.user = next.User
-	if sessions != KeepSessions {
-		s.tookOwnSignOutLocked(*next.SessionsRevokedAt)
+	took := func(next storeFile) {
+		s.user = next.User
+		if sessions != KeepSessions {
+			s.tookOwnSignOutLocked(*next.SessionsRevokedAt)
+		}
 	}
-	return nil
+	// A running bridge's write in flight at the rename carries the
+	// credential this replaced, and with it the marker: see
+	// commitAndConfirm.
+	reverted := func(replaced, cur storeContents) bool {
+		return replaced.user != nil && sameCredential(cur.user, replaced.user)
+	}
+	return s.commitAndConfirm(build, took, reverted)
 }
 
 // SignOutEverywhere ends every console session, with the password left as
@@ -493,25 +498,110 @@ func (s *Store) ResetPassword(username, newPassword string, sessions SessionActi
 // seen (adoptSignOutLocked). It reads the file before every write, and a
 // session check reads it whenever a stat says the file changed, so the
 // sessions end at their next request, with no restart. A restart does
-// not bring them back, since the file no longer holds them.
+// not bring them back, since the file no longer holds them. The write is
+// confirmed against a running bridge's write in flight at its rename
+// (commitAndConfirm), which would put back the marker this replaced.
 //
 // ErrNotInitialised when the file holds no credential: the marker is
 // written beside one, and a store without one serves no console.
 func (s *Store) SignOutEverywhere() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+	build := func(cur storeContents) (storeFile, error) {
 		if cur.user == nil {
 			return storeFile{}, ErrNotInitialised
 		}
 		return storeFile{User: cur.user, SessionsRevokedAt: nextSignOut(s.now(), cur.revokedAt)}, nil
-	})
+	}
+	took := func(next storeFile) { s.tookOwnSignOutLocked(*next.SessionsRevokedAt) }
+	// A running bridge's write in flight at the rename carries the marker
+	// this replaced: see commitAndConfirm.
+	reverted := func(replaced, cur storeContents) bool {
+		return cur.user != nil && cur.revokedAt.Equal(replaced.revokedAt)
+	}
+	return s.commitAndConfirm(build, took, reverted)
+}
+
+// commitAndConfirm commits build's file and takes it into this process
+// (took, under s.mu), then confirms it: after confirmSettle, with s.mu
+// released, it reads the file again, and when reverted says the file is
+// back to what the commit replaced it commits once more, up to
+// maxConfirmRedos times.
+//
+// The confirmation closes the one window commitLocked's check cannot:
+// a write the running bridge had checked (its own unchangedSince) but not
+// yet renamed when this commit renamed. That write was built from the file
+// before this one, so it carries back exactly the credential and the
+// sign-out marker this replaced, and once it lands the bridge never sees
+// the marker and its later writes carry the old state on. It lands within
+// RenameWithRetry's retry budget of its check (750 ms on Windows, where
+// a scanner holding a fresh file forces the retries; no retry on POSIX),
+// and its check came before this rename, so after confirmSettle it has
+// landed or never will. A newer write by another process carries a newer
+// credential or marker, which reverted does not match, and is left alone.
+// Only a writer stalled for longer than the settle between its check and
+// its rename gets past this, which a kernel lock would close (declined in
+// #1039, for its new failure modes in the bridge's own write path; see
+// ops/engineering-log.md, #1044). CodeRabbit on #1044.
+//
+// The write already landed, so a confirmation read that fails is not
+// reported: nothing shows it was undone.
+func (s *Store) commitAndConfirm(
+	build func(cur storeContents) (storeFile, error),
+	took func(next storeFile),
+	reverted func(replaced, cur storeContents) bool,
+) error {
+	s.mu.Lock()
+	next, replaced, err := s.commitLocked(build)
+	if err == nil {
+		took(next)
+	}
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	s.tookOwnSignOutLocked(*next.SessionsRevokedAt)
-	return nil
+	for redo := 0; ; redo++ {
+		time.Sleep(confirmSettle)
+		if beforeConfirmHook != nil {
+			beforeConfirmHook()
+		}
+		s.mu.Lock()
+		cur, err := readStoreFile(s.path)
+		if err != nil || !reverted(replaced, cur) {
+			s.mu.Unlock()
+			return nil
+		}
+		if redo == maxConfirmRedos {
+			s.mu.Unlock()
+			return errWrittenOver
+		}
+		next, _, err = s.commitLocked(build)
+		if err == nil {
+			took(next)
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 }
+
+// confirmSettle is how long commitAndConfirm waits before its read: the
+// rename retry budget, in which a checked write lands, and a margin. A var
+// so this package's tests can run without the wait.
+var confirmSettle = atomicwrite.RenameRetryBudget() + 250*time.Millisecond
+
+// maxConfirmRedos bounds how often commitAndConfirm commits again for a
+// file that keeps coming back: one stale write is the race, three are a
+// writer that is not converging, reported rather than chased.
+const maxConfirmRedos = 3
+
+// errWrittenOver is commitAndConfirm giving up on a file that kept going
+// back to what it replaced.
+var errWrittenOver = errors.New("adminauth: another process kept writing the store back over this change; run the command again")
+
+// beforeConfirmHook is a test-only seam (nil in production), fired before
+// each confirmation read: where a test lands the running bridge's
+// in-flight write.
+var beforeConfirmHook func()
 
 // nextSignOut is the marker a sign-out writes: now, or one nanosecond past
 // the marker the file already holds when the clock does not put now after
@@ -779,7 +869,7 @@ func (s *Store) SetInitialPassword(username, password string) error {
 // beside whichever credential the file holds next.
 func (s *Store) persistSessionsLocked(now time.Time) error {
 	s.lastSessionFlush = now
-	written, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+	written, _, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
 		// The set is built HERE, from memory as it is after commitLocked
 		// took the read: a sign-out found in it has just ended sessions this
 		// process held, and a set built before the read would write them
@@ -822,34 +912,35 @@ func (s *Store) persistSessionsLocked(now time.Time) error {
 // file has left it. build returns the file to write, or an error that
 // ends the write; a file with no User writes nothing and returns a zero
 // storeFile and a nil error. A read that fails writes nothing and returns
-// its error.
+// its error. It also returns the contents the written file was built from,
+// which commitAndConfirm compares a later read with.
 //
 // A commit records the stamp of the file it put in place, so the session
 // check's stat gate does not read back what this process just wrote
 // (Gemini's review, 2026-09-27): each session write would otherwise cost
 // the next console request a full read.
-func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (storeFile, error) {
+func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (storeFile, storeContents, error) {
 	for attempt := 1; ; attempt++ {
 		cur, err := readStoreFile(s.path)
 		if err != nil {
-			return storeFile{}, err
+			return storeFile{}, storeContents{}, err
 		}
 		s.adoptLocked(cur)
 		next, err := build(cur)
 		if err != nil || next.User == nil {
-			return storeFile{}, err
+			return storeFile{}, storeContents{}, err
 		}
 		written, err := s.writeStoreLocked(next, s.unchangedSince(cur))
 		if errors.Is(err, errStoreMoved) && attempt < maxCommitAttempts {
 			continue
 		}
 		if err != nil {
-			return storeFile{}, err
+			return storeFile{}, storeContents{}, err
 		}
 		if written != nil {
 			s.seen = fileStamp{known: true, info: written}
 		}
-		return next, nil
+		return next, cur, nil
 	}
 }
 

@@ -614,3 +614,139 @@ func TestEndOtherSessionsReportsAnEndItCouldNotSave(t *testing.T) {
 	}
 	requireEndedOnDisk(t, path, "the next write after an end that was not saved", other)
 }
+
+// landInFlightWrite sets beforeConfirmHook to write back, at the first
+// confirmation, the file as it was before the command: the running bridge's
+// write that had passed its own check when the command renamed, and renamed
+// after it (CodeRabbit on #1044). It returns how many confirmation reads ran.
+func landInFlightWrite(t *testing.T, path string) *int {
+	t.Helper()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirms := 0
+	beforeConfirmHook = func() {
+		confirms++
+		if confirms == 1 {
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { beforeConfirmHook = nil })
+	return &confirms
+}
+
+// TestASignOutIsNotLostToAWriteTheBridgeHadInFlight: the commit's own check
+// cannot see a running bridge's write that passed ITS check just before the
+// sign-out renamed and renames just after. That write carries the marker the
+// sign-out replaced, so once it lands the bridge never sees a sign-out, and
+// the command has already printed that every console is signed out. The
+// command reads the file again once such a write must have landed, finds it
+// back to what it replaced, and signs out again.
+func TestASignOutIsNotLostToAWriteTheBridgeHadInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		signOut func(t *testing.T, path string)
+	}{
+		{"sign-out-everywhere", signOutElsewhere},
+		{"reset-password", rotateAndSignOutElsewhere},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, path, first, _ := runningBridge(t)
+			confirms := landInFlightWrite(t, path)
+
+			tc.signOut(t, path)
+
+			if *confirms != 2 {
+				t.Errorf("the command read its write back %d times, want 2 (the write undone, then the one after the redo)", *confirms)
+			}
+			if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
+				t.Errorf("after %s and the in-flight write, the running bridge still signs in a session (err=%v)", tc.name, err)
+			}
+			requireEndedOnDisk(t, path, tc.name+" and the in-flight write", first)
+			if tc.name == "reset-password" {
+				requireRotationOnDisk(t, path, tc.name+" and the in-flight write")
+			}
+		})
+	}
+}
+
+// TestARotationIsNotLostToAWriteTheBridgeHadInFlight is the same window for a
+// rotation that keeps the sessions: the in-flight write carries back the
+// credential it replaced, #1039's leaked password.
+func TestARotationIsNotLostToAWriteTheBridgeHadInFlight(t *testing.T) {
+	_, path, _, _ := runningBridge(t)
+	confirms := landInFlightWrite(t, path)
+
+	rotateElsewhere(t, path) // --keep-sessions
+
+	if *confirms != 2 {
+		t.Errorf("the rotation read its write back %d times, want 2", *confirms)
+	}
+	requireRotationOnDisk(t, path, "a rotation and the in-flight write")
+}
+
+// TestAWriteThatSupersedesASignOutIsLeftAlone: a write another process makes
+// AFTER the command, built from the command's file, carries a credential or a
+// marker the command did not replace, and the confirmation must not take it
+// for the in-flight write and write the command's change back over it. Here a
+// second rotation lands inside the settle of the first.
+func TestAWriteThatSupersedesASignOutIsLeftAlone(t *testing.T) {
+	a, path, first, _ := runningBridge(t)
+	const third = "a third password, set just after"
+	confirms := 0
+	beforeConfirmHook = func() {
+		confirms++
+		if confirms == 1 {
+			c, err := OpenStore(path)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := c.ResetPassword("admin", third, KeepSessions); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { beforeConfirmHook = nil })
+
+	rotateAndSignOutElsewhere(t, path)
+
+	c, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Verify("admin", third); err != nil {
+		t.Errorf("the rotation after the first one was written over by the first one's confirmation: %v", err)
+	}
+	if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("the sign-out did not reach the running bridge (err=%v)", err)
+	}
+}
+
+// TestAStoreThatKeepsComingBackIsReported: a file that goes back to what the
+// command replaced at every confirmation is not a race one more write wins,
+// and the command says so rather than print that it succeeded.
+func TestAStoreThatKeepsComingBackIsReported(t *testing.T) {
+	_, path, _, _ := runningBridge(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeConfirmHook = func() {
+		if err := os.WriteFile(path, before, 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { beforeConfirmHook = nil })
+
+	b, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SignOutEverywhere(); !errors.Is(err, errWrittenOver) {
+		t.Errorf("SignOutEverywhere against a store written back at every confirmation = %v, want errWrittenOver", err)
+	}
+}
