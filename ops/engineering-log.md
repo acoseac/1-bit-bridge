@@ -19519,3 +19519,47 @@ tags from local files by the same rule.
   stamped.
 - The existing synth test now also asserts the flag.
 - `go test -race ./...` (50 packages) and `make build-all` on Go 1.26.6.
+
+## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential
+
+The 2026-09-23 external audit's H3, bridge half. Turning off the app's
+"Bulk-harvest the whole library" stopped only the app's renewals; the
+`bulk_harvest` credential the bridge already held stayed usable until it
+expired, and the privacy policy said so, telling users to switch the harvest
+off on the bridge to stop it at once. The bridge had only
+`POST /v1/atlas-harvest/credential`. Reported by the iOS audit session and
+taken into v0.2.1 at the user's request (backlog B12); the app's call ships
+in the iOS twin.
+
+### Decisions
+
+- **`Clear()`, the store's existing forget.** It drops the token and its
+  expiry and keeps the base URL and the sync cursor, the same state an
+  Atlas-rejected token leaves, so a re-provision of the same library
+  resumes rather than re-submitting everything.
+- **204 whether or not a credential was held.** The app calls it on every
+  switch-off, including a second one, and must not have to ask first.
+- **The demo refuses with 403 `demo_read_only`.** A demo bridge's bearer is
+  public and its one harvest credential is shared by every demo user; one
+  user switching harvest off would stop it for all. The POST's accepted
+  residual (a public bearer can overwrite the token for the pinned host) is
+  a denial of function by an attacker; this would have been one by an
+  ordinary user, and on every switch-off.
+- **Harvest off answers 404 `harvest_not_supported`,** the POST's shape. The
+  store is opened only when harvest is on, so a credential file left from
+  before is not touched; nothing on that bridge reads it.
+- **Write-rate-limited** (`rateWrite`), like the POST, and listed in
+  PROTOCOL.md's write-limit section.
+
+### Tests and controls
+
+- `internal/api/atlas_harvest_revoke_test.go`:
+  `TestAtlasHarvestCredentialDeleteForgetsIt` (204 twice, the sink cleared
+  each time), `TestAtlasHarvestCredentialDeleteRefusals` (harvest off 404,
+  demo 403 with nothing cleared, no bearer 401), and
+  `TestAtlasHarvestCredentialDeleteClearsTheStoredToken` against the real
+  `atlasharvest.StateStore`: after the DELETE `AtlasCredential()` finds
+  nothing, the token is gone from the file, and the cursor is still 42.
+  All red on main (405: no route).
+- Controls: without the demo check only the demo case goes red; without the
+  `Clear()` call the two clearing tests go red.

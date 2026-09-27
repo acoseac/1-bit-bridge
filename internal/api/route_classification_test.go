@@ -61,6 +61,7 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/atlas-meta/artist/{mbid}",
 		"POST /v1/atlas-ingest",
 		"POST /v1/atlas-harvest/credential",
+		"DELETE /v1/atlas-harvest/credential",
 		"GET /v1/smart-playlists",
 		"GET /v1/renderers",
 		"GET /v1/events",
