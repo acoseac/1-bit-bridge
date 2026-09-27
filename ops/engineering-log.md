@@ -19711,3 +19711,13 @@ iOS redemption as the Mirror-PR twin.
   shape check; no limiter; the console never issuing; the link dropping the
   code; serve wiring two stores (only the boot test); serve leaving the API
   unwired (only the boot test); rotate issuing no code.
+- **Review round 3 (CodeRabbit).** `ValidShape` took any 43 base64url
+  characters, but 43 characters carry 258 bits for a 256-bit code, so the
+  last character's two low bits are zero in every issued code and 48 of the
+  64 characters can never end one. Such a code reached the store and was
+  answered `410` where a malformed code is `400`. It now decodes strictly
+  (`base64.RawURLEncoding.Strict()`) and requires 32 bytes, and it keeps the
+  length check, because the decoder skips line breaks and a real code with
+  one inserted decodes to the same 32 bytes. Two controls: the old character
+  loop turns exactly the two impossible-ending cases red, and dropping the
+  length check turns exactly the inserted-line-break case red.
