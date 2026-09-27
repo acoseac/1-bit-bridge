@@ -299,10 +299,10 @@ func OpenStore(path string) (*Store, error) {
 }
 
 // IsInitialised reports whether the credentials file held an account
-// at the last read: the open, or since then a login attempt or a
-// write. Every caller asks straight after OpenStore. Used by the
-// bridge serve startup path to refuse-to-start in public mode when no
-// admin has been minted yet.
+// at the last read: the open, or since then a login attempt, a write,
+// or a session check that found the file changed. Every caller asks
+// straight after OpenStore. Used by the bridge serve startup path to
+// refuse-to-start in public mode when no admin has been minted yet.
 func (s *Store) IsInitialised() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
