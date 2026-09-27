@@ -19,6 +19,16 @@ type AtlasHarvestCredentialSink interface {
 	Clear() error
 }
 
+// WithStoredHarvestCredentialClearer wires the revoke for a bridge whose
+// harvest is off (no sink wired): clear forgets a credential the state file
+// still holds from when it was on. Without it, re-enabling the harvest would
+// bring that credential back into use although the app that provisioned it
+// asked for it to be revoked.
+func (s *Server) WithStoredHarvestCredentialClearer(clear func() error) *Server {
+	s.clearStoredHarvestCredential = clear
+	return s
+}
+
 // WithAtlasHarvest wires the credential sink, enabling POST
 // /v1/atlas-harvest/credential. Gated on cfg.Atlas.HarvestEnabled by the caller.
 //
@@ -172,22 +182,35 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 // resumes). 204 whether or not a credential was held, so the app can call it
 // on every switch-off without asking first.
 //
-// A demo bridge refuses with 403 demo_read_only. Its bearer is public and
-// its one harvest credential is shared by every demo user, so one user
-// switching harvest off must not stop it for all; the POST's residual (a
-// public bearer can overwrite the token) is not widened into a public
-// off switch.
+// The same holds on a bridge whose harvest is OFF. Its state file can still
+// hold the credential from when the harvest was on, and re-enabling the
+// harvest reads that file again, so a 404 there would tell the app nothing
+// is held while a credential waited to come back into use (CodeRabbit on
+// #1981). With no sink wired the handler clears the file itself.
+//
+// A demo bridge refuses with 403 demo_read_only, whatever its harvest
+// setting. Its bearer is public and its one harvest credential is shared by
+// every demo user, so one user switching harvest off must not stop it for
+// all; the POST's residual (a public bearer can overwrite the token) is not
+// widened into a public off switch.
 func (s *Server) atlasHarvestCredentialDelete(w http.ResponseWriter, r *http.Request) {
-	if s.atlasHarvestCred == nil {
-		writeError(w, http.StatusNotFound, "harvest_not_supported", "this bridge does not accept harvest credentials")
-		return
-	}
 	if s.demoMode {
 		writeError(w, http.StatusForbidden, "demo_read_only",
 			"this demo bridge's harvest credential is shared by every demo user and is not revoked by one")
 		return
 	}
-	if err := s.atlasHarvestCred.Clear(); err != nil {
+	var err error
+	switch {
+	case s.atlasHarvestCred != nil:
+		err = s.atlasHarvestCred.Clear()
+	case s.clearStoredHarvestCredential != nil:
+		err = s.clearStoredHarvestCredential()
+	default:
+		// Only a server wired with neither, which serve never builds.
+		writeError(w, http.StatusNotFound, "harvest_not_supported", "this bridge does not accept harvest credentials")
+		return
+	}
+	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "persist_failed", "failed to clear the harvest credential", err)
 		return
 	}

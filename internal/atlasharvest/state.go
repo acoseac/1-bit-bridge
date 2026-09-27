@@ -163,6 +163,28 @@ func (s *StateStore) Clear() error {
 	return s.persistLocked()
 }
 
+// ClearStoredCredential forgets the credential the state file at path holds,
+// keeping the sync position, for a bridge that opens no StateStore because
+// its harvest is off. The file outlives the switch: re-enabling the harvest
+// reads it again, so a credential left there would come back into use though
+// the app that provisioned it had asked for it to be revoked. A missing file,
+// or one holding no credential, is left as it is: nothing is held, so nothing
+// is written.
+func ClearStoredCredential(path string) error {
+	s, err := OpenStateStore(path)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.Token == "" && s.st.ExpiresAt.IsZero() {
+		return nil
+	}
+	s.st.Token = ""
+	s.st.ExpiresAt = time.Time{}
+	return s.persistLocked()
+}
+
 // AddPendingCovers records release MBIDs Atlas reported resolved, so the
 // refresh sweep re-fetches their (now premium) covers. New entries start at 0
 // attempts; an already-pending MBID is left at its current attempt count (a

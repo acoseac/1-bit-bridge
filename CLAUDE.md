@@ -787,9 +787,16 @@ lost my library."
   answers 403 `demo_read_only`**: its one credential is shared by every
   demo user, so one of them switching off must not stop the harvest for
   all, and the POST's accepted residual (a public bearer can overwrite the
-  token) is not widened into a public off switch. A bridge with harvest off
-  answers 404 like the POST; a credential file it may still hold is left
-  alone, since nothing there reads it.
+  token) is not widened into a public off switch, whatever the harvest
+  setting. **A bridge with the harvest OFF clears the file too, and answers
+  204**: no store is open there, so `serve` wires
+  `atlasharvest.ClearStoredCredential` instead of the sink. This bullet said
+  "a credential file it may still hold is left alone, since nothing there
+  reads it" until CodeRabbit (on the app's #1981) caught the premise:
+  re-enabling the harvest reads that file again, so a 404 told the app
+  nothing was held while a credential waited to come back into use. **`204`
+  is the only answer that means revoked**; the app reports anything else,
+  405 from an older bridge included, as not revoked.
 - **Don't label a spec section with a version you cannot verify.** The `since
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client

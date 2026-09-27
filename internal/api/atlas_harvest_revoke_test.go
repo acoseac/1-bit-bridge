@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 )
@@ -38,13 +39,14 @@ func TestAtlasHarvestCredentialDeleteForgetsIt(t *testing.T) {
 	}
 }
 
-// TestAtlasHarvestCredentialDeleteRefusals pins the three refusals: a bridge
-// with harvest off has no credential route (404, the POST's shape), a demo
-// bridge refuses (403 demo_read_only: its credential is shared by every
-// demo user, so one user switching harvest off must not stop it for all),
-// and an unauthenticated caller gets 401. None of them clears anything.
+// TestAtlasHarvestCredentialDeleteRefusals pins the refusals: a server wired
+// with neither the sink nor the stored-credential clearer answers 404 (serve
+// always wires one of them), a demo bridge refuses (403 demo_read_only: its
+// credential is shared by every demo user, so one user switching harvest
+// off must not stop it for all), and an unauthenticated caller gets 401.
+// None of them clears anything.
 func TestAtlasHarvestCredentialDeleteRefusals(t *testing.T) {
-	t.Run("harvest off", func(t *testing.T) {
+	t.Run("neither wired", func(t *testing.T) {
 		token, srv := newHarvestCredTestServer(t, nil)
 		resp := doReq(t, srv, http.MethodDelete, "/v1/atlas-harvest/credential", token, "", "")
 		resp.Body.Close()
@@ -129,4 +131,57 @@ func readBody(t *testing.T, resp *http.Response) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile pins the
+// revoke on a bridge whose harvest is off (CodeRabbit on the app's #1981).
+// Its state file can still hold the credential from when the harvest was
+// on, and re-enabling the harvest reads that file again, so the DELETE
+// clears it there and answers 204 rather than 404.
+func TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+	seeded, err := atlasharvest.OpenStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seeded.SetCredential("bh-secret-token", "https://atlas.example", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seeded.SetCursor(42); err != nil {
+		t.Fatal(err)
+	}
+
+	token, srv := newHarvestCredTestServer(t, nil)
+	srv.WithStoredHarvestCredentialClearer(func() error { return atlasharvest.ClearStoredCredential(path) })
+	resp := doReq(t, srv, http.MethodDelete, "/v1/atlas-harvest/credential", token, "", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", resp.StatusCode)
+	}
+	reopened, err := atlasharvest.OpenStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := reopened.AtlasCredential(); ok {
+		t.Fatal("re-enabling the harvest would find the revoked credential")
+	}
+	if got := reopened.Snapshot().ResultCursor; got != 42 {
+		t.Fatalf("cursor = %d, want 42", got)
+	}
+}
+
+// A demo bridge refuses whatever its harvest setting: with the harvest off
+// the clearer must not run either.
+func TestAtlasHarvestCredentialDeleteOnADemoBridgeWithTheHarvestOffClearsNothing(t *testing.T) {
+	token, srv := newHarvestCredTestServerPinned(t, nil, "", true)
+	called := 0
+	srv.WithStoredHarvestCredentialClearer(func() error { called++; return nil })
+	resp := doReq(t, srv, http.MethodDelete, "/v1/atlas-harvest/credential", token, "", "")
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "demo_read_only") {
+		t.Fatalf("status = %d body %q, want 403 demo_read_only", resp.StatusCode, body)
+	}
+	if called != 0 {
+		t.Fatal("a demo bridge cleared its stored harvest credential")
+	}
 }
