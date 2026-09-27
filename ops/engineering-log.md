@@ -20082,12 +20082,18 @@ set was predicted by name and matched.
 Gemini was over its daily quota and CodeRabbit paused at its plan limit, so
 SonarCloud was the only reviewer. Its quality gate failed on one `go:S2077`,
 and it raised four smells. All five are fixed, plus a race its fix run found.
-- **`go:S2077`: `FreshDSDPeaks` built its IN list at the call site.** It now
-  binds the paths as one `json_each` argument over constant statements, the
-  `VariantsForPaths` shape. A path that is not valid UTF-8 is bound raw, one at
-  a time, because `encoding/json` rewrites it and it would never match
-  (`splitIllFormedUTF8Paths`; `TestFreshDSDPeaksFindsAnIllFormedPath`). The
-  rewrite also checks `rows.Err()`, which the old loop dropped.
+- **`go:S2077`: `FreshDSDPeaks` built its IN list at the call site.** It is
+  now ONE literal statement binding the paths as one `json_each` argument, the
+  `VariantsForPaths` shape, plus one raw path. A path that is not valid UTF-8
+  goes in the raw slot, one at a time, because `encoding/json` rewrites it and
+  it would never match (`splitIllFormedUTF8Paths`;
+  `TestFreshDSDPeaksFindsAnIllFormedPath`). The rewrite also checks
+  `rows.Err()`, which the old loop dropped. The first fix, two statements
+  assembled from a shared constant, was flagged again: **SonarCloud reads
+  through a named const to its concatenation**, so a query argument is quiet
+  only when it is a literal or a function parameter. Several comments in this
+  package say a named const is enough; `main` carries 30 open S2077s that
+  show it is not.
 - `AlbumGainDB` (cognitive complexity 30) is a `survey` now: a pass, a claimed
   measurement and the list of peaks. The no-op claim resolver says why it is
   empty, `Catalog` is `CatalogStreamer`, and the real-toolchain test's
