@@ -157,7 +157,19 @@ func TestValidShape(t *testing.T) {
 		want bool
 	}{
 		{good, true},
-		{"abcXYZ019-_" + strings.Repeat("q", codeLength-11), true},
+		// Every alphabet class, '-' and '_' included, ending on a character
+		// whose two low bits are zero ('g' is 32).
+		{"abcXYZ019-_" + strings.Repeat("q", codeLength-12) + "g", true},
+		// 43 characters carry 258 bits and a code is 256, so the last one's
+		// two low bits are always zero in a code this package issued: only
+		// A E I M Q U Y c g k o s w 0 4 8 can end one. 'q' is 42 and 'B' is 1.
+		{"abcXYZ019-_" + strings.Repeat("q", codeLength-11), false},
+		{good[:codeLength-1] + "B", false},
+		{good[:codeLength-1] + "8", true},
+		// The decoder skips line breaks: one in place of a character decodes
+		// short, and one inserted into a real code is refused by length.
+		{good[:21] + "\n" + good[22:], false},
+		{good[:21] + "\n" + good[21:], false},
 		{"", false},
 		{good[:codeLength-1], false},
 		{good + "A", false},

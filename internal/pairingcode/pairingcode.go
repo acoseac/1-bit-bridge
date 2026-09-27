@@ -122,22 +122,19 @@ func (s *Store) Take(code string) (tokenID string, ok bool) {
 	return e.tokenID, true
 }
 
-// ValidShape reports whether code could be one this package issued: exactly
-// 43 characters of unpadded base64url. A handler refuses anything else before
-// it reaches the store.
+// ValidShape reports whether code could be one this package issued: the
+// unpadded base64url encoding of exactly codeBytes bytes. That is 43
+// characters, and since they carry 258 bits for 256, the last one's two low
+// bits are zero, which the strict decoder checks. A handler refuses anything
+// else before it reaches the store. Both checks are needed: the decoder skips
+// line breaks, so a real code with one inserted decodes to the same 32 bytes,
+// and only the length check refuses it.
 func ValidShape(code string) bool {
 	if len(code) != codeLength {
 		return false
 	}
-	for i := 0; i < len(code); i++ {
-		c := code[i]
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
-		default:
-			return false
-		}
-	}
-	return true
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(code)
+	return err == nil && len(raw) == codeBytes
 }
 
 func (s *Store) evictOldestLocked() {
