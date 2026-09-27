@@ -97,6 +97,17 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// A name the app's pairing parser would refuse is refused here, before
+	// anything is written, as any other bad flag is: one that is not UTF-8
+	// (`--name $'Caf\xe9'` from a Latin-1 terminal was saved as `!!binary`
+	// and every QR's name=Caf%E9 was refused as a missing field) or one over
+	// config.MaxLibraryNameLength. A blank one is no name, as below.
+	if name := config.TrimLibraryName(*libraryName); name != "" {
+		if err := config.CheckLibraryName(name); err != nil {
+			fmt.Fprintf(stderr, "--name %v\n", err)
+			return 2
+		}
+	}
 	if *publicMode {
 		if *publicDomain == "" {
 			fmt.Fprintf(stderr, "--public requires --domain <fqdn>\n")
@@ -268,16 +279,24 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// is an empty one. The flag was saved as given until 2026-09-27, and
 	// Load served it so, padding and all, in /v1/health and in every
 	// pairing QR, which the app refuses when the name is empty or padded.
+	//
+	// The install's name is kept as Load serves it (RepairLibraryName): a
+	// config can hold one over the cap or one that is not UTF-8, which Load
+	// repairs, and keeping the file's would offer at the prompt a name the
+	// prompt then refuses when Enter takes it.
 	firstName := firstInstallName()
 	defaultName := firstName
 	if prior != nil {
-		if kept := config.TrimLibraryName(prior.LibraryName); kept != "" {
+		if kept := config.RepairLibraryName(prior.LibraryName); kept != "" {
 			defaultName = kept
 		}
 	}
 	name := config.TrimLibraryName(*libraryName)
 	if name == "" && !*nonInteractive {
-		name = config.TrimLibraryName(ask(in, stdout, "Library display name", defaultName))
+		var code int
+		if name, code = askLibraryName(in, stdout, stderr, defaultName); code != 0 {
+			return code
+		}
 	}
 	nameKept := false
 	if name == "" {
@@ -1205,7 +1224,38 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 
 // maxLibraryPrompts bounds the interactive library-path re-prompt loop so a
 // non-TTY stdin that slipped past the menu's TTY gate can't spin forever.
+// askLibraryName's loop takes the same bound.
 const maxLibraryPrompts = 5
+
+// askLibraryName asks for the library's display name, offering def, and asks
+// again when the answer is one the app's pairing parser would refuse
+// (config.CheckLibraryName), where `--name` exits 2: by the prompt the library
+// is chosen and the preflight has run, and a run should not end over the
+// name. The answer is trimmed as the parser trims it, and one blank once
+// trimmed is returned as "", no name, which the caller turns into def.
+//
+// Enter takes def, and so does a closed stdin (ask returns it for both), so
+// the loop cannot spin on a stream that has ended. def is not checked: it is
+// the host's name or the name the install is served under, and a host name
+// the parser would refuse is repaired where the config is saved
+// (config.RepairLibraryName, in Normalize). Returns (name, 0), or ("", 2)
+// after maxLibraryPrompts refused answers.
+func askLibraryName(in *bufio.Reader, stdout, stderr io.Writer, def string) (string, int) {
+	for attempt := 0; attempt < maxLibraryPrompts; attempt++ {
+		answer := ask(in, stdout, "Library display name", def)
+		name := config.TrimLibraryName(answer)
+		if name == "" || answer == def {
+			return name, 0
+		}
+		err := config.CheckLibraryName(name)
+		if err == nil {
+			return name, 0
+		}
+		fmt.Fprintln(stderr, paint(ansiRed, "✗ the name "+err.Error()))
+	}
+	fmt.Fprintf(stderr, "Too many invalid attempts. Aborting.\n")
+	return "", 2
+}
 
 // resolveLibraryDir expands a leading ~, makes the path absolute, and
 // verifies it's an existing directory. Returns the absolute path or an

@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/urlquery"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -37,6 +38,15 @@ const httpsScheme = "https://"
 // still has a Tailscale fallback recorded and can roam without a
 // re-pair. Older iOS builds ignore unknown query params and keep using
 // `url` alone.
+//
+// A space is written %20, never "+" (urlquery.Encode). The app reads this
+// query with Foundation's URLComponents.queryItems, which keeps a "+" as a
+// plus, and url.Values.Encode wrote every space in the library name as
+// one: until 2026-09-27 a bridge named "My Library" paired as
+// "My+Library", and the default name as "1-bit+Bridge", which the app
+// pre-fills as the name it saves the bridge under. The bridge's own tests
+// decoded with u.Query(), a form decoder that reads "+" as a space, so
+// they could not see it.
 func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternates []string) string {
 	q := url.Values{}
 	q.Set("url", bridgeURL)
@@ -51,7 +61,7 @@ func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternat
 	q.Set("token", rawToken)
 	q.Set("fingerprint", fingerprint)
 	q.Set("name", libraryName)
-	return "bridge://pair?" + q.Encode()
+	return "bridge://pair?" + urlquery.Encode(q)
 }
 
 // pairAlternates returns every URL the admin console should bake into

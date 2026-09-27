@@ -2,9 +2,9 @@ package admin
 
 import (
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/urlquery"
 )
 
 // TestSafeQueryPreservesLiteralPlus pins the trap this helper exists
@@ -53,7 +53,11 @@ func TestSafeQueryLeavesOtherParamsAlone(t *testing.T) {
 // that the client must use encodeURIComponent (%20 for space, %2B for
 // plus), which is what this asserts.
 //
-// The cases below are exactly what encodeURIComponent produces.
+// The Go client is `bridge enrichment misses --path`, which escapes with
+// urlquery.Escape, and the cases are encoded with that same function. It
+// writes what encodeURIComponent writes for them, and it is the escape the
+// CLI used url.QueryEscape in place of until 2026-09-27, the same "+" for
+// a space.
 func TestSafeQueryRoundTripsEncodeURIComponent(t *testing.T) {
 	for _, want := range []string{
 		"Plus Test/A+B Song.flac",
@@ -62,9 +66,7 @@ func TestSafeQueryRoundTripsEncodeURIComponent(t *testing.T) {
 		"a&b/c=d/e?f.flac",
 		"plain.flac",
 	} {
-		// encodeURIComponent's escape set, expressed the way Go's
-		// url.QueryEscape does NOT (it would emit "+" for a space).
-		encoded := strings.ReplaceAll(url.QueryEscape(want), "+", "%20")
+		encoded := urlquery.Escape(want)
 		r := httptest.NewRequest("GET", "/x?path="+encoded, nil)
 		if got := safeQuery(r).Get("path"); got != want {
 			t.Errorf("path %q encoded as %q round-tripped to %q", want, encoded, got)

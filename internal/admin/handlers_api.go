@@ -2361,6 +2361,16 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 					msg: "libraryName: must not be blank (devices show this bridge under it, " +
 						"and a pairing code without one does not pair)"}
 			}
+			// Nor one the pairing code cannot carry: over
+			// MaxLibraryNameLength runes (JSON has already replaced any
+			// byte that is not UTF-8). Measured 2026-09-27: 257 characters
+			// answered 200 `live` and the next QR did not pair. Refused,
+			// not cut, for the blank name's reason: the operator typed it,
+			// and Normalize cutting it would store a name nobody typed.
+			if err := config.CheckLibraryName(v); err != nil {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate",
+					msg: "libraryName: " + err.Error()}
+			}
 			// Compare before assigning: the write is idempotent either
 			// way (the stored value is already trimmed), but without the
 			// compare a same-value submit could not be reported as

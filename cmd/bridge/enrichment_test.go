@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -302,6 +303,41 @@ func TestCollectMissesProbesOnce(t *testing.T) {
 	// And the fallback still tells the truth about why it read the store.
 	if !strings.Contains(rep.Source, "bridge is running") {
 		t.Errorf("Source = %q, want it to say the bridge is running", rep.Source)
+	}
+}
+
+// TestMissesViaAdminSendsTheScopeSafeQueryReadsBack: `--path` reaches the
+// handler as the operator typed it. GET /api/enrichment/misses reads the
+// path through the admin console's safeQuery, which keeps a "+" as a plus
+// so that a folder named "A+B" resolves, and the CLI wrote a space as "+":
+// measured on 2026-09-27 against a running bridge, `bridge enrichment misses
+// --path "Meridian Glass"` asked for "Meridian+Glass" and reported 0 of the
+// 5 tracks under it, where the same request with %20 found all 5. The query
+// is read here the way safeQuery reads it, "+" kept; the handler's half,
+// safeQuery reading what urlquery.Escape writes, is pinned in internal/admin
+// by TestSafeQueryRoundTripsEncodeURIComponent.
+func TestMissesViaAdminSendsTheScopeSafeQueryReadsBack(t *testing.T) {
+	const scope = "Meridian Glass/A+B Album"
+	var rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"","scanned":0,"missing":0}`))
+	}))
+	defer srv.Close()
+
+	if _, err := missesViaAdmin(context.Background(), strings.TrimPrefix(srv.URL, "http://"), scope); err != nil {
+		t.Fatalf("missesViaAdmin: %v", err)
+	}
+	raw, ok := strings.CutPrefix(rawQuery, "path=")
+	if !ok || strings.Contains(raw, "&") {
+		t.Fatalf("query = %q, want the one path parameter", rawQuery)
+	}
+	if strings.Contains(raw, "+") {
+		t.Errorf("path=%s carries a raw %q, which safeQuery reads as a plus", raw, "+")
+	}
+	if got, err := url.PathUnescape(raw); err != nil || got != scope {
+		t.Errorf("path=%s reads back as %q (err %v), want %q", raw, got, err, scope)
 	}
 }
 

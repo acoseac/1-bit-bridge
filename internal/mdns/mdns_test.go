@@ -7,7 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
+
+	hcmdns "github.com/hashicorp/mdns"
+	"github.com/miekg/dns"
 )
 
 func TestBuildTXTRecordsIncludesProtocolAndLibrary(t *testing.T) {
@@ -240,6 +244,135 @@ func TestAdvertisedHostNeverBareLocal(t *testing.T) {
 	if got := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
 		t.Errorf("advertisedHost(host.) = %q, want host.local", got)
 	}
+}
+
+// TestInstanceNameFitsADNSLabel: the Bonjour instance name is the library
+// name, and it is one DNS label, which holds 63 bytes (RFC 6763 4.1.1).
+// hashicorp/mdns does not check it: NewMDNSService takes a longer one,
+// Advertise succeeds and `bridge serve` says "mDNS: advertising as", and
+// then every answer to a browse fails to pack, with "dns: bad rdata", so
+// the bridge is never discovered. Measured on 2026-09-27 (main at 3214aa17)
+// through the Records-then-Pack path below, which is the one the server
+// takes to answer: 63 bytes packed, 64 did not, and 22 CJK characters are
+// 66. The same two names, served on a Linux LAN and browsed with
+// hashicorp/mdns's client, were not found; each query logged "[ERR] mdns:
+// Failed to handle query: ... dns: bad rdata" at INFO. The library name may
+// be 256 runes, so the instance is cut to fit, on a rune boundary and with
+// no space left at its end; the TXT record's library= carries the rest.
+func TestInstanceNameFitsADNSLabel(t *testing.T) {
+	for _, name := range []string{
+		strings.Repeat("a", 63),
+		strings.Repeat("a", 64),
+		strings.Repeat("a", 256),
+		strings.Repeat("é", 32), // 64 bytes; byte 63 is inside a rune
+		"東京の音楽ライブラリ・ハイレゾコレクション集",            // 22 runes, 66 bytes
+		strings.Repeat("a", 62) + " b",      // the cut lands after a space
+		strings.Repeat("a", 62) + `\suffix`, // the cut lands after a backslash
+		`AC\DC Live`,                        // kept whole, backslash and all
+		`Ends in a backslash\`,              // a backslash no cut left
+		`\065`,                              // "A", to miekg/dns, unescaped
+		"Living Room NAS: Hi-Res FLAC and DSD Archive (Synology)", // 55 bytes, kept whole
+	} {
+		label, err := wireInstanceLabel(sanitizeInstance(name))
+		switch {
+		case err != nil:
+			t.Errorf("the instance for %q does not pack: %v", name, err)
+		case len(label) > 63:
+			t.Errorf("the instance for a name of %d bytes is %d bytes on the wire, more than a DNS label holds", len(name), len(label))
+		case !utf8.ValidString(label):
+			t.Errorf("the instance for %q is %q on the wire, which is not UTF-8", name, label)
+		case label == "" || !strings.HasPrefix(name, label):
+			t.Errorf("the instance for %q is %q on the wire, want a non-empty prefix of the name", name, label)
+		case strings.TrimRightFunc(label, unicode.IsSpace) != label:
+			t.Errorf("the instance for %q is %q on the wire, which ends in a space", name, label)
+		case len(name) <= 63 && label != name:
+			t.Errorf("the instance for %q is %q on the wire, want a name that fits kept whole", name, label)
+		}
+		instance := sanitizeInstance(name)
+		svc, err := hcmdns.NewMDNSService(instance, Service, "", "host.local.", 7788,
+			[]net.IP{net.ParseIP("192.0.2.1")}, buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: name}, nil))
+		if err != nil {
+			t.Fatalf("NewMDNSService(%q): %v", instance, err)
+		}
+		answer := new(dns.Msg)
+		answer.Response = true
+		answer.Answer = svc.Records(dns.Question{Name: Service + ".local.", Qtype: dns.TypePTR, Qclass: dns.ClassINET})
+		if len(answer.Answer) == 0 {
+			t.Fatalf("premise: a browse for %s has no answer", Service)
+		}
+		if _, err := answer.Pack(); err != nil {
+			t.Errorf("the answer to a browse for a bridge named %q does not pack: %v", name, err)
+		}
+	}
+}
+
+// wireInstanceLabel is instance as a browse answer carries it: the first
+// label of the service instance name hashicorp/mdns builds from it
+// (instance + "." + Service + ".local."), packed as miekg/dns packs it. That
+// string is DNS presentation format, where a backslash escapes what follows
+// it: `\X` is X and `\DDD` a byte, so a backslash the name holds must reach
+// it as `\\`, and one at the end of the instance escapes the dot after it,
+// which merges the instance into the service label.
+func wireInstanceLabel(instance string) (string, error) {
+	buf := make([]byte, 512)
+	if _, err := dns.PackDomainName(instance+"."+Service+".local.", buf, 0, nil, false); err != nil {
+		return "", err
+	}
+	return string(buf[1 : 1+int(buf[0])]), nil
+}
+
+// TestTXTCarriesTheLibraryNameAsWritten: the TXT record's library= is the
+// name the app's discovery picker shows, and hashicorp/mdns hands its strings
+// to miekg/dns as presentation format, the instance's trap in a second place:
+// a backslash escapes what follows it (`\X` is X, `\DDD` a byte) and a lone
+// one at the end is dropped. Measured on 2026-09-27 on a Linux LAN: a bridge
+// named "AC\DC Live" was browsed with library="ACDC Live", before and after
+// the instance's own fix. Every TXT string is escaped after its cap, which
+// counts the bytes the record carries, so a cut can leave a backslash too.
+func TestTXTCarriesTheLibraryNameAsWritten(t *testing.T) {
+	a239 := strings.Repeat("a", 239)
+	for _, tc := range []struct{ name, want string }{
+		{`AC\DC Live`, `AC\DC Live`},
+		{`Ends in a backslash\`, `Ends in a backslash\`},
+		{`\065`, `\065`},
+		{a239 + `\x`, a239 + `\`}, // the 240-byte cap lands after the backslash
+		{"My Music", "My Music"},
+	} {
+		strs, err := wireTXT(buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: tc.name}, nil))
+		if err != nil {
+			t.Errorf("the TXT record for %q does not pack: %v", tc.name, err)
+			continue
+		}
+		got, found := "", false
+		for _, s := range strs {
+			if v, ok := strings.CutPrefix(s, "library="); ok {
+				got, found = v, true
+			}
+		}
+		if !found || got != tc.want {
+			t.Errorf("the TXT record for %q carries library=%q (found %v), want %q", tc.name, got, found, tc.want)
+		}
+	}
+}
+
+// wireTXT is entries as a TXT record carries them, packed as miekg/dns packs
+// the strings hashicorp/mdns hands it: the character-strings of its RDATA,
+// after a root owner name (one byte) and the type, class, TTL and RDLENGTH
+// (ten).
+func wireTXT(entries []string) ([]string, error) {
+	rr := &dns.TXT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeTXT, Class: dns.ClassINET}, Txt: entries}
+	buf := make([]byte, 8192)
+	n, err := dns.PackRR(rr, buf, 0, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for rdata := buf[11:n]; len(rdata) > 0; {
+		l := int(rdata[0])
+		out = append(out, string(rdata[1:1+l]))
+		rdata = rdata[1+l:]
+	}
+	return out, nil
 }
 
 // TestAdvertiseStartsAndStops spins up a real mDNS server on a high

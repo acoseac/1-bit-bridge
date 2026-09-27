@@ -1546,6 +1546,10 @@ bridge://pair?url=<https bridge URL>&token=<base64url bearer>&fingerprint=<AB:CD
 | `fingerprint` | Server TLS cert SHA-256 in colon-delimited uppercase hex. Used for pinning. |
 | `name`        | Human-readable library name (shown in the iOS UI). |
 
+**Encoding.** Each value is percent-encoded as a URI query component (RFC 3986): a space is `%20` and a literal `+` is `%2B`. iOS reads the query with Foundation's `URLComponents.queryItems`, which keeps a raw `+` as a plus, so a space written as `+` (the form encoding of Go's `url.Values.Encode`) arrives as a `+`. Bridges up to and including v0.2.0 wrote the library name that way, so a bridge named `My Library` pre-fills the pairing sheet with `My+Library`.
+
+**`name` limits.** iOS refuses a pairing code whose `name` is empty, has leading or trailing whitespace (as `CharacterSet.whitespacesAndNewlines` trims it, which counts U+200B), is not valid UTF-8 once percent-decoded (it then has no value, and is reported missing), or is longer than 256 Characters (grapheme clusters). The bridge stores only names within all four: it caps them at 256 Unicode scalars, which is never more than 256 Characters.
+
 Unknown query parameters MUST be ignored — future additive fields (e.g. a display hint for the pairing modal) stay at the same protocol version.
 
 **iOS behaviour**: after parsing, the client runs the same `/v1/health` probe + authed `/v1/manifest?since=<future>` verify steps it uses for manual pairing, then persists the share on success. A malformed URL (missing fields, token/fingerprint fail regex sanity) is rejected before any network call.
