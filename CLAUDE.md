@@ -1945,7 +1945,7 @@ no failing test — which is the shape to expect in this area.
   lost against a 10 Hz writer) and, on Windows, its retries. A kernel lock would
   close it, as for adminauth.json, and is not taken.
 - **…and a debounced write that FAILS starts the next window too, and a store
-  the running bridge cannot read is reported once each way** (#1045).
+  the running bridge cannot read is reported once each way** (#1047).
   Validate's and RecordClientVersion's debounced write started the next 30 s
   window only when it LANDED (`writeLocked` stamped `lastUsedFlush`), so while
   it could not land every request past the window re-entered the write: 10

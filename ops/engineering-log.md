@@ -18670,7 +18670,7 @@ list stay consistent). Leave Windows' retries as the residual.
 - **A bridge still running the old binary** keeps both windows until it
   restarts.
 
-## 2026-09-27 — a failed debounced `tokens.json` write starts the next window, and an unreadable store is reported once (#1045)
+## 2026-09-27 — a failed debounced `tokens.json` write starts the next window, and an unreadable store is reported once (#1047)
 
 #1043's entry recorded it under Out of scope: "A tokens.json the running
 bridge cannot read logs an Error on every authenticated request … Filed as
