@@ -73,8 +73,15 @@
       <h2 class="section-head">General</h2>
 
       <div class="field">
+        {{/*
+          `required` and the pattern stop a blank name before it is sent:
+          the Save is a real submit button, so the browser checks them
+          before app.js sees the submit. The PATCH refuses a name that is
+          blank once trimmed (TrimLibraryName in internal/config), and the
+          pattern catches spaces alone, which `required` lets through.
+        */}}
         <label>Library name
-          <input name="libraryName" type="text" value="{{.Data.LibraryName}}">
+          <input name="libraryName" type="text" value="{{.Data.LibraryName}}" required pattern=".*\S.*" title="Devices show this bridge under this name, so it cannot be blank.">
         </label>
         <small class="hint">Shown in the iOS pairing UI and mDNS TXT records.</small>
       </div>
