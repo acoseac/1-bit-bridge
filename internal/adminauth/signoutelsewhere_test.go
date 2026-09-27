@@ -541,14 +541,9 @@ func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 	if ended != 2 {
 		t.Errorf("EndOtherSessions ended %d, want 2", ended)
 	}
-	if _, err := a.ValidateSession(caller); err != nil {
-		t.Errorf("the caller's own session was ended: %v", err)
-	}
-	for i, raw := range others {
-		if _, err := a.ValidateSession(raw); !errors.Is(err, ErrSessionNotFound) {
-			t.Errorf("other session %d on the running bridge = %v, want ErrSessionNotFound", i, err)
-		}
-	}
+	// The file before anything else: the caller's next check falls past the
+	// debounce and writes the set itself, which would land an end that
+	// EndOtherSessions only made in memory.
 	requireEndedOnDisk(t, path, "EndOtherSessions", append(others, stale)...)
 	c, err := OpenStore(path)
 	if err != nil {
@@ -557,6 +552,14 @@ func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 	c.now = clock.now
 	if _, err := c.ValidateSession(caller); err != nil {
 		t.Errorf("the caller's session is not in the file for the next start: %v", err)
+	}
+	if _, err := a.ValidateSession(caller); err != nil {
+		t.Errorf("the caller's own session was ended: %v", err)
+	}
+	for i, raw := range others {
+		if _, err := a.ValidateSession(raw); !errors.Is(err, ErrSessionNotFound) {
+			t.Errorf("other session %d on the running bridge = %v, want ErrSessionNotFound", i, err)
+		}
 	}
 }
 
