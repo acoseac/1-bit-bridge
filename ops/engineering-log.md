@@ -19663,3 +19663,28 @@ in the iOS twin.
   All red on main (405: no route).
 - Controls: without the demo check only the demo case goes red; without the
   `Clear()` call the two clearing tests go red.
+- **Review round (CodeRabbit on the app's #1981): the harvest-off 404 was
+  not "nothing held".** The route answered 404 `harvest_not_supported` on a
+  bridge with `atlas.harvestEnabled` off without touching the state file,
+  and this entry's CLAUDE.md rule said why: nothing there reads the file.
+  Re-enabling the harvest does, so a credential the app had asked to revoke
+  came back into use, while the app had read the 404 as nothing held. `serve`
+  now wires `atlasharvest.ClearStoredCredential` whenever no live store is
+  open. It drops the token and expiry and keeps the sync position, and it
+  writes nothing when nothing is held (no file created, none rewritten). The
+  route answers 204 either way. The demo check moved ahead of both clears:
+  a demo bridge refuses whatever its harvest setting. PROTOCOL.md now says
+  204 is the only answer that means revoked (the same review asked the app
+  to stop taking a 200 for one).
+- Tests: `TestClearStoredCredential` (a held credential cleared, the cursor
+  kept; no file not created; a file with nothing held not rewritten, judged
+  by planted content, not mtime);
+  `TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile`;
+  `TestAtlasHarvestCredentialDeleteOnADemoBridgeWithTheHarvestOffClearsNothing`;
+  and the boot test `TestServeRevokesAHarvestCredentialWithTheHarvestOff`,
+  which runs the real serve over a seeded state file.
+- Four controls, each turning exactly its predicted tests red: serve wiring
+  no clearer (the boot test alone); the handler ignoring the clearer (the
+  harvest-off route test and the boot test); the demo check after the clear
+  (the demo tests); a clear that writes with nothing held
+  (`TestClearStoredCredential`).
