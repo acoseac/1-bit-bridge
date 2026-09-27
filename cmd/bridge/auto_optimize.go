@@ -196,21 +196,39 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		MinFreeBytes: sw.minFreeBytes(),
 		FreeBytes:    freeBytes,
 	}
-	if aborted := sw.drainCandidates(ctx, cands, outputDir, freeBytes, scratchFree, counts); aborted {
+	if aborted := sw.drainCandidates(ctx, cands, transcode.JobKindOptimize, outputDir, freeBytes, scratchFree, counts); aborted {
+		return nil
+	}
+	if aborted := sw.drainSupersededPCMRenditions(ctx, outputDir, freeBytes, scratchFree, counts); aborted {
 		return nil
 	}
 
-	// Remaining backlog for the admin card. A second pass over the same
-	// predicate — deliberately, so the card's number and the sweeper's
-	// work cannot drift — and affordable because it runs once per sweep
-	// (default cadence: the scan interval), not per tick of anything hot.
-	if remaining, cerr := sw.store.CountAutoOptimizeCandidates(ctx, sw.eligibilityOpts()); cerr == nil {
-		counts.Remaining = remaining
-	} else if ctx.Err() == nil {
-		logger.Warn("auto-optimize sweep: count remaining", "err", cerr)
-	}
+	counts.Remaining = sw.remainingBacklog(ctx)
 	logAutoOptimizeSweep(counts)
 	return counts
+}
+
+// remainingBacklog is the admin card's "N remaining". A second pass over
+// the same predicates — deliberately, so the card's number and the
+// sweeper's work cannot drift — and affordable because it runs once per
+// sweep (default cadence: the scan interval), not per tick of anything hot.
+// While DSD renditions are on it counts the faithful renditions still on an
+// older DSD schema too, which drainSupersededPCMRenditions moves. A failed
+// count is logged and adds nothing.
+func (sw *autoOptimizeSweeper) remainingBacklog(ctx context.Context) int {
+	opts := sw.eligibilityOpts()
+	remaining, err := sw.store.CountAutoOptimizeCandidates(ctx, opts)
+	if err != nil && ctx.Err() == nil {
+		logger.Warn("auto-optimize sweep: count remaining", "err", err)
+	}
+	if opts.DSDRender {
+		superseded, err := sw.store.CountSupersededPCMRenditions(ctx, opts)
+		if err != nil && ctx.Err() == nil {
+			logger.Warn("auto-optimize sweep: count superseded faithful renditions", "err", err)
+		}
+		remaining += superseded
+	}
+	return remaining
 }
 
 // planVerdict is what planCandidate decided about one candidate.
@@ -229,7 +247,14 @@ const (
 // planCandidate turns one candidate row into a submittable JobSpec, or
 // says why it can't. No side effects — the caller owns the counters, so
 // the decision rules stay readable in one place.
-func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string, soxInfo transcode.SoxInfo) (transcode.JobSpec, int64, planVerdict) {
+//
+// `kind` is the tier: JobKindOptimize for the compact candidates, or
+// JobKindPCMRender for a faithful rendition being moved to the current DSD
+// schema (drainSupersededPCMRenditions).
+func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, kind transcode.JobKind, outputDir string, soxInfo transcode.SoxInfo) (transcode.JobSpec, int64, planVerdict) {
+	if kind == transcode.JobKindPCMRender {
+		return sw.planPCMRender(c, outputDir)
+	}
 	// Re-run the GO gate. The SQL predicate that selected this row is a
 	// documented MIRROR of it (pinned by the admin package's lockstep
 	// test), and on a path that spends disk and CPU the Go gate stays
@@ -312,7 +337,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 // drainCandidates submits the planned candidates, maintaining the running
 // disk budget. Returns true when the context was cancelled mid-drain, so
 // the caller can discard partial counts (shutdown is not a sweep result).
-func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, kind transcode.JobKind, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
 	floor := counts.MinFreeBytes
 	var projectedTotal int64
 	defer func() { counts.ProjectedBytes = projectedTotal }()
@@ -324,7 +349,7 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 		if ctx.Err() != nil {
 			return true
 		}
-		spec, projected, verdict := sw.planCandidate(c, outputDir, soxInfo)
+		spec, projected, verdict := sw.planCandidate(c, kind, outputDir, soxInfo)
 		switch verdict {
 		case planIneligible:
 			counts.Ineligible++
@@ -361,6 +386,84 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 	}
 	return false
 }
+
+// drainSupersededPCMRenditions moves the FAITHFUL renditions to the current
+// DSD schema — v2 is the album-level gain. The compact tier moves through
+// the candidate query itself (a DSD source is covered only by a current-
+// schema row), but the faithful tier is never swept: it is rendered on
+// request, and a phone that holds a `pcm-` rendition never asks again. So
+// this pass re-renders exactly the tracks that already have one, on the
+// background lane, under the same caps, disk budgets and per-sweep cap as
+// the compact pass it follows (the rows it enqueues count as regenerations).
+// A sweep that already stopped — disk floor, full queue, cap spent — adds
+// nothing. The superseded row stays: a phone that downloaded it finds its
+// id and gain in the manifest, which lists the new one first.
+func (sw *autoOptimizeSweeper) drainSupersededPCMRenditions(ctx context.Context, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+	budget := sw.maxPerSweep() - counts.Enqueued
+	if !sw.caps().Active() || counts.DiskFloorReached || counts.QueueSaturated || budget <= 0 {
+		return false
+	}
+	cands, err := sw.store.ListSupersededPCMRenditions(ctx, budget, sw.eligibilityOpts())
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Warn("auto-optimize sweep: list superseded faithful renditions", "err", err)
+		}
+		return false
+	}
+	before := counts.Enqueued
+	// The compact pass already spent part of the sidecar budget; charge it
+	// here too, so the two passes together stay above the floor, and add it
+	// back afterwards — drainCandidates reports only its own projection.
+	compactProjected := counts.ProjectedBytes
+	aborted = sw.drainCandidates(ctx, cands, transcode.JobKindPCMRender, outputDir, freeBytes-compactProjected, scratchFree, counts)
+	counts.ProjectedBytes += compactProjected
+	if n := counts.Enqueued - before; n > 0 && !aborted {
+		logger.Info("auto-optimize sweep: faithful renditions moved to the current DSD schema",
+			"enqueued", n, "schema", transcode.DSDRenditionSchemaVersion)
+	}
+	return aborted
+}
+
+// planPCMRender is planCandidate for the faithful tier: the DSD gate,
+// the family's 4× base rate at 24 bits, on the background lane, with the
+// render facts from the track row exactly as the compact tier takes them.
+func (sw *autoOptimizeSweeper) planPCMRender(c manifest.AutoOptimizeCandidate, outputDir string) (transcode.JobSpec, int64, planVerdict) {
+	if !transcode.PCMRenderEligible(c.Path, c.Codec, c.IsDSD, c.SampleRate, c.Compression, sw.caps()) {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	targetRate, terr := transcode.ResolveTargetRateForPCMRender(c.SampleRate)
+	if terr != nil {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	projected := transcode.ProjectedSize(c.Size, c.SampleRate, c.BitsPerSample,
+		targetRate, pcmRenderTargetBits, transcode.DefaultCompressionFactor(pcmRenderTargetBits))
+	abs, info, rerr := sw.resolver.ResolveChecked(c.Path)
+	if rerr != nil || info.IsDir() {
+		return transcode.JobSpec{}, projected, planUnresolvable
+	}
+	return transcode.JobSpec{
+		SourceAbsPath:     abs,
+		SourceLibraryRel:  c.Path,
+		SourceMTimeNS:     c.MTimeNS,
+		SourceSize:        c.Size,
+		SourceSampleRate:  c.SampleRate,
+		SourceBits:        c.BitsPerSample,
+		SourceIsDSD:       true,
+		SourceCompression: c.Compression,
+		SourceChannels:    c.Channels,
+		SourceDurationSec: c.DurationSec,
+		TargetSampleRate:  targetRate,
+		TargetBits:        pcmRenderTargetBits,
+		Quality:           transcode.QualityVeryHigh,
+		OutputDir:         outputDir,
+		TempDir:           sw.renderTempDir(),
+		Kind:              transcode.JobKindPCMRender,
+		Background:        true,
+	}, projected, planEnqueue
+}
+
+// pcmRenderTargetBits is the faithful tier's depth (`pcm-…-24`).
+const pcmRenderTargetBits = 24
 
 // laneCount is the concurrent-render bound the scratch check is sized
 // for. Nil or nonsensical reads as 1 — a single lane is the pre-#863

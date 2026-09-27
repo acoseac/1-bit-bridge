@@ -1002,7 +1002,7 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 }
 
 // SubmitPCMRender is the faithful DSD rendition's batch entry point
-// (`pcm-v1-<176400|192000>-24`): the optimize pipeline over the `pcm-`
+// (`pcm-v2-<176400|192000>-24`): the optimize pipeline over the `pcm-`
 // coverage prefix, with the DSD gate in place of the PCM one. Batch scope
 // SKIPS every non-DSD / ineligible projection — a mixed FLAC+DSD album
 // renders its DSD tracks and never aborts, the FLACs counted into the

@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
+	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
@@ -707,6 +708,15 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 		return 0
 	}
 
+	// The album-level gain, exactly as the serve pool applies it: every DSD
+	// render shares its boost with its album. No pool here, so the resolver
+	// rides each DSD spec from the producer below.
+	albumGains, err := newCLIAlbumGainer(store, resolver, p)
+	if err != nil {
+		fmt.Fprintf(stderr, "album gain: %v\n", err)
+		return 1
+	}
+
 	// Worker pool. SoX is single-threaded per invocation; we run
 	// `workers` parallel sox processes and let the OS scheduler
 	// fan them across cores. A bounded channel keeps memory
@@ -729,6 +739,9 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// until a worker drains a job, defeating prompt shutdown.
 producerLoop:
 	for _, c := range candidates {
+		if c.spec.SourceIsDSD {
+			c.spec.AlbumGain = albumGains
+		}
 		select {
 		case jobsCh <- c:
 		case <-ctx.Done():
@@ -755,6 +768,46 @@ producerLoop:
 		return 1
 	}
 	return 0
+}
+
+// newCLIAlbumGainer is the CLI's album-level gain decider, the one the serve
+// pool applies with the CLI's own album-mate spec (cliAlbumMateSpec).
+func newCLIAlbumGainer(store *manifest.Store, resolver *bridgefs.Resolver, p runUpscaleParams) (*albumgain.Resolver, error) {
+	return albumgain.New(albumgain.Config{
+		Catalog: store,
+		Peaks:   store,
+		SpecFor: cliAlbumMateSpec(store, resolver, p),
+	})
+}
+
+// cliAlbumMateSpec measures an album-mate with no recorded peak with the
+// spec THIS command would render it with: classifyUpscaleTrack under the
+// run's own kind, quality and directories, with the filter and the resume
+// check lifted — a mate outside `--filter`, or already rendered, still
+// bounds the album — and with its source facts from the track row, as the
+// serve side stamps them (the classifier's are a live stat).
+func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runUpscaleParams) albumgain.SpecFor {
+	mate := p
+	mate.filter, mate.force, mate.dryRun = "", true, false
+	return func(ctx context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error) {
+		t, err := store.LookupTrack(ctx, path)
+		if err != nil {
+			return transcode.JobSpec{}, err
+		}
+		if t == nil {
+			return transcode.JobSpec{}, fmt.Errorf("album-mate %s is not in the library", path)
+		}
+		var ignored upscaleSkipCounters
+		c, exit := classifyUpscaleTrack(ctx, io.Discard, store, resolver, *t, mate, &ignored)
+		if exit != 0 || c == nil {
+			return transcode.JobSpec{}, fmt.Errorf("album-mate %s is not renderable by this command", path)
+		}
+		spec := c.spec
+		spec.Quality = like.Quality
+		spec.SourceMTimeNS = t.ModTime.UnixNano()
+		spec.SourceSize = t.Size
+		return spec, nil
+	}
 }
 
 // runGCForwardSweep unlinks every file the inventory classified as an

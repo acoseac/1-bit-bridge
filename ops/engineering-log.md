@@ -20111,3 +20111,98 @@ packages (944 tests, all accounted for): dropping the re-read under the claim
 turned exactly `TestASurveyRereadsThePeakUnderItsClaim` red ("measured 2
 times, want exactly 1"), and dropping the raw bind for ill-formed paths turned
 exactly `TestFreshDSDPeaksFindsAnIllFormedPath` red.
+
+## 2026-09-27 — the album-level gain switched on: DSD renditions move to schema v2
+
+The parts landed dark in #1053 (the entry above). This PR switches them on.
+Every DSD render the serve pool runs (on-demand, batch or swept) and every
+one `bridge optimize` / `bridge render` runs now shares its boost with its
+album, and the renditions already on disk move to it.
+
+**Decisions and what was rejected**
+- **A schema bump with new ids, not a re-render under v1.** The app applies a
+  rendition's `appliedGainDB` to the bytes of its downloaded copy, and it
+  looks the gain up by id. Checked in the iOS source: `downloadedOfflineVariant`
+  returns the copy's stored `offlineVariantID`, `dsdRenditionSource` reads that
+  id's `appliedGainDB` from the queue item's variants, and an id that has
+  vanished plays as plain PCM, untrimmed. Re-rendering `optimized-dsd-v1-…` in
+  place would have the app trim old bytes by the new gain. So v2 mints new
+  ids and **the v1 rows stay** while their files exist. The GC never reaps a
+  superseded row whose sidecar exists (two comments claimed it did; both are
+  corrected). They go only once the app records a downloaded copy's gain with
+  the copy, plus a grace period.
+- **Newest first.** iOS's `bestVariant` takes the first variant of a family at
+  the expected rate, so the manifest's order decides what every shipped app
+  streams and downloads. `variantsAggSQL` now orders each track's array by
+  `created_at DESC, variant_id DESC`. Filtering superseded rows out of the
+  manifest instead was rejected: it breaks the downloaded copies above. The
+  order reaches the PCM families too, and for the better: the app takes the
+  first `upscaled-` / `optimized-` match as well, and primary-key order listed
+  a superseded `upscaled-v1-…` (before sox's `-G` guard) ahead of its
+  `upscaled-v2-…` replacement.
+- **The bridge drives the move.** A phone never requests a family it already
+  holds, so nothing would ask for v2. A DSD source's sweeper coverage now needs
+  a fresh row of the CURRENT DSD schema. A PCM source's stays version-agnostic,
+  the rule that keeps the sweeper out of a regenerate loop.
+  `manifest.DSDRenditionSchemaVersion` mirrors transcode's, pinned by
+  `TestManifestMirrorsTheDSDRenditionSchema`.
+- **The faithful tier moves only where it exists.** It is rendered on request,
+  so `drainSupersededPCMRenditions` re-renders the tracks that already hold a
+  `pcm-` row and never adds one: a track without one would get a 5 GB-an-hour
+  rendition nobody asked for. It runs after the compact pass, under the same
+  per-sweep cap and disk budgets, and the card's "remaining" counts its
+  backlog too.
+- **Wiring, extracted so tests run it.** In serve, `wireAlbumGain`
+  (`albumgain.New` with the adapter's `albumMateSpec`, then
+  `Pool.SetAlbumGainer`), and the post-scan hook invalidates the album index.
+  In the CLI, `cliAlbumMateSpec` classifies a mate with the run's own
+  classifier, with `--filter` and the resume check lifted, because a mate
+  outside the filter still bounds the album. Both take a mate's source facts
+  from the track row, which a peak's freshness is judged against.
+- PROTOCOL.md: `appliedGainDB` is clip-guarded per album, the value belongs to
+  the rendition id, a track can list superseded renditions, the list is newest
+  first, and the DSD families are `v2`.
+
+**Cost on the reference bridge (the plan's Phase 0).** 1,704 compact
+renditions and 3 faithful ones re-render. That is about 5 hours of sweeping,
+and about 44 GB more on disk while v1 is kept.
+
+**Tests**
+- `manifest`: a DSD track holding only a v1 compact rendition is a candidate
+  again, while a current one and a PCM track's superseded row still cover
+  (`TestAutoOptimizeCandidatesMoveDSDToTheCurrentSchema`). The faithful pass
+  selects a v1-only track and one whose current rendition is stale, never a
+  current one or a track with none, and nothing without DSD caps
+  (`TestListSupersededPCMRenditions`). A track's renditions are listed newest
+  first, the v1 row keeps its own gain, and equal times fall back to the id
+  (`TestVariantsListTheNewestRenditionFirst`).
+- `transcode`: the mirror test checks the ids a render writes against the
+  manifest's LIKE patterns. `TestDSDFamilyPrefixes`' tripwire is `v2`.
+- `cmd/bridge`: the sweep runs both passes in one sweep, respects a cap the
+  compact pass spent, and moves nothing without caps. The two mate-spec
+  builders measure on the render's profile. **End to end on the real
+  toolchain**, through the serve wiring and through `runUpscaleBatch`: an
+  album of a −3 and a −12 dBFS DSF tone. The own guards are 2.0 and 6.0 dB;
+  both renditions carry 2.0, and the published files measure −4.01 and
+  −13.01 dB RMS, keeping the source's 9 dB. Per-track guards would have put
+  them 5 dB apart.
+- Every existing test expectation that spelled a v1 DSD id now spells v2
+  (eight files).
+
+**Negative controls**, on the committed tree, each red set predicted by name
+and every started test accounted for:
+- Four mutations in one run of `manifest` and `cmd/bridge` (1,416 tests):
+  version-agnostic DSD coverage, no `ORDER BY` on the variants, `wireAlbumGain`
+  and the CLI producer not setting the gainer, and both mate-spec builders
+  ignoring the render's quality. Exactly 7 went red:
+  - the schema-move and newest-first tests. Without the `ORDER BY`, the array
+    read `optimized-dsd-v1-…, pcm-v1-…, optimized-dsd-v2-…`: the primary-key
+    order the decision above rests on;
+  - the sweep test, through its "both passes" and "spent cap" subtests;
+  - both end-to-end tests, where the quiet track took its own +6, both scopes
+    read "track", and the files sat 5.00 dB apart;
+  - both mate-spec tests, on the profile's rate flag.
+- The faithful pass disabled: exactly the "both passes" subtest (1 job, not 3).
+- The card's remaining without the faithful backlog: exactly the same subtest,
+  on `Remaining = 1, want 3`.
+- The manifest's mirror at "v3": exactly `TestManifestMirrorsTheDSDRenditionSchema`.

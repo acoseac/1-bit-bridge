@@ -1148,8 +1148,8 @@ no failing test — which is the shape to expect in this area.
 - **THREE CLI commands feed the same classifier and worker pool, split by
   tier, and their DSD arms are gated per RUN.** `bridge upscale` (PCM →
   higher-rate PCM), `bridge optimize` (PCM → 16/44.1|48, and DSD →
-  `optimized-dsd-v1-*` under the flag) and `bridge render` (DSD →
-  `pcm-v1-*-24`). `runUpscaleParams.dsdCaps` is probed once per run and its
+  `optimized-dsd-v2-*` under the flag) and `bridge render` (DSD →
+  `pcm-v2-*-24`). `runUpscaleParams.dsdCaps` is probed once per run and its
   ZERO VALUE refuses every DSD source, which is what keeps `upscale` and a
   flag-less `optimize` byte-for-byte unchanged. **The admission itself
   delegates to `transcode.OptimizeEligibleFor` / `PCMRenderEligible`** — the
@@ -1230,11 +1230,12 @@ no failing test — which is the shape to expect in this area.
   "gain 2.0" across three different coefficient sets — **a constant factor across
   every variant of a parameter is evidence about the MEASUREMENT, not the
   subject**; it was a print bug (`want {dc*0.5}` while passing `u = dc`).
-- **The album-level gain's parts (2026-09-27, dark until its switch-on PR;
-  `ops/plan-2026-09-27-dsd-album-gain.md`).** Stage B's guard decides each
-  track's boost alone, so an album's tracks shift against each other (Phase 0,
-  on the operator's library: 57 % of DSD albums by more than 1 dB). The album
-  gain gives every track the boost its album's hottest track allows.
+- **The album-level gain's parts (2026-09-27, #1053; switched on as the DSD
+  `v2` schema by the PR after it; `ops/plan-2026-09-27-dsd-album-gain.md`).**
+  Stage B's guard decides each track's boost alone, so an album's tracks shift
+  against each other (Phase 0, on the operator's library: 57 % of DSD albums
+  by more than 1 dB). The album gain gives every track the boost its album's
+  hottest track allows.
   - **`dsd_peaks` (v47)** holds one true peak at unity per (track,
     `DSDPeakProfile` = recipe|tier|rate|rateFlag). NULL means silent and a
     missing row means never measured. A peak is fresh only while its mtime and
@@ -1276,6 +1277,35 @@ no failing test — which is the shape to expect in this area.
     `TestIndexGroupsLikeTheAdminCatalog` pins the grouping against
     `librarycat`. **Don't group by folder.** Routed rows and SACD virtual
     tracks never count: neither is rendered here.
+  - **The switch-on is the DSD schema `v2`, never a re-render under `v1`.** A
+    phone applies a rendition's `appliedGainDB` to the bytes of its
+    downloaded copy, looked up by id, so re-rendering an id in place gives old
+    bytes the new gain. v2 mints new ids, and **a `v1` row stays while its file
+    exists** (nothing reaps it). **Don't add a reaper until the app records the
+    gain with its downloaded copy, plus a grace period.** `variantsAggSQL`
+    lists a track's renditions newest first (`created_at DESC, variant_id
+    DESC`), because iOS takes the first prefix match
+    (`TestVariantsListTheNewestRenditionFirst`).
+  - **A DSD source's coverage needs a fresh row of the CURRENT DSD schema**
+    (`manifest.DSDRenditionSchemaVersion`, the mirror
+    `TestManifestMirrorsTheDSDRenditionSchema` pins); a PCM source's stays
+    version-agnostic. A phone never requests a family it holds, so the bridge
+    drives the move. The sweeper's compact pass moves by that coverage rule.
+    `drainSupersededPCMRenditions` moves the faithful tier after it, under the
+    same cap and disk budgets, and **only for tracks that already hold a
+    `pcm-` row** (never a new 5 GB-an-hour tier). The card's "remaining"
+    counts both. Without auto-optimize, `bridge optimize` / `bridge render`
+    move them: their skip check is the exact current id.
+  - **Wiring.** Serve: `wireAlbumGain` (`albumgain.New` with
+    `upscaleEnqueuerAdapter.albumMateSpec`, then `Pool.SetAlbumGainer`), and
+    `Invalidate()` in the post-scan hook. CLI: `newCLIAlbumGainer` /
+    `cliAlbumMateSpec`, the run's own classifier with `--filter` and the resume
+    check lifted, because a mate outside the filter still bounds the album.
+    Both build a mate's spec the way a render of it would be built, with the
+    source facts from the TRACK ROW, which a peak's freshness is judged
+    against. `TestAlbumGainEndToEnd_RealToolchain` (serve) and
+    `TestRenderCLIAlbumGainEndToEnd_RealToolchain` (CLI) render one album of two
+    real tones and check the published files keep the source's 9 dB between them.
 
 - **`Enqueue` fires `fireStateChange()` UNDER the lock, before the unlock**, in
   both pools. Workers are bounded by `Stop`'s `wg.Wait()`; `Enqueue` is not, so

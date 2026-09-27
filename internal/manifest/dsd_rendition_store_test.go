@@ -126,7 +126,7 @@ func TestUpsertVariantRoundTripsGainColumns(t *testing.T) {
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
 	}
 	dsd := base
-	dsd.VariantID, dsd.SampleRate, dsd.BitsPerSample, dsd.SizeBytes = "pcm-v1-176400-24", 176400, 24, 10
+	dsd.VariantID, dsd.SampleRate, dsd.BitsPerSample, dsd.SizeBytes = "pcm-v2-176400-24", 176400, 24, 10
 	dsd.AppliedGainDB, dsd.TruePeakDBTP = ptrF(4.8), ptrF(-5.8)
 	pcm := base
 	pcm.VariantID, pcm.SampleRate, pcm.BitsPerSample, pcm.SizeBytes = "optimized-v2-44100-16", 44100, 16, 5
@@ -224,7 +224,7 @@ func TestListTracksVariantsCarryAppliedGainDBOnlyWhenSet(t *testing.T) {
 	upsertParent(t, s, "Music/A/2.flac")
 
 	if err := s.UpsertVariant(ctx, VariantRow{
-		SourcePath: "Music/A/1.dsf", VariantID: "pcm-v1-176400-24",
+		SourcePath: "Music/A/1.dsf", VariantID: "pcm-v2-176400-24",
 		SidecarPath: "/tmp/p.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 10,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
 		AppliedGainDB: ptrF(0), TruePeakDBTP: ptrF(-0.4),
@@ -295,8 +295,8 @@ func TestVariantKindBuckets_PCMAndOptimizedDSD(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 	seedKindVariants(t, s, []VariantRow{
-		{SourcePath: "A/01.dsf", VariantID: "pcm-v1-176400-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 700, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
-		{SourcePath: "A/01.dsf", VariantID: "optimized-dsd-v1-44100-16", SidecarPath: "/tmp/a2.flac", Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 50, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
+		{SourcePath: "A/01.dsf", VariantID: "pcm-v2-176400-24", SidecarPath: "/tmp/a1.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 700, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
+		{SourcePath: "A/01.dsf", VariantID: "optimized-dsd-v2-44100-16", SidecarPath: "/tmp/a2.flac", Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 50, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
 		{SourcePath: "B/01.flac", VariantID: "optimized-v2-44100-16", SidecarPath: "/tmp/b1.flac", Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 400, SourceMTimeNS: 1, SourceSize: 100, SoxSettings: "{}", CreatedAt: 1},
 	})
 
@@ -341,7 +341,7 @@ func dsdEligibilityFixture(t *testing.T, s *Store) []string {
 	seedFormatTrack(t, s, "D/04.flac", "FLAC", 96000, 24, false)
 	seedFormatTrack(t, s, "D/05.flac", "FLAC", 44100, 16, false)
 	if err := s.UpsertVariant(context.Background(), VariantRow{
-		SourcePath: "D/03.dsf", VariantID: "pcm-v1-176400-24",
+		SourcePath: "D/03.dsf", VariantID: "pcm-v2-176400-24",
 		SidecarPath: "/tmp/p.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: 1,
 		SourceMTimeNS: 1, SourceSize: 1, SoxSettings: "{}", CreatedAt: 1,
 	}); err != nil {
@@ -502,9 +502,9 @@ func TestListAutoOptimizeCandidates_DSDArm(t *testing.T) {
 	// A fresh compact rendition is coverage (its prefix is the optimize
 	// prefix); a faithful one is a different tier and is not.
 	m1, s1 := trackRowMTimeAndSize(t, s, "D/01.dsf")
-	seedOptimizeVariant(t, s, "D/01.dsf", "optimized-dsd-v1-44100-16", m1, s1)
+	seedOptimizeVariant(t, s, "D/01.dsf", "optimized-dsd-v2-44100-16", m1, s1)
 	m2, s2 := trackRowMTimeAndSize(t, s, "D/02.dff")
-	seedOptimizeVariant(t, s, "D/02.dff", "pcm-v1-176400-24", m2, s2)
+	seedOptimizeVariant(t, s, "D/02.dff", "pcm-v2-176400-24", m2, s2)
 	if got := keys(list(EligibilityOpts{DSDRender: true, DST: true})); !equal(got, []string{"D/02.dff", "P/01.flac"}) {
 		t.Errorf("after the renditions landed: %v, want [D/02.dff P/01.flac]", got)
 	}

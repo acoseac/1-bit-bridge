@@ -67,8 +67,11 @@ var logger = logging.Component("transcode")
 // schema bump produces a fresh VariantID — operators run `bridge
 // upscale` once after upgrade and the iOS client picks up the new
 // guard-clean variants automatically. Pre-v2 sidecars stay served
-// by their existing track_variants rows until the next
-// `bridge upscale --gc` pass cleans them up.
+// by their existing track_variants rows. This said the next
+// `bridge upscale --gc` pass cleans them up; it does not — the GC
+// removes files without a row and rows without a file, never a
+// superseded row whose sidecar exists, and the DSD schema move
+// (DSDRenditionSchemaVersion) relies on exactly that.
 const VariantSchemaVersion = "v2"
 
 // sidecarTmpSuffix terminates the atomic-rename temp file sox writes
@@ -346,7 +349,7 @@ func (j JobSpec) RenderScratchBytes() int64 {
 //	pcm-<dsdSchemaVersion>-<targetRate>-<targetBits>            // JobKindPCMRender (DSD source only)
 //
 // e.g. `upscaled-v2-176400-24`, `optimized-v2-44100-16`,
-// `optimized-dsd-v1-44100-16` or `pcm-v1-176400-24`. iOS keys on the
+// `optimized-dsd-v2-44100-16` or `pcm-v2-176400-24`. iOS keys on the
 // prefix to slot the variant into the share-level "prefer upscaled"
 // toggle vs. the runtime CarPlay-routing path; the DSD families are
 // described in dsd_render.go. Future variant kinds (e.g. PCM→DSD

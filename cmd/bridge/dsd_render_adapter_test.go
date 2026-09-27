@@ -123,7 +123,7 @@ func TestBuildOptimizeSpec_DSDNeedsCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("caps on: %v", err)
 	}
-	if got, want := spec.VariantID(), "optimized-dsd-v1-44100-16"; got != want {
+	if got, want := spec.VariantID(), "optimized-dsd-v2-44100-16"; got != want {
 		t.Errorf("VariantID = %q, want %q", got, want)
 	}
 	if !spec.SourceIsDSD || spec.Kind != transcode.JobKindOptimize || spec.TargetBits != 16 || spec.TargetSampleRate != 44100 {
@@ -175,7 +175,7 @@ func TestBuildPCMRenderSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dsf: %v", err)
 	}
-	if got, want := spec.VariantID(), "pcm-v1-176400-24"; got != want {
+	if got, want := spec.VariantID(), "pcm-v2-176400-24"; got != want {
 		t.Errorf("dsf VariantID = %q, want %q", got, want)
 	}
 	if spec.Kind != transcode.JobKindPCMRender || spec.TargetBits != 24 || !spec.SourceIsDSD || spec.TempDir != "/scratch" {
@@ -185,7 +185,7 @@ func TestBuildPCMRenderSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("48k family: %v", err)
 	}
-	if got, want := spec48.VariantID(), "pcm-v1-192000-24"; got != want {
+	if got, want := spec48.VariantID(), "pcm-v2-192000-24"; got != want {
 		t.Errorf("48k family VariantID = %q, want %q", got, want)
 	}
 	if _, err := buildPCMRenderSpec(flac, abs(flac), "/variants", "/scratch", capsDSDDST); !errors.Is(err, api.ErrUpscaleIneligible) {
@@ -265,3 +265,50 @@ func TestAdapterEnqueueKinds_DSDGates(t *testing.T) {
 // observable when ffmpeg is absent, i.e. the test's verdict would depend
 // on the host's toolchain). Pinning it would need a transcode-level
 // snapshot seam; the guard is layering, documented at the site.
+
+// TestAlbumMateSpecMeasuresOnTheRendersProfile: the album-level gain
+// measures an album-mate on the RENDERING job's profile — its tier, quality
+// and directories — through the gates an on-request render of the mate
+// would pass, with the source facts from the track row, which is what a
+// recorded peak's freshness is judged against.
+func TestAlbumMateSpecMeasuresOnTheRendersProfile(t *testing.T) {
+	ctx := context.Background()
+	f := newAdapterFixture(t).withCaps(capsDSD)
+	f.seed(t, "A/DSD/01.dsf", "DSF", 2822400, 1, true, "", 300, 2)
+	mate := f.seed(t, "A/DSD/02.dsf", "DSF", 2822400, 1, true, "", 240, 2)
+	f.seed(t, "A/DSD/03.dff", "DFF", 2822400, 1, true, "DST", 300, 2)
+	for _, like := range []transcode.JobSpec{
+		{Kind: transcode.JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16,
+			Quality: transcode.QualityHigh, OutputDir: "/out", TempDir: "/job-scratch"},
+		{Kind: transcode.JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 176400, TargetBits: 24,
+			Quality: transcode.QualityHigh, OutputDir: "/out", TempDir: "/job-scratch"},
+	} {
+		spec, err := f.a.albumMateSpec(ctx, mate.Path, like)
+		if err != nil {
+			t.Fatalf("%s: %v", like.Kind, err)
+		}
+		if got, want := spec.DSDPeakProfile(), like.DSDPeakProfile(); got != want {
+			t.Errorf("%s: the mate is measured on %q, the render's profile is %q", like.Kind, got, want)
+		}
+		if spec.SourceLibraryRel != mate.Path || spec.SourceAbsPath != filepath.Join(f.libDir, mate.Path) {
+			t.Errorf("%s: source %q / %q, want the mate", like.Kind, spec.SourceLibraryRel, spec.SourceAbsPath)
+		}
+		if spec.OutputDir != "/out" || spec.TempDir != "/job-scratch" || spec.Quality != transcode.QualityHigh {
+			t.Errorf("%s: dirs/quality %q/%q/%q, want the render's", like.Kind, spec.OutputDir, spec.TempDir, spec.Quality)
+		}
+		if spec.SourceMTimeNS != mate.ModTime.UnixNano() || spec.SourceSize != mate.Size {
+			t.Errorf("%s: source facts %d/%d, want the row's %d/%d", like.Kind, spec.SourceMTimeNS, spec.SourceSize,
+				mate.ModTime.UnixNano(), mate.Size)
+		}
+		if spec.SourceDurationSec != 240 || spec.SourceChannels != 2 {
+			t.Errorf("%s: duration/channels %v/%d, want the row's 240/2", like.Kind, spec.SourceDurationSec, spec.SourceChannels)
+		}
+	}
+	like := transcode.JobSpec{Kind: transcode.JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16}
+	if _, err := f.a.albumMateSpec(ctx, "A/DSD/03.dff", like); !errors.Is(err, api.ErrUpscaleIneligible) {
+		t.Errorf("a DST mate without the dst decoder: err = %v, want ErrUpscaleIneligible", err)
+	}
+	if _, err := f.a.albumMateSpec(ctx, "A/DSD/gone.dsf", like); err == nil {
+		t.Error("a mate with no row must not be measured")
+	}
+}
