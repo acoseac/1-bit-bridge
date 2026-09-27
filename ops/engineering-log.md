@@ -18187,3 +18187,141 @@ error silently defaulting a kept field was already met: any decode error is
 - **`BRIDGE_DATA_DIR` in init's own environment**: the preflight grades the
   environment's data dir (`config.Load`) while the rewrite keeps the
   file's.
+
+## 2026-09-27 — a rewrite keeps the library name when the run names none (#1041)
+
+#1040's entry listed the name in the documented overwrite and recorded it
+under Out of scope ("Reset, unmeasured here: … the library name, which
+becomes the hostname without `--name`"). Measured here, and decided the
+other way.
+
+### What was measured
+
+- **The mechanism.** initCmd filled the name from `--name`, else from
+  `os.Hostname()` under `--yes` (`"1-bit Bridge"` on a host without one),
+  else from a prompt whose default was the hostname. Nothing read the name
+  in the config it replaced.
+- **End to end, the real binary, darwin/arm64** (host `Macbook.local`),
+  main at `ef01bf6c` and the fix at `c31c2887`, each a first `bridge init
+  --no-service --skip-doctor` and then a rewrite:
+
+  | | scenario | main | fix |
+  |---|---|---|---|
+  | N1 | `--yes --name "My Library"`, then `--yes --force` with no `--name` | exit 0, `libraryName: Macbook.local`, the run silent about it | exit 0, `My Library` kept and listed under "kept from the config this run replaces" |
+  | N2 | N1's install, rewritten interactively: the library, Enter at the name prompt, `y` at Overwrite | the prompt offered `[Macbook.local]`, and saved it | offered `[My Library]`, and kept it |
+  | N3 | a public install (`--public --admin-tls-proxy`, loopback ports) named `Jazz Archive`, rewritten `--public --force` with no `--name` | `Macbook.local`, beside the "Admin credentials — kept" box | kept and listed |
+  | N4 | N3's install rewritten with `--name Renamed` | | `Renamed`, nothing listed |
+  | N5 | a loopback install init named for its host, rewritten with no `--name` | | `Macbook.local`, nothing listed |
+
+- **What clients are told**, from `bridge serve` on N1's install (mDNS and
+  Tailscale off by env): the unauthenticated `/v1/health` `libraryName`
+  and the `name=` of a pairing URL minted by `POST /api/tokens` both went
+  from `My Library` to `Macbook.local` on main, and stayed `My Library`
+  with the fix.
+- **What the name reaches**, read rather than measured: `/v1/health`
+  (non-optional in the app's Codable, so a caller with no token gets it
+  too), the Bonjour TXT `library=`, every pairing QR's `name=`, which the
+  app makes a newly paired bridge's display name (`BridgeEditorView`,
+  `name = pairing.libraryName`), the editor's "Library" row and the
+  `shareName` it saves from health, the console's title and login page,
+  `bridge status`, the export, and the tsnet node's hostname where
+  `tailscale.hostname` is unset (a rewrite resets `tailscale.mode`, so only
+  once tsnet is turned back on). A paired device's own list name is the
+  `share.name` chosen at pairing, so a rename does not retitle it. Nothing
+  keys an identity on the name: the DLNA UDN hashes `dlna.friendlyName`.
+
+### Decisions
+
+- **Kept where the run names none**, #1040's rule for the roots: the run
+  writes nothing in its place, and the hostname is only init's guess for a
+  first install. The interactive prompt offers the install's name as its
+  default, which Enter takes; a typed name and `--name` still replace it.
+- **In either posture.** #1040 starts a posture change from the new
+  posture's endpoints because the old list names the old posture's
+  addresses, and a name names none. A public rewrite of a LAN install puts
+  the name on an unauthenticated internet-facing endpoint, but a first
+  public install without `--name` publishes the hostname there, which is
+  usually the more revealing of the two.
+- **A config that gives no name, or a blank one, keeps none**, and the
+  rewrite takes the hostname, as a first install does and as main did. The
+  first draft kept what such a config is served under, `Load`'s
+  `DefaultLibraryName`, defaulted in `readPriorInstall` as that function
+  defaults `dataDir`. The consult below objected with a concrete defect:
+  the run then listed `libraryName  1-bit Bridge` as kept from a config
+  that never held the key. The fallback is nobody's choice, the defect is
+  about a name an operator chose, #1040 treats an empty roots list as
+  nothing to keep, and the `dataDir` analogy fails because there `Load`'s
+  default and init's coincide. So the change reaches only installs whose
+  config gives a name. A blank one (a hand edit, a console save, or `init
+  --name "  "`) counts as none.
+- **Listed only where a first install would have taken another name**, and
+  only on a `--yes` run, since an interactive run showed it at the prompt.
+  A rewrite of an install named for its host prints nothing, and an install
+  carried to a new host lists its old name. `printKept`'s claim that "the
+  common rewrite, of an install init made, prints nothing" was narrowed to
+  what stays true: a rewrite that gives an install init made the answers it
+  was made with.
+- **One first-install default** (`firstInstallName`). The interactive path
+  had no `DefaultLibraryName` fallback and saved an empty name on a host
+  without one, which `Load` then served as `DefaultLibraryName`; it saves
+  `DefaultLibraryName` now. What is served is unchanged.
+
+### Tests and controls
+
+- `cmd/bridge/init_rewrite_keeps_test.go`, driving the real `initCmd` twice
+  over one `--dir`:
+  - `TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed`, both postures, the
+    public one with the preflight: kept and listed; replaced by `--name`;
+    no name in the config, and a blank one, take the host's; an install
+    named for its host keeps it with nothing listed. It reads the saved name
+    through `config.Load` and the list through `keptValue`, which does not
+    hard-code `printKept`'s padding.
+  - `TestInitInteractiveRewriteOffersTheInstallsName`: the prompt's offer
+    and the saved name, for Enter, a typed name, and a first install
+    (offered the host's, the control). It skips where stdin is a terminal,
+    on which the `--no-service` branch offers to start the bridge; under `go
+    test` it never is, since the go command wires no stdin to a test binary.
+  - `TestInitRewriteKeepsTheFileNotTheEnvironment` rewrites with no `--name`
+    and `BRIDGE_LIBRARY_NAME` set, and requires the file's name.
+  - `TestPriorInstallReadsWhatLoadReads` reads a named config as `Load`
+    does, and `TestPriorInstallTagsAreConfigs` covers the new field.
+  - The rewrite postures gained `install`, which names both runs. `setUp` is
+    `install` named First with a rewrite named Rewritten, so no existing
+    caller changed; `loopbackInit` and `publicInit` pass no `--name` for an
+    empty name, which no caller passed before.
+- **Red first** against main's behaviour, with only the struct field added
+  so the tests built: the kept rows in both postures, both interactive
+  offers, the environment test, and the first draft's nameless default. The
+  `--name`, blank, host-named and first-install rows passed, as controls
+  must.
+- Negative controls against `c31c2887`, each checked to build, run with
+  `-count=1`, and restored from HEAD with the tree checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the install's name never the default | the kept rows (both postures), both interactive rewrite rows, the environment test |
+  | NC2 | a kept name never listed | the kept rows' listing, both postures |
+  | NC3 | the name listed on every `--yes` rewrite | the no-name, blank and host-named rows, both postures |
+  | NC4 | the kept name read through `config.Load` | the environment test (`Env Name` written), the no-name rows (`1-bit Bridge` kept) |
+  | NC5 | a blank name kept | the blank rows |
+  | NC6 | the prompt offers the host's name again, `--yes` still keeping | both interactive rewrite rows, and nothing else |
+  | NC7 | the new field's yaml key renamed | the tags test, the parity test, the kept rows, the interactive rewrite rows, the environment test |
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with the diff. It
+agreed with the decision, with listing only a name a first install would not
+take, with the interactive exception and with keeping the name across a
+posture change, and objected to keeping `DefaultLibraryName` for a config
+that gives no name, above. Taken.
+
+### Out of scope
+
+- **The console saves an empty name** (measured on the same build): `PATCH
+  /api/settings` with `libraryName: ""` answered `live`, `/v1/health`
+  served `""`, and after a restart `1-bit Bridge`, since `applyDefaults`
+  runs only in `Load`. The live and restarted values of one field disagree.
+  Filed as its own task. A whitespace-only name is served verbatim by `Load`
+  as well.
+- **The name prompt comes before "Overwrite?"**, so an interactive run that
+  answers no, or that is then refused, answered the name for nothing.

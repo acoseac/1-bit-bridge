@@ -2629,7 +2629,8 @@ what it claimed**, and none of it had a failing test.
 - **A rewrite replaces the SETTINGS, never the INSTALL.** `bridge init
   --force` (or "Overwrite? y") keeps `dataDir`, `tlsCertPath` and
   `tlsKeyPath` always, a loopback install's `customEndpoints` on a loopback
-  rewrite, and `libraryRoots` when the run names no `--library` (#1040). It
+  rewrite, and `libraryRoots` when the run names no `--library` (#1040),
+  and `libraryName` when it names no `--name` (#1041). It
   built `bridge.yaml` from `baseConfig` and the flags and kept nothing.
   Measured with the real binary: a config naming its pair outside the data
   dir lost it, init minted a new one there and printed it as "Stable across
@@ -2648,9 +2649,23 @@ what it claimed**, and none of it had a failing test.
   addresses), and a `--library` replaces the roots. The preflight grades
   only a root the run names: a kept public root may be a mount that is not
   up, `checkLibraryRoots` FAILs a missing one, and public init must not
-  need the mount (init's public-mode note). The rest (features,
-  cadences, the ports, which #970 GRADES rather than keeps, the name) is the
-  documented overwrite. **Read what is kept from the FILE
+  need the mount (init's public-mode note). **So is the name, where the
+  run names none** (#1041), in either posture, since a name names no
+  address. The hostname a run without `--name` took is only init's guess
+  for a first install: measured, `My Library` became `Macbook.local` in the
+  file, in `/v1/health` (unauthenticated) and in every new pairing QR's
+  `name=`, the name a newly paired phone takes, and the interactive prompt
+  offered the hostname as its default over the install's own. The prompt
+  offers the install's name now, `--name` replaces it, and the kept list
+  shows it only where a first install would have taken another, so the
+  rewrite of an install named for its host prints nothing. **A config
+  giving no name, or a blank one, keeps none** and takes the hostname, as
+  before: `Load` serves it `DefaultLibraryName`, a fallback nobody chose,
+  and keeping that listed it as kept from a config that never held it (a
+  Gemini consult caught the first draft doing so). Don't default the name
+  in `readPriorInstall` the way it defaults `dataDir`, whose `Load` default
+  is init's own. The rest (features, cadences, the ports, which #970
+  GRADES rather than keeps) is the documented overwrite. **Read what is kept from the FILE
   (`readPriorInstall`), never through `config.Load`**: Load applies
   `BRIDGE_*`, so keeping its values writes the caller's environment into the
   YAML (`writeAutoInitConfig`'s rule), and its unknown-key refusal would cost
