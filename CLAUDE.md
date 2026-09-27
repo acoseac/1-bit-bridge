@@ -2127,8 +2127,38 @@ no failing test — which is the shape to expect in this area.
   asserts only the FILE can no longer see the abort**, since #1043's re-read
   before the commit refuses the same write: the skip-persist tests passed with
   the abort removed, and count stagings now. The cause, a CLI run as root
-  re-owning the file, is the runbook's "always as the service user" rule, and
-  is not fixed in code.
+  re-owning the file, was the runbook's "always as the service user" rule
+  alone until the next bullet fixed it for this file.
+- **A CLI write run as root keeps the owner of the file it replaces**
+  (#1048). `sudo bridge pair`, `sudo bridge admin reset-password`,
+  `sign-out-everywhere` or `login-link`, `sudo bridge cert rotate`, `sudo
+  bridge update` and a `sudo bridge init --force` rewrite beside a service
+  install staged their file as root, 0600, and the bridge running as the
+  service user could no longer read it: #1044's 503 on every console
+  request, #1047's stale token list, and a restart that could not open the
+  store or load its key. Measured with the real CLI as root over an install
+  uid 4242 owns: exactly six files came back root's (`bridge.yaml`,
+  `tokens.json`, `adminauth.json`, `adminauth-tickets.json`, `server.crt`,
+  `server.key`). `fsutil.KeepOwner` runs on each staged file while it is
+  open, before the rename, as one more of the site's own steps (the Atomic
+  writes rule: no shared writer), and does something only when the process
+  is root: it gives the file the owner of the ENTRY it replaces (`os.Lstat`,
+  so a symlink's own owner, never its target's), or of the directory for a
+  new file. The updater's `update-state.json` takes it too. **Keep, not
+  refuse**: a refusal keyed on who owns the data dir turns away a setup that
+  works (a container run as root over a bind mount another uid owns, whose
+  files the root service created), while the replaced file's own owner is
+  the evidence of who reads it. **A chown that fails abandons the write**
+  (root_squash NFS gives root's files to nobody), so the service keeps a
+  file it can read. **Not covered**: the job and database CLIs (`scan`,
+  `upscale` / `optimize` / `render` / `analyze`, `artwork`, `backup` /
+  `restore`, `manifest`, an offline `library` change), which create
+  directories and sidecars rather than replace one file; the runbook's
+  "always as the service user" still stands for them. Pinned per writer
+  through `fsutil.SimulateRootForTest` on every host, and as root by
+  `TestKeepOwnerAsRoot` and `TestCLIRunAsRootKeepsTheInstallOwner`, which CI
+  skips and dido's container runs. With the six writers reverted, the
+  end-to-end test names exactly those six files.
 - **`logging.Component` resolves `slog.Default()` at LOG time, not construction.**
   Package-level `var logger = logging.Component(...)` runs during package init,
   before `main()` calls `logging.Init()` — a captured-handler shape would lock
@@ -3460,9 +3490,11 @@ its twin.** The top list is older, shorter, and read first.
   stalled past the settle between its check and its rename gets through; a
   kernel lock would close that, and #1039 declined one. Open: a bridge still
   running the OLD binary drops the unknown field and writes its sessions
-  back, so restart first, then sign out; and `sudo bridge admin
-  reset-password` leaves a root-owned file the service cannot read, which now
-  refuses every console request until it is chowned.
+  back, so restart first, then sign out. A `sudo bridge admin
+  reset-password` left a root-owned file the service could not read, which
+  refused every console request until it was chowned; since #1048 the
+  write keeps the file's owner (the KeepOwner bullet under Config, settings
+  and process lifecycle).
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it
