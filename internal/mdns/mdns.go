@@ -598,6 +598,15 @@ const maxInstanceLen = 63
 // control chars cause encoding errors), then cuts what is left to the
 // maxInstanceLen bytes a DNS label holds, on a rune boundary, with no space
 // left at its end, and logs the cut.
+//
+// What it returns is DNS presentation format, not the label itself:
+// hashicorp/mdns joins it into "<instance>._onebit-bridge._tcp.local." and
+// miekg/dns packs that string, reading a backslash as an escape (`\X` is X,
+// `\DDD` a byte). So each backslash is written `\\`, AFTER the cut, which
+// counts the label's bytes. Unescaped, "AC\DC" went out as "ACDC", `\065`
+// as "A", and a trailing backslash (a name's own, or one the cut left)
+// escaped the dot after it and merged the instance into the service label:
+// a different name, or one too long to pack (CodeRabbit on #1046).
 func sanitizeInstance(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -611,7 +620,7 @@ func sanitizeInstance(s string) string {
 		instance = strings.TrimRightFunc(instance, unicode.IsSpace)
 		logger.Info("mdns: instance name cut to fit a DNS label", "instance", instance, "dropped", dropped)
 	}
-	return instance
+	return strings.ReplaceAll(instance, `\`, `\\`)
 }
 
 // ipsForAdvertise returns the non-loopback IPv4/IPv6 addresses to

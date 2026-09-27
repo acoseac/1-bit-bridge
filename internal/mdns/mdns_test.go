@@ -265,23 +265,30 @@ func TestInstanceNameFitsADNSLabel(t *testing.T) {
 		strings.Repeat("a", 64),
 		strings.Repeat("a", 256),
 		strings.Repeat("é", 32), // 64 bytes; byte 63 is inside a rune
-		"東京の音楽ライブラリ・ハイレゾコレクション集",                                  // 22 runes, 66 bytes
-		strings.Repeat("a", 62) + " b",                            // the cut lands after a space
+		"東京の音楽ライブラリ・ハイレゾコレクション集",            // 22 runes, 66 bytes
+		strings.Repeat("a", 62) + " b",      // the cut lands after a space
+		strings.Repeat("a", 62) + `\suffix`, // the cut lands after a backslash
+		`AC\DC Live`,                        // kept whole, backslash and all
+		`Ends in a backslash\`,              // a backslash no cut left
+		`\065`,                              // "A", to miekg/dns, unescaped
 		"Living Room NAS: Hi-Res FLAC and DSD Archive (Synology)", // 55 bytes, kept whole
 	} {
-		instance := sanitizeInstance(name)
+		label, err := wireInstanceLabel(sanitizeInstance(name))
 		switch {
-		case len(instance) > 63:
-			t.Errorf("sanitizeInstance(%d bytes) = %d bytes, more than a DNS label holds", len(name), len(instance))
-		case !utf8.ValidString(instance):
-			t.Errorf("sanitizeInstance(%q) = %q, which is not UTF-8", name, instance)
-		case instance == "" || !strings.HasPrefix(name, instance):
-			t.Errorf("sanitizeInstance(%q) = %q, want a non-empty prefix of the name", name, instance)
-		case strings.TrimRightFunc(instance, unicode.IsSpace) != instance:
-			t.Errorf("sanitizeInstance(%q) = %q, which ends in a space", name, instance)
-		case len(name) <= 63 && instance != name:
-			t.Errorf("sanitizeInstance(%q) = %q, want a name that fits kept whole", name, instance)
+		case err != nil:
+			t.Errorf("the instance for %q does not pack: %v", name, err)
+		case len(label) > 63:
+			t.Errorf("the instance for a name of %d bytes is %d bytes on the wire, more than a DNS label holds", len(name), len(label))
+		case !utf8.ValidString(label):
+			t.Errorf("the instance for %q is %q on the wire, which is not UTF-8", name, label)
+		case label == "" || !strings.HasPrefix(name, label):
+			t.Errorf("the instance for %q is %q on the wire, want a non-empty prefix of the name", name, label)
+		case strings.TrimRightFunc(label, unicode.IsSpace) != label:
+			t.Errorf("the instance for %q is %q on the wire, which ends in a space", name, label)
+		case len(name) <= 63 && label != name:
+			t.Errorf("the instance for %q is %q on the wire, want a name that fits kept whole", name, label)
 		}
+		instance := sanitizeInstance(name)
 		svc, err := hcmdns.NewMDNSService(instance, Service, "", "host.local.", 7788,
 			[]net.IP{net.ParseIP("192.0.2.1")}, buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788, LibraryName: name}, nil))
 		if err != nil {
@@ -294,9 +301,24 @@ func TestInstanceNameFitsADNSLabel(t *testing.T) {
 			t.Fatalf("premise: a browse for %s has no answer", Service)
 		}
 		if _, err := answer.Pack(); err != nil {
-			t.Errorf("the answer to a browse for a bridge named %d bytes does not pack: %v", len(name), err)
+			t.Errorf("the answer to a browse for a bridge named %q does not pack: %v", name, err)
 		}
 	}
+}
+
+// wireInstanceLabel is instance as a browse answer carries it: the first
+// label of the service instance name hashicorp/mdns builds from it
+// (instance + "." + Service + ".local."), packed as miekg/dns packs it. That
+// string is DNS presentation format, where a backslash escapes what follows
+// it: `\X` is X and `\DDD` a byte, so a backslash the name holds must reach
+// it as `\\`, and one at the end of the instance escapes the dot after it,
+// which merges the instance into the service label.
+func wireInstanceLabel(instance string) (string, error) {
+	buf := make([]byte, 512)
+	if _, err := dns.PackDomainName(instance+"."+Service+".local.", buf, 0, nil, false); err != nil {
+		return "", err
+	}
+	return string(buf[1 : 1+int(buf[0])]), nil
 }
 
 // TestAdvertiseStartsAndStops spins up a real mDNS server on a high

@@ -170,12 +170,14 @@ func TestSettingsFormRequiresALibraryName(t *testing.T) {
 	if !regexp.MustCompile(`\srequired[\s>]`).MatchString(input) {
 		t.Errorf("the libraryName input is not required: %s", input)
 	}
-	// maxlength counts UTF-16 code units, never fewer than the runes the
-	// handler counts, so the box never lets through a name the handler
-	// refuses; it stops a name of astral characters (emoji) short of the
-	// cap, where the handler's 400 would not come into it.
-	if want := fmt.Sprintf(` maxlength="%d"`, config.MaxLibraryNameLength); !strings.Contains(input, want) {
-		t.Errorf("the libraryName input lacks%s, so a name the handler refuses is sent: %s", want, input)
+	// No maxlength: the handler's 400 is what refuses a name over
+	// config.MaxLibraryNameLength, and the console shows it ("Save failed:
+	// libraryName: must be at most 256 characters, ..."). maxlength counts
+	// UTF-16 code units, so it stopped a name of 129 emoji the handler takes
+	// (CodeRabbit on #1046), and it cuts a pasted name without a word, which
+	// stores a name nobody typed: the outcome the handler refuses to produce.
+	if regexp.MustCompile(`\smaxlength=`).MatchString(input) {
+		t.Errorf("the libraryName input has a maxlength, which refuses names the handler takes: %s", input)
 	}
 	m := regexp.MustCompile(`\spattern="([^"]*)"`).FindStringSubmatch(input)
 	if m == nil {
