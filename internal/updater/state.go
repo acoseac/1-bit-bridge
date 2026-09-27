@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -187,6 +188,12 @@ func SaveState(dataDir string, st State) error {
 	// Panic-safety FD close (LIFO order — runs before Remove). See
 	// internal/auth/auth.go for the rationale; pattern repeats here.
 	defer func() { _ = tmp.Close() }()
+	// A `sudo bridge update` beside a service install stages this marker
+	// as root, and the service must read it at the boot that acts on it.
+	if err := fsutil.KeepOwner(tmp, StatePath(dataDir)); err != nil {
+		tmp.Close()
+		return fmt.Errorf("keep the update marker's owner: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write tmp: %w", err)
