@@ -336,9 +336,8 @@ func TestADeletedStoreFileIsNoCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrNotInitialised) {
-		t.Errorf("Verify with the store file gone = %v, want ErrNotInitialised", err)
-	}
+	// The write first, so it cannot pass on a credential the login check
+	// below already re-read.
 	clock.t = clock.t.Add(time.Second)
 	if _, err := a.ValidateSession(session); err != nil {
 		t.Fatal(err)
@@ -349,32 +348,42 @@ func TestADeletedStoreFileIsNoCredential(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a session write recreated the deleted store file (stat err=%v)", err)
 	}
+	if err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrNotInitialised) {
+		t.Errorf("Verify with the store file gone = %v, want ErrNotInitialised", err)
+	}
 }
 
-// TestAnInitialCredentialIsNotWrittenOverAnother: the first-credential writers
-// decide "is there an account" from the file at the write, not from what was
-// there at open. Two processes that both opened an empty store (`bridge init`
-// and a bridge seeding from its environment, say) otherwise both mint, and
-// the second silently replaces the password the first one printed.
+// TestAnInitialCredentialIsNotWrittenOverAnother: the credential writers
+// decide "is there an account, and whose" from the file at the write, not
+// from what was there at open. Two processes that both opened an empty store
+// (`bridge init` and a bridge seeding from its environment, say) otherwise
+// both mint, and the second silently replaces the password the first one
+// printed; a reset-password under another name replaces the account.
+//
+// Each row is a store of its own, opened empty, so none can pass on an
+// account an earlier row's read already put in its memory.
 func TestAnInitialCredentialIsNotWrittenOverAnother(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "adminauth.json")
-	first, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
+	openEmpty := func() *Store {
+		s, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
-	second, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := first.SetInitialPassword("admin", leakedPassword); err != nil {
+	mint, seed, rename := openEmpty(), openEmpty(), openEmpty()
+	if err := openEmpty().SetInitialPassword("admin", leakedPassword); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := second.MintInitial("admin"); !errors.Is(err, ErrAlreadyInitialised) {
+	if _, err := mint.MintInitial("admin"); !errors.Is(err, ErrAlreadyInitialised) {
 		t.Errorf("MintInitial over a store another process initialised = %v, want ErrAlreadyInitialised", err)
 	}
-	if err := second.SetInitialPassword("admin", rotatedPassword); !errors.Is(err, ErrAlreadyInitialised) {
+	if err := seed.SetInitialPassword("admin", rotatedPassword); !errors.Is(err, ErrAlreadyInitialised) {
 		t.Errorf("SetInitialPassword over a store another process initialised = %v, want ErrAlreadyInitialised", err)
+	}
+	if err := rename.ResetPassword("someone-else", rotatedPassword); !errors.Is(err, ErrUsernameMismatch) {
+		t.Errorf("ResetPassword under another name over a store another process initialised = %v, want ErrUsernameMismatch", err)
 	}
 	c, err := OpenStore(path)
 	if err != nil {
@@ -441,6 +450,34 @@ func TestRedemptionRefusesAnAccountReplacedElsewhere(t *testing.T) {
 
 	if user, err := a.RedeemLoginTicket(ticket); !errors.Is(err, ErrTicketInvalid) {
 		t.Errorf("a ticket for an account replaced elsewhere = (%q, %v), want ErrTicketInvalid", user, err)
+	}
+}
+
+// TestMintRefusesAnAccountReplacedElsewhere is the mint half of the check
+// above: `bridge admin login-link` names an account, and the store answers
+// from the file rather than from what it read at open.
+func TestMintRefusesAnAccountReplacedElsewhere(t *testing.T) {
+	_, path, _, _ := runningBridge(t)
+	cli, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetInitialPassword("someone-else", rotatedPassword); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cli.MintLoginTicket("admin"); err == nil {
+		t.Error("a ticket was minted for an account the file no longer has")
+	}
+	if _, err := cli.MintLoginTicket("someone-else"); err != nil {
+		t.Errorf("a ticket for the account the file does have was refused: %v", err)
 	}
 }
 
