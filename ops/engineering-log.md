@@ -17616,3 +17616,208 @@ row). It added the first-install consequence recorded above.
   never reaches the credential step, so a public install whose store has
   no account stays without one until an overwriting run or `bridge admin
   reset-password`. serve's refusal names both. Pre-existing.
+
+## 2026-09-27 — reset-password takes on a running bridge, which no longer writes the old password back (#1039)
+
+#1038's entry recorded it under Out of scope: "`bridge admin reset-password`
+does not survive a running public bridge … its next session write (login,
+the 30 s activity debounce, logout, the shutdown flush) writes the old hash
+back, since `persist()` writes `s.user` from memory and never re-reads the
+file."
+
+### What was measured
+
+- **The mechanism, in two stores on one file** (the probe that filed it,
+  then `store_crossprocess_test.go`): after B's `ResetPassword`, A (the
+  running bridge) still verified the old password, and after any of A's four
+  session writes a fresh `OpenStore` verified the OLD password and refused
+  the new one. `persist()` marshalled `storeFile{User: s.user, Sessions:
+  s.sessions}` from memory and nothing ever re-read the file.
+- **End to end, against a real public-mode `serve`**
+  (`TestResetPasswordTakesOnARunningPublicBridge`, on main before the fix):
+  a console signed in with the minted password, `reset-password` run beside
+  it, one console request (inside the debounce, so it only marks the set
+  pending), and a stop. After the stop the file "refuses the current
+  password … still accepts the password rotated away from", and the
+  restarted bridge answered `POST /login` with the old password `200`. The
+  shutdown flush of the restart the command advised was the write that did
+  it.
+- **The hosted control plane hits it.** `bridge-tenant passwd` runs
+  `reset-password` as the tenant user and then `restart_tenant`, so the
+  printed password failed whenever a console request had landed in the 30 s
+  before the restart (the Jobs page and the Diagnostics panel poll every 5
+  to 10 s while visible).
+- **Its CLI message was false twice.** "Restart the bridge to invalidate
+  existing sessions": the restart undid the rotation, and it has not ended a
+  session since #800 made them persist (the same file, loaded at start). The
+  `ResetPassword` and `adminResetPasswordCmd` docblocks said the same.
+- **Cost of the re-reads**: `readStoreFile` measured 15 µs at one session
+  and 0.86 ms at the 1,024-session cap (darwin/arm64, a throwaway
+  benchmark), against a ~250 ms bcrypt compare per login attempt, which the
+  limiter also bounds. The adminauth suite ran 13 to 14 s on both main and
+  the branch.
+
+### Decisions
+
+- **The credential is the FILE's.** Every decision about it (Verify on each
+  attempt, a ticket's account at mint and at redeem, "is there an account"
+  for the initial-credential writers, the reset's username check) and every
+  write re-reads it (`refreshCredentialLocked`) and adopts it. **"The
+  file's", not "keep the newer by `passwordChangedAt`"** (the report's
+  suggestion): every credential write in every process is synchronous and
+  adopted into memory only once its rename lands, so memory is never ahead
+  of the file and "newer" can only mean the file's; a timestamp would keep
+  memory over a restored backup and depends on a wall clock that can step.
+  A change adopted from disk logs one Info line ("the admin credential
+  changed on disk"), which is the journal's evidence the rotation took.
+- **A file that cannot be READ decides nothing and is written over by
+  nothing.** Verify refuses (this process's copy is the password rotated
+  away from), a session write aborts and stays pending, a credential write
+  fails. Realistic causes: a damaged file, and EACCES after a `sudo bridge
+  admin reset-password` on a service install leaves a root-owned 0600
+  file. Before, the running bridge overwrote that file with the old
+  credential at its next write (a rename needs only the directory); now it
+  refuses logins with an Error line naming the read, and a restart fails to
+  open the store as it always did.
+- **A MISSING file is no credential.** Verify answers ErrNotInitialised and
+  a session write does not recreate the file, since whoever removed it or
+  moved it aside meant it gone; `auth.Store` already reads a deleted
+  `tokens.json` as "revoke all".
+- **Sessions are the serving bridge's**, the only process that makes or
+  ends them. A session write puts down the set in memory; a credential
+  write puts down the set it finds in the file AT THE WRITE, verbatim, never
+  the copy read at open: reset-password waits at a prompt between the two,
+  so the copy would drop a session signed in meanwhile and bring back one
+  signed out (`TestARotationCarriesTheRunningBridgesSessions`).
+- **A rotation still does not end sessions**, `TestSessionSurvivesResetPassword`'s
+  existing, deliberate contract. Only the false claim went: the message now
+  says a running bridge takes the password at its next sign-in with no
+  restart, and that signed-in consoles stay signed in across a restart.
+- **A failed login or logout write stays pending** (`sessionsDirty` set
+  before the write). A failed logout used to leave nothing pending, so with
+  no other session active the shutdown flush landed nothing and the restart
+  brought the session back. **A failed attempt starts the next debounce
+  window**, or a file that stays unreadable costs a read and an Error line
+  per console request, the M-SEARCH shape. **With the file gone the sessions
+  stay pending**, and go down beside the next credential the file holds.
+- **A redemption reads the credential before it spends the ticket**, on the
+  hit path only (a bogus ticket still costs one read). A read failure leaves
+  the ticket on disk, as a ticket-file write failure does, which is what the
+  handler's 500 ("the record is still on disk") already said; its message
+  now names the credential store too.
+- **`Username()` and `IsInitialised()` still answer from memory.** The
+  first pre-fills an UNAUTHENTICATED page; a lagging pre-fill costs one
+  failed login, and that attempt is a read. Every caller of the second asks
+  straight after `OpenStore`.
+
+### Tests and controls
+
+- `internal/adminauth/store_crossprocess_test.go` (two or three stores on
+  one file), `cmd/bridge/admin_reset_password_live_test.go` (a real
+  public-mode `serve` twice, `adminCmd` beside it),
+  `TestResetPasswordRollsBackOnPersistFailure` split into "the read fails"
+  and "the write fails", and `TestAnInitialCredentialWhoseWriteFailsIsNotLive`.
+  `…RedemptionRefusesARenamedAccount` (removed) mutated A's memory to stand in for
+  another process; with the account read from the file that no longer means
+  anything, so it is replaced by
+  `TestRedemptionRefusesAnAccountReplacedElsewhere`, which replaces the
+  account from another store.
+- **Red on main** (the final test files run against main's `store.go`
+  and `ticket.go` in a scratch worktree): the four writer rows, both Verify
+  tests, the sessions-carried, unreadable-file, debounce, deleted-file,
+  initial-credential, mint and both redemption tests, the rollback test's
+  new "the read fails" (main wrote over the damaged file), and the e2e as
+  quoted above. Three pass there, as they should:
+  `TestARotationLeavesLoginTicketsAlone` (the sidecar staying intact is a
+  constraint, not a defect), `TestAnInitialCredentialWhoseWriteFailsIsNotLive`
+  (main had the rollback; it pins it) and
+  `TestSessionsHeldWhileTheStoreIsGoneLandOnceItIsBack`, whose premise does
+  not arise on main, where the flush recreates the file instead (NC19 is its
+  red). `TestARotationDuringASessionWriteIsNotUndone` uses the new test seam
+  and does not compile on main; NC18 and NC20 are its red.
+- **The old rollback fixture no longer reached the write.** A store path
+  under a regular file now fails at the READ, and on Windows that read
+  answers `ERROR_PATH_NOT_FOUND`, which is `os.ErrNotExist` there, so it
+  reads as "no store" rather than an error. The read case uses a damaged
+  file; the write case a 0500 directory (POSIX, not root).
+- Negative controls against the committed fix, each restored from HEAD and
+  the tree checked clean before the next (a harness in the scratchpad; its
+  first version opened a file for writing before computing the mutation and
+  truncated `store.go` on a pattern that no longer matched, restored from
+  the commit the rule says to make first). None failed to build:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no re-read before staging a session write | all four writer rows, on "the write never landed" (the pre-commit check alone refuses every commit), the deleted-file, rotation-during-write and file-gone tests, the e2e |
+  | NC1b | neither read compares the credential | all four writer rows on the clobber, the e2e |
+  | NC2 | Verify answers from memory | the two Verify tests, the e2e |
+  | NC3 | Verify falls back to memory on a read error | the unreadable-file Verify test |
+  | NC4 | a rotation writes the sessions it read at open | the sessions-carried test |
+  | NC5 | the initial-credential writers decide from memory | the initial-credential test |
+  | NC6 | the reset's username check reads memory | the initial-credential test |
+  | NC7 | ResetPassword swaps in before the write | "the write fails" |
+  | NC8 | an initial credential swapped in before the write | both initial-write rows |
+  | NC9 | a failed logout not left pending | its unreadable-file row |
+  | NC10 | a failed login not left pending | its unreadable-file row |
+  | NC11 | only a successful write starts the window | the debounce test |
+  | NC12 | redemption checks the account loaded at start | both redemption tests |
+  | NC13 | redemption spends before reading | the unreadable-credential redemption test |
+  | NC14 | mint checks the account loaded at start | the mint test |
+  | NC15 | the old message | the e2e |
+  | NC16 | a rotation clears the ticket file | the sidecar test |
+  | NC17 | a rotation writes no sessions | the sessions-carried test (and a logout row, whose bytes then equal the rotation's) |
+  | NC18 | no pre-commit comparison | the rotation-during-write test |
+  | NC19 | the file-gone branch clears the pending flag | the file-gone test |
+  | NC20 | one attempt, no rebuild | the rotation-during-write test, on its session |
+
+- **A control can pass because a second layer caught it.** NC1 first ran
+  against a test that asserted only the credential, and the pre-commit
+  re-check kept the rotation on disk by refusing every commit: the defect's
+  replacement was a write that never lands. The writer rows now also
+  require the file to change after the rotation. **And a test step can mark
+  the thing it tests**: the login row first validated its new session
+  before the flush, and a validate sets the pending flag itself, which
+  would have hidden NC10.
+
+### Consult
+
+A direct Gemini consult (`consult.py`, gemini-3.8-flash) with the diff, on
+four decisions. It agreed on "disk wins" and on failing closed, and found
+two defects in the first draft, both taken: the file-gone branch cleared
+the pending flag, dropping the sessions from the flush (NC19), and my claim
+that only a microsecond window remained was wrong by three orders of
+magnitude. The re-read came before a temp-file write and an fsync, so a
+rotation landing in them was put back by the commit (NC18, NC20). Its read
+retry for Verify was declined, unmeasured on Windows: Go opens a file
+there with read and write sharing (`syscall.Open`'s `sharemode`), and a
+transient refusal would cost one 401 and one of the limiter's five attempts
+per 15 minutes, not a lockout. Its flock proposal is recorded
+below. Its correction of the rationale stands: the "stale lockfile" reason
+this repo gives for declining interprocess locks (`bridge restore`, the
+ticket sidecar) is about lock FILES, and the kernel drops a flock or
+LockFileEx lock with the process.
+
+### Out of scope
+
+- **Nothing can end another console session.** A rotation does not, a
+  restart does not (#800), a running bridge writes its sessions back beside
+  a new credential file, and logout ends only the caller's own. The only
+  route is stopping the bridge and editing the file. Whether a rotation
+  should end sessions, or offer to (`--sign-out-everywhere`), is a product
+  decision, left for its own change.
+- **`auth.Store` has the fsync window this change closed here.** Its
+  debounced persists run `reloadIfStale` and then a write, an fsync and a
+  rename, so a `bridge pair` mint that lands in between is lost from
+  `tokens.json`. Measured nowhere yet.
+- **A kernel lock would close the rename window** that remains here. Not
+  taken: it would be the repo's first interprocess lock, with platform code
+  (flock / LockFileEx on a stable lock file, since the store is replaced by
+  rename) and a bounded wait so a hung holder cannot wedge `s.mu`.
+- **A bridge still running the old binary** (after `bridge update` swapped
+  the file, before the restart) still writes the old password back,
+  including at the shutdown flush of the restart that brings the new binary
+  up. Restart first, then rotate. The new message cannot know.
+- **Two credential writers at once** (two resets, or init against a bridge
+  seeding from its environment) are last-writer-wins inside their own write
+  windows. The check-at-the-write closes the realistic case, a writer
+  that read an empty store before another initialised it.
