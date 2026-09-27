@@ -91,6 +91,57 @@ func TestInitRewriteKeepsTheTLSPairItsConfigNames(t *testing.T) {
 	}
 }
 
+// TestInitRewriteRefusesHalfATLSPair: a config naming one half of a pair,
+// in the reported layout (the pair moved out of the data dir). It names a
+// pair nothing can load, so a rewrite cannot keep it, and dropping the half
+// it names mints a new pair in the data dir, which is the reported pin break
+// by another route. Refused before anything is written, with the remedy.
+func TestInitRewriteRefusesHalfATLSPair(t *testing.T) {
+	for _, tc := range []struct{ named, missing string }{
+		{"tlsCertPath", "tlsKeyPath"},
+		{"tlsKeyPath", "tlsCertPath"},
+	} {
+		t.Run(tc.named+" alone", func(t *testing.T) {
+			tmp := t.TempDir()
+			cfgDir := filepath.Join(tmp, "cfg")
+			rewrite := rewritePostures[0].setUp(t, cfgDir)
+			paths := map[string]string{
+				"tlsCertPath": filepath.Join(tmp, "pki", "bridge.crt"),
+				"tlsKeyPath":  filepath.Join(tmp, "pki", "bridge.key"),
+			}
+			movePair(t, filepath.Join(cfgDir, "data"), paths["tlsCertPath"], paths["tlsKeyPath"])
+			appendToConfig(t, cfgDir, tc.named+": "+paths[tc.named]+"\n")
+			before := readConfigFile(t, cfgDir)
+			pair := readPair(t, paths["tlsCertPath"], paths["tlsKeyPath"])
+
+			code, out := rewrite()
+			defer logRunOnFailure(t, out)
+
+			if code == 0 {
+				t.Error("a rewrite over half a TLS pair exited 0")
+			}
+			if readConfigFile(t, cfgDir) != before {
+				t.Error("the refused rewrite changed the config")
+			}
+			if _, err := os.Stat(filepath.Join(cfgDir, "data", servertls.CertFileName)); err == nil {
+				t.Error("the rewrite minted a pair in the data dir")
+			}
+			if readPair(t, paths["tlsCertPath"], paths["tlsKeyPath"]) != pair {
+				t.Error("the rewrite changed the install's pair")
+			}
+			for _, want := range []string{
+				"names " + tc.named + " without " + tc.missing,
+				"add " + tc.missing,
+				"the config was NOT changed",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the refusal does not say %q", want)
+				}
+			}
+		})
+	}
+}
+
 // TestInitRewriteKeepsTheDataDirItsConfigNames: an install whose config keeps
 // its state in another directory, where its tokens, its database, a public
 // install's admin credentials and the default TLS pair live.
@@ -134,6 +185,11 @@ func TestInitRewriteKeepsTheDataDirItsConfigNames(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(cfgDir, "data")); err == nil {
 				t.Error("the rewrite made a data dir beside the config, which the install does not use")
+			}
+			for _, want := range []string{"dataDir", state} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the rewrite does not say it kept %q", want)
+				}
 			}
 			if credentials != nil {
 				if got, _ := os.ReadFile(filepath.Join(state, "adminauth.json")); string(got) != string(credentials) {

@@ -123,6 +123,11 @@ func (p *priorInstallFile) loopback() bool {
 //     for the pid file. Where there is no pair there, the rewrite would MINT
 //     one, and the config it cannot read may name the pair every device
 //     pinned anywhere, so it refuses.
+//   - A config naming one half of a TLS pair names a pair nothing can load,
+//     and dropping the half it names would serve the data dir's pair, or mint
+//     one, which no device may have pinned: the reported pin break by another
+//     route. Kept, the half failed validation, a refusal too, but one that
+//     said neither what to do nor that nothing had changed.
 //   - A demo bridge's config and a managed tenant's are written by other
 //     tooling, in postures init never writes: a rewrite made the demo an
 //     ordinary bridge, dropping the token every shipped app carries, and a
@@ -149,6 +154,13 @@ func refuseRewrite(stdout, stderr io.Writer, cfgPath, dataDir string, prior *pri
 		fmt.Fprintf(stderr, "init cannot tell which TLS pair this install serves, and there is none at %s.\n", certPath)
 		fmt.Fprintln(stderr, "a rewrite would mint a new one, and every device paired with this install would have to pair again.")
 		fmt.Fprintln(stderr, "fix the YAML, or move bridge.yaml aside to set this install up from scratch.")
+	case prior != nil && (prior.TLSCertPath == "") != (prior.TLSKeyPath == ""):
+		named, missing := "tlsCertPath", "tlsKeyPath"
+		if prior.TLSCertPath == "" {
+			named, missing = missing, named
+		}
+		fmt.Fprintf(stderr, "the config at %s names %s without %s, so init cannot tell which TLS pair this install serves.\n", cfgPath, named, missing)
+		fmt.Fprintf(stderr, "add %s, or remove %s to use the pair in the data dir.\n", missing, named)
 	case len(postures) > 0:
 		var keys, costs []string
 		for _, m := range postures {
@@ -210,12 +222,12 @@ func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept b
 const keptFromHeading = "kept from the config this run replaces:"
 
 // printKept lists, after the rewrite is saved, what it kept that a first
-// install at cfgDir would not have: a data dir elsewhere, a pair the config
-// names, the roots when the run named none, the custom endpoints. An
-// operator who rewrote a config should not have to diff it to learn that
-// these stayed, and the common rewrite, of an install init made, prints
-// nothing.
-func printKept(w io.Writer, cfg *config.Config, cfgDir string, rootsKept, endpointsKept bool) {
+// install would not have: a data dir other than initDataDir (init's own,
+// beside the config), a pair the config names, the roots when the run named
+// none, the custom endpoints. An operator who rewrote a config should not
+// have to diff it to learn that these stayed, and the common rewrite, of an
+// install init made, prints nothing.
+func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, endpointsKept bool) {
 	var lines [][2]string
 	add := func(key string, values ...string) {
 		for i, v := range values {
@@ -225,7 +237,7 @@ func printKept(w io.Writer, cfg *config.Config, cfgDir string, rootsKept, endpoi
 			lines = append(lines, [2]string{key, v})
 		}
 	}
-	if cfg.DataDir != filepath.Join(cfgDir, "data") {
+	if cfg.DataDir != initDataDir {
 		add("dataDir", cfg.DataDir)
 	}
 	if cfg.TLSCertPath != "" {

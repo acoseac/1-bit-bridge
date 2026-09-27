@@ -128,7 +128,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// credential store, the TLS pair and the service all use from here on.
 	// With no config, or one init cannot read, the data dir is init's own.
 	prior, priorErr := readPriorInstall(cfgPath)
-	dataDir := filepath.Join(cfgDir, "data")
+	initDataDir := filepath.Join(cfgDir, "data")
+	dataDir := initDataDir
 	if prior != nil {
 		dataDir = prior.DataDir
 	}
@@ -500,7 +501,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
-	printKept(stdout, cfg, cfgDir, rootsKept, endpointsKept)
+	printKept(stdout, cfg, initDataDir, rootsKept, endpointsKept)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
