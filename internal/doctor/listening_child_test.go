@@ -5,13 +5,16 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // listeningChildEnv makes this test binary, run again by one of the tests
@@ -36,8 +39,10 @@ const listeningChildReady = "listening child ready, port "
 //
 // The child holds until its stdin reaches EOF: the test's cleanup kills it
 // first, and if this binary dies before that, the pipe closes and the child
-// exits by itself. The same shape as the Linux tests' startUndumpable,
-// without making the child non-dumpable, so it runs on every platform.
+// exits by itself. It runs a collection before it says it is ready
+// (collectBeforeReady). The same shape as the Linux tests'
+// startUndumpable, without making the child non-dumpable, so it runs on
+// every platform.
 func startListeningChild(t *testing.T, mode string) (pid, port int) {
 	t.Helper()
 	top, _, _ := strings.Cut(t.Name(), "/")
@@ -109,8 +114,134 @@ func runListeningChild(mode string) {
 		}
 		port = l.Addr().(*net.TCPAddr).Port
 	}
+	collectBeforeReady()
 	fmt.Printf("%s%d\n", listeningChildReady, port)
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	runtime.KeepAlive(l)
 	os.Exit(0)
+}
+
+// TestAListeningChildKeepsItsPortThroughACollection: the port the child
+// reports is still held once it is ready, after the collection it runs
+// first. Only the KeepAlive holds it: the listener's local is not read
+// after the port, and the collection closes a listener nothing references
+// (TestACollectionClosesAListenerNothingReferences).
+func TestAListeningChildKeepsItsPortThroughACollection(t *testing.T) {
+	if mode := os.Getenv(listeningChildEnv); mode != "" {
+		runListeningChild(mode)
+	}
+	_, port := startListeningChild(t, "listen")
+	requirePortHeld(t, port)
+}
+
+// collectBeforeReady is collectAndFinalize, run by a child of these tests
+// after it listens and before it says it is ready, so the tests grade a
+// listener that has already been through a collection. The runtime forces
+// one two minutes after the last (runtime/proc.go's forcegcperiod), but
+// only once one has run, and whether a child's startup runs one depends on
+// how much it allocates: on go1.26.6 it does on macOS and does not on
+// Linux. With the collection here, a child that drops its listener has
+// lost the port before any test grades it, on every platform, rather than
+// in a test held past two minutes on a platform whose startup collected.
+// It ends the child on an error, which the parent reports as a child that
+// exited before it was ready.
+func collectBeforeReady() {
+	if err := collectAndFinalize(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// collectAndFinalize runs a garbage collection and returns once the
+// finalizers and cleanups it queued have run. net closes a listener nothing
+// references from a finalizer (net/fd_posix.go sets (*netFD).Close as one),
+// so a listener a process has dropped is closed by the time this returns,
+// and one it keeps reachable is not.
+//
+// runtime.GC returns once the collection has queued them, not once they
+// have run, so this then waits until the runtime has run as many of each as
+// it has queued, by its own counts (runtime/metrics). Counts rather than a
+// sentinel finalizer of this function's own: one goroutine runs finalizers,
+// a batch at a time and each batch newest first (runtime/mfinal.go), so a
+// sentinel can run ahead of the listener's, and cleanups, which a comment
+// in fd_posix.go proposes for the netFD instead, run on goroutines of their
+// own.
+func collectAndFinalize() error {
+	runtime.GC()
+	s := []metrics.Sample{
+		{Name: "/gc/finalizers/queued:finalizers"},
+		{Name: "/gc/finalizers/executed:finalizers"},
+		{Name: "/gc/cleanups/queued:cleanups"},
+		{Name: "/gc/cleanups/executed:cleanups"},
+	}
+	metrics.Read(s)
+	for _, m := range s {
+		if m.Value.Kind() != metrics.KindUint64 {
+			return fmt.Errorf("runtime/metrics has no %s", m.Name)
+		}
+	}
+	for deadline := time.Now().Add(10 * time.Second); s[1].Value.Uint64() < s[0].Value.Uint64() || s[3].Value.Uint64() < s[2].Value.Uint64(); metrics.Read(s) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("10 s after a collection, the runtime had run %d of the %d finalizers and %d of the %d cleanups it queued",
+				s[1].Value.Uint64(), s[0].Value.Uint64(), s[3].Value.Uint64(), s[2].Value.Uint64())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return nil
+}
+
+// TestACollectionClosesAListenerNothingReferences is the premise the tests
+// that ask for a held port after collectAndFinalize rest on: it closes a
+// listener nothing references, so the port binds again. Were that not so,
+// a child's port surviving the collection would say nothing about the
+// KeepAlive that keeps it. It fails the day net stops closing such a
+// listener when it is collected.
+func TestACollectionClosesAListenerNothingReferences(t *testing.T) {
+	port := listenAndDrop(t)
+	if err := collectAndFinalize(); err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("port %d is still held after a collection by a listener nothing references (%v): "+
+			"collectAndFinalize did not wait for net to close it", port, err)
+	}
+	_ = l.Close()
+}
+
+// listenAndDrop listens on a loopback port and returns the port, keeping
+// nothing that references the listener. It is a function of its own, never
+// inlined, so no variable of its caller's can hold the listener.
+//
+// The port is drawn from 20000–32767, below every platform's ephemeral
+// range (Linux's starts at 32768, macOS's and Windows' at 49152), as
+// cmd/bridge's freeLoopbackTCPAndUDPAddr draws. An ephemeral port, once the
+// collection frees it, could be handed to another process's bind or
+// connect before the rebind that looks at it.
+//
+//go:noinline
+func listenAndDrop(t *testing.T) int {
+	t.Helper()
+	for range 20 {
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(20000+rand.IntN(32767-20000+1)))
+		if l, err := net.Listen("tcp", addr); err == nil {
+			return l.Addr().(*net.TCPAddr).Port
+		}
+	}
+	t.Fatal("no port in 20000..32767 bound in 20 draws")
+	return 0
+}
+
+// requirePortHeld fails the test unless something still listens on
+// 127.0.0.1:port: a bind of it must be refused as in use.
+func requirePortHeld(t *testing.T, port int) {
+	t.Helper()
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err == nil {
+		_ = l.Close()
+		t.Fatalf("port %d binds again: the child's listener was closed by the collection it ran before it said it was ready", port)
+	}
+	if !isAddrInUse(err) {
+		t.Fatalf("binding port %d: %v; want it refused as in use", port, err)
+	}
 }

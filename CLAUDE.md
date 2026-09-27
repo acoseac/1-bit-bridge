@@ -3864,6 +3864,23 @@ its twin.** The top list is older, shorter, and read first.
   process's `PR_GET_DUMPABLE` did not move. No production code uses
   `Credential`; one that did would make the BRIDGE non-dumpable the same
   way, hiding it from every same-user owner probe.
+- **A test child that holds a listener keeps it reachable past its wait,
+  with `runtime.KeepAlive` after the wait** (#1036). net closes a listener
+  nothing references from a finalizer, and `runUndumpable` held its
+  listener only in a local nothing read after the port, so a collection
+  while it waited would have freed the port a test records as the
+  bridge's or the holder's (`runListeningChild` had the KeepAlive since
+  #1034). **It was latent for a reason the timer hides**: the runtime
+  forces a collection two minutes after the last one only once one has
+  run, and on Linux the child's startup runs none at the default GOGC
+  (macOS's does), so it took a bigger init or a lower GOGC to arm it.
+  Both children now collect before they say they are ready
+  (`collectBeforeReady`), so a child that drops its listener fails every
+  test that uses it at once, on every platform. The rule is not about
+  listeners: a file or a conn a child or a test keeps only in a local is
+  closed by a collection the same way, and only something that still
+  refers to it keeps it open (a `defer` or a `t.Cleanup` that names it, a
+  KeepAlive after the wait).
 - **Time an event where it HAPPENS, and match interleaved runs by an id.**
   Both errors were made measuring #997. A "serve has returned" marker printed
   from a `t.Cleanup` registered after `drainServeOnCleanup` runs BEFORE the
