@@ -18033,7 +18033,8 @@ install that is THERE' bullet both say 'survives the rewrite'."
   every failing leaf, and the whole set re-run against `a4f0bfa1` with the
   same result. NC19's first form deleted `namedRoots`' only use and did not
   build (CLAUDE.md's trap); it keeps the variable and grades the kept roots
-  through it. None of the rows below failed to build:
+  through it. NC9 to NC13, whose lines a later tidy-up touched (`717a7aa5`),
+  were re-run there, red as below. None of the rows below failed to build:
 
   | | mutation | red |
   |---|---|---|
