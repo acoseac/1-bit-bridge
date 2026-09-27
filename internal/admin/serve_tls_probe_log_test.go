@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog/handshaketest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -81,8 +82,11 @@ func TestTLSConsoleDoesNotLogALocalProbe(t *testing.T) {
 	_ = probe.Close()
 
 	rejecter := handshaketest.RejectTheCert(t, addr)
-	handshaketest.WaitForLine(t, logs, "http: TLS handshake error from "+rejecter+": remote error: tls: bad certificate", 10*time.Second)
+	handshaketest.WaitForLine(t, logs, "http: TLS handshake error from "+handshakelog.ClientPlaceholder+": remote error: tls: bad certificate", 10*time.Second)
 	time.Sleep(300 * time.Millisecond)
+	if strings.Contains(logs.String(), rejecter) {
+		t.Errorf("the rejecting client's address %s reached the log:\n%s", rejecter, logs.String())
+	}
 
 	for _, line := range strings.Split(logs.String(), "\n") {
 		if strings.Contains(line, "TLS handshake error") && strings.HasSuffix(line, ": EOF") {

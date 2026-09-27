@@ -1,5 +1,6 @@
-// Package handshakelog keeps a local liveness probe out of a TLS
-// listener's error log, and nothing else.
+// Package handshakelog is the error log of the bridge's HTTP servers. It
+// keeps a local liveness probe out of it, and every peer's address out of
+// what it keeps.
 //
 // The image's HEALTHCHECK runs `bridge health`, which proves the API
 // listener is up by connecting and closing — no TLS, so no certificate to
@@ -40,6 +41,13 @@
 //
 // HTTP/3 needs nothing: the probe is TCP, and quic-go's http3.Server logs a
 // failed connection only at Debug, through a Logger the bridge never sets.
+//
+// The peer's address comes out of every line either logger keeps
+// (RedactPeers). net/http prints it in a failed handshake, a recovered
+// panic and the HTTP/2 connection errors, and the bridge's privacy page
+// promises that client IPs are not logged for the phone-facing API: a
+// phone with a stale pin, a cancelled endpoint probe and a scanner each
+// used to leave one. The line keeps everything else, the reason included.
 package handshakelog
 
 import (
@@ -47,6 +55,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,7 +69,7 @@ import (
 // Every line the logger keeps goes to the standard library's default
 // logger, which is exactly where a nil ErrorLog sends it — so panics,
 // accept errors, HTTP/2 errors and every other handshake failure reach the
-// operator unchanged.
+// operator, with the peer's address taken out (RedactPeers).
 //
 // Wrap the RAW listener: the one handed to ServeTLS, or the one BEFORE
 // tls.NewListener. Never wrap a listener that already yields *tls.Conn
@@ -70,6 +79,42 @@ import (
 func Wrap(l net.Listener) (net.Listener, *log.Logger) {
 	w := &listener{Listener: l}
 	return w, log.New(errorLog{w}, "", 0)
+}
+
+// ErrorLog is the logger for an http.Server whose listener Wrap cannot
+// take: one that yields *tls.Conn, such as tsnet's ListenTLS. It drops no
+// line and takes the peer's address out of each one.
+func ErrorLog() *log.Logger {
+	return log.New(redactingLog{}, "", 0)
+}
+
+// redactingLog forwards each line to the standard logger, as a nil
+// ErrorLog would, without the peer's address.
+type redactingLog struct{}
+
+func (redactingLog) Write(p []byte) (int, error) {
+	log.Print(RedactPeers(string(p)))
+	return len(p), nil
+}
+
+// ClientPlaceholder stands where a peer's address was.
+const ClientPlaceholder = "<client address>"
+
+// peerAddr matches an address where net/http and its bundled HTTP/2 server
+// print a peer's (Go 1.26): after "from " ("http: TLS handshake error from
+// %s", "timeout waiting for SETTINGS frames from %v", "http2: server
+// connection error from %v"), after "client " ("error reading preface from
+// client %v") and after "serving " ("http: panic serving %v", "http2: panic
+// serving %v"). The address is IPv4 or bracketed IPv6, with its port.
+// Anchoring on those words keeps a LOCAL address in the line, such as the
+// listen address in an accept error, which is the operator's own
+// configuration and says nothing about who connected.
+var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) )(?:\d{1,3}(?:\.\d{1,3}){3}|\[[^\]\s]+\]):\d+`)
+
+// RedactPeers returns line with each peer address in it replaced by
+// ClientPlaceholder.
+func RedactPeers(line string) string {
+	return peerAddr.ReplaceAllString(line, "${1}"+ClientPlaceholder)
 }
 
 type listener struct {
@@ -159,12 +204,14 @@ const (
 // each line and hands it over whole.
 type errorLog struct{ l *listener }
 
-// Write forwards the line to the standard logger, exactly as a nil
-// ErrorLog would, unless it is a silent probe's.
+// Write forwards the line to the standard logger, as a nil ErrorLog would
+// but without the peer's address, unless it is a silent probe's. The probe
+// is recognised by its address, so the check reads the line as net/http
+// wrote it and the redaction comes after.
 func (w errorLog) Write(p []byte) (int, error) {
 	line := string(p)
 	if !w.l.isSilentProbe(line) {
-		log.Print(line)
+		log.Print(RedactPeers(line))
 	}
 	return len(p), nil
 }
