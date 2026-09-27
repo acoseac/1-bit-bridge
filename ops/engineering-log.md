@@ -17797,6 +17797,54 @@ this repo gives for declining interprocess locks (`bridge restore`, the
 ticket sidecar) is about lock FILES, and the kernel drops a flock or
 LockFileEx lock with the process.
 
+### Review round 1
+
+- **CodeQL (`go/clear-text-logging`, alert 127)** read `PasswordChangedAt`,
+  a field named for a password, as a secret flowing to the adoption log
+  line. It is a timestamp, but the line's own time already says when the
+  running bridge took the change, so it was dropped rather than dismissed:
+  the line carries the username alone. A dismissal of a heuristic this
+  broad comes back on the next field that mentions a password.
+- **Gemini** reviewed the first head with no comments.
+- **CodeRabbit did not start on its own.** No walkthrough appeared (on
+  #1038 it came 10 s after the PR opened); `@coderabbitai review` started
+  it, and its note said the pass used the last included review of the
+  hour.
+- **CodeRabbit's one finding (Major) was real, and it is the consult's
+  window from the other side.** reset-password read the file's sessions,
+  then staged its write, and renamed with no check: a login or logout the
+  running bridge committed during that write and fsync was overwritten,
+  and a logout overwritten that way comes back at the next restart, when
+  nothing in the bridge's memory overrules it. **Every write now goes
+  through one `commitLocked`**: build from a fresh read, stage, re-read
+  just before the rename, commit only if the file is byte for byte the one
+  the write was built from, rebuild otherwise (up to three times). It
+  replaces the session writer's credential-only comparison, which could
+  never have caught this side: a session change leaves the credential as
+  it was. That is the compare-and-swap CodeRabbit offered as the
+  alternative to a cross-process lock; the lock stays out, for the
+  reasons under Out of scope.
+- `TestARotationDoesNotCommitOverASessionChangeMadeDuringItsWrite` drives
+  a logout and a login into the reset's staging window through the test
+  seam (now `beforeCommitHook`, fired in every writer). The controls were
+  re-run against the new structure, each restored from HEAD and the tree
+  checked clean before the next, and the rows whose mutation had to change
+  shape now read:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | a session write builds from this process's credential (`held := s.user`) | all four writer rows, the deleted-file and rotation-during-write tests, the e2e (the pre-commit check alone does not stop it: the file is unchanged since the read, and the write puts down the wrong credential) |
+  | NC18 | no write re-checks the file before its commit | both mid-write tests |
+  | NC20 | one attempt, no rebuild | both mid-write tests |
+  | NC21 | the pre-commit check compares the credential alone (round 1's rule) | the new reset-side test only, on both rows |
+
+  The first run of NC18 and NC21 did not build: the mutation removed
+  `bytes`' only use, CLAUDE.md's "delete a variable's only use" in its
+  import form, and a control that does not build proves nothing. With a
+  discarded use kept, both ran as above. NC4 and NC17 also turn the new
+  test red, since the rotation's sessions then come from memory or from
+  nowhere.
+
 ### Out of scope
 
 - **Nothing can end another console session.** A rotation does not, a

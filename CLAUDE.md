@@ -3078,14 +3078,18 @@ its twin.** The top list is older, shorter, and read first.
   down the set in memory; a credential write puts down the set it finds in the
   file AT THE WRITE, never the one read at open, since reset-password waits at a
   prompt in between. **One re-read is not enough**: staging costs a write and an
-  fsync (milliseconds, tens on a cloud disk), so a session write reads the
-  credential again before its rename and rebuilds around a change
-  (`beforeSessionCommitHook`); the rename itself (on Windows, with its retries)
-  is what remains. A kernel lock (flock / LockFileEx) would close that, and the
-  "stale lockfile" reason this file gives for declining interprocess locks is
-  about lockFILES: the kernel drops those locks with the process. **A rotation
-  does not end sessions, and neither does a restart** (they persist, #800);
-  reset-password said a restart ended them until 2026-09-27.
+  fsync (milliseconds, tens on a cloud disk), so EVERY write goes through
+  `commitLocked`, which re-reads the file just before its rename and rebuilds
+  from a fresh read if it changed at all, byte for byte. Comparing the
+  credential alone covered the running bridge's writes and missed
+  reset-password's, whose rename dropped a login or brought back a logout
+  committed while it staged (CodeRabbit on #1039). The rename itself (on
+  Windows, with its retries) is what remains. A kernel lock (flock / LockFileEx)
+  would close that, and the "stale lockfile" reason this file gives for
+  declining interprocess locks is about lockFILES: the kernel drops those locks
+  with the process. **A rotation does not end sessions, and neither does a
+  restart** (they persist, #800); reset-password said a restart ended them until
+  2026-09-27.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
   an in-memory map is invisible to the redeemer and the feature never works — it
