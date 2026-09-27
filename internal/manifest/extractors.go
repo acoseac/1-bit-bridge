@@ -376,7 +376,21 @@ var Ext = map[string]bool{
 //
 // Only files behind a tag stack change; the version-stale diff-guard keeps
 // the client delta to exactly those rows.
-const ExtractorVersion = 16
+//
+// v17 — the compilation flag reaches the wire (`Track.Compilation`, from
+// the TCMP / cpil / COMPILATION read populateFromTagMetadata already made
+// for its "Various Artists" safety net). iOS keeps performers who appear
+// only on compilations out of its Artists list, and a flagged album whose
+// album artist is a DJ or a label is invisible to it without the flag.
+// The field is omitempty, so only FLAGGED files change: they gain
+// `"compilation":true` in tags_json, take the full-upsert leg (which
+// re-queues their enrichment once; mergePostScanFields keeps their MBIDs
+// and art meanwhile), and are the iOS delta. Every other non-ISO row
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO
+// virtual rows re-expand as on every bump (processSACDISO has no diff-guard),
+// which the client's diff-before-write absorbs. No other field of any file
+// changes — the synth's condition is unchanged.
+const ExtractorVersion = 17
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -835,9 +849,15 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 // AND has no explicit `AlbumArtist`, force `AlbumArtist = "Various
 // Artists"`. Pre-fix the iOS bridge upsert fell back to per-track
 // `Artist` for albumArtist on missing-tag, which produced one Album
-// row per artist on multi-artist compilations. iOS doesn't see the
-// compilation flag (it's not in BridgeTrack), so the synth has to
-// happen here.
+// row per artist on multi-artist compilations. The synth still happens
+// here, so album identity is settled before the row reaches the wire.
+//
+// **The flag itself is on the wire too** (`Track.Compilation`, since
+// ExtractorVersion 17): the synth only covers a flagged file with NO
+// album artist, and a flagged file whose album artist is a DJ or a
+// label ("Ministry of Sound") looked like an ordinary album to iOS.
+// Same read, same "1" test, so the two can never disagree about which
+// files are compilations.
 func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	if v := strings.TrimSpace(m.Title()); v != "" {
 		t.Title = v
@@ -923,14 +943,15 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	// keys (`MUSICBRAINZ_ALBUMID`) AND ID3v2 TXXX descriptions
 	// (`MusicBrainz Album Id` — Picard's canonical form).
 	if raw := m.Raw(); raw != nil {
-		// Compilation safety net (CLAUDE.md / Gemini A6 / iOS bug
-		// review #6b). Only fires when albumArtist is empty AND a
-		// compilation flag is set to "1" — preserves the user's
-		// explicit albumArtist when one is tagged. TCMP (ID3v2),
-		// CPIL (iTunes / MP4), COMPILATION (Vorbis / FLAC) all
-		// carry the same semantic.
-		if t.AlbumArtist == "" {
-			if comp, ok := stringOf(raw, "tcmp", "cpil", "compilation"); ok && comp == "1" {
+		// Compilation flag + safety net (CLAUDE.md / Gemini A6 / iOS
+		// bug review #6b). TCMP (ID3v2), CPIL (iTunes / MP4),
+		// COMPILATION (Vorbis / FLAC) all carry the same semantic, and
+		// only "1" means yes. The flag always reaches the wire; the
+		// synth only fires when albumArtist is empty — it preserves the
+		// user's explicit albumArtist when one is tagged.
+		if comp, ok := stringOf(raw, "tcmp", "cpil", "compilation"); ok && comp == "1" {
+			t.Compilation = true
+			if t.AlbumArtist == "" {
 				t.AlbumArtist = "Various Artists"
 			}
 		}

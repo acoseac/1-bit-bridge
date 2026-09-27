@@ -248,6 +248,7 @@ func buildID3v2_3(fields map[string]string) []byte {
 		"work":         "TIT1",
 		"originalYear": "TORY",
 		"bpm":          "TBPM",
+		"compilation":  "TCMP",
 	}
 	var body bytes.Buffer
 	for k, v := range fields {

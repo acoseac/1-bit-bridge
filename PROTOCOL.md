@@ -376,6 +376,19 @@ iOS surfaces these on a third subtitle line in track rows ("Composer: X" with co
 
 Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]string`) are preserved by the extractor and serialised as a `; `-joined scalar string on the existing `artist` / `albumArtist` fields. The wire shape stays scalar; the iOS app splits on `; ` and exposes a sub-menu picker on multi-artist rows. Pre-v1.3 extractors silently collapsed multi-value tags to whichever single value the underlying library returned first; the v1.3 behavior is backwards-compatible (single-artist sources are unchanged).
 
+#### Compilation flag — `compilation` (additive, since ExtractorVersion 17)
+
+```json
+{ "path": "Music/Various/The Annual/01.flac", "size": 12345678, "mtime": "…", "artist": "Performer A", "albumArtist": "Ministry of Sound", "album": "The Annual", "compilation": true }
+```
+
+`compilation` is `true` when the file's own tags mark it part of a compilation: ID3v2 `TCMP`, MP4 `cpil` or a Vorbis `COMPILATION` comment, set to `1`. Only `1` counts; `0`, `true` and an absent tag all read as unflagged. It comes from the same read that has long made the bridge fill `albumArtist` with `"Various Artists"` for a flagged file that has no album artist. That fill is unchanged, so a flagged track whose album artist IS tagged (a DJ mix, a label sampler) keeps it and now also carries the flag.
+
+- **Only `true` is meaningful.** The field is `omitempty`, so an unflagged track and a track from a bridge that predates the field look the same. Absence makes no claim; a client combines the flag with its other signals, such as a Various-Artists `albumArtist`, rather than reading absence as proof of an ordinary album.
+- The iOS app uses it, with Various-Artists `albumArtist` markers, to keep artists who appear only on compilations out of its Artists list.
+- A bridge upgraded to ExtractorVersion 17 re-extracts every file once. Flagged tracks gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
+- An app that predates the field consumes that delta without it. The iOS app therefore reaches back to a fixed date, once per bridge, on its first sync after gaining the field, so the flag arrives whichever side updated first.
+
 #### DSD specifics
 
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
