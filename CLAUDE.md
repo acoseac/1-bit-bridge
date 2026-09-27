@@ -180,6 +180,7 @@ The user works across **multiple Claude accounts and machines**. Per-account pri
 | Wire-protocol / cross-repo contracts | `PROTOCOL.md` (repo root — **not** `docs/`) + the iOS repo's mirror entry, bumped in lockstep |
 | Deploy procedures, journal diagnostics, host-specific ops | **`ops/deployment-runbook.md`** — `## Production deployments` above already tells every agent to read it before a deploy, so it reaches sessions that never open `CLAUDE.md` |
 | Build/test commands and their gotchas | `## Build` above |
+| A follow-up found and not built (a defect beside this change, a finding agreed to be out of scope, a question to measure later) | **`~/Desktop/to-do/bridge-backlog.md`**, never a task chip: see `## Follow-ups go in the backlog, not in task chips` below |
 
 **`ops/`, never `docs/`, for anything operational** — see the warning in `## Production deployments`: `docs/` is served as a public website from a public repo, so live hosts, key paths and unfixed-weakness enumerations must not go there. This makes the repo-vs-private line *three*-way here: public `docs/` → internal `ops/` → private memory.
 
@@ -190,6 +191,32 @@ The user works across **multiple Claude accounts and machines**. Per-account pri
 2. **Never cite a private memory from a repo file** — it's a dangling reference for every other account. If a repo file needs the fact, put the **fact** in the repo.
 3. **Repo first, then the pointer.** When something is both shareable and worth a personal reminder, write the repo entry first and leave the private memory as a one-line pointer.
 4. **Only `CLAUDE.md` is auto-loaded.** `ops/engineering-log.md` exists so a rule can stay short without losing its evidence — but a finding written *only* there is the same inert paper as rule 1. Every batch writes the **rule** here and the **record** there.
+
+## Follow-ups go in the backlog, not in task chips
+
+**Don't call `spawn_task`** (the desktop app's background-task chip) in this repo;
+the user asked for this on 2026-09-27. A session that finds something worth doing
+outside its own change adds an entry to **`~/Desktop/to-do/bridge-backlog.md`**
+instead, and names the entry in its final report. Chips piled up on finished
+sessions, each visible only from the session that raised it, with nothing to collect
+them before a release; the ones still showing on four finished sessions that day
+were moved into the backlog and withdrawn.
+
+- **Add** under `## Open` with the next free id, in the shape the file's header
+  gives: Status, Priority, Source (session, PR, finding), What, Why it matters,
+  Evidence (how it was measured and where the record is), Constraints, and a
+  **Prompt** a fresh session can run as it stands, the text a chip would have
+  carried.
+- **Take** an entry by putting the branch and PR on its Status line. **Ship** it by
+  moving it under `## Done` with the PR number and merge sha.
+- **Before a release**, read `## Open` and decide what goes in.
+
+It lives outside the repo on purpose. The repo is public, and entries describe
+weaknesses that are not fixed yet and name private hosts, which is the content
+`ops/README.md` keeps untracked. `~/Desktop` is iCloud-synced, so the file reaches
+every Mac, and every account on a Mac reads the same file. A backlog entry holds
+WORK, not rules: a rule a follow-up teaches still goes in this file, and its record
+in `ops/engineering-log.md`.
 
 ## Things that have bitten before
 
