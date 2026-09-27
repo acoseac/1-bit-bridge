@@ -1,7 +1,7 @@
 // Package adminauth manages the admin console's single-user
 // authentication layer: bcrypt-hashed credentials persisted to disk,
-// in-memory session tokens, and a per-(IP, username) login rate
-// limiter. Gated on `deployment.mode == public` — loopback installs
+// session tokens persisted beside them, and a per-(IP, username) login
+// rate limiter. Gated on `deployment.mode == public` — loopback installs
 // remain unauthenticated as their historical contract requires.
 //
 // Sessions persist alongside the credentials, so a restart no longer
