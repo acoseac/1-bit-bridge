@@ -498,12 +498,13 @@ lost my library."
   to a log line, never a hung exit. A writer includes a goroutine whose CHILD
   PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
   unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
-- **A scan a shutdown stops reports none of its writes as failures, and the
-  final flush DROPS its batch on purpose**: the skip gate redoes exactly what
-  was dropped, and flushing on a context detached from the cancel would hold
-  shutdown for rows the next scan writes anyway
-  (`TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo`). The
-  rule is under **The CLI and the serve wiring**. (#1000)
+- **A scan a shutdown stops reports no write the stop cancelled as a
+  failure, and the final flush DROPS its batch on purpose**: the skip gate
+  redoes exactly what was dropped, and flushing on a context detached from
+  the cancel would hold shutdown for rows the next scan writes anyway
+  (`TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo`). A
+  write that fails for any other reason is still reported. The rule is
+  under **The CLI and the serve wiring**. (#1000)
 - **Anything walking FLAC metadata blocks SEEKS past a validated PICTURE payload,
   never drains it.** The single-open FLAC path exists because a 5–25 MiB embedded
   cover crossing the wire twice per track halved scanner throughput on NAS-mounted
@@ -3315,8 +3316,10 @@ mentions across the four `ops/audit-*.md` files.
   next pass redoes. That looser form is RIGHT only where the error cannot
   carry the cancellation: a tsnet node the shutdown closed under
   `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
-  context alone. **A stopped pass reports no failure and records no
-  verdict, count or status for the work the stop interrupted.** The
+  context alone. **A stopped pass reports no failure the stop caused, and
+  records no verdict, count or status for the work the stop
+  interrupted.** A `ctxerr` site still reports any other failure, even
+  one that lands during the shutdown (#998's second condition). The
   enricher's fetches absorb their own errors, so a cancelled portrait
   search used to reach `markSkipped`, which counted `no_mb_match` and
   logged `enrichment skipped` for a verdict it never wrote. It now stops
