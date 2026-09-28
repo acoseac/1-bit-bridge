@@ -1,10 +1,8 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,10 +26,7 @@ func decodeErrorResponse(t *testing.T, body []byte) ErrorResponse {
 
 func TestWriteErrorLog_RecordsErrAndReturnsSanitizedMessage(t *testing.T) {
 	// Capture slog records to make sure the underlying err lands in the log.
-	prev := slog.Default()
-	buf := &bytes.Buffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	buf := withTestSlog(t)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
@@ -131,10 +126,7 @@ func TestWriteResolveError_TypedSentinelsReturnStableMessages(t *testing.T) {
 func TestWriteResolveError_DefaultBranchSanitizes(t *testing.T) {
 	// An unknown resolver error must not leak its text. The diagnostic
 	// detail goes to the server log; the wire body is generic.
-	prev := slog.Default()
-	buf := &bytes.Buffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	buf := withTestSlog(t)
 
 	leaky := errors.New("readonly: /Users/operator/Music/private-stash refused")
 	rr := httptest.NewRecorder()
@@ -162,10 +154,7 @@ func TestWriteResolveError_DefaultBranchSanitizes(t *testing.T) {
 // log line carries the library-relative path the client asked for and the
 // error without its path, as the privacy page promises for error lines.
 func TestWriteResolveError_LogsTheLibraryPathNotTheAbsoluteOne(t *testing.T) {
-	prev := slog.Default()
-	buf := &bytes.Buffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	buf := withTestSlog(t)
 
 	statErr := &os.PathError{Op: "stat", Path: "/Users/operator/Music/Artist/Album/01.flac", Err: syscall.EACCES}
 	rr := httptest.NewRecorder()

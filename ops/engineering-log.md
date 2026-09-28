@@ -23790,3 +23790,148 @@ of the two checks.
 - On a managed bridge whose `managedSettings` lists `optimizeEnabled`,
   the gear offers a switch the PATCH refuses, as the panel-wide tray
   already did for both of its switches.
+
+## 2026-09-28 — outside the logging packages' own tests, every test that swaps slog's default goes through loggingtest.SetDefault, and a sweep refuses one that does not
+
+#1064 added `loggingtest.SetDefault(t, l)` and listed, under "Left as they
+are", the test files that still put back only slog's default after swapping
+it. This change moves every one onto it and adds the sweep that entry named.
+Backlog B31; PR #1075.
+
+### What was measured on main (37807845)
+
+- **The population.** The sweep, written first and run before any
+  conversion, reported 29 references in 12 test files: `slog.SetDefault` 28
+  times, `logging.Init` once. They are the files #1064's entry listed:
+  `internal/api` (`errors_test.go`, three tests, and `middleware_test.go`'s
+  `withTestSlog`), `internal/updater/verify_darwin_test.go`,
+  `internal/transcode/pool_log_redaction_test.go`,
+  `internal/pairing/store_test.go`,
+  `internal/manifest/store_probe_ctx_log_test.go` and
+  `log_library_paths_test.go`, `internal/integrity/relocation_test.go`,
+  `internal/analyze/pool_failure_test.go`,
+  `internal/albumgain/mate_log_redaction_test.go`,
+  `internal/metrics/metrics_test.go` (a deferred `slog.SetDefault(prior)`
+  around a `logging.Init`), and `internal/logging/logging_test.go` (three
+  calls, restoring nothing).
+- **The swallowed lines.** A throwaway probe test that calls `slog.Info` and
+  `log.Print` once each, run straight after one capturing test of each file
+  in one `go test -count=1 -v -run '^(<capturing test>|<probe>)$'`
+  (GOTOOLCHAIN=go1.26.6, darwin/arm64). Fourteen capturing tests across the
+  twelve files: after every one, 0 of the probe's 2 lines reached the
+  output, while the probe run alone printed 2 of 2 in each package. The
+  host's go1.27.1 gave the same 0 of 2 after
+  `TestWriteErrorLog_RecordsErrAndReturnsSanitizedMessage`. The mechanism is
+  #1064's: `slog.SetDefault(l)` points the log package's output at l's
+  handler and zeroes its flags, and putting back slog's own default undoes
+  neither.
+
+### What changed
+
+- **Every capture in the twelve files goes through
+  `loggingtest.SetDefault`** (internal/logging's own `Init` calls aside;
+  see below). Where a package had a helper (`withTestSlog`, `captureLogs`
+  in pairing, integrity and analyze, manifest's `captureDefaultLogger` and
+  `captureScanLogs`), the helper changed and its callers did not. The three
+  inline captures in `internal/api/errors_test.go` were `withTestSlog`'s
+  body, so they call it.
+- **`internal/metrics` no longer calls `logging.Init`.** The test needs a
+  default that keeps its Warn out of the output; a discarding handler
+  installed through `SetDefault` is that, and is put back. `Init` cannot be
+  undone from outside its package (its `once` is private), so a second call
+  in the binary would also have done nothing.
+- **No capture was in a parallel test.** `SetDefault` refuses one (#1064),
+  and every changed package's suite passed with it, so no interference was
+  hiding behind the hand-rolled form.
+- **internal/logging.** Its tests test the logger itself: `Init`, the
+  dynamic handler, the cache that `slog.SetDefault` invalidates. Restoring
+  there means leaving what a test binary that never ran `Init` has: slog's
+  default, the log package's output and flags, and a fresh `once`.
+  `resetOnce(t)` now does that (it installs a discarding default through
+  `SetDefault`, which the test's own `Init` and swaps come after, and resets
+  `once` at cleanup), and the two direct swaps go through `SetDefault`, so
+  the package needs no exemption for `slog.SetDefault`. Its tests call `Init`
+  unqualified, which the sweep does not read, so a new `TestMain` checks,
+  once every test has run, that the four are back, and fails the run
+  otherwise. Before, `resetOnce` put back nothing: the probe run after
+  `TestComponentAttributesIncluded` printed 0 of 2.
+- cmd/bridge's keeper sweep's `keeperWalkDir` and `writeKeeperTree` are now
+  `moduleDirRule` and `writeFixtureTree`, shared with the new sweep, which
+  so walks by the directory rule #1007 and #1008 settled.
+
+### The sweep
+
+`TestNoTestSetsTheDefaultLoggerByHand` (cmd/bridge) parses every `_test.go`
+file the go tool reads and refuses a selector naming `slog.SetDefault` or
+`logging.Init`.
+
+- **Test files only.** Every capture in the tree was in one. Production has
+  three references, `Init`'s own `slog.SetDefault` and `main`'s two calls of
+  `Init`, which is what a scan of non-test files reports (NC6).
+- **`logging.Init` counts.** It is `slog.SetDefault` behind a `sync.Once`,
+  with no restore, and it is how the metrics test reached the defect. A
+  sweep of `slog.SetDefault` alone passes a test that calls only `Init`.
+- **A reference, called or not**, through whatever name the file imports the
+  package by (`importName`, the keeper sweep's). `defer
+  slog.SetDefault(prior)` was one of the 29, and a method value is the same
+  reference. A dot import is reported: its calls carry no package name.
+- **An exemption is the directory of the package that tests the call,
+  exactly.** `internal/logging/loggingtest` for `slog.SetDefault`: its tests
+  build a prior default by hand, because the restore is what they test
+  (`TestInstallersRestoreTheStandardLogger` sets a TextHandler default
+  first). `internal/logging` for `logging.Init`, which covers an external
+  test there. Neither covers a directory below it, and internal/logging's
+  tests are held to the `slog.SetDefault` rule.
+- **No scope tracking.** A local named `slog` or `logging` with a
+  `SetDefault` or `Init` field would be reported. None exists; such a report
+  fails closed, and the fix is a rename.
+- **Floors.** At this change the scan parsed 824 test files, 23 of them
+  importing a setter's package by name; the floors are 100 and 10. Only the
+  second catches a skip rule that swallows `internal/` (NC9: 103 files
+  parsed, 3 importers).
+
+### Tests
+
+- `TestNoTestSetsTheDefaultLoggerByHand`: red on main with the 29 findings,
+  green after.
+- `TestDefaultLoggerSweepOnAFixture`: the scan over a synthetic tree, written
+  with LF and with CRLF, with exact findings (file:line and reference): the
+  hand-rolled install and restore, an alias in a `defer` and as a method
+  value, a dot import, `logging.Init` in another package's test, a test file
+  below loggingtest's directory, and `slog.SetDefault` in an external test
+  of internal/logging. Quiet: `loggingtest.SetDefault`, a comment and a
+  string naming the call, another package's `SetDefault`, a blank import, a
+  non-test file, loggingtest's own test, `logging.Init` in internal/logging's
+  test, an emacs lock file, a `_` file, and test files under `_scratch/`,
+  `testdata/` and another checkout. It also requires 9 test files read, 7 of
+  them importers.
+- The probe, after the change: 2 of 2 after each of the fourteen tests.
+
+### Negative controls
+
+Each on the committed tree, restored with `git checkout --` before the next.
+
+| Control | Red |
+|---|---|
+| NC1: `internal/albumgain`'s capture back to the hand-rolled form | the tree test only, with that file's two references |
+| NC2: the scan matches the package's own name, not the file's import name | the fixture test only (both subtests), missing the two alias findings |
+| NC3: no `logging.Init` entry | the fixture test only: its finding missing, 6 importers not 7 |
+| NC4: the exemption by prefix, not the exact directory | the fixture test only, missing `internal/logging/loggingtest/deeper/x_test.go:5` |
+| NC5: a dot import not reported | the fixture test only, missing the dot import |
+| NC6: non-test files read too | both: the tree reports `cmd/bridge/main.go:2099` and `:2130` and `internal/logging/logging.go:80`; the fixture reports `pkg/prod.go`, 10 files, 8 importers |
+| NC7: no `goToolIgnores` in the file rule | the fixture test only: the walk fails parsing the lock file |
+| NC7b: only its `.` half | the fixture test only, reporting `pkg/_draft_test.go:5` |
+| NC8: no `moduleDirRule` | the fixture test only, reporting the files under `_scratch/`, `pkg/testdata/` and `worktrees/mid/` |
+| NC9: a skip rule that swallows `internal/` | both: the tree test on the importers floor, the fixture on its findings |
+| NC10: one internal/logging test calls `Init` without `resetOnce(t)` | internal/logging's `TestMain` only: every test passes and the run fails (default, output and flags not back); the tree sweep stays green |
+| NC11: `resetOnce` does not reset `once` at cleanup | internal/logging's `TestMain` only (once not fresh) |
+
+### Left as they are
+
+- `handshaketest.CaptureStdLog` points the log package at a buffer and puts
+  back its output, flags and prefix, but does not refuse a parallel test as
+  `SetDefault` does, so two overlapping captures would put back each other's
+  state. None of its callers is parallel.
+- The sweep reads test files, so a test-helper package's non-test file
+  (`handshaketest.go` is one) that swapped the default by hand would pass.
+  Among such files only loggingtest's own calls `slog.SetDefault`.
