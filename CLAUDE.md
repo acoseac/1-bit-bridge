@@ -2665,7 +2665,11 @@ no failing test — which is the shape to expect in this area.
   breath the settings response calls the change pending. This is why there is no
   `partial` status — the rule removes the case instead of naming it. The
   field → apply-semantics matrix is **`ops/settings-apply-semantics.md`**, and a
-  test drives the real handler for every row in it.
+  test drives the real handler for every row in it. **That test checks the
+  REPORT, and no consumer**: under `upscaleEnabled`'s `live` row the console's
+  size projection was taken at boot until 2026-09-28, and four consumers read
+  the flag without its sox half (the construction-time bullet under The CLI
+  and the serve wiring, and the one after it).
 - **…and a DEFAULT splits the halves too, when a writer can store what `Load`
   would replace** (#1042). `applyDefaults` runs in `Load` alone, and before
   the `BRIDGE_*` overrides, so its `if c.LibraryName == ""` reached neither
@@ -3752,6 +3756,70 @@ mentions across the four `ops/audit-*.md` files.
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
   operator who switched upscaling off can still reclaim the disk, where
   `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
+- **…and a value runServe DECIDES from the config while it builds Deps is a
+  boot snapshot, however live its reader is** (2026-09-28).
+  `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals
+  called in place that answered nil unless `upscale.enabled` was true at
+  that moment, and the projection handler read nil as "feature off".
+  Measured with the real `serve`, flipping `upscaleEnabled` through
+  `PATCH /api/settings`, which answered `live` both times: `GET
+  /api/library/browse-projection` answered 503 `upscale-disabled` after the
+  switch went on and 200 after it went off, while `/v1/health` followed it,
+  and with no sox on PATH it projected while health said off. The same nil
+  made `GET /api/upscale/variants-dir` report `freeBytes: 0`, "0 B free" on
+  the Library roots page, on every bridge booted with upscaling off. The two
+  sat directly above `OptimizeEligible`, whose own comment records this fix
+  for `optimizeEnabled`. Both helpers are now wired on every bridge, and the
+  handler refuses on `s.upscaleActive()`
+  (`Deps.UpscaleActive`, the batch's gate and /v1's, which
+  `TestConsoleBatchGateIsTheV1UpscaleGate` pins) before the target read, the
+  walk and the disk probe. **A function literal called where a Deps field or
+  a `With*` option is written decides on a WIRING fact (a nil handle), never
+  on the config**: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  sweeps runServe for one that reads `cfg`, `cfgHolder`, `liveCfg()` or a
+  live predicate outside the closure it returns. **A `live` row in
+  `ops/settings-apply-semantics.md` is a claim about every consumer, and
+  `TestMatrixDocMatchesWhatTheHandlerReports` checks only the REPORT**: it
+  passed throughout. The consumers are checked by a boot test that flips the
+  field through the PATCH and asks each one
+  (`TestServeProjectionFollowsTheLiveUpscaleGate`, which puts a stand-in sox
+  first on PATH, POSIX only, so the switch-on leg means something on a host
+  without sox, and checks health agrees before it compares).
+- **…and a LIVE reader of the flag alone splits the gate too: every consumer
+  that answers "is upscaling on" reads `upscaleActiveFn`, the flag AND a
+  usable sox** (2026-09-28). Four read `upscale.enabled` live and without the
+  sox half: the console's tile (`Deps.UpscaleStats` / `UpscaleBusy`, and the
+  Settings chip that takes its verdict from it), `/v1/upscale/stats`'
+  `enabled` (whose PROTOCOL.md row says "matching `/v1/health.upscaleEnabled`"),
+  the auto-optimize sweeper and its Jobs card, and `Deps.OptimizeActive`. On
+  a bridge without sox, health said off and they said on, and the sweeper
+  WORKED on it: its decodability check reads a failed probe as "can decode",
+  so it queued every eligible track, each job failed with a WARN and struck
+  its file, and the third strike suppresses a file from pre-generation for 30
+  days. Measured with the real binary, six hi-res tracks, a 20 s cadence: 18
+  jobs, 18 WARNs, all six suppressed within 40 s; restarted WITH sox, every
+  sweep still queued nothing (`remaining: 0`, rendered "all caught up") until
+  `POST /api/upscale/failures/retry`. A toolchain fault recorded as a fact
+  about the files. **The CarPlay kind reads one closure**,
+  `carPlayOptimizeActiveFn` (the upscale gate AND the optimize switch):
+  `WithCarPlayOptimize`, `Deps.OptimizeActive`
+  (`TestConsoleCarPlayGateIsTheV1CarPlayGate`, the only pin possible, since
+  both of its readers ask `UpscaleActive` first) and, with the pre-generation
+  flag, the sweeper. **A card that reports a switch beside a gate says why
+  they differ**: the auto-optimize card's `enabled` is the switches, `active`
+  the gate, and `degradedReason: "sox_missing"` the difference, rendered as a
+  "degraded" badge, a hint of its own that clears when the probe (30 s TTL)
+  finds sox, and "not run" where a refused sweep's `disabled` would read
+  "turned off". No restart is needed and none is advised. The settings PATCH
+  gives `optimizeEnabled` and `autoOptimizeEnabled` the sox reason
+  `upscaleEnabled` had. `TestServeWithoutSoxReportsUpscalingOffOnEverySurface`
+  boots the real serve on a PATH with no sox and asks every surface; it and
+  the report test were red on the old code, and seven controls each turn red
+  only the assertions of the surface they revert. **Still open**: the
+  transcode pool strikes a file for ANY runner error, a missing sox
+  included, where the analysis pool records a missing tool as transient. The
+  gate now keeps the sweeper away without sox, and what remains is a job
+  queued inside the probe's TTL after sox disappears.
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
@@ -4839,7 +4907,17 @@ its twin.** The top list is older, shorter, and read first.
   endpoint answer, the folder view's rule, since `/api/library/browse`
   carries no feature state. The #1060 AST sweep counts a call of
   `optimizeActive` as reading the CarPlay switch. A save from either tray
-  redraws the panel: the next bullet.
+  redraws the panel: the next bullet. **The panel-wide note must close
+  wherever the upscale gate does**, because `Deps.OptimizeActive` includes
+  that gate (the flag and a usable sox: `carPlayOptimizeActiveFn`, under The
+  CLI and the serve wiring), and a block the panel-wide note does not
+  show falls through to the CarPlay row's "switched off". The summary's
+  `soxAvailable` is therefore `Server.soxUsable`, the gate's sox half
+  (found, and FLAC when the build's formats are known): with the precheck
+  alone a sox without FLAC read as available, and the panel named a switch
+  that was on while the hi-res Generate stayed live over a refusal
+  (`TestTheVariantSummaryReadsSoxAsTheGateDoes`, and the panel test's
+  fourth state).
 - **A tray redraws the page only through its spec's `onSaved`, and a page
   redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
   #1068). A feature tray saves one switch and repaints nothing else, so
@@ -5560,9 +5638,16 @@ its twin.** The top list is older, shorter, and read first.
   five files missed a sixth site that the shape match found.) **It reads
   every function in the test files, helpers included** (2026-09-28): it read
   Test functions alone, so a launch factored into a helper went unaudited,
-  and two such helpers already existed. A serve test boots through
-  `bootServe` (main_test.go), which registers the drain itself; with that
-  drain deleted, the Test-only guard stayed green.
+  and two such helpers already existed. It wants the drain in the function
+  that launches. **A serve test boots through a helper**: `bootServe`
+  (main_test.go), which runs a command line, or `startConsoleBridge`
+  (served_bridge_test.go), which writes the config, calls `runServe` with
+  a `serveOpts` hook no flag carries, and builds the console and phone
+  clients. Both start serve through `launchServe`, the one launch and the
+  one drain, and with that drain deleted the Test-only guard stayed green.
+  SonarCloud's gate fails a PR past 3% duplicated new lines and counts new
+  lines that repeat OLD code, and an inline boot block was 16 to 23 lines
+  of exactly that.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the
@@ -5612,7 +5697,14 @@ its twin.** The top list is older, shorter, and read first.
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
   (two writes in one tick leave them equal, so the check silently passes on the
   platform most likely to break). Normalize CRLF before any `\n`-literal scan of
-  a static file — there is no `.gitattributes` pinning `eol`.
+  a static file — there is no `.gitattributes` pinning `eol`. **A time decoded
+  from JSON has no monotonic reading**, so `After` against a local
+  `time.Now()` compares wall clocks, which is where the tick bites:
+  `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` waited for the Jobs
+  card's `lastFinishedAt` to pass the instant of its nudge, a sweep the gate
+  refuses finished inside the tick, and the wait ran out on the Windows leg
+  (2026-09-28; 6 runs of 6 under a simulated 15.625 ms clock). A serve test
+  counts through a `serveOpts` hook instead (`autoOptimizeSwept`).
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP

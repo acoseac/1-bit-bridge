@@ -23936,6 +23936,446 @@ Each on the committed tree, restored with `git checkout --` before the next.
   (`handshaketest.go` is one) that swapped the default by hand would pass.
   Among such files only loggingtest's own calls `slog.SetDefault`.
 
+## 2026-09-28 — the console's size projection follows the live upscale switch
+
+Backlog B25. runServe built `admin.Deps.ProjectedSize` and
+`AvailableDiskSpace` as function literals called in place, each answering
+nil unless `cfgHolder.Load().Upscale.Enabled` was true at that moment, and
+`apiLibraryBrowseProjection` read a nil helper as "feature off" (503
+`upscale-disabled`). So the projection took `upscale.enabled` at boot while
+`ops/settings-apply-semantics.md` calls the field `live` and the settings
+PATCH reports it `live`. The literals sat directly above `OptimizeEligible`,
+whose comment records the same fix for `optimizeEnabled` (the WIRED vs
+ACTIVE split); the upscale half was left. `AvailableDiskSpace` has a second
+reader, `probeVariantsDirUsage` behind `GET /api/upscale/variants-dir`, which
+feeds the Library roots page's "Free on that volume": nil there reads as 0.
+
+No page of the console calls the projection since the Library Inspector
+went; any loopback process or public-mode session can. The free-space figure
+is on a page every operator sees.
+
+### Measured
+
+`TestServeProjectionFollowsTheLiveUpscaleGate`, written first and run on the
+unchanged tree (99b6d1e6): the real `serve` over an empty library, booted
+with `upscale.enabled` false and then true, the flag flipped twice through
+`PATCH /api/settings` (both answered `live`), and after every step
+`/v1/health`'s `upscaleEnabled`, the projection and the variants-dir figure
+read. A stand-in `sox` (a `/bin/sh` script answering `--help` with a format
+list) is first on PATH, so health follows the flag on a host without sox.
+
+- Booted off: `freeBytes=0` at all three steps; after the switch went on,
+  health said on and the projection answered 503 `upscale-disabled`.
+- Booted on: after the switch went off, health said off and the projection
+  answered 200 with a projection.
+- The same on dido in the stock `golang:1.26.6` image (no sox, no lsof),
+  under `-race`, with the new tests copied onto `origin/main`.
+- With no sox on PATH at all (the Mac's PATH cut to `/usr/bin:/bin`, the shape
+  of CI's Windows leg, which gets no stand-in): booted on, the projection
+  answered 200 at all three steps while health said off at all three, since
+  the literal read the flag and not the sox half.
+
+### Decisions
+
+- Both helpers are wired on every bridge, and the handler refuses on
+  `s.upscaleActive()`: `Deps.UpscaleActive`, which runServe wires to
+  `upscaleActiveFn`, the closure `WithUpscale` gives /v1 and the batch submit
+  reads (#1060; `TestConsoleBatchGateIsTheV1UpscaleGate` pins that identity,
+  so no new wiring line needs its own pin). One predicate, so the projection
+  and `/v1/health` cannot disagree, a nil gate reads as off, and the refusal
+  is the same 503 `upscale-disabled` for every kind.
+- Rejected: gating inside `ProjectedSize`. It returns an int64, so "off"
+  would have to be a 0, and the endpoint would answer 200 with an empty
+  projection, a plausible wrong answer. Rejected: re-deriving the helpers on
+  each PATCH (a setter the settings handler calls), a second lifecycle for two
+  pure functions. Rejected: gating on the config flag. It is live, but it has
+  no sox half, and NC3 below shows the admin test is what catches it on a host
+  whose sox works.
+- Where the gate sits: after the path normalisation (no work, and a traversal
+  stays a 400 whatever the switch) and the manifest check, before the target
+  read, the projection walk and the disk probe. No WARN on the refusal: a read
+  refused is not worth a line, where the batch's refused mutation logs /v1's.
+- `AvailableDiskSpace` is a fact about the disk, so the variants-dir figure
+  answers whatever the switch; only the projection reads the gate.
+- A sweep for the shape: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  reads every admin.Deps value and every argument of a `With*` call in
+  runServe that is a function literal called in place, and reports one whose
+  own body reads `cfg`, `cfgHolder`, calls `liveCfg()`, or calls a live
+  predicate (a name ending in ActiveFn, CapsFn or EnabledFn). A read inside a
+  literal it returns runs per call and is left alone, as is a field name
+  (`x.cfg`, a `cfg:` key). The census it rests on: runServe has eleven such
+  literals, all in the admin.Deps literal; the two above read the config, and
+  the other nine (`TriggerCadenceRearm`, `BookletPath`, `BookletNudge`,
+  `OptimizeEligible`, `TargetRateForOptimize`, `DSDRenderEligible`,
+  `TargetRateForPCMRender`, `BatchCoordinator`, `VariantDeleter`) decide on a
+  slice or a nil handle, the harvest client's being the deliberately boot-bound
+  atlas posture. No `With*` argument is one. Reads of the boot `cfg` outside
+  such literals were read too: the api options take `cfg.Atlas.Enabled`,
+  `cfg.Demo.Enabled` and the DLNA verdict, none of them live, and the updater's
+  boot values sit beside the live providers it reads.
+- The boot test costs 1.1 s under `-race` on dido (two boots). The stand-in sox
+  is POSIX-only, as the Tailscale fake is; on Windows the boot-on leg still
+  fails the old code, as the no-sox run above shows.
+
+### Tests and controls
+
+`cmd/bridge/serve_projection_gate_test.go` (the boot test),
+`cmd/bridge/admin_upscale_gate_wiring_test.go` (the sweep and
+`TestConstructionTimeConfigReadsOnAFixture`, which runs it over synthetic
+source holding each shape it reports and each it leaves alone), and
+`internal/admin/handlers_projection_gate_test.go`
+(`TestProjectionAnswersTheUpscaleGateLive`: on, off, on for the upscale,
+optimize and pcm kinds, with the disk probes counted, so a refusal is shown to
+come before the probe; `TestProjectionReadsANilUpscaleGateAsOff`).
+`TestMatrixDocMatchesWhatTheHandlerReports/upscaleEnabled` passes before and
+after: it checks the PATCH report, and the report was never wrong.
+
+Negative controls on the committed tree (3bdb47cb), each restored with
+`git checkout --` and the tests re-run green:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| NC1: main.go's two literals put back (the handler keeps its gate) | the sweep, naming exactly `ProjectedSize` and `AvailableDiskSpace`; the boot test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg (the handler's gate answers the off step), the fixture test, the identity test |
+| NC2: the handler's `!s.upscaleActive()` removed | the boot test at every step health said off (booted off, steps 0 and 2; booted on, step 1); the admin live test for all three kinds; the nil-gate test | the sweep |
+| NC3: the handler gated on `cfg.Upscale.Enabled` instead | the admin live test (all three kinds) and the nil-gate test | the boot test with the stand-in sox; with no sox on PATH it goes red at the three steps where the flag is on |
+| NC4: the detector descends into nested literals | the sweep (`DSDRenderEligible` calls `dsdRenderCapsFn()`, `BatchCoordinator` reads `cfgHolder`, both inside the closures they return); the fixture (its read-inside-the-returned-closure case) | |
+| NC5: the detector counts field names as reads | the fixture (its `cfg:` key and `s.cfg` case) | the sweep (no such field on the tree) |
+| NC6: the stand-in sox prints nothing | the boot test's fixture check, at the first step with the flag on in each leg | |
+
+The sweep was then split into small helpers (53db0ae4; its own function had
+shadowed the package's `run`). NC5 re-run there, as the `cfg:` key
+collection now goes through `forEachKeyedElement`: dropping that collection
+turns the fixture red on its `cfg:` key alone, and the sweep stays green.
+
+### The four consumers without the sox half
+
+Found while measuring the projection, and fixed in the same PR on the
+orchestrator's request (a second commit, ae8a43fa). Four consumers read
+`upscale.enabled` live but without the sox half of `upscaleActiveFn`, so on
+a bridge whose sox is missing they disagreed with `/v1/health`: the
+console's upscale tile (`admin.Deps.UpscaleStats` and `UpscaleBusy`, and the
+Settings chip beside the switch, which takes its verdict from the tile's
+`enabled`), `/v1/upscale/stats`' `enabled` (`upscaleStatsAdapter`, whose own
+comment said it keeps "the wire semantics in lockstep with
+/v1/health.upscaleEnabled"), the auto-optimize sweeper's gate
+(`autoOptimizeEnabledFn`, which the Jobs card also reported as `active`),
+and `admin.Deps.OptimizeActive`.
+
+#### Measured, before
+
+The binary at 9776892c (these consumers as on main), `upscale.enabled` and
+`upscale.autoOptimize.enabled` true with `intervalSec: 20`, PATH cut to
+`/usr/bin:/bin`, over six 96 kHz / 24-bit FLACs and one 44.1 kHz / 16-bit,
+made with sox beforehand:
+
+- `/v1/health`: `upscaleEnabled: false`, no `carPlayOptimize`.
+  `/api/upscale/stats`: `enabled: true`, `soxAvailable: false`, a pool.
+  `/api/jobs` auto-optimize: `enabled: true, active: true`.
+- The first three sweeps (after the 3-minute settle, then every 20 s) each
+  enqueued 6, with `remaining` 6, 6 and 5: 18 jobs, 18 failed, 18
+  `pool: sox failed` WARNs (`exec: "sox": executable file not found in
+  $PATH`). The 16-bit track sits at the CarPlay floor and was never offered.
+- Every failure struck its file (`RecordVariantFailure`). After the third,
+  all six held `variant_fail_count` 3 and the suppression predicate took
+  them (`suppressedFailures: 6`), 40 s after the first sweep. Every later
+  sweep enqueued 0 with `remaining: 0`, which `formatAutoOptimizeRemaining`
+  renders "all caught up", over a library holding no CarPlay variant.
+- Restarted on the same data WITH sox on PATH: two sweeps enqueued 0,
+  `remaining: 0`, `suppressedFailures: 6`, `soxAvailable: true`. The
+  suppression is keyed on the file's (size, mtime) for `variantFailureTTL`,
+  30 days, and installing sox changes neither.
+- `POST /api/upscale/failures/retry` answered `{"cleared":6}`, and a nudged
+  sweep then enqueued 6: 6 done, 0 failed, 6 optimized variants.
+
+Why every job: `planCandidate` asks `soxInfo.CanDecode`, and
+`transcode.SnapshotOrOpen` answers a failed probe with the zero `SoxInfo`,
+whose `CanDecode` fails open (formats unknown), so without sox every eligible
+track reads as decodable. On the default cadence (the scan interval, 6 h,
+plus a nudge after every scan) with `maxPerSweep` 200, that is up to 200
+WARNs a sweep, and 200 files suppressed per three sweeps.
+
+#### Measured, after
+
+The binary at ae8a43fa, the same fixture, PATH `$W/bin:/usr/bin:/bin` with
+`$W/bin` empty:
+
+- `/v1/health` `upscaleEnabled: false`; `/api/upscale/stats` `enabled:
+  false`, `soxAvailable: false`, no pool; the card `enabled: true, active:
+  false, degradedReason: "sox_missing"`.
+- Three sweeps, each recorded `disabled` with 0 enqueued: 0 WARN lines and
+  `suppressedFailures: 0`.
+- A symlink to sox dropped into `$W/bin`, a directory the running bridge
+  already searches: the card read active 24 s later, with no restart (the
+  probe's TTL is 30 s), and a nudged sweep enqueued 6: 6 done, 0 failed,
+  `suppressedFailures` 0. For those seconds `/api/upscale/stats` said
+  `enabled: true` beside `soxAvailable: false`: the admin keeps its own 30 s
+  cache of the probe on top of runServe's. Left, since it only lags.
+- In a browser: the card's badge "degraded", its hint "Enabled but inactive:
+  sox is not installed on the bridge host, or has no FLAC support. No
+  restart is needed once it is fixed…", Sweep now hidden and Remaining "—".
+  The Settings chip beside "Enable PCM upscaling" read "not running — sox
+  not found" (the old binary said "active"), above the banner.
+
+#### Decisions
+
+- The CarPlay kind reads one closure, `carPlayOptimizeActiveFn` (the upscale
+  gate AND the optimize switch): `WithCarPlayOptimize`, `OptimizeActive`,
+  and, with the pre-generation flag, the sweeper. `OptimizeActive` changes
+  nothing a request can see, since both of its readers ask `UpscaleActive`
+  first; it was the copy that would let a reader hear "on" without sox, so
+  it is pinned by identity (`TestConsoleCarPlayGateIsTheV1CarPlayGate`,
+  which shares `requireConsoleGateIsTheV1Gate` with the batch pin).
+- The card: `enabled` is the three switches (`autoOptimizeSwitchedOnFn`),
+  `active` the sweeper's gate, `degradedReason: "sox_missing"` when they
+  differ. The key is the analysis card's, since the gate adds exactly
+  `soxUsable` (sox on PATH, and with FLAC); the console's label now names
+  both halves. The hint is an element of its own, so the description comes
+  back when the gate opens, which it now does live, and a refused sweep's
+  `disabled` reads "not run" there, not "turned off". It does not say
+  "Restart after fixing", as the analysis card's hint still does (stale
+  since #781; left).
+- `/v1/upscale/stats`: not a wire change. PROTOCOL.md's `enabled` row says
+  it is false when the sox precheck says no, "matching
+  `/v1/health.upscaleEnabled`"; the code drifted when #781 made the pool
+  unconditional and the adapter's `upscalePool != nil` stopped meaning
+  anything. No iOS code decodes the endpoint (the app names the
+  `upscale.stats` SSE topic in a doc comment and its parser tests; nothing
+  reads the payload), and the SSE frame comes from the same adapter. The row
+  still says the precheck "demoted the feature at startup", stale wording for
+  a live gate; left for a Mirror-PR, since the two PROTOCOL.md copies must
+  stay byte-identical and this change could not touch the app's.
+- The Settings chip reads the tile's `enabled`, now the gate, beside the
+  saved switch (the page renders the checkbox from the config, and the chip
+  runs once, at load): switch on and verdict off is `sox_missing`, painted as
+  "not running — <the doctor's audio-toolchain summary>". Its other arm said
+  "restart to apply" where the doctor finds sox and the gate does not; with
+  both gates live that is a probe about to catch up, and it says so. The sox
+  banners under the upscale and analysis switches said the bridge "will
+  degrade to feature-off at startup"; they now say the feature stays off
+  until sox is installed, with no restart needed.
+- The settings PATCH gives `optimizeEnabled` and `autoOptimizeEnabled`,
+  switched on, the sox reason `upscaleEnabled` and `analysisEnabled` carry;
+  `autoOptimizeEnabled` only where it reported `live`, since a restart-bound
+  report already says why.
+- Not changed: the transcode pool strikes a file for any runner error, a
+  missing sox included, where the analysis pool's rule is that a missing
+  tool is transient and records nothing. The gate now keeps the sweeper away
+  from the pool without sox; what remains is a job queued inside the probe's
+  30 s TTL after sox disappears. Reported for its own change.
+
+#### Tests and controls
+
+`cmd/bridge/serve_upscale_sox_gate_test.go`
+(`TestServeWithoutSoxReportsUpscalingOffOnEverySurface`): the real serve
+with upscale, the CarPlay kind and pre-generation on, `minFreeBytes: 1` and
+a 1 ms settle, over two hand-written 96 kHz / 24-bit FLACs (STREAMINFO and a
+Vorbis comment, no frames), on a PATH with every directory holding a sox
+removed (`exec.LookPath` must then fail). It asks `/v1/health` (must say
+off: a fixture check), `/api/upscale/stats`, `/v1/upscale/stats` with a
+bearer token minted through the console, and, once the scan has indexed both
+tracks, the Jobs card after a nudged sweep. 0.7 s. `TestUpscaleDegradedReason`
+gained the two CarPlay switches, both started off.
+
+Red on the old code first: the three tests copied into an archive of
+9776892c (where `carPlayOptimizeActiveFn`, `autoOptimizeSwitchedOnFn` and
+`optimizeOn` are all absent). The boot test failed on the console's stats,
+on `/v1/upscale/stats`, on the card's `active` and `degradedReason`, and on
+its sweep (`Disabled:false Enqueued:2`), with six `pool: sox failed` WARNs in
+its log; the pin failed on "WithCarPlayOptimize is handed *ast.FuncLit"; the
+report test on both switches' reasons, for both probe failures.
+
+Negative controls on ae8a43fa, each restored from the commit:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the boot test (both readers ask `UpscaleActive` first) |
+| the card's degraded key not set | `degradedReason` only | |
+| `optimizeEnabled`'s sox reason not set | the report test, that field, both probe failures | `autoOptimizeEnabled` |
+| `autoOptimizeOn` not set | the report test, that field, both probe failures | `optimizeEnabled` |
+
+`UpscaleBusy` moved with `UpscaleStats`, and no test tells the two apart:
+with the gate closed the sweeper queues nothing, so the pool is idle
+whichever predicate asks.
+
+### Review round 1: the two boot tests share their setup
+
+SonarCloud's quality gate failed the PR on duplicated new code, 3.7% against
+a 3% ceiling. Its component tree put the duplicated new lines in the two boot
+tests (23 in `serve_projection_gate_test.go`, 24 in
+`serve_upscale_sox_gate_test.go`), and its duplications API named three
+blocks: the tests' boot blocks against each other (23 lines, from the config
+write to the phone client), and each against the inline boot of
+`TestServeRedeemsThePairingLinksCode` and
+`TestServeBakesHealthEndpointsIntoThePairingQR` (16 to 20 lines). A new line
+that repeats OLD code counts as duplicated new code.
+
+`startServedBridge` (`cmd/bridge/served_bridge_test.go`) now writes the
+config (a library under the test's own directory, `yamlTail` appended as
+written, and a `fill` callback for files the startup scan must find), boots
+serve, registers its drain, waits for both listeners and builds the console
+and phone clients. Both tests call it, and everything they assert is
+unchanged. It is spelled with names of its own: SonarCloud's duplication
+detector for Go keeps identifiers and folds only string literals, so a helper
+written with the old tests' names would repeat their token runs as new code.
+The older boot tests keep their inline blocks, which are old code.
+
+Moving the launch into a helper took both tests out of
+`TestEveryBackgroundGoroutineDrainsOnCleanup`'s population, which read Test
+functions only, and its docblock asked for the match to be widened in the
+same change that adds such a helper. It now reads every function in the
+package's test files and wants the drain in the function that launches. A
+census before the change, the guard's own shape run over every function: 45
+Test functions and 2 helpers (`runOneFingerprintPass` and
+`runOneSmartPlaylistPass` in `sweep_cancel_test.go`) launch the shape, and all
+47 drain in the same function, so the widening reports nothing it did not
+already cover. A helper that hands its channel back for the caller to drain
+would be reported, and none exists.
+
+Controls re-run on this commit's code, each restored from the commit. Every
+earlier row came out as recorded above:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| main.go's two literals put back | the projection test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg |
+| the handler's `!s.upscaleActive()` removed | the projection test at every step health said off (booted off, steps 0 and 2; booted on, step 1) | |
+| the handler gated on `cfg.Upscale.Enabled` | | the projection test with the stand-in sox (the admin live test catches it) |
+| the stand-in sox prints nothing | the fixture check, at the first step with the flag on in each leg | |
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`) | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the sox test |
+| the card's degraded key not set | `degradedReason` only | |
+| the helper's drain replaced by `t.Cleanup(stop)` | the drain guard, naming `startServedBridge` | |
+| the same, with the guard's Test-only filter put back | | the drain guard: the widening is what sees it |
+
+Gemini's two MEDIUM comments asked `putUsableSoxOnPath` and
+`withoutSoxOnPath` to call `t.Setenv` first, so that a parallel test is
+refused. Each helper's one PATH change already is a `t.Setenv`, which refuses
+a parallel test and restores PATH, so both were declined on the threads.
+
+SonarCloud re-analysed the pushed refactor within two minutes: the gate
+passed, with 0.0% duplicated new lines and no file holding one. It raised one
+new smell, on the helper itself: `godre:S8242`, a `context.Context` stored in
+a struct field (`servedBridge.ctx`, serve's own context, which the tests
+handed to their console requests). The follow-up keeps serve's context a
+local of `startServedBridge`, where only the serve goroutine and the drain
+use it, and the requests take `t.Context()`, which is live for the whole test
+body: `patchUpscaleEnabled` reads it itself, and `pairViaAdmin` is handed it.
+Re-run on the follow-up, each as recorded above: the handler's
+`!s.upscaleActive()` removed, the sweeper's gate back to the three switches,
+the `/v1/upscale/stats` adapter back to the flag, and the helper's drain
+replaced by `t.Cleanup(stop)`. The PR's three `go:S3776` cognitive-complexity
+smells (`requireConsoleGateIsTheV1Gate` at 28, `constructionTimeConfigReads`
+at 19, the projection test at 24, against 15) do not gate, since the
+maintainability rating on new code stays A, and are left.
+
+### Review round 2: a clock tick on Windows, and #1071's boot helper
+
+The helper round 1 describes is `startConsoleBridge` since this round, and
+its type `consoleBridge`: `servedBridge` is #1071's.
+
+**CI on `6c34070d` failed on test (windows-latest)** (run 36447240629, job
+109012588718): `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` ran
+out its 30 s wait with the card reading `Enabled:true Active:false
+DegradedReason:sox_missing`, a sweep recorded, and `lastFinishedAt` set.
+The test decided that a sweep had run after its nudge by comparing that
+`lastFinishedAt` with a `time.Now()` taken before the nudge. A sweep the
+gate refuses finishes within a millisecond, which on Windows is inside one
+tick of the wall clock, and a time decoded from JSON carries no monotonic
+reading, so `After` compared wall clocks, found them equal, and never held.
+The cadence is long, so no later sweep moved the time on. CLAUDE.md
+already said "assert on counted events" for this clock.
+
+serve takes `serveOpts.autoOptimizeSwept`, nil in production and called
+once a sweep's result is on the Jobs card. `startConsoleBridge` counts with
+it, and the test reads the count after the scan, nudges, waits until the
+count passes the one it read, and then reads the card once (`/api/jobs`
+reads the sweep status live, uncached). It asks what the timestamp asked,
+a sweep that finished after the nudge was sent, where a sweep already
+running can count, as before, and a refused sweep has nothing to show
+either way. The projection boot test compares no times. A grep of the
+tree's tests for `After` against a captured instant found one more of the
+kind, `internal/auth`'s `TestValidateUpdatesLastUsedAt` (`time.Now().UTC()`,
+which strips the monotonic reading, then a 5 ms sleep), outside this PR
+and not examined further.
+
+Controls, on the committed fix, each restored with `git checkout --`. The
+coarse clock is simulated by snapping both the finish time
+(`sweepFinished`) and the test's instant to a 15.625 ms tick with
+`Truncate`:
+
+| mutation | result |
+|---|---|
+| the timestamp wait put back, under the simulated tick | red 6 runs of 6, each after 30 s, with `lastFinishedAt` on a tick boundary: the CI failure |
+| the counted wait, under the same tick | green 6 runs of 6 |
+| the hook never called | red: no sweep finished within 30 s (0 before the nudge, 0 after) |
+| the sweeper's gate back to the three switches | red on the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`, so the sweep it read had the two tracks) |
+
+**#1071 merged first, with a boot helper and a drain-guard widening of its
+own.** Both widenings were the same change, the Test-prefix filter dropped,
+so the merge keeps one guard: this branch's name for the audit helper
+(`auditBackgroundLaunchesIn`, since it reads helpers too) and its error
+text (which says the drain goes in the function that launches), and both
+docblocks' reasons. #1071's `servedBridge` and this branch's type shared a
+name, so the branch renamed its own to `consoleBridge` before the merge,
+and the merge commit builds with both boot helpers launching serve. After
+it, both start serve through `launchServe` (main_test.go): the goroutine,
+the drain and the wait for the banner, around a function that runs serve.
+`bootServe` hands it `run` with a command line, as before, so #1071's two
+tests boot exactly as they did; `startConsoleBridge` hands it `runServe`
+with the `serveOpts` the hook needs, then waits for the console and builds
+the clients. The guard's shape now finds 42 tests and three helpers
+(`launchServe`, `runOneFingerprintPass`, `runOneSmartPlaylistPass`), each
+draining where it launches: 46 at the merge commit, when both boot helpers
+launched. #1071's record of its own controls is under its entry above.
+
+Controls on the unified launch, each restored with `git checkout --`:
+
+| mutation | result |
+|---|---|
+| `launchServe`'s drain replaced by `t.Cleanup(cancel)` | the drain guard red, naming `launchServe` |
+| the same, with the guard back to Test functions | the drain guard green: the gap each PR recorded for its own helper |
+| the projection handler's `!s.upscaleActive()` removed | the projection test red at every step health said off (booted off, steps 0 and 2; booted on, step 1) |
+| runServe wires a nil `OrphanSweepStatus` (with `_ = orphanSweepStatus`, or it does not build) | #1071's Jobs-card test red, booted through `bootServe` |
+
+**Then #1068 merged**, while this round's push was going out (c1bdedf4
+merges it; the one conflict was the log's end). It serves
+`Server.optimizeActive` in the album and artist variant summaries, and the
+panel names the CarPlay switch ("CarPlay-optimized variants are switched
+off for this bridge", with a gear for that switch) when `optimizeActive` is
+false and no panel-wide note has closed both kinds. The panel-wide notes
+come from the summary's `enabled` (the configured flag) and `soxAvailable`,
+which was the precheck alone. This branch makes `Deps.OptimizeActive` the
+upscale gate (the flag and a usable sox) and the CarPlay switch, and a
+usable sox is found AND able to write FLAC where the build's formats are
+known (cmd/bridge's `soxUsable`). So with both switches on and a sox
+without FLAC, the merge showed no panel-wide note, the CarPlay row called
+a switch that was on "switched off" and offered its gear, and the hi-res
+Generate stayed live over a submit that answered 503 `upscale-disabled`.
+The last was already so on main, whose batch submit has read the full gate
+since #1060; the false "switched off" came with this branch.
+
+The summary's `soxAvailable` is `Server.soxUsable` now (1f28f692): the
+precheck finds sox, and `UpscaleSoxFLAC` does not report a build known to
+lack FLAC, which is `soxUsable`'s verdict over the same cached probe. The
+panel's sox note reads "sox is not installed on the bridge host, or has no
+FLAC support, so no variants can be generated.", the Jobs card's words for
+the same verdict. #1068's panel test wires its gates as cmd/bridge does
+now (the CarPlay predicate through the upscale gate, the upscale gate with
+a FLAC probe) and gains a fourth state: both switches on, a sox without
+FLAC, both submits refused, and the panel showing one note naming FLAC, no
+row note and no tray. Red on the merge commit, as above.
+`TestTheVariantSummaryReadsSoxAsTheGateDoes` pins the three FLAC answers.
+
+| mutation | result |
+|---|---|
+| the summary's `soxAvailable` back to the precheck alone | the new test's "without FLAC" case, and the panel test's fourth state (the CarPlay row's "switched off", the hi-res Generate live), both red |
+| `soxUsable` counting an unread build as without FLAC (`_ = known`, or it does not build) | the new test's "could not be read" case and `TestAlbumDetailVariantSummarySeparatesOffFromNoSox` red; the panel test green, its probe always known |
+| the panel's sox note back to its old words | the panel test's fourth state red (no note naming FLAC) |
+
 ## 2026-09-28 — a GENA callback on this machine or the link gets the initial NOTIFY only from that address, and the NOTIFY follows no redirect (backlog B39, half of #818's step two)
 
 #818 (2026-09-01) was step one of a two-step narrowing of the GENA initial

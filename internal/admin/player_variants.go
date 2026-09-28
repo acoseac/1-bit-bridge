@@ -28,7 +28,7 @@ func (s *Server) variantSummaryFor(r *http.Request, paths []string, sourceBytes 
 	out := &playerVariantSummaryDTO{
 		SourceBytes:    sourceBytes,
 		Enabled:        upscaleFeatureEnabled(cfg),
-		SoxAvailable:   s.deps.UpscalePrecheck != nil && s.deps.UpscalePrecheck() == nil,
+		SoxAvailable:   s.soxUsable(),
 		OptimizeActive: s.optimizeActive(),
 	}
 
@@ -97,11 +97,29 @@ func exemptCount(total, eligible int) int {
 }
 
 // upscaleFeatureEnabled reports the CONFIGURED state, which is
-// deliberately not the same question as whether the pool is running.
-// The runtime answer (`/api/upscale/stats.enabled`) is nil when sox
-// failed its boot precheck; here the two are reported separately so the
-// UI can say "enabled, but sox is missing" rather than collapsing both
-// into "off".
+// deliberately not the same question as whether the feature runs. The
+// runtime answer (`/api/upscale/stats`' `enabled`, the live gate) is false
+// whenever sox is unusable too; here the two halves are reported
+// separately, this one and soxUsable, so the UI can say "enabled, but sox
+// is missing" rather than collapsing both into "off".
 func upscaleFeatureEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.Upscale.Enabled
+}
+
+// soxUsable reports whether the host's sox can generate variants: the
+// precheck finds it, and a build whose formats are known has FLAC. It is
+// the verdict cmd/bridge's soxUsable gives over the same cached probe,
+// the sox half of the gate it wires into Deps.UpscaleActive, so the
+// variant summary's soxAvailable closes wherever the gate's sox half
+// does. With the precheck alone, a sox without FLAC read as available:
+// the panel then showed no panel-wide reason for a gate that refuses both
+// kinds, so the hi-res Generate stayed live over a refusal and the
+// CarPlay row called a switch that is on "switched off" (Deps.OptimizeActive
+// includes the gate).
+func (s *Server) soxUsable() bool {
+	if s.deps.UpscalePrecheck == nil || s.deps.UpscalePrecheck() != nil {
+		return false
+	}
+	hasFLAC, known := s.soxFLACStatus()
+	return !known || hasFLAC
 }

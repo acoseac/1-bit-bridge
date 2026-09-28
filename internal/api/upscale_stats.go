@@ -43,15 +43,14 @@ type UpscaleStatsProvider interface {
 // failed jobs).
 //
 //   - Enabled mirrors live runtime state, NOT the persisted
-//     `cfg.Upscale.Enabled` flag. The two diverge in two real
-//     cases the admin handler documents (see CLAUDE.md / PR #110):
-//     (a) startup demoted the feature when sox-precheck failed
-//     even though the flag was on; (b) the operator just PATCHed
-//     the flag off but the long-lived Pool is still alive until
-//     restart. Both surface as `pool == nil` from the wiring
-//     closure, and we report `enabled = (pool != nil)` so the
-//     iOS-facing /v1/health.upscaleEnabled and this endpoint
-//     agree about what "active" means.
+//     `cfg.Upscale.Enabled` flag. The two diverge when the flag is
+//     on and sox is unusable, and when the operator has just
+//     PATCHed the flag off while the long-lived Pool stays alive
+//     (it lives until shutdown). The cmd/bridge adapter reads the
+//     same live gate as /v1/health.upscaleEnabled (the flag AND a
+//     usable sox), so the two agree about what "active" means; it
+//     read the flag alone until 2026-09-28, and a bridge without
+//     sox answered `enabled: true` beside `soxAvailable: false`.
 //   - Pool is omitted when the feature is off (no pool to query).
 //   - SoxAvailable is omitted when the test harness didn't wire a
 //     precheck closure.

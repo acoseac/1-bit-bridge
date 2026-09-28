@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -226,8 +227,10 @@ func renderPanelsUnderNode(t *testing.T, node string, cases any) []renderedPanel
 // the panel alone passes with a summary that never carries it; this one
 // needs both halves, and the switches move through the PATCH the Settings
 // page and the panel's own tray send. The gates are wired as cmd/bridge
-// wires them, from the live config. The fixture's two hi-res FLACs are
-// eligible for both kinds, so a disabled Generate here can only mean a
+// wires them, from the live config and, for the upscale gate, a sox that
+// one state leaves without FLAC: both switches on and both kinds refused,
+// which only a panel-wide note may explain. The fixture's two hi-res FLACs
+// are eligible for both kinds, so a disabled Generate here can only mean a
 // refusal, never "nothing to do".
 func TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -238,11 +241,18 @@ func TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt(t *testin
 	seedVariantAlbum(t, srv.deps.Manifest)
 	stub := &fakeBatchCoordinator{}
 	srv.deps.BatchCoordinator = stub
+	// The sox half as cmd/bridge reads it (soxUsable): found, and FLAC
+	// wherever the build's formats are known. Found always, here; FLAC is
+	// what one state takes away.
+	var soxHasFLAC atomic.Bool
+	soxHasFLAC.Store(true)
 	srv.deps.UpscalePrecheck = func() error { return nil }
-	srv.deps.UpscaleActive = func() bool { return srv.deps.CfgHolder.Load().Upscale.Enabled }
+	srv.deps.UpscaleSoxFLAC = func() (bool, bool) { return soxHasFLAC.Load(), true }
+	srv.deps.UpscaleActive = func() bool {
+		return srv.deps.CfgHolder.Load().Upscale.Enabled && soxHasFLAC.Load()
+	}
 	srv.deps.OptimizeActive = func() bool {
-		live := srv.deps.CfgHolder.Load()
-		return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
+		return srv.deps.UpscaleActive() && srv.deps.CfgHolder.Load().Upscale.EffectiveOptimizeEnabled()
 	}
 	albumID := albumIDByTitle(t, srv, "Album")
 
@@ -260,11 +270,16 @@ func TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt(t *testin
 	for _, s := range []struct {
 		name     string
 		settings map[string]any
+		noFLAC   bool
 	}{
-		{"both on", map[string]any{"upscaleEnabled": true, "optimizeEnabled": true}},
-		{"CarPlay off", map[string]any{"optimizeEnabled": false}},
-		{"upscaling off", map[string]any{"upscaleEnabled": false}},
+		{"both on", map[string]any{"upscaleEnabled": true, "optimizeEnabled": true}, false},
+		{"CarPlay off", map[string]any{"optimizeEnabled": false}, false},
+		{"upscaling off", map[string]any{"upscaleEnabled": false}, false},
+		// Both switches on, and a sox that cannot write FLAC: the gate is
+		// closed, so both submits refuse, and neither switch is the reason.
+		{"sox without FLAC", map[string]any{"upscaleEnabled": true, "optimizeEnabled": true}, true},
 	} {
+		soxHasFLAC.Store(!s.noFLAC)
 		if code := doJSON(t, srv.Handler(), http.MethodPatch, "/api/settings", s.settings, nil); code != http.StatusOK {
 			t.Fatalf("%s: PATCH /api/settings %v answered %d", s.name, s.settings, code)
 		}
@@ -345,6 +360,18 @@ func TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt(t *testin
 			}
 			if withTray && (len(p.Trays) != 1 || strings.Join(p.Trays[0].Fields, ",") != "upscaleEnabled,optimizeEnabled") {
 				t.Errorf("%s: trays %+v, want the panel-wide one with both switches", p.Name, p.Trays)
+			}
+		case "sox without FLAC":
+			if st.refused["upscale"] != errCodeUpscaleDisabled || st.refused["optimize"] != errCodeUpscaleDisabled {
+				t.Fatalf("%s: the submits answered %v, want %q for both kinds", p.Name, st.refused, errCodeUpscaleDisabled)
+			}
+			// The gate stops both kinds, so it is said once, above them, and
+			// the CarPlay row must not call a switch that is on "switched
+			// off". The fix is a package, so no gear is offered either.
+			if len(p.PanelNotes) != 1 || !strings.Contains(p.PanelNotes[0], "FLAC") ||
+				len(hiRes.Notes)+len(carPlay.Notes)+len(p.Trays) != 0 {
+				t.Errorf("%s: panel notes %q, hi-res row %q, CarPlay row %q, trays %+v; want one panel "+
+					"note naming FLAC and nothing else", p.Name, p.PanelNotes, hiRes.Notes, carPlay.Notes, p.Trays)
 			}
 		}
 	}
