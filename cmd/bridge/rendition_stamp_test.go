@@ -461,8 +461,17 @@ func TestARefusedRequestRescansTheFileSoTheNextOneRenders(t *testing.T) {
 // block the HTTP request that made it.
 func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	full := newSourceRescanner()
-	for i := 0; i < sourceRescanQueueCap+5; i++ {
-		full.request(fmt.Sprintf("/lib/D%03d/01.flac", i), fmt.Sprintf("D%03d/01.flac", i))
+	filled := make(chan struct{})
+	go func() {
+		defer close(filled)
+		for i := 0; i < sourceRescanQueueCap+5; i++ {
+			full.request(fmt.Sprintf("/lib/D%03d/01.flac", i), fmt.Sprintf("D%03d/01.flac", i))
+		}
+	}()
+	select {
+	case <-filled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a request blocked on the full queue: it runs inside an HTTP request, and must drop instead")
 	}
 	if len(full.queue) != sourceRescanQueueCap || len(full.pending) != sourceRescanQueueCap {
 		t.Errorf("queue %d, pending %d after %d directories, want both at the cap %d",
@@ -487,16 +496,26 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
 
+	next := func(what string) string {
+		t.Helper()
+		select {
+		case dir := <-scanned:
+			return dir
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no %s within 5 s", what)
+			return ""
+		}
+	}
 	r.request("/lib/A/01.flac", "A/01.flac")
 	r.request("/lib/A/02.flac", "A/02.flac")
-	if got := <-scanned; got != "/lib/A" {
+	if got := next("scan"); got != "/lib/A" {
 		t.Fatalf("scanned %q, want /lib/A", got)
 	}
 	r.request("/lib/A/01.flac", "A/01.flac")
 	r.request("/lib/A/03.flac", "A/03.flac")
 	close(hold)
-	if got := <-scanned; got != "/lib/A" {
-		t.Fatalf("second scan of %q, want /lib/A again: a request made during the first scan", got)
+	if got := next("second scan, for the requests made during the first"); got != "/lib/A" {
+		t.Fatalf("second scan of %q, want /lib/A again", got)
 	}
 	r.mu.Lock()
 	queued, pending := len(r.queue), len(r.pending)
