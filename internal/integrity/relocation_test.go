@@ -175,6 +175,13 @@ func TestVariantWatcher_doesNotAdoptAPartialCopy(t *testing.T) {
 // catalog. It refuses, warns, and deletes nothing — and the same
 // catalog with the guard disabled, or over a tree that holds no
 // sidecars, is reaped as it always was.
+//
+// A fresh ext4 volume mounted as the variants directory is such a tree:
+// it holds nothing but its locked lost+found, which is the filesystem's
+// (IsFilesystemLostFound). Until 2026-09-28 the probe answered that
+// directory's permission error, and the guard refused the reap on every
+// tick; a volume whose sidecars sort after its lost+found was refused
+// for the same error rather than for its sidecars.
 func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T) {
 	oldDir := filepath.Join(t.TempDir(), "mnt", "bridge-variants")
 	const n = 30
@@ -187,21 +194,41 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 		}
 		return rows
 	}
-	// A tree that holds real sidecars, but under a layout the probe does
-	// not know (a flat dump of the old tree's files).
-	treeWithSidecars := func(t *testing.T) string {
-		dir := t.TempDir()
+	// writeSidecars puts five real sidecars in dir, flat: a layout the
+	// probe does not know (a dump of the old tree's files).
+	writeSidecars := func(t *testing.T, dir string) {
 		for i := 0; i < 5; i++ {
 			name := fmt.Sprintf("%02d.flac.upscaled-v2-176400-24.flac", i)
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
+	}
+	treeWithSidecars := func(t *testing.T) string {
+		dir := t.TempDir()
+		writeSidecars(t, dir)
 		return dir
 	}
 	treeWithJunk := func(t *testing.T) string {
 		dir := t.TempDir()
 		writeDecoySidecar(t, dir)
+		return dir
+	}
+	// A variants directory that is an ext4 volume's mount root, replaced
+	// by a fresh volume: nothing on it but the volume's root-owned
+	// lost+found, which the bridge's user cannot list. Every sidecar
+	// really went, and the rows are the sweep's to reap.
+	freshVolume := func(t *testing.T) string {
+		dir := t.TempDir()
+		lockDir(t, mkdirAllUnder(t, dir, "lost+found"))
+		return dir
+	}
+	// The same volume holding sidecars, all of them under a directory
+	// that sorts after its lost+found.
+	sidecarsAfterLostFound := func(t *testing.T) string {
+		dir := t.TempDir()
+		writeSidecars(t, mkdirAllUnder(t, dir, "mozart"))
+		lockDir(t, mkdirAllUnder(t, dir, "lost+found"))
 		return dir
 	}
 
@@ -211,13 +238,24 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 		percent     int
 		wantDeleted int
 		wantRefused int
+		// locks is true for a tree with a directory its mode locks, which
+		// denies nothing on Windows or to root.
+		locks bool
+		// wantReason is what the refusal must say, when set.
+		wantReason string
 	}{
-		{"refused: every row missing, sidecars in the tree", treeWithSidecars, 20, 0, n},
-		{"proceeds: the tree holds no sidecars", treeWithJunk, 20, n, 0},
-		{"proceeds: guard disabled at 100", treeWithSidecars, 100, n, 0},
+		{"refused: every row missing, sidecars in the tree", treeWithSidecars, 20, 0, n, false, ""},
+		{"proceeds: the tree holds no sidecars", treeWithJunk, 20, n, 0, false, ""},
+		{"proceeds: guard disabled at 100", treeWithSidecars, 100, n, 0, false, ""},
+		{"proceeds: a fresh volume holds only its lost+found", freshVolume, 20, n, 0, true, ""},
+		{"refused: the sidecars sort after the volume's lost+found", sidecarsAfterLostFound, 20, 0, n, true,
+			"while the variants directory still holds sidecar files"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.locks {
+				skipWhereModesDenyNothing(t)
+			}
 			buf := captureLogs(t)
 			dir := tc.dir(t)
 			lister := &fakeLister{snapshots: [][]VariantSnapshot{catalog()}}
@@ -239,6 +277,9 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 				}
 				if !strings.Contains(refusals[0], "30 of 30 rows (100%)") {
 					t.Errorf("the refusal should name the numbers: %s", refusals[0])
+				}
+				if tc.wantReason != "" && !strings.Contains(refusals[0], tc.wantReason) {
+					t.Errorf("the refusal should say %q: %s", tc.wantReason, refusals[0])
 				}
 				if publisher.eventCount() != 0 {
 					t.Errorf("a refused tick published %d events", publisher.eventCount())

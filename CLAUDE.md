@@ -399,7 +399,8 @@ lost my library."
   never one per link: a mount takes every link into it at once. **A link to a
   DIRECTORY is not a track**, whatever its name, and the walk still follows no
   directory link (loops). **Nor is a named pipe, a socket or a device, or a
-  link to one** (`notAFile`): whatever stat the row would carry must describe
+  link to one** (`fsutil.NotAFile`, the list every byte route refuses by too:
+  the next bullet): whatever stat the row would carry must describe
   something that opens as a file, and a regular file whose own stat says
   otherwise is judged through. A worker opens what the walk hands it, and
   opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
@@ -428,8 +429,46 @@ lost my library."
   (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
   needed no change: it already said a listing row describes the target, and
   a virtual row carries the container's size. A library ROOT that is itself
-  a link is not this rule's shape: that is the next bullet (this one said
-  "still open" until the same day).
+  a link is not this rule's shape: that is the `fsutil.WalkableRoot` bullet
+  below (this one said "still open" until the same day).
+- **…and a route that serves a file's bytes opens it with
+  `fsutil.OpenAsFile`, never `os.Open`** (2026-09-28, B46). Keeping such
+  entries out of the manifest stopped nothing a client names:
+  `/v1/download`, `/v1/read`, the player's audio and download routes and the
+  DLNA file route opened the path with `os.Open`, and opening a named pipe
+  waits for a writer with nothing that can cancel the wait (a blocked
+  open(2) cannot be interrupted from Go). Measured over the real
+  `api.Server`: the client gave up at 2 s, and both handlers, and the two
+  updater sessions they had begun (a pinned one keeps auto-install
+  deferring on every poll), stayed until a writer came 7 s in; `/v1/stat`
+  and `/v1/list` answered at once. A link to `/dev/null` was served as an
+  empty 200, a socket as a 500. The DLNA route serves the MANIFEST's path,
+  and a row outlives its file until the scan that reaps it. **One list**:
+  `fsutil.NotAFile` is #1070's, moved out of the scanner, so the manifest and
+  the routes cannot disagree about what a track can be; never a second copy.
+  `OpenAsFile` opens `O_NONBLOCK|O_NOCTTY` on unix, refuses by the OPENED
+  file's own stat (so a path replaced after a caller's stat is judged as
+  what it is now), and clears `O_NONBLOCK` again for a file, because a FUSE
+  daemon is handed the flags with every read. **Its EWOULDBLOCK fallback to
+  a plain open is load-bearing**: a nonblocking open of a file under another
+  process's write lease (Samba's kernel oplocks, an NFS delegation) fails
+  where a plain open waits for the break (up to lease-break-time, 45 s),
+  and a FIFO's nonblocking open never answers EWOULDBLOCK. The
+  resolver-backed routes ALSO refuse on the resolver's stat before any open:
+  that is what refuses a socket (the kernel refuses its open itself,
+  EOPNOTSUPP on macOS, ENXIO on Linux, so `OpenAsFile` cannot name it) and
+  keeps a device from being opened at all. The answers reuse existing codes,
+  so there is no wire change and no Mirror-PR: 400 `bad_request` "path is a
+  <kind>, not a file" (what a directory already got), 400 `bad_path` on the
+  player, 404 on DLNA, 410 `variant_missing_on_disk` for a rendition whose
+  sidecar is not a file. **`TestEveryServedFileIsOpenedAsAFile` fails on any
+  production declaration that passes `http.ServeContent` a file it opened
+  with `os.Open`/`os.OpenFile`**, so the cache routes (artwork, booklets,
+  playlist covers, waveforms) open through it too and the rule has no
+  exceptions; it reads one declaration at a time, so an open in one function
+  served from another goes unseen. Still `os.Open`: the scanner's
+  extractors, which open what the walk judged a moment earlier (a swap in
+  between is a race), and the background jobs that open manifest paths.
 - **A library ROOT that is itself a link to a directory is walked THROUGH,
   and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
   backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
@@ -1902,8 +1941,14 @@ no failing test — which is the shape to expect in this area.
   `OrphanSidecarSweeper.tick`, `upscale --gc`'s FORWARD sweep and `analyze --gc`
   did not, and `upscale --gc`'s reverse guard fires only after the forward sweep
   has already unlinked. An empty set over an EMPTY directory stays a silent
-  no-op. A BACKGROUND sweeper gets no override (nobody is in the loop to express
-  intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
+  no-op, and "empty" means nothing the reaper would remove, never "no entry at
+  all" (2026-09-28): the background sweep asks its inventory
+  (`emptyCatalogRefusal`), so a directory left holding empty folders, a
+  `.DS_Store`, a Trash or the filesystem's `lost+found` is quiet, and
+  `artwork --gc`'s empty-store guard reads the cache as its walk does. The CLI
+  `--gc` sweeps' own guard (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks
+  for any entry. A BACKGROUND sweeper gets no override (nobody is in the loop to
+  express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
   `--gc` command offers it — which is how `artwork --gc` was found to have
   carried an un-escapable refusal since it was written.
 - **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
@@ -2130,7 +2175,15 @@ no failing test — which is the shape to expect in this area.
   render / analyze (and `--allow-partial-walk` past the refusal of a walk
   that could not list part of the tree, below); `artwork --gc` is exempt
   BY NAME in the sweep test (content/MBID-keyed, no absolute path a
-  relocation can strand). #940 left
+  relocation can strand). **So `artwork --gc` steps over a directory it
+  cannot list** (2026-09-28): its verdict about a file is that file's name
+  against the keys, with no count over the tree for an unseen part to
+  flip, so it names the directory on stderr, counts it on the summary,
+  exits 0 unless a removal failed, and steps over the filesystem's
+  `lost+found` (`IsFilesystemLostFound`) without a word. It stopped at the
+  first such directory with exit 1 and no summary, after removing the
+  orphans that sort ahead of it; a cache root it cannot read still fails.
+  #940 left
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
@@ -2169,10 +2222,11 @@ no failing test — which is the shape to expect in this area.
   a budget carried between passes can be spent on files it never counted.
   The one cross-tick state is a LOG latch, the M-SEARCH rule: the refusal
   WARNs once when a streak starts and at most daily while it lasts; a tick
-  that decided nothing (a failed or stopped listing or walk, an empty
-  catalog) leaves the latch alone; the first tick that proceeds after it
-  logs one Info line. Its hint never names `bridge variants move` (it needs
-  the rows a lost index lacks). **A stranded tree no larger than the
+  that decided nothing (a failed or stopped listing or walk) leaves the
+  latch alone; the first tick that proceeds after it logs one Info line.
+  An empty catalog is a verdict, not a tick that decided nothing: the
+  third kind, under the Jobs-card bullet below. Its hint never names
+  `bridge variants move` (it needs the rows a lost index lacks). **A stranded tree no larger than the
   catalog is still reaped**, exactly as `--gc` reaps it: the refusal needs
   its floor, `orphans > rows` AND the ratio. The shared walker changed one
   behaviour on purpose: a SYMLINKED variants directory is walked now (the
@@ -2221,7 +2275,7 @@ no failing test — which is the shape to expect in this area.
   root-owned `lost+found` of an ext4 volume mounted AS the variants
   directory is not an unknown**: a directory named exactly that, directly
   under the RESOLVED walk root, that a PERMISSION error keeps this user
-  out of, is not counted (`isFilesystemLostFound`). Since #1063 it made
+  out of, is not counted (`IsFilesystemLostFound`). Since #1063 it made
   the background sweep refuse every tick and `bridge doctor` warn on every
   run. Nothing the bridge writes can be in it: a `<variantsDir>/lost+found`
   the bridge made (a single-root library's top-level folder of that name,
@@ -2231,11 +2285,19 @@ no failing test — which is the shape to expect in this area.
   `lost+found` could put sidecars in one the service user cannot list
   (unexamined, as the filesystem's); a volume mounted deeper in the tree
   has its `lost+found` counted, since nothing about the walk root vouches
-  for it; an I/O error on it counts. `TreeHoldsVariantSidecars`, the
-  reverse guard's probe, still fails closed on an unreadable `lost+found`
-  (a refused mass ROW deletion, the safe direction). A Gemini consult was
-  attempted for the `lost+found` trade-off and refused by the API's
-  spending cap; the rule is the narrow one, decided here.
+  for it; an I/O error on it counts. **The reverse guard's probe reads it
+  by the same rule** (2026-09-28; `IsFilesystemLostFound` is exported for
+  it and for `artwork --gc`). `TreeHoldsVariantSidecars` returned that
+  directory's permission error whenever no sidecar sorted ahead of it, so
+  on a fresh volume mounted as the variants directory `MassDeleteRefusal`
+  refused to reap rows whose sidecars really went, on every
+  `VariantWatcher` tick and in `upscale --gc` (exit 1, "could not be
+  read"), and it refused a tree whose sidecars sort after it for the
+  error rather than for the sidecars. It is evidence neither way there
+  now; any other directory the probe cannot list still fails it closed.
+  A Gemini consult was attempted for the `lost+found` trade-off and
+  refused by the API's spending cap; the rule is the narrow one, decided
+  here.
 - **The Jobs card shows the background orphan sweep's refusal**
   (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
   interval was positive, while every tick refused and only the journal
@@ -2251,9 +2313,22 @@ no failing test — which is the shape to expect in this area.
   `TestEveryOrphanRefusalKindIsWorded` runs `describeOrphanGCRefusal`
   under node for every kind, because the leaf guard proves the key is READ,
   not that it is WORDED; `TestServeReportsTheOrphanSweepRefusalOnTheJobsCard`
-  boots serve and is the only test that sees the wiring line. The
-  empty-catalog refusal is not a latch kind (it WARNs every tick and
-  decides nothing about the tree), so the chip does not show it.
+  boots serve and is the only test that sees the wiring line (a new kind
+  also joins `OrphanRefusalKinds`: the `/api/jobs` guard bullet under
+  **Admin console**). **The empty catalog is the third kind**
+  (`emptyCatalog`, 2026-09-28): it WARNed on every tick outside the latch
+  (five lines in eight seconds at a 2 s interval, on a real serve) while
+  the chip said "on". It is decided from the tick's inventory, ahead of
+  the mass-orphan check (which would refuse most of the same trees, but
+  none under its floor of ten): it refuses when the walk found a sidecar
+  file it would remove, or an entry it could not stat, weighed as one
+  (`emptyCatalogRefusal`); a tree with nothing it would remove ends a
+  streak and is otherwise quiet; a directory the walk cannot list, with
+  no file in view, is the partial walk's refusal. **Don't decide it from
+  `dirIsEmpty`**, main's question and this change's first draft: over a
+  directory left holding empty folders, a `.DS_Store`, a Trash or the
+  filesystem's `lost+found`, main WARNed "holds files" on every tick, and
+  the draft kept the card refusing forever (seen in a browser).
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
@@ -3374,7 +3449,10 @@ what it claimed**, and none of it had a failing test.
   `withExistingInstallDeps` carries ports and pid file too, and is named
   for what it does rather than for certs — a name that says otherwise is
   how the next field gets left out. The first-install skip keeps its own
-  control. (#963)
+  control. (#963) The one part of that install it leaves ungraded is a
+  port a `--yes --force` rewrite moves off (2026-09-28, the "…on a `--yes
+  --force` rewrite" bullet below); the certificate and the data dir are
+  graded as ever.
 - **…and grades the ports it is about to SAVE, which is a different
   question** (#970). The preflight runs BEFORE the keep-or-overwrite
   decision, so where the install's config loads it grades the install's
@@ -3406,15 +3484,47 @@ what it claimed**, and none of it had a failing test.
   nothing, and its `OwnPIDPortsUnknown` exception (the "…over a config
   that is there and does not load" bullet) stays for a port that could
   differ. **A refusal on the run's ports says so under the report**
-  (`portsThisInitWrites`, printed only when a port check FAILed and no
-  config loaded): those lines are the run's choice, not a verdict about an
-  install, and the checks' own hint names a bridge.yaml, where a public
-  run chooses its ports with `--listen-address` and `--admin-address`.
-  **A public run's address flag that `config.ValidateBindAddress` refuses
-  is refused before the preflight** (exit 2), which has no port to grade
-  for it; it was refused only at the validation before Save, after a
-  preflight that graded 7788 in its place. Both flags are still ignored,
-  silently, without `--public`.
+  (`portsThisInitWrites`, printed only when a port check FAILed on the
+  run's ports: where no config loaded, or on a `--yes --force` rewrite,
+  the next bullet): those lines are the run's choice, not a verdict about
+  an install, and the checks' own hint names a bridge.yaml, where a run
+  chooses its ports with `--listen-address` and `--admin-address`. **An
+  address flag the config would refuse is refused before the preflight**
+  (exit 2, `initAddressFlagsError`), which has no port to grade for it; a
+  public run's was refused only at the validation before Save, after a
+  preflight that graded 7788 in its place. **Both flags apply in either
+  posture** since 2026-09-28: a loopback run read neither, and saved
+  `:7788` / `127.0.0.1:7789` with exit 0 and no word, whatever it was
+  given, `0.0.0.0` and an address with no port included. **A loopback
+  run's `--admin-address` must name a loopback host**
+  (`config.ValidateLoopbackAddress`, the rule `Validate` holds that
+  install's adminAddress to, now one function for the file and the flag):
+  its console has no login, so binding loopback is its whole trust
+  boundary. Don't honour a non-loopback one there and let `Validate` refuse
+  it after the preflight, and don't widen the rule for the flag.
+- **…and on a `--yes --force` rewrite of an install whose config loads,
+  the preflight grades only the install's ports the rewrite KEEPS**
+  (2026-09-28). That run is the one rewrite certain before the preflight,
+  and the preflight graded the install's old ports all the same: an
+  install on `:X` / `:Y`, its bridge stopped, another process on X, and a
+  rewrite moving the API off X exited 1 on `[FAIL] port-api :X in use`
+  (measured with the real binary, as a public run and as a loopback one),
+  about a port the saved config never binds. `portsARewriteAbandons` lists
+  the install's ports the rewrite binds in NEITHER role, and
+  `doctor.Deps.AbandonedPorts` answers each ok "not checked: this rewrite
+  moves off :X", with no probe; the second pass grades what the rewrite
+  writes in their place, as before. **Build that list over both roles,
+  never per role**: a rewrite moving the console onto the old API port
+  binds that port again, and a per-role list names it, so the second pass,
+  which carries the same Deps while it grades that port as the new admin
+  port, answers "not checked" and saves a port a stranger holds. **A kept
+  port is graded as the install's, pid file and all**, and its refusal says
+  it is a port this init would write (`portsThisInitWrites`). **An
+  interactive run grades them all, as before**: its "Overwrite?" comes
+  after the preflight, and a no keeps the install's ports, as `--yes`
+  without `--force` does, so a stranger on one refuses a run that may keep
+  it. That is the residual: an interactive rewrite moving off such a port
+  is refused before its prompt, and `--yes --force` is the way through.
 - **The "is it us?" fallback must NOT reach a port the run is choosing.**
   `checkPort` answers ok or warn — never fail — whenever the pid in
   `OwnPIDFile` is alive and the owner probe could not rule it out (one it
@@ -3851,6 +3961,22 @@ what it claimed**, and none of it had a failing test.
   legal as `"0"`. `autoStartProbeTarget` is the same question for
   `spawnNowOrWarn` — extracted because the other branch starts a real
   detached process, so the behaviour otherwise has no test at all.
+- **A doctor hint is read by an OPERATOR, so no string in `internal/doctor`
+  names a `Deps` field** (2026-09-28). Three hints were notes for whoever
+  calls the package, and each reached operators, measured with the real
+  binary: `pass Deps.port-apiPort` under "no port set" for every config or
+  init flag naming `:0` (the answer the bullet above says `checkPort` "has
+  always had"), `pass Deps.DataDir so doctor can inspect cert state` on
+  EVERY `bridge doctor` run before `bridge init`, and `pass Deps.ConfigDir
+  …` on one with no home directory. Each is a sentence about the install
+  now (`portZeroHint`, `noDataDirHint`, `noConfigDirHint`), severities
+  unchanged. `TestNoStringInThisPackageNamesADepsField` walks the package's
+  string LITERALS by AST, so the docblocks that discuss the fields are not
+  read, and a hint built from pieces (`"pass Deps."+name+"Port"`) is caught
+  by its first; a floor of files and literals keeps a sweep that read
+  nothing from passing. A caller's mistake (a zero `Deps`) and an operator's
+  choice (`:0`) arrive at the same branch, and only the operator reads the
+  report.
 - **`bridge init` decides every refusal BEFORE it writes `bridge.yaml`, and
   keeps what an install already has: its TLS pair and a public install's
   admin ACCOUNT** (#1038). A public `--force` re-init over a public install
@@ -5026,7 +5152,11 @@ its twin.** The top list is older, shorter, and read first.
   `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
   comes back blank, `undefined` or `null` (what `console.log` prints for a
   case that returns nothing), as its key, as the fallback, or in another
-  kind's words.
+  kind's words. **And a list that stands for every value is pinned to the
+  declarations**: `TestEveryOrphanRefusalKindIsListed` reads the integrity
+  package's source for every constant of type `OrphanRefusalKind` and
+  requires `OrphanRefusalKinds()` to hold exactly those, since a kind the
+  list omits is worded by nobody and the wording test passes over it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
@@ -5939,7 +6069,17 @@ its twin.** The top list is older, shorter, and read first.
   card's `lastFinishedAt` to pass the instant of its nudge, a sweep the gate
   refuses finished inside the tick, and the wait ran out on the Windows leg
   (2026-09-28; 6 runs of 6 under a simulated 15.625 ms clock). A serve test
-  counts through a `serveOpts` hook instead (`autoOptimizeSwept`).
+  counts through a `serveOpts` hook instead (`autoOptimizeSwept`). **An mtime
+  compare is wrong in BOTH directions** (B52, 2026-09-28): "was it written?"
+  FAILS correct code when both writes land in one tick, and "was it NOT
+  rewritten?" passes with the guard removed. Five tests held the pattern with
+  this rule in front of them (four in internal/auth, the tls reload test).
+  They count writes (`inCommitWindow`), read the file back through a fresh
+  store, and compare identity (`os.SameFile`): every write here stages a new
+  file and renames it, so a rewritten path is another file, which bytes
+  cannot tell for a rewrite of the same bytes. **A FAT disk image reproduces
+  the class on any Mac**: `hdiutil create -fs MS-DOS` keeps 2 s mtimes, and
+  `TMPDIR` on it puts every `t.TempDir()` there.
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP

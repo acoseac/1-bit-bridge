@@ -318,12 +318,18 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 		writeError(w, http.StatusNotFound, "not_found", "no such track")
 		return
 	}
-	if info.IsDir() {
+	// A directory, a named pipe, a socket or a device, or a link to one, is
+	// refused on the resolver's stat, before anything opens it: opening a
+	// named pipe waits for a writer, so until 2026-09-28 a FIFO named like a
+	// track held this request, and the playback session begun above, until
+	// one came. The open below refuses the same kinds again, for a path
+	// replaced since that stat (fsutil.OpenAsFile).
+	if fsutil.NotAFile(info.Mode()) != "" {
 		writeError(w, http.StatusBadRequest, "bad_path", "not a file")
 		return
 	}
 
-	servePath, serveInfo := abs, info
+	servePath := abs
 	if variantID != "" {
 		v, err := s.deps.Manifest.LookupVariant(r.Context(), rel, variantID)
 		if err != nil || v == nil {
@@ -376,19 +382,19 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 				variantGoneMessage)
 			return
 		}
+		// Stat'ed before it is opened for the source's reason above: what
+		// is at the rendition's path must be a file too.
 		vi, err := os.Stat(sidecarPath)
-		if err != nil {
+		if err != nil || fsutil.NotAFile(vi.Mode()) != "" {
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
 				variantGoneMessage)
 			return
 		}
-		servePath, serveInfo = sidecarPath, vi
+		servePath = sidecarPath
 	}
 
-	f, err := os.Open(servePath)
-	if err != nil {
-		logger.Error("player audio: open", "path", servePath, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not open the file")
+	f, serveInfo, ok := openPlayerFile(w, servePath, variantID != "")
+	if !ok {
 		return
 	}
 	defer f.Close()
@@ -405,6 +411,28 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, serveInfo.Name(), serveInfo.ModTime(), f)
+}
+
+// openPlayerFile opens the file a player request serves, through
+// fsutil.OpenAsFile, and answers the request itself when it cannot. What is
+// no longer a file by the time it is opened (replaced since the handler's
+// stat) gets the answer that stat would have given it: 410 for a rendition,
+// "was here, fall back to the source", and 400 for a source. Any other
+// failure is a 500.
+func openPlayerFile(w http.ResponseWriter, servePath string, variant bool) (*os.File, os.FileInfo, bool) {
+	f, info, err := fsutil.OpenAsFile(servePath)
+	switch {
+	case err == nil:
+		return f, info, true
+	case fsutil.NotAFileKind(err) != "" && variant:
+		writeError(w, http.StatusGone, "variant_missing_on_disk", variantGoneMessage)
+	case fsutil.NotAFileKind(err) != "":
+		writeError(w, http.StatusBadRequest, "bad_path", "not a file")
+	default:
+		logger.Error("player audio: open", "path", servePath, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not open the file")
+	}
+	return nil, nil, false
 }
 
 // setAttachmentHeaders writes a Content-Disposition that survives

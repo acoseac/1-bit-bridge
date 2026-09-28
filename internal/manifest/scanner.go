@@ -2969,8 +2969,8 @@ const (
 	// loop). The walk spares the entry's own row and mints none for it.
 	walkedFileTargetUnreadable
 	// walkedFileNotAFile: the entry is, or names, something that does not
-	// open as a file (notAFile): a directory, a named pipe, a socket or a
-	// device. It is not a track, whatever its name says, and the walk
+	// open as a file (fsutil.NotAFile): a directory, a named pipe, a socket
+	// or a device. It is not a track, whatever its name says, and the walk
 	// follows no directory link. Nothing is minted for it, and a row at its
 	// path is reaped like a deleted file's, after the same missing-count
 	// grace: the walk stat'ed the entry and knows what is there, which is
@@ -3004,8 +3004,8 @@ const (
 // the test costs them one syscall.
 //
 // Whatever the stat, it must describe something that opens as a file, or the
-// entry is not indexed (notAFile): a directory, a named pipe, a socket or a
-// device, or a link to one. A worker opens what it is handed, and opening a
+// entry is not indexed (fsutil.NotAFile): a directory, a named pipe, a socket
+// or a device, or a link to one. A worker opens what it is handed, and opening a
 // named pipe waits for a writer, with nothing to cancel the wait, so until
 // 2026-09-28 a FIFO named like a track held a scan worker forever, and the
 // scan with it: Scan holds the scanner's mutex for its whole run, so every
@@ -3031,39 +3031,10 @@ func walkedFileInfo(typ fs.FileMode, own, through func() (fs.FileInfo, error)) (
 	if err != nil {
 		return nil, walkedFileTargetUnreadable, err
 	}
-	if notAFile(info.Mode()) != "" {
+	if fsutil.NotAFile(info.Mode()) != "" {
 		return info, walkedFileNotAFile, nil
 	}
 	return info, walkedFileIndex, nil
-}
-
-// notAFileKinds are the kinds of entry a walk does not index, each with the
-// name the scan's line gives it, checked in order: a character device
-// carries ModeDevice too.
-var notAFileKinds = []struct {
-	bit  fs.FileMode
-	name string
-}{
-	{fs.ModeDir, "directory"},
-	{fs.ModeNamedPipe, "named pipe"},
-	{fs.ModeSocket, "socket"},
-	{fs.ModeCharDevice, "character device"},
-	{fs.ModeDevice, "device"},
-}
-
-// notAFile names the kind of an entry whose stat reports m when a walk does
-// not index it, and answers "" when it does: for a regular file, and for a
-// Windows reparse point that names nothing (ModeIrregular), such as a cloud
-// placeholder, which opens, and hydrates, like a file. That is why the test
-// is a list of kinds refused and not "is a regular file": on Windows a
-// OneDrive library with files on demand is ModeIrregular throughout.
-func notAFile(m fs.FileMode) string {
-	for _, k := range notAFileKinds {
-		if m&k.bit != 0 {
-			return k.name
-		}
-	}
-	return ""
 }
 
 // walkTally counts the audio-named entries a walk passed over for one reason,
@@ -3132,7 +3103,7 @@ func walkErrReason(err error) string {
 
 // noteNotAFile records the entry at rel, whose stat reports m.
 func (w *walkTallies) noteNotAFile(rel string, m fs.FileMode) {
-	w.notFiles.note(rel, notAFile(m))
+	w.notFiles.note(rel, fsutil.NotAFile(m))
 }
 
 // report logs each tally, once, when there is one.

@@ -25318,6 +25318,736 @@ for #131 and #132, with the #1055 re-fingerprint named; `SplitRoot`,
 re-fingerprints it, as #1055 did to #7 and #8: read the new alert's flow
 from the SARIF, and dismiss it again only while its barrier still stands.
 
+## 2026-09-28 — every route that serves a file's bytes refuses what is not a file, and never waits on a named pipe (backlog B46)
+
+#1070 stopped the scanner indexing a named pipe, a socket or a device, or a
+link to one. Nothing stopped a client naming one: `/v1/list` still lists
+such an entry (as a zero-byte file), and `/v1/download`, `/v1/read`, the web
+player's audio and download routes and the DLNA file route opened the path
+with `os.Open`. Opening a named pipe waits for a writer, and nothing can
+cancel the wait: open(2) is a blocking system call and Go cannot interrupt
+one.
+
+### The measurement
+
+A throwaway program (never committed) over the real `api.Server` behind
+`httptest`, with a session tracker from `internal/updater`, a regular track
+and a FIFO named `02 Pipe.flac` beside it, and a client timeout of 2 s, on
+unchanged code (4cd133e1), macOS:
+
+```
+/v1/stat?path=Artist/Album/02%20Pipe.flac               -> 200 in 2ms: {"isDir":false,"size":0,...}
+/v1/list?path=Artist/Album                              -> 200 in 0s: [...,{"name":"02 Pipe.flac",...,"isDir":false,"size":0,...}]
+/v1/download?path=Artist/Album/02%20Pipe.flac           -> client gave up after 2.002s: ... (Client.Timeout exceeded while awaiting headers)
+/v1/read?path=Artist/Album/02%20Pipe.flac bytes=0-65535 -> client gave up after 2.002s: ...
+updater sessions in flight right after both clients gave up: 2
+updater sessions in flight 3 s later:                       2
+ERROR http ... path=/v1/download status=500 duration_ms=7005
+ERROR http ... path=/v1/read status=500 duration_ms=5003
+sessions in flight after a writer came and went (11ms): 0
+```
+
+Both handlers, and the two updater sessions they had begun, stayed until
+the program played the writer 7 s in; then ServeContent failed its seek
+("seeker can't seek", 500). A session left in flight keeps auto-install
+deferring on every poll (`Tracker.Inflight`). The same program on the fix:
+400 at once with `{"error":"bad_request","message":"path is a named pipe,
+not a file"}`, no session left, and one Warn line naming the
+library-relative path (`err="named pipe is not a file"`). The red runs of
+the new tests below measured the rest: a link to `/dev/null` was served as
+an empty 200 by all three route families, a socket as a 500 by the two
+resolver-backed ones (the kernel refuses its open), and a rendition whose
+sidecar is a FIFO held its request the same way. The DLNA route serves the
+manifest's path, and a row outlives its file until the scan that reaps it,
+after the missing-count grace, so a track replaced by a FIFO was served
+until then.
+
+### The change
+
+- `fsutil.NotAFile` is #1070's list (`notAFileKinds`, `notAFile`), moved out
+  of `internal/manifest` so the scanner and the routes refuse by one list.
+  `internal/fsutil` imports nothing internal, so every caller can import it.
+- `fsutil.OpenAsFile` opens `O_RDONLY|O_NONBLOCK|O_NOCTTY` on unix, takes
+  the opened file's own stat, refuses a `NotAFile` kind with a
+  `*NotAFileError` inside the `*fs.PathError`, and clears `O_NONBLOCK` again
+  for a file. The nonblocking open is what makes a FIFO's open return, and
+  refusing by the OPENED file's stat is what closes the window between a
+  caller's stat and the open (a path replaced in between is judged as what
+  it is now). Open errors come back exactly as `os.OpenFile` gives them, so
+  every caller's `os.IsNotExist` arm answers as before.
+- The resolver-backed routes (`serveFile`, `servePlayerBytes`) ALSO refuse on
+  the resolver's stat before opening anything. That stat is free (the
+  resolver already took it), keeps a device from being opened at all, and
+  is the only thing that refuses a socket, because the kernel refuses a
+  socket's open itself (EOPNOTSUPP on macOS, ENXIO on Linux) before there is
+  a file to stat. The player stats a rendition's sidecar before opening it
+  for the same reason.
+- Answers, all existing codes: 400 `bad_request` "path is a <kind>, not a
+  file" on `/v1/download` and `/v1/read` (a directory already got 400
+  `bad_request`, and PROTOCOL.md's table gives it a malformed path), 400
+  `bad_path` "not a file" on the player (its directory answer), 404 on DLNA
+  (its answer for a source it cannot open), and 410
+  `variant_missing_on_disk` for a rendition whose sidecar is not a file, on
+  all three ("was here, fall back to the source"; `serveVariant` does not
+  reap for it, since nothing says the file is gone). No wire change, so no
+  PROTOCOL.md edit and no Mirror-PR.
+- Every production declaration that passes `http.ServeContent` a file now
+  opens it through `OpenAsFile`: the four byte routes, and the cache routes
+  (the artwork ladder and the artist image, both booklet routes, playlist
+  covers, waveforms, the console's cache files), which serve files the
+  bridge wrote itself. Converting those costs one fcntl a request and
+  removes each site's separate `f.Stat()` block, and it is what lets
+  `TestEveryServedFileIsOpenedAsAFile` hold with no exceptions.
+
+### Decided against
+
+- A stat before the open alone: the window between the stat and the open
+  stays, and a FIFO swapped in there (a symlink repointed, say) holds the
+  request forever.
+- A plain open on a goroutine with a timeout: the handler returns, but the
+  goroutine and the descriptor it eventually gets stay until a writer
+  comes, since a blocked open cannot be cancelled.
+- `O_NONBLOCK` with no fallback. It changes one answer for a regular file:
+  while another open holds a write lease on it (Samba's kernel oplocks take
+  one, an NFS server's delegation another), a nonblocking open fails with
+  EWOULDBLOCK where a plain open waits for the break, up to
+  lease-break-time (45 s by default). Measured on Linux (NC7 below): without
+  the fallback `OpenAsFile` answers "resource temporarily unavailable" at
+  once; with it, it waits out the test's 300 ms lease and opens (0.30 s). A
+  FIFO's nonblocking open never answers EWOULDBLOCK, so the fallback is no
+  way back to the wait.
+- Leaving `O_NONBLOCK` set on the file served. POSIX gives it no effect on a
+  regular file's reads, but a FUSE daemon (rclone, sshfs) is handed the
+  file's flags with every read, and one that honours the flag can answer
+  EAGAIN mid-stream. `setBlocking` clears it (NC6).
+- A new error code such as `not_a_file`: a wire change, which needs the iOS
+  mirror. `bad_request` already carries the directory case.
+- `O_NOCTTY` is kept and not pinned by a test: it matters only if a
+  terminal is swapped in after the caller's stat, and a systemd service is
+  a session leader with no controlling terminal, which on Linux an open of
+  a terminal without the flag hands it. It is inert for everything else.
+
+### Tests and negative controls
+
+`internal/fsutil`: `TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError`
+(every platform), `TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting` and
+`TestOpenAsFileLeavesTheFileItOpensBlocking` (unix),
+`TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes` (Linux; it takes a
+write lease on its own file and skips where a host refuses one). The route
+tests drive the real handlers through `fsutiltest.ServeWithin`, which
+bounds a request at 5 s and then plays the writer on the test's FIFOs, so a
+red run neither hangs the suite nor leaves a handler behind:
+`TestByteRoutesRefuseWhatIsNotAFile` (api, with a counting session tracker:
+every request must begin one and end it), `TestPlayerByteRoutesRefuseWhatIsNotAFile`
+(admin, the same for playback sessions, with renditions whose sidecars are
+a FIFO and a socket) and `Test_FileHandler_RefusesWhatIsNotAFile` (dlna).
+Each plants the same entries (`fsutiltest.PlantNotAFiles`: a FIFO, a link
+to it, a link to `/dev/null`, a socket) beside a track that must still be
+served. `internal/fsutil/fsutiltest` also took over #1070's scanner test
+helpers (`MakeFIFO`, `BindSocket`, the writer loop as `AwaitPastFIFOs`), so
+there is one copy of each. `TestEveryServedFileIsOpenedAsAFile` (cmd/bridge)
+reads every production file (438 of them, holding 12 `http.ServeContent`
+calls, when its floors were set); `TestServedFileSweepOnFixtures` runs its
+scan over six sources whose findings are known.
+
+On the committed fix (6e0247b2 and a8886f47, which are 86ac29fc and
+e2cc1d21 after the rebase onto 73ef5b58), each restored and re-run
+green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `internal/api/files.go` as on main | `TestByteRoutesRefuseWhatIsNotAFile`: the six requests on the pipe and the link to it, and the FIFO rendition, held 5 s each, then 500; the link to `/dev/null` 200 three times; the socket 500 three times. The sweep names `serveFile` and `serveVariant` |
+| NC2: `internal/admin/player_audio.go` as on main | the player test: the pipe and its link held 5 s on both routes, then 500; `/dev/null` 200 twice; the socket 500 twice; the FIFO rendition held, then 500; the socket rendition 500. The sweep names `servePlayerBytes` |
+| NC3: `internal/dlna/file_handler.go` as on main | the DLNA test: `/dev/null` 200 on GET and HEAD, the pipe and its link held 5 s then 500 on both, the FIFO rendition held then 500 (the socket passed, 404 from the failed open, as before). The sweep names `serveFromFilesystem` |
+| NC4: `openNoWait` without `O_NONBLOCK` | the fsutil test's pipe and link rows (held 5 s); the api test's FIFO rendition only, since its sources are refused on the resolver's stat; the DLNA test's pipe and link rows and its rendition. The player test stayed green: it stats the source and the sidecar before opening |
+| NC5: the api's refusal on the resolver's stat disabled | the api test's three socket rows only (500 from the refused open) |
+| NC5b: the player's refusal on the source's stat disabled | the player test's two socket rows only |
+| NC5c: the player's refusal on the sidecar's stat disabled | the socket rendition only (500) |
+| NC6: `O_NONBLOCK` left set | `TestOpenAsFileLeavesTheFileItOpensBlocking` (flags 0x4) |
+| NC7 (dido, golang:1.26.6): the EWOULDBLOCK fallback removed | `TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes`: "resource temporarily unavailable" |
+| NC8: `internal/api/booklet.go` and `internal/admin/handlers_library_meta.go` as on main | the sweep names `booklet`, `serveCacheFile` and `apiLibraryBooklet` |
+| NC8b: the sweep ignores `os.OpenFile` | `TestServedFileSweepOnFixtures`' `os.OpenFile` row only |
+| NC9: the named pipe dropped from `NotAFile`'s list | both sides: `TestNotAFileNamesEachKindTheWalkRefuses`, `TestScanner_AnEntryThatIsNotAFileIsNotATrack` (the scans held 10 s, a row minted "01" at 0 bytes), the fsutil pipe rows ("opened a named pipe as a file"), and the api pipe rows (500 at once, since the open no longer waits) |
+
+The route tests were red on main for every refusal row but the DLNA
+socket rows, which answered 404 there too, and the track beside the
+entries was served on both.
+
+### Not covered
+
+- `/v1/list` lists such an entry as a zero-byte file. A client that follows
+  the listing now gets the 400 at once; hiding the entry is a listing
+  decision (a dangling link deliberately still appears).
+- The listing's own `os.Open` of a directory has the same window: a
+  directory replaced by a FIFO between the resolver's stat and the open
+  holds the request. An `O_DIRECTORY` open would close it.
+- The scanner's extractors open with `os.Open` what the walk judged a moment
+  earlier, and the background jobs that open manifest paths
+  (`acoustid.ComputeFromPrefix`, `analyze`'s STREAMINFO read) do too; a FIFO
+  reaches them only through a swap after the walk, or a row whose file was
+  replaced before its reap.
+
+## 2026-09-28 — bridge init honours its address flags on a loopback run, a --force rewrite is not refused over a port it moves off, and doctor's hints speak to the operator
+
+Backlog B34: the three leftovers #1066's entry recorded under Out of scope.
+
+### What was measured
+
+Every run below is the real binary on the dev Mac, stdin `/dev/null`: "main"
+is a build of 172d4704, "after" a build of this branch.
+
+**A loopback init read neither address flag.**
+
+| | run | main | after |
+|---|---|---|---|
+| 1a | loopback first install, `--listen-address 127.0.0.1:A --admin-address 127.0.0.1:B`, both free | exit 0, saved `:7788` / `127.0.0.1:7789`, no word | exit 0, saved A / B |
+| 1b | the same with `--admin-address 0.0.0.0:B` | exit 0, saved the defaults | exit 2: `--admin-address "0.0.0.0:B": host "0.0.0.0" is not a loopback address`, and a line saying why (next section) |
+| 1c | the same with `--listen-address 443` | exit 0, saved the defaults | exit 2: `--listen-address "443": address 443: missing port in address` |
+
+**A `--yes --force` rewrite was refused over a port it moves off.** An
+install whose config loads, on 127.0.0.1:X and :Y, no pid file (its bridge
+stopped), X held by a python listener:
+
+| | rewrite | main | after |
+|---|---|---|---|
+| 2a | public, onto A / B | exit 1, `[FAIL] port-api :X in use`, "another process owns this port; stop it or pick a different address in bridge.yaml", config unchanged | exit 0, saved A / B |
+| 2b | loopback, no flags (so the defaults, free on the Mac) | exit 1, the same FAIL | exit 0, saved `:7788` / `127.0.0.1:7789` |
+| 2c | control: public, keeping X for the API | exit 1, the same FAIL, no note | exit 1, the same FAIL, `[ok] port-admin not checked: this rewrite moves off :Y`, and "port-api and port-admin above grade the ports this init would write; --listen-address and --admin-address choose others." |
+
+**Three doctor hints named a `Deps` field.** The task named the first; a
+grep for the pattern (every string literal in `internal/doctor` holding
+`Deps.`) found the other two, and each reached an operator:
+
+| | run | hint on main |
+|---|---|---|
+| 3a | `bridge doctor --config` over `listenAddress: ":0"`, `adminAddress: "127.0.0.1:0"` | `[warn] port-api no port set` / `pass Deps.port-apiPort`, and `pass Deps.port-adminPort` |
+| 3b | a public first install with `--listen-address 127.0.0.1:0` | the same, under "preflight warnings" |
+| 3c | `bridge doctor` with no config anywhere (HOME a fresh directory, an empty working directory): every run before `bridge init` | `[warn] tls-cert no data dir set` / `pass Deps.DataDir so doctor can inspect cert state` |
+| 3d | the same with HOME unset | also `[warn] config-dir no config dir set` / `pass Deps.ConfigDir so doctor can verify write access` |
+
+After, the same runs print, in order: "the address names port 0, so the
+system picks a free port each time the bridge starts, and there is none to
+check; set a fixed port if clients must reach this listener on the same
+port after a restart"; "no config that loads says where the certificate is,
+so there is none to inspect (config-file above says why); `bridge init`
+mints one on a first install"; and "no config was named or found, and the
+default config directory could not be resolved: it lives under this user's
+home directory (HOME, or USERPROFILE on Windows), which is not set. Set it,
+or name a config with --config". Summaries and severities are unchanged.
+
+### Decisions
+
+- **Honour the address flags on a loopback run rather than refuse them.**
+  `initAddresses` already took them; a loopback run returned before reading
+  them. It now reads them in either posture, so the preflight grades and
+  the config saves the same ports by the one definition #1066 made. An
+  operator whose 7788 is taken (a second bridge beside the first) had no
+  init route but to edit bridge.yaml after init had graded and saved the
+  defaults. Refusing was the smaller change and left that operator where
+  they were.
+- **A loopback run's `--admin-address` must name a loopback host**, the
+  rule `Validate` holds that install's adminAddress to: its console has no
+  login. `config.ValidateLoopbackAddress(field, addr)` wraps the unexported
+  `validateLoopbackAddress` with the field in the error, as
+  `ValidateBindAddress` does, and `Validate`'s loopback branch now calls it
+  too, so the file and the flag share one function (the error text is
+  byte-identical to the old `adminAddress %q: %w`). `initAddressFlagsError`
+  runs the bind check on both flags first, then the loopback rule, and adds
+  one line only to a HOST refusal: "without --public the admin console has
+  no login, so it listens on this machine only: reach it from another over
+  an SSH tunnel, or run init with --public for a console with a login". A
+  port that does not parse is no question of login. The unexported function
+  stays, since four comments and the top of CLAUDE.md name it.
+- **One note for both postures.** `portsThisInitWrites(public)` said "…
+  would write, its defaults." for a loopback run, false once the flags are
+  read; it is one sentence now, naming the flags.
+- **A certain rewrite leaves the ports it abandons ungraded.** Only `--yes
+  --force` over a config that loads is certain before the preflight: `--yes`
+  alone keeps the config, and an interactive run asks "Overwrite?" after
+  the preflight, where a no keeps the install's ports. `portsARewriteAbandons`
+  lists the install's ports the rewrite binds in neither role, and
+  `doctor.Deps.AbandonedPorts` answers a listed port ok "not checked: this
+  rewrite moves off :X" without probing it (`abandonedPortCheck`, in
+  `checkListenPort` after the owned-port answer). The shape follows
+  `ungradedConfigPortCheck`'s: a line that says it was not graded, and why.
+  The second pass grades the ports written in their place, as before, and
+  carries the same Deps; the list never names a port the run writes, which
+  is what makes that safe. Port 0 is matched like any other port (unlike
+  `OwnedPorts`, where 0 means unset): here it comes from a config, where
+  `:0` is a legal address a rewrite may leave.
+- **Rejected: a list built per role** (a check's port is abandoned when its
+  own role moves). A rewrite that moves the console onto the install's old
+  API port binds that port again; a per-role list names it, and the second
+  pass, grading it as the new admin port with the same Deps, answers "not
+  checked" and saves a port a stranger holds. NC8 below.
+- **Rejected: the preflight grading the run's ports in place of the
+  install's on a certain rewrite.** A changed port needs the pid file
+  cleared (#970) and a kept one needs it (the running bridge holds it), and
+  `Deps` carries one pid file for both checks. Attribution-only mode
+  (`OwnPIDPortsUnknown`) for both would refuse a capability-bound bridge on
+  its own kept port wherever the probe cannot read it, #1027's documented
+  limit, on the NUC's ordinary shape. The second pass already has the right
+  semantics per port.
+- **Rejected: moving "Overwrite?" ahead of the preflight** so an interactive
+  run is certain too. It reorders the interactive flow for every re-init and
+  still leaves a no-answer grading the install. The residual is recorded in
+  CLAUDE.md: an interactive rewrite moving off a held port is refused before
+  its prompt, and `--yes --force` is the way through.
+- **On a certain rewrite the note prints under a refused kept port.** Every
+  port graded there is one the rewrite writes, and the check's own hint
+  names a bridge.yaml the run is about to replace.
+- **All three `Deps.` hints, not only the port's, and a sweep.** The task
+  named the port hint; the other two are the same defect and reached more
+  operators (3c is every pre-init doctor run). `TestNoStringInThisPackageNamesADepsField`
+  walks the package's string literals by AST (the docblocks that discuss the
+  fields are comments, and not read), with a floor of 10 files and 200
+  literals. Severities stay: whether tls-cert's pre-init warn should decline
+  as an ok "not checked", as #1022's rule would suggest, is a separate
+  change (Out of scope).
+- **Consult**: Gemini is at the project's monthly spending cap; decided
+  without it, on the measurements above.
+
+### Tests
+
+- `cmd/bridge/init_loopback_addresses_test.go`:
+  `TestInitLoopbackRunWritesTheAddressesItIsGiven` (two first-install
+  shapes, both on 127.0.0.1 and the API on every interface with the console
+  on localhost, and a `--force` rewrite of a loopback install); it holds
+  `writeInstallConfig` (an install's config on any two addresses, which the
+  `:0` doctor row uses) and `writeLoopbackInstall` on top of it, which
+  `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads` now uses in
+  place of its own copy. The keep and moves-to tests share
+  `assertRewriteRefused` (exit 1, the FAIL on the held port, the config
+  untouched): SonarCloud fails a PR whose new lines are more than 3 %
+  duplicated.
+- `cmd/bridge/init_run_ports_test.go`: `TestInitPreflightRefusesAPortTheRunWrites`
+  gained a loopback-flags row and lost its per-row note;
+  `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` gained five loopback
+  rows (a listen address with no port, an admin port out of range, and an
+  admin host that is every interface, empty, or a name), requires the "no
+  login" line on exactly the three host rows, and passes `--library` so the
+  address is the run's only usage error.
+- `cmd/bridge/init_force_rewrite_ports_test.go`, each row in both postures:
+  `TestInitForceRewriteIsNotRefusedOverAPortItMovesOff`,
+  `TestInitForceRewriteStillRefusesAPortItKeeps` (kept as the listen port,
+  and as the admin port: the other-role shape),
+  `TestInitForceRewriteGradesThePortItMovesTo` (a stranger on the old port
+  and the new one: the second pass refuses the new one, and nothing names
+  the old), `TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt`
+  (the control that pins the residual), and `TestPortsARewriteAbandons`
+  (nine shapes, the swaps included; no row abandons a port the run writes).
+- `cmd/bridge/doctor_operator_hints_test.go`: `TestPrintedHintsSpeakToTheOperator`
+  drives `doctorCmd` and `initCmd` into 3a to 3d and a loopback init naming
+  `:0`, and requires the check's warn with no `Deps.` anywhere in the output.
+- `internal/doctor`: `TestHintsWithNothingToGradeSpeakToTheOperator`,
+  `TestNoStringInThisPackageNamesADepsField`, `TestAnAbandonedPortIsNotProbed`
+  (a held, listed port answers ok "not checked" on both checks with zero
+  calls to the bind probe; the same port unlisted FAILs).
+- **Red first, on the unchanged tree.** The new and changed test files were
+  copied into an archive of 172d4704 (a grep for `AbandonedPorts` and
+  `abandonedPortCheck` there found none), with `portsThisInitWrites()`
+  spelled as main's public variant, whose words the new note keeps, and a
+  stub `portsARewriteAbandons` returning nil so the package compiled. Red:
+  both new `internal/doctor` hint tests (the sweep naming `doctor.go:371`,
+  `:459` and `:965`), `TestPrintedHintsSpeakToTheOperator` 5 of 5, every
+  row of the three `TestInitForceRewrite…` tests, `TestInitLoopbackRunWritesTheAddressesItIsGiven`
+  3 of 3, the five loopback rows of the address-flag test, and the
+  loopback-flags row of the preflight-refusal table. Also red, by the
+  note's words only: that table's loopback-defaults row and
+  `TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`,
+  whose loopback note was "…, its defaults.". Green, as controls should be:
+  the interactive test, the keep test, and #1066's tests.
+
+### Negative controls
+
+Each on the committed tree (690fff79), restored with `git checkout --` and
+the tree confirmed clean after each; `-count=1` over `TestInit|TestDoctor|TestMenuDoctor|TestConfiguredPort|TestAutoStart|TestPrintedHints|TestPortsARewrite`
+in `cmd/bridge` and all of `internal/doctor`. Every mutation matched once
+and built.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | a loopback run reads neither address flag again | every loopback-flag test: the three `TestInitLoopbackRunWritesTheAddressesItIsGiven` rows, the loopback-flags row of the refusal table, the loopback init naming `:0`, and the loopback row of each `TestInitForceRewrite…` test (the run writes the free defaults and saves) |
+| NC2 | a loopback run's admin address skips the loopback rule | the three admin-host rows of the address-flag test, alone |
+| NC3 | the flags checked on a public run only, as before | the five loopback rows of the address-flag test |
+| NC4 | no abandoned list set | the not-refused test and the new-port test, both postures |
+| NC5 | the ladder never asks `abandonedPortCheck` | NC4's four rows and `TestAnAbandonedPortIsNotProbed` |
+| NC6 | `--yes` without `--force` abandons ports too | `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`, alone |
+| NC7 | any run over a loaded config abandons ports | that test and the interactive test |
+| NC8 | the list built per role | the two other-role rows of the keep test, and three `TestPortsARewriteAbandons` rows (the swap, and a port moving onto the other role's, each way) |
+| NC9 | the note only where no config loaded, as before | the four keep-test rows |
+| NC10 | no second pass on a `--force` rewrite | the new-port test (both postures), `TestInitRefusesToSaveAPortItNeverGraded`, `TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID` |
+| NC11 | the port-0 hint back to `"pass Deps."+name+"Port"` | the two port rows of the hint test, the sweep, and the three `:0` rows of the printed-hints test |
+| NC12 | the tls-cert hint back | its hint row, the sweep, and the two printed rows with no config (the no-home run has no data dir either) |
+| NC13 | the config-dir hint back | its hint row, the sweep, and the no-home printed row |
+| NC14 | the sweep reads no file | the sweep, on its floor |
+| NC15 | the admin address skips the bind check | the two admin-out-of-range rows, public and loopback (the loopback one then carries the "no login" line) |
+| NC16 | `abandonedPortCheck` probes the port before answering | `TestAnAbandonedPortIsNotProbed`, alone |
+
+### Gate
+
+On the dev Mac (host Go 1.27.1), over the branch merged with main at
+84a3df20 (#1074):
+
+- `go vet ./...`: clean.
+- The pinned gofmt (`go1.26.6`'s `gofmt -l`) over the ten Go files the
+  branch touches: nothing listed. `make fmt` was not run (the host's
+  gofmt 1.27 rewrites two files CI calls clean).
+- `go test -race -count=1 -p 2 -timeout 30m`: `internal/doctor` and
+  `internal/config` ok, and `cmd/bridge` ok on the PR head, the tree-wide
+  sweeps included (the citation guard reads this entry).
+- `make build-all P=2`: all six binaries. The three packages' test binaries
+  also compile for `windows/amd64` and `linux/amd64`.
+- NC4, NC8, NC9 and NC10 re-run after the helper refactor
+  (`assertRewriteRefused`, `writeInstallConfig`), each red on exactly the
+  tests the table above lists for it.
+
+The full Linux race suite runs in CI, and on dido for the PR head.
+
+### Out of scope
+
+- **`--domain`, `--email` and `--admin-tls-proxy` are still ignored,
+  silently, without `--public`**: a loopback init given all three exits 0,
+  and none reaches the saved config (measured with this branch's binary).
+  Their help says "required with --public" and "with --public:", so an
+  operator who forgets `--public` gets a loopback install and no word.
+- **tls-cert's "no data dir set" is a warn on every `bridge doctor` run
+  before `bridge init`**, where #1022's rule for a check that declines for
+  a reason another line reports (config-file's "none found") would make it
+  an ok "not checked". Its hint is an operator sentence now; the severity
+  is a separate change, which moves every first-run report's warn count.
+- **A loopback `--force` rewrite keeps a loopback install's
+  `customEndpoints` while writing the run's ports**, so a kept endpoint can
+  name the port the rewrite moves off. This predates the change (a loopback
+  rewrite always wrote the defaults, whatever port the install used), and
+  `printKept` lists the kept endpoints; the flags now at least let the
+  rewrite keep the port.
+- **An interactive rewrite moving off a held port is still refused before
+  its "Overwrite?" prompt** (recorded in CLAUDE.md as the residual).
+
+### Review round 1 (CodeRabbit, one finding, taken)
+
+- **The printed-hints test passed a report that printed no hint at all**
+  (Minor): it required the check's warn and no "Deps." anywhere, and a
+  report without hints satisfies both. Each case now names a phrase of its
+  hint, and `hintUnder` requires it on the line printReport puts under the
+  check. With both hint printers in cmd/bridge/doctor.go removed (NC, on the
+  committed test), all five cases are red; restored, green.
+
+## 2026-09-28 — the auth and tls tests count writes and compare file identity, never a clock tick apart (backlog B52)
+
+`TestValidateUpdatesLastUsedAt` took `time.Now().UTC()`, slept 5 ms and asserted
+the stamp `Validate` wrote was strictly `After` it. `.UTC()` strips the
+monotonic reading, so that compares wall clocks, and Windows advances the wall
+clock in ticks of about 15.6 ms. #1067 met the same shape in its own serve test
+on the Windows leg (the bullet this entry extends). A survey of every
+`_test.go` for a reading taken before an action and then a strict
+`After` / `Before` on what the action wrote found only this one; widening it to
+mtimes found five more tests deciding "was the file rewritten?" from mtimes a
+few milliseconds apart.
+
+- internal/auth: `TestValidateDebouncesLastUsedPersist`,
+  `TestRecordClientVersionUpdatesInMemoryAndFlushPersists`,
+  `TestRecordClientVersionDebouncesUnderRapidChanges`,
+  `TestRecordClientVersionSkipsDiskOnRepeat`.
+- internal/tls: `TestReloadsWithoutRegenerating` (its comment: "Small sleep
+  so any mtime change would be visible on coarse-grained FSes", with a 10 ms
+  sleep).
+
+**An mtime compare is wrong both ways.** "Was it written?" (`!mt.After(before)`)
+fails correct code when both writes land in one tick; "was it NOT rewritten?"
+(`mt.After(before)`) passes with the guard removed. The existing rule named the
+second half only.
+
+### Reproduction, on a coarse filesystem
+
+A FAT32 disk image keeps 2 s mtimes, so a Mac can reproduce the coarse-tick
+case with one (`hdiutil create -size 200m -fs MS-DOS`, attached with
+`-nobrowse`, `TMPDIR` pointed into it so `t.TempDir()` lands there). APFS
+keeps nanosecond mtimes, which is why these tests pass on a Mac's own disk. On main (84a3df20), unchanged
+code:
+
+```
+--- FAIL: TestValidateDebouncesLastUsedPersist
+    auth_test.go:213: FlushLastUsed did not persist: 2026-09-28 22:06:42 +0200 CEST (want > 2026-09-28 22:06:42 +0200 CEST)
+--- FAIL: TestRecordClientVersionUpdatesInMemoryAndFlushPersists
+    auth_test.go:662: FlushLastUsed did not persist deferred client-version update (mtime 2026-09-28 22:06:42 +0200 CEST == 2026-09-28 22:06:42 +0200 CEST)
+```
+
+`TestValidateUpdatesLastUsedAt` cannot be driven red here without a clock seam
+the store does not have, and none was added for it: its fix is a bound that
+holds at any clock resolution, so there is nothing a seam would buy.
+
+### The change (tests only)
+
+- `TestValidateUpdatesLastUsedAt`: the stamp is zero before `Validate` and lies
+  in `[before, after]`, two readings taken around the call.
+- The four auth debounce tests count writes through `inCommitWindow` (its hook
+  fires once per staging) and read the result back through a store opened fresh
+  from the file (`onlyTokenOnDisk`), never an mtime. The sleeps that existed
+  to space stamps apart are gone.
+- `TestRecordClientVersionSkipsDiskOnRepeat` repeated the same version INSIDE
+  the debounce window after `Mint`, where no call writes anyway, so it passed
+  with the same-value skip removed on every filesystem (NC3). It now opens the
+  window first (`setLastUsedFlushForTest`), and a new version at the end is the
+  positive control that the window was open.
+- `TestReloadsWithoutRegenerating` compares the cert and key by `os.SameFile`.
+  A regenerated pair already fails its fingerprint check; a rewrite of the
+  SAME bytes is caught by identity, since every write in the package stages a
+  new file and renames it into place. Bytes cannot see that rewrite.
+
+### Negative controls
+
+Each on the committed tests (834eafe7), run on APFS and on the FAT image, beside
+main's versions of the same tests:
+
+| mutation | new tests, APFS and FAT alike | main's tests |
+|---|---|---|
+| NC1: the debounce removed (`flushDueLocked` always true) | the three debounce tests red | on FAT, `…DebouncesUnderRapidChanges` green |
+| NC2: `FlushLastUsed` writes nothing | the two flush tests red | red |
+| NC3: the same-value skip removed | `…SkipsDiskOnRepeat` red | green on APFS and FAT |
+| NC4: `Validate` stamps nothing | `TestValidateUpdatesLastUsedAt` and the flush test's read-back red | red |
+| NC5: the reload rewrites the cert with the same bytes | `TestReloadsWithoutRegenerating` red | green on FAT |
+
+Restored, all five auth tests and the tls test are green on APFS and on FAT
+(`-count=3` on FAT).
+
+### Left alone
+
+`internal/adminauth`'s sign-out fixture compares size and mtime on purpose: it
+builds a replacement with the old file's size and mtime to prove the store
+notices a rename by identity. `api/files_entryinfo_test.go` and the SACD
+scanner tests compare a stat they took with one they set, not two writes.
+
+## 2026-09-28 — the reverse guard and `artwork --gc` read the filesystem's lost+found as the inventory does, and the orphan sweep's empty catalog is a latched refusal decided from the inventory (backlog B42)
+
+Three leftovers of #1071, in one PR. Each was reproduced on main
+(172d4704) before any code changed, with a throwaway helper under a
+`_`-prefixed directory for the two library calls, the real `bridge` binary
+for everything else, and a real `bridge serve` for the sweep.
+
+### 1: the reverse guard's probe failed closed on the filesystem's lost+found
+
+#1071 taught `TakeSidecarInventory` that the root-owned, 0700 `lost+found`
+of an ext4 volume mounted AS the variants directory is the filesystem's
+(`isFilesystemLostFound`), and left `TreeHoldsVariantSidecars`, the
+probe behind the reverse guard, answering that directory's permission
+error. Measured on main, the directory locked with `chmod 000`:
+
+- A fresh volume holding only its `lost+found`:
+  `TreeHoldsVariantSidecars = false, err = open …/lost+found: permission
+  denied`, and `MassDeleteRefusal` over 30 of 30 missing rows refused "… and
+  the variants directory could not be read (open …/lost+found: permission
+  denied)". That is the refusal every `VariantWatcher` tick makes over a
+  replaced volume, whose rows' sidecars really went.
+- `bridge upscale --gc` over the same volume with 30 such rows: "GC:
+  refusing to run — 30 of 30 rows (100%) have no sidecar at either
+  location, over the 20% threshold, and the variants directory could not be
+  read (…)", the relocation advice, exit 1.
+- Sidecars only under `mozart/`, which sorts after `lost+found`: the same
+  error, so the guard refused for a read failure rather than for the
+  sidecars it would have found.
+
+After: the fresh volume answers `false, nil`, the refusal is empty and
+`upscale --gc` reaps the 30 rows ("GC reverse sweep: removed 30 orphan
+row(s)", exit 0); the `mozart/` tree answers `true, nil` and is refused
+"while the variants directory still holds sidecar files".
+
+- Decided: `IsFilesystemLostFound` is exported and the probe's walk skips
+  that one directory, as evidence neither way. Any other directory the
+  probe cannot list still fails it closed, the root included.
+- Found on the way: the rule compared `filepath.Dir(path)` with the walk
+  root as given, and `filepath.WalkDir` cleans every path below its root,
+  so a root handed over with a trailing separator lost the rule. Harmless
+  where the root is resolved first (`EvalSymlinks` cleans it), not for the
+  artwork GC, which walks its directory as configured. It compares against
+  `filepath.Clean(walkRoot)` now; the unit table has the row.
+
+### 2: `bridge artwork --gc` stopped at the first directory it could not list
+
+The cache held two referenced files, an unreferenced one at the top and an
+unreferenced thumbnail in `thumbs/`. Measured on main:
+
+- `thumbs/` locked: "walk artwork dir: open …/thumbs: permission denied",
+  exit 1, no summary, and the top-level orphan already removed (it sorts
+  ahead of `thumbs`). The run changed the cache and reported a failure.
+- The cache directory as a volume's mount root, its `lost+found` locked:
+  the same stop at `lost+found`, the top orphan removed, the one in
+  `thumbs/` never examined.
+- A fresh install (no track references any artwork) on that mount root:
+  "artwork gc: cannot inspect …/artwork: open …/lost+found: permission
+  denied", exit 1, from the empty-store guard's own walk.
+
+After: the first names the directory on stderr ("artwork gc: could not
+list a directory, so the files in it were neither examined nor removed:
+…"), ends "GC: removed 1 orphan(s), kept 2 known cache file(s), 0 skipped,
+0 failure(s), 1 director(y/ies) it could not list." and exits 0; the second
+removes both orphans without a word about `lost+found`; the third exits 0.
+
+- Decided: step over and report, not refuse. The artwork GC's verdict
+  about a file is that file's stem against `ArtworkMBIDsInUse`; there is no
+  count or ratio over the tree for an unseen part to flip, which is what
+  makes a partial walk dangerous for the sidecar sweeps
+  (`PartialWalkRefusal`). A file the walk did not reach is neither examined
+  nor removed, so stepping over its directory removes nothing a full walk
+  would keep. Exit 0 unless a removal failed: the directory is counted on
+  the summary and named on stderr, which is where an operator running the
+  command looks.
+- Rejected: a refusal with an `--allow-partial-walk` of its own. It would
+  protect no verdict, and a cache on an ext4 mount root would need the flag
+  on every run. Rejected: stepping over silently, which leaves an unlisted
+  `thumbs/` uncollected with nothing to say so.
+- A cache ROOT this user cannot list still fails: nothing was examined.
+  The empty-store guard (`artworkCacheHasFiles`) reads the cache as the
+  walk does, so the two cannot disagree about a fresh install.
+
+### 3: the orphan sweep's empty-catalog refusal
+
+Measured on main with a real `bridge serve`, the orphan sweep at 2 s and an
+empty catalog:
+
+- Over five renditions: five WARN lines ("refusing — no variant row
+  references any sidecar, but the variants directory holds files") in the
+  eight seconds after the console came up, and `/api/jobs` said
+  `{"orphanSidecarGC": true}` with no refusal. The M-SEARCH shape, and the
+  Jobs card said "on".
+- Over NO rendition, a variants directory holding a `.DS_Store`, empty
+  folders and a locked `lost+found`: the same five lines in eight seconds.
+  Main asked `dirIsEmpty`, whether the directory held any entry at all, so
+  a fresh ext4 volume mounted as the variants directory, before its first
+  rendition, WARNed "holds files" on every tick.
+
+**The first draft kept that question.** It made the refusal a third latch
+kind (`emptyCatalog`): one WARN per streak, at most daily, an Info line when
+it lifts, the card showing it. Checked in a browser on a throwaway bridge,
+the card read "refusing" as it should; then, with the renditions deleted
+and their folders and a `.DS_Store` left, it went on reading "refusing",
+over a tree the sweep would unlink nothing from. A streak that cannot end is
+the card's version of the WARN it replaced.
+
+**Decided: the verdict comes from the tick's inventory**, as the other two
+kinds' do (`emptyCatalogRefusal`). The tick walks first; with an empty
+known set it refuses when the walk found a sidecar file it would remove, or
+an entry it could not stat, weighed as one such file as
+`MassOrphanRefusalFor` weighs it. That check stays ahead of the mass-orphan
+one, which refuses most of the same trees but none under its floor of ten,
+and whose advice names a lost index. Nothing else counts, because nothing
+else is a file this sweep would remove: a directory, a file `Consider`
+rejects, anything under a pruned dot-directory, the filesystem's
+`lost+found`. A directory the walk could not list, with no file in view, is
+the partial walk's refusal, which says what is true of it. With nothing to
+remove the tick ends any streak (one Info line) and returns without a
+summary line, as main's empty catalog over an empty directory always did.
+
+- Consequences, each deliberate: an empty-catalog tick now walks the tree
+  (the sweep's own measurement is 128 ms per 100,001 files, and the
+  documented routes to an empty catalog are transient); an empty catalog
+  over an unreadable variants root is a partial-walk refusal, where main
+  said nothing (`dirIsEmpty`'s error was dropped), as a non-empty catalog
+  over it already was; a refused empty-catalog tick logs the per-tick
+  summary line at Info, as the other two kinds' do.
+- Rejected: counting every regular file (a nil `Consider`), since this
+  sweep removes `.flac` files only and the rest are nothing to protect.
+  Rejected: weighing a directory the walk could not list as a file: it may
+  hold nothing, and the empty-catalog wording would then be false (the
+  control below).
+- The card: `describeOrphanGCRefusal` words `emptyCatalog` ("No variant
+  row names a rendition while the variants directory holds renditions, so
+  every one of them would read as an orphan, and nothing is unlinked. …"),
+  and `OrphanRefusalKinds` lists it. `TestEveryOrphanRefusalKindIsListed`
+  scans the package's source for every constant of type
+  `OrphanRefusalKind`, since a kind the list omits is worded by nobody and
+  the wording test passes over it.
+
+After, on the same two shapes with the real binary: one WARN and
+`"orphanSidecarGCRefusal": "emptyCatalog"` over the renditions; no line at
+all and the card "on" over the folders, `.DS_Store` and `lost+found`.
+
+Verified in a real browser on a throwaway loopback bridge (the orphan sweep
+at 2 s, an empty catalog over five renditions): the card showed the
+"refusing" badge, "refusing since 16s ago" and the reason under the list.
+The renditions deleted, folders and a `.DS_Store` left: one "no longer
+refusing" Info line (`files=0 rows=0`) and the card "on". A locked
+`lost+found` added at the root: still "on", no line. Three renditions put
+back: a new streak, one WARN, the card refusing. Two WARN lines in all, over
+about 110 s of 2 s ticks. At 375 px in dark: no horizontal scroll, the line
+163 × 31, the reason paragraph 293 × 149.
+
+### Tests
+
+New: `TestTreeHoldsVariantSidecars`'s two lost+found subtests; the
+`TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars` rows for a
+fresh volume and for sidecars sorting after its `lost+found`;
+`TestRunGCReapsTheRowsOfAFreshVolume`; the trailing-separator check in
+`TestIsFilesystemLostFoundReadsAllThreeTerms`;
+`TestArtworkGCStepsOverADirectoryItCannotList`,
+`TestArtworkGCStepsOverTheFilesystemsLostFoundWithoutAWord`,
+`TestArtworkGCEmptyStoreGuardReadsTheCacheAsTheWalkDoes` and
+`TestArtworkGCStillFailsOnACacheItCannotList`;
+`TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal`,
+`TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove`
+(seven shapes: emptied, removed, empty folders left, only files the sweep
+never removes, the renditions in the Trash, only the filesystem's
+`lost+found`, and a directory the walk cannot list, which becomes the
+partial walk's refusal), `TestEmptyCatalogRefusalCountsWhatTheSweepWouldRemove`
+and `TestEveryOrphanRefusalKindIsListed`. Extended:
+`TestServeReportsTheOrphanSweepRefusalOnTheJobsCard` (an empty catalog,
+through the real serve), `TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch`
+(an empty-catalog streak between the other two),
+`TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir` (no summary
+line either), `TestMaintenanceChipSaysTheOrphanSweepIsRefusing` (every
+kind) and `TestEveryOrphanRefusalKindIsWorded` (three kinds). Adapted:
+`TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing`
+lost its empty-catalog case, a verdict now, and requires that a tick which
+decided nothing logs no refusal of another kind.
+
+### Negative controls, each on a committed tree and restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| the probe stops skipping the filesystem's `lost+found` | the first new `TestTreeHoldsVariantSidecars` subtest, both new watcher rows, `TestRunGCReapsTheRowsOfAFreshVolume` |
+| the rule compares the walk root uncleaned | `TestIsFilesystemLostFoundReadsAllThreeTerms`, alone |
+| the artwork walks stop stepping over an unlisted directory | `TestArtworkGCStepsOverADirectoryItCannotList`, `…StepsOverTheFilesystemsLostFoundWithoutAWord` and every case of `…EmptyStoreGuardReadsTheCacheAsTheWalkDoes` |
+| the artwork walks forget the `lost+found` rule | `TestArtworkGCStepsOverTheFilesystemsLostFoundWithoutAWord`, alone |
+| the cache root itself is stepped over | `TestArtworkGCStillFailsOnACacheItCannotList`, alone |
+| the empty-store guard stops stepping over | every case of `TestArtworkGCEmptyStoreGuardReadsTheCacheAsTheWalkDoes` |
+| the summary stops counting unlisted directories | `TestArtworkGCStepsOverADirectoryItCannotList`, alone |
+| the walk stops naming the directory on stderr | the same test, and the guard's unlisted-only case |
+| the empty-catalog refusal bypasses the latch (main's WARN) | the latch test, the status test, all seven streak cases, the serve test's empty catalog |
+| `dirIsEmpty` decides it again (the first draft) | five streak cases: empty folders, files never removed, the Trash, `lost+found`, the unlisted directory; emptied and removed stay green |
+| it refuses on any empty known set | the quiet test, all seven streak cases, the pure test's two "must not" rows |
+| an entry the walk could not stat is not weighed | the pure test's unstat-able row, alone |
+| an unlisted directory is weighed as a file | the pure test's unlisted row and the streak's unlisted case |
+| the quiet return is dropped | the quiet test (a summary line), alone |
+| the mass-orphan check runs first | the status test and the serve test's empty catalog |
+| `OrphanRefusalKinds` drops `emptyCatalog` | `TestEveryOrphanRefusalKindIsListed` and `TestEveryOrphanRefusalKindIsWorded` |
+| `OrphanRefusalKinds` names a kind nothing declares | `TestEveryOrphanRefusalKindIsListed`, alone |
+| the console loses the `emptyCatalog` wording | `TestEveryOrphanRefusalKindIsWorded`, alone |
+| the jobs handler drops the `emptyCatalog` kind | `TestMaintenanceChipSaysTheOrphanSweepIsRefusing` and the serve test's empty catalog |
+
+The probe, artwork, list, wording and handler controls ran on the first
+commit (07b03731), whose code at those places is the final code but for the
+console's wording; the empty-catalog controls ran on the final tree. Three
+controls of the first draft's `dirIsEmpty` arms went with it.
+
+### Out of scope
+
+- `sweepArtworkCache`, the serve-time LRU cap on the same cache, still
+  stops at the first directory it cannot list, the filesystem's
+  `lost+found` included: its WARN every tick, and the cap never enforced.
+- `artwork --gc` removes `artist-<mbid>-<size>.jpg` portraits and the
+  16-hex version-alias thumbnails in `thumbs/` as orphans:
+  `ArtworkMBIDsInUse` returns only `artworkMBID`. Regenerable, not lost.
+- Neither artwork walk resolves a symlinked cache root, so both see one
+  entry and do nothing there.
+- The CLI `--gc` sweeps' own empty-catalog refusal
+  (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks `dirIsEmpty`, so a
+  variants directory holding only a `lost+found`, a `.DS_Store` or empty
+  folders needs `--allow-empty` for a GC with nothing to do.
+- `VariantWatcher`'s mass-delete refusal WARNs on every tick, unlatched.
+- `bridge init` ignores `--listen-address` and `--admin-address` without
+  `--public`, without a word.
+
 ## 2026-09-28 — a library root that is a link to a directory is walked through
 
 Backlog B41, found by #1070's session with a throwaway program and left

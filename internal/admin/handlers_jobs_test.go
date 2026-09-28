@@ -89,9 +89,13 @@ func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
 		t.Errorf("orphanSidecarGCRefusingSince = %q, want %q", got, since.Format(time.RFC3339))
 	}
 
-	status.Refusing = integrity.OrphanRefusalPartialWalk
-	if got := raw()["orphanSidecarGCRefusal"]; got != "partialWalk" {
-		t.Errorf("a partial-walk refusal reads %v, want the partialWalk key", got)
+	// Every kind reaches the payload as its key: the console words it
+	// (TestEveryOrphanRefusalKindIsWorded), and the key is what it switches on.
+	for _, k := range integrity.OrphanRefusalKinds() {
+		status.Refusing = k
+		if got := raw()["orphanSidecarGCRefusal"]; got != string(k) {
+			t.Errorf("the %s refusal reads %v, want its key", k, got)
+		}
 	}
 
 	status = integrity.OrphanSweepStatus{}

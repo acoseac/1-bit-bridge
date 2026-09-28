@@ -30,6 +30,18 @@ import (
 //	  .DS_Store            (hidden, should not appear in list)
 func fileFixture(t *testing.T) (*httptest.Server, string, string) {
 	t.Helper()
+	srv, raw, root := fileFixtureServer(t)
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	return hs, raw, root
+}
+
+// fileFixtureServer lays down fileFixture's library tree and returns the
+// server over it, not yet listening, with a bearer token and the library
+// root, for a test that wires more into the server or drives its handler
+// directly.
+func fileFixtureServer(t *testing.T) (*Server, string, string) {
+	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
 	for _, p := range []string{
@@ -59,10 +71,7 @@ func fileFixture(t *testing.T) (*httptest.Server, string, string) {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("test")
 
-	srv := New(cfg, store, nil, "fp")
-	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(hs.Close)
-	return hs, raw, root
+	return New(cfg, store, nil, "fp"), raw, root
 }
 
 func authGet(t *testing.T, hs *httptest.Server, path, token string) *http.Response {
