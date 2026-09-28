@@ -340,6 +340,23 @@ func (b *stampBridge) delta(t *testing.T, since time.Time) []string {
 	return out
 }
 
+// synced is a delta cursor no track has moved past yet, what a device holds
+// right after a sync. It is read off the delta rather than the clock: a
+// bump may land a few nanoseconds past a clock that ticks every 15.6 ms
+// (indexedAtAdvanceSQL), so a time.Now() taken just after one can be behind
+// it on Windows.
+func (b *stampBridge) synced(t *testing.T) time.Time {
+	t.Helper()
+	for range 200 {
+		if c := time.Now(); len(b.delta(t, c)) == 0 {
+			return c
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("every cursor for a second had a track past it")
+	return time.Time{}
+}
+
 // TestAChangedFileIsNotRenderedUntilItsRowIsReRead drives the loop B24 was
 // filed for through the real entry points: POST /v1/upscale into the
 // adapter, the auto-optimize sweep, and GET /v1/download. Both sources
@@ -365,7 +382,7 @@ func TestAChangedFileIsNotRenderedUntilItsRowIsReRead(t *testing.T) {
 
 	b.change(t, stampPCM)
 	b.change(t, stampDSD)
-	changed, before := time.Now(), b.queue.count()
+	changed, before := b.synced(t), b.queue.count()
 	b.alternate(t, "the rows behind the files", 3)
 	if got := b.queue.since(before); len(got) != 0 {
 		t.Errorf("%d renders over three rounds of a request and a sweep while the row was behind the file: %v\n"+
@@ -479,11 +496,14 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	}
 
 	// Queued before the loop runs, so which requests share a scan does not
-	// depend on when the loop takes one.
+	// depend on when the loop takes one. The directories are OS paths, as
+	// the ones the adapter hands over are (filepath.Dir of the resolved
+	// file): on Windows a scan of "\lib\A", never "/lib/A".
+	dirA, dirB := filepath.FromSlash("/lib/A"), filepath.FromSlash("/lib/B")
 	r := newSourceRescanner()
-	r.request("/lib/A/01.flac", "A/01.flac")
-	r.request("/lib/A/02.flac", "A/02.flac")
-	r.request("/lib/B/01.flac", "B/01.flac")
+	r.request(filepath.Join(dirA, "01.flac"), "A/01.flac")
+	r.request(filepath.Join(dirA, "02.flac"), "A/02.flac")
+	r.request(filepath.Join(dirB, "01.flac"), "B/01.flac")
 	if len(r.queue) != 2 {
 		t.Fatalf("%d scans queued for two directories, want 2: two files of one directory share a scan", len(r.queue))
 	}
@@ -517,14 +537,14 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 		}
 	}
 
-	next("/lib/A")
+	next(dirA)
 	// A's scan has started, and may already have passed these files.
-	r.request("/lib/A/03.flac", "A/03.flac")
-	r.request("/lib/A/04.flac", "A/04.flac")
+	r.request(filepath.Join(dirA, "03.flac"), "A/03.flac")
+	r.request(filepath.Join(dirA, "04.flac"), "A/04.flac")
 	release <- struct{}{}
-	next("/lib/B")
+	next(dirB)
 	release <- struct{}{}
-	next("/lib/A")
+	next(dirA)
 	// The third scan is held, so the loop takes nothing more: what is
 	// still queued now would be a fourth.
 	r.mu.Lock()
