@@ -3,13 +3,13 @@ package integrity
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -32,25 +32,44 @@ import (
 // OrphanSidecarSweepIntervalSec`, typically minutes to hours) is what
 // spaces that from library scans and serving.
 //
-// What the chunk still bounds: how many files a tick unlinks, so a
-// legitimate backlog drains over several ticks rather than in one burst,
-// and how many orphan paths the inventory retains (MaxOrphanPaths: ~750 KB
-// at 150 bytes a path). `SidecarInventory.Orphans` is counted in full
-// either way, and the refusal reads that count, never the retained list —
-// a count capped at the chunk would read 5,000 orphans where there are
-// 10,048, and against a catalog of 10,000 rows it would proceed.
-//
-// A failed unlink keeps its slot, so the retained list is the tree's first
-// `gcChunkSize` orphans in walk order on every tick: fewer than that many
-// files this user cannot remove only shrink each tick's share, while that
-// many or more at the head of the walk stall the rest until the operator
-// fixes them — each tick's sampled WARN names them.
+// What the chunk still bounds: how many files a tick SUCCESSFULLY unlinks,
+// so a legitimate backlog drains over several ticks rather than in one
+// burst. How many orphan paths the inventory retains is
+// gcRetainedPerUnlink times that. `SidecarInventory.Orphans` is counted in
+// full either way, and the refusal reads that count, never the retained
+// list — a count capped at the chunk would read 5,000 orphans where there
+// are 10,048, and against a catalog of 10,000 rows it would proceed.
 //
 // 5000 was chosen when the chunk bounded the WALK (Gemini on PR #282: the
 // 100 it replaced made a full sweep O(N × N/chunk) in AllVariants reads).
 // Pure constant, not configurable — the operator-facing knob is the SWEEP
 // CADENCE, not the chunk size.
 const gcChunkSize = 5000
+
+// gcRetainedPerUnlink is how many orphan paths a tick keeps for each
+// unlink the chunk allows, so a tick can walk past files this user cannot
+// remove and still unlink its chunk.
+//
+// Until 2026-09-28 a tick kept exactly one chunk of paths and every
+// attempt, failed or not, spent a slot. The retained list is the tree's
+// first orphans in walk order on every tick, so a chunk's worth of files
+// the service user cannot unlink at the head of the walk (root-owned
+// directories a `sudo bridge upscale` left behind) blocked every orphan
+// behind them, every tick, where the cursor this sweep had until #1063
+// moved past them. Measured with a chunk of 5: eight orphans in a
+// read-only directory ahead of ten deletable ones, and four ticks
+// unlinked nothing. The cap is on SUCCESSFUL unlinks now, and a tick tries
+// the retained paths in order until it has unlinked a chunk.
+//
+// The bound is memory, and each tick still decides alone (no failure is
+// remembered across ticks: #1063's rule). At four, a tick keeps 20,000
+// paths: measured at 10.8 MB of heap with paths of 205 bytes, two spellings
+// each (OrphanPaths and OrphanWalkedPaths), freed when the tick ends. A
+// head of up to 15,000 files this user cannot remove still leaves a full
+// chunk of unlinks per tick; 20,000 or more stall the tick again, each
+// tick's summary counting them as failed and its sampled WARN naming
+// them.
+const gcRetainedPerUnlink = 4
 
 // gcGracePeriod gates orphan detection on file modification time:
 // files newer than this threshold are skipped during the sweep so a
@@ -122,8 +141,9 @@ const orphanRefusalExamples = 3
 // (2026-09-28). A tick lists the catalog, takes ONE read-only inventory
 // of the whole tree (TakeSidecarInventory — the walker `upscale --gc`,
 // `analyze --gc` and `bridge doctor`'s variants-index share), asks
-// MassOrphanRefusal of the whole tree's counts, and only then unlinks: at
-// most gcChunkSize files, each re-checked first (reclaimOrphan). Until
+// MassOrphanRefusalFor of the whole tree's counts and PartialWalkRefusal
+// of the walk, and only then unlinks: gcChunkSize files at most, each
+// re-checked first (reclaimOrphan), trying past any it cannot remove. Until
 // then this sweep unlinked INSIDE a walk chunked at 5,000 entries with a
 // cursor across ticks, and its only guard was "is the known set EMPTY?" —
 // so #940's shape, a catalog of 200 rows over a stranded tree of 10,048
@@ -134,18 +154,21 @@ const orphanRefusalExamples = 3
 // walk (an unmount, a cancel, a pruned root) or from a catalog that
 // changed mid-pass, and a budget carried between passes can be spent on
 // files it never counted. So no verdict crosses a tick; the one state
-// that does is the refusal's log latch.
+// that does is the refusal's latch, which Status reports to the console's
+// Jobs card.
 //
 // **No override.** A background sweeper has nobody in the loop to express
-// intent — the reason `--allow-empty` and `--allow-mass-orphans` exist on
-// the CLI and not here — so a refused tick unlinks nothing and says why:
-// one WARN when a streak of refused ticks starts, repeated at most once a
-// day while it lasts (the M-SEARCH rule: an identical line every tick
-// makes every other line unfindable), and one Info line when a tick
-// proceeds again. `bridge upscale --gc --allow-mass-orphans` is the way
-// past it. The threshold is `cfg.Integrity.VariantSweepMaxDeletePercent`,
-// the reverse sweep's knob with the same meaning at this end (100
-// disables both guards).
+// intent — the reason `--allow-empty`, `--allow-mass-orphans` and
+// `--allow-partial-walk` exist on the CLI and not here — so a refused tick
+// unlinks nothing and says why: one WARN when a streak of refused ticks
+// starts, repeated at most once a day while it lasts (the M-SEARCH rule:
+// an identical line every tick makes every other line unfindable), one
+// Info line when a tick proceeds again, and a "refusing" badge on the Jobs
+// card for as long as the streak lasts. `bridge upscale --gc` with those
+// flags is the way past it. The threshold is
+// `cfg.Integrity.VariantSweepMaxDeletePercent`, the reverse sweep's knob
+// with the same meaning at this end (100 disables both guards, and the
+// partial-walk refusal with them).
 //
 // **What the refusal does NOT cover.** MassOrphanRefusal refuses only when
 // its floor of ten, `orphans > rows` AND the ratio all hold, so a stranded
@@ -179,19 +202,28 @@ type OrphanSidecarSweeper struct {
 	// (cfg.Integrity.VariantSweepMaxDeletePercent); see MassOrphanRefusal.
 	maxOrphanPercent int
 
-	// refusing and lastRefusalLog are the refusal's log latch, the only
-	// state that crosses ticks. refusing holds the message of the refusal
-	// the current streak logged, "" outside a streak: a refused tick sets
-	// it, and a tick whose walk read the whole tree and whose verdict
-	// proceeds clears it. A tick refused for the OTHER reason starts a new
-	// streak and logs at once, since its advice differs. lastRefusalLog is
-	// when the refusal was last logged. A tick that stops before a verdict
-	// (a listing or a walk that failed or was stopped, an empty catalog)
-	// leaves both alone: it is evidence of nothing, so it neither ends a
-	// streak nor says the catalog recovered. Owned by the run goroutine;
-	// the tests drive tick directly, never beside a running loop.
-	refusing       string
+	// refusing, refusingSince and lastRefusalLog are the refusal's latch,
+	// the only state that crosses ticks. refusing holds the kind of refusal
+	// the current streak is, "" outside a streak: a refused tick sets it,
+	// and a tick whose walk read the whole tree and whose verdict proceeds
+	// clears it. A tick refused for the OTHER reason starts a new streak
+	// and logs at once, since its advice differs. refusingSince is when
+	// the streak started, lastRefusalLog when the refusal was last logged.
+	// A tick that stops before a verdict (a listing or a walk that failed
+	// or was stopped, an empty catalog) leaves all three alone: it is
+	// evidence of nothing, so it neither ends a streak nor says the catalog
+	// recovered. Owned by the run goroutine; the tests drive tick directly,
+	// never beside a running loop. A reader on another goroutine reads
+	// status instead.
+	refusing       OrphanRefusalKind
+	refusingSince  time.Time
 	lastRefusalLog time.Time
+
+	// status is the latch as Status reports it: written by the run
+	// goroutine whenever the latch moves, read by the console's /api/jobs
+	// handler. An immutable snapshot behind an atomic pointer, so the
+	// reader takes no lock the tick holds.
+	status atomic.Pointer[OrphanSweepStatus]
 
 	// onTickComplete is a test-only seam — same convention as
 	// VariantWatcher.SetOnTickComplete. Fires AFTER the per-tick
@@ -405,14 +437,16 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 //     deletes on a truncated inventory would be deleting on a ratio
 //     measured from part of the tree. A walk that fails or is stopped
 //     unlinks nothing.
-//  4. Ask MassOrphanRefusal of the whole-tree counts — `inv.Orphans`, the
-//     full count, never the retained list — and unlink nothing on a
-//     refusal. Then refuse a walk that could not read an entry
-//     (inv.Unreadable): its counts describe part of the tree, which is
+//  4. Ask MassOrphanRefusalFor of the whole-tree counts — `inv.Orphans`,
+//     the full count, never the retained list, with each entry the walk
+//     could not stat weighed as one more orphan — and unlink nothing on a
+//     refusal. Then refuse a walk that could not list a directory
+//     (PartialWalkRefusal): its counts describe part of the tree, which is
 //     the reason step 3 takes no MaxEntries.
-//  5. Unlink at most the chunk's worth of the retained orphans, each
-//     re-checked first, from an inventory whose listed and walked paths
-//     pair up (reclaimOrphans).
+//  5. Unlink at most the chunk's worth of the retained orphans, trying
+//     them in walk order past any that fail, each re-checked first, from
+//     an inventory whose listed and walked paths pair up
+//     (reclaimOrphans).
 //
 // Every tick that reaches the walk logs one summary line (orphanTick.log);
 // a refused one logs its refusal through the latch (noteRefusal).
@@ -492,7 +526,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	chunk := s.effectiveChunkSize()
 	inv, err := TakeSidecarInventory(ctx, root, known, SidecarInventoryOptions{
 		Consider:       shouldConsiderSidecarFile,
-		MaxOrphanPaths: chunk,
+		MaxOrphanPaths: chunk * gcRetainedPerUnlink,
 	})
 	if err != nil {
 		// The walk stops only for its context or for a tree it could not
@@ -511,28 +545,30 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 
-	if reason := MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), s.maxOrphanPercent); reason != "" {
-		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanRefusal, reason, orphanRefusalHint}, inv.OrphanPaths)
+	// The entries the walk could not stat are weighed as what they could
+	// be (MassOrphanRefusalFor): each is at most one file.
+	if reason := MassOrphanRefusalFor(inv, len(rows), s.maxOrphanPercent); reason != "" {
+		s.noteRefusal(tickStart, root, orphanRefusal{OrphanRefusalMassOrphans, msgOrphanRefusal, reason, orphanRefusalHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
 	}
-	// A walk that could not read an entry (inv.Unreadable) refuses too
-	// (CodeRabbit on #1063). What it could not read is missing from every
-	// count, and a directory it could not list may hold any number of
-	// orphans, so the verdict above is about part of the tree and can
-	// proceed where the whole would refuse: a stranded tree whose larger
-	// half sits behind a directory the service user cannot list loses the
-	// half it can. Checked after the mass-orphan verdict, which keeps its
-	// own, more urgent, advice when the part the walk saw already refuses:
-	// the floor and orphans > rows only grow as more of the tree is seen.
-	// The cost falls on a variants directory that holds a directory the
-	// bridge's user may never list, a root-owned lost+found at the top of
-	// an ext4 volume mounted there being the ordinary one: that sweep
-	// reclaims nothing until it is readable, and says so once a day.
-	if inv.Unreadable > 0 {
-		reason := fmt.Sprintf("the walk could not read %d entr(y/ies), so its %d orphan(s) of %d file(s) "+
-			"against %d row(s) describe part of the tree", inv.Unreadable, inv.Orphans, inv.Files, len(rows))
-		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanPartialWalk, reason, orphanPartialWalkHint}, inv.OrphanPaths)
+	// A walk that could not LIST a directory refuses too (CodeRabbit on
+	// #1063). What it could not list is missing from every count and may
+	// hold any number of orphans, so the verdict above is about part of the
+	// tree and can proceed where the whole would refuse: a stranded tree
+	// whose larger half sits behind a directory the service user cannot
+	// list loses the half it can. Checked after the mass-orphan verdict,
+	// which keeps its own, more urgent, advice when the part the walk saw
+	// already refuses: the floor and orphans > rows only grow as more of
+	// the tree is seen. The cost falls on a variants directory that holds
+	// a directory the bridge's user may never list: that sweep reclaims
+	// nothing until it is readable, and says so once a day. The ordinary
+	// case, a root-owned lost+found at the top of an ext4 volume mounted
+	// as the variants directory, is the filesystem's and not counted
+	// (isFilesystemLostFound); an entry the walk could not stat is
+	// bounded and was weighed above.
+	if reason := PartialWalkRefusal(inv, len(rows), s.maxOrphanPercent); reason != "" {
+		s.noteRefusal(tickStart, root, orphanRefusal{OrphanRefusalPartialWalk, msgOrphanPartialWalk, reason, orphanPartialWalkHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
 	}
@@ -571,18 +607,21 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	return tally.unlinked
 }
 
-// reclaimOrphans takes at most chunk of the inventory's orphans and hands
-// each one's WALKED path to reclaimOrphan, counting and logging what it did
-// under the configured spelling, and stops at a cancelled context with the
-// context's error. OrphanWalkedPaths[i] is the file OrphanPaths[i] names, as
-// the walk visited it: the unlink goes to the tree the verdict was taken
-// over, whatever the configured root points at by now. An inventory whose
-// two lists do not pair up is refused whole, with ErrUnpairedInventory and
-// nothing unlinked (SidecarInventory.CheckPaired), BEFORE the lists are cut
-// to the chunk, since cutting the shorter one is itself the panic.
-// Per-path lines are sampled at logSampleCap per message per tick, the rest
-// at Debug: a legitimate backlog is a chunk of 5,000 unlinks a tick, and
-// the summary line carries the totals.
+// reclaimOrphans hands the inventory's orphans, in walk order, each by its
+// WALKED path, to reclaimOrphan until chunk of them have been unlinked or
+// the list ends, counting and logging what it did under the configured
+// spelling, and stops at a cancelled context with the context's error.
+// Only an unlink spends the chunk: a file that failed, was gone, was in
+// its grace or is no longer a file does not, so a tick walks past files
+// this user cannot remove to the ones it can (gcRetainedPerUnlink).
+// OrphanWalkedPaths[i] is the file OrphanPaths[i] names, as the walk
+// visited it: the unlink goes to the tree the verdict was taken over,
+// whatever the configured root points at by now. An inventory whose two
+// lists do not pair up is refused whole, with ErrUnpairedInventory and
+// nothing unlinked (SidecarInventory.CheckPaired), before either list is
+// indexed. Per-path lines are sampled at logSampleCap per message per
+// tick, the rest at Debug: a legitimate backlog is a chunk of 5,000
+// unlinks a tick, and the summary line carries the totals.
 func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarInventory, chunk int, tickStart time.Time) (orphanTally, error) {
 	grace := s.effectiveGracePeriod()
 	var (
@@ -592,13 +631,11 @@ func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarIn
 	if err := inv.CheckPaired(); err != nil {
 		return tally, err
 	}
-	paths, walked := inv.OrphanPaths, inv.OrphanWalkedPaths
-	if len(paths) > chunk {
-		// MaxOrphanPaths already capped the list; the cap is restated where
-		// the unlinks happen so it cannot quietly depend on an option.
-		paths, walked = paths[:chunk], walked[:chunk]
-	}
-	for i, p := range paths {
+	walked := inv.OrphanWalkedPaths
+	for i, p := range inv.OrphanPaths {
+		if tally.unlinked >= chunk {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return tally, err
 		}
@@ -730,10 +767,12 @@ type orphanTally struct {
 // variants move`: that command needs the ROWS, and in the lost-index shape
 // there are none to move (#940).
 func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanRefusal, orphans []string) {
-	if s.refusing == r.msg && now.Sub(s.lastRefusalLog) < orphanRefusalRepeat {
+	if s.refusing != r.kind {
+		s.refusing, s.refusingSince = r.kind, now
+		s.publishStatus()
+	} else if now.Sub(s.lastRefusalLog) < orphanRefusalRepeat {
 		return
 	}
-	s.refusing = r.msg
 	s.lastRefusalLog = now
 	examples := make([]string, 0, orphanRefusalExamples)
 	for _, p := range orphans {
@@ -753,10 +792,65 @@ func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanR
 	)
 }
 
-// orphanRefusal is one refused tick's WARN: the message of its kind, the
-// numbers behind this refusal, and the kind's advice.
+// orphanRefusal is one refused tick's WARN: its kind, the message of the
+// kind, the numbers behind this refusal, and the kind's advice.
 type orphanRefusal struct {
+	kind              OrphanRefusalKind
 	msg, reason, hint string
+}
+
+// OrphanRefusalKind names what a streak of refused ticks of the background
+// orphan sweep refuses. The console receives it as a key and words it
+// itself, the discipline the Jobs page keeps for every bounded reason.
+type OrphanRefusalKind string
+
+// The kinds of refusal the background orphan sweep's latch holds.
+const (
+	// OrphanRefusalMassOrphans: the catalog is far smaller than the tree it
+	// describes, the lost-index shape (MassOrphanRefusalFor).
+	OrphanRefusalMassOrphans OrphanRefusalKind = "massOrphans"
+	// OrphanRefusalPartialWalk: the walk could not list part of the
+	// variants directory (PartialWalkRefusal).
+	OrphanRefusalPartialWalk OrphanRefusalKind = "partialWalk"
+)
+
+// OrphanRefusalKinds is every kind a refusing streak can be, for a caller
+// that has to word each one (the console's Jobs card) and a test that
+// holds it to that.
+func OrphanRefusalKinds() []OrphanRefusalKind {
+	return []OrphanRefusalKind{OrphanRefusalMassOrphans, OrphanRefusalPartialWalk}
+}
+
+// OrphanSweepStatus is what the background orphan sweep's refusal latch
+// says, for a reader on another goroutine: until 2026-09-28 the console's
+// Jobs card said "on" while every tick refused, and only the journal said
+// otherwise.
+type OrphanSweepStatus struct {
+	// Refusing is the kind of refusal the current streak is; empty when
+	// the sweep is not refusing.
+	Refusing OrphanRefusalKind
+	// Since is when the streak started: the first refused tick of it.
+	// Zero when Refusing is empty.
+	Since time.Time
+}
+
+// Status reports the refusal latch as the run goroutine last left it. Safe
+// from any goroutine; the zero value (not refusing) before the first tick
+// that decided anything, and for a nil sweeper.
+func (s *OrphanSidecarSweeper) Status() OrphanSweepStatus {
+	if s == nil {
+		return OrphanSweepStatus{}
+	}
+	if p := s.status.Load(); p != nil {
+		return *p
+	}
+	return OrphanSweepStatus{}
+}
+
+// publishStatus stores the latch for Status, as a fresh value each time so
+// a reader never sees one being written.
+func (s *OrphanSidecarSweeper) publishStatus() {
+	s.status.Store(&OrphanSweepStatus{Refusing: s.refusing, Since: s.refusingSince})
 }
 
 // noteProceeding ends a refusal streak: the first tick whose walk finished
@@ -773,7 +867,8 @@ func (s *OrphanSidecarSweeper) noteProceeding(root string, inv SidecarInventory,
 	if s.refusing == "" {
 		return
 	}
-	s.refusing = ""
+	s.refusing, s.refusingSince = "", time.Time{}
+	s.publishStatus()
 	logger.Info(msgOrphanRefusalLifted,
 		slog.Int("files", inv.Files),
 		slog.Int("orphans", inv.Orphans),
@@ -796,10 +891,11 @@ const orphanRefusalHint = "nothing was unlinked. A catalog this much smaller tha
 const orphanPartialWalkHint = "nothing was unlinked. The mass-orphan check weighs the whole tree, and a " +
 	"directory this walk could not list may hold any number of files it did not count, so a verdict on the " +
 	"part it saw could let through a tree the whole would refuse. Make everything under the variants " +
-	"directory readable by the user this bridge runs as: a root-owned lost+found at the top of an ext4 volume " +
-	"mounted there counts, and pointing the variants directory at a folder below the mount avoids it. " +
-	"`bridge doctor` (variants-index) reports the same entries. This sweep has no override; it logs this " +
-	"when it starts refusing and once a day while it keeps refusing."
+	"directory listable by the user this bridge runs as (root-owned directories left by a CLI run with sudo " +
+	"are the usual cause; the lost+found of an ext4 volume mounted AS the variants directory is the " +
+	"filesystem's and does not count, while one of a volume mounted further down does). `bridge doctor` " +
+	"(variants-index) reports the same directories. This sweep has no override; it logs this when it starts " +
+	"refusing and once a day while it keeps refusing."
 
 // The orphan sweep's refusal lines: the latched WARN of each kind, and the
 // Info line a tick logs when it proceeds after a streak of refusals.
@@ -838,12 +934,16 @@ func (t orphanTick) log() {
 	if t.cutShort {
 		msg = msgOrphanTickCutShort
 	}
-	attrs := make([]slog.Attr, 0, 12)
+	attrs := make([]slog.Attr, 0, 13)
 	if t.walked {
 		attrs = append(attrs,
 			slog.Int("files", t.inv.Files),
 			slog.Int("known", t.inv.Known),
 			slog.Int("orphans", t.inv.Orphans),
+			// How many of them the tick kept paths for and could try
+			// (gcRetainedPerUnlink): failed == retained with unlinked == 0
+			// is a tick stalled behind files this user cannot remove.
+			slog.Int("retained", len(t.inv.OrphanPaths)),
 			slog.Int("unreadable", t.inv.Unreadable),
 			slog.Bool("refused", t.refused),
 		)

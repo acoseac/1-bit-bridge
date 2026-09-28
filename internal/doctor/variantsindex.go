@@ -61,12 +61,25 @@ type VariantsIndex struct {
 	// closure that passed 0 would walk a 200k-file tree on a
 	// settings-page render and every count would still look right.
 	Budget int
-	// Unreadable counts directories the walk could not descend into.
-	// Their contents are missing from Files and Orphans, so like
-	// Truncated it makes the RATIO a statement about part of the tree —
-	// and WouldRefuseGC is withheld for it on the same terms
-	// (CodeRabbit on #940).
+	// Unreadable counts ENTRIES the walk could not resolve: a directory it
+	// could not list, and a link or junction it could not stat. This said
+	// "directories" until 2026-09-28, the wording #969 had corrected in
+	// both CLI sweeps and not here. Their contents are missing from Files
+	// and Orphans.
 	Unreadable int
+	// UnlistedDirs is how many of those are directories the walk could not
+	// list, which may hold any number of files: like Truncated they make
+	// the RATIO a statement about part of the tree, and WouldRefuseGC is
+	// withheld for them on the same terms (CodeRabbit on #940). The rest
+	// are at most one file each and the verdict weighs them
+	// (integrity.MassOrphanRefusalFor).
+	UnlistedDirs int
+	// GCRefusesPartialWalk is integrity.PartialWalkRefusal's verdict: true
+	// when `bridge upscale --gc` refuses to act on a walk like this one
+	// without --allow-partial-walk. Sound on a truncated walk, because a
+	// directory this walk could not list is one the whole walk cannot list
+	// either.
+	GCRefusesPartialWalk bool
 	// VariantsDir is the directory the counts were taken against.
 	VariantsDir string
 }
@@ -117,8 +130,11 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 		// turn up well inside the budget.
 		scope = fmt.Sprintf(" (the first %d file(s) — the tree is larger)", idx.Files)
 	}
-	if idx.Unreadable > 0 {
-		scope += fmt.Sprintf("; %d director(y/ies) could not be read", idx.Unreadable)
+	if idx.UnlistedDirs > 0 {
+		scope += fmt.Sprintf("; %d director(y/ies) could not be read", idx.UnlistedDirs)
+	}
+	if links := idx.Unreadable - idx.UnlistedDirs; links > 0 {
+		scope += fmt.Sprintf("; %d link(s) could not be resolved", links)
 	}
 	if idx.Files == 0 && idx.Rows > 0 {
 		// The other way round, and "all referenced" would be a strange
@@ -160,9 +176,7 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 			return warn(checkNameVariantsIndex,
 				fmt.Sprintf("%d variant row(s); every one of the %d sidecar file(s) the walk could reach is referenced%s",
 					idx.Rows, idx.Files, scope),
-				"A directory under the variants directory could not be read, so its sidecars were neither counted "+
-					"here nor seen by `bridge upscale --gc` — and the serving path may not be able to open them "+
-					"either. Check the ownership and mode of that tree against the user this bridge runs as.")
+				unreachableHint(idx))
 		}
 		if idx.Truncated {
 			return ok(checkNameVariantsIndex,
@@ -185,16 +199,26 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 	switch {
 	case idx.WouldRefuseGC:
 		hint.WriteString("`bridge upscale --gc` REFUSES this shape, so it will not unlink anything. ")
-	case idx.Truncated || idx.Unreadable > 0:
-		// The sweep's own ratio is over the WHOLE tree and this walk saw
-		// part of one — stopped at its budget, or stepped over a directory
-		// it could not read. What the sweep will decide cannot be told
+	case idx.GCRefusesPartialWalk:
+		// Known from here, and sound on a truncated walk too: a directory
+		// this walk could not list is one `--gc`'s own walk cannot list
+		// either, and since 2026-09-28 it refuses such a walk rather than
+		// take its verdict from the rest. Until then this hint said that
+		// `--gc` "measures the whole tree", which a directory it could not
+		// list made false.
+		hint.WriteString("`bridge upscale --gc` refuses to act on a walk that could not list part of the tree, as this one " +
+			"could not, so it unlinks nothing until those directories are listable by the user running it; " +
+			"--allow-partial-walk lets it act on the part it can list, where the mass-orphan check still runs. ")
+	case idx.Truncated:
+		// The sweep's own ratio is over the WHOLE tree and this walk
+		// stopped at its budget. What the sweep will decide cannot be told
 		// from here, and saying either "refuses" or "reclaims them" would
 		// be a guess dressed as a fact. Point at the thing that measures
 		// the whole tree; it is safe to run, because refusing is its
-		// default.
+		// default, and it refuses a walk of its own that could not list
+		// part of the tree.
 		hint.WriteString("Whether `bridge upscale --gc` reclaims these or refuses them cannot be told from a partial walk — " +
-			"run it and read what it says; it measures the whole tree and unlinks nothing when it refuses. ")
+			"run it and read what it says; it walks the whole tree and unlinks nothing when it refuses. ")
 	default:
 		hint.WriteString("`bridge upscale --gc` reclaims them. ")
 	}
@@ -204,4 +228,27 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 		fmt.Fprintf(&hint, " (+%d more)", idx.Orphans-len(idx.OrphanSample))
 	}
 	return warn(checkNameVariantsIndex, summary, hint.String())
+}
+
+// unreachableHint is the advice for a walk that found every sidecar it
+// could reach referenced and could not reach all of them. A directory it
+// could not list is a fault on the host: its sidecars are counted nowhere,
+// `bridge upscale --gc` refuses such a walk (GCRefusesPartialWalk), so does
+// the background orphan sweep, and the serving path may not be able to
+// open them either. A link it could not resolve alone is the smaller case:
+// the sweeps weigh it as at most one file and go on, and only what it
+// points at is unreachable.
+func unreachableHint(idx VariantsIndex) string {
+	if idx.UnlistedDirs == 0 {
+		return "A link under the variants directory could not be resolved, so whatever it points at was not counted " +
+			"here, and the serving path may not be able to open it either. Check the ownership and mode of its " +
+			"target against the user this bridge runs as."
+	}
+	hint := "A directory under the variants directory could not be read, so its sidecars were neither counted " +
+		"here nor seen by `bridge upscale --gc`, and the serving path may not be able to open them either. "
+	if idx.GCRefusesPartialWalk {
+		hint += "`--gc` and the background orphan sweep refuse to act on a walk that could not list part of the " +
+			"tree, so neither reclaims anything until it is readable. "
+	}
+	return hint + "Check the ownership and mode of that tree against the user this bridge runs as."
 }
