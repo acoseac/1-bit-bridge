@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -131,9 +132,15 @@ func Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak(t *testin
 		!strings.Contains(reports[2], "consecutiveFailures=12") {
 		t.Fatalf("want a Warn, an Error and the recovery carrying the streak's 12, got:\n%s", buf.String())
 	}
+	// slog's TextHandler quotes a value holding a space, a quote or '=', and
+	// Windows names its loopback "Loopback Pseudo-Interface 1".
+	wantIface := "interface=" + a.cfg.Interface.Name
+	if strings.ContainsAny(a.cfg.Interface.Name, " =\"") {
+		wantIface = "interface=" + strconv.Quote(a.cfg.Interface.Name)
+	}
 	for _, line := range reports {
-		if !strings.Contains(line, "interface="+a.cfg.Interface.Name) {
-			t.Errorf("line does not name the advertiser's interface:\n%s", line)
+		if !strings.Contains(line, wantIface) {
+			t.Errorf("line does not name the advertiser's interface (%s):\n%s", wantIface, line)
 		}
 	}
 	if strings.Contains(buf.String(), "NOTIFY alive send failed") {
