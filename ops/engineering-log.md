@@ -27522,3 +27522,34 @@ of the branch, on the same two bridges:
 - Every other control the console disables while a request is out loses
   focus the same way the tray switch did (`wireJobButton`'s buttons on the
   Jobs page among them).
+
+### Review round 1: a dropped snapshot's request
+
+CodeRabbit (Major, on boot.js's new drop): `invalidateTraySettings`
+nulls the promise and leaves the request running, so its answer still
+writes `traySettings` and `trayManaged`. Verified against the code, and
+wider than stated: the old request's `.catch` also nulled the NEWER
+request's promise, so a caller meanwhile started a third fetch.
+
+- **Measured in a browser**, on the Jobs page (nine trays mounted), with
+  `API.get` wrapped to hold back one `/api/settings` answer for 2 s: a
+  request made with Smart mixes off, the switch then turned on by a PATCH,
+  a drop and a fresh snapshot (on), then the held answer landing. On the
+  build before the fix the snapshot went back to off and the next tray
+  sync (what every tray save runs) rendered the Smart mixes switch OFF
+  beside a server that held ON; on the fixed build the snapshot and the
+  switch stayed on. The player's route drop makes the window common: every
+  route that mounts a tray drops the snapshot, so a request from the page
+  being left is often in flight.
+- **Fix.** `traySettingsSnapshot` caches an answer, and clears the promise
+  on a failure, only while its request is still `traySettingsPromise`. No
+  new state: the drop already clears that promise, so promise identity is
+  the generation CodeRabbit proposed.
+- **Test.** `TestADroppedTraySnapshotIsNotCachedWhenItsAnswerArrives`
+  (`feature_tray_snapshot_test.go`) runs the shipped pair under node with
+  the answers released by hand: the old answer landing last, landing
+  first, and failing, beside a control with no drop. Red on the old code
+  in three steps (the old answer cached in both orders, three fetches).
+- **Controls**, on the committed fix: NC19, caching every answer, turns
+  the two "old answer" steps red; NC20, clearing the promise on any
+  failure, turns the failure steps red (three fetches, no snapshot).

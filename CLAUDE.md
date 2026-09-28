@@ -5548,7 +5548,16 @@ its twin.** The top list is older, shorter, and read first.
   `TestTheSmartMixesPageRedrawsInPlaceAfterItsGearSavesTheSwitch` runs the
   shipped view under node; `TestThePlayerRouteDropsTheTraySnapshot` pins
   the drop structurally, since `route()` cannot run without booting the
-  player.
+  player. **A drop also discards the answer to a request made before it**
+  (CodeRabbit on #1088): `invalidateTraySettings` nulled the promise and
+  left the request running, so its answer still became the snapshot, over
+  a newer answer or in place of the one the new page waited for, and its
+  failure dropped the newer request. In a browser, with the older answer
+  held back: the Jobs page's Smart mixes switch rendered off at the next
+  tray sync while the server held on. `traySettingsSnapshot` caches an
+  answer, and drops a failed request, only while its request is still
+  `traySettingsPromise`
+  (`TestADroppedTraySnapshotIsNotCachedWhenItsAnswerArrives`).
 - **…and a tray save gives focus back to its switch** (2026-09-28). A save
   disables its switch while the PATCH is out, and a browser moves focus off
   a focused control that becomes disabled (the focus fixup rule) and does
