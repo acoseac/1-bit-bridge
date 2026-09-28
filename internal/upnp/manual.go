@@ -241,7 +241,11 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 		ContentDirectoryControlURL: ctrlURL,
 		DescriptionURL:             url,
 		DeviceUDN:                  strings.TrimSpace(desc.UDN),
-		LastSeenAt:                 p.nowFunc(),
+		// The operator's URL approves a local control URL only when it is
+		// of that kind itself, and a name approves none: the ingest and the
+		// proxy dial the control URL under this (backlog B36).
+		DialApproval: discovery.OperatorChose(url),
+		LastSeenAt:   p.nowFunc(),
 	})
 }
 
