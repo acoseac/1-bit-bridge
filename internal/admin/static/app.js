@@ -5567,6 +5567,10 @@ function formatAutoOptimizeResult(last) {
   // "unreadable", which is the analysis strike population one card over,
   // counted from a different predicate and listed on the Jobs page.
   if (last.unresolvable) parts.push(`${last.unresolvable} unresolvable`);
+  // Files that changed after the scan that recorded them: rendering one
+  // now would record a version that is already gone, so the sweep waits
+  // for the next scan to read it.
+  if (last.changedSinceScan) parts.push(`${last.changedSinceScan} waiting for a scan (changed on disk)`);
   let text = parts.join(" · ");
   if (last.diskFloorReached) {
     text += ` — paused, ${formatBytes(last.freeBytes)} free is at the ${formatBytes(last.minFreeBytes)} floor`;

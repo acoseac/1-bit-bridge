@@ -318,6 +318,11 @@ type upscaleSkipCounters struct {
 	notPCM          int
 	sourceMissing   int
 	alreadyAtTarget int
+	// changedSinceScan counts files that changed on disk after the scan
+	// that wrote their row: listed as candidates that need no run, since a
+	// render would record a version that no longer exists
+	// (rendition_stamp.go).
+	changedSinceScan int
 }
 
 // resolveCLITargetForKind picks the per-track (targetRate, targetBits)
@@ -483,13 +488,19 @@ func classifyUpscaleTrack(
 		counters.sourceMissing++
 		return nil, 0
 	}
-	if _, statErr := os.Stat(absPath); statErr != nil {
+	info, statErr := os.Stat(absPath)
+	if statErr != nil {
 		counters.sourceMissing++
 		return nil, 0
 	}
+	// The version the rendition records is the ROW's, as every writer's is
+	// (rendition_stamp.go): the serve path compares it with the file on
+	// disk, and the auto-optimize sweep and the album gain with the row.
 	spec := transcode.JobSpec{
 		SourceAbsPath:    absPath,
 		SourceLibraryRel: t.Path,
+		SourceMTimeNS:    t.ModTime.UnixNano(),
+		SourceSize:       t.Size,
 		SourceSampleRate: sourceRateHz,
 		SourceBits:       srcBits,
 		TargetSampleRate: target,
@@ -502,9 +513,15 @@ func classifyUpscaleTrack(
 	if trackIsDSD {
 		applyDSDSpecFacts(&spec, t)
 	}
-	if err := spec.FreshnessFromFile(); err != nil {
-		counters.sourceMissing++
-		return nil, 0
+	// A file that changed after its last scan is not rendered, `--force`
+	// or not: whichever version the rendition recorded, the serve path or
+	// the auto-optimize sweep would call it stale. It stays a candidate
+	// that needs no run, so the dry run lists it, and so the album gain,
+	// which measures an album-mate through this function, still measures
+	// it (cliAlbumMateSpec takes the spec whatever needsRun says).
+	if !sourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
+		counters.changedSinceScan++
+		return &upscaleCandidate{spec: spec, skipNote: "changed on disk since the last scan"}, 0
 	}
 	needsRun, skipNote := upscaleResumeDecision(ctx, store, t.Path, spec, p.force)
 	return &upscaleCandidate{spec: spec, needsRun: needsRun, skipNote: skipNote}, 0
@@ -556,6 +573,9 @@ func reportUpscaleSummary(stdout io.Writer, totalCandidates, toRun int, counters
 	}
 	if counters.sourceMissing > 0 {
 		fmt.Fprintf(stdout, "Skipped %d track(s) with missing source files (run `bridge scan` to reconcile).\n", counters.sourceMissing)
+	}
+	if counters.changedSinceScan > 0 {
+		fmt.Fprintf(stdout, "Skipped %d track(s) that changed on disk since the last scan (run `bridge scan`, then this again).\n", counters.changedSinceScan)
 	}
 }
 
@@ -795,8 +815,10 @@ func newCLIAlbumGainer(store *manifest.Store, resolver *bridgefs.Resolver, p run
 // spec THIS command would render it with: classifyUpscaleTrack under the
 // run's own kind, quality and directories, with the filter and the resume
 // check lifted — a mate outside `--filter`, or already rendered, still
-// bounds the album — and with its source facts from the track row, as the
-// serve side stamps them (the classifier's are a live stat).
+// bounds the album. Its source facts are the track row's, the classifier's
+// own stamp (rendition_stamp.go), and a mate whose file changed since its
+// last scan is measured all the same: the classifier lists it as needing
+// no run, and a measurement takes the spec whatever that says.
 func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runUpscaleParams) albumgain.SpecFor {
 	mate := p
 	mate.filter, mate.force, mate.dryRun = "", true, false
@@ -815,8 +837,6 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 		}
 		spec := c.spec
 		spec.Quality = like.Quality
-		spec.SourceMTimeNS = t.ModTime.UnixNano()
-		spec.SourceSize = t.Size
 		return spec, nil
 	}
 }

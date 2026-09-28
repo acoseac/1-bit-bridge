@@ -886,6 +886,11 @@ type upscaleEnqueuerAdapter struct {
 	// tempDir resolves the render scratch directory per call (empty =
 	// the OS temp dir). Nil-safe.
 	tempDir func() string
+	// rescan asks for the directory of a file whose row is behind it to
+	// be read again (sourceRescanner.request, with the file's absolute
+	// and library-relative paths). Nil-safe: unwired, a refused file
+	// waits for the periodic scan.
+	rescan func(abs, rel string)
 }
 
 // renditionQueue is the one transcode.Pool method the adapter calls. It is
@@ -976,11 +981,18 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 	return abs, track, nil
 }
 
-// finalizeAndEnqueue is the shared trailing scaffolding for both
-// `EnqueueOne` and `EnqueueOptimize`: capture freshness, run the
-// resumability check, hand to the pool, map pool errors. The kind-
-// specific spec construction (target rate, bits, Kind field) stays
-// in each caller; this function takes the prepared spec.
+// finalizeAndEnqueue is the shared trailing scaffolding for the three
+// enqueue entry points: stamp the source version, run the resumability
+// check, hand to the pool, map pool errors. The kind-specific spec
+// construction (target rate, bits, Kind field) stays in each caller;
+// this function takes the prepared spec and the track row it came from.
+//
+// The spec records the version the ROW records, as every other writer's
+// does, and a file that changed on disk after its row was written is not
+// rendered: whichever version such a render recorded, the sweeper or the
+// serve path would call it stale (rendition_stamp.go). It is refused with
+// errSourceAheadOfRow, and its directory is queued for a rescan, so the
+// next request finds the row current and renders.
 //
 // `errPoolClosedAsSourceMissing` chooses between the two documented
 // `ErrPoolClosed` mappings:
@@ -991,11 +1003,19 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 //     Gemini bot review on PR #270 — wrap original sentinel so the
 //     handler logs the real cause; optimize is invisible runtime
 //     infrastructure with no user-facing toast).
-func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trackPath string, errPoolClosedAsSourceMissing bool) error {
-	if err := spec.FreshnessFromFile(); err != nil {
+func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, track *manifest.Track, errPoolClosedAsSourceMissing bool) error {
+	info, err := os.Stat(spec.SourceAbsPath)
+	if err != nil {
 		return api.ErrUpscaleSourceMissing
 	}
-	existing, getVErr := a.store.LookupVariant(context.Background(), trackPath, spec.VariantID())
+	spec.SourceMTimeNS, spec.SourceSize = track.ModTime.UnixNano(), track.Size
+	if !sourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
+		if a.rescan != nil {
+			a.rescan(spec.SourceAbsPath, track.Path)
+		}
+		return errSourceAheadOfRow
+	}
+	existing, getVErr := a.store.LookupVariant(context.Background(), track.Path, spec.VariantID())
 	if getVErr != nil {
 		return fmt.Errorf("get variant row: %w", getVErr)
 	}
@@ -1125,7 +1145,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
-	return a.finalizeAndEnqueue(spec, track.Path, false)
+	return a.finalizeAndEnqueue(spec, track, false)
 }
 
 // EnqueuePCMRender is the faithful DSD rendition's per-track entry point
@@ -1142,7 +1162,7 @@ func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) er
 	if err != nil {
 		return err
 	}
-	return a.finalizeAndEnqueue(spec, track.Path, false)
+	return a.finalizeAndEnqueue(spec, track, false)
 }
 
 // albumMateSpec is the album-level gain's albumgain.SpecFor: the spec that
@@ -1151,10 +1171,13 @@ func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) er
 // tier gate, so a mate this bridge could not render is not measured either —
 // under the job's own tier, quality and directories.
 //
-// Source facts come from the TRACK ROW, as the sweeper stamps them: a peak
-// is judged fresh against the row (manifest.FreshDSDPeaks), so a live stat
-// would make the measurement of a file the scanner has not caught up with
-// read as stale on every render until it does.
+// Source facts come from the TRACK ROW, as every writer stamps them
+// (rendition_stamp.go): a peak is judged fresh against the row
+// (manifest.FreshDSDPeaks), so a live stat would make the measurement of a
+// file the scanner has not caught up with read as stale on every render
+// until it does. Unlike a render, a measurement of such a file is not
+// refused: it measures the bytes on disk, which are what an album-mate's
+// render uses the figure for, and the row's next version re-measures it.
 func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error) {
 	abs, track, err := a.resolveAndLookupTrack(path)
 	if err != nil {
@@ -1271,7 +1294,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 		Quality:          transcode.QualityVeryHigh,
 		OutputDir:        a.outputDir(),
 	}
-	return a.finalizeAndEnqueue(spec, track.Path, true)
+	return a.finalizeAndEnqueue(spec, track, true)
 }
 
 // upscaleBatchCoordinatorAdapter implements api.BatchCoordinator
@@ -3955,6 +3978,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 		}
+		// A request for a rendition of a file that changed after its last
+		// scan is refused, and queues a rescan of the file's directory so
+		// the next request finds the row current (rendition_stamp.go).
+		// bgWriters-joined: the scan writes the store, and it runs on
+		// scanCtx, which the shutdown cancels.
+		rescanner := newSourceRescanner()
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			rescanner.run(scanCtx, scanner.ScanSubtree)
+		}()
 		enqueuer := &upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
@@ -3964,6 +3998,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			soxInfo:   soxCache.snapshot,
 			dsdCaps:   dsdRenderCapsFn,
 			tempDir:   liveRenderTempDir,
+			rescan:    rescanner.request,
 		}
 		apiSrv.WithUpscaleEnqueuer(enqueuer)
 		albumGainResolver, err = wireAlbumGain(upscalePool, manifestStore, enqueuer)

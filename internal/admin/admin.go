@@ -1095,6 +1095,12 @@ type AutoOptimizeJobState struct {
 // stalled — without them a sweep that enqueued nothing because the
 // volume is nearly full is indistinguishable from one that had nothing
 // to do.
+//
+// ChangedSinceScan counts candidates whose file changed on disk after the
+// scan that wrote its row. They are passed over, not rendered: a rendition
+// would record a version the serve path or the next sweep calls stale
+// (cmd/bridge rendition_stamp.go). The scan that reads them offers them
+// again.
 type AutoOptimizeSweepCounts struct {
 	// Disabled marks a sweep that short-circuited because the feature
 	// is off. Reported rather than omitted so an operator who just
@@ -1105,6 +1111,7 @@ type AutoOptimizeSweepCounts struct {
 	AlreadyInflight  int   `json:"alreadyInflight,omitempty"`
 	Ineligible       int   `json:"ineligible,omitempty"`
 	Unresolvable     int   `json:"unresolvable,omitempty"`
+	ChangedSinceScan int   `json:"changedSinceScan,omitempty"`
 	Remaining        int   `json:"remaining"`
 	ProjectedBytes   int64 `json:"projectedBytes,omitempty"`
 	FreeBytes        int64 `json:"freeBytes,omitempty"`

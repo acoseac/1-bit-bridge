@@ -39,7 +39,14 @@ func renderCLIFixture(t *testing.T, src renderSource) (*manifest.Store, *bridgef
 	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(abs, []byte("x"), 0o600); err != nil {
+	// 1000 bytes and the row's mtime from the file: a file and its row as a
+	// scan leaves them, since the classifier passes over a file that changed
+	// after its row was written (sourceIsAtRow).
+	if err := os.WriteFile(abs, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
 		t.Fatal(err)
 	}
 	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
@@ -55,7 +62,7 @@ func renderCLIFixture(t *testing.T, src renderSource) (*manifest.Store, *bridgef
 	}
 	dsd := isDSD
 	tr := manifest.Track{
-		Path: rel, Size: 1000, Codec: codec, IsDSD: &dsd,
+		Path: rel, Size: fi.Size(), ModTime: fi.ModTime(), Codec: codec, IsDSD: &dsd,
 		SampleRate: &rate, BitsPerSample: &bits, Compression: compression,
 	}
 	if durationSec > 0 {
