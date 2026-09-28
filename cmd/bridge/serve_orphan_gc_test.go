@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -30,7 +28,7 @@ func TestServeReportsTheOrphanSweepRefusalOnTheJobsCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	dataDir, variantsDir := filepath.Join(dir, "data"), filepath.Join(dir, "variants")
-	seedLostIndex(t, dataDir, variantsDir, 2, 40)
+	seedVariantCatalog(t, dataDir, variantsDir, 2, 40)
 
 	adminPort := freeLoopbackPort(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
@@ -41,29 +39,20 @@ func TestServeReportsTheOrphanSweepRefusalOnTheJobsCard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	stdout, stderr := &safeBuffer{}, &safeBuffer{}
-	done := make(chan int, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath, "--addr", "127.0.0.1:0"}, stdout, stderr)
-	}()
-	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	waitForListening(t, stdout, 30*time.Second)
+	served := bootServe(t, "--config", cfgPath, "--addr", "127.0.0.1:0")
 	adminAddr := fmt.Sprintf("127.0.0.1:%d", adminPort)
-	waitForAdminReady(t, adminAddr, done, stderr)
+	waitForAdminReady(t, adminAddr, served.done, served.stderr)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	var last map[string]any
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-		last = jobsMaintenanceOf(t, ctx, client, "http://"+adminAddr+"/api/jobs")
+		last = jobsMaintenanceOf(t, client, "http://"+adminAddr+"/api/jobs")
 		if last["orphanSidecarGCRefusal"] != nil {
 			break
 		}
 	}
 	if last["orphanSidecarGC"] != true || last["orphanSidecarGCRefusal"] != "massOrphans" {
-		t.Fatalf("the Jobs payload does not carry the sweep's refusal: %v\nstderr: %s", last, stderr.String())
+		t.Fatalf("the Jobs payload does not carry the sweep's refusal: %v\nstderr: %s", last, served.stderr.String())
 	}
 	if since, _ := last["orphanSidecarGCRefusingSince"].(string); since == "" {
 		t.Errorf("the refusal carries no start: %v", last)
@@ -75,52 +64,11 @@ func TestServeReportsTheOrphanSweepRefusalOnTheJobsCard(t *testing.T) {
 	}
 }
 
-// seedLostIndex writes, under dataDir's manifest, `rows` variant rows each
-// with its file under variantsDir, and `stranded` sidecar files no row
-// references: the shape a lost index leaves.
-func seedLostIndex(t *testing.T, dataDir, variantsDir string, rows, stranded int) {
-	t.Helper()
-	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-	ctx := context.Background()
-	const variant = "upscaled-v2-176400-24"
-	for i := 0; i < rows; i++ {
-		source := fmt.Sprintf("Artist/Kept/%02d.flac", i)
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 100, ModTime: time.Now()}); err != nil {
-			t.Fatal(err)
-		}
-		p := transcode.VariantSidecarPath(variantsDir, source, variant)
-		writeFixtureFile(t, p, 50)
-		if err := store.UpsertVariant(ctx, manifest.VariantRow{
-			SourcePath: source, VariantID: variant, SidecarPath: p, Format: "flac",
-			SampleRate: 176400, BitsPerSample: 24, SizeBytes: 50, SourceMTimeNS: 1, SourceSize: 100,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i := 0; i < stranded; i++ {
-		writeFixtureFile(t, transcode.VariantSidecarPath(variantsDir, fmt.Sprintf("Artist/Stranded %d/%02d.flac", i%3, i), variant), 1000)
-	}
-	// Older than the sweep's grace, as a stranded tree is.
-	old := time.Now().Add(-time.Hour)
-	if err := filepath.WalkDir(variantsDir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		return os.Chtimes(p, old, old)
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // jobsMaintenanceOf GETs the admin's /api/jobs and returns its maintenance
 // object as decoded JSON, so a key's absence stays visible.
-func jobsMaintenanceOf(t *testing.T, ctx context.Context, client *http.Client, url string) map[string]any {
+func jobsMaintenanceOf(t *testing.T, client *http.Client, url string) map[string]any {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

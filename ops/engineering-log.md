@@ -22379,3 +22379,55 @@ reads "could not list", and the full-count test's fixture (above).
 One control was invalid on its first form: deleting the wiring line in
 `main.go` left `orphanSweepStatus` unused and the package did not build; it
 was rewritten to wire nil and keep a use.
+
+### Review round 1: SonarCloud's duplication gate
+
+CodeRabbit (on `4948fd32`) and Gemini left no findings. SonarCloud's
+quality gate failed on duplication: 3.3% of the new code (60 lines in 9
+blocks, over 1,797 new lines; the gate is 3%). Read through its
+`duplications/show` API, every block but three was test setup this change
+repeated from a test that already had it: the serve boot (the Jobs-card
+test against the harvest-revoke test, 12 lines), the lost-index seed (the
+same test against the doctor fixture, 20), the waveform seed (the
+partial-walk test against the mass-orphan one, 12), and the node runner
+(the orphan-refusal wording test against the sweep-line one, 13). Each is
+one helper now: `bootServe` (main_test.go), `seedVariantCatalog`
+(doctor_variants_index_test.go), `waveformTree` (moved beside
+`strandedTree`), and `runConsoleFunction` (internal/admin). The older side
+of each pair uses its helper too, since a helper only the new test called
+would still repeat the old test's lines.
+
+**The drain guard had to widen to take `bootServe`.**
+`TestEveryBackgroundGoroutineDrainsOnCleanup` read Test functions alone, so
+a boot moved into a helper left its audit. It reads every function in the
+test files now: 45 match (42 tests and three helpers, two of which,
+`runOneFingerprintPass` and `runOneSmartPlaylistPass`, already launched
+unaudited, and both drain). With `bootServe`'s drain deleted it goes red
+naming `bootServe`; with the same deletion and the Test-only filter put
+back, it stays green, which is the gap it had.
+
+**The three `--allow-partial-walk` lines stay.** Each extends the flag
+block `upscale`, `optimize` and `render` already repeat, and its help text
+is one const, so the wording cannot drift. A helper registering that one
+flag would still sit inside the repeated block; removing the block means
+one helper for every `--gc` override, which the per-file flag sweeps
+(anchored on each command declaring `fs.Bool("<flag>"` itself) would have
+to follow. Three lines of 1,797 is 0.17%.
+
+Controls re-run on the refactored tests, each restored with
+`git checkout --` (the code under them is the refactor commit's):
+
+| mutation | result |
+|---|---|
+| runServe wires a nil `OrphanSweepStatus` | the serve Jobs-card test red |
+| the jobs handler never fills the refusal | the serve Jobs-card test red |
+| serve's harvest-off clearer clears nothing | the harvest-revoke test red ("re-enabling the harvest would find the revoked credential") |
+| `bootServe` registers no drain | the drain guard red, naming `bootServe` |
+| the same, with the guard back to Test functions | the drain guard GREEN (the gap) |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` red |
+| `describeAnalysisSweep` drops `alreadyQueued` | `TestDescribeAnalysisSweepAccountsForEveryTrack` red |
+| `analyze --gc` skips the mass-orphan refusal | `TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed` red |
+| `analyze --gc` skips the partial-walk refusal | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed` red |
+| the doctor's partial-walk hint case disabled | `TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk` red |
+| the doctor probe never says the sweep would refuse | `TestDoctorReportsAVariantCatalogThatLostItsIndex` red |
+| the doctor verdict withheld for a link too | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC` red |

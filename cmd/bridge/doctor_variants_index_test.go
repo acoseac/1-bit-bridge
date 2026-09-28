@@ -29,8 +29,19 @@ func variantsIndexInstall(t *testing.T, dir string, rows, orphans int) (cfgPath,
 	cfgPath = writeInstallAt(t, dir, "Artist/Album/01.flac")
 	variantsDir = filepath.Join(dir, "variants")
 	appendYAML(t, cfgPath, "upscale:\n    enabled: true\n    variantsDir: "+variantsDir+"\n")
+	seedVariantCatalog(t, filepath.Join(dir, "data"), variantsDir, rows, orphans)
+	return cfgPath, variantsDir
+}
 
-	store, err := manifest.OpenStore(manifest.DefaultDBPath(filepath.Join(dir, "data")))
+// seedVariantCatalog writes, into dataDir's manifest, `rows` variant rows
+// each with its file at the canonical path under variantsDir, and
+// `stranded` sidecar files no row references, all older than the orphan
+// sweep's grace: with few rows and many stranded files, the shape a lost
+// index leaves. variantsDir exists afterwards even with nothing in it,
+// because an absent one is a different (legitimate) state.
+func seedVariantCatalog(t *testing.T, dataDir, variantsDir string, rows, stranded int) {
+	t.Helper()
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,16 +62,22 @@ func variantsIndexInstall(t *testing.T, dir string, rows, orphans int) (cfgPath,
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < orphans; i++ {
+	for i := 0; i < stranded; i++ {
 		writeFixtureFile(t, transcode.VariantSidecarPath(variantsDir,
 			fmt.Sprintf("Artist/Stranded %d/%02d.flac", i%3, i), variant), 1000)
 	}
-	// The directory must exist even with nothing in it — an absent one is
-	// a different (legitimate) state.
 	if err := os.MkdirAll(variantsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return cfgPath, variantsDir
+	old := time.Now().Add(-time.Hour)
+	if err := filepath.WalkDir(variantsDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		return os.Chtimes(p, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func appendYAML(t *testing.T, cfgPath, body string) {

@@ -8,10 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
-	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -180,38 +178,6 @@ func TestRunGCProceedsPastTheFilesystemsLostFound(t *testing.T) {
 	if strings.Contains(stderr.String(), "could not be read") {
 		t.Errorf("the filesystem's lost+found was reported as unreadable:\n%s", stderr.String())
 	}
-}
-
-// waveformTree seeds `fresh` analysis rows each with its waveform at the
-// canonical path, and `stranded` waveform files no row references, under
-// dir — the analyze twin of strandedTree.
-func waveformTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Store, []string) {
-	t.Helper()
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ctx := context.Background()
-	for i := 0; i < fresh; i++ {
-		source := fmt.Sprintf("Artist/Re-analyzed/%02d.flac", i)
-		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
-		writeFixtureFile(t, p, 20)
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 10, ModTime: time.Now()}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
-			SourcePath: source, WaveformPath: p, SourceMTimeNS: 1, SourceSize: 10, SchemaVersion: "wf4",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	paths := make([]string, stranded)
-	for i := range paths {
-		paths[i] = analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
-		writeFixtureFile(t, paths[i], 20)
-	}
-	return store, paths
 }
 
 // TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed — the waveform twin, in

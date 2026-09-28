@@ -69,6 +69,38 @@ func strandedTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Stor
 	return store, paths
 }
 
+// waveformTree seeds `fresh` analysis rows each with its waveform at the
+// canonical path, and `stranded` waveform files no row references, under
+// dir — the analyze twin of strandedTree.
+func waveformTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Store, []string) {
+	t.Helper()
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	for i := 0; i < fresh; i++ {
+		source := fmt.Sprintf("Artist/Re-analyzed/%02d.flac", i)
+		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
+		writeFixtureFile(t, p, 20)
+		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 10, ModTime: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
+			SourcePath: source, WaveformPath: p, SourceMTimeNS: 1, SourceSize: 10, SchemaVersion: "wf4",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := make([]string, stranded)
+	for i := range paths {
+		paths[i] = analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
+		writeFixtureFile(t, paths[i], 20)
+	}
+	return store, paths
+}
+
 func writeFixtureFile(t *testing.T, path string, size int) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -185,36 +217,12 @@ func TestRunGCMassOrphanGuardLeavesSmallSweepsAlone(t *testing.T) {
 // milder of the two; not a different rule. (The enumeration lesson: a fix
 // that lists the sites it covers misses one.)
 func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
-	dataDir := t.TempDir()
-	dir := analyze.WaveformDirFor(dataDir)
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
+	dir := analyze.WaveformDirFor(t.TempDir())
 	ctx := context.Background()
 
 	// Two rows whose waveforms are where they say, forty files nothing
 	// references, and one half-written scratch file.
-	for i := 0; i < 2; i++ {
-		source := fmt.Sprintf("Artist/Re-analyzed/%02d.flac", i)
-		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
-		writeFixtureFile(t, p, 20)
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 10, ModTime: time.Now()}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
-			SourcePath: source, WaveformPath: p, SourceMTimeNS: 1, SourceSize: 10, SchemaVersion: "wf4",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var stranded []string
-	for i := 0; i < 40; i++ {
-		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
-		writeFixtureFile(t, p, 20)
-		stranded = append(stranded, p)
-	}
+	store, stranded := waveformTree(t, dir, 2, 40)
 	scratch := filepath.Join(dir, "half-written.waveform.bin.tmp")
 	writeFixtureFile(t, scratch, 3)
 

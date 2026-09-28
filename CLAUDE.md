@@ -5149,7 +5149,12 @@ its twin.** The top list is older, shorter, and read first.
   that merely NAME a helper, and one for the old `defer cancel()` shape misses
   the sites that never had one. (#944; extended to the in-process loops, and
   `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
-  five files missed a sixth site that the shape match found.)
+  five files missed a sixth site that the shape match found.) **It reads
+  every function in the test files, helpers included** (2026-09-28): it read
+  Test functions alone, so a launch factored into a helper went unaudited,
+  and two such helpers already existed. A serve test boots through
+  `bootServe` (main_test.go), which registers the drain itself; with that
+  drain deleted, the Test-only guard stayed green.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the

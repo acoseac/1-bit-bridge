@@ -2,9 +2,7 @@ package admin
 
 import (
 	"encoding/json"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -66,16 +64,8 @@ func describeOrphanGCRefusals(t *testing.T, node string, names []string) []strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	fn := extractJSFunction(t, readFile(t, "static/app.js"), "describeOrphanGCRefusal")
-	script := fn + "\nfor (const k of " + string(payload) + ") console.log(describeOrphanGCRefusal(k));\n"
-	path := filepath.Join(t.TempDir(), "orphan-gc.mjs")
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
+	out := runConsoleFunction(t, node, "describeOrphanGCRefusal",
+		"for (const k of "+string(payload)+") console.log(describeOrphanGCRefusal(k));")
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) != len(names) {
 		t.Fatalf("node printed %d line(s) for %d name(s):\n%s", len(lines), len(names), out)
