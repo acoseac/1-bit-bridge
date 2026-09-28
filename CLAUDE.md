@@ -779,6 +779,26 @@ lost my library."
   A mention in running prose is NOT a contract — the guard accepts only a `### `
   heading or a bold `METHOD /path` lead-in, because prose-mention is the state
   six live endpoints were already in.
+- **`DELETE /v1/atlas-harvest/credential` forgets the harvest credential,
+  and a demo bridge refuses it** (#1049). Switching the app's library
+  harvest off stopped only the app's renewals: the `bulk_harvest`
+  credential the bridge held stayed usable until it expired (the audit's
+  H3). The route calls the store's `Clear()`, which drops the token and its
+  expiry and KEEPS the sync position (a re-provision resumes), answers 204
+  whether or not one was held, and draws from the write bucket. **The demo
+  answers 403 `demo_read_only`**: its one credential is shared by every
+  demo user, so one of them switching off must not stop the harvest for
+  all, and the POST's accepted residual (a public bearer can overwrite the
+  token) is not widened into a public off switch, whatever the harvest
+  setting. **A bridge with the harvest OFF clears the file too, and answers
+  204**: no store is open there, so `serve` wires
+  `atlasharvest.ClearStoredCredential` instead of the sink. This bullet said
+  "a credential file it may still hold is left alone, since nothing there
+  reads it" until CodeRabbit (on the app's #1981) caught the premise:
+  re-enabling the harvest reads that file again, so a 404 told the app
+  nothing was held while a credential waited to come back into use. **`204`
+  is the only answer that means revoked**; the app reports anything else,
+  405 from an older bridge included, as not revoked.
 - **Don't label a spec section with a version you cannot verify.** The `since
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client

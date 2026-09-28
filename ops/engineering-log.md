@@ -20314,3 +20314,72 @@ iOS redemption as the Mirror-PR twin.
   one inserted decodes to the same 32 bytes. Two controls: the old character
   loop turns exactly the two impossible-ending cases red, and dropping the
   length check turns exactly the inserted-line-break case red.
+
+## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential (#1049)
+
+The 2026-09-23 external audit's H3, bridge half. Turning off the app's
+"Bulk-harvest the whole library" stopped only the app's renewals; the
+`bulk_harvest` credential the bridge already held stayed usable until it
+expired, and the privacy policy said so, telling users to switch the harvest
+off on the bridge to stop it at once. The bridge had only
+`POST /v1/atlas-harvest/credential`. Reported by the iOS audit session and
+taken into v0.2.1 at the user's request (backlog B12); the app's call ships
+in the iOS twin.
+
+### Decisions
+
+- **`Clear()`, the store's existing forget.** It drops the token and its
+  expiry and keeps the base URL and the sync cursor, the same state an
+  Atlas-rejected token leaves, so a re-provision of the same library
+  resumes rather than re-submitting everything.
+- **204 whether or not a credential was held.** The app calls it on every
+  switch-off, including a second one, and must not have to ask first.
+- **The demo refuses with 403 `demo_read_only`.** A demo bridge's bearer is
+  public and its one harvest credential is shared by every demo user; one
+  user switching harvest off would stop it for all. The POST's accepted
+  residual (a public bearer can overwrite the token for the pinned host) is
+  a denial of function by an attacker; this would have been one by an
+  ordinary user, and on every switch-off.
+- **Harvest off answers 404 `harvest_not_supported`,** the POST's shape. The
+  store is opened only when harvest is on, so a credential file left from
+  before is not touched; nothing on that bridge reads it.
+- **Write-rate-limited** (`rateWrite`), like the POST, and listed in
+  PROTOCOL.md's write-limit section.
+
+### Tests and controls
+
+- `internal/api/atlas_harvest_revoke_test.go`:
+  `TestAtlasHarvestCredentialDeleteForgetsIt` (204 twice, the sink cleared
+  each time), `TestAtlasHarvestCredentialDeleteRefusals` (harvest off 404,
+  demo 403 with nothing cleared, no bearer 401), and
+  `TestAtlasHarvestCredentialDeleteClearsTheStoredToken` against the real
+  `atlasharvest.StateStore`: after the DELETE `AtlasCredential()` finds
+  nothing, the token is gone from the file, and the cursor is still 42.
+  All red on main (405: no route).
+- Controls: without the demo check only the demo case goes red; without the
+  `Clear()` call the two clearing tests go red.
+- **Review round (CodeRabbit on the app's #1981): the harvest-off 404 was
+  not "nothing held".** The route answered 404 `harvest_not_supported` on a
+  bridge with `atlas.harvestEnabled` off without touching the state file,
+  and this entry's CLAUDE.md rule said why: nothing there reads the file.
+  Re-enabling the harvest does, so a credential the app had asked to revoke
+  came back into use, while the app had read the 404 as nothing held. `serve`
+  now wires `atlasharvest.ClearStoredCredential` whenever no live store is
+  open. It drops the token and expiry and keeps the sync position, and it
+  writes nothing when nothing is held (no file created, none rewritten). The
+  route answers 204 either way. The demo check moved ahead of both clears:
+  a demo bridge refuses whatever its harvest setting. PROTOCOL.md now says
+  204 is the only answer that means revoked (the same review asked the app
+  to stop taking a 200 for one).
+- Tests: `TestClearStoredCredential` (a held credential cleared, the cursor
+  kept; no file not created; a file with nothing held not rewritten, judged
+  by planted content, not mtime);
+  `TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile`;
+  `TestAtlasHarvestCredentialDeleteOnADemoBridgeWithTheHarvestOffClearsNothing`;
+  and the boot test `TestServeRevokesAHarvestCredentialWithTheHarvestOff`,
+  which runs the real serve over a seeded state file.
+- Four controls, each turning exactly its predicted tests red: serve wiring
+  no clearer (the boot test alone); the handler ignoring the clearer (the
+  harvest-off route test and the boot test); the demo check after the clear
+  (the demo tests); a clear that writes with nothing held
+  (`TestClearStoredCredential`).

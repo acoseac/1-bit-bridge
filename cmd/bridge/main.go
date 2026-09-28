@@ -2963,7 +2963,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// file failed to open.
 	var harvestState *atlasharvest.StateStore
 	if cfg.Atlas.HarvestEnabled && cfg.Atlas.Enabled {
-		hs, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
+		hs, herr := atlasharvest.OpenStateStore(harvestStatePath(cfg.DataDir))
 		if herr != nil {
 			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
 		} else {
@@ -3518,6 +3518,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			harvestClient.BookletFiles = bookletDiskStore{dir: bookletsDir}
 		}
 		apiSrv.WithBooklets(manifestStore, bookletsDir, harvestClient.NudgeBookletFetch)
+	} else {
+		// No live store, so no sink: the harvest is off (or its state file
+		// would not open). DELETE /v1/atlas-harvest/credential still clears
+		// a credential the file holds from when the harvest was on, because
+		// re-enabling the harvest reads that file again.
+		apiSrv.WithStoredHarvestCredentialClearer(func() error {
+			return atlasharvest.ClearStoredCredential(harvestStatePath(cfg.DataDir))
+		})
 	}
 	if harvestClient != nil {
 		bgWriters.Add(1)
@@ -5382,4 +5390,11 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Scan complete: %d tracks indexed in %s\n", n, time.Since(start).Round(time.Millisecond))
 	return 0
+}
+
+// harvestStatePath is the bulk harvest's state file, holding its credential
+// and sync position: opened by serve when the harvest is on, and cleared of
+// its credential by the revoke route when it is off.
+func harvestStatePath(dataDir string) string {
+	return filepath.Join(dataDir, "atlas-harvest.json")
 }

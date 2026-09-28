@@ -16,11 +16,18 @@ type fakeHarvestCred struct {
 	token, baseURL string
 	expiresAt      time.Time
 	called         int
+	cleared        int
 }
 
 func (f *fakeHarvestCred) SetCredential(token, baseURL string, expiresAt time.Time) error {
 	f.called++
 	f.token, f.baseURL, f.expiresAt = token, baseURL, expiresAt
+	return nil
+}
+
+func (f *fakeHarvestCred) Clear() error {
+	f.cleared++
+	f.token, f.expiresAt = "", time.Time{}
 	return nil
 }
 

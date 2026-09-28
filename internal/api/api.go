@@ -198,6 +198,10 @@ type Server struct {
 	// hands the bridge an App-Attest-minted bulk_harvest token here. Nil unless
 	// WithAtlasHarvest is wired (gated on cfg.Atlas.HarvestEnabled).
 	atlasHarvestCred AtlasHarvestCredentialSink
+	// clearStoredHarvestCredential backs DELETE /v1/atlas-harvest/credential
+	// on a bridge whose harvest is off, so no sink is wired: it forgets a
+	// credential the state file still holds from when the harvest was on.
+	clearStoredHarvestCredential func() error
 	// atlasHarvestPinnedBase is cfg.Atlas.CanonicalHarvestBaseURL() — the only
 	// Atlas host POST /v1/atlas-harvest/credential accepts. "" = unpinned,
 	// which demo mode refuses. See refuseUnpinnedHarvestBaseURL.

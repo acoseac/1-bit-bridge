@@ -317,6 +317,7 @@ func (s *Server) routeRegistry() []route {
 		// Phase-H bulk-harvest credential handoff from the iOS app — a single
 		// small atomic file write.
 		{pattern: "POST /v1/atlas-harvest/credential", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitWrite(s.atlasHarvestCredential)))},
+		{pattern: "DELETE /v1/atlas-harvest/credential", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitWrite(s.atlasHarvestCredentialDelete)))},
 
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).
