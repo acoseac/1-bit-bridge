@@ -1759,10 +1759,18 @@ no failing test — which is the shape to expect in this area.
   POST or a script repeat it. `sourceIsAtRow` is the one check, the scanner's
   EXACT skip-gate comparison, never serve's 2 s tolerance: the on-demand path
   refuses (`errSourceAheadOfRow`, counted `rejected`, no wire change) and
-  queues a rescan of the file's directory (`sourceRescanner`, bgWriters-joined,
-  one queued scan per directory, a request dropped when 64 wait), so the next
-  request renders; the sweeper counts `changedSinceScan` and passes over; the
-  CLI lists the file as needing no run, `--force` included. **Don't stamp a
+  queues a rescan of the file's directory (`sourceRescanner`, bgWriters-joined),
+  so the next request renders; the sweeper counts `changedSinceScan` and passes
+  over; the CLI lists the file as needing no run, `--force` included. **The
+  rescanner's queue is its pending set**: a directory is queued once at a time
+  (and again once its scan has started), drained oldest first, up to 1,024.
+  Until review round 1 it was a 64-slot channel that dropped the 65th, and a
+  dropped directory was rescanned only if a later request named a file in it,
+  so a client that asked once (a folder POST over more album directories, or
+  plays piling up while a full scan holds the scanner's lock) waited for the
+  periodic scan. The bound is also the work one burst queues: a rescan that
+  re-reads a changed file runs the whole-library duplicate restamp (1.1 s over
+  50,012 rows on the dev Mac, 7 ms for an album with nothing changed). **Don't stamp a
   live stat anywhere** (`FreshnessFromFile` is gone), **and don't render a file
   its row no longer describes**: a row-stamped render of new bytes is the one
   the serve path refuses, and with auto-optimize off (the default) nothing

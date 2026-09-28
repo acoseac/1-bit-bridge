@@ -24814,9 +24814,12 @@ render.
   the file's directory is queued for a rescan. `sourceRescanner` is one loop
   on `scanCtx`, joined on `bgWriters`, running `ScanSubtree` per queued
   directory. A directory is queued at most once at a time, and again once
-  its scan has started (the file may change after the walk passed it); with
-  64 waiting, a request is dropped and the periodic scan reads the file. The
-  phone plays the source this time, and its next request renders.
+  its scan has started (the file may change after the walk passed it). The
+  queue is the pending set itself, drained oldest first, up to 1,024
+  directories; a request that finds it full is dropped, and its directory
+  waits for the periodic scan, or for a later request once there is room
+  (review round 1, below: it was a 64-slot channel). The phone plays the
+  source this time, and its next request renders.
 - Sweeper: `planChangedSinceScan` in both passes, counted as
   `changedSinceScan` on the Jobs card ("N waiting for a scan (changed on
   disk)") and in the sweep's log line.
@@ -24897,3 +24900,68 @@ Each on the committed fix, run with `-count=1`, restored before the next.
 With main's adapter and the sweeper's check both in place, the sweep no
 longer re-rendered (2 renders, not 12): the check is a second line of its
 own.
+
+### Review round 1: the rescanner keeps a directory past its 64th
+
+CodeRabbit read the rescanner's drop as a six-hour refusal: a request that
+found the 64-slot channel full dropped its directory after
+`finalizeAndEnqueue` had already refused the render, and every later request
+is refused until a scan updates the row. Checked against the code and the
+app before acting:
+
+- A refused request answers 202 with `rejected: 1` (the handler counts
+  `ErrUpscaleIneligible` as rejected, silently), and a folder POST one
+  `rejected` per refused file.
+- A later request for any file in a dropped directory re-queued it once the
+  channel had room, since a dropped directory never entered `pending`. The
+  app asks for a missing family on every play of the track (PlayerService's
+  tier-0 blocks, `BridgeRenditionRequestGate`, with no memory of a refusal),
+  one file at a time (`DownloadCoordinator` too), so for the phone a drop
+  cost one more play of the source.
+- What was lost is a directory no later request names: a one-shot folder
+  POST over more than 64 album directories of changed files (the loop takes
+  the first at once, so 65 fit), or plays piling up while a full scan holds
+  the scanner's lock, which `ScanSubtree` waits on. That directory waited
+  for the periodic scan, six hours by default, which is the cost the design
+  above rejected as refusing without the rescan.
+
+Measured before choosing a bound, with a throwaway probe on the dev Mac: over
+50,012 rows, `ScanSubtree` of a 12-file DSF album with one file touched took
+1.07 to 1.22 s, of which `RestampDuplicates` alone took 1.05 to 1.27 s (a
+subtree scan that commits a row runs the whole-library restamp); the same
+album with nothing changed took 7 ms. So the bound is on work, not memory: a
+full queue of 1,024 changed albums is about nineteen minutes there.
+
+The fix: the queue is the pending set itself, an ordered list bounded at
+1,024 (`sourceRescanQueueCap`) beside a one-slot wake channel. `request`
+appends under the mutex and signals without blocking, and `run` drains the
+whole list on each wake, taking a directory out of `pending` as its scan
+starts. Rejected: a retry set beside the channel, as the review proposed
+(two structures to keep in step, for the semantics of one longer list); an
+unbounded one (the bound is the work a burst can queue); and turning an
+overflow into one full scan (lossless, and cheaper for a burst in the
+thousands, but a request-triggered walk of the whole library, which after a
+long periodic scan would be a second walk right behind it).
+
+`TestSourceRescannerScansEveryDirectoryABurstAsksFor` queues two files in
+each of 200 directories before the loop starts and requires every directory
+scanned exactly once. On the code before the fix, 136 of the 200 were never
+scanned, the first D064.
+
+| mutation | red | green |
+|---|---|---|
+| the bound back at 64 | the burst test (136 of 200 never scanned) | the queue, loop and rescan tests |
+| one directory per wake | the burst test (199 of 200), the queue test (no second scan of A) | the loop and rescan tests |
+| no coalescing | the burst test (all 200 scanned twice), the queue test (3 queued for two directories) | the loop and rescan tests |
+| `pending` cleared when the scan ends | the queue test (no second scan of A) | the other three |
+| unbounded | the queue test (1,029 waiting) | the other three |
+| a blocking wake send | the queue test (a request blocked), the burst test (hung) | the loop and rescan tests |
+
+The first CI run's Windows leg failed
+`TestServeStillReportsATailnetHTTP3BindThatFails` in its TempDir cleanup: the
+startup backup's `bridge.db` was still open, which only `vacuumInto` opens.
+Not this branch: its one change to serve is a goroutine parked on `scanCtx`,
+which opened nothing in that test; the same head passed on a re-run; and the
+failed attempt ran every package about three times slower than the re-run
+(`cmd/bridge` 400 s against 127 s, and `internal/adminauth`, which the branch
+does not touch, 182 s against 50 s). Filed as backlog B63.
