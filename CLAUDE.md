@@ -1291,9 +1291,18 @@ no failing test — which is the shape to expect in this area.
   - **Claims cannot deadlock, by construction.** A render claims its own track
     before Stage A and resolves the claim on EVERY exit (a deferred error
     covers early failures). A survey claims an album-mate while it measures
-    it. So a claim is only ever held by work that is decoding, and nothing
-    waits while holding one. **Don't make a render wait before resolving its
-    own claim, and don't hold a survey claim across a wait.**
+    it, and releases it on every exit too, a panic included: `measureClaimed`
+    defers the release as its first statement (2026-09-28). Released only by
+    plain calls after the measurement, a panic in the decode left the claim
+    registered, and because `transcode.Pool.processJob` recovers a runner
+    panic and keeps the worker, every later render of that album waited on it
+    until its own deadline, until a restart
+    (`TestAMateWhoseMeasurementPanicsReleasesItsClaim`: 2 s of waiting, then
+    `context deadline exceeded`, before the defer). So a claim is only ever
+    held by work that is decoding, and nothing waits while holding one.
+    **Don't make a render wait before resolving its own claim, don't hold a
+    survey claim across a wait, and don't release a claim anywhere but on
+    every exit.**
   - A waiter whose claim resolved without a peak measures that mate itself,
     because the holder's failure may have been transient. Only the waiter's OWN
     failed measurement leaves the mate out of the album.
