@@ -373,9 +373,16 @@ func TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4(t *testing.T) {
 			lan("en1", "fd12:3456::1", "fe80::1"),
 			lan("awdl0", "fe80::a0d1"),
 		}, EligibilityOpts{}, []string{"en1", "awdl0"}},
-		// The tunnel rule runs first, and neither rule empties the set.
-		{"tunnel_rule_first", []fakeIface{
+		// Neither rule empties the set.
+		{"neither_rule_empties_the_set", []fakeIface{
 			tunnel("utun0", "fe80::2"),
+			lan("awdl0", "fe80::a0d1"),
+		}, EligibilityOpts{}, []string{"awdl0"}},
+		// The tunnel rule runs first, so a host whose set (as the tunnel
+		// rule alone left it) holds no IPv4 member keeps that set: a
+		// self-assigned tunnel does not come back in.
+		{"tunnel_rule_first", []fakeIface{
+			tunnel("utun3", "169.254.3.3"),
 			lan("awdl0", "fe80::a0d1"),
 		}, EligibilityOpts{}, []string{"awdl0"}},
 		{"nothing_eligible", []fakeIface{
