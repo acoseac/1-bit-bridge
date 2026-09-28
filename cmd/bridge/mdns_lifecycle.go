@@ -79,31 +79,26 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 			}
 		}
 		// `InterfaceSource` callback resolves the LAN-eligible
-		// interface fresh on every rebind. A static capture at
+		// interface fresh on every rebind tick. A static capture at
 		// startup would let a Wi-Fi → Ethernet handoff (interface
 		// index changes, original adapter goes down) keep the mDNS
 		// listener pinned to a now-dead adapter until the next
 		// process restart. The rebind loop in `internal/mdns`
-		// already polls `ipsForAdvertise` dynamically; this closes
-		// the asymmetry so Interface follows the same hot-resolve
-		// pattern. Soft-fail: if the picker errors (host with no
-		// LAN-eligible interface at all), return nil + log → mDNS
-		// falls back to OS-default selection. Per CodeRabbit on
-		// PR #307 round-1.
-		ifaceSource := func() *net.Interface {
-			iface, err := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
-			if err != nil {
-				fmt.Fprintf(m.stderr, "mDNS: LAN interface pick failed (rebind will use OS default): %v\n", err)
-				return nil
-			}
-			return iface
-		}
+		// compares what it answers with the running responder's
+		// interface every minute. Soft-fail: if the picker errors
+		// (host with no LAN-eligible interface at all), return nil
+		// + log once → mDNS falls back to OS-default selection. Per
+		// CodeRabbit on PR #307 round-1.
+		// TestMDNSInterfaceSourceIsTheOncePerStreakOne pins that the
+		// source is lanInterfaceSource's, written in the literal.
 		a, err := bridgemdns.Advertise(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
-			InterfaceSource: ifaceSource,
+			InterfaceSource: lanInterfaceSource(func() (*net.Interface, error) {
+				return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+			}, m.stderr),
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
@@ -126,6 +121,32 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 	_ = m.advertiser.Close()
 	m.advertiser = nil
 	fmt.Fprintf(m.stdout, "mDNS: advertisement stopped\n")
+}
+
+// lanInterfaceSource returns the advertiser's InterfaceSource: pick's
+// interface, or nil when pick fails. The advertiser calls it at every
+// rebind tick, once a minute, so a failure is printed when a streak of
+// them starts or its text changes, never per call: a host with no
+// LAN-eligible interface would otherwise print the same line every
+// minute, the M-SEARCH flood's shape. Until 2026-09-28 it was called
+// only when a rebuild ran, and printed every failure.
+func lanInterfaceSource(pick func() (*net.Interface, error), stderr io.Writer) func() *net.Interface {
+	var mu sync.Mutex
+	var printed string // the failure last printed; "" once a pick succeeds
+	return func() *net.Interface {
+		iface, err := pick()
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			if msg := err.Error(); msg != printed {
+				printed = msg
+				fmt.Fprintf(stderr, "mDNS: LAN interface pick failed (rebind will use OS default): %v\n", err)
+			}
+			return nil
+		}
+		printed = ""
+		return iface
+	}
 }
 
 // Close shuts down any active advertiser. Safe to call on a

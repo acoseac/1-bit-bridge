@@ -1789,7 +1789,8 @@ no failing test — which is the shape to expect in this area.
   errors), and `TakeSidecarInventory`, the walker the sweep uses now,
   refuses it again. The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
-  the watchers tick regardless. (#917)
+  the watchers tick regardless. (#917) The orphan GC's chip also says when
+  that sweep is refusing (2026-09-28, the Jobs-card bullet below).
 
 - **A recorded sidecar path is a CLAIM about where the file was, never
   proof that it is gone.** `track_variants.sidecar_path` and
@@ -1946,12 +1947,17 @@ no failing test — which is the shape to expect in this area.
   proposed in review, and it turns two tests red. The decision is taken as
   `(mode, stat)` so the Windows shape is driveable on any platform; a plain
   file answers without a stat, and the closure does not escape (measured).
-- **`SidecarInventory.Unreadable` is a count of ENTRIES, and BOTH sweeps say
-  so.** It covers a directory the walk could not descend into AND a
-  non-regular entry it could not stat. `upscale --gc` and `analyze --gc`
-  print that one count from two places and both called it directories; a
-  wording fix reaching one of them is the enumeration failure this file
-  keeps recording.
+- **`SidecarInventory.Unreadable` is a count of ENTRIES, and every place
+  that prints it says so.** It covers a directory the walk could not
+  descend into AND a non-regular entry it could not stat. `upscale --gc`
+  and `analyze --gc` print that one count from two places and both called
+  it directories; a wording fix reaching one of them is the enumeration
+  failure this file keeps recording, and it happened: `bridge doctor`'s
+  variants-index summary said "director(y/ies)" until 2026-09-28. The two
+  kinds are counted apart now (`UnlistedDirs` is the directories), because
+  they bound different things: a directory the walk could not list may
+  hold any number of files, a link it could not stat at most one (the
+  partial-walk bullet below).
 - **A forward sweep's denominator is the TREE, never the catalog, and the
   term that knows a lost index is `orphans > rows`.** Adoption and the
   canonical known set both need the ROWS; the 2026-09-20 aftermath had
@@ -1976,8 +1982,10 @@ no failing test — which is the shape to expect in this area.
   up — a guard inside the walk measures a ratio from the tree it has
   already destroyed, so the test asserts on the FILES.
   `--allow-mass-orphans` is the CLI's way past it on upscale / optimize /
-  render / analyze; `artwork --gc` is exempt BY NAME in the sweep test
-  (content/MBID-keyed, no absolute path a relocation can strand). #940 left
+  render / analyze (and `--allow-partial-walk` past the refusal of a walk
+  that could not list part of the tree, below); `artwork --gc` is exempt
+  BY NAME in the sweep test (content/MBID-keyed, no absolute path a
+  relocation can strand). #940 left
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
@@ -1990,14 +1998,27 @@ no failing test — which is the shape to expect in this area.
   stranded files) went in three ticks on the old code: 4,800, 5,000, 248.
   Each tick now lists the catalog, takes the whole tree's inventory
   (`TakeSidecarInventory`, read-only, a `.flac` Consider, NO `MaxEntries`),
-  refuses on `MassOrphanRefusal` of the FULL `Orphans` count, and only then
-  unlinks at most `gcChunkSize`, each path re-checked first
-  (`reclaimOrphan`: a fresh Lstat, the inventory's own `classifyWalkEntry`,
-  the grace against the tick start). **The chunk caps UNLINKS, never the
-  walk**, and the retained `OrphanPaths` are capped with it, so a refusal
-  fed their length reads 100 where there are 1,000 and proceeds (the
-  full-count test pins it). The walk costs 128 ms per 100,001 files warm on
-  the dev Mac, every tick. **No verdict crosses a tick**: a tally across
+  refuses on `MassOrphanRefusalFor` of the FULL `Orphans` count, then on
+  `PartialWalkRefusal`, and only then unlinks up to `gcChunkSize` files,
+  each path re-checked first (`reclaimOrphan`: a fresh Lstat, the
+  inventory's own `classifyWalkEntry`, the grace against the tick start).
+  **The chunk caps SUCCESSFUL unlinks, never the walk and never the
+  attempts** (2026-09-28): a tick keeps `gcRetainedPerUnlink` (4) chunks of
+  paths and tries them in walk order until it has unlinked a chunk. It
+  kept one chunk until then and every attempt spent a slot, so a chunk's
+  worth of files the service user cannot remove at the head of the walk (a
+  root-owned directory a `sudo bridge upscale` left) stalled every orphan
+  behind them, every tick, where the old cursor had moved past them
+  (measured with a chunk of 5: eight in a read-only directory ahead of ten
+  deletable ones, four ticks, nothing unlinked). 20,000 retained paths
+  measured 10.8 MB of heap at 205-byte paths, freed with the tick; a head
+  of 20,000 or more stalls again, and the summary's `retained` beside
+  `failed` shows it. **Nothing about a failure crosses a tick either.** The
+  refusal reads the full count, never the retained list: fed its length,
+  400 retained against 500 rows proceeds where 1,000 orphans refuse (the
+  full-count test, whose fixture had to grow from 150 rows when the list
+  did, or it bit only through its wording). The walk costs 128 ms per
+  100,001 files warm on the dev Mac, every tick. **No verdict crosses a tick**: a tally across
   ticks was rejected, because its verdict can come from a partial walk (an
   unmount, a cancel, a pruned root) or a catalog that changed mid-pass, and
   a budget carried between passes can be spent on files it never counted.
@@ -2013,22 +2034,81 @@ no failing test — which is the shape to expect in this area.
   old WalkDir Lstat'd the link and swept nothing). The `.flac` Consider
   stays, so the ratio is over the files this sweep would remove, where
   `upscale --gc`'s nil Consider counts and removes every file. **A walk
-  that could not read an entry (`inv.Unreadable`) refuses too**, after the
-  mass-orphan check and under a WARN of its own (CodeRabbit on #1063). What
-  it could not read is missing from every count, and a directory the
-  service user cannot list may hold any number of orphans, so a verdict
-  that proceeds over the part it saw can be a refusal over the whole: 1,000
-  stranded files behind a locked directory and 15 in view, against 20
-  rows, pass the check, and the review head unlinked the 15. The
-  inventory's docblock said an unreadable entry "can only make the
-  deletion set SMALLER", which is true of the list and false of the
-  verdict. The latch keys on the KIND of refusal, so a streak that turns
-  into the other kind logs at once. **The cost is deliberate**: a variants
-  directory holding a directory the bridge may never list, a root-owned
-  `lost+found` at the top of an ext4 volume mounted there being the
-  ordinary one, reclaims nothing until it is readable, and its hint says
-  so once a day. The two CLI sweeps still report such entries and go on;
-  whether they should refuse too (and past which flag) is open.
+  that could not LIST a directory refuses too** (`PartialWalkRefusal`),
+  after the mass-orphan check and under a WARN of its own (CodeRabbit on
+  #1063). What it could not list is missing from every count and may hold
+  any number of orphans, so a verdict that proceeds over the part it saw
+  can be a refusal over the whole: 1,000 stranded files behind a locked
+  directory and 15 in view, against 20 rows, pass the check, and the
+  review head unlinked the 15. The inventory's docblock said an unreadable
+  entry "can only make the deletion set SMALLER", which is true of the
+  list and false of the verdict. The latch keys on the KIND of refusal, so
+  a streak that turns into the other kind logs at once. **The cost is
+  deliberate**: a variants directory holding a directory the bridge may
+  never list reclaims nothing until it is readable, and its hint says so
+  once a day. The ordinary such directory, the root-owned `lost+found` of
+  an ext4 volume mounted AS the variants directory, is the filesystem's
+  and not counted (next bullet), and a link the walk could not stat is
+  weighed, not refused. The CLI sweeps make the same refusal since
+  2026-09-28 (next bullet).
+- **…and a partial walk is refused by every forward sweep, weighed by what
+  it can hide** (2026-09-28). `upscale --gc` (optimize, render) and
+  `analyze --gc` took `MassOrphanRefusal` over the part of the tree they
+  could read and went on: over #1063's shape both unlinked the 15 and
+  exited 0. The inventory splits its unknowns, and the three sweeps and
+  the doctor read them through two shared decisions. **A directory the
+  walk could not list** (`UnlistedDirs`) is unbounded, so
+  `PartialWalkRefusal` refuses the verdict, after `MassOrphanRefusalFor`,
+  whose lost-index advice is the more urgent. The CLI's way past it is
+  **`--allow-partial-walk`, which waives that refusal and nothing else**:
+  the mass-orphan check still runs over what was read. Never
+  `--allow-mass-orphans` as the way past it, which gives up the whole
+  protection to get past one directory; but `--allow-mass-orphans` waives
+  the partial-walk refusal too, since that refusal exists only to protect
+  the verdict the flag has set aside. So does a threshold of 100, where no
+  count can refuse. **A link the walk could not stat** is never walked
+  into, so it is nothing, one known file or one orphan, and
+  `MassOrphanRefusalFor` counts it as an orphan (o+k of f+k): a known file
+  only lowers the ratio and an orphan only raises the refusal (100·(o+1) >
+  pct·(f+1) follows from 100·o > pct·f for pct ≤ 100), so that refuses
+  exactly when some reading would, pinned against every reading by brute
+  force (`TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`). **The
+  root-owned `lost+found` of an ext4 volume mounted AS the variants
+  directory is not an unknown**: a directory named exactly that, directly
+  under the RESOLVED walk root, that a PERMISSION error keeps this user
+  out of, is not counted (`isFilesystemLostFound`). Since #1063 it made
+  the background sweep refuse every tick and `bridge doctor` warn on every
+  run. Nothing the bridge writes can be in it: a `<variantsDir>/lost+found`
+  the bridge made (a single-root library's top-level folder of that name,
+  or a multi-root root whose basename it is) is its own and listable, so
+  it is walked as before, and so is any readable one (a CLI run as root).
+  **Residuals**: a render run as ROOT for a library folder named
+  `lost+found` could put sidecars in one the service user cannot list
+  (unexamined, as the filesystem's); a volume mounted deeper in the tree
+  has its `lost+found` counted, since nothing about the walk root vouches
+  for it; an I/O error on it counts. `TreeHoldsVariantSidecars`, the
+  reverse guard's probe, still fails closed on an unreadable `lost+found`
+  (a refused mass ROW deletion, the safe direction). A Gemini consult was
+  attempted for the `lost+found` trade-off and refused by the API's
+  spending cap; the rule is the narrow one, decided here.
+- **The Jobs card shows the background orphan sweep's refusal**
+  (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
+  interval was positive, while every tick refused and only the journal
+  said so, once a day. The sweep publishes its latch through an atomic
+  snapshot (`OrphanSidecarSweeper.Status`: the kind,
+  `integrity.OrphanRefusalKind`, and when the streak started), runServe
+  wires it into `admin.Deps.OrphanSweepStatus`, and `/api/jobs` carries
+  `maintenance.orphanSidecarGCRefusal` (a KEY the console words) and
+  `orphanSidecarGCRefusingSince`, omitted while the sweep is not refusing
+  or not running. The card shows a "refusing" badge on the line and the
+  reason in a `hint warn` under the list: a sentence in a list cell wrapped
+  into a 163 px column 170 px tall at 375 px (measured in a browser).
+  `TestEveryOrphanRefusalKindIsWorded` runs `describeOrphanGCRefusal`
+  under node for every kind, because the leaf guard proves the key is READ,
+  not that it is WORDED; `TestServeReportsTheOrphanSweepRefusalOnTheJobsCard`
+  boots serve and is the only test that sees the wiring line. The
+  empty-catalog refusal is not a latch kind (it WARNs every tick and
+  decides nothing about the tree), so the chip does not show it.
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
@@ -2049,7 +2129,13 @@ no failing test — which is the shape to expect in this area.
   orphans throughout. **The probe reports the budget it ran under**: a
   closure wired with 0 walks the whole tree on a page render and every
   count still looks right, which is the one mistake no number reveals.
-  (#940)
+  (#940) **Its hint said `--gc` "measures the whole tree"**, false past a
+  directory it could not list; since 2026-09-28 it says `--gc` refuses
+  such a walk (`GCRefusesPartialWalk`, sound on a truncated prefix, since
+  a directory this walk could not list is one the whole walk cannot list
+  either), names directories and links apart, and withholds the ratio
+  verdict only for an unlisted directory: a link is weighed as `--gc`
+  weighs it.
 - **A guard that reads the world AFTER a sweep has to be told what the sweep
   did.** `gcCheckOutputDirBeforeReverseSweep` reads a missing-or-empty variants
   directory as a lost mount — right, except that on the legacy hash-flat layout
@@ -2354,6 +2440,32 @@ no failing test — which is the shape to expect in this area.
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+- **A Tailscale interface is eligible ONLY through the opt-in
+  (`EligibilityOpts.TsnetIfaceName`), and its ULA is what had defeated it**
+  (2026-09-28). A Tailscale interface carries an address in
+  `fd7a:115c:a1e0::/48`, and one in 100.64/10 where the tailnet has IPv4. The
+  100.64/10 address always counted as public; the ULA is
+  inside fc00::/7, so `net.IP.IsPrivate` counted it as a LAN address and
+  admitted the interface with no opt-in (and no production caller sets one).
+  Measured: the dev Mac's `utun12` and dido's `tailscale0` were eligible with
+  their addresses and not without the ULA. The real bridge on the Mac then
+  ran an SSDP advertiser on utun12 (LOCATION on its 100.x address) and a
+  renderer- and a UPnP-discovery client sending into it, and on dido each
+  of those consumers' first step (the group join, an M-SEARCH send)
+  succeeded on tailscale0. On Windows (reasoned from the ranking and pinned
+  by a row, not measured) the Wintun adapter, which has no point-to-point
+  flag, outranked a zero-config LAN as the mDNS responder's single pick.
+  `isTailscaleULA` sorts the ULA out BEFORE `IsPrivate` and counts it as
+  public, so it admits nothing AND keeps the zero-config arm from admitting
+  a tailnet with IPv4 switched off (fe80 plus the ULA). **Address-based, not
+  name-based**: macOS numbers its utuns, and Windows' adapter carries no
+  flag that says tunnel. 100.64/10 needed no change: a LAN genuinely
+  numbered in CGNAT space was refused before and still is. `tailscaleULA`
+  is pinned to `tsaddr.TailscaleULARange()` by
+  `TestTailscaleULAIsTailscalesRange`. Multicast written to the tailnet
+  interface reached no peer in the one tailnet measured (no exit node, no
+  subnet router): 0 of 32 datagrams each way between the Mac and dido,
+  beside 32 of 32 unicast controls.
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns
@@ -2367,7 +2479,8 @@ no failing test — which is the shape to expect in this area.
   private IPv4, then any other usable address (a ULA, the opted-in tsnet
   interface), then link-local only, and enumeration order among equals, so
   a host whose first eligible interface already ranks best keeps it (dido
-  measured: `enp1s0f0` and the same five-member set as before).
+  measured: `enp1s0f0` and the same five-member set as before; three
+  members since the next paragraph's rule and the Tailscale bullet above).
   `PickAllLANEligibleInterfaces` keeps its members and order but leaves out
   a point-to-point interface whose only addresses are link-local whenever
   anything else is eligible: six such utuns sat in the dev Mac's set, and
@@ -2379,20 +2492,66 @@ no failing test — which is the shape to expect in this area.
   ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
   and the bullet above says why each arm is there. **Don't reduce the key
   to either half**: the flag alone misses Windows' Wintun adapter
-  (Tailscale, WireGuard; `IF_TYPE_PROP_VIRTUAL`, which Go gives no
-  point-to-point flag) and a Mac's `bridge0` holding a self-assigned
-  address, and the class alone ties a WireGuard tunnel's private 10.x with
-  `en0` and lets enumeration order pick the tunnel (each half turns rows
-  red that the other leaves green). One case moves the other way: a host
-  whose LAN is zero-config (169.254 / fe80 only) beside a private-IPv4
-  bridge (`docker0`, a VM's) now binds the bridge, where the first eligible
-  used to win if it came first. The tables drive `pickLANInterface` and
-  `pickAllLANInterfaces`, the seam both exported pickers call
-  (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
+  (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`,
+  which Go gives no point-to-point flag) and a Mac's `bridge0` holding a
+  self-assigned address, and the class alone ties a WireGuard tunnel's
+  private 10.x with `en0` and lets enumeration order pick the tunnel (each
+  half turns rows red that the other leaves green). One case moves the
+  other way: a host whose LAN is zero-config (169.254 / fe80 only) beside a
+  private-IPv4 bridge (`docker0`, a VM's) now binds the bridge, where the
+  first eligible used to win if it came first. The tables drive
+  `pickLANInterface` and `pickAllLANInterfaces`, the seam both exported
+  pickers call (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
   `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel`), and
   `TestTheExportedPickersRunTheSelection` compares the exported pair with it
   on the host, which can fail only where the first eligible interface does
   not rank best (the dev Mac, not a typical Linux runner).
+- **…and then leaves out a member with no IPv4 address, whenever one with
+  an IPv4 address remains** (2026-09-28). Every consumer of the set runs
+  SSDP over IPv4 (udp4, 239.255.255.250): the advertisers, which already
+  skipped such a member (`gatherAdvertiseEndpoints`), and the renderer and
+  UPnP-upstream discovery clients, which did not. On the dev Mac awdl0 and
+  llw0 (fe80 only, not point-to-point) each got a renderer client whose every
+  M-SEARCH failed with `can't assign requested address` (a WARN per client
+  and an ERROR ten minutes on; since #1072 the UPnP-upstream clients on the
+  same members report theirs as well); on dido each
+  docker veth (fe80 only, a port of `docker0` or a user bridge, both members
+  with an IPv4 address) got two clients, whose sends Linux lets out. **The
+  rule is the SET's, not the SSDP call sites'**: all three consumers are IPv4
+  SSDP, and it sits beside the tunnel rule #1051 justified by the same
+  failed send. A 169.254 address counts (the direct-cable renderer).
+  **It runs AFTER the tunnel rule, and neither rule empties the set**, so a
+  host whose tunnel-ruled set holds no IPv4 member (an IPv6-only LAN) keeps
+  that set exactly, and UPnP upstream, whose manual-URL poller starts only
+  where an SSDP client does, still starts there. The single pick can then
+  be a member the set leaves out (an IPv6-only LAN beside a tunnel holding a
+  private IPv4, or awdl0 beside an opted-in tunnel, since a non-tunnel
+  ranks first): `assertPickIsInTheSet` allows exactly that, a pick carrying
+  no IPv4 while a member does, because the responder answers over IPv6 too.
+  `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` and
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` drive both rules.
+- **The mDNS rebind loop compares the ADVERTISEMENT, never the host's
+  addresses** (2026-09-28). `maybeRebind` rebuilt the responder whenever
+  `ipsForAdvertise()`, every up interface's addresses, differed from the set
+  cached at the last rebuild, while the records carry only the pinned
+  interface's. So an address coming or going on another interface rebuilt
+  it with the same records on the same interface. Sampled at the loop's
+  cadence for 80 minutes: 21 such changes on dido, every one a docker veth
+  (a container starting or stopping), and 1 on the dev Mac, a new utun
+  coming up; the pick and its addresses changed 0 times on either.
+  Each tick now builds the advertisement a rebuild would make
+  (`advertisementNow`: the InterfaceSource's pick, and the addresses
+  narrowed to it, or all of them when nothing is pinned) and rebuilds only
+  when it is not `same` as the running one. **By name AND index**: an
+  adapter re-created under a new index has none of the old sockets' group
+  memberships. That asks the InterfaceSource every tick, where it was asked
+  only on a rebuild, so the responder follows a better interface as soon as
+  the picker names it, **and the source must not print per call**:
+  cmd/bridge's `lanInterfaceSource` prints a failed pick once per streak (a
+  host with no LAN-eligible interface would print a line a minute), and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne` requires the Config literal
+  to take it. The rebind tests pin the responder to the loopback interface,
+  which hashicorp/mdns binds on macOS and on Linux (measured).
 
 - **A folder's children sort by `RelativePath`, with `AbsolutePath` only
   as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`
@@ -4505,7 +4664,15 @@ its twin.** The top list is older, shorter, and read first.
   `*AnalysisSweepState`, and a field added to its `last` breakdown and never
   rendered leaves this guard green (measured on #992), so that breakdown is
   pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
-  executes the line that renders it.
+  executes the line that renders it. **A leaf the server sends as a KEY
+  for the console to word needs its wording pinned too**: the guard proves
+  `maintenance.orphanSidecarGCRefusal` is read, not that every value it
+  can take has words, so `TestEveryOrphanRefusalKindIsWorded` runs
+  `describeOrphanGCRefusal` under node for each
+  `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
+  comes back blank, `undefined` or `null` (what `console.log` prints for a
+  case that returns nothing), as its key, as the fallback, or in another
+  kind's words.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
@@ -5283,7 +5450,12 @@ its twin.** The top list is older, shorter, and read first.
   that merely NAME a helper, and one for the old `defer cancel()` shape misses
   the sites that never had one. (#944; extended to the in-process loops, and
   `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
-  five files missed a sixth site that the shape match found.)
+  five files missed a sixth site that the shape match found.) **It reads
+  every function in the test files, helpers included** (2026-09-28): it read
+  Test functions alone, so a launch factored into a helper went unaudited,
+  and two such helpers already existed. A serve test boots through
+  `bootServe` (main_test.go), which registers the drain itself; with that
+  drain deleted, the Test-only guard stayed green.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the

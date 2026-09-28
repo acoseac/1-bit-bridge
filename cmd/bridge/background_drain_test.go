@@ -7,7 +7,6 @@ import (
 	"go/token"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
@@ -146,10 +145,15 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 // fixture's teardown is ORDERED behind it, which is the `defer`
 // -beats-t.Cleanup trap drainLoopOnCleanup's docblock describes and no
 // AST shape can catch. It matches the `go func(){ defer close(ch) … }()`
-// form: a launch factored out into a fixture helper would not be seen,
-// which the floor cannot reveal either, since the thirteen that exist
-// would still satisfy it. Widen the match in the same change that adds
-// such a helper.
+// form in EVERY function of the package's test files, a helper as well as
+// a test: until 2026-09-28 it read Test functions only, so a launch
+// factored out into a fixture helper went unseen, and the floor could not
+// reveal it. That is the change that added bootServe (the boot every
+// `serve` test repeated), and two helpers already launched goroutines
+// unaudited then (runOneFingerprintPass, runOneSmartPlaylistPass; both
+// drain). A helper that launches must register the drain itself, which
+// is also where the drain's ordering against the caller's cleanups is
+// decided.
 func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -173,20 +177,21 @@ func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 		}
 		checked += auditBackgroundTestsIn(t, fset, path)
 	}
-	// Thirteen at the time of writing. Adding a drained test only raises
-	// this, so the floor never needs bumping — it trips when the count
-	// DROPS, which is the scan silently ceasing to match.
+	// Thirteen when written, all tests; 45 on 2026-09-28, when helpers
+	// joined (42 tests and three helpers). Adding a drained launch only
+	// raises this, so the floor never needs bumping — it trips when the
+	// count DROPS, which is the scan silently ceasing to match.
 	if checked < 13 {
-		t.Fatalf("matched %d test(s) starting a drainable goroutine, want at least 13 — "+
+		t.Fatalf("matched %d function(s) starting a drainable goroutine, want at least 13 — "+
 			"the scan has stopped matching what it is meant to match", checked)
 	}
 }
 
-// auditBackgroundTestsIn reports how many tests in one file start a
-// drainable goroutine, and errors for each that does so without
-// registering a drain. Split out from the test body to keep the nesting
-// shallow (SonarCloud go:S3776 on PR #944); the count it returns is what
-// feeds the floor.
+// auditBackgroundTestsIn reports how many functions in one file, tests and
+// the helpers they call alike, start a drainable goroutine, and errors for
+// each that does so without registering a drain. Split out from the test
+// body to keep the nesting shallow (SonarCloud go:S3776 on PR #944); the
+// count it returns is what feeds the floor.
 func auditBackgroundTestsIn(t *testing.T, fset *token.FileSet, path string) int {
 	t.Helper()
 	f, err := parser.ParseFile(fset, path, nil, 0)
@@ -196,7 +201,7 @@ func auditBackgroundTestsIn(t *testing.T, fset *token.FileSet, path string) int 
 	matched := 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+		if !ok || fn.Body == nil {
 			continue
 		}
 		if !launchesADrainableGoroutine(fn.Body) {

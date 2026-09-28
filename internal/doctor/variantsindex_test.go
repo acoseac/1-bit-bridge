@@ -115,10 +115,35 @@ func TestVariantsIndexScopesATruncatedWalk(t *testing.T) {
 // from every count, so the counts are about part of the tree.
 func TestVariantsIndexReportsAnUnreadableDirectory(t *testing.T) {
 	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
-		return VariantsIndex{Rows: 10, Files: 10, Known: 10, Unreadable: 3}, nil
+		return VariantsIndex{Rows: 10, Files: 10, Known: 10, Unreadable: 3, UnlistedDirs: 3}, nil
 	}})
 	if !strings.Contains(c.Summary, "3 director(y/ies) could not be read") {
 		t.Errorf("summary hides that the walk could not see part of the tree: %q", c.Summary)
+	}
+}
+
+// TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve — Unreadable is a
+// count of ENTRIES: a directory the walk could not list and a link it
+// could not stat. The summary called them all directories until
+// 2026-09-28, the wording #969 had already corrected in both CLI sweeps;
+// a link the walk could not follow is not a directory to go and chmod.
+func TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 10, Files: 10, Known: 10, Unreadable: 3, UnlistedDirs: 1, GCRefusesPartialWalk: true}, nil
+	}})
+	for _, want := range []string{"1 director(y/ies) could not be read", "2 link(s) could not be resolved"} {
+		if !strings.Contains(c.Summary, want) {
+			t.Errorf("summary does not say %q: %q", want, c.Summary)
+		}
+	}
+	links := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 10, Files: 10, Known: 10, Unreadable: 2}, nil
+	}})
+	if links.Status != Warn || strings.Contains(links.Summary, "director") {
+		t.Errorf("two links the walk could not stat: status %v, summary %q, want a warn naming no directory", links.Status, links.Summary)
+	}
+	if !strings.Contains(links.Hint, "A link under the variants directory could not be resolved") {
+		t.Errorf("the hint sends the operator to a directory for a link: %q", links.Hint)
 	}
 }
 
@@ -243,15 +268,22 @@ func TestVariantsIndexWillNotGuessTheSweepsVerdictFromAPartialWalk(t *testing.T)
 // over part of the tree. The lower bound survives it (hiding entries can
 // only lower `orphans`, and `rows` is the whole catalog either way); the
 // verdict does not. (CodeRabbit on #940.)
+//
+// What `--gc` does with such a walk IS known, though, and the hint says
+// so: since 2026-09-28 it refuses a walk that could not list part of the
+// tree, where this hint had told the operator that `--gc` "measures the
+// whole tree", which the same directory made false.
 func TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory(t *testing.T) {
 	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
 		return VariantsIndex{
 			Rows: 200, Files: 9000, Known: 200, Orphans: 8800,
-			Unreadable: 2, // the probe withholds WouldRefuseGC for this
-			// ...while the monotone half stays assertable.
-			OrphansExceedRows: true,
-			OrphanSample:      []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
-			VariantsDir:       "/srv/bridge-variants",
+			Unreadable: 2, UnlistedDirs: 2, // the probe withholds WouldRefuseGC for this
+			// ...while the monotone half stays assertable, and so does the
+			// partial-walk refusal.
+			OrphansExceedRows:    true,
+			GCRefusesPartialWalk: true,
+			OrphanSample:         []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
+			VariantsDir:          "/srv/bridge-variants",
 		}, nil
 	}})
 	if c.Status != Warn {
@@ -263,13 +295,15 @@ func TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory(t *t
 	if !strings.Contains(c.Hint, "LOST INDEX") {
 		t.Errorf("the monotone warning was dropped with the verdict: %q", c.Hint)
 	}
-	for _, forbidden := range []string{"REFUSES", "reclaims them"} {
+	for _, forbidden := range []string{"REFUSES", "reclaims them", "whole tree and unlinks"} {
 		if strings.Contains(c.Hint, forbidden) {
 			t.Errorf("a definite %q was claimed over a tree the walk could not fully read: %q", forbidden, c.Hint)
 		}
 	}
-	if !strings.Contains(c.Hint, "cannot be told from a partial walk") {
-		t.Errorf("hint does not say the verdict is out of reach: %q", c.Hint)
+	for _, want := range []string{"refuses to act on a walk that could not list part of the tree", "--allow-partial-walk"} {
+		if !strings.Contains(c.Hint, want) {
+			t.Errorf("hint does not say what `--gc` does with such a walk (%q): %q", want, c.Hint)
+		}
 	}
 }
 
@@ -284,7 +318,8 @@ func TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory(t *t
 // hold, since only a FAIL does that.)
 func TestVariantsIndexWarnsWhenItCouldNotReadPartOfTheTree(t *testing.T) {
 	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
-		return VariantsIndex{Rows: 500, Files: 500, Known: 500, Unreadable: 1, VariantsDir: "/srv/bridge-variants"}, nil
+		return VariantsIndex{Rows: 500, Files: 500, Known: 500, Unreadable: 1, UnlistedDirs: 1,
+			GCRefusesPartialWalk: true, VariantsDir: "/srv/bridge-variants"}, nil
 	}})
 	if c.Status != Warn {
 		t.Fatalf("status=%v, want warn — a clean result was claimed over a tree part of which could not be read", c.Status)
@@ -297,5 +332,10 @@ func TestVariantsIndexWarnsWhenItCouldNotReadPartOfTheTree(t *testing.T) {
 	}
 	if !strings.Contains(c.Hint, "ownership and mode") {
 		t.Errorf("hint gives the operator nothing to do: %q", c.Hint)
+	}
+	// ...and says what the sweeps do meanwhile, which is nothing: both
+	// refuse a walk that could not list part of the tree.
+	if !strings.Contains(c.Hint, "refuse to act on a walk that could not list part of the tree") {
+		t.Errorf("hint does not say the sweeps refuse such a walk: %q", c.Hint)
 	}
 }
