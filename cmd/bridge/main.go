@@ -4831,49 +4831,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			st := upscalePool.Stats()
 			return st.Inflight > 0 || st.QueueLen > 0
 		},
-		// Library Inspector projection closures (v1.3). Wired
-		// to nil when upscale is disabled so the admin
-		// projection handler's existing `nil` check fires (503
-		// `upscale-disabled`). The prior shape wired non-nil
-		// closures that returned an error string — admin
-		// handler then surfaced 500 `disk-probe` instead of
-		// 503. Per CodeRabbit major on PR #203 round 2.
-		ProjectedSize: func() func(int64, int, int, int, int) int64 {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
-				return nil
-			}
-			return func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
-				return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
-					targetRate, targetBits,
-					transcode.DefaultCompressionFactor(targetBits))
-			}
-		}(),
-		AvailableDiskSpace: func() func(string) (int64, error) {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
-				return nil
-			}
-			// Nearest-existing-ancestor probe: the variants dir is
-			// created lazily, so a bare statfs on it would ENOENT
-			// before the first sidecar lands.
-			return transcode.AvailableDiskSpaceNearest
-		}(),
-		// CarPlay-optimize deps closures. Gated on BOTH
-		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()` so
-		// the projection endpoint surfaces 503 in lockstep with
-		// the api.Server's `WithCarPlayOptimize(upscaleActive
-		// && cfg.Upscale.EffectiveOptimizeEnabled())` advertisement
-		// (line ~1543 above). Pre-fix gated on Upscale.Enabled
-		// alone, so a bridge with optimize explicitly DISABLED in
-		// the config would still serve `?kind=optimize` projection
-		// data — divergent from what /v1/health advertises and
-		// from what POST /v1/upscale (kind=optimize) accepts. Per
-		// CodeRabbit major on PR #276.
-		// WIRED vs ACTIVE, split. These two closures now answer only "is
-		// the feature wired on this bridge" — the pool exists, which is a
-		// boot fact and cannot change — while OptimizeActive below carries
-		// the operator's toggle and is read live.
+		// The projection endpoint's two helpers, WIRED on every bridge.
+		// Whether the endpoint may answer is the live upscale gate's
+		// question (UpscaleActive below, which the handler reads per
+		// request), and free space is a fact about the disk, which the
+		// variants-dir panel reports whether upscaling is on or not.
+		// Until 2026-09-28 both were closures called ONCE, here, that
+		// answered nil when `upscale.enabled` was false at that moment,
+		// and the handler's nil check was its whole gate: 503 after the
+		// Settings PATCH that switched upscaling on and reported it
+		// `live`, until a restart; projections after the PATCH that
+		// switched it off; and "0 B free" on the panel of every bridge
+		// booted with upscaling off.
+		ProjectedSize: func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+			return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
+				targetRate, targetBits,
+				transcode.DefaultCompressionFactor(targetBits))
+		},
+		// Nearest-existing-ancestor probe: the variants dir is created
+		// lazily, so a bare statfs on it would ENOENT before the first
+		// sidecar lands.
+		AvailableDiskSpace: transcode.AvailableDiskSpaceNearest,
+		// CarPlay-optimize deps closures, WIRED vs ACTIVE split. These two
+		// answer only "is the feature wired on this bridge" — the pool
+		// exists, which is a boot fact and cannot change — while
+		// OptimizeActive below carries the operator's toggle and is read
+		// live. (PR #276 had gated them, at construction, on
+		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()`, so that the
+		// projection endpoint's optimize kind answered 503 in lockstep
+		// with /v1/health's carPlayOptimize; before that a bridge with
+		// optimize DISABLED still served `?kind=optimize` projections.)
 		//
 		// Before the split both questions were folded into whether these
 		// were nil, evaluated ONCE at Deps construction. That is what made
@@ -4894,10 +4881,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return transcode.TargetRateForOptimize
 		}(),
-		// The LIVE upscale gate for POST /api/upscale/batch: the same
-		// closure WithUpscale hands the /v1 server, so the console refuses
-		// a batch exactly when /v1/health reports `upscaleEnabled: false`.
-		// BatchCoordinator below cannot say this; it is always wired.
+		// The LIVE upscale gate for POST /api/upscale/batch and GET
+		// /api/library/browse-projection: the same closure WithUpscale
+		// hands the /v1 server, so the console refuses a batch, and a
+		// projection, exactly when /v1/health reports
+		// `upscaleEnabled: false`. BatchCoordinator below cannot say this,
+		// nor can ProjectedSize above; both are always wired.
 		UpscaleActive: upscaleActiveFn,
 		OptimizeActive: func() bool {
 			live := liveCfg()

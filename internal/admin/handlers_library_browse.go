@@ -624,12 +624,19 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
-	if s.deps.ProjectedSize == nil || s.deps.AvailableDiskSpace == nil {
-		// Closures not wired (test harness, or upscale feature off
-		// at boot). Surface a clean 503 rather than a typed-nil
-		// panic so test harnesses can be parsed.
-		writeError(w, http.StatusServiceUnavailable, "upscale-disabled",
-			"upscale feature is not configured on this bridge")
+	// The live upscale gate, read per request: the closure the /v1 server
+	// and the batch submit read (Deps.UpscaleActive), so this endpoint and
+	// /v1/health cannot disagree about whether the feature is on, and a
+	// Settings flip applies to the next request. It comes before the
+	// target read, the projection walk and the disk probe, and applies to
+	// every kind. The nil closures are a harness that wired nothing;
+	// cmd/bridge wires both on every bridge. Until 2026-09-28 cmd/bridge
+	// wired them only when `upscale.enabled` was true at boot and this
+	// nil check was the gate: 503 after the feature was switched on, until
+	// a restart, and projections after it was switched off.
+	if s.deps.ProjectedSize == nil || s.deps.AvailableDiskSpace == nil || !s.upscaleActive() {
+		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+			errMsgUpscalingNotEnabled)
 		return
 	}
 
