@@ -33,6 +33,26 @@ func dialLoopbackSender(t *testing.T) *net.UDPConn {
 	return sender
 }
 
+// dialLoopbackSink is a sender like Start's, dialled at a UDP socket the test
+// holds open on loopback. A write that fits goes out: from dialLoopbackSender
+// it can fail, since nothing listens on the discard port and the ICMP
+// port-unreachable an earlier write drew fails a later one with
+// "connection refused" (one run in a few under -race).
+func dialLoopbackSink(t *testing.T) *net.UDPConn {
+	t.Helper()
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Skipf("cannot bind a loopback UDP socket in this environment: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	sender, err := net.DialUDP("udp4", nil, sink.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial the loopback sink: %v", err)
+	}
+	t.Cleanup(func() { _ = sender.Close() })
+	return sender
+}
+
 // Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause pins
 // the periodic burst's side of the M-SEARCH rule: Stop closes the sender,
 // and a burst the periodic goroutine had begun then meets net.ErrClosed on
@@ -88,7 +108,7 @@ func Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak(t *testin
 		t.Fatalf("the streak escalated inside its first burst, which counted writes, not bursts:\n%s", buf.String())
 	}
 
-	sender := dialLoopbackSender(t)
+	sender := dialLoopbackSink(t)
 	a.announceAlive(sender)
 	const escalation = "NOTIFY send failing persistently; DLNA advertising is degraded"
 	if got := strings.Count(buf.String(), escalation); got != 1 {
