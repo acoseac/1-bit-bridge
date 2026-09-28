@@ -335,7 +335,7 @@ func TestDefaultClientDialCheck(t *testing.T) {
 		if tc.source != "" {
 			ctx = WithAnnouncementSource(ctx, udpFrom(tc.source))
 		}
-		err := refuseUnannouncedHostLocal(ctx, "tcp4", tc.address, nil)
+		err := refuseUnapprovedHostLocal(ctx, "tcp4", tc.address, nil)
 		if got := err == nil; got != tc.allowed {
 			t.Errorf("source %q, connect to %s: allowed = %v (err %v), want %v",
 				tc.source, tc.address, got, err, tc.allowed)

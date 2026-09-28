@@ -8,6 +8,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 )
@@ -159,25 +160,30 @@ func TestResolveControlURLResolvesAManualServer(t *testing.T) {
 	// Before the poller has answered, a miss is honest: the ingest
 	// reports "has not answered yet" rather than claiming the feature is
 	// missing.
-	if got, err := r.ResolveControlURL(context.Background(), srv); err != nil || got != "" {
+	if got, _, err := r.ResolveControlURL(context.Background(), srv); err != nil || got != "" {
 		t.Fatalf("cold cache: got %q err=%v; want an empty resolution", got, err)
 	}
 
+	chosen := discovery.OperatorChose(srv.ManualDescriptionURL)
 	cache.Upsert(upnp.ServerInfo{
 		UDN:                        key,
 		FriendlyName:               "Cellar",
 		ContentDirectoryControlURL: "http://192.168.0.62:8200/ctl/ContentDir",
 		DescriptionURL:             srv.ManualDescriptionURL,
 		DeviceUDN:                  "uuid:cellar",
+		DialApproval:               chosen,
 		LastSeenAt:                 time.Now(),
 	})
 
-	got, err := r.ResolveControlURL(context.Background(), srv)
+	got, approval, err := r.ResolveControlURL(context.Background(), srv)
 	if err != nil {
 		t.Fatalf("ResolveControlURL: %v", err)
 	}
 	if got != "http://192.168.0.62:8200/ctl/ContentDir" {
 		t.Errorf("ResolveControlURL = %q, want the cached control URL", got)
+	}
+	if approval != chosen {
+		t.Errorf("approval = %+v, want the cached entry's %+v", approval, chosen)
 	}
 
 	// The device's OWN udn must not resolve it — nothing keys on that.
@@ -198,7 +204,7 @@ func TestLiveHostResolvesAManualServer(t *testing.T) {
 		LastSeenAt:                 time.Now(),
 	})
 	h := &serverCacheHostResolver{cache: cache}
-	got, ok := h.LiveHost(key)
+	got, _, ok := h.LiveHost(key)
 	if !ok {
 		t.Fatal("LiveHost missed a manual server; playback would 503 with no fallback")
 	}

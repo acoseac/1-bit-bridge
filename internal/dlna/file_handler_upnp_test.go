@@ -3,11 +3,13 @@ package dlna
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
@@ -29,11 +31,14 @@ func (s *stubRoutingLookup) GetUPnPRouting(_ context.Context, p string) (*manife
 
 type stubHostResolver struct{ host string }
 
-func (s *stubHostResolver) LiveHost(_ string) (string, bool) {
+// LiveHost answers with the approval of a server announcing from
+// 127.0.0.1, where every stub upstream here listens: the device dial check
+// then lets the proxy reach it (internal/upnpproxy pins the refusal).
+func (s *stubHostResolver) LiveHost(_ string) (string, discovery.DialApproval, bool) {
 	if s.host == "" {
-		return "", false
+		return "", discovery.DialApproval{}, false
 	}
-	return s.host, true
+	return s.host, discovery.AnnouncedFrom(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}), true
 }
 
 // The Test_FileHandler_UPnPRoutedTrack_* tests below assert the

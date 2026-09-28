@@ -49,6 +49,18 @@ package discovery
 // service URL, for every source: one naming this machine or a link-local
 // address is kept only from a description URL of the same kind, which is
 // what bounds the operator's approval of a manual upstream (SourceUserChosen).
+//
+// A URL checked once is dialled many times, and a NAME in it is resolved
+// again at every dial (backlog B36, 2026-09-28): the upstream ingest's SOAP
+// Browse and every byte fetch internal/upnpproxy makes for a routed track
+// dial the cached ContentDirectory control URL's host for as long as it is
+// cached. A peer that passed discovery with a name resolving to its own LAN
+// address could answer 127.0.0.1 for it later, and both requests then
+// reached the bridge's console (measured: the proxy relayed the console's
+// 200). So what approved a local connect travels with the URL
+// (DialApproval: the announcing packet's address, or the kind of host the
+// operator's URL named) and every request to a device goes through the same
+// dial check (NewDeviceTransport).
 
 import (
 	"context"
@@ -59,6 +71,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -116,7 +129,7 @@ type hostKind int
 const (
 	// hostElsewhere is an address on the LAN, a tailnet or the internet, or
 	// a name the string cannot place. A name that resolves to this machine
-	// is the dial check's (refuseUnannouncedHostLocal), not this one's.
+	// is the dial check's (refuseUnapprovedHostLocal), not this one's.
 	hostElsewhere hostKind = iota
 	// hostThisMachine is a loopback or unspecified address (a connect to
 	// either reaches this machine), or a localhost name (RFC 6761).
@@ -139,13 +152,7 @@ func classifyHost(host string) (hostKind, netip.Addr) {
 	h := strings.TrimSuffix(host, ".")
 	if a, err := netip.ParseAddr(h); err == nil {
 		a = a.Unmap()
-		switch {
-		case a.IsLoopback() || a.IsUnspecified():
-			return hostThisMachine, a
-		case a.IsLinkLocalUnicast():
-			return hostLinkLocal, a
-		}
-		return hostElsewhere, a
+		return addrKind(a), a
 	}
 	lower := strings.ToLower(h)
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
@@ -156,6 +163,22 @@ func classifyHost(host string) (hostKind, netip.Addr) {
 		return hostNumericSpelling, netip.Addr{}
 	}
 	return hostElsewhere, netip.Addr{}
+}
+
+// addrKind is the kind of an address, which must be unmapped: this machine
+// for a loopback or unspecified address (a connect to either reaches this
+// machine), link-local for an IPv4 or IPv6 link-local unicast address, and
+// elsewhere for any other. classifyHost asks it about an IP literal in a URL
+// and the dial check about the address a connect targets, so the string and
+// the connect judge an address by one rule.
+func addrKind(a netip.Addr) hostKind {
+	switch {
+	case a.IsLoopback() || a.IsUnspecified():
+		return hostThisMachine
+	case a.IsLinkLocalUnicast():
+		return hostLinkLocal
+	}
+	return hostElsewhere
 }
 
 // endsInANumber reports whether a host's last label is a number the WHATWG
@@ -346,73 +369,190 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 	return location
 }
 
-// announcementSourceKey carries the SSDP packet's source address in the
-// context of the fetches it causes, for the dial check.
-type announcementSourceKey struct{}
-
-// WithAnnouncementSource returns ctx carrying src, the address of the SSDP
-// packet whose LOCATION a fetch follows. NewDeviceFetchClient's dial check
-// connects to this machine or a link-local address only when it is that
-// address. Both SSDP clients wrap every fetch a packet causes (the
-// description, and a renderer's GetProtocolInfo) in it.
-func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
-	return context.WithValue(ctx, announcementSourceKey{}, announcerAddr(src))
+// DialApproval is what lets a request the bridge sends a UPnP device connect
+// to this machine or a link-local address. The dial check
+// (refuseUnapprovedHostLocal, in every NewDeviceTransport) refuses such a
+// connect unless the request's context carries an approval that covers it
+// (WithDialApproval). The zero DialApproval covers neither kind, so a
+// request that carries none reaches other hosts only.
+//
+// Two things approve such a connect, the same two that let a device's URL
+// name such an address at all:
+//
+//   - AnnouncedFrom: the SSDP packet the URL came from was sent from that
+//     very address. It approves that address and no other, and never the
+//     unspecified address, which is no packet's source.
+//   - OperatorChose: the operator configured a URL whose host names this
+//     machine or a link-local address. It approves every address of that
+//     kind, as resolveServiceURL keeps a service URL of that kind from such
+//     a description.
+//
+// A URL is checked when it is found and dialled for as long as it is cached,
+// and a name in it resolves again at every dial. So the approval is recorded
+// beside the URL it came with (internal/upnp's ServerInfo.DialApproval) and
+// carried to every later request that dials it: the ingest's SOAP Browse and
+// every byte fetch of a routed track. Comparable, so a cache can store it and
+// a test can compare it.
+type DialApproval struct {
+	// source is the announcing packet's address, unmapped and without a
+	// zone, or the zero Addr for an approval that came from no packet.
+	source netip.Addr
+	// chosen is the kind of host an operator's URL named: hostThisMachine
+	// or hostLinkLocal, or hostElsewhere (the zero value) when it named
+	// neither.
+	chosen hostKind
 }
 
-// errUnannouncedHostLocal is the dial check's refusal.
-var errUnannouncedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
-	"on the say-so of an SSDP packet from another address")
+// AnnouncedFrom is the approval an SSDP packet from src gives the URLs it
+// leads to: a connect to this machine or a link-local address at src's own
+// address only. A nil src, or one that holds no address, approves none.
+func AnnouncedFrom(src *net.UDPAddr) DialApproval {
+	return DialApproval{source: announcerAddr(src)}
+}
 
-// refuseUnannouncedHostLocal is NewDeviceFetchClient's net.Dialer
-// ControlContext. net passes it the address each connect attempt targets,
-// after name resolution (every A and AAAA answer is its own attempt), so it
-// judges what a name RESOLVED to, which no check of the URL can: a public DNS
-// name pointed at 127.0.0.1, a rebinding answer, macOS's inet_aton spellings.
-// A loopback or link-local address is allowed only when it is the address
-// the request's context says the SSDP packet came from; the unspecified
-// address and an address that does not parse, never. The resolver's own
-// connects to a DNS server do not come through here (net's Resolver dials
-// with a Dialer of its own), so a stub resolver on 127.0.0.53 keeps working.
-func refuseUnannouncedHostLocal(ctx context.Context, _, address string, _ syscall.RawConn) error {
+// OperatorChose is the approval the operator's configured URL gives a manual
+// upstream (upnpUpstream.servers[].manualDescriptionURL): a connect to any
+// address of the kind its host names when that is this machine or a
+// link-local address, and to neither otherwise. A NAME approves no such
+// address, whatever it resolves to: the operator chose the name, not an
+// answer for it that another host on the LAN can give (anyone can answer an
+// mDNS query), and a name answered with 127.0.0.1 at a later dial is exactly
+// the rebinding the check exists for. So a manual upstream on this machine
+// keeps its local services when its URL names localhost or a loopback
+// address, and not when it names this host by its host name.
+func OperatorChose(rawURL string) DialApproval {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return DialApproval{}
+	}
+	switch kind, _ := classifyHost(u.Hostname()); kind {
+	case hostThisMachine, hostLinkLocal:
+		return DialApproval{chosen: kind}
+	}
+	return DialApproval{}
+}
+
+// permits reports whether the approval lets a connect reach a, the address a
+// dial resolved to: always for an address elsewhere; and for this machine or
+// a link-local address when an operator's URL named that kind of host, or
+// when a is the announcing packet's own address (never the unspecified
+// address).
+func (d DialApproval) permits(a netip.Addr) bool {
+	a = a.Unmap()
+	if hostKindAllowed(addrKind(a), d.chosen) {
+		return true
+	}
+	return !a.IsUnspecified() && d.source.IsValid() && a.WithZone("") == d.source
+}
+
+// dialApprovalKey carries a request's DialApproval in its context, for the
+// dial check.
+type dialApprovalKey struct{}
+
+// WithDialApproval returns ctx carrying a, the approval of the URL a request
+// is sent to. The dial check of every NewDeviceTransport reads it at each
+// connect.
+func WithDialApproval(ctx context.Context, a DialApproval) context.Context {
+	return context.WithValue(ctx, dialApprovalKey{}, a)
+}
+
+// WithAnnouncementSource returns ctx carrying AnnouncedFrom(src): the
+// approval of the SSDP packet from src whose LOCATION a fetch follows. Both
+// SSDP clients wrap every fetch a packet causes (the description, and a
+// renderer's GetProtocolInfo) in it.
+func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
+	return WithDialApproval(ctx, AnnouncedFrom(src))
+}
+
+// errUnapprovedHostLocal is the dial check's refusal.
+var errUnapprovedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
+	"that neither the SSDP packet the URL came from nor the operator's configured URL named")
+
+// refuseUnapprovedHostLocal is the ControlContext of every NewDeviceTransport
+// dialer. net passes it the address each connect attempt targets, after name
+// resolution (every A and AAAA answer is its own attempt), so it judges what
+// a name RESOLVED to, which no check of the URL can: a public DNS name
+// pointed at 127.0.0.1, a rebinding answer, macOS's inet_aton spellings. A
+// loopback, unspecified or link-local address is allowed only when the
+// DialApproval in the request's context permits it; an address that does
+// not parse, never. The resolver's own connects to a DNS server do not come
+// through here (net's Resolver dials with a Dialer of its own), so a stub
+// resolver on 127.0.0.53 keeps working.
+func refuseUnapprovedHostLocal(ctx context.Context, _, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return fmt.Errorf("discovery dial check: %q: %w", address, err)
+		return fmt.Errorf("device dial check: %q: %w", address, err)
 	}
-	a := ap.Addr().Unmap()
-	if !a.IsLoopback() && !a.IsUnspecified() && !a.IsLinkLocalUnicast() {
+	approval, _ := ctx.Value(dialApprovalKey{}).(DialApproval)
+	if approval.permits(ap.Addr()) {
 		return nil
 	}
-	from, _ := ctx.Value(announcementSourceKey{}).(netip.Addr)
-	if a.IsUnspecified() || !from.IsValid() || a.WithZone("") != from {
-		return errUnannouncedHostLocal
-	}
-	return nil
+	return errUnapprovedHostLocal
 }
 
-// NewDeviceFetchClient returns the http.Client both SSDP discovery clients
-// fetch an announced device with, when their config names no Dispatcher
-// (cmd/bridge names none). It follows no redirect (a 3xx comes back as
-// itself, so a device cannot redirect the bridge anywhere), and every connect
-// goes through refuseUnannouncedHostLocal. Three transport settings keep
-// that check whole: no proxy, since through one the connect goes to the
-// proxy and the check would judge the proxy's address (and refuse every
-// fetch on a host whose HTTP_PROXY is on 127.0.0.1), while a LOCATION names
-// a device on the link the packet arrived on, which a proxy cannot stand in
-// for; no kept-alive connections, so a request never reuses a connection
-// that another packet's source allowed; and no TLS dialer of its own, which
-// would connect around the check. A manual upstream is fetched with a client
-// of its own (internal/upnp's ManualPoller): its URL is the operator's
-// choice, and pointing it at this machine is legitimate.
-func NewDeviceFetchClient(timeout time.Duration) *http.Client {
-	dialer := &net.Dialer{ControlContext: refuseUnannouncedHostLocal}
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy:               nil,
-			DialContext:         dialer.DialContext,
-			DisableKeepAlives:   true,
-			TLSHandshakeTimeout: 10 * time.Second,
+// resolverForTest, when set, is the resolver every NewDeviceTransport dial
+// resolves a name with, in place of net.DefaultResolver. Only
+// UseResolverForTest sets it.
+var resolverForTest atomic.Pointer[net.Resolver]
+
+// UseResolverForTest makes every dial through a NewDeviceTransport resolve
+// names with r, until the returned function restores the resolver in place
+// before. Tests only, and production code must never call it: it lets a test
+// make a name answer one address and then another (internal/dnstest)
+// without replacing net.DefaultResolver, which any goroutine in the process
+// reads with no synchronisation.
+func UseResolverForTest(r *net.Resolver) (restore func()) {
+	prev := resolverForTest.Swap(r)
+	return func() { resolverForTest.Store(prev) }
+}
+
+// NewDeviceTransport returns the http.Transport for every request the bridge
+// sends a UPnP device, at a URL a device or the operator's configuration
+// supplied: the discovery clients' description and GetProtocolInfo fetches
+// (NewDeviceFetchClient), the upstream ingest's SOAP Browse, and every byte
+// fetch internal/upnpproxy makes for a routed track. d is the dialer
+// template (timeouts, TCP keep-alive), and its ControlContext is replaced by
+// the dial check, which judges every connect against the DialApproval the
+// request's context carries.
+//
+// Three settings keep that check whole, and a caller must not undo them. No
+// proxy: through one the connect goes to the proxy, so the check would judge
+// the proxy's address (and refuse every request on a host whose HTTP_PROXY
+// is on 127.0.0.1), while a device is on the link, which a proxy cannot stand
+// in for. No kept-alive connections: net/http can hand a connection it
+// dialed for one request to another (a dial finishing after its request
+// found another connection goes to the idle pool), so a request could use a
+// connection another request's approval allowed. And no TLS dialer of its
+// own, which would connect around the check.
+func NewDeviceTransport(d net.Dialer) *http.Transport {
+	d.ControlContext = refuseUnapprovedHostLocal
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if r := resolverForTest.Load(); r != nil {
+				withResolver := d
+				withResolver.Resolver = r
+				return withResolver.DialContext(ctx, network, address)
+			}
+			return d.DialContext(ctx, network, address)
 		},
+		DisableKeepAlives:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+}
+
+// NewDeviceFetchClient returns an http.Client over NewDeviceTransport that
+// follows no redirect (a 3xx comes back as itself, so a device cannot
+// redirect the bridge anywhere), with timeout bounding each request. Both
+// SSDP discovery clients fetch an announced device with it when their config
+// names no Dispatcher (cmd/bridge names none), and the upstream ingest sends
+// its SOAP with it. A manual upstream's description is fetched with a client
+// of its own (internal/upnp's ManualPoller), without the dial check: its URL
+// is the operator's choice, and a URL on this machine is legitimate there.
+func NewDeviceFetchClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: NewDeviceTransport(net.Dialer{}),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

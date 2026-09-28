@@ -17,14 +17,16 @@ import (
 	"testing"
 	"time"
 
+	"tailscale.com/ipn/ipnstate"
+
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/sqlitetest"
 	servertailscale "github.com/acoseac/1-bit-bridge/internal/tailscale"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
-	"tailscale.com/ipn/ipnstate"
 )
 
 // runServe's own goroutines run on the serve ctx: the tsnet start and its
@@ -342,8 +344,8 @@ func (c *cancellingSOAP) Do(ctx context.Context, _ *http.Request) (*http.Respons
 // cancelTestResolver always resolves the configured server.
 type cancelTestResolver struct{}
 
-func (cancelTestResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, error) {
-	return "http://192.0.2.1:8200/ctl/ContentDir", nil
+func (cancelTestResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
+	return "http://192.0.2.1:8200/ctl/ContentDir", discovery.DialApproval{}, nil
 }
 
 // newCancelTestIngester builds an ingester over doer for cancelTestServer.
