@@ -341,7 +341,7 @@ func TestRunAnalyzeGCKeepsARelocatedWaveform(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, newWaveforms, false, false); rc != 0 {
+	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, newWaveforms, analyzeGCOptions{}); rc != 0 {
 		t.Fatalf("runAnalyzeGC rc=%d\nstderr: %s", rc, stderr.String())
 	}
 	if _, err := os.Stat(canonical); err != nil {

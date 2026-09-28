@@ -611,7 +611,7 @@ func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testin
 	requireTicksUnlinkNothing(t, s, 2, "the walk could not read part of the tree")
 	requireLinesSay(t, rec.Failures(msgOrphanPartialWalk), 1,
 		"the partial-walk WARN, once for two ticks, naming what the walk could not read and what it counted",
-		"could not read 1 entr(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
+		"could not list 1 director(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
 	requireLinesSay(t, rec.Lines(msgOrphanRefusal), 0,
 		"the part the walk saw passes the mass-orphan check, so no lost-index WARN")
 	requireLinesSay(t, rec.Lines(msgOrphanTickComplete), 2,

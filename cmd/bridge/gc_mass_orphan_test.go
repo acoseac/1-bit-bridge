@@ -219,7 +219,7 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 	writeFixtureFile(t, scratch, 3)
 
 	var stdout, stderr bytes.Buffer
-	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, false, false); rc == 0 {
+	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, analyzeGCOptions{}); rc == 0 {
 		t.Fatalf("analyze --gc swept a tree the catalog no longer describes\nstderr: %s", stderr.String())
 	}
 	for _, p := range stranded {
@@ -238,7 +238,7 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, false, true); rc != 0 {
+	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, analyzeGCOptions{allowMassOrphans: true}); rc != 0 {
 		t.Fatalf("analyze --gc --allow-mass-orphans rc=%d\nstderr: %s", rc, stderr.String())
 	}
 	for _, p := range stranded {
@@ -260,11 +260,22 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 //
 // `artwork --gc` is deliberately out of scope and asserted so below.
 func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) {
+	requireForwardSweepGCOverride(t, "allow-mass-orphans")
+}
+
+// requireForwardSweepGCOverride fails the test for every command in this
+// package that declares `--gc` without declaring flag, except `artwork
+// --gc`, which must NOT declare it: artwork is cached from the network and
+// keyed by content / MBID, takes no sidecar inventory, and makes none of
+// the forward sweeps' verdicts. One body for each forward-sweep override,
+// so a new one gets the same scan, exemption and floors.
+func requireForwardSweepGCOverride(t *testing.T, flag string) {
+	t.Helper()
 	// Anchored on the declaration, not on prose: stripGoComments would
 	// blank these string literals, so the scan is raw and a `--gc`
 	// mentioned in a docblock cannot satisfy `fs.Bool("gc"`.
 	gcRe := regexp.MustCompile(`fs\.Bool\("gc"`)
-	allowRe := regexp.MustCompile(`fs\.Bool\("allow-mass-orphans"`)
+	allowRe := regexp.MustCompile(`fs\.Bool\("` + regexp.QuoteMeta(flag) + `"`)
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -294,13 +305,13 @@ func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) 
 			// Named explicitly so a later reader sees a decision rather
 			// than an omission.
 			if allowRe.MatchString(src) {
-				t.Errorf("artwork.go grew --allow-mass-orphans; if that is deliberate, move it out of this exemption")
+				t.Errorf("artwork.go grew --%s; if that is deliberate, move it out of this exemption", flag)
 			}
 			continue
 		}
 		if !allowRe.MatchString(src) {
-			t.Errorf("%s declares a sidecar --gc but not --allow-mass-orphans: an operator whose files "+
-				"really are junk gets a refusal with no way past it", name)
+			t.Errorf("%s declares a sidecar --gc but not --%s: a refusal of its forward sweep "+
+				"there has no way past it", name, flag)
 			continue
 		}
 		covered++
@@ -311,7 +322,7 @@ func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) 
 		t.Fatalf("scanned only %d --gc command(s); the anchor has drifted", checked)
 	}
 	if covered < 4 {
-		t.Fatalf("only %d command(s) carry the override; upscale / optimize / render / analyze all should", covered)
+		t.Fatalf("only %d command(s) carry --%s; upscale / optimize / render / analyze all should", covered, flag)
 	}
 }
 

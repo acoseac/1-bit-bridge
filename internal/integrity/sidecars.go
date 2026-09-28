@@ -3,7 +3,6 @@ package integrity
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -511,27 +510,29 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 
-	if reason := MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), s.maxOrphanPercent); reason != "" {
+	// The entries the walk could not stat are weighed as what they could
+	// be (MassOrphanRefusalFor): each is at most one file.
+	if reason := MassOrphanRefusalFor(inv, len(rows), s.maxOrphanPercent); reason != "" {
 		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanRefusal, reason, orphanRefusalHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
 	}
-	// A walk that could not read an entry (inv.Unreadable) refuses too
-	// (CodeRabbit on #1063). What it could not read is missing from every
-	// count, and a directory it could not list may hold any number of
-	// orphans, so the verdict above is about part of the tree and can
-	// proceed where the whole would refuse: a stranded tree whose larger
-	// half sits behind a directory the service user cannot list loses the
-	// half it can. Checked after the mass-orphan verdict, which keeps its
-	// own, more urgent, advice when the part the walk saw already refuses:
-	// the floor and orphans > rows only grow as more of the tree is seen.
-	// The cost falls on a variants directory that holds a directory the
-	// bridge's user may never list, a root-owned lost+found at the top of
-	// an ext4 volume mounted there being the ordinary one: that sweep
-	// reclaims nothing until it is readable, and says so once a day.
-	if inv.Unreadable > 0 {
-		reason := fmt.Sprintf("the walk could not read %d entr(y/ies), so its %d orphan(s) of %d file(s) "+
-			"against %d row(s) describe part of the tree", inv.Unreadable, inv.Orphans, inv.Files, len(rows))
+	// A walk that could not LIST a directory refuses too (CodeRabbit on
+	// #1063). What it could not list is missing from every count and may
+	// hold any number of orphans, so the verdict above is about part of the
+	// tree and can proceed where the whole would refuse: a stranded tree
+	// whose larger half sits behind a directory the service user cannot
+	// list loses the half it can. Checked after the mass-orphan verdict,
+	// which keeps its own, more urgent, advice when the part the walk saw
+	// already refuses: the floor and orphans > rows only grow as more of
+	// the tree is seen. The cost falls on a variants directory that holds
+	// a directory the bridge's user may never list: that sweep reclaims
+	// nothing until it is readable, and says so once a day. The ordinary
+	// case, a root-owned lost+found at the top of an ext4 volume mounted
+	// as the variants directory, is the filesystem's and not counted
+	// (isFilesystemLostFound); an entry the walk could not stat is
+	// bounded and was weighed above.
+	if reason := PartialWalkRefusal(inv, len(rows), s.maxOrphanPercent); reason != "" {
 		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanPartialWalk, reason, orphanPartialWalkHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
@@ -796,10 +797,11 @@ const orphanRefusalHint = "nothing was unlinked. A catalog this much smaller tha
 const orphanPartialWalkHint = "nothing was unlinked. The mass-orphan check weighs the whole tree, and a " +
 	"directory this walk could not list may hold any number of files it did not count, so a verdict on the " +
 	"part it saw could let through a tree the whole would refuse. Make everything under the variants " +
-	"directory readable by the user this bridge runs as: a root-owned lost+found at the top of an ext4 volume " +
-	"mounted there counts, and pointing the variants directory at a folder below the mount avoids it. " +
-	"`bridge doctor` (variants-index) reports the same entries. This sweep has no override; it logs this " +
-	"when it starts refusing and once a day while it keeps refusing."
+	"directory listable by the user this bridge runs as (root-owned directories left by a CLI run with sudo " +
+	"are the usual cause; the lost+found of an ext4 volume mounted AS the variants directory is the " +
+	"filesystem's and does not count, while one of a volume mounted further down does). `bridge doctor` " +
+	"(variants-index) reports the same directories. This sweep has no override; it logs this when it starts " +
+	"refusing and once a day while it keeps refusing."
 
 // The orphan sweep's refusal lines: the latched WARN of each kind, and the
 // Info line a tick logs when it proceeds after a streak of refusals.

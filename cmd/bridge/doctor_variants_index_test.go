@@ -324,3 +324,50 @@ func TestDoctorVariantsIndexClaimsNoVerdictFromATruncatedWalk(t *testing.T) {
 		t.Errorf("an unbounded walk withheld the verdict (truncated=%v wouldRefuse=%v)", idx.Truncated, idx.WouldRefuseGC)
 	}
 }
+
+// TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk drives the real
+// probe and check over a tree the walk cannot fully list: a directory of
+// stranded files locked from this user, beside the root-owned lost+found an
+// ext4 volume mounted as the variants directory carries. The locked
+// directory is the one counted (the lost+found is the filesystem's), the
+// ratio verdict is withheld for it, and the hint says what `--gc` will do,
+// which is refuse: it said `--gc` "measures the whole tree" until
+// 2026-09-28, false past a directory it could not list.
+func TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root lists any directory, so the walk would not be partial")
+	dir := t.TempDir()
+	cfgPath, variantsDir := variantsIndexInstall(t, dir, 20, 15)
+	for _, sub := range []string{"Locked", "lost+found"} {
+		writeFixtureFile(t, filepath.Join(variantsDir, sub, "a.flac.upscaled-v2-176400-24.flac"), 10)
+		locked := filepath.Join(variantsDir, sub)
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	}
+
+	idx, err := variantsIndexCounts(context.Background(), manifest.DefaultDBPath(filepath.Join(dir, "data")), variantsDir, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Unreadable != 1 || idx.UnlistedDirs != 1 || idx.WouldRefuseGC || !idx.GCRefusesPartialWalk {
+		t.Errorf("probe: unreadable=%d unlistedDirs=%d wouldRefuse=%v refusesPartialWalk=%v, want 1, 1, false, true",
+			idx.Unreadable, idx.UnlistedDirs, idx.WouldRefuseGC, idx.GCRefusesPartialWalk)
+	}
+
+	c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps(cfgPath)), "variants-index")
+	if c.Status != doctor.Warn {
+		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
+	}
+	for _, want := range []string{"15 of 35 sidecar file(s)", "1 director(y/ies) could not be read"} {
+		if !strings.Contains(c.Summary, want) {
+			t.Errorf("summary does not say %q: %q", want, c.Summary)
+		}
+	}
+	if !strings.Contains(c.Hint, "refuses to act on a walk that could not list part of the tree") {
+		t.Errorf("hint does not say what `--gc` does with this walk: %q", c.Hint)
+	}
+	if strings.Contains(c.Hint, "whole tree and unlinks") {
+		t.Errorf("hint claims `--gc` measures the whole tree past a directory it cannot list: %q", c.Hint)
+	}
+}
