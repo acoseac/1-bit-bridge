@@ -5230,6 +5230,36 @@ its twin.** The top list is older, shorter, and read first.
   landed at whatever moment the goroutine was scheduled, which can be AFTER the
   drain and so invert the very ordering the drain establishes. Neither is
   visible to an AST shape check, so the guard does not claim them.
+- **Put a test seam on the instance it serves; where a package-level seam
+  must remain, its restore runs after every goroutine that read it has
+  FINISHED, and cleanups run last-registered-first** (2026-09-28). The
+  first half is the per-SERVER rule under the 2026-09-09 LOUPE entries,
+  met a second time. `statFunc`, the reachability probe's `os.Stat` seam,
+  was a package variable, and `TestReachabilityProbe_InflightGuardIsPerRoot`
+  restored it in a cleanup registered after `hangingStat`'s release, so
+  the restore ran FIRST, while the probe goroutine that had read the seam
+  was still parked in the stand-in; CI reported the race once and the rerun
+  passed. **A released goroutine has not finished**: the release is the
+  test's own close, which puts the test before the goroutine and not after
+  it, so release-then-restore raced 5 runs in 5, as did release, a 50 ms
+  sleep, then restore; only something the goroutine does AFTER its read,
+  seen through synchronisation (its delete of its in-flight flag, under
+  `c.mu`), orders the read. The first fix waited for exactly that, and
+  CodeRabbit found the flaw a wait keeps: past its deadline it still had
+  to restore, so it traded the race for a bound. The seam is now
+  `reachabilityCache.stat`, set to `os.Stat` by `newReachabilityCache`
+  and read by `probeLocked` under `c.mu` into a local the stat goroutine
+  calls, so a test's stand-in reaches only its own cache and nothing is
+  put back. **A race report is only as good as the detector's history**:
+  it keeps four accesses per memory word, and a racing read was reported
+  in 10 runs of 10 when two synchronised reads from other goroutines
+  followed it, and in 0 of 10 when three did (a 30-line probe, go1.26.6).
+  Here the healthy probe's read displaced the hung one's once the sibling
+  test's accesses were in the word: 0 of 10 runs after the sibling and 0
+  of 3 whole-package runs reported it, against 10 of 10 run alone.
+  **Reproduce and negative-control such a race with the one test alone**
+  (`-run '^Name$'`). The tree restores about fifty other package-level
+  seams in one-line cleanups; they were not audited for this shape.
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
@@ -5748,7 +5778,9 @@ a fix that landed IN THIS WINDOW did not reach a sibling.
   cap through package globals is a write the race detector can pair with a
   live handler's read, and `buildExport` read the cap twice, so a change
   between them could panic the slice. Read once into locals; put the seam on
-  the struct.
+  the struct. (A second case, 2026-09-28: the reachability probe's stat
+  seam, whose restore raced a parked probe; under **Build, CI, and test
+  discipline**.)
 - **The scratch pre-flight is sized for every LANE**, not the largest single
   job — the pool runs `EffectiveWorkers()` concurrently on distinct dedup
   keys and holds that many Stage A intermediates at once. The docblock

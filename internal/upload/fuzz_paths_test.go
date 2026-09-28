@@ -116,9 +116,10 @@ func FuzzValidateRelPath(f *testing.F) {
 	})
 }
 
-// FuzzAcceptedExt is a pure no-panic sweep over the extension classifier.
-// It has no property beyond termination — the classification itself is a
-// lookup — but it is on the same untrusted string.
+// FuzzAcceptedExt runs the extension classifier over the same untrusted
+// string and asserts one property: whatever it classifies as audio, it also
+// accepts. The converse does not hold, since a companion file (cover art, a
+// booklet, a lyrics file, a cue sheet) is accepted without being audio.
 func FuzzAcceptedExt(f *testing.F) {
 	for _, s := range []string{"", ".", "a.flac", "a.FLAC", "a.jpg", "a.exe", ".flac", "a.b.c.dsf"} {
 		f.Add(s)

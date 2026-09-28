@@ -219,12 +219,13 @@ func validateSegment(seg string) error {
 // refusing to produce a dot segment in the first place, and the scanner's own
 // dot-directory skip.
 //
-// Kept rather than deleted because it is a pure predicate with unit tests and a
-// FUZZ target (FuzzAcceptedExt's neighbour in fuzz_paths_test.go) over one of
-// the three untrusted-input surfaces, and dropping fuzz coverage to remove six
-// lines is the wrong trade. It is the right function to reach for if a path
-// ever does arrive from somewhere that has not been through ValidateRelPath —
-// what it must not do is imply that one already does.
+// Kept rather than deleted because it is a pure predicate with unit tests,
+// and FuzzValidateRelPath runs it on every path ValidateRelPath accepts, which
+// must come back false: fuzz coverage of the client-supplied upload paths, an
+// untrusted-input surface, and dropping it to remove six lines is the wrong
+// trade. It is the right function to reach for if a path ever does arrive from
+// somewhere that has not been through ValidateRelPath — what it must not do is
+// imply that one already does.
 func IsUnderStaging(rel string) bool {
 	for _, seg := range strings.Split(rel, "/") {
 		if strings.HasPrefix(seg, ".") {
