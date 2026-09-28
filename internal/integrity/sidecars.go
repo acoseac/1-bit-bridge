@@ -207,17 +207,15 @@ type OrphanSidecarSweeper struct {
 	// the only state that crosses ticks. refusing holds the kind of refusal
 	// the current streak is, "" outside a streak: a refused tick sets it,
 	// and a tick whose walk read the whole tree and whose verdict proceeds
-	// clears it, as does an empty catalog over an empty or missing
-	// directory, which has nothing left to protect (noteEmptyCatalog). A
-	// tick refused for ANOTHER reason starts a new streak and logs at once,
-	// since its advice differs. refusingSince is when the streak started,
-	// lastRefusalLog when the refusal was last logged. A tick that stops
-	// before a verdict (a listing or a walk that failed or was stopped, an
-	// empty catalog over a directory it could not read) leaves all three
-	// alone: it is evidence of nothing, so it neither ends a streak nor
-	// says the catalog recovered. Owned by the run goroutine; the tests
-	// drive tick directly, never beside a running loop. A reader on
-	// another goroutine reads status instead.
+	// clears it, an empty catalog over a tree with nothing to remove
+	// included. A tick refused for ANOTHER reason starts a new streak and
+	// logs at once, since its advice differs. refusingSince is when the
+	// streak started, lastRefusalLog when the refusal was last logged. A
+	// tick that stops before a verdict (a listing or a walk that failed or
+	// was stopped) leaves all three alone: it is evidence of nothing, so it
+	// neither ends a streak nor says the catalog recovered. Owned by the
+	// run goroutine; the tests drive tick directly, never beside a running
+	// loop. A reader on another goroutine reads status instead.
 	refusing       OrphanRefusalKind
 	refusingSince  time.Time
 	lastRefusalLog time.Time
@@ -434,25 +432,29 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 //  1. Resolve the tree and refuse an empty answer, before anything could
 //     resolve "" to the working directory.
 //  2. List the catalog (AllVariants) BEFORE the walk — snapshot-then-walk,
-//     see the type's docblock — and refuse an EMPTY known set over a
-//     directory that holds files, through the latch (noteEmptyCatalog).
+//     see the type's docblock.
 //  3. Take the whole tree's inventory, with no MaxEntries: a sweep that
 //     deletes on a truncated inventory would be deleting on a ratio
 //     measured from part of the tree. A walk that fails or is stopped
 //     unlinks nothing.
-//  4. Ask MassOrphanRefusalFor of the whole-tree counts — `inv.Orphans`,
-//     the full count, never the retained list, with each entry the walk
-//     could not stat weighed as one more orphan — and unlink nothing on a
-//     refusal. Then refuse a walk that could not list a directory
-//     (PartialWalkRefusal): its counts describe part of the tree, which is
-//     the reason step 3 takes no MaxEntries.
-//  5. Unlink at most the chunk's worth of the retained orphans, trying
-//     them in walk order past any that fail, each re-checked first, from
-//     an inventory whose listed and walked paths pair up
-//     (reclaimOrphans).
+//  4. Refuse an EMPTY known set over a tree that holds a file this sweep
+//     would remove (emptyCatalogRefusal). Then ask MassOrphanRefusalFor of
+//     the whole-tree counts — `inv.Orphans`, the full count, never the
+//     retained list, with each entry the walk could not stat weighed as
+//     one more orphan — and unlink nothing on a refusal. Then refuse a
+//     walk that could not list a directory (PartialWalkRefusal): its
+//     counts describe part of the tree, which is the reason step 3 takes
+//     no MaxEntries.
+//  5. With an empty known set that passed, there is nothing to unlink:
+//     return. Otherwise unlink at most the chunk's worth of the retained
+//     orphans, trying them in walk order past any that fail, each
+//     re-checked first, from an inventory whose listed and walked paths
+//     pair up (reclaimOrphans).
 //
-// Every tick that reaches the walk logs one summary line (orphanTick.log);
-// a refused one logs its refusal through the latch (noteRefusal).
+// Every tick that reaches the walk logs one summary line (orphanTick.log),
+// but for one whose empty catalog meets a tree with nothing to remove,
+// which is quiet as it always was; a refused one logs its refusal through
+// the latch (noteRefusal).
 func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	root := ""
 	if s.outputDir != nil {
@@ -488,40 +490,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// sweep builds its set the same way.
 	known := KnownSidecarSet(root, rows)
 
-	// FAIL CLOSED on an empty known-set. Every file under the variants dir
-	// misses an empty `known`, so the whole rendition tree would read as
-	// orphaned — hours of sox/ffmpeg on a real library, and nothing
-	// regenerates it until the operator asks again.
-	//
-	// The listing's error arm above fails closed already; a query that
-	// SUCCEEDS and returns no rows did not, and the routes to it are
-	// ordinary. The reset procedure this repo's own CLAUDE.md documents is
-	// `rm -f bridge.db*` + restart, and `run` takes a tick at boot. A
-	// single<->multi root flip runs WipeFilesystemTracks, and
-	// `track_variants` CASCADEs on `tracks`, so the window between the wipe
-	// and the re-transcode reads zero rows too.
-	//
-	// Kept, and AHEAD of the mass-orphan refusal below. That one refuses
-	// most of the same trees (with no rows, every orphan is more than the
-	// catalog holds) but not one under its floor of ten, which it would
-	// unlink whole; and this one costs no walk and says what is actually
-	// wrong (the catalog is empty).
-	//
-	// It is a refusal of its own kind, through the latch like the others
-	// (noteEmptyCatalog): one WARN when a streak starts, at most one a day
-	// while it lasts, and a status the Jobs card shows. Until 2026-09-28 it
-	// WARNed on every tick and left the latch alone, so the card said "on"
-	// while every tick refused.
-	//
-	// Deliberately no operator override here: a background sweeper has
-	// nobody in the loop to express intent, which is what the two CLI GCs'
-	// explicit --allow-empty is for.
 	tickStart := time.Now()
-	if len(known) == 0 {
-		s.noteEmptyCatalog(tickStart, root, len(rows))
-		return 0
-	}
-
 	chunk := s.effectiveChunkSize()
 	inv, err := TakeSidecarInventory(ctx, root, known, SidecarInventoryOptions{
 		Consider:       shouldConsiderSidecarFile,
@@ -544,6 +513,37 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 
+	// FAIL CLOSED on an empty known set. Every file under the variants dir
+	// misses an empty `known`, so the whole rendition tree would read as
+	// orphaned — hours of sox/ffmpeg on a real library, and nothing
+	// regenerates it until the operator asks again.
+	//
+	// The listing's error arm above fails closed already; a query that
+	// SUCCEEDS and returns no rows did not, and the routes to it are
+	// ordinary. The reset procedure this repo's own CLAUDE.md documents is
+	// `rm -f bridge.db*` + restart, and `run` takes a tick at boot. A
+	// single<->multi root flip runs WipeFilesystemTracks, and
+	// `track_variants` CASCADEs on `tracks`, so the window between the wipe
+	// and the re-transcode reads zero rows too.
+	//
+	// AHEAD of the mass-orphan refusal below, which refuses most of the same
+	// trees (with no rows, every orphan is more than the catalog holds) but
+	// not one under its floor of ten, which it would unlink whole; and this
+	// one says what is actually wrong. It is decided from the inventory, as
+	// the other two are, and is a latched kind of its own
+	// (emptyCatalogRefusal): until 2026-09-28 it asked only whether the
+	// directory held any entry at all, WARNed on every tick and was not on
+	// the Jobs card, so a directory holding empty folders, a .DS_Store or
+	// the filesystem's lost+found, and no rendition, refused forever.
+	//
+	// Deliberately no operator override here: a background sweeper has
+	// nobody in the loop to express intent, which is what the two CLI GCs'
+	// explicit --allow-empty is for.
+	if reason := emptyCatalogRefusal(inv, len(known), len(rows)); reason != "" {
+		s.noteRefusal(tickStart, root, orphanRefusal{OrphanRefusalEmptyCatalog, msgOrphanEmptyCatalog, reason, orphanEmptyCatalogHint}, inv.OrphanPaths)
+		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
+		return 0
+	}
 	// The entries the walk could not stat are weighed as what they could
 	// be (MassOrphanRefusalFor): each is at most one file.
 	if reason := MassOrphanRefusalFor(inv, len(rows), s.maxOrphanPercent); reason != "" {
@@ -572,6 +572,13 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 	s.noteProceeding(root, inv, len(rows))
+	if len(known) == 0 {
+		// An empty catalog over a tree with nothing this sweep would remove
+		// is a bridge that has never rendered anything, or whose renditions
+		// are all gone: nothing to protect and nothing to do, so no summary
+		// line, as it always was.
+		return 0
+	}
 
 	if s.beforeUnlinksForTest != nil {
 		s.beforeUnlinksForTest()
@@ -791,25 +798,40 @@ func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanR
 	logger.Warn(r.msg, append(attrs, slog.String("hint", r.hint))...)
 }
 
-// noteEmptyCatalog decides a tick whose catalog names no sidecar, from
-// whether the variants directory holds anything: one that holds files is
-// refused as a streak of its own kind (OrphanRefusalEmptyCatalog), since
-// every file in it would read as an orphan; one that is empty or missing
-// has nothing to protect and ends any streak, as a tick that proceeds
-// does, the counts it logs (all zero) saying which it was; one it cannot
-// read decides nothing and leaves the latch alone, as a walk that failed
-// does. The empty and missing readings are silent outside a streak, as an
-// empty catalog over an empty directory always was.
-func (s *OrphanSidecarSweeper) noteEmptyCatalog(now time.Time, root string, rows int) {
-	empty, err := dirIsEmpty(root)
-	switch {
-	case err == nil && !empty:
-		s.noteRefusal(now, root, orphanRefusal{OrphanRefusalEmptyCatalog, msgOrphanEmptyCatalog,
-			fmt.Sprintf("%d variant row(s), none naming a sidecar, over a variants directory that holds files", rows),
-			orphanEmptyCatalogHint}, nil)
-	case err == nil || errors.Is(err, fs.ErrNotExist):
-		s.noteProceeding(root, SidecarInventory{}, rows)
+// emptyCatalogRefusal decides whether a tick whose known set is empty must
+// refuse, and says why; empty means the tick goes on to the other checks.
+// known is the size of the tick's known set, rows of its catalog.
+//
+// With no row naming a sidecar, every file the walk considered is an
+// orphan, so it refuses whenever there is one, below the mass-orphan floor
+// too. An entry the walk could not stat is weighed as MassOrphanRefusalFor
+// weighs it, as one more such file: it refuses when some reading of it
+// would. Nothing else in the tree counts, because nothing else is a file
+// this sweep would remove: a directory, empty or not, a file Consider
+// rejects (a .DS_Store, a README), anything under a pruned dot-directory,
+// and the filesystem's lost+found. Until 2026-09-28 the refusal asked
+// whether the directory held any entry at all (dirIsEmpty), and a variants
+// directory holding only such things refused forever, over nothing it
+// would have unlinked. A directory the walk could not LIST is left to
+// PartialWalkRefusal: it may hold renditions or nothing, and the walk
+// reached no file to count.
+func emptyCatalogRefusal(inv SidecarInventory, known, rows int) string {
+	if known > 0 {
+		return ""
 	}
+	unstatted := inv.Unreadable - inv.UnlistedDirs
+	if unstatted < 0 {
+		unstatted = 0
+	}
+	if inv.Files+unstatted == 0 {
+		return ""
+	}
+	reason := fmt.Sprintf("%d variant row(s), none naming a sidecar, over %d sidecar file(s), every one of which reads as an orphan",
+		rows, inv.Files+unstatted)
+	if unstatted > 0 {
+		reason += fmt.Sprintf(", counting the %d entr(y/ies) the walk could not stat as such files", unstatted)
+	}
+	return reason
 }
 
 // orphanRefusal is one refused tick's WARN: its kind, the message of the
@@ -833,8 +855,8 @@ const (
 	// variants directory (PartialWalkRefusal).
 	OrphanRefusalPartialWalk OrphanRefusalKind = "partialWalk"
 	// OrphanRefusalEmptyCatalog: no variant row names a sidecar while the
-	// variants directory holds files, so every file there would read as an
-	// orphan (the empty-known-set guard in tick).
+	// variants directory holds sidecar files, so every one of them would
+	// read as an orphan (emptyCatalogRefusal).
 	OrphanRefusalEmptyCatalog OrphanRefusalKind = "emptyCatalog"
 )
 
@@ -879,9 +901,8 @@ func (s *OrphanSidecarSweeper) publishStatus() {
 
 // noteProceeding ends a refusal streak: the first tick whose walk finished
 // and whose verdict proceeds says so, once, with the counts it proceeded
-// on, and so does the first whose empty catalog meets an empty or missing
-// directory (noteEmptyCatalog), with counts of zero. Outside a streak it
-// says nothing.
+// on, an empty catalog's over a tree with nothing to remove included.
+// Outside a streak it says nothing.
 //
 // The line claims only that the check passed, because the counts it passed
 // on need not be a recovered catalog: a variants volume unmounted during a
@@ -924,11 +945,11 @@ const orphanPartialWalkHint = "nothing was unlinked. The mass-orphan check weigh
 	"refusing and once a day while it keeps refusing."
 
 // orphanEmptyCatalogHint is the advice of a refusal for a catalog that
-// names no sidecar over a variants directory that holds files. The CLI's
-// way past it needs both flags from ten files up: --allow-empty gets past
-// its own empty-catalog refusal, and with no rows every file is then more
-// than the catalog holds, which --allow-mass-orphans waives.
-const orphanEmptyCatalogHint = "nothing was unlinked. With no row naming a sidecar, every file in the " +
+// names no sidecar over a variants directory that holds sidecar files. The
+// CLI's way past it needs both flags from ten files up: --allow-empty gets
+// past its own empty-catalog refusal, and with no rows every file is then
+// more than the catalog holds, which --allow-mass-orphans waives.
+const orphanEmptyCatalogHint = "nothing was unlinked. With no row naming a sidecar, every sidecar file in the " +
 	"variants directory reads as an orphan, and this sweep does not remove a whole rendition tree on an empty " +
 	"catalog. The catalog is empty for a while after bridge.db is reset or a library root change wipes the rows, " +
 	"and fills again as tracks are rendered; if it stays empty, check that the bridge opened the database you " +
@@ -940,7 +961,7 @@ const orphanEmptyCatalogHint = "nothing was unlinked. With no row naming a sidec
 const (
 	msgOrphanRefusal       = "orphan sidecar sweep: refusing to unlink — the catalog is far smaller than the tree it describes"
 	msgOrphanPartialWalk   = "orphan sidecar sweep: refusing to unlink — the walk could not read part of the variants directory"
-	msgOrphanEmptyCatalog  = "orphan sidecar sweep: refusing to unlink — no variant row references any sidecar, but the variants directory holds files"
+	msgOrphanEmptyCatalog  = "orphan sidecar sweep: refusing to unlink — no variant row references any sidecar, but the variants directory holds sidecar files"
 	msgOrphanRefusalLifted = "orphan sidecar sweep: no longer refusing — this tick read the whole tree and its counts pass the mass-orphan check"
 )
 
@@ -954,8 +975,9 @@ type orphanTick struct {
 	walked bool
 	inv    SidecarInventory
 	// refused is true when the tick unlinked nothing on purpose: the
-	// mass-orphan check refused, the walk could not read part of the tree,
-	// or the inventory's lists did not pair up.
+	// catalog named no sidecar, the mass-orphan check refused, the walk
+	// could not read part of the tree, or the inventory's lists did not
+	// pair up.
 	refused bool
 	tally   orphanTally
 	// cutShort is true when a stop or a failure ended the walk or the

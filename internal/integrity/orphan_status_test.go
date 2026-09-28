@@ -18,8 +18,8 @@ import (
 // Jobs card said "on" while every tick refused, and only the journal said
 // otherwise. Status reports the latch: which kind of refusal a streak is,
 // and since when; a streak of another kind restarts the clock, and an
-// empty catalog over a tree that holds files is one; a tick that decided
-// nothing leaves it; the first tick that proceeds clears it.
+// empty catalog over a tree that holds sidecar files is one; a tick that
+// decided nothing leaves it; the first tick that proceeds clears it.
 func TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch(t *testing.T) {
 	skipWhereModesDenyNothing(t)
 	dir := t.TempDir()
@@ -60,7 +60,7 @@ func TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch(t *testing.T) {
 		t.Errorf("a failed listing moved the status: %+v, want %+v", got, first)
 	}
 
-	// An empty catalog over a tree that holds files refuses, and is a
+	// An empty catalog over a tree that holds sidecar files refuses, and is a
 	// streak of its own kind, with its own start.
 	l.rows = nil
 	s.tick(context.Background())

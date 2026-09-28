@@ -94,7 +94,7 @@ func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
 	for _, k := range integrity.OrphanRefusalKinds() {
 		status.Refusing = k
 		if got := raw()["orphanSidecarGCRefusal"]; got != string(k) {
-			t.Errorf("a %s refusal reads %v, want its key", k, got)
+			t.Errorf("the %s refusal reads %v, want its key", k, got)
 		}
 	}
 

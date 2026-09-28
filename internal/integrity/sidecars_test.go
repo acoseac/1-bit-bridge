@@ -549,52 +549,36 @@ func TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount(t *testing.T) {
 // TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing
 // — the refusal is logged once per streak, and a tick that never reached a
 // verdict is evidence of nothing: a listing that failed, a walk that failed
-// or was stopped, a catalog that read empty over a directory the sweep
-// could not read. None of them may end the streak, which would have the
-// next refused tick WARN again, and none may claim the check passed. (An
-// empty catalog over a directory it CAN read is a verdict: a refusal of its
-// own kind over files, nothing to protect over none. Until 2026-09-28 every
-// empty catalog was a tick that decided nothing.)
+// or was stopped. None of them may end the streak, which would have the
+// next refused tick WARN again, none may claim the check passed, and none
+// may log a refusal of another kind. (An empty catalog was on this list
+// until 2026-09-28. It is a verdict now, taken from the inventory: a
+// refusal of its own kind over sidecar files, nothing to protect over none,
+// and a partial walk over a directory the walk could not list.)
 func TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// middle runs the second of three ticks, the one that decides
 		// nothing, and puts the lister back.
-		middle func(t *testing.T, s *OrphanSidecarSweeper, l *switchableLister)
-		// locks is true for a middle that locks a directory by its mode,
-		// which denies nothing on Windows or to root.
-		locks bool
+		middle func(s *OrphanSidecarSweeper, l *switchableLister)
 	}{
-		{"the listing fails", func(_ *testing.T, s *OrphanSidecarSweeper, l *switchableLister) {
+		{"the listing fails", func(s *OrphanSidecarSweeper, l *switchableLister) {
 			l.err = errors.New("database is locked")
 			s.tick(context.Background())
 			l.err = nil
-		}, false},
-		{"the walk fails", func(_ *testing.T, s *OrphanSidecarSweeper, _ *switchableLister) {
+		}},
+		{"the walk fails", func(s *OrphanSidecarSweeper, _ *switchableLister) {
 			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			defer cancel()
 			s.tick(ctx)
-		}, false},
-		{"the walk is stopped", func(_ *testing.T, s *OrphanSidecarSweeper, _ *switchableLister) {
+		}},
+		{"the walk is stopped", func(s *OrphanSidecarSweeper, _ *switchableLister) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			s.tick(ctx)
-		}, false},
-		{"the catalog reads empty over a directory the sweep cannot read", func(t *testing.T, s *OrphanSidecarSweeper, l *switchableLister) {
-			rows := l.rows
-			l.rows = nil
-			dir := lockDir(t, s.outputDir())
-			s.tick(context.Background())
-			if err := os.Chmod(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			l.rows = rows
-		}, true},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.locks {
-				skipWhereModesDenyNothing(t)
-			}
 			dir, live := strandedTree(t)
 			l := &switchableLister{rows: rowsNaming(live)}
 			s := NewOrphanSidecarSweeper(l, staticDir(dir), time.Hour, sweepPercent)
@@ -602,7 +586,7 @@ func TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing
 
 			rec := loggingtest.Record(t)
 			s.tick(context.Background())
-			tc.middle(t, s, l)
+			tc.middle(s, l)
 			s.tick(context.Background())
 
 			if got := rec.Lines(msgOrphanRefusal); len(got) != 1 {
@@ -1313,6 +1297,9 @@ func TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir(t *testing.T) {
 	if got := rec.Failures(); len(got) != 0 {
 		t.Errorf("an empty catalog over an empty directory warned:\n%s", strings.Join(got, "\n"))
 	}
+	if got := rec.Lines(msgOrphanTickComplete); len(got) != 0 {
+		t.Errorf("an empty catalog over an empty directory logged a tick summary:\n%s", strings.Join(got, "\n"))
+	}
 }
 
 // TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal — the refusal of an
@@ -1358,39 +1345,97 @@ func TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal(t *testing.T) {
 	}
 }
 
-// TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakWithNothingLeftToProtect
-// — an empty catalog over an EMPTY or MISSING variants directory has
-// nothing to refuse, so it ends a streak as a tick that proceeds does: the
-// operator emptied the tree, or it went with its volume, and the card must
-// not go on saying the sweep refuses. It says so once, at Info.
-func TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakWithNothingLeftToProtect(t *testing.T) {
-	for name, clear := range map[string]func(dir string) error{
-		"the directory is emptied": func(dir string) error {
-			entries, err := os.ReadDir(dir)
-			for _, e := range entries {
-				if err == nil {
-					err = os.Remove(filepath.Join(dir, e.Name()))
-				}
-			}
-			return err
-		},
-		"the directory is removed": os.RemoveAll,
-	} {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			seedTestSidecarTree(t, dir, "rendition-", 5)
-			ageFixtures(t, dir)
-			s := NewOrphanSidecarSweeper(&switchableLister{}, staticDir(dir), time.Hour, sweepPercent)
-			rec := loggingtest.Record(t)
-			requireTicksUnlinkNothing(t, s, 1, "the catalog is empty")
-			if err := clear(dir); err != nil {
+// TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove
+// — an empty catalog refuses over the sidecar files this sweep would
+// remove, and over nothing else. Until 2026-09-28 the refusal asked
+// whether the variants directory held any entry at all (dirIsEmpty), so a
+// directory left holding the renditions' empty folders, a .DS_Store, a
+// Trash of them or the filesystem's lost+found refused on every tick, over
+// a tree the sweep would unlink nothing from; with the refusal on the Jobs
+// card, the card said so (measured in a browser on a real serve). Each
+// case starts a streak over five renditions and turns the tree into what
+// it names. Where nothing the sweep would remove is left, the streak ends,
+// once, at Info. A directory the walk cannot list may still hold
+// renditions, and there the streak becomes the partial walk's refusal.
+func TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove(t *testing.T) {
+	remove := func(t *testing.T, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if err := os.RemoveAll(p); err != nil {
 				t.Fatal(err)
 			}
-			requireTicksUnlinkNothing(t, s, 2, name)
-			requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once", " files=0", " rows=0")
-			if got := s.Status(); got != (OrphanSweepStatus{}) {
-				t.Errorf("status %+v, want not refusing", got)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// leave turns dir, whose renditions are files (in album), into what
+		// the case names.
+		leave func(t *testing.T, dir, album string, files []string)
+		// locks is true for a case that locks a directory by its mode, which
+		// denies nothing on Windows or to root.
+		locks bool
+		// becomes is the kind of refusal the streak turns into; "" when it
+		// ends.
+		becomes OrphanRefusalKind
+	}{
+		{"the directory is emptied", func(t *testing.T, dir, _ string, _ []string) {
+			remove(t, filepath.Join(dir, "Artist"))
+		}, false, ""},
+		{"the directory is removed", func(t *testing.T, dir, _ string, _ []string) {
+			remove(t, dir)
+		}, false, ""},
+		{"the renditions' empty folders are left", func(t *testing.T, _, _ string, files []string) {
+			remove(t, files...)
+		}, false, ""},
+		{"only files this sweep never removes are left", func(t *testing.T, dir, _ string, files []string) {
+			remove(t, files...)
+			for _, rel := range []string{".DS_Store", "README.txt", filepath.Join("Artist", "Album", "cover.jpg")} {
+				if err := os.WriteFile(filepath.Join(dir, rel), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
+		}, false, ""},
+		{"the renditions are in the Trash", func(t *testing.T, dir, album string, _ []string) {
+			if err := os.Rename(album, filepath.Join(mkdirAllUnder(t, dir, filepath.Join(".Trashes", "501")), "Album")); err != nil {
+				t.Fatal(err)
+			}
+		}, false, ""},
+		{"only the filesystem's lost+found is left", func(t *testing.T, dir, _ string, _ []string) {
+			remove(t, filepath.Join(dir, "Artist"))
+			lockDir(t, mkdirAllUnder(t, dir, "lost+found"))
+		}, true, ""},
+		{"they sit in a directory the walk cannot list", func(t *testing.T, _, album string, _ []string) {
+			lockDir(t, album)
+		}, true, OrphanRefusalPartialWalk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.locks {
+				skipWhereModesDenyNothing(t)
+			}
+			dir := t.TempDir()
+			album := filepath.Join(dir, "Artist", "Album")
+			files := seedTestSidecarTree(t, album, "rendition-", 5)
+			ageFixtures(t, dir)
+			s := NewOrphanSidecarSweeper(&switchableLister{}, staticDir(dir), time.Hour, sweepPercent)
+			s.gracePeriodForTest = time.Nanosecond
+			rec := loggingtest.Record(t)
+			requireTicksUnlinkNothing(t, s, 1, "the catalog is empty")
+			if got := s.Status().Refusing; got != OrphanRefusalEmptyCatalog {
+				t.Fatalf("an empty catalog over five renditions: refusing %q, want %q", got, OrphanRefusalEmptyCatalog)
+			}
+
+			tc.leave(t, dir, album, files)
+			requireTicksUnlinkNothing(t, s, 2, tc.name)
+			requireLinesSay(t, rec.Failures(msgOrphanEmptyCatalog), 1, "the empty-catalog WARN, for the renditions' streak alone")
+			if got := s.Status().Refusing; got != tc.becomes {
+				t.Errorf("refusing %q, want %q", got, tc.becomes)
+			}
+			if tc.becomes != "" {
+				requireLinesSay(t, rec.Failures(msgOrphanPartialWalk), 1, "the partial walk's WARN, once", " variants_dir="+dir)
+				requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 0, "a streak that changed kind never lifted")
+				return
+			}
+			requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once", " files=0", " rows=0")
 		})
 	}
 }

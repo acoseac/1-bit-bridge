@@ -5808,8 +5808,8 @@ function describeOrphanGCRefusal(kind) {
         "let a lost index through, so nothing is unlinked. Make every directory there listable by the " +
         "user the bridge runs as.";
     case "emptyCatalog":
-      return "No variant row names a rendition while the variants directory holds files, so every file " +
-        "there would read as an orphan, and nothing is unlinked. The catalog is empty for a while after the " +
+      return "No variant row names a rendition while the variants directory holds renditions, so every one " +
+        "of them would read as an orphan, and nothing is unlinked. The catalog is empty for a while after the " +
         "database is reset or the library folders change; if it stays empty, check that the bridge is using " +
         "the database you meant.";
     default:
