@@ -51,14 +51,14 @@ const defaultRebindInterval = 60 * time.Second
 //
 // Internally manages a re-advertise goroutine that watches for
 // network-interface changes and rebuilds the underlying mDNS
-// server when the IP set drifts. The goroutine's lifetime is tied
-// to Close().
+// server when what it advertises would change (maybeRebind). The
+// goroutine's lifetime is tied to Close().
 type Advertiser struct {
-	cfg       Config
-	rebindMu  sync.Mutex // guards server + cachedIPs + closed against the rebind goroutine
-	server    *hcmdns.Server
-	cachedIPs []net.IP // last IP set advertised; compared against new snapshots in rebindLoop
-	closed    bool
+	cfg      Config
+	rebindMu sync.Mutex // guards server + running + closed against the rebind goroutine
+	server   *hcmdns.Server
+	running  advertisement // what server advertises; compared against a fresh one in maybeRebind
+	closed   bool
 
 	// ipSource returns the current advertise-eligible interface
 	// IPs. Pluggable so tests can drive the rebind loop
@@ -101,13 +101,17 @@ type Config struct {
 	LibraryName string
 
 	// InterfaceSource yields the LAN-eligible network interface to
-	// bind the mDNS multicast listener to. Called once per rebind
-	// (initial advertise + every IP-drift tick from the rebind
-	// loop), so a hotswap of the underlying LAN adapter (Wi-Fi →
-	// Ethernet handoff, dock plug-in, etc.) reaches the next
-	// rebind without restarting the bridge. Per CodeRabbit on PR #307
-	// round-1 — the prior shape captured a static `*net.Interface`
-	// at startup and let it go stale across rebinds.
+	// bind the mDNS multicast listener to. Called at the initial
+	// advertise and on EVERY tick of the rebind loop, which rebuilds
+	// when the interface it answers differs from the one the running
+	// responder is pinned to, so a hotswap of the underlying LAN
+	// adapter (Wi-Fi → Ethernet handoff, dock plug-in, etc.) reaches
+	// the next tick without restarting the bridge. Per CodeRabbit on
+	// PR #307 round-1 — the prior shape captured a static
+	// `*net.Interface` at startup and let it go stale across rebinds.
+	// Being called every minute, it must not log every failure it
+	// answers with nil (cmd/bridge's `lanInterfaceSource` logs one per
+	// streak).
 	//
 	// When the source returns nil, hashicorp/mdns falls through to
 	// `net.ListenMulticastUDP(network, nil, ...)` and the OS picks
@@ -134,12 +138,14 @@ type Config struct {
 // an error if the underlying UDP sockets can't be opened (typically a
 // permissions issue on Linux without cap_net_bind).
 //
-// On success, spawns a background goroutine that polls the
-// advertise-eligible interface set every defaultRebindInterval (60 s)
-// and rebuilds the underlying mDNS server when the IP set drifts —
-// hashicorp/mdns snapshots IPs at construction time and never re-
-// binds, so without this loop a Wi-Fi roam / Ethernet plug / docking-
-// station handoff silently kills discovery until process restart.
+// On success, spawns a background goroutine that polls the host's
+// interfaces and the InterfaceSource every defaultRebindInterval (60 s)
+// and rebuilds the underlying mDNS server when the interface picked or
+// the addresses on it change, or any address when none is picked
+// (maybeRebind) — hashicorp/mdns snapshots IPs at
+// construction time and never re-binds, so without this loop a Wi-Fi
+// roam / Ethernet plug / docking-station handoff silently kills
+// discovery until process restart.
 // Goroutine stops on Close().
 func Advertise(cfg Config) (*Advertiser, error) {
 	return advertiseInternal(cfg, ipsForAdvertise, defaultRebindInterval, true /* spawn loop */)
@@ -181,8 +187,9 @@ func advertiseInternal(cfg Config, ipSource func() []net.IP, interval time.Durat
 	// a.rebindMu" contract unconditionally — a future refactor that
 	// moves the goroutine spawn earlier can't silently turn this into
 	// a race (the `*Locked` naming stays truthful).
+	adv := a.advertisementNow()
 	a.rebindMu.Lock()
-	err := a.rebuildLocked(a.ipSource())
+	err := a.rebuildLocked(adv)
 	a.rebindMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -193,13 +200,76 @@ func advertiseInternal(cfg Config, ipSource func() []net.IP, interval time.Durat
 	return a, nil
 }
 
+// advertisement is what a running responder depends on: the interface
+// its sockets are pinned to (nil: the OS picks) and the addresses its A,
+// AAAA and TXT `ips=` records carry. rebuildLocked stands up exactly
+// one, and maybeRebind rebuilds only when a fresh one is not the same.
+type advertisement struct {
+	iface *net.Interface
+	ips   []net.IP
+}
+
+// advertisementOf returns the advertisement of a responder pinned to
+// iface on a host whose advertisable addresses are ips, ifaceAddrs being
+// iface's own: ips narrowed to ifaceAddrs, or all of ips when iface is
+// nil or carries none of them (its addresses unread, or gone in a race
+// with an adapter's teardown), so the responder still publishes
+// something the next tick can correct.
+//
+// The narrowing is what keeps the records to addresses the listener can
+// answer on: without it they announced every interface's, a Tailscale
+// address on another adapter included, and a client resolved to one the
+// bridge could not reply on (Gemini on PR #307 round-1).
+func advertisementOf(ips []net.IP, iface *net.Interface, ifaceAddrs []net.Addr) advertisement {
+	adv := advertisement{iface: iface, ips: ips}
+	if iface != nil {
+		if narrowed := filterIPsToAddrs(ips, ifaceAddrs); len(narrowed) > 0 {
+			adv.ips = narrowed
+		}
+	}
+	return adv
+}
+
+// same reports whether a and b make the same responder: one pinned to
+// the same interface, by name and index (an adapter re-created under a
+// new index has none of the old sockets' group memberships), carrying
+// the same addresses in any order.
+func (a advertisement) same(b advertisement) bool {
+	if (a.iface == nil) != (b.iface == nil) {
+		return false
+	}
+	if a.iface != nil && (a.iface.Index != b.iface.Index || a.iface.Name != b.iface.Name) {
+		return false
+	}
+	return ipSetEqual(a.ips, b.ips)
+}
+
+// advertisementNow returns the advertisement a rebuild would make now:
+// the ipSource's addresses, the InterfaceSource's pick, and that pick's
+// own addresses. It takes no lock (both sources walk the host's
+// interfaces), so the caller takes rebindMu after it.
+func (a *Advertiser) advertisementNow() advertisement {
+	ips := a.ipSource()
+	var iface *net.Interface
+	if a.cfg.InterfaceSource != nil {
+		iface = a.cfg.InterfaceSource()
+	}
+	var ifaceAddrs []net.Addr
+	if iface != nil {
+		// Unreadable addresses leave nothing to narrow to, so the
+		// advertisement carries all of ips, as it always did.
+		ifaceAddrs, _ = iface.Addrs()
+	}
+	return advertisementOf(ips, iface, ifaceAddrs)
+}
+
 // rebuildLocked tears down the existing hashicorp/mdns server (if
-// any) and stands a fresh one up bound to ips. The caller MUST
-// hold a.rebindMu so concurrent rebinds and Close calls don't
-// race the server pointer. Returns the error from NewServer when
-// the new server fails to start; in that case the cached server
-// is left as-nil so the next tick retries.
-func (a *Advertiser) rebuildLocked(ips []net.IP) error {
+// any) and stands a fresh one up making adv. The caller MUST hold
+// a.rebindMu so concurrent rebinds and Close calls don't race the
+// server pointer. Returns the error from NewServer when the new
+// server fails to start; in that case the previous server (none, at
+// the first advertise) keeps running and the next tick retries.
+func (a *Advertiser) rebuildLocked(adv advertisement) error {
 	instance := sanitizeInstance(a.cfg.InstanceName)
 	if instance == "" {
 		instance = "1-bit Bridge"
@@ -209,41 +279,12 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 	// the TXT record), so we re-append it here.
 	host := a.cfg.advertisedHost() + "."
 
-	// Resolve the LAN interface fresh on every rebuild. A static
-	// capture at advertise-time would let a Wi-Fi → Ethernet
-	// handoff (interface index changes) silently keep advertising
-	// against a now-down adapter. Source closure also returns nil
-	// when the operator hasn't passed one — preserves OS-default
-	// behavior for callers that don't care. Per CodeRabbit on PR
-	// #307 round-1.
-	var iface *net.Interface
-	if a.cfg.InterfaceSource != nil {
-		iface = a.cfg.InterfaceSource()
-	}
-
-	// Filter the advertised IP set to the pinned interface's IPs.
-	// Without this, mDNS A/AAAA records announce IPs that don't
-	// belong to the listener's interface — clients resolve to an
-	// IP we can't reply on. The picker validates that the chosen
-	// interface has at least one usable IP, so the filtered list
-	// should not be empty in practice; if it IS (race against
-	// adapter teardown), fall back to the unfiltered set so we
-	// still publish *something* the rebind loop can correct on
-	// the next tick. Per Gemini on PR #307 round-1.
-	advertisedIPs := ips
-	if iface != nil {
-		filtered := filterIPsToInterface(ips, iface)
-		if len(filtered) > 0 {
-			advertisedIPs = filtered
-		}
-	}
-
-	// Build the TXT record from the same interface-filtered set the
+	// Build the TXT record from the same interface-narrowed set the
 	// A/AAAA records use, so the `ips=` hint matches what the client
 	// would resolve anyway.
-	info := buildTXTRecords(a.cfg, advertisedIPs)
+	info := buildTXTRecords(a.cfg, adv.ips)
 
-	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, advertisedIPs, info)
+	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, adv.ips, info)
 	if err != nil {
 		return fmt.Errorf("mdns: NewMDNSService: %w", err)
 	}
@@ -256,7 +297,7 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 	// (its own fallback to OS-default).
 	srv, err := hcmdns.NewServer(&hcmdns.Config{
 		Zone:  svc,
-		Iface: iface,
+		Iface: adv.iface,
 	})
 	if err != nil {
 		return fmt.Errorf("mdns: NewServer: %w", err)
@@ -271,20 +312,22 @@ func (a *Advertiser) rebuildLocked(ips []net.IP) error {
 		}
 	}
 	a.server = srv
-	a.cachedIPs = append([]net.IP(nil), ips...)
+	a.running = advertisement{iface: adv.iface, ips: append([]net.IP(nil), adv.ips...)}
 	return nil
 }
 
 // rebindLoop runs in a background goroutine for the lifetime of
-// the Advertiser. Each tick it diffs the current IP source against
-// the cached set and rebuilds the underlying mDNS server when they
-// disagree. Logs the rebuild so operators can correlate "discovery
-// stopped working" reports against actual server-side action.
+// the Advertiser. Each tick it compares the advertisement a rebuild
+// would make now with the running one and rebuilds the underlying
+// mDNS server when they differ. Logs the rebuild so operators can
+// correlate "discovery stopped working" reports against actual
+// server-side action.
 //
-// Cheap when nothing changes: a single net.Interfaces() call + a
-// sorted-string compare. Expensive only on the (rare) network
-// transition tick: tears down and rebuilds the hashicorp/mdns
-// listener pair, which costs a couple of UDP sockets.
+// Cheap when nothing changes: two walks of the host's interfaces (the
+// ipSource's and the picker's) and an address-set compare. Expensive
+// only on the (rare) tick that changes the advertisement: tears down
+// and rebuilds the hashicorp/mdns listener pair, which costs a couple
+// of UDP sockets.
 func (a *Advertiser) rebindLoop() {
 	t := time.NewTicker(a.rebindInterval)
 	defer t.Stop()
@@ -298,18 +341,25 @@ func (a *Advertiser) rebindLoop() {
 	}
 }
 
+// maybeRebind rebuilds the responder when the advertisement a rebuild
+// would make now differs from the running one: another interface, or
+// other addresses ON it. Until 2026-09-28 it compared the ipSource's
+// full set, every up interface's addresses, so an address coming or
+// going on an interface the responder is not pinned to (a tunnel, a
+// docker veth per container start or stop) rebuilt it with the same
+// records on the same interface.
 func (a *Advertiser) maybeRebind() {
-	fresh := a.ipSource()
+	fresh := a.advertisementNow()
 	a.rebindMu.Lock()
 	defer a.rebindMu.Unlock()
 	if a.closed {
 		return
 	}
-	if ipSetEqual(a.cachedIPs, fresh) {
+	if fresh.same(a.running) {
 		return
 	}
 	if err := a.rebuildLocked(fresh); err != nil {
-		// Don't blank cachedIPs — the previous server is still
+		// Don't touch running — the previous server is still
 		// running (we only swap in rebuildLocked on success), so
 		// a transient NewMDNSService failure leaves us no worse
 		// off than before. Next tick retries.
@@ -319,11 +369,20 @@ func (a *Advertiser) maybeRebind() {
 		// sequences across success/failure ticks without learning
 		// a per-callsite vocabulary (Qodo on PR #112).
 		logger.Error("mdns: rebind failed; keeping previous advertisement",
-			"err", err, "ips", ipsForLog(fresh))
+			"err", err, "iface", ifaceForLog(fresh.iface), "ips", ipsForLog(fresh.ips))
 		return
 	}
 	logger.Info("mdns: re-advertising on new interface set",
-		"ips", ipsForLog(a.cachedIPs))
+		"iface", ifaceForLog(a.running.iface), "ips", ipsForLog(a.running.ips))
+}
+
+// ifaceForLog names the interface for the `iface` log attribute:
+// "" for none, where hashicorp/mdns lets the OS pick.
+func ifaceForLog(iface *net.Interface) string {
+	if iface == nil {
+		return ""
+	}
+	return iface.Name
 }
 
 // ipSetEqual returns true when a and b cover the same IPs, ignoring
@@ -369,23 +428,11 @@ func ipsForLog(ips []net.IP) []string {
 	return out
 }
 
-// filterIPsToInterface returns the subset of `ips` that are bound
-// to `iface`. Used by rebuildLocked when the operator pinned a
-// specific LAN interface — without filtering, mDNS would advertise
-// A/AAAA records pointing at IPs the listener can't reply on (e.g.
-// a Tailscale IP from another adapter). Soft-fail on `iface.Addrs()`
-// error → return the original list (better to over-advertise than
-// to suppress everything). Returning empty is a valid result — the
-// caller must handle that case (rebuildLocked falls back to the
-// unfiltered set). Per Gemini on PR #307 round-1.
-func filterIPsToInterface(ips []net.IP, iface *net.Interface) []net.IP {
-	if iface == nil {
-		return ips
-	}
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return ips
-	}
+// filterIPsToAddrs returns the subset of `ips` among `addrs`, an
+// interface's own addresses (advertisementOf's narrowing). Returning
+// empty is a valid result, and advertisementOf answers it with the
+// unfiltered set.
+func filterIPsToAddrs(ips []net.IP, addrs []net.Addr) []net.IP {
 	ifaceIPs := make(map[string]struct{}, len(addrs))
 	for _, addr := range addrs {
 		switch v := addr.(type) {
@@ -632,8 +679,10 @@ func sanitizeInstance(s string) string {
 	return strings.ReplaceAll(instance, `\`, `\\`)
 }
 
-// ipsForAdvertise returns the non-loopback IPv4/IPv6 addresses to
-// advertise in A/AAAA records. Link-local addresses are included —
+// ipsForAdvertise returns the non-loopback IPv4/IPv6 addresses of every
+// up interface, which advertisementOf narrows to the pinned interface's
+// for the A/AAAA records (all of them are advertised only when nothing
+// is pinned). Link-local addresses are included —
 // mDNS/Bonjour is explicitly designed to work over link-local
 // (fe80::/10 and 169.254.0.0/16) and excluding them would break
 // discovery on IPv6-only or zero-config LANs. Returns nil if no usable

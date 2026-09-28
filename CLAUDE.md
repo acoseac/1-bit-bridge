@@ -2440,6 +2440,32 @@ no failing test — which is the shape to expect in this area.
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+- **A Tailscale interface is eligible ONLY through the opt-in
+  (`EligibilityOpts.TsnetIfaceName`), and its ULA is what had defeated it**
+  (2026-09-28). A Tailscale interface carries an address in
+  `fd7a:115c:a1e0::/48`, and one in 100.64/10 where the tailnet has IPv4. The
+  100.64/10 address always counted as public; the ULA is
+  inside fc00::/7, so `net.IP.IsPrivate` counted it as a LAN address and
+  admitted the interface with no opt-in (and no production caller sets one).
+  Measured: the dev Mac's `utun12` and dido's `tailscale0` were eligible with
+  their addresses and not without the ULA. The real bridge on the Mac then
+  ran an SSDP advertiser on utun12 (LOCATION on its 100.x address) and a
+  renderer- and a UPnP-discovery client sending into it, and on dido each
+  of those consumers' first step (the group join, an M-SEARCH send)
+  succeeded on tailscale0. On Windows (reasoned from the ranking and pinned
+  by a row, not measured) the Wintun adapter, which has no point-to-point
+  flag, outranked a zero-config LAN as the mDNS responder's single pick.
+  `isTailscaleULA` sorts the ULA out BEFORE `IsPrivate` and counts it as
+  public, so it admits nothing AND keeps the zero-config arm from admitting
+  a tailnet with IPv4 switched off (fe80 plus the ULA). **Address-based, not
+  name-based**: macOS numbers its utuns, and Windows' adapter carries no
+  flag that says tunnel. 100.64/10 needed no change: a LAN genuinely
+  numbered in CGNAT space was refused before and still is. `tailscaleULA`
+  is pinned to `tsaddr.TailscaleULARange()` by
+  `TestTailscaleULAIsTailscalesRange`. Multicast written to the tailnet
+  interface reached no peer in the one tailnet measured (no exit node, no
+  subnet router): 0 of 32 datagrams each way between the Mac and dido,
+  beside 32 of 32 unicast controls.
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns
@@ -2453,7 +2479,8 @@ no failing test — which is the shape to expect in this area.
   private IPv4, then any other usable address (a ULA, the opted-in tsnet
   interface), then link-local only, and enumeration order among equals, so
   a host whose first eligible interface already ranks best keeps it (dido
-  measured: `enp1s0f0` and the same five-member set as before).
+  measured: `enp1s0f0` and the same five-member set as before; three
+  members since the next paragraph's rule and the Tailscale bullet above).
   `PickAllLANEligibleInterfaces` keeps its members and order but leaves out
   a point-to-point interface whose only addresses are link-local whenever
   anything else is eligible: six such utuns sat in the dev Mac's set, and
@@ -2465,20 +2492,66 @@ no failing test — which is the shape to expect in this area.
   ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
   and the bullet above says why each arm is there. **Don't reduce the key
   to either half**: the flag alone misses Windows' Wintun adapter
-  (Tailscale, WireGuard; `IF_TYPE_PROP_VIRTUAL`, which Go gives no
-  point-to-point flag) and a Mac's `bridge0` holding a self-assigned
-  address, and the class alone ties a WireGuard tunnel's private 10.x with
-  `en0` and lets enumeration order pick the tunnel (each half turns rows
-  red that the other leaves green). One case moves the other way: a host
-  whose LAN is zero-config (169.254 / fe80 only) beside a private-IPv4
-  bridge (`docker0`, a VM's) now binds the bridge, where the first eligible
-  used to win if it came first. The tables drive `pickLANInterface` and
-  `pickAllLANInterfaces`, the seam both exported pickers call
-  (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
+  (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`,
+  which Go gives no point-to-point flag) and a Mac's `bridge0` holding a
+  self-assigned address, and the class alone ties a WireGuard tunnel's
+  private 10.x with `en0` and lets enumeration order pick the tunnel (each
+  half turns rows red that the other leaves green). One case moves the
+  other way: a host whose LAN is zero-config (169.254 / fe80 only) beside a
+  private-IPv4 bridge (`docker0`, a VM's) now binds the bridge, where the
+  first eligible used to win if it came first. The tables drive
+  `pickLANInterface` and `pickAllLANInterfaces`, the seam both exported
+  pickers call (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
   `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel`), and
   `TestTheExportedPickersRunTheSelection` compares the exported pair with it
   on the host, which can fail only where the first eligible interface does
   not rank best (the dev Mac, not a typical Linux runner).
+- **…and then leaves out a member with no IPv4 address, whenever one with
+  an IPv4 address remains** (2026-09-28). Every consumer of the set runs
+  SSDP over IPv4 (udp4, 239.255.255.250): the advertisers, which already
+  skipped such a member (`gatherAdvertiseEndpoints`), and the renderer and
+  UPnP-upstream discovery clients, which did not. On the dev Mac awdl0 and
+  llw0 (fe80 only, not point-to-point) each got a renderer client whose every
+  M-SEARCH failed with `can't assign requested address` (a WARN per client
+  and an ERROR ten minutes on; since #1072 the UPnP-upstream clients on the
+  same members report theirs as well); on dido each
+  docker veth (fe80 only, a port of `docker0` or a user bridge, both members
+  with an IPv4 address) got two clients, whose sends Linux lets out. **The
+  rule is the SET's, not the SSDP call sites'**: all three consumers are IPv4
+  SSDP, and it sits beside the tunnel rule #1051 justified by the same
+  failed send. A 169.254 address counts (the direct-cable renderer).
+  **It runs AFTER the tunnel rule, and neither rule empties the set**, so a
+  host whose tunnel-ruled set holds no IPv4 member (an IPv6-only LAN) keeps
+  that set exactly, and UPnP upstream, whose manual-URL poller starts only
+  where an SSDP client does, still starts there. The single pick can then
+  be a member the set leaves out (an IPv6-only LAN beside a tunnel holding a
+  private IPv4, or awdl0 beside an opted-in tunnel, since a non-tunnel
+  ranks first): `assertPickIsInTheSet` allows exactly that, a pick carrying
+  no IPv4 while a member does, because the responder answers over IPv6 too.
+  `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` and
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` drive both rules.
+- **The mDNS rebind loop compares the ADVERTISEMENT, never the host's
+  addresses** (2026-09-28). `maybeRebind` rebuilt the responder whenever
+  `ipsForAdvertise()`, every up interface's addresses, differed from the set
+  cached at the last rebuild, while the records carry only the pinned
+  interface's. So an address coming or going on another interface rebuilt
+  it with the same records on the same interface. Sampled at the loop's
+  cadence for 80 minutes: 21 such changes on dido, every one a docker veth
+  (a container starting or stopping), and 1 on the dev Mac, a new utun
+  coming up; the pick and its addresses changed 0 times on either.
+  Each tick now builds the advertisement a rebuild would make
+  (`advertisementNow`: the InterfaceSource's pick, and the addresses
+  narrowed to it, or all of them when nothing is pinned) and rebuilds only
+  when it is not `same` as the running one. **By name AND index**: an
+  adapter re-created under a new index has none of the old sockets' group
+  memberships. That asks the InterfaceSource every tick, where it was asked
+  only on a rebuild, so the responder follows a better interface as soon as
+  the picker names it, **and the source must not print per call**:
+  cmd/bridge's `lanInterfaceSource` prints a failed pick once per streak (a
+  host with no LAN-eligible interface would print a line a minute), and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne` requires the Config literal
+  to take it. The rebind tests pin the responder to the loopback interface,
+  which hashicorp/mdns binds on macOS and on Linux (measured).
 
 - **A folder's children sort by `RelativePath`, with `AbsolutePath` only
   as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`

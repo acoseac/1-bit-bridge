@@ -23349,3 +23349,220 @@ suggestion and adding the two spellings it did not name (`null` prints as
 test red with "has no refusal reason", and each is green against the old
 one, so nothing else in the test caught them. Gemini was at its daily
 quota this round.
+
+## 2026-09-28 — a tailnet interface needs the opt-in, the SSDP set leaves out a member with no IPv4, and the mDNS responder rebuilds only when its advertisement changes (backlog B15, #1051's follow-ups)
+
+#1051's entry left three things: Tailscale's interface was eligible through
+its ULA, members with no IPv4 address still got SSDP clients, and the mDNS
+rebind loop rebuilt on addresses its records do not carry. Each was measured
+before anything was changed.
+
+### What was measured on the old code
+
+- **Tailscale's interface is LAN-eligible without the opt-in, through its
+  ULA.** A throwaway program called `IsLANEligibleInterface` on every
+  interface twice, with all its addresses and with the
+  `fd7a:115c:a1e0::/48` one removed, and printed both pickers:
+
+  | host | Tailscale interface | eligible | without the ULA | multicast set |
+  |---|---|---|---|---|
+  | the dev Mac (darwin/arm64) | `utun12`: up, pointtopoint, multicast, running; fe80, a 100.64/10 address, a ULA in the /48 | true | false | en0 awdl0 llw0 utun12 |
+  | dido (Linux 7.0, `--network host`) | `tailscale0`: the same flags, 100.64/10 /32, the ULA /128, fe80 | true | false | enp1s0f0 docker0 br-… tailscale0 and four veths |
+
+  The ULA is inside fc00::/7, so `net.IP.IsPrivate` counts it and
+  `hasPrivate` admitted the interface; the 100.64/10 address has always
+  counted as public. No production caller sets `TsnetIfaceName`, and
+  `dlna.allowTsnet` is read by nothing, so the opt-in the docs describe was
+  never what admitted it.
+- **What the bridge did with it.** The real binary on the Mac (DLNA with
+  renderer discovery and UPnP upstream on, a throwaway config, the HTTP
+  listener on `:17790`) logged `SSDP advertiser started` twice,
+  `interface=en0` and `interface=utun12`, the second with its LOCATION on
+  the tunnel's 100.x address; `UPnP upstream started … interfaces=4`; and
+  four renderer-discovery clients (en0, awdl0, llw0, utun12). Per member,
+  the probe did what each consumer does first: on utun12 and on dido's
+  tailscale0 `ListenMulticastUDP` joined the SSDP group and an M-SEARCH send
+  succeeded, written into the tunnel. Windows was not measured: Wintun is
+  `IF_TYPE_PROP_VIRTUAL`, which Go gives no point-to-point flag, so by
+  #1051's ranking its adapter (class "other usable", from the ULA) outranks
+  a zero-config LAN (link-local only) and is the single pick the mDNS
+  responder binds; beside a private-IPv4 LAN it ranks below it and is still
+  in the set.
+- **Whether that multicast reaches a peer.** Between the Mac and dido (one
+  tailnet, no exit node, no subnet router): a sender pinned to the tunnel
+  (`IP_MULTICAST_IF`) wrote 32 SSDP-shaped datagrams to 239.255.255.250:1900,
+  all without error, and a listener joined to the group on the other side's
+  tunnel received 0, in both directions, while 32 of 32 unicast datagrams
+  sent beside them to the peer's 100.x address arrived. A multicast M-SEARCH
+  from dido's tailscale0 drew 0 answers from the Mac's bridge (the one with
+  an advertiser on utun12). So in this tailnet the advertiser and the
+  clients on the tunnel reached no peer; what the fix removes is that work,
+  and, on Windows, the responder's pick.
+- **Members with no IPv4 address.** On the Mac, awdl0 and llw0 (fe80 only,
+  not point-to-point) each got a renderer client; each client's first
+  M-SEARCH failed with `sendto: can't assign requested address`, logged as
+  a WARN `M-SEARCH send failed` (two in the probe bridge's first seconds,
+  naming no interface before #1072; since #1072 the UPnP-upstream clients
+  on the same two members report theirs too), and
+  `ListenMulticastUDP("udp4", awdl0, …)` failed
+  `no such network interface` (the advertiser already skipped both, through
+  `firstIPv4OnInterface`). On dido the four veths (fe80 only, not
+  point-to-point) each got a client too, and there the join and the sends
+  succeed, since Linux joins by interface index. `ip -o link` shows each
+  veth as a port (`master`) of `docker0` or `br-46c2e99686b3`, both of them
+  members with a private IPv4. Every consumer of the set is IPv4 SSDP
+  (udp4, 239.255.255.250): the advertisers, the renderer clients and the
+  UPnP-upstream clients (a grep of `PickAllLANEligibleInterfaces`'s three
+  callers).
+- **The mDNS rebind loop.** `maybeRebind` compared `ipsForAdvertise()`
+  (every up interface's addresses) with the set cached at the last rebuild,
+  while `rebuildLocked` narrowed the records to the pinned interface's. A
+  copy of `ipsForAdvertise` and the picker sampled once a minute for 80
+  minutes, as the loop ticks, and counted where each comparison differed:
+  on dido the full set changed 21 times, every one a docker veth coming or
+  going (16 distinct veths, one per container), and the advertised set
+  (the pick and its addresses) 0 times; on the dev Mac the full set changed
+  once, a new tunnel (`utun13`) coming up, #1051's case, and the advertised
+  set 0 times. So all 22 rebuilds the old loop would have made in those two
+  windows changed nothing it advertised.
+- hashicorp/mdns pins a responder to the loopback interface on macOS and on
+  Linux, whose `lo` carries no multicast flag (both `ListenMulticastUDP`
+  calls and `NewServer` succeed, in a container's namespace and the host's),
+  which is what lets the rebind tests run on a CI runner.
+
+### Decisions
+
+- **The Tailscale ULA is classified before `IsPrivate` and counts as
+  public.** Public, not merely "not private", because a tailnet with IPv4
+  switched off leaves the ULA beside an fe80, which the zero-config arm
+  (`hasLinkLocal && !hasPublic`) would otherwise admit. By ADDRESS, not by
+  name: macOS numbers its utuns, and nothing in Windows' adapter says
+  tunnel. 100.64/10 needed nothing: it was already refused, and a LAN
+  genuinely numbered in CGNAT space is refused as before. A LAN that uses
+  Tailscale's own ULA prefix would lose eligibility through it; RFC 4193's
+  40-bit global ID makes a collision a one-in-2^40 case, and a private IPv4
+  beside it still admits. The prefix is a local `netip.Prefix`, pinned to
+  `tsaddr.TailscaleULARange()` by a test, rather than an import of tsaddr
+  into `internal/dlna`, which imports nothing of tailscale.com; this is
+  `internal/advertise`'s precedent too. `lanPreferenceOf` is unchanged: an
+  eligible interface carrying the ULA has a real private address, whose
+  class the ULA cannot better.
+- **The IPv4 rule is the SET's, not the SSDP call sites'.** Every consumer
+  of the set runs IPv4 SSDP, the advertisers already skipped such a member,
+  and #1051 justified its tunnel rule on the set by the same failed send.
+  Filtering at the two discovery wirings instead was rejected: it leaves the
+  set holding members no consumer can use, and puts the rule in two places.
+  **Conditional**, like the tunnel rule: when no member carries IPv4 the set
+  is kept, so an IPv6-only host behaves as before; unconditional would empty
+  the set there and, through `startUPnPUpstreamIfEnabled`'s early return,
+  switch off UPnP upstream's manual URLs, which need no multicast.
+  **After the tunnel rule**, so where the tunnel rule leaves no IPv4 member
+  the set is exactly #1051's: the other order readmits a self-assigned
+  tunnel beside an fe80-only interface. A 169.254 address counts: that is
+  the direct-cable renderer #1051 kept the zero-config arm for.
+- **The single pick may now sit outside the set**, and only one way:
+  carrying no IPv4 while a member does. The responder answers over IPv6
+  too, and #1051's ranking puts a non-tunnel first, so an IPv6-only LAN
+  beside a tunnel holding a private IPv4 is its pick and is rightly outside
+  an IPv4 set. No single-pick key keeps strict membership there without
+  ranking the tunnel first. `assertPickIsInTheSet` and the host coherence
+  test allow exactly that case.
+- **The rebind compares the advertisement.** `advertisementOf` is the one
+  computation of what a rebuild stands up (the pinned interface, and the
+  addresses narrowed to it, or all of them when nothing is pinned or none
+  is on it); `rebuildLocked` builds from it and records it as `running`,
+  and `maybeRebind` rebuilds only when a fresh one is not `same`: the
+  interface by name and index, the addresses as a set. Rejected: skipping
+  point-to-point interfaces in `ipsForAdvertise`, which misses Wintun and
+  the docker veths (every change measured on dido) and would change what a
+  responder with nothing pinned advertises.
+- **The InterfaceSource is asked every tick**, where it was asked only
+  inside a rebuild; the responder now follows a better pick when the picker
+  names it, rather than on the next address change anywhere. The
+  cmd/bridge closure printed every failed pick, which per tick is a line a
+  minute on a host with no LAN-eligible interface, so `lanInterfaceSource`
+  prints once per streak (and again when the error's text changes), and an
+  AST test requires the Config literal to take it.
+- **Stale comments corrected.** `internal/dlna`'s package doc said the DLNA
+  listener "is bound ONLY to LAN-eligible interfaces"; eligibility governs
+  SSDP and the single pick, and the HTTP listener binds
+  `dlna.listenAddress`. `cmd/bridge/dlna_wiring.go` said `AllowTsnet` is
+  "honoured at the admin-config layer" and that the empty
+  `TsnetIfaceName` "keeps the picker on LAN-only interfaces": nothing reads
+  `AllowTsnet`, and the second was true only from this change on; the
+  config field's doc now says it changes nothing yet.
+- A Gemini consult on the classification and the placement was refused by
+  the API (the project's spending cap), so these were decided on the
+  measurements above.
+
+### Tests and controls
+
+- `internal/dlna`: 11 rows in `TestIsLANEligibleInterface` (the three
+  platforms' Tailscale shapes without the opt-in, IPv4 switched off, the ULA
+  alone, the /48's last address, a ULA just outside it on either side, a
+  private IPv4 and a ULA beside Tailscale's, and the opt-in);
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` (7 hosts, both
+  pickers); `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` (10 hosts);
+  `TestTailscaleULAIsTailscalesRange`. `macos_host`'s set lost utun12 and
+  awdl0, the Windows single-pick row became a WireGuard adapter numbered
+  with a ULA (Tailscale's is no longer a candidate, and the row exists for
+  Wintun's missing flag), and the Tailscale key row became the opted-in
+  one.
+- `internal/mdns`: `TestAdvertisementSameIsWhatARebuildWouldChange` (10
+  rows), `TestTheRunningAdvertisementIsTheOneBuilt`, and, in their own file
+  so they build on the old code, `TestRebindIgnoresAddressesOffThePinnedInterface`
+  and `TestRebindFollowsTheInterfaceSource`, which drive `maybeRebind` with
+  the responder pinned to the loopback interface. The two filter tests
+  became `advertisementOf` tests.
+- `cmd/bridge`: `TestLANInterfaceSourcePrintsAFailureOncePerStreak` and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne`.
+- **Red first**, on the pre-fix commit in a throwaway worktree with the
+  new test files copied in (those that build there): 19 subtests red in
+  `internal/dlna` (6 eligibility rows, 6 of the 7 tailnet hosts, 6 of the
+  10 IPv4 hosts, `macos_host`), the guards green; both rebind tests red on
+  macOS and on Linux (golang:1.26.6 on dido). The new functions' own tables
+  (`advertisementOf`, `same`, `lanInterfaceSource`) have no old form.
+- **Negative controls**, each applied once to the committed fix by a script
+  that requires its target text exactly once, `-count=1`, restored with
+  `git checkout --` and checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no Tailscale case (the ULA private again) | the 6 eligibility rows, 6 tailnet hosts, `macos_host` |
+  | NC2a | the prefix widened to /32 | the two just-outside rows, the tsaddr pin |
+  | NC2b | the prefix narrowed to /64 | the /48's last address, the Linux shape (`…:ab12::1`), the tsaddr pin |
+  | NC3 | the ULA admits nothing but blocks nothing | `tailscale_ipv6_only_no_optin`, `ipv6_only_tailnet_beside_a_zero_config_lan` |
+  | NC4 | no IPv4 rule | 6 IPv4 hosts, `macos_host` |
+  | NC5 | the IPv4 rule unconditional | 3 IPv4 hosts, `tunnels_alone_are_kept`, one tailnet host, 2 single-pick rows through membership |
+  | NC6 | 169.254 does not count as IPv4 | `link_local_ipv4_counts`, `direct_cable_kept_beside_en0`, `macos_host`, one single-pick row through membership |
+  | NC7 | the IPv4 rule before the tunnel rule | `tunnel_rule_first` |
+  | NC8 | the membership check strict again | `opted_in_tsnet_counts_as_ipv4`, `ipv6_only_lan_beside_an_ipv4_tunnel` |
+  | NC9 | no narrowing | the two "off the pinned interface" rows, the narrowing test, the running test, `TestRebindIgnoresAddressesOffThePinnedInterface` |
+  | NC10 | `same` ignores the interface | the new-index row, `TestRebindFollowsTheInterfaceSource` |
+  | NC11 | `same` compares the name only | the new-index row |
+  | NC13 | every failed pick printed | the streak test |
+  | NC14 | an inline closure in the Config literal | the AST test |
+  | NC15 | a success does not end the streak | the streak test, once fixed (below) |
+
+  The first draft's `tunnel_rule_first` row (two fe80-only interfaces) could
+  not tell the two orders apart, which planning NC7 showed before it ran;
+  that row became `neither_rule_empties_the_set`, and `tunnel_rule_first`
+  a self-assigned tunnel beside an fe80-only interface. NC15 went green on
+  its first run: the streak test's last failure had a different text from
+  the one printed before the success, so it printed with or without the
+  reset. It now repeats that text, and NC15 turns it red.
+- **After**, on the Mac: the set is en0 alone, one advertiser, one renderer
+  client, `UPnP upstream started … interfaces=1`, no send failure, and the
+  bridge holds 4 UDP sockets where it held 12; with mDNS on, `dns-sd -B`
+  finds it on en0 beside the NUC's bridge. On dido: the set is enp1s0f0,
+  docker0 and br-46c2e99686b3, with two veths up at the time.
+
+### Out of scope
+
+- The single picker ranks a non-tunnel fe80-only interface (awdl0) and a
+  169.254 one equally, so on a Mac with no private-IPv4 LAN, enumeration
+  order would give the responder awdl0 over a direct cable. An IPv4
+  tie-break after the class would take the cable; not measured on a host
+  that has both.
+- `dlna.allowTsnet` does nothing until serve passes the pickers the
+  tsnet interface's name.

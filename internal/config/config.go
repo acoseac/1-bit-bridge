@@ -1532,7 +1532,9 @@ type DLNAConfig struct {
 	// playback. Setting this true is only useful for the
 	// uncommon case where renderer + iOS are BOTH on the same
 	// tailnet (renderer published via subnet router with
-	// multicast forwarding hacks).
+	// multicast forwarding hacks). Nothing reads it yet: serve
+	// passes the LAN pickers no tsnet interface name, so setting
+	// it changes nothing (cmd/bridge/dlna_wiring.go).
 	AllowTsnet bool `yaml:"allowTsnet,omitempty"`
 
 	// TelemetryEnabled wires the per-request middleware that
