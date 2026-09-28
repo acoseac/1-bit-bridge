@@ -1521,26 +1521,84 @@ function restoreButton(ids, label, status) {
 }
 
 export async function renderMixes(view, ctx) {
-  const { setToolbar, mixesEnabled } = ctx;
-  if (!mixesEnabled) {
-    // The gear is the POINT of this state: the empty state used to name
-    // a page in Settings and leave the reader to walk there, which is
-    // the trip this whole tray exists to remove. The switch is restart-
-    // required, so it says so after the save rather than pretending the
-    // grid will fill in.
-    setToolbar(mixesToolbar(null));
+  // The toolbar is built ONCE per route and outlives a redraw. The gear's
+  // tray holds a save's "Saved." and the focus, and a redraw that rebuilt
+  // the toolbar would take both away, which is what the variant panel's
+  // redraw does (#1068). "Regenerate all" joins the bar, ahead of the gear,
+  // when there are mixes to regenerate.
+  const page = { view, ctx, bar: el("div", { class: "toolbar" }), gear: null, at: ctx.gen() };
+  const built = mixesTray((field) => {
+    // Only the Smart mixes switch decides what this page shows. Audio
+    // analysis changes what the next regeneration can build, not what is
+    // here now, and a redraw for it would repaint the same page.
+    if (field === "smartPlaylistsEnabled") void drawMixes(page);
+  });
+  if (built) {
+    page.gear = built.button;
+    page.bar.appendChild(built.button);
+  }
+  ctx.setToolbar(built ? el("div", { class: "toolbar-stack" }, page.bar, built.tray) : page.bar);
+  await drawMixes(page);
+}
+
+/**
+ * Paint the mixes page from the server's answer: the grid while smart mixes
+ * are switched on, "Smart mixes are off" while they are not, and "Regenerate
+ * all" only where there is an engine to run.
+ *
+ * The switch comes from /api/player/mixes, which reads it per request. The
+ * page seed carried it until 2026-09-28, read once per page load, so a save
+ * in this page's own gear left "Smart mixes are off" beside "Saved.", and
+ * the player's own navigation back here showed it again, until a reload
+ * (backlog B35). The tray's onSaved calls this for that switch.
+ *
+ * `page.at` is the route this page was drawn for: a redraw a save starts
+ * after the reader has moved on must not paint over the page they are on.
+ */
+async function drawMixes(page) {
+  const { view, ctx, bar, gear, at } = page;
+  if (ctx.gen() !== at) return;
+  clear(view);
+  view.appendChild(spinner());
+  let r;
+  try {
+    r = await api.mixes();
+  } catch (e) {
+    if (isAborted(e) || ctx.gen() !== at) return;
     clear(view);
-    view.appendChild(emptyState("Smart mixes are off",
-      "Turn them on with the gear above — they are generated from your listening history."));
+    view.appendChild(errorState(e, () => { void drawMixes(page); }));
+    return;
+  }
+  if (ctx.gen() !== at) return;
+  // `!== false`: an answer that does not say reads as on, and the grid (or
+  // its own empty state) is what the reader then sees.
+  const on = r.enabled !== false;
+  // Everything ahead of the gear is this draw's. The gear stays put, so a
+  // redraw cannot move an element the reader is on.
+  while (bar.firstChild && bar.firstChild !== gear) bar.removeChild(bar.firstChild);
+  if (on) {
+    for (const n of regenerateAllControls()) {
+      if (gear) bar.insertBefore(n, gear);
+      else bar.appendChild(n);
+    }
+  }
+  if (!on) {
+    clear(view);
+    // The gear is the POINT of this state: the empty state used to name a
+    // page in Settings and leave the reader to walk there. Unless the
+    // control plane owns the switch: then the gear leaves it out, and
+    // pointing at it would send the reader to nothing.
+    view.appendChild(emptyState("Smart mixes are off", r.managed
+      ? "They are generated from your listening history, and are switched off for this bridge."
+      : "Turn them on with the gear above — they are generated from your listening history."));
     return;
   }
   // "Regenerate all" came from the retired /smartmixes page. It belongs
   // on the grid rather than on a mix: it runs the whole engine, and
   // every family's contents change at once.
-  setToolbar(mixesToolbar(regenerateAllButton()));
   await renderPagedList(view, ctx, {
-    fetchPage: () => api.mixes(),
-    pick: (r) => r.collections || [],
+    fetchPage: () => Promise.resolve(r),
+    pick: (d) => d.collections || [],
     make: (c) => collectionTile(c, `/mix/${c.id}`, "smartmix"),
     containerClass: "grid",
     countNoun: "mix",
@@ -1550,21 +1608,19 @@ export async function renderMixes(view, ctx) {
 }
 
 /**
- * The mixes grid's toolbar: whatever controls the state has, plus the
- * feature gear.
+ * The mixes page's feature tray, or null when app.js did not publish one.
  *
  * window.BridgeFeatureTray, not an import: the tray lives in app.js,
  * which is a deferred classic script — the same one-way window handshake
  * boot.js uses in the other direction for window.__player. Guarded,
  * because a missing app.js must cost the gear and not the grid.
  *
- * The tray is returned INSIDE the toolbar node rather than placed as a
- * sibling, because setToolbar clears only #player-toolbar: a sibling
- * would survive every route change and stack a copy per visit.
+ * The caller puts the tray INSIDE the toolbar node rather than beside it,
+ * because setToolbar clears only #player-toolbar: a sibling would survive
+ * every route change and stack a copy per visit.
  */
-function mixesToolbar(controls) {
-  const bar = controls || el("div", { class: "toolbar" });
-  const built = window.BridgeFeatureTray?.build({
+function mixesTray(onSaved) {
+  return window.BridgeFeatureTray?.build({
     title: "Smart mixes",
     blurb: "Auto-generated playlists — Heavy Rotation, Forgotten Favorites, " +
       "Auto Mix — rebuilt daily from what your devices have played.",
@@ -1579,20 +1635,19 @@ function mixesToolbar(controls) {
       },
     ],
     link: { href: "/settings?tab=audio", text: "All audio settings →" },
-  });
-  if (!built) return bar;
-  bar.appendChild(built.button);
-  return el("div", { class: "toolbar-stack" }, bar, built.tray);
+    onSaved,
+  }) || null;
 }
 
 /**
- * The mixes grid's one operator control.
+ * The mixes grid's one operator control, as the button and its status
+ * line, for the caller to place ahead of the gear.
  *
  * A rebuild takes a while and changes every family, so the button
  * reports and then re-routes rather than mutating tiles in place —
  * there is no partial state worth painting.
  */
-function regenerateAllButton() {
+function regenerateAllControls() {
   const status = el("span", { class: "muted small", attrs: { role: "status" } });
   const btn = el("button", { class: "btn", text: "Regenerate all" });
   btn.addEventListener("click", async () => {
@@ -1613,7 +1668,7 @@ function regenerateAllButton() {
       btn.textContent = was;
     }
   });
-  return el("div", { class: "toolbar" }, btn, status);
+  return [btn, status];
 }
 
 /**

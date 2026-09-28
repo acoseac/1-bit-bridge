@@ -42,11 +42,16 @@ globalThis.document = { createElement: (tag) => new El(tag) };
 let traySeq = 0;
 let traySettings = null;
 let traySettingsPromise = null;
+let trayManaged = null;
 const mountedTrays = new Set();
 let patchAnswer = null;
+let patches = [];
+let settingsAnswer = { optimizeEnabled: false, upscaleEnabled: false };
 const API = {
-  get: async () => ({ optimizeEnabled: false, upscaleEnabled: false }),
-  patch: async () => {
+  // A fresh copy each time: a save writes into the snapshot it was given.
+  get: async () => JSON.parse(JSON.stringify(settingsAnswer)),
+  patch: async (url, body) => {
+    patches.push(body);
     if (patchAnswer instanceof Error) throw patchAnswer;
     return patchAnswer;
   },
@@ -59,9 +64,9 @@ function markRestartPending() {}
 // to the end of a save, extracted by name so the harness runs the shipped
 // code rather than a copy of it.
 var trayHarnessFunctions = []string{
-	"escapeHTML", "pruneDetachedTrays", "traySettingsSnapshot", "buildFeatureTray",
-	"buildTrayRow", "trayControlFor", "trayLabelFor", "trayValueOf", "trayApplyValue",
-	"syncTray", "applyStatusFor", "saveTrayField",
+	"escapeHTML", "pruneDetachedTrays", "traySettingsSnapshot", "trayFieldManaged",
+	"buildFeatureTray", "buildTrayRow", "trayControlFor", "trayLabelFor", "trayValueOf",
+	"trayApplyValue", "syncTray", "applyTrayManaged", "applyStatusFor", "saveTrayField",
 }
 
 // trayHarnessRun builds one tray per case with the shipped buildFeatureTray,

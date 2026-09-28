@@ -716,12 +716,17 @@ var playerRoutes = []string{
 
 // playerPageData is the seed the shell hydrates from, so the first view
 // paints without a redundant round-trip for the parts that are cheap.
+//
+// Nothing a gear on a player page can save belongs here: the seed is read
+// once per page load, and neither a save nor the player's own navigation
+// reloads it. The smart-mix switch was here until 2026-09-28
+// (`mixesEnabled`) and left "Smart mixes are off" beside its own tray's
+// "Saved."; the mixes endpoint carries it now (playerMixesResponse).
 type playerPageData struct {
 	Section      string `json:"section"`
 	ID           string `json:"id"`
 	Query        string `json:"query"`
 	AtlasEnabled bool   `json:"atlasEnabled"`
-	MixesEnabled bool   `json:"mixesEnabled"`
 	LibraryName  string `json:"libraryName"`
 }
 
@@ -734,7 +739,6 @@ func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
 		ID:           id,
 		Query:        r.URL.Query().Get("q"),
 		AtlasEnabled: cfg.Atlas.Enabled,
-		MixesEnabled: cfg.SmartPlaylists.EffectiveEnabled(),
 		LibraryName:  cfg.LibraryName,
 	})
 }

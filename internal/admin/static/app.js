@@ -3381,14 +3381,32 @@ let traySeq = 0;
 // place so a tray opened afterwards shows the new value rather than the
 // one from page load.
 //
-// Dropped on every page init (see dispatchPageInit), NOT held for the
-// session: config changes from places this module never sees — the
-// Settings form, the CLI, another tab, a second browser — and a tray
-// showing a value from three navigations ago is the same
-// two-surfaces-disagree failure the cross-tray re-sync below exists to
-// prevent. One request per visit to a page that has trays.
+// Dropped on every page init (see dispatchPageInit) and on every player
+// route (window.BridgeFeatureTray.invalidate, from boot.js's route(); the
+// player never runs a page init, and until 2026-09-28 it held one snapshot
+// for the whole page load), NOT held for the session: config changes from
+// places this module never sees — the Settings form, the CLI, another tab,
+// a second browser — and a tray showing a value from three navigations ago
+// is the same two-surfaces-disagree failure the cross-tray re-sync below
+// exists to prevent. One request per visit to a page that has trays.
 let traySettings = null;
 let traySettingsPromise = null;
+
+// The settings fields the control plane owns on this bridge (a snapshot's
+// `managedSettings`, the effective set the PATCH refuses), or null before
+// any snapshot has landed in this document. Kept across
+// invalidateTraySettings on purpose: a console cannot change the deployment
+// block, so a tray built after the first snapshot leaves a managed row out
+// from its first paint, rather than showing it until its own fetch lands.
+// Every snapshot that lands replaces it.
+let trayManaged = null;
+
+// trayFieldManaged reports whether the control plane owns a field, as the
+// last snapshot said. Unknown is not managed: before the first snapshot a
+// tray's rows are all shown, and all disabled until it lands (syncTray).
+function trayFieldManaged(field) {
+  return !!trayManaged && trayManaged.has(field);
+}
 
 // Every tray mounted on the CURRENT page, so a save in one can re-sync
 // the others: analysisEnabled appears on both the Audio analysis card
@@ -3413,7 +3431,11 @@ function traySettingsSnapshot() {
   if (traySettings) return Promise.resolve(traySettings);
   if (!traySettingsPromise) {
     traySettingsPromise = API.get("/api/settings")
-      .then((s) => { traySettings = s || {}; return traySettings; })
+      .then((s) => {
+        traySettings = s || {};
+        trayManaged = new Set(Array.isArray(traySettings.managedSettings) ? traySettings.managedSettings : []);
+        return traySettings;
+      })
       .catch((err) => { traySettingsPromise = null; throw err; });
   }
   return traySettingsPromise;
@@ -3509,7 +3531,11 @@ function buildFeatureTray(spec) {
   // a save, so a reader who never opens one accumulates them silently.
   // (Gemini on PR #763.)
   pruneDetachedTrays();
-  const entry = { tray, controls };
+  const hasNote = (spec.rows || []).some((row) => row.type === "note");
+  const entry = { button, tray, controls, hasNote };
+  // From the first paint when a snapshot has already told this document
+  // which fields are managed; syncTray applies it again when one lands.
+  applyTrayManaged(entry);
   mountedTrays.add(entry);
   pageSignal().addEventListener("abort", () => mountedTrays.delete(entry), { once: true });
 
@@ -3598,7 +3624,7 @@ function buildTrayRow(row, status, controls, onSaved) {
     wrap.appendChild(hint);
   }
 
-  const ctl = { row, input, onSaved };
+  const ctl = { row, input, onSaved, wrap };
   controls.push(ctl);
   // change, not input: a number field would otherwise PATCH on every
   // keystroke, and "6" on the way to "60" is a real, saved value.
@@ -3725,9 +3751,48 @@ function syncTray(entry) {
     trayApplyValue(ctl, traySettings[ctl.row.field]);
     ctl.input.disabled = false;
   }
+  applyTrayManaged(entry);
+}
+
+// applyTrayManaged leaves out of a tray every row whose field the control
+// plane owns on this bridge, and hides the gear once nothing is left to
+// show.
+//
+// The settings PATCH refuses a managed field, so a switch offered for one
+// could only answer "Save failed", which is what every tray did on a
+// managed bridge until 2026-09-28 (backlog B35): the variant panel's gear
+// offered PCM upscaling and CarPlay, the Jobs page's Backups and Update
+// checks gears offered nothing else. Hidden, not shown disabled, as the
+// Settings page hides the same fields (hideManagedSettings) and the library
+// page leaves out the roots form: a greyed switch on a hosted bridge reads
+// as something the reader could earn. The row's input is disabled too, so
+// nothing can send it. A tray keeps its gear while a field row or a note
+// row is left, since a note is written for the reader whatever the switches
+// are (History's).
+function applyTrayManaged(entry) {
+  let shown = entry.hasNote;
+  for (const ctl of entry.controls) {
+    const managed = trayFieldManaged(ctl.row.field);
+    ctl.wrap.hidden = managed;
+    if (managed) ctl.input.disabled = true;
+    else shown = true;
+  }
+  entry.button.hidden = !shown;
+  if (!shown && !entry.tray.hidden) {
+    entry.tray.hidden = true;
+    entry.button.setAttribute("aria-expanded", "false");
+  }
 }
 
 async function saveTrayField(ctl, status) {
+  // The console sends only what it showed. A managed row is hidden and its
+  // input disabled (applyTrayManaged), so only a change dispatched from
+  // script gets here, and the PATCH would refuse it whole: snap the control
+  // back and send nothing.
+  if (trayFieldManaged(ctl.row.field)) {
+    if (traySettings) trayApplyValue(ctl, traySettings[ctl.row.field]);
+    return;
+  }
   const value = trayValueOf(ctl);
   if (value == null) {
     status.dataset.tone = "err";
@@ -3817,9 +3882,11 @@ function attachFeatureTray(head, spec) {
 // The player module is an ES module and app.js is a deferred classic
 // script, so there is no import between them — the same one-way window
 // handshake boot.js already uses for window.__player, in the other
-// direction. Exposed as a function rather than the internals so the
-// player cannot reach the snapshot cache.
-window.BridgeFeatureTray = { build: buildFeatureTray };
+// direction. Exposed as functions rather than the internals so the
+// player cannot reach the snapshot cache. `invalidate` is what the
+// player's router calls on each route, the drop an operator page gets
+// from dispatchPageInit, which the player never runs.
+window.BridgeFeatureTray = { build: buildFeatureTray, invalidate: invalidateTraySettings };
 
 // showUpnpRestartBanner injects (or refreshes) a one-time "Restart
 // required" banner above the configured panel so the operator knows

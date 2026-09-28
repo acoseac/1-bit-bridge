@@ -207,8 +207,36 @@ func (s *Server) apiPlayerPlaylistDetail(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// playerMixesResponse is GET /api/player/mixes: the stored mixes, and the
+// smart-mix switch they depend on.
+//
+// Enabled is the switch, read per request (SmartPlaylists.EffectiveEnabled,
+// the regenerator's own reading), with no mixes while it is off. The Smart
+// mixes page draws its off state from it and redraws from it after its own
+// gear saves the switch; it read the page seed until 2026-09-28, once per
+// page load, so that save left "Smart mixes are off" beside "Saved." until a
+// reload (backlog B35). Managed says the control plane owns the switch, so
+// the page must not tell the reader to turn it on: its gear leaves that
+// switch out.
+type playerMixesResponse struct {
+	playerCollectionsResponse
+	Enabled bool `json:"enabled"`
+	Managed bool `json:"managed,omitempty"`
+}
+
 // apiPlayerMixes handles GET /api/player/mixes.
 func (s *Server) apiPlayerMixes(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	managed := cfg.Deployment.IsManagedSettingOrImplied("smartPlaylistsEnabled")
+	if !cfg.SmartPlaylists.EffectiveEnabled() {
+		// Off answers before the catalog: nothing here needs it, and a
+		// catalog too large to build must not hide the switch's state.
+		writeJSON(w, http.StatusOK, playerMixesResponse{
+			playerCollectionsResponse: playerCollectionsResponse{Collections: []playerCollectionDTO{}},
+			Managed:                   managed,
+		})
+		return
+	}
 	cat, ok := s.playerCatalog(w, r)
 	if !ok {
 		return
@@ -230,8 +258,12 @@ func (s *Server) apiPlayerMixes(w http.ResponseWriter, r *http.Request) {
 			Covers:   mosaicFor(cat, smartMixHeadPaths(m, mosaicScanDepth)),
 		})
 	}
-	writeJSON(w, http.StatusOK, playerCollectionsResponse{
-		Collections: out, SnapshotAt: snapshotStamp(cat.BuiltAt),
+	writeJSON(w, http.StatusOK, playerMixesResponse{
+		playerCollectionsResponse: playerCollectionsResponse{
+			Collections: out, SnapshotAt: snapshotStamp(cat.BuiltAt),
+		},
+		Enabled: true,
+		Managed: managed,
 	})
 }
 
