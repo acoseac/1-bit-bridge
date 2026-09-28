@@ -24982,20 +24982,21 @@ the change), on macOS (APFS), a root indexed with two FLACs under
   it of the root's listing (`holdsLibraryContent`). The root entry itself is
   never counted, as before.
 - **Every file the walk does not index counts as nothing, not a list of named
-  ones.** The request named dot-entries and some detritus (`Thumbs.db`,
-  `desktop.ini`, `lost+found`, `$RECYCLE.BIN`, `System Volume Information`,
-  `@eaDir`, `#recycle`). A list of FILES that are not content would be a
-  second rule beside the walk's, and would miss the next one (a
-  `NOT_MOUNTED` marker an administrator leaves in a mount point, a macOS
-  `Icon\r`). The cost, accepted: a mounted root whose last audio file went
-  while only non-audio files stayed (a cover image, a playlist) reads as
-  emptied and keeps its rows, with an error line per scan, until
-  `.bridge-allow-empty` is placed, which is what an emptied root has always
-  cost. A root holding a directory is unaffected, since a directory counts.
-  A directory LINK below a root is a file entry to the walk and counts as
-  nothing, as the walk sees it (the scanner follows no link below a root), so
-  rows once indexed under a path that later became such a link are spared
-  with a line rather than reaped at the threshold.
+  ones.** The first proposal was to ignore dot-entries and a list of named
+  detritus (`Thumbs.db`, `desktop.ini`, `lost+found`, `$RECYCLE.BIN`,
+  `System Volume Information`, `@eaDir`, `#recycle`). A list of FILES that
+  are not content would be a second rule beside the walk's, and would miss
+  the next one (a `NOT_MOUNTED` marker an administrator leaves in a mount
+  point, a macOS `Icon\r`). The cost, accepted: a mounted root whose last
+  audio file went while only non-audio files stayed (a cover image, a
+  playlist) reads as emptied and keeps its rows, with an error line per
+  scan, until `.bridge-allow-empty` is placed, which is what an emptied root
+  has always cost. A root holding a directory is unaffected, since a
+  directory counts. A directory LINK below a root is a file entry to the
+  walk and counts as nothing, as the walk sees it (the scanner follows no
+  link below a root), so a root holding nothing but such links reads as
+  emptied too, and rows once indexed below them are spared with a line
+  rather than reaped at the threshold.
 - **The sentinel is asked for by name.** It is a dot-file, so it no longer
   makes a root non-empty: `hasAllowEmptySentinel` is what decides, in Scan,
   in a subtree scan of the root, and now in the audit, where a Gemini review
