@@ -5753,24 +5753,29 @@ function renderJobCards(j) {
 // which could not list part of the variants directory, and it has no
 // override; it says so in the journal once a day. This line read "on"
 // throughout until 2026-09-28, so a sweep that had unlinked nothing for
-// weeks looked healthy here. Built with textContent; the refusal kind is a
-// key the server sends and describeOrphanGCRefusal words.
+// weeks looked healthy here. The line carries the badge and when the
+// refusal started; the why goes in the warning under the card's list,
+// since a sentence in a list cell wraps into a tall column on a phone.
+// Built with textContent; the refusal kind is a key the server sends and
+// describeOrphanGCRefusal words.
 function renderOrphanSidecarGC(mt) {
   const el = document.getElementById("job-maint-gc");
+  const why = document.getElementById("job-maint-gc-refusal");
   if (!el) return;
-  if (!mt.orphanSidecarGC) {
-    el.textContent = "off (default)";
-    return;
+  const kind = mt.orphanSidecarGC ? mt.orphanSidecarGCRefusal : "";
+  if (why) {
+    why.hidden = !kind;
+    why.textContent = kind ? `Orphan sidecar GC is refusing. ${describeOrphanGCRefusal(kind)}` : "";
   }
-  if (!mt.orphanSidecarGCRefusal) {
-    el.textContent = "on";
+  if (!kind) {
+    el.textContent = mt.orphanSidecarGC ? "on" : "off (default)";
     return;
   }
   const badge = document.createElement("span");
   badge.className = "badge warn";
   badge.textContent = "refusing";
   el.textContent = "";
-  el.append(badge, ` ${describeOrphanGCRefusal(mt.orphanSidecarGCRefusal)} Started ${agoOrDash(mt.orphanSidecarGCRefusingSince)}.`);
+  el.append(badge, ` since ${agoOrDash(mt.orphanSidecarGCRefusingSince)}`);
 }
 
 // describeOrphanGCRefusal words a refusal kind of the background orphan
