@@ -31,25 +31,44 @@ import (
 // OrphanSidecarSweepIntervalSec`, typically minutes to hours) is what
 // spaces that from library scans and serving.
 //
-// What the chunk still bounds: how many files a tick unlinks, so a
-// legitimate backlog drains over several ticks rather than in one burst,
-// and how many orphan paths the inventory retains (MaxOrphanPaths: ~750 KB
-// at 150 bytes a path). `SidecarInventory.Orphans` is counted in full
-// either way, and the refusal reads that count, never the retained list —
-// a count capped at the chunk would read 5,000 orphans where there are
-// 10,048, and against a catalog of 10,000 rows it would proceed.
-//
-// A failed unlink keeps its slot, so the retained list is the tree's first
-// `gcChunkSize` orphans in walk order on every tick: fewer than that many
-// files this user cannot remove only shrink each tick's share, while that
-// many or more at the head of the walk stall the rest until the operator
-// fixes them — each tick's sampled WARN names them.
+// What the chunk still bounds: how many files a tick SUCCESSFULLY unlinks,
+// so a legitimate backlog drains over several ticks rather than in one
+// burst. How many orphan paths the inventory retains is
+// gcRetainedPerUnlink times that. `SidecarInventory.Orphans` is counted in
+// full either way, and the refusal reads that count, never the retained
+// list — a count capped at the chunk would read 5,000 orphans where there
+// are 10,048, and against a catalog of 10,000 rows it would proceed.
 //
 // 5000 was chosen when the chunk bounded the WALK (Gemini on PR #282: the
 // 100 it replaced made a full sweep O(N × N/chunk) in AllVariants reads).
 // Pure constant, not configurable — the operator-facing knob is the SWEEP
 // CADENCE, not the chunk size.
 const gcChunkSize = 5000
+
+// gcRetainedPerUnlink is how many orphan paths a tick keeps for each
+// unlink the chunk allows, so a tick can walk past files this user cannot
+// remove and still unlink its chunk.
+//
+// Until 2026-09-28 a tick kept exactly one chunk of paths and every
+// attempt, failed or not, spent a slot. The retained list is the tree's
+// first orphans in walk order on every tick, so a chunk's worth of files
+// the service user cannot unlink at the head of the walk (root-owned
+// directories a `sudo bridge upscale` left behind) blocked every orphan
+// behind them, every tick, where the cursor this sweep had until #1063
+// moved past them. Measured with a chunk of 5: eight orphans in a
+// read-only directory ahead of ten deletable ones, and four ticks
+// unlinked nothing. The cap is on SUCCESSFUL unlinks now, and a tick tries
+// the retained paths in order until it has unlinked a chunk.
+//
+// The bound is memory, and each tick still decides alone (no failure is
+// remembered across ticks: #1063's rule). At four, a tick keeps 20,000
+// paths: measured at 10.8 MB of heap with paths of 205 bytes, two spellings
+// each (OrphanPaths and OrphanWalkedPaths), freed when the tick ends. A
+// head of up to 15,000 files this user cannot remove still leaves a full
+// chunk of unlinks per tick; 20,000 or more stall the tick again, each
+// tick's summary counting them as failed and its sampled WARN naming
+// them.
+const gcRetainedPerUnlink = 4
 
 // gcGracePeriod gates orphan detection on file modification time:
 // files newer than this threshold are skipped during the sweep so a
@@ -404,14 +423,16 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 //     deletes on a truncated inventory would be deleting on a ratio
 //     measured from part of the tree. A walk that fails or is stopped
 //     unlinks nothing.
-//  4. Ask MassOrphanRefusal of the whole-tree counts — `inv.Orphans`, the
-//     full count, never the retained list — and unlink nothing on a
-//     refusal. Then refuse a walk that could not read an entry
-//     (inv.Unreadable): its counts describe part of the tree, which is
+//  4. Ask MassOrphanRefusalFor of the whole-tree counts — `inv.Orphans`,
+//     the full count, never the retained list, with each entry the walk
+//     could not stat weighed as one more orphan — and unlink nothing on a
+//     refusal. Then refuse a walk that could not list a directory
+//     (PartialWalkRefusal): its counts describe part of the tree, which is
 //     the reason step 3 takes no MaxEntries.
-//  5. Unlink at most the chunk's worth of the retained orphans, each
-//     re-checked first, from an inventory whose listed and walked paths
-//     pair up (reclaimOrphans).
+//  5. Unlink at most the chunk's worth of the retained orphans, trying
+//     them in walk order past any that fail, each re-checked first, from
+//     an inventory whose listed and walked paths pair up
+//     (reclaimOrphans).
 //
 // Every tick that reaches the walk logs one summary line (orphanTick.log);
 // a refused one logs its refusal through the latch (noteRefusal).
@@ -491,7 +512,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	chunk := s.effectiveChunkSize()
 	inv, err := TakeSidecarInventory(ctx, root, known, SidecarInventoryOptions{
 		Consider:       shouldConsiderSidecarFile,
-		MaxOrphanPaths: chunk,
+		MaxOrphanPaths: chunk * gcRetainedPerUnlink,
 	})
 	if err != nil {
 		// The walk stops only for its context or for a tree it could not
@@ -572,18 +593,21 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	return tally.unlinked
 }
 
-// reclaimOrphans takes at most chunk of the inventory's orphans and hands
-// each one's WALKED path to reclaimOrphan, counting and logging what it did
-// under the configured spelling, and stops at a cancelled context with the
-// context's error. OrphanWalkedPaths[i] is the file OrphanPaths[i] names, as
-// the walk visited it: the unlink goes to the tree the verdict was taken
-// over, whatever the configured root points at by now. An inventory whose
-// two lists do not pair up is refused whole, with ErrUnpairedInventory and
-// nothing unlinked (SidecarInventory.CheckPaired), BEFORE the lists are cut
-// to the chunk, since cutting the shorter one is itself the panic.
-// Per-path lines are sampled at logSampleCap per message per tick, the rest
-// at Debug: a legitimate backlog is a chunk of 5,000 unlinks a tick, and
-// the summary line carries the totals.
+// reclaimOrphans hands the inventory's orphans, in walk order, each by its
+// WALKED path, to reclaimOrphan until chunk of them have been unlinked or
+// the list ends, counting and logging what it did under the configured
+// spelling, and stops at a cancelled context with the context's error.
+// Only an unlink spends the chunk: a file that failed, was gone, was in
+// its grace or is no longer a file does not, so a tick walks past files
+// this user cannot remove to the ones it can (gcRetainedPerUnlink).
+// OrphanWalkedPaths[i] is the file OrphanPaths[i] names, as the walk
+// visited it: the unlink goes to the tree the verdict was taken over,
+// whatever the configured root points at by now. An inventory whose two
+// lists do not pair up is refused whole, with ErrUnpairedInventory and
+// nothing unlinked (SidecarInventory.CheckPaired), before either list is
+// indexed. Per-path lines are sampled at logSampleCap per message per
+// tick, the rest at Debug: a legitimate backlog is a chunk of 5,000
+// unlinks a tick, and the summary line carries the totals.
 func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarInventory, chunk int, tickStart time.Time) (orphanTally, error) {
 	grace := s.effectiveGracePeriod()
 	var (
@@ -593,13 +617,11 @@ func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarIn
 	if err := inv.CheckPaired(); err != nil {
 		return tally, err
 	}
-	paths, walked := inv.OrphanPaths, inv.OrphanWalkedPaths
-	if len(paths) > chunk {
-		// MaxOrphanPaths already capped the list; the cap is restated where
-		// the unlinks happen so it cannot quietly depend on an option.
-		paths, walked = paths[:chunk], walked[:chunk]
-	}
-	for i, p := range paths {
+	walked := inv.OrphanWalkedPaths
+	for i, p := range inv.OrphanPaths {
+		if tally.unlinked >= chunk {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return tally, err
 		}
@@ -840,12 +862,16 @@ func (t orphanTick) log() {
 	if t.cutShort {
 		msg = msgOrphanTickCutShort
 	}
-	attrs := make([]slog.Attr, 0, 12)
+	attrs := make([]slog.Attr, 0, 13)
 	if t.walked {
 		attrs = append(attrs,
 			slog.Int("files", t.inv.Files),
 			slog.Int("known", t.inv.Known),
 			slog.Int("orphans", t.inv.Orphans),
+			// How many of them the tick kept paths for and could try
+			// (gcRetainedPerUnlink): failed == retained with unlinked == 0
+			// is a tick stalled behind files this user cannot remove.
+			slog.Int("retained", len(t.inv.OrphanPaths)),
 			slog.Int("unreadable", t.inv.Unreadable),
 			slog.Bool("refused", t.refused),
 		)

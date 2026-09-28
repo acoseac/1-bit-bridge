@@ -399,6 +399,73 @@ func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	}
 }
 
+// TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove — a tick keeps
+// the tree's first orphans in walk order, and until 2026-09-28 it kept
+// exactly one chunk of them and every attempt spent a slot, so a chunk's
+// worth of files this user cannot remove at the head of the walk (a
+// root-owned directory a `sudo bridge upscale` left) blocked every orphan
+// behind them, every tick. Measured on the old code with the first row's
+// fixture: four ticks, nothing unlinked. The chunk caps UNLINKS now, and a
+// tick tries past the failures. The retained list is bounded
+// (gcRetainedPerUnlink chunks), so a head of undeletable files as long as
+// the whole list stalls the tick again: the second row pins that residual,
+// and the summary line that shows it.
+func TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove(t *testing.T) {
+	skipWhereModesDenyNothing(t)
+	for _, c := range []struct {
+		name         string
+		chunk        int
+		perTick      []int
+		wantSummary1 []string
+	}{
+		{"a chunk of 5 walks past the 8 it cannot remove", 5, []int{5, 5, 0},
+			[]string{" orphans=18", " retained=18", " unlinked=5", " failed=8"}},
+		{"a head as long as the retained list stalls the tick", 2, []int{0, 0},
+			[]string{" orphans=18", " retained=8", " unlinked=0", " failed=8"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			live := seedTestSidecarTree(t, dir, "live-", 30)
+			stuck := filepath.Join(dir, "a-stuck")
+			seedTestSidecarTree(t, stuck, "stuck-", 8)
+			seedTestSidecarTree(t, filepath.Join(dir, "z"), "free-", 10)
+			ageFixtures(t, dir)
+			// Read-only, so this user can list the directory and cannot
+			// unlink what is in it: the walk sees the eight, the unlinks
+			// fail with a permission error.
+			if err := os.Chmod(stuck, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+			s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+			s.gracePeriodForTest = time.Nanosecond
+			s.chunkSizeForTest = c.chunk
+			rec := loggingtest.Record(t)
+
+			total := 0
+			for i, want := range c.perTick {
+				n := s.tick(context.Background())
+				if n != want {
+					t.Errorf("tick %d unlinked %d, want %d", i+1, n, want)
+				}
+				total += n
+			}
+			if got := countFiles(t, dir); got != 48-total {
+				t.Errorf("%d files left after %d unlinks, want %d", got, total, 48-total)
+			}
+			summaries := rec.Lines(msgOrphanTickComplete)
+			if len(summaries) != len(c.perTick) {
+				t.Fatalf("want one summary per tick, got %d:\n%s", len(summaries), strings.Join(summaries, "\n"))
+			}
+			for _, want := range c.wantSummary1 {
+				if !strings.Contains(summaries[0], want) {
+					t.Errorf("the first tick's summary lacks %q: %s", want, summaries[0])
+				}
+			}
+		})
+	}
+}
+
 // TestOrphanSidecarSweeperRefusesAStrandedTree is #940's shape, the one
 // that change left the background sweep open to: after a lost index the
 // catalog holds a handful of rows (the auto-optimize sweeper's fresh
