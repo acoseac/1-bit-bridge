@@ -121,6 +121,7 @@ type Server struct {
 	sessions               SessionTracker
 	pairing                *pairing.Store
 	pairingRateLimiter     *pairingRateLimiter
+	pairingCodes           PairingCodeTaker             // nil unless WithPairingCodes wired; POST /v1/pairing/redeem 404s without it
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
@@ -1003,6 +1004,14 @@ func (s *Server) reapDeviceSeen(now time.Time) int {
 // behaviour for free (404 from the unregistered route).
 func (s *Server) WithPairing(p *pairing.Store) *Server {
 	s.pairing = p
+	return s
+}
+
+// WithPairingCodes wires the one-time codes the console's pairing links
+// carry (internal/pairingcode), enabling POST /v1/pairing/redeem. The
+// console issues from the same store in the same process.
+func (s *Server) WithPairingCodes(c PairingCodeTaker) *Server {
+	s.pairingCodes = c
 	return s
 }
 

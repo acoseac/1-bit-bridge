@@ -78,8 +78,11 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	// req.URL (public-domain LE cert for a public dial URL, self-signed
 	// otherwise) so the iOS first-contact pin check can't reject pairing.
 	fp := pairFingerprint(req.URL, s.deps.Fingerprint, s.deps.FingerprintForHost)
+	// A fresh code replaces the one the token's previous QR carried
+	// (pairingcode.Store keeps one live code per token), so the old QR
+	// has nothing left to redeem, as its token has nothing left to use.
 	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
-	pairURL := buildPairURL(req.URL, rawToken, fp, cfg.LibraryName, alternates)
+	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok.ID), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the rotate — operator can

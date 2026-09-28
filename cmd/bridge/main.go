@@ -58,6 +58,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
@@ -3366,12 +3367,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		leCertExpiry = func() time.Time { return am.Status().NotAfter }
 	}
 
+	// The pairing link's one-time codes (internal/pairingcode): the
+	// console issues them into this store (admin.Deps.PairingCodes, below)
+	// and POST /v1/pairing/redeem takes them from it. ONE store in THIS
+	// process: a code issued anywhere else could never be redeemed.
+	pairingCodes := pairingcode.New()
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
+		WithPairingCodes(pairingCodes).
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider, store: manifestStore, variantsDir: liveVariantsDir}).
@@ -4603,6 +4611,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// host-network walk, which is the no-Tailscale shape both shipped
 		// in from PR #269 until 2026-09-20 (see advertisedEndpoints).
 		Endpoints:       apiSrv.ReachableEndpoints,
+		PairingCodes:    pairingCodes,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: soxCache.precheck,

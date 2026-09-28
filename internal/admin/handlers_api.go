@@ -1946,7 +1946,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
 	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
-	pairURL := buildPairURL(req.URL, rawToken, fp, cfg.LibraryName, alternates)
+	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok.ID), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
 		// QR render failures don't block the pairing — the user can still
