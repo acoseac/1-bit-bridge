@@ -962,6 +962,39 @@ lost my library."
   Host comparison, not URL comparison — the two differ in exactly the part that
   is wrong, so the existing string dedupe cannot see it. `autocert.domain` cannot
   simply be omitted: public mode refuses to start without it.
+- **An endpoint the bridge advertises carries no user name, password, query
+  or fragment** (backlog B54). A `customEndpoints` entry was kept as
+  written, so `/v1/health`, which answers without a token, published
+  `https://user:password@host:7788` (a token as the user name, a `?token=`,
+  a `#…` alike) to any caller, and the pairing QR's `urls=` carried it
+  (measured on main with the real binary: all four shapes, in both); in
+  public mode a declared endpoint is also the QR's PRIMARY `url=`. The phone
+  uses none of those parts: it sets its own `Authorization` header (the
+  bearer token) on every request, and its request delegate cancels every
+  challenge but the server's certificate, so userinfo could never have
+  reached a proxy in front of the bridge; the app only stored the secret and
+  dialled with it (read in `BridgeSourceClient`, `BridgePairingURL` and
+  `SMBStore`, 2026-09-28). **Repair what is stored, refuse what is typed**
+  (the library name's rule, under Config): `ValidateCustomEndpoints`, which
+  `Normalize` runs for `Load` and every writer, keeps such an entry WITHOUT
+  those parts (`config.HasCredentialParts`), dedupes on the published form,
+  and warns once per entry under its own message, never "dropped"; the
+  settings PATCH refuses a typed one whole (`config.CheckCustomEndpoints`,
+  400 `validate`, nothing written), and `bridge init --public --domain`
+  refuses a domain carrying one (exit 2, nothing written), since the domain
+  is also the autocert host that health and the QR build a URL from.
+  **Don't drop such an entry**: its host and port still reach the bridge,
+  and a loaded config must not lose a route over a part nothing reads.
+  **Don't strip at the publish sites**: every enumeration
+  (`ReachableEndpoints`, `pairAlternates`' public branch,
+  `defaultBridgeURL`, the console's panel) reads the normalized list, and a
+  second strip is the copy that drifts. No wire change and no Mirror-PR: an
+  endpoint is still a URL the client dials. The file keeps the value until
+  the next save writes the normalized list, which the warning says.
+  `TestServePublishesNoCustomEndpointCredential` boots serve and checks
+  health, a minted link and every log line;
+  `TestHealthPublishesNoCustomEndpointCredential` and
+  `TestPublicPairingCarriesNoCustomEndpointCredential` cover public mode.
 - **mDNS TXT records carry `host` + `port`.** Without them iOS must
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
@@ -2473,12 +2506,31 @@ no failing test — which is the shape to expect in this area.
   A tailnet node may hold 100.100.100.200 (it is in 100.64/10, one address
   in four million) and would lose its routed dials. The resolver's own DNS
   connects do not pass the dial check, so Azure's DNS on 168.63.129.16 keeps
-  working. A manual upstream's own description fetch is not checked (the
-  operator's URL; upstream ingest is refused in public mode), and no later
-  dial of one reaches a metadata address. `TestCloudMetadataAddrsAreTheDocumentedOnes`
+  working. `TestCloudMetadataAddrsAreTheDocumentedOnes`
   holds the list to its sources, and
   `TestAPacketFromAMetadataAddressApprovesNoLaterDialThere` drives the chain
-  through the real ingest and proxy.
+  through the real ingest and proxy. **A manual upstream's own description
+  fetch is refused one too** (backlog B54; this bullet said it was not
+  checked until then): it ran on a plain client, so a manual URL on a
+  metadata address was sent a GET every poll, its answer parsed and dropped,
+  and nothing said why the server never appeared. **Refused, not warned
+  about and fetched**: it was the one request the rule did not reach, a GET
+  to IMDS is the request the rule exists to prevent, no media server serves
+  on one, and such a server could never walk anyway (its later dials are
+  refused). The poller refuses a literal before any request
+  (`discovery.NamesCloudMetadataAddr`) and fetches on `NewDeviceTransport`
+  under `discovery.ManualDescriptionFetch()`, which permits every address
+  BUT a metadata one: a name resolving to one is refused at the connect,
+  while a name resolving to this machine is still fetched (#1069's
+  decision; only the later dials need `localhost`). Either refusal warns
+  ONCE per server, naming its host: a failed fetch is a Debug line, which
+  the bridge never prints. The ingest's per-server error (the console's
+  last walk error) says so for a literal, where it said "has not answered
+  yet". The console refuses a typed literal (`AddServer`), and a config
+  holding one still loads.
+  `TestManualPollerNeverFetchesACloudMetadataDescription` holds both
+  refusals and both controls (a direct-cable literal, a name answering
+  127.0.0.1).
 - **A URL that names a port and no host (`https://:8443`) is not a URL of any
   host, and Go dials it on THIS machine**, so every validator reads
   `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
@@ -2494,7 +2546,10 @@ no failing test — which is the shape to expect in this area.
   base accepts userinfo, so `http://user:password@:5000` reached the journal
   whole, and a dropped custom endpoint was quoted whole, a parse failure
   twice (the parse error quotes it). `url.URL.Redacted` is not enough: it
-  keeps a token written as the user name, and the query.
+  keeps a token written as the user name, and the query. The REFUSALS take
+  the same rule since backlog B54 (the bullet under Config on naming a
+  configured URL), and the manual upstream poller's warnings name the host
+  alone.
 - **…and a GENA callback on THIS machine or a link-local address gets the
   initial NOTIFY only when the SUBSCRIBE came from that address, and the
   NOTIFY follows no redirect** (backlog B39, 2026-09-28). The DLNA listener
@@ -2927,6 +2982,26 @@ no failing test — which is the shape to expect in this area.
   paste without a word; the handler's 400 is what the page shows ("Save
   failed: libraryName: must be at most 256 characters, …"). Added in #1046's
   first round, removed on review (CodeRabbit).
+- **A configured URL is named in every refusal and warning by its field,
+  its scheme and its host, never its value** (backlog B54). #1074 gave the
+  WARNINGS that rule (`urlOriginForLog`, under DLNA) and left the two
+  REFUSALS that stop the bridge from starting: `normalizeBaseURL`'s and
+  `Validate`'s harvest pin quoted the value (`got
+  "ftp://user:password@mirror/ws/2"`), which serve prints, `bridge doctor`
+  puts on its config-file line and the console's PATCH answers, and an
+  enrich base may legitimately carry a mirror's password (net/http sends
+  userinfo as Basic auth). `urlFieldForLog` is the one naming
+  (`enrich.musicbrainzBaseURL (ftp://mirror.example)`), and the message says
+  what the value may not carry, since it is not shown. **A URL with no host
+  part renders as NOTHING, scheme included**: `user:password@host`, written
+  without a scheme, parses with the USER NAME as its scheme, and #1074's own
+  custom-endpoint warning quoted it twice (`(s3cret-pw:)`, `got
+  "s3cret-pw"`). **Search for a leaked secret without regard to case**:
+  `url.Parse` LOWERCASES a scheme, which is how #1074's test, searching for
+  `s3cret-Pw`, passed over that leak.
+  `TestNoStartupErrorCarriesAURLsCredentials` (every shape, through Load,
+  Validate and the environment) and
+  `TestAStartupRefusalNamesAURLWithoutItsCredential` (serve and doctor).
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true
