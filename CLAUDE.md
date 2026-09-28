@@ -4453,7 +4453,10 @@ its twin.** The top list is older, shorter, and read first.
   `maintenance.orphanSidecarGCRefusal` is read, not that every value it
   can take has words, so `TestEveryOrphanRefusalKindIsWorded` runs
   `describeOrphanGCRefusal` under node for each
-  `integrity.OrphanRefusalKinds()` entry (2026-09-28).
+  `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
+  comes back blank, `undefined` or `null` (what `console.log` prints for a
+  case that returns nothing), as its key, as the fallback, or in another
+  kind's words.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and

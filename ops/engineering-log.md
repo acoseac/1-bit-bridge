@@ -22779,3 +22779,20 @@ Controls re-run on the refactored tests, each restored with
 | the doctor's partial-walk hint case disabled | `TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk` red |
 | the doctor probe never says the sweep would refuse | `TestDoctorReportsAVariantCatalogThatLostItsIndex` red |
 | the doctor verdict withheld for a link too | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC` red |
+
+### Review round 2: an empty refusal reason
+
+CodeRabbit (on `615ec468`, one Trivial comment) found that
+`TestEveryOrphanRefusalKindIsWorded` did not reject an EMPTY reason: its
+cases were the fallback, the bare key and another kind's words, and an
+empty line is none of them. Measured with `partialWalk`'s case in
+`describeOrphanGCRefusal` returning `""`, returning nothing, returning
+`null` and returning `" "`: the test on `615ec468` passed all four, while
+the Jobs card would have read "Orphan sidecar GC is refusing." with no
+reason, or with "undefined" or "null" as one. It now rejects a line that is
+blank, `undefined` or `null` before its other cases, taking CodeRabbit's
+suggestion and adding the two spellings it did not name (`null` prints as
+"null"; a blank passes `== ""`). The same four mutations turn the new
+test red with "has no refusal reason", and each is green against the old
+one, so nothing else in the test caught them. Gemini was at its daily
+quota this round.

@@ -12,8 +12,11 @@ import (
 // TestEveryOrphanRefusalKindIsWorded runs the shipped describeOrphanGCRefusal
 // under node for every kind the background orphan sweep can report
 // (integrity.OrphanRefusalKinds), and requires each to come back as a
-// sentence of its own: not the fallback that shows the bare key, and not
-// another kind's words.
+// sentence of its own: not empty, not the fallback that shows the bare key,
+// and not another kind's words. Empty includes what console.log prints for
+// a case that returns nothing or null ("undefined", "null"): the card would
+// then read "Orphan sidecar GC is refusing." with no reason, or with that
+// word as one (CodeRabbit on #1071).
 //
 // The server sends the kind as a key and the console words it, the
 // discipline the Jobs page keeps for every bounded reason. That split has
@@ -45,6 +48,8 @@ func TestEveryOrphanRefusalKindIsWorded(t *testing.T) {
 	for i, k := range kinds {
 		line := lines[i]
 		switch {
+		case strings.TrimSpace(line) == "" || line == "undefined" || line == "null":
+			t.Errorf("kind %q has no refusal reason (%q): the Jobs card would say the sweep refuses and not why", k, line)
 		case line == strings.ReplaceAll(fallback, "notAKind", string(k)):
 			t.Errorf("kind %q falls through to the fallback (%q): the Jobs card would show it as its key", k, line)
 		case strings.Contains(line, string(k)):
