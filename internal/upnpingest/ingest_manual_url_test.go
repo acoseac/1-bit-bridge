@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 )
 
@@ -16,8 +17,8 @@ import (
 // instead of the not-discoverable one.
 type unresolvedResolver struct{}
 
-func (unresolvedResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, error) {
-	return "", nil
+func (unresolvedResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
+	return "", discovery.DialApproval{}, nil
 }
 
 // TestIngester_Run_ManualURLOnlyServerReportsNotYetSupported pins the

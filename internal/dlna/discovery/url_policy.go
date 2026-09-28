@@ -49,6 +49,23 @@ package discovery
 // service URL, for every source: one naming this machine or a link-local
 // address is kept only from a description URL of the same kind, which is
 // what bounds the operator's approval of a manual upstream (SourceUserChosen).
+//
+// A URL checked once is dialled many times, and a NAME in it is resolved
+// again at every dial (backlog B36, 2026-09-28): the upstream ingest's SOAP
+// Browse and every byte fetch internal/upnpproxy makes for a routed track
+// dial the cached ContentDirectory control URL's host for as long as it is
+// cached. A peer that passed discovery with a name resolving to its own LAN
+// address could answer 127.0.0.1 for it later, and both requests then
+// reached the bridge's console (measured: the proxy relayed the console's
+// 200). So what approved a local connect travels with the URL
+// (DialApproval: the announcing packet's address, or the kind of host the
+// operator's URL named) and every request to a device goes through the same
+// dial check (NewDeviceTransport).
+//
+// No rule here lets a device's say-so, or any approval, lead the bridge to a
+// cloud provider's metadata address (cloudMetadataAddrs), not even a packet's
+// own: an SSDP source is not authenticated, and a peer on the link can send
+// one from 169.254.169.254 (CodeRabbit on #1074).
 
 import (
 	"context"
@@ -59,6 +76,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -109,6 +127,10 @@ var errServiceURLHostLocal = errors.New("names this machine or a link-local addr
 // 2130706433): no device writes one, and resolvers disagree about it.
 var errServiceURLNumericHost = errors.New("host ends in a number but is not an IP address")
 
+// errServiceURLCloudMetadata is resolveServiceURL's refusal of a service URL
+// on a cloud metadata address (cloudMetadataAddrs), whatever the source.
+var errServiceURLCloudMetadata = errors.New("names a cloud metadata address, which no device serves on")
+
 // hostKind says where a URL host can lead a connection, judged from the
 // string alone.
 type hostKind int
@@ -116,13 +138,14 @@ type hostKind int
 const (
 	// hostElsewhere is an address on the LAN, a tailnet or the internet, or
 	// a name the string cannot place. A name that resolves to this machine
-	// is the dial check's (refuseUnannouncedHostLocal), not this one's.
+	// is the dial check's (refuseUnapprovedHostLocal), not this one's.
 	hostElsewhere hostKind = iota
 	// hostThisMachine is a loopback or unspecified address (a connect to
 	// either reaches this machine), or a localhost name (RFC 6761).
 	hostThisMachine
-	// hostLinkLocal is an IPv4 or IPv6 link-local address, where a cloud
-	// VM's metadata service lives (169.254.169.254).
+	// hostLinkLocal is an IPv4 or IPv6 link-local address: a
+	// zero-configuration device's, or a cloud VM's metadata service (whose
+	// addresses are hostMetadata instead).
 	hostLinkLocal
 	// hostNumericSpelling ends in a number without being an IP literal.
 	// The WHATWG URL standard reads such a host as IPv4, macOS's resolver
@@ -130,7 +153,67 @@ const (
 	// loopback listener there), and Go's own resolver refuses it on Linux.
 	// No device writes one, so it is refused wherever it appears.
 	hostNumericSpelling
+	// hostMetadata is an address a cloud provider serves instance metadata,
+	// credentials or platform services on (cloudMetadataAddrs), link-local
+	// or not. No device serves on one, so it is refused wherever it appears
+	// and whatever approved the request, the announcing packet's own
+	// address included.
+	hostMetadata
 )
+
+// cloudMetadataAddrs are the addresses cloud providers serve instance
+// metadata, credentials and platform services on, from each provider's own
+// documentation (2026-09-28). A request the bridge sends one on a device's
+// say-so can read a cloud VM's credentials, and no UPnP device serves on
+// one, so every rule here refuses them (addrKind classifies them as
+// hostMetadata): a LOCATION (LocationFromSource), a service URL
+// (resolveServiceURL, for every source) and every connect (the dial check),
+// whatever the approval. The approval is the case that needs this list: an
+// SSDP source is not authenticated, a peer on the same L2 segment can send
+// a packet FROM 169.254.169.254, and the same-address exception would
+// approve exactly that address, for the description fetch and every later
+// dial (CodeRabbit on #1074). Ten of them are not link-local at all, and
+// were fetched on any device's say-so, since the other rules bound only
+// this machine and the link: the IPv6 ones in fd00::/8 are unique-local
+// addresses, Alibaba's 100.100.100.200 is in 100.64/10 (which a tailnet
+// node can hold too, one address in four million), and Azure's
+// 168.63.129.16 is a Microsoft public address.
+//
+// Exact addresses, never a range: a direct-cable renderer self-assigns an
+// address anywhere in 169.254/16 or fe80::/10, and a /24 around
+// 169.254.169.254 would refuse one such device in 254. The one list both
+// the string check and the dial check read, through addrKind.
+var cloudMetadataAddrs = func() map[netip.Addr]struct{} {
+	m := make(map[netip.Addr]struct{})
+	for _, s := range []string{
+		// Instance metadata on AWS, Azure, Google Cloud, Oracle Cloud,
+		// OpenStack, DigitalOcean, Hetzner, IBM Cloud, Linode and others.
+		"169.254.169.254",
+		"fd00:ec2::254",                    // AWS instance metadata (IPv6, Nitro)
+		"169.254.169.253", "fd00:ec2::253", // AWS Route 53 Resolver
+		"169.254.169.123", "fd00:ec2::123", // AWS Time Sync Service
+		"169.254.170.2",                  // AWS ECS task metadata and credentials
+		"169.254.170.23", "fd00:ec2::23", // AWS EKS Pod Identity credentials
+		"fd20:ce::254",                 // Google Cloud metadata (IPv6-only instances)
+		"fd00:c1::a9fe:a9fe",           // Oracle Cloud instance metadata (IPv6)
+		"fe80::a9fe:a9fe",              // OpenStack and Linode metadata (IPv6)
+		"fd00:a9fe:a9fe::1",            // Linode metadata (IPv6)
+		"169.254.42.42", "fd00:42::42", // Scaleway metadata
+		"169.254.0.23", "169.254.10.10", // Tencent Cloud metadata
+		"100.100.100.200", // Alibaba Cloud metadata
+		"168.63.129.16",   // Azure WireServer (the host's own endpoint)
+	} {
+		m[netip.MustParseAddr(s)] = struct{}{}
+	}
+	return m
+}()
+
+// isCloudMetadataAddr reports whether a, unmapped and without its zone, is
+// one of cloudMetadataAddrs.
+func isCloudMetadataAddr(a netip.Addr) bool {
+	_, ok := cloudMetadataAddrs[a.Unmap().WithZone("")]
+	return ok
+}
 
 // classifyHost reads a URL host (url.URL.Hostname, so an IPv6 literal comes
 // without brackets and with its zone) and returns its kind and, for an IP
@@ -139,13 +222,7 @@ func classifyHost(host string) (hostKind, netip.Addr) {
 	h := strings.TrimSuffix(host, ".")
 	if a, err := netip.ParseAddr(h); err == nil {
 		a = a.Unmap()
-		switch {
-		case a.IsLoopback() || a.IsUnspecified():
-			return hostThisMachine, a
-		case a.IsLinkLocalUnicast():
-			return hostLinkLocal, a
-		}
-		return hostElsewhere, a
+		return addrKind(a), a
 	}
 	lower := strings.ToLower(h)
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
@@ -156,6 +233,25 @@ func classifyHost(host string) (hostKind, netip.Addr) {
 		return hostNumericSpelling, netip.Addr{}
 	}
 	return hostElsewhere, netip.Addr{}
+}
+
+// addrKind is the kind of an address, which must be unmapped: a cloud
+// metadata address first (cloudMetadataAddrs, link-local or not), then this
+// machine for a loopback or unspecified address (a connect to either reaches
+// this machine), link-local for an IPv4 or IPv6 link-local unicast address,
+// and elsewhere for any other. classifyHost asks it about an IP literal in a
+// URL and the dial check about the address a connect targets, so the string
+// and the connect judge an address by one rule.
+func addrKind(a netip.Addr) hostKind {
+	switch {
+	case isCloudMetadataAddr(a):
+		return hostMetadata
+	case a.IsLoopback() || a.IsUnspecified():
+		return hostThisMachine
+	case a.IsLinkLocalUnicast():
+		return hostLinkLocal
+	}
+	return hostElsewhere
 }
 
 // endsInANumber reports whether a host's last label is a number the WHATWG
@@ -176,13 +272,14 @@ func endsInANumber(label string) bool {
 
 // hostKindAllowed reports whether a URL host of kind k may be used where the
 // reference host (the description URL's, for a service URL) is of kind ref:
-// always for a host elsewhere, never for a numeric spelling, and for this
-// machine or a link-local address only from a reference of the same kind.
+// always for a host elsewhere, never for a numeric spelling or a cloud
+// metadata address, and for this machine or a link-local address only from a
+// reference of the same kind.
 func hostKindAllowed(k, ref hostKind) bool {
 	switch k {
 	case hostElsewhere:
 		return true
-	case hostNumericSpelling:
+	case hostNumericSpelling, hostMetadata:
 		return false
 	}
 	return k == ref
@@ -247,7 +344,9 @@ func fetchableLocation(raw string) string {
 //   - Whatever the source, a URL naming this machine or a link-local
 //     address is refused unless base names an address of the same kind
 //     (errServiceURLHostLocal), and one whose host ends in a number without
-//     being an IP address is refused outright (errServiceURLNumericHost).
+//     being an IP address (errServiceURLNumericHost) or names a cloud
+//     metadata address (errServiceURLCloudMetadata) is refused outright,
+//     from a description at that very address too.
 //     For a discovered description the same-host rule already implies the
 //     first; for a manual upstream it is the bound on the operator's
 //     approval: a manual URL on another host keeps a service on a third, and
@@ -279,8 +378,11 @@ func resolveServiceURL(base *url.URL, raw string, source DescriptionSource) (str
 		return "", errServiceURLOffHost
 	}
 	kind, _ := classifyHost(abs.Hostname())
-	if kind == hostNumericSpelling {
+	switch kind {
+	case hostNumericSpelling:
 		return "", errServiceURLNumericHost
+	case hostMetadata:
+		return "", errServiceURLCloudMetadata
 	}
 	if baseKind, _ := classifyHost(base.Hostname()); !hostKindAllowed(kind, baseKind) {
 		return "", errServiceURLHostLocal
@@ -311,10 +413,12 @@ func announcerAddr(src *net.UDPAddr) netip.Addr {
 // It refuses what the host string shows: an IP literal naming this machine
 // or a link-local address that is not the address the packet came from (the
 // unspecified address never is one), a localhost name unless the packet came
-// from a loopback address, and a numeric spelling no device writes. A packet
-// with a loopback source was sent on this machine, whose processes can reach
-// the console directly. A name the string cannot place is kept: the default
-// client's dial check judges the address it resolves to.
+// from a loopback address, a numeric spelling no device writes, and a cloud
+// metadata address from any source, that address included. A packet with a
+// loopback source was sent on this machine, whose processes can reach the
+// console directly; one from a metadata address was spoofed, since the
+// metadata service sends no SSDP. A name the string cannot place is kept:
+// the default client's dial check judges the address it resolves to.
 func LocationFromSource(location string, src *net.UDPAddr) string {
 	if location == "" {
 		return ""
@@ -327,7 +431,7 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 	switch kind {
 	case hostElsewhere:
 		return location
-	case hostNumericSpelling:
+	case hostNumericSpelling, hostMetadata:
 		return ""
 	}
 	from := announcerAddr(src)
@@ -346,73 +450,222 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 	return location
 }
 
-// announcementSourceKey carries the SSDP packet's source address in the
-// context of the fetches it causes, for the dial check.
-type announcementSourceKey struct{}
-
-// WithAnnouncementSource returns ctx carrying src, the address of the SSDP
-// packet whose LOCATION a fetch follows. NewDeviceFetchClient's dial check
-// connects to this machine or a link-local address only when it is that
-// address. Both SSDP clients wrap every fetch a packet causes (the
-// description, and a renderer's GetProtocolInfo) in it.
-func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
-	return context.WithValue(ctx, announcementSourceKey{}, announcerAddr(src))
+// DialApproval is what lets a request the bridge sends a UPnP device connect
+// to this machine or a link-local address. The dial check
+// (refuseUnapprovedHostLocal, in every NewDeviceTransport) refuses such a
+// connect unless the request's context carries an approval that covers it
+// (WithDialApproval). The zero DialApproval covers neither kind, so a
+// request that carries none reaches other hosts only.
+//
+// Two things approve such a connect, the same two that let a device's URL
+// name such an address at all:
+//
+//   - AnnouncedFrom: the SSDP packet the URL came from was sent from that
+//     very address. It approves that address and no other, and never the
+//     unspecified address, which is no packet's source.
+//   - OperatorChose: the operator configured a URL whose host names this
+//     machine or a link-local address. It approves every address of that
+//     kind, as resolveServiceURL keeps a service URL of that kind from such
+//     a description.
+//
+// Neither approves a cloud metadata address (cloudMetadataAddrs), not even
+// a packet's own: a peer on the link can send one from 169.254.169.254.
+//
+// A URL is checked when it is found and dialled for as long as it is cached,
+// and a name in it resolves again at every dial. So the approval is recorded
+// beside the URL it came with (internal/upnp's ServerInfo.DialApproval) and
+// carried to every later request that dials it: the ingest's SOAP Browse and
+// every byte fetch of a routed track. Comparable, so a cache can store it and
+// a test can compare it.
+type DialApproval struct {
+	// source is the announcing packet's address, unmapped and without a
+	// zone, or the zero Addr for an approval that came from no packet.
+	source netip.Addr
+	// chosen is the kind of host an operator's URL named: hostThisMachine
+	// or hostLinkLocal, or hostElsewhere (the zero value) when it named
+	// neither.
+	chosen hostKind
 }
 
-// errUnannouncedHostLocal is the dial check's refusal.
-var errUnannouncedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
-	"on the say-so of an SSDP packet from another address")
+// AnnouncedFrom is the approval an SSDP packet from src gives the URLs it
+// leads to: a connect to this machine or a link-local address at src's own
+// address only. A nil src, or one that holds no address, approves none.
+func AnnouncedFrom(src *net.UDPAddr) DialApproval {
+	return DialApproval{source: announcerAddr(src)}
+}
 
-// refuseUnannouncedHostLocal is NewDeviceFetchClient's net.Dialer
-// ControlContext. net passes it the address each connect attempt targets,
-// after name resolution (every A and AAAA answer is its own attempt), so it
-// judges what a name RESOLVED to, which no check of the URL can: a public DNS
-// name pointed at 127.0.0.1, a rebinding answer, macOS's inet_aton spellings.
-// A loopback or link-local address is allowed only when it is the address
-// the request's context says the SSDP packet came from; the unspecified
+// OperatorChose is the approval the operator's configured URL gives a manual
+// upstream (upnpUpstream.servers[].manualDescriptionURL): a connect to any
+// address of the kind its host names when that is this machine or a
+// link-local address, and to neither otherwise. A URL on a cloud metadata
+// address approves nothing, since no media server is one. A NAME approves
+// no such address, whatever it resolves to: the operator chose the name, not
+// an answer for it that another host on the LAN can give (anyone can answer
+// an mDNS query), and a name answered with 127.0.0.1 at a later dial is
+// exactly the rebinding the check exists for. So a manual upstream on this
+// machine keeps its local services when its URL names localhost or a
+// loopback address, and not when it names this host by its host name.
+func OperatorChose(rawURL string) DialApproval {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return DialApproval{}
+	}
+	switch kind, _ := classifyHost(u.Hostname()); kind {
+	case hostThisMachine, hostLinkLocal:
+		return DialApproval{chosen: kind}
+	}
+	return DialApproval{}
+}
+
+// String names what the approval covers, for a log line or a test failure.
+func (d DialApproval) String() string {
+	switch {
+	case d.chosen == hostThisMachine:
+		return "an operator's URL on this machine"
+	case d.chosen == hostLinkLocal:
+		return "an operator's link-local URL"
+	case d.source.IsValid():
+		return "announced from " + d.source.String()
+	}
+	return "no local address"
+}
+
+// permits reports whether the approval lets a connect reach a, the address a
+// dial resolved to: never for a cloud metadata address; always for any other
+// address elsewhere; and for this machine or a link-local address when an
+// operator's URL named that kind of host, or when a is the announcing
+// packet's own address (never the unspecified address).
+func (d DialApproval) permits(a netip.Addr) bool {
+	a = a.Unmap()
+	kind := addrKind(a)
+	if kind == hostMetadata {
+		return false
+	}
+	if hostKindAllowed(kind, d.chosen) {
+		return true
+	}
+	return !a.IsUnspecified() && d.source.IsValid() && a.WithZone("") == d.source
+}
+
+// dialApprovalKey carries a request's DialApproval in its context, for the
+// dial check.
+type dialApprovalKey struct{}
+
+// WithDialApproval returns ctx carrying a, the approval of the URL a request
+// is sent to. The dial check of every NewDeviceTransport reads it at each
+// connect.
+func WithDialApproval(ctx context.Context, a DialApproval) context.Context {
+	return context.WithValue(ctx, dialApprovalKey{}, a)
+}
+
+// WithAnnouncementSource returns ctx carrying AnnouncedFrom(src): the
+// approval of the SSDP packet from src whose LOCATION a fetch follows. Both
+// SSDP clients wrap every fetch a packet causes (the description, and a
+// renderer's GetProtocolInfo) in it.
+func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
+	return WithDialApproval(ctx, AnnouncedFrom(src))
+}
+
+// errUnapprovedHostLocal is the dial check's refusal of a connect to this
+// machine or a link-local address that the request's approval does not
+// cover.
+var errUnapprovedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
+	"that neither the SSDP packet the URL came from nor the operator's configured URL named")
+
+// errCloudMetadataAddr is the dial check's refusal of a connect to a cloud
+// metadata address, which no approval covers.
+var errCloudMetadataAddr = errors.New("refusing to connect to a cloud metadata address, which no device serves on")
+
+// refuseUnapprovedHostLocal is the ControlContext of every NewDeviceTransport
+// dialer. net passes it the address each connect attempt targets, after name
+// resolution (every A and AAAA answer is its own attempt), so it judges what
+// a name RESOLVED to, which no check of the URL can: a public DNS name
+// pointed at 127.0.0.1, a rebinding answer, macOS's inet_aton spellings. A
+// loopback, unspecified or link-local address is allowed only when the
+// DialApproval in the request's context permits it; a cloud metadata
 // address and an address that does not parse, never. The resolver's own
 // connects to a DNS server do not come through here (net's Resolver dials
-// with a Dialer of its own), so a stub resolver on 127.0.0.53 keeps working.
-func refuseUnannouncedHostLocal(ctx context.Context, _, address string, _ syscall.RawConn) error {
+// with a Dialer of its own), so a stub resolver on 127.0.0.53, or Azure's
+// on 168.63.129.16, keeps working.
+func refuseUnapprovedHostLocal(ctx context.Context, _, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return fmt.Errorf("discovery dial check: %q: %w", address, err)
+		return fmt.Errorf("device dial check: %q: %w", address, err)
 	}
-	a := ap.Addr().Unmap()
-	if !a.IsLoopback() && !a.IsUnspecified() && !a.IsLinkLocalUnicast() {
+	approval, _ := ctx.Value(dialApprovalKey{}).(DialApproval)
+	if approval.permits(ap.Addr()) {
 		return nil
 	}
-	from, _ := ctx.Value(announcementSourceKey{}).(netip.Addr)
-	if a.IsUnspecified() || !from.IsValid() || a.WithZone("") != from {
-		return errUnannouncedHostLocal
+	if isCloudMetadataAddr(ap.Addr()) {
+		return errCloudMetadataAddr
 	}
-	return nil
+	return errUnapprovedHostLocal
 }
 
-// NewDeviceFetchClient returns the http.Client both SSDP discovery clients
-// fetch an announced device with, when their config names no Dispatcher
-// (cmd/bridge names none). It follows no redirect (a 3xx comes back as
-// itself, so a device cannot redirect the bridge anywhere), and every connect
-// goes through refuseUnannouncedHostLocal. Three transport settings keep
-// that check whole: no proxy, since through one the connect goes to the
-// proxy and the check would judge the proxy's address (and refuse every
-// fetch on a host whose HTTP_PROXY is on 127.0.0.1), while a LOCATION names
-// a device on the link the packet arrived on, which a proxy cannot stand in
-// for; no kept-alive connections, so a request never reuses a connection
-// that another packet's source allowed; and no TLS dialer of its own, which
-// would connect around the check. A manual upstream is fetched with a client
-// of its own (internal/upnp's ManualPoller): its URL is the operator's
-// choice, and pointing it at this machine is legitimate.
-func NewDeviceFetchClient(timeout time.Duration) *http.Client {
-	dialer := &net.Dialer{ControlContext: refuseUnannouncedHostLocal}
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy:               nil,
-			DialContext:         dialer.DialContext,
-			DisableKeepAlives:   true,
-			TLSHandshakeTimeout: 10 * time.Second,
+// resolverForTest, when set, is the resolver every NewDeviceTransport dial
+// resolves a name with, in place of net.DefaultResolver. Only
+// UseResolverForTest sets it.
+var resolverForTest atomic.Pointer[net.Resolver]
+
+// UseResolverForTest makes every dial through a NewDeviceTransport resolve
+// names with r, until the returned function restores the resolver in place
+// before. Tests only, and production code must never call it: it lets a test
+// make a name answer one address and then another (internal/dnstest)
+// without replacing net.DefaultResolver, which any goroutine in the process
+// reads with no synchronisation.
+func UseResolverForTest(r *net.Resolver) (restore func()) {
+	prev := resolverForTest.Swap(r)
+	return func() { resolverForTest.Store(prev) }
+}
+
+// NewDeviceTransport returns the http.Transport for every request the bridge
+// sends a UPnP device, at a URL a device or the operator's configuration
+// supplied: the discovery clients' description and GetProtocolInfo fetches
+// (NewDeviceFetchClient), the upstream ingest's SOAP Browse, and every byte
+// fetch internal/upnpproxy makes for a routed track. d is the dialer
+// template (timeouts, TCP keep-alive), and its ControlContext is replaced by
+// the dial check, which judges every connect against the DialApproval the
+// request's context carries.
+//
+// Three settings keep that check whole, and a caller must not undo them. No
+// proxy: through one the connect goes to the proxy, so the check would judge
+// the proxy's address (and refuse every request on a host whose HTTP_PROXY
+// is on 127.0.0.1), while a device is on the link, which a proxy cannot stand
+// in for. No kept-alive connections: a pooled connection carries the next
+// request to the same host:port without a dial, so without a check (measured
+// on upnpproxy's old pool: a fetch approved only for a LAN address rode an
+// idle connection to 127.0.0.1), and net/http also hands a connection it
+// dialed for one request to another that is waiting. And no TLS dialer of
+// its own, which would connect around the check.
+func NewDeviceTransport(d net.Dialer) *http.Transport {
+	d.ControlContext = refuseUnapprovedHostLocal
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if r := resolverForTest.Load(); r != nil {
+				withResolver := d
+				withResolver.Resolver = r
+				return withResolver.DialContext(ctx, network, address)
+			}
+			return d.DialContext(ctx, network, address)
 		},
+		DisableKeepAlives:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+}
+
+// NewDeviceFetchClient returns an http.Client over NewDeviceTransport that
+// follows no redirect (a 3xx comes back as itself, so a device cannot
+// redirect the bridge anywhere), with timeout bounding each request. Both
+// SSDP discovery clients fetch an announced device with it when their config
+// names no Dispatcher (cmd/bridge names none), and the upstream ingest sends
+// its SOAP with it. A manual upstream's description is fetched with a client
+// of its own (internal/upnp's ManualPoller), without the dial check: its URL
+// is the operator's choice, and a URL on this machine is legitimate there.
+func NewDeviceFetchClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: NewDeviceTransport(net.Dialer{}),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

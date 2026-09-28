@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -32,7 +34,12 @@ type stubHostResolver struct {
 	ok   bool
 }
 
-func (s *stubHostResolver) LiveHost(_ string) (string, bool) { return s.host, s.ok }
+// LiveHost answers with the approval of a server announcing from
+// 127.0.0.1, where every stub upstream here listens: the device dial check
+// then lets the proxy reach it (internal/upnpproxy pins the refusal).
+func (s *stubHostResolver) LiveHost(_ string) (string, discovery.DialApproval, bool) {
+	return s.host, discovery.AnnouncedFrom(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}), s.ok
+}
 
 // upstreamRecord captures one upstream request the proxy made.
 type upstreamRecord struct {
