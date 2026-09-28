@@ -2324,7 +2324,8 @@ no failing test — which is the shape to expect in this area.
   UPnP-upstream discovery clients, which did not. On the dev Mac awdl0 and
   llw0 (fe80 only, not point-to-point) each got a renderer client whose every
   M-SEARCH failed with `can't assign requested address` (a WARN per client
-  and an ERROR ten minutes on, neither naming the interface); on dido each
+  and an ERROR ten minutes on; since #1072 the UPnP-upstream clients on the
+  same members report theirs as well); on dido each
   docker veth (fe80 only, a port of `docker0` or a user bridge, both members
   with an IPv4 address) got two clients, whose sends Linux lets out. **The
   rule is the SET's, not the SSDP call sites'**: all three consumers are IPv4
