@@ -384,6 +384,16 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		// step differs: an unreachable URL is a network or typo
 		// question, an undiscovered UDN is an SSDP one.
 		if strings.TrimSpace(srv.UDN) == "" && strings.TrimSpace(srv.ManualDescriptionURL) != "" {
+			// The poller never fetches a manual URL on a cloud metadata
+			// address (backlog B54), so it never answers: say why, since
+			// "not answered yet" sends the operator to the network. A name
+			// that resolves to one is refused at the connect, which only
+			// the poller's warning can say.
+			if discovery.NamesCloudMetadataAddr(srv.ManualDescriptionURL) {
+				res.Err = errors.New("manual description URL names a cloud metadata address, which the bridge " +
+					"does not fetch — configure the server's own address")
+				return
+			}
 			res.Err = errors.New("manual description URL has not answered yet — check the URL is reachable from the bridge and serves a device description with a ContentDirectory service")
 			return
 		}
