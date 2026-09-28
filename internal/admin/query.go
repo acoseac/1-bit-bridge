@@ -18,11 +18,18 @@ import (
 //
 // This is a documented trap in this codebase — the /v1 variant-delete
 // endpoint shipped with it and silently no-op'd for every path
-// containing a "+" — and the admin browse, projection, enrichment and
-// player-audio handlers all read a path from the query. The player's
-// own JS is immune (URLSearchParams percent-escapes "+"), but a curl,
-// a bookmark, or any other client is not, so the fix belongs at the
-// parse, not at one caller.
+// containing a "+" — and the admin browse, projection, enrichment,
+// player-audio and variant-delete handlers all read a path from the
+// query. A curl, a bookmark or any other client can send a literal "+",
+// so the fix belongs at the parse, not at one caller.
+//
+// It binds the console's own JS too, and in the other direction.
+// URLSearchParams escapes a "+" as %2B, which survives, but writes a
+// SPACE as "+", which this parser keeps as a plus: every path with a
+// space in it would arrive wrong. So a client of a path parameter
+// escapes with encodeURIComponent (%20 and %2B), as audioURL and
+// deleteVariants in static/player/api.js do, and a handler moving onto
+// safeQuery moves its client in the same commit.
 //
 // Percent-escaping before parsing preserves an ALREADY-encoded "%2B"
 // too: that decodes to "+" in one pass, and this only rewrites the

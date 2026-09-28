@@ -744,7 +744,17 @@ lost my library."
 - **`safeQuery` on every path-bearing query consumer.** `url.Values` decodes `+`
   as a space, so a path containing `+` silently resolves to the wrong file — a
   `200 {deletedCount: 0}` no-op. The client half must use `encodeURIComponent`,
-  never `URLSearchParams` (which form-encodes a space back to `+`).
+  never `URLSearchParams` (which form-encodes a space back to `+`). **The
+  console's variant delete was the last admin handler reading a library path
+  through `r.URL.Query()`** (2026-09-28): `curl -X DELETE
+  '…/api/upscale/variants?prefix=AC+DC'` answered `deletedCount: 0` on main and
+  left the rendition on disk. Its client, `deleteVariants` in
+  static/player/api.js, was on `URLSearchParams` and worked only because the
+  server form-decoded too, so the handler moved to `safeQuery` and the client to
+  `encodeURIComponent` in one commit. **The two halves move together**: either
+  alone breaks every path with a space.
+  `TestDeleteVariantsClientRoundTripsThroughTheServer` runs the shipped client
+  under node and sends the URL it builds to the handler.
 - **…and a query the bridge WRITES for such a reader goes through
   `internal/urlquery`, never `url.QueryEscape` or `url.Values.Encode`**
   (#1046). Both write a space as `+`, and two readers keep `+` as a plus:
@@ -1330,9 +1340,18 @@ no failing test — which is the shape to expect in this area.
   - **Claims cannot deadlock, by construction.** A render claims its own track
     before Stage A and resolves the claim on EVERY exit (a deferred error
     covers early failures). A survey claims an album-mate while it measures
-    it. So a claim is only ever held by work that is decoding, and nothing
-    waits while holding one. **Don't make a render wait before resolving its
-    own claim, and don't hold a survey claim across a wait.**
+    it, and releases it on every exit too, a panic included: `measureClaimed`
+    defers the release as its first statement (2026-09-28). Released only by
+    plain calls after the measurement, a panic in the decode left the claim
+    registered, and because `transcode.Pool.processJob` recovers a runner
+    panic and keeps the worker, every later render of that album waited on it
+    until its own deadline, until a restart
+    (`TestAMateWhoseMeasurementPanicsReleasesItsClaim`: 2 s of waiting, then
+    `context deadline exceeded`, before the defer). So a claim is only ever
+    held by work that is decoding, and nothing waits while holding one.
+    **Don't make a render wait before resolving its own claim, don't hold a
+    survey claim across a wait, and don't release a claim anywhere but on
+    every exit.**
   - A waiter whose claim resolved without a peak measures that mate itself,
     because the holder's failure may have been transient. Only the waiter's OWN
     failed measurement leaves the mate out of the album.
@@ -3184,7 +3203,24 @@ mentions across the four `ops/audit-*.md` files.
   now never nil, so any bearer-token holder could enqueue sox jobs on a bridge
   advertising `upscaleEnabled: false`. **When a construction guard becomes
   unconditional, enumerate what that guard was gating — the nil-ness of a
-  handle is a gate, and it stops being one.**
+  handle is a gate, and it stops being one.** **Every pass stopped short of
+  the console's batch** (2026-09-28): #852 restored the two /v1 handlers above,
+  #878 (the 2026-09-09 LOUPE) restored `POST /v1/upscale/batch`, and
+  `POST /api/upscale/batch` still checked only `BatchCoordinator == nil`, a
+  coordinator runServe builds on every bridge. Measured on main with the real
+  `serve` and upscale off (the default): 202, `enqueuedCount: 2`, two
+  renditions written, while `/v1/health` said `upscaleEnabled: false`; any
+  loopback process or public-mode session could do it. The submit now reads
+  `admin.Deps.UpscaleActive` first, which runServe wires to `upscaleActiveFn`,
+  the closure `WithUpscale` hands /v1 (`TestConsoleBatchGateIsTheV1UpscaleGate`
+  requires the same identifier; a nil gate reads as off), and the optimize kind
+  reads `OptimizeActive` too, as the projection endpoint does: /v1 refused that
+  kind with the CarPlay switch off and the console accepted it. Both come before
+  the scope, and `TestEveryBatchSubmitReadsTheUpscaleGateFirst` sweeps every
+  `BatchCoordinator.Submit*` caller by AST. **The console's delete stays open on
+  purpose**, as do cancel, list and the failure retry: the owner's call, so an
+  operator who switched upscaling off can still reclaim the disk, where
+  `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s

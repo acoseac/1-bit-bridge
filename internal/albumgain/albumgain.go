@@ -298,7 +298,19 @@ func (s *survey) unknown(path string) bool {
 // (TestASurveyRereadsThePeakUnderItsClaim). A failed measurement leaves the
 // mate out of the album; only a cancelled context or a failed store read is
 // returned.
+//
+// The deferred release is for a panic. The measurement is a decode, and
+// transcode.Pool's processJob recovers a panic in its runner and keeps the
+// worker, so the process outlives it. Released only by the calls below, the
+// claim stayed registered with its done channel open, and every later render
+// of the album waited on it until its own deadline, failed, and did the same
+// on retry, until a restart (TestAMateWhoseMeasurementPanicsReleasesItsClaim).
+// The render's own claim has always resolved on every exit (renderDSD
+// defers it). release is idempotent, so the explicit calls keep their
+// release-before-record order and the deferred one then does nothing. It is
+// the direct call form, so its arguments are bound here, at entry.
 func (s *survey) measureClaimed(ctx context.Context, path string, key claimKey, c *claim) error {
+	defer s.r.release(key, c)
 	recorded, err := s.r.cfg.Peaks.FreshDSDPeaks(ctx, s.profile, []string{path})
 	if err != nil {
 		s.r.release(key, c)
