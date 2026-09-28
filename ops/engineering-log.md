@@ -22098,7 +22098,11 @@ Device identities and addresses stay out of this file.
   cover each rule from both sides. Sixty seconds each afterwards,
   `-fuzzminimizetime 1s`, `-parallel 4`: `FuzzParseDeviceDescription`
   1,233,873 executions, `FuzzParseSSDPHeaders` 1,981,900,
-  `FuzzParseGetProtocolInfoResponse` 2,673,667, no failure.
+  `FuzzParseGetProtocolInfoResponse` 2,673,667, no failure. The target's
+  signature gained an argument, and the nightly job restores a Go build
+  cache that can hold corpus entries of the old one; an entry of the old
+  signature planted in the local fuzz cache was skipped and the run passed,
+  so a restored cache cannot fail the job.
 - The existing redirect tests of both default clients now send their
   request with a loopback source in its context: their two servers listen
   on 127.0.0.1, which the dial check otherwise refuses.
