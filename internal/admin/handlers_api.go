@@ -2328,12 +2328,16 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// cadenceChanged: a background loop's schedule changed, so the
 		// rearm fan-out should wake them to re-read it.
 		cadenceChanged bool
-		// fingerprintOn / upscaleOn / analysisOn: the toggle was switched
-		// ON, so the post-commit block below can check whether the
-		// toolchain will actually let it run and say so.
-		fingerprintOn bool
-		upscaleOn     bool
-		analysisOn    bool
+		// fingerprintOn / upscaleOn / analysisOn / optimizeOn /
+		// autoOptimizeOn: the toggle was switched ON, so the post-commit
+		// block below can check whether the toolchain will actually let
+		// it run and say so. autoOptimizeOn is set only where the switch
+		// reported `live`, since a restart-bound one already says why.
+		fingerprintOn  bool
+		upscaleOn      bool
+		analysisOn     bool
+		optimizeOn     bool
+		autoOptimizeOn bool
 		// autoOptimizeFlipped: the pre-generation gate changed value.
 		// Hot-applies via a sweeper nudge instead of restartRequired.
 		autoOptimizeFlipped bool
@@ -2573,8 +2577,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				next.Upscale.OptimizeEnabled = &v
 				// HOT: the health advertisement, the admin projection
 				// gate and the pre-generation sweeper all read the flag
-				// live. The sweeper is wired unconditionally (within an
-				// active upscale pool) so off→on has something to start.
+				// live. The sweeper is wired unconditionally, like the
+				// pool, so off→on has something to start.
+				optimizeOn = v
 				report.live("optimizeEnabled")
 			} else {
 				report.unchanged("optimizeEnabled")
@@ -2650,6 +2655,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 							"(the upscale pool is absent, or the optimize kind is off), "+
 							errMsgPersistedNeedsRestart)
 				} else {
+					autoOptimizeOn = *p.AutoOptimizeEnabled
 					report.live("autoOptimizeEnabled")
 				}
 			} else {
@@ -2974,11 +2980,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			report.set("fingerprintEnabled", applyLive, fingerprintDegradedMessage(why))
 		}
 	}
-	// Same shape for the two sox-backed features: the setting applied, but
+	// Same shape for the sox-backed features: the setting applied, but
 	// whether anything RUNS depends on a toolchain this bridge may not
 	// have. A restart would not install sox, so `live` is the honest
 	// status — with a reason, so the operator is not left watching a
-	// switch they just moved do nothing.
+	// switch they just moved do nothing. The CarPlay kind and its
+	// pre-generation read the upscale gate, sox included, since
+	// 2026-09-28; before that the sweeper ran without sox, and a switch
+	// turned on here answered a bare `live` while every job it queued
+	// failed.
 	if hasFLAC, known := s.soxFLACStatus(); s.deps.UpscalePrecheck != nil {
 		soxErr := s.deps.UpscalePrecheck()
 		if why := soxDegradedMessage(soxErr, hasFLAC, known); why != "" {
@@ -2987,6 +2997,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 			if analysisOn {
 				report.set("analysisEnabled", applyLive, why)
+			}
+			if optimizeOn {
+				report.set("optimizeEnabled", applyLive, why)
+			}
+			if autoOptimizeOn {
+				report.set("autoOptimizeEnabled", applyLive, why)
 			}
 		}
 	}
@@ -3089,18 +3105,19 @@ type upscaleStatsResponse struct {
 // precheck); fires on dashboard refresh every 5 s.
 //
 // **`enabled` reports live runtime state**, NOT the persisted
-// config (CodeRabbit major on PR #110). The two diverge in two
-// real cases: (a) startup demoted the feature when sox-precheck
-// failed even though `cfg.Upscale.Enabled == true`, (b) the
-// operator just PATCHed `upscaleEnabled = false` but the
-// long-lived Pool is still alive until restart. Both surface as
-// `pool == nil` from the closure (which gates on the config
-// flag too — see cmd/bridge wiring); we report
-// `enabled = (pool != nil)` so the iOS-facing /v1/health
-// semantics and the admin tile agree about what "active"
-// means. The Settings PATCH form reads the persisted
-// `cfg.Upscale.Enabled` from `/api/settings.upscaleEnabled`
-// separately for the toggle's initial state.
+// config (CodeRabbit major on PR #110). The two diverge when the
+// flag is on and sox is unusable, and when the operator has just
+// PATCHed `upscaleEnabled = false` while the long-lived Pool stays
+// alive (it lives until shutdown whatever the flag says). Both
+// surface as `pool == nil` from the Deps closure, which cmd/bridge
+// gates on the live upscale gate /v1/health reads (the flag AND a
+// usable sox; the flag alone until 2026-09-28, so a bridge without
+// sox answered `enabled: true` here); we report
+// `enabled = (pool != nil)` so the iOS-facing /v1/health semantics
+// and the admin tile agree about what "active" means. The Settings
+// PATCH form reads the persisted `cfg.Upscale.Enabled` from
+// `/api/settings.upscaleEnabled` separately for the toggle's
+// initial state.
 func (s *Server) apiUpscaleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.getUpscaleStatsSnapshot(r.Context()))
 }

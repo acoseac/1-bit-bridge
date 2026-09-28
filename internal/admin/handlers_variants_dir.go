@@ -251,7 +251,9 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 // probeVariantsDirUsage returns (usedBytes, freeBytes) for the
 // volume hosting `dir`. The `used` figure is the cumulative size
 // of variant sidecars (via `Manifest.CountVariants`), not the whole
-// volume. Free comes from the wired `AvailableDiskSpace` closure.
+// volume. Free comes from the wired `AvailableDiskSpace` closure,
+// which cmd/bridge wires on every bridge: until 2026-09-28 it was nil
+// on one booted with upscaling off, and the panel read "0 B free".
 //
 // Tolerates errors silently — a probe failure surfaces as zeros in
 // the UI rather than a 500. The variants_dir CHANGE path is the
@@ -259,8 +261,9 @@ func assertNotUnderLibraryRoots(candidate string, roots []string) error {
 // they can still type a path AND save it.
 func (s *Server) probeVariantsDirUsage(ctx context.Context, dir string) (int64, int64) {
 	var used int64
-	// Guard the manifest deref — nil when upscaling is disabled. The free-
-	// space probe below is independent of the manifest, so it still runs.
+	// Guard the manifest deref: a harness may wire none (cmd/bridge always
+	// does). The free-space probe below is independent of the manifest,
+	// so it still runs.
 	if s.deps.Manifest != nil {
 		if _, u, err := s.deps.Manifest.CountVariants(ctx); err == nil {
 			used = u
