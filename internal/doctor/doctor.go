@@ -1021,8 +1021,8 @@ func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile stri
 // "pass Deps.port-apiPort" until 2026-09-28, a note for whoever calls this
 // package, which reached every operator whose config, or whose `bridge init`
 // flag, names :0.
-const portZeroHint = "the address names port 0, so the system picks a free port each time the bridge starts " +
-	"and there is none to check; name a fixed port if clients must find this listener at the same one after a restart"
+const portZeroHint = "the address names port 0, so the system picks a free port each time the bridge starts, " +
+	"and there is none to check; set a fixed port if clients must reach this listener on the same port after a restart"
 
 // bindVerdict is the bind probe both port ladders start from (checkPort
 // and checkChosenPort). It returns inUse when something holds the port,
