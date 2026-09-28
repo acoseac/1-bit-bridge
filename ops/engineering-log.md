@@ -23976,6 +23976,10 @@ store and watcher, on macOS (APFS), a library of two FLACs under
   unmount of a mount point): `Scan` logged the guard line and spared the rows;
   three subtree scans deleted both, no line.
 
+A trailing slash in `bridge.yaml` was no workaround: `config.Load` Cleans
+every root (`resolvePaths` through `ResolvePath`), so the scanner is handed
+`/music` however it is written.
+
 By reading, the other walks of a root: the doctor's inotify pre-flight
 (`countDirs`, Linux) counted nothing under a linked root while the watcher,
 once fixed, registers a watch per directory; `POST /v1/upscale` for the root
@@ -24110,8 +24114,8 @@ a deleted row; the watcher test at its 3 s deadline; the upscale test with
 `enqueued [.]`; the sweep on all five root walks; and on dido
 `countDirs(…/music) = 0, want 4`.
 
-Negative controls on the committed change (9ec9854e), each restored and
-re-run green:
+Negative controls on the committed change (9ec9854e before a rebase onto
+main, f445bbcd after it), each restored and re-run green:
 
 | mutation | goes red |
 |---|---|
