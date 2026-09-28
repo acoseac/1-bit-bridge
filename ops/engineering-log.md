@@ -23935,3 +23935,187 @@ Each on the committed tree, restored with `git checkout --` before the next.
 - The sweep reads test files, so a test-helper package's non-test file
   (`handshaketest.go` is one) that swapped the default by hand would pass.
   Among such files only loggingtest's own calls `slog.SetDefault`.
+
+## 2026-09-28 — every rendition records its track row's version, and a changed file is not rendered until its row is read again
+
+Backlog B24. A rendition records the version of its source it was made
+from: `track_variants.source_mtime_ns` / `source_size`, and a DSD
+rendition's Stage B peak, which `UpsertVariant` writes to `dsd_peaks` with
+the same pair. Three readers judge that version, on two clocks. The
+auto-optimize candidate queries (`autoOptimizeCandidateSQL`,
+`supersededPCMRenditionSQL`) and `FreshDSDPeaks` compare it with the track
+row; the serve path (`api.serveVariant`: mtime within 2 s, size exact)
+compares it with the file on disk. The on-demand path
+(`upscaleEnqueuerAdapter.finalizeAndEnqueue`, behind POST /v1/upscale) and
+the CLI (`classifyUpscaleTrack`) stamped a live stat
+(`JobSpec.FreshnessFromFile`); the sweeper, the batch coordinator and the
+album survey (`albumMateSpec`, `cliAlbumMateSpec`) stamped the row. The two
+clocks agree whenever the scanner is caught up. Between a change to a file
+and the scan that reads it, no stamp satisfies both: a render reads the new
+bytes, so one stamped with the row names a version it was not made from and
+the serve path refuses it, and one stamped with the file is stale to the
+sweep, which renders it again.
+
+### Measured
+
+A real bridge, the binary built from main at 37807845 and from the fix, over
+a library of one 96 kHz / 24-bit FLAC and one DSD64 DSF, with
+`upscale.enabled`, `upscale.dsdRender.enabled`, `upscale.autoOptimize` on at
+`intervalSec: 20`, and the default `scanIntervalSec: 21600`. After the first
+sweep rendered both compact tiers, the FLAC was retagged (`metaflac
+--dont-use-padding`: size and mtime move) and the DSF touched (mtime
+moves), and no scan ran. Then three rounds of POST /v1/upscale (`optimize`
+on both files, `pcm` on the DSF) followed by one sweeper tick. Counted:
+renders (`/v1/upscale/stats`, done), what `GET /v1/download?variant=`
+answers for the FLAC's compact tier, the DSF's compact tier and its
+faithful tier, and the manifest delta since the step began.
+
+| step | main | fix |
+|---|---|---|
+| two ticks after the change, no request | 0 renders; 410 410 404 | the same |
+| round 1, the requests | 3 renders; 200 200 200 | 1 render; 410 410 200 |
+| round 1, the tick | 3 renders; 410 410 410 | 2 renders; 200 200 200 |
+| rounds 2 and 3 | 6 renders each, the same flip | 0 renders; 200 200 200; no delta |
+| renders after the change | 18 | 3 |
+
+On main every step pushed a delta for both tracks. With the fix, round 1's
+compact requests were refused and queued rescans, the DSF's had already run
+when the faithful request arrived (so that one rendered in the same round),
+and the tick rendered both compact tiers from the rows the rescans wrote.
+An earlier run on main, `optimize` only, made 12 renders over three rounds
+with the same flip, and a tick with no request rendered nothing: the
+renditions from before the change answered 410 until the next scan, as
+designed.
+
+### Why the phone alone does not spin it, and what one request cost
+
+The iOS app asks for a rendition only while none of the family is listed
+(PlayerService's tier-0 block, `DownloadCoordinator.shouldAutoGenerateVariant`,
+`BridgeRenditionRequestGate.shouldRequest`: "Already built, just not usable
+right now"), and the manifest lists a variant whether or not it is fresh. So
+the unbounded alternation needs a client that asks again: `bridge optimize`
+/ `render` / `upscale`, a folder POST, a script, or the phone after a
+rendition is deleted.
+
+One phone request still cost three renders with the defaults. The sweeper's
+tick timer restarts after the post-scan sweep and the scanner's after the
+scan, so the tick fires milliseconds after the next periodic scan STARTS,
+over the previous scan's rows. It re-rendered the live-stamped rendition
+with the row's old stamp (410 from then on), and the post-scan sweep
+rendered it a third time; or, when the tick's job was still queued or
+running (a DSD render takes minutes), the post-scan sweep counted it
+`AlreadyInflight` and the old stamp stayed until the next scan, six hours
+on. The phone does not ask again for a rendition it has listed, so it
+played the source meanwhile.
+
+The faithful tier took part through `drainSupersededPCMRenditions`: a
+live-stamped `pcm-v2` row is not a fresh row of the current DSD schema, so
+the pass re-rendered it, and that tier is the largest (24-bit at four times
+the base rate, a full DSD decode). A live-stamped peak was stale to
+`FreshDSDPeaks`, so every render of an album-mate decoded that track again
+(`MeasureDSDPeak`, Stages A and B) until a survey recorded a row-stamped
+peak.
+
+The sweeper had a smaller version of its own: a changed file with no
+rendition was a candidate, and its render read the new bytes under the
+row's old stamp, which the serve path refused until the scan and a second
+render.
+
+### Design
+
+- Every writer stamps the row. `JobSpec.FreshnessFromFile` had no other
+  caller and is removed, and the JobSpec fields' docblock says where the
+  stamp comes from.
+- A render starts only while the file still matches its row
+  (`sourceIsAtRow`): the scanner's skip-gate comparison, exact size and
+  mtime, not the serve path's 2 s tolerance, which is about stamps taken
+  through different mounts. A file that fails it is one the next scan
+  re-reads.
+- On-demand: refused as `errSourceAheadOfRow`, which wraps
+  `api.ErrUpscaleIneligible` (202 with `rejected: 1`, no wire change), and
+  the file's directory is queued for a rescan. `sourceRescanner` is one loop
+  on `scanCtx`, joined on `bgWriters`, running `ScanSubtree` per queued
+  directory. A directory is queued at most once at a time, and again once
+  its scan has started (the file may change after the walk passed it); with
+  64 waiting, a request is dropped and the periodic scan reads the file. The
+  phone plays the source this time, and its next request renders.
+- Sweeper: `planChangedSinceScan` in both passes, counted as
+  `changedSinceScan` on the Jobs card ("N waiting for a scan (changed on
+  disk)") and in the sweep's log line.
+- CLI: a changed file is a candidate that needs no run, `--force` included,
+  listed in a dry run as `SKIP (changed on disk since the last scan)` and
+  summarised with "run `bridge scan`, then this again". `cliAlbumMateSpec`
+  takes the classifier's spec whatever needsRun says, so a changed
+  album-mate is still measured, as `albumMateSpec` measures one on the
+  serve side; its own row-stamp override was redundant and is gone.
+
+Rejected:
+
+- Stamping on-demand renders from the row and rendering anyway. It ends
+  the loop, since the sweep then sees them as fresh, but the render reads
+  the new bytes under the old stamp, so the serve path refuses it. With
+  auto-optimize off (the default) nothing renders it again and the phone
+  never asks: a request that renders a servable rendition today would
+  leave one answering 410 until an operator re-rendered it.
+- Keeping the live stamp and having the sweep accept a rendition that
+  matches the file. Two clocks remain. The candidate queries are SQL
+  against the row and cannot see the file, so every such track would hold
+  a LIMIT slot on every sweep until the scan, and `FreshDSDPeaks` is SQL
+  too.
+- Refusing without the rescan. It ends the loop too, but with the defaults
+  a request for a changed file would be refused for up to six hours, where
+  main rendered a servable rendition at once (until the sweep overwrote it).
+- A synchronous rescan inside the request: `ScanSubtree` takes the
+  scanner's lock, which a full scan holds for its whole walk.
+
+Left alone: the serve path, which keeps asking the file; the batch
+coordinator, which stamps the row and renders only a track with no
+rendition of the family, so it takes no part in the loop, though a render
+it makes of a changed file stays refused until something renders it again
+after the scan; and the album survey, which measures the bytes on disk and
+stamps the row.
+
+### Tests
+
+`TestAChangedFileIsNotRenderedUntilItsRowIsReRead` drives the loop through
+POST /v1/upscale (the real api handler and adapter),
+`autoOptimizeSweeper.sweepOnce` and GET /v1/download (the real
+`variantStoreAdapter`), with `committingQueue` in the pool's place: it
+commits each job as `Pool.processJob` does, a sidecar at the spec's path
+and `UpsertVariant` with the spec's stamp and, for DSD, a peak. That needed
+the adapter's pool behind a one-method interface (`renditionQueue`). On the
+code before the fix it reproduced the bridge's numbers: 12 renders over
+three rounds (the FLAC's compact tier and the DSF's faithful tier), each
+swept render answering 410, the faithful peak stale after each request, and
+a delta for both tracks. `TestARefusedRequestRescansTheFileSoTheNextOneRenders`
+runs the rescanner over a real scanner and a minted DSF.
+`TestSourceRescannerQueuesADirectoryOnceAtATime`,
+`TestAutoOptimizeSweepPassesOverAFileThatChangedSinceItsScan` (both passes)
+and `TestTheCLIRendersOnlyAFileItsRowStillDescribes` (the classifier,
+`--force`, the dry run and the album-mate spec) cover the rest. The adapter,
+sweeper and CLI fixtures seeded rows whose mtime or size their file did not
+have, and now describe a scanned library. The first version of the
+rescanner test read the queue while the loop could still drain it and
+passed with the coalescing removed; it now queues before the loop starts
+and releases one scan at a time.
+
+### Negative controls
+
+Each on the committed fix, run with `-count=1`, restored before the next.
+
+| mutation | red | green |
+|---|---|---|
+| on-demand: no refusal, row stamp kept | the loop test (the faithful render answers 410, 1 render, a delta), the rescan test (the first request queued a job) | the other three |
+| on-demand: live stamp (main's adapter) | the loop test (2 renders, the faithful peak stale, a delta), the rescan test | the other three |
+| sweeper: no check in the compact pass | the sweep test (03's compact tier swept, `changedSinceScan` 2) | the other four |
+| sweeper: no check in the faithful pass | the sweep test (both faithful tiers swept, 1) | the other four |
+| CLI: no check | the CLI test (needsRun under `--force`, no dry-run lines) | the other four |
+| CLI: live stamp | the CLI test (the spec and the album-mate spec carry the file's mtime) | the other four |
+| on-demand: refusal without the rescan | the rescan test (the row unchanged 10 s later) | the other four |
+| rescanner: no coalescing | the rescanner test (3 scans queued for two directories) | the other four |
+| rescanner: pending cleared after the scan | the rescanner test (no second scan of the directory) | the other four |
+| rescanner: a blocking send | the rescanner test (a request blocked on the full queue) | the other four |
+
+With main's adapter and the sweeper's check both in place, the sweep no
+longer re-rendered (2 renders, not 12): the check is a second line of its
+own.

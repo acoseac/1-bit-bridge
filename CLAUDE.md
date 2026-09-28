@@ -1735,6 +1735,45 @@ no failing test — which is the shape to expect in this area.
   Staleness compares against the TRACK ROW, and the sweeper stamps from that
   same row — a live stat makes every variant read stale whenever the scanner
   hasn't caught up.
+- **…and EVERY rendition writer stamps the row, and a render starts only while
+  the file still matches it** (2026-09-28, backlog B24). A rendition records ONE
+  version (`source_mtime_ns` / `source_size`, and a DSD one's peak in
+  `dsd_peaks`) and two clocks judge it: the sweep's candidate queries and
+  `FreshDSDPeaks` against the row, the serve path against the file on disk (a
+  sidecar of other bytes must never be served). Between a change to a file and
+  the scan that reads it no stamp satisfies both. The on-demand path (POST
+  /v1/upscale) and the CLI stamped a live stat while the sweeper, the batch
+  coordinator and the album survey stamped the row, so each re-rendered what
+  the other wrote: measured on a real bridge (`autoOptimize.intervalSec: 20`),
+  three rounds of a request for three renditions and a sweep made 18 renders,
+  a delta for both tracks on every step, and the downloads answered 200 after
+  each request and 410 after each sweep; with the fix, 3 renders, all 200.
+  With the defaults the sweep's periodic tick fires milliseconds after each
+  periodic scan STARTS, on the previous scan's rows, so the flip came once per
+  scan interval; the faithful tier took part through
+  `drainSupersededPCMRenditions` (a live-stamped `pcm-v2` row is not "fresh"),
+  and a live-stamped peak was re-decoded by every album-mate render. The phone
+  never asks again for a family it has listed (PlayerService tier 0,
+  `shouldAutoGenerateVariant`, `BridgeRenditionRequestGate`), so one of its
+  requests cost 3 renders and up to a scan interval of 410; the CLI, a folder
+  POST or a script repeat it. `sourceIsAtRow` is the one check, the scanner's
+  EXACT skip-gate comparison, never serve's 2 s tolerance: the on-demand path
+  refuses (`errSourceAheadOfRow`, counted `rejected`, no wire change) and
+  queues a rescan of the file's directory (`sourceRescanner`, bgWriters-joined,
+  one queued scan per directory, a request dropped when 64 wait), so the next
+  request renders; the sweeper counts `changedSinceScan` and passes over; the
+  CLI lists the file as needing no run, `--force` included. **Don't stamp a
+  live stat anywhere** (`FreshnessFromFile` is gone), **and don't render a file
+  its row no longer describes**: a row-stamped render of new bytes is the one
+  the serve path refuses, and with auto-optimize off (the default) nothing
+  renders it again and the phone never asks. The album survey still MEASURES a
+  changed mate (a peak describes the bytes on disk; `cliAlbumMateSpec` ignores
+  needsRun). The batch coordinator stamps the row but does not check, so a
+  render it makes of a changed file stays refused until something renders it
+  again after the scan. `TestAChangedFileIsNotRenderedUntilItsRowIsReRead`
+  drives the loop through the real handler, sweeper and download path, with
+  `committingQueue` committing each job as `Pool.processJob` does (the adapter
+  takes its pool through `renditionQueue` for that).
 - **`maxPerSweep` is not just a queue guard**: `UpsertVariant` strict-advances
   `indexed_at`, so an uncapped first sweep pushes one delta row per variant to
   every paired device at once. The disk floor is a RUNNING budget and the probe
