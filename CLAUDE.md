@@ -2345,9 +2345,10 @@ no failing test — which is the shape to expect in this area.
   `ipsForAdvertise()`, every up interface's addresses, differed from the set
   cached at the last rebuild, while the records carry only the pinned
   interface's. So an address coming or going on another interface rebuilt
-  it with the same records on the same interface: on dido every one of
-  those changes was a docker veth, a container starting or stopping, and the
-  pinned interface's set did not change once (the record has the counts).
+  it with the same records on the same interface. Sampled at the loop's
+  cadence for 80 minutes: 21 such changes on dido, every one a docker veth
+  (a container starting or stopping), and 1 on the dev Mac, a new utun
+  coming up; the pick and its addresses changed 0 times on either.
   Each tick now builds the advertisement a rebuild would make
   (`advertisementNow`: the InterfaceSource's pick, and the addresses
   narrowed to it, or all of them when nothing is pinned) and rebuilds only
