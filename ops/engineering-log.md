@@ -23980,14 +23980,14 @@ A trailing slash in `bridge.yaml` was no workaround: `config.Load` Cleans
 every root (`resolvePaths` through `ResolvePath`), so the scanner is handed
 `/music` however it is written.
 
-By reading, the other walks of a root: the doctor's inotify pre-flight
-(`countDirs`, Linux) counted nothing under a linked root while the watcher,
-once fixed, registers a watch per directory; `POST /v1/upscale` for the root
-folder (`"."` single-root, the basename multi-root) walked the link as one
-entry and enqueued the folder itself. Both measured with the new tests on
-main: `countDirs` = 0 (want 4, on dido), and the stub enqueuer was handed
-`["."]`. Serving was never affected: `fs.Resolver` joins lexically and the
-OS follows the root link on every open, and `bridge doctor`'s
+The other walks of a root, found by sweeping for the call and measured with
+the new tests on main: the doctor's inotify pre-flight (`countDirs`, Linux)
+counted 0 directories under a linked root (want 4, on dido) while the
+watcher, once fixed, registers a watch per directory; and
+`POST /v1/upscale` for the root folder (`"."` single-root, the basename
+multi-root) walked the link as one entry and handed the enqueuer the folder
+itself, `["."]`. Serving was never affected: `fs.Resolver` joins lexically
+and the OS follows the root link on every open, and `bridge doctor`'s
 `library-roots` check (`os.Stat`, `os.ReadDir`) called the linked root
 reachable and non-empty, which is how the scanner's view went unnoticed.
 
@@ -24056,10 +24056,18 @@ reachable and non-empty, which is how the scanner's view went unnoticed.
   link, ReadDirectoryChangesW's `CreateFile` follows a junction, and
   fsnotify's kqueue backend follows one level (it Readlinks and Lstats once),
   so a link to a link on macOS or BSD gets the root's own watch as a
-  non-directory: events for files directly in the root name the root itself.
-  Subdirectories are watched in every case, since they are added by their
-  configured paths and resolve through the link. A runtime-created directory
-  is walked as before, and the scanner walks no link below a root.
+  non-directory. Measured with a throwaway test on macOS: over a root that
+  is one link, a file dropped into the root and one dropped two levels down
+  were both indexed; over a link to a link, only the one two levels down
+  was, and the root's own event named the root, so the watcher dispatched a
+  subtree scan of its parent and logged `ERROR subtree scan … is not under
+  any configured library root`. Left as it is: the periodic scan picks the
+  file up, the watcher is off by default, and fsnotify names a kqueue event
+  by the path it was given, so no spelling of the root's watch both reaches
+  the directory and names a path under the configured root. Subdirectories
+  are watched in every case, since they are added by their configured paths
+  and resolve through the link. A runtime-created directory is walked as
+  before, and the scanner walks no link below a root.
 - **The doctor and the upscale walk** take the same helper. `countDirs`
   answers an error for a root that cannot be seen (the check warns "could
   not enumerate"), where it counted 0. The upscale walk follows the folder
