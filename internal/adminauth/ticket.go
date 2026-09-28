@@ -360,6 +360,15 @@ func ticketAbsent(err error, goos string) bool {
 // only read, so a mint leaves every ticket but its own byte for byte as it
 // found it.
 //
+// An entry that is not a regular file is not a ticket, whatever its name:
+// every ticket is a regular file a mint renamed into place, and nothing else
+// the bridge writes here takes that name. Such an entry is skipped, neither
+// counted nor removed. A directory, or a link to one, fails its read with an
+// error that is not absence, so it was counted as possibly live, and
+// maxLiveTickets of them refused every mint. The type comes from the listing
+// (an lstat where the filesystem does not report one), so a symlink is
+// skipped whatever it points to.
+//
 // Pruning happens here and nowhere else. Its old home was a redemption's miss
 // branch, which an unauthenticated request reaches; a mint is an operator's.
 func (s *Store) pruneTicketsLocked(now time.Time) (int, error) {
@@ -369,6 +378,9 @@ func (s *Store) pruneTicketsLocked(now time.Time) (int, error) {
 	}
 	live := 0
 	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
 		digest, ok := s.ticketDigestFromName(e.Name())
 		if !ok {
 			continue

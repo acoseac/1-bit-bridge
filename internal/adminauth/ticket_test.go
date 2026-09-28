@@ -173,6 +173,48 @@ func TestLiveTicketsAreBounded(t *testing.T) {
 	}
 }
 
+// TestAnEntryThatIsNotAFileIsNeverALiveTicket pins that the mint's prune
+// counts only REGULAR files toward the ceiling. A directory, or a link to one,
+// named exactly like a ticket file fell into the arm that counts an entry it
+// could not read as live (which keeps an unreadable ticket inside the
+// ceiling), so maxLiveTickets of them refused every mint. Nothing the bridge
+// writes there is anything but a regular file. (Gemini on #1062.)
+func TestAnEntryThatIsNotAFileIsNeverALiveTicket(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, at string)
+	}{
+		{"a directory", func(t *testing.T, at string) {
+			if err := os.Mkdir(at, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a link to a directory", func(t *testing.T, at string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("creating a symlink needs a privilege a Windows runner may not have")
+			}
+			if err := os.Symlink(t.TempDir(), at); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := ticketStore(t)
+			for i := 0; i < maxLiveTickets; i++ {
+				tc.plant(t, s.ticketFilePath(hashTicket(strings.Repeat("x", i+1))))
+			}
+			raw, err := s.MintLoginTicket("admin")
+			if err != nil {
+				t.Fatalf("mint beside %d entries named like tickets that are not files: %v "+
+					"(they were counted as live tickets)", maxLiveTickets, err)
+			}
+			if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+				t.Fatalf("redeem = (%q, %v), want (admin, nil)", user, err)
+			}
+		})
+	}
+}
+
 // The regression that unit tests could not see: `bridge admin login-link` runs
 // as a separate process from the serving bridge, so a ticket has to survive the
 // process that minted it. Two Store values over one path stand in for that.
