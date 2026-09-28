@@ -157,20 +157,28 @@ func TestValidateEmptyStringAlwaysMisses(t *testing.T) {
 	}
 }
 
+// TestValidateUpdatesLastUsedAt pins that a hit stamps LastUsedAt. It
+// asserts the stamp is set and lies between two readings of the clock
+// taken around the call, never that it is strictly after a reading taken
+// before it: Windows advances the wall clock in ticks of about 15.6 ms,
+// so a strict After across a 5 ms sleep can compare two equal stamps.
 func TestValidateUpdatesLastUsedAt(t *testing.T) {
 	s, _ := newTmpStore(t)
 	raw, _, _ := s.Mint("Mac")
-	t0 := time.Now().UTC()
-	time.Sleep(5 * time.Millisecond)
+	if got := s.List()[0].LastUsedAt; !got.IsZero() {
+		t.Fatalf("LastUsedAt = %v before any Validate, want zero", got)
+	}
+	before := time.Now().UTC()
 	if _, ok := s.Validate(raw); !ok {
 		t.Fatal("Validate miss")
 	}
+	after := time.Now().UTC()
 	tokens := s.List()
 	if len(tokens) != 1 {
 		t.Fatalf("List len = %d", len(tokens))
 	}
-	if !tokens[0].LastUsedAt.After(t0) {
-		t.Errorf("LastUsedAt not updated: %v (expected > %v)", tokens[0].LastUsedAt, t0)
+	if got := tokens[0].LastUsedAt; got.IsZero() || got.Before(before) || got.After(after) {
+		t.Errorf("LastUsedAt = %v, want a stamp in [%v, %v]", got, before, after)
 	}
 }
 
@@ -178,8 +186,15 @@ func TestValidateDebouncesLastUsedPersist(t *testing.T) {
 	// Rapid Validate hits within the debounce window must NOT rewrite
 	// tokens.json — the window is lastUsedFlushInterval. A subsequent
 	// FlushLastUsed persists the pending timestamp on clean shutdown.
+	//
+	// The writes are COUNTED (inCommitWindow counts every staging), never
+	// read off the file's mtime: two writes inside one clock tick (about
+	// 15.6 ms on Windows, 2 s on FAT) leave the mtime equal, which failed
+	// the flush half against correct code and let the debounce half pass
+	// with the debounce broken.
 	s, path := newTmpStore(t)
 	raw, _, _ := s.Mint("Mac")
+	staged, _ := inCommitWindow(t, 0, func() {})
 
 	// Mint already stamped `lastUsedFlush` via its own persist(), so a
 	// subsequent Validate lands inside the debounce window and must NOT
@@ -187,40 +202,50 @@ func TestValidateDebouncesLastUsedPersist(t *testing.T) {
 	// within Validate's success branch; centralising the stamp in
 	// persist() means Mint/Revoke paths also debounce subsequent hits,
 	// which is the invariant this assertion pins.)
-	if _, ok := s.Validate(raw); !ok {
-		t.Fatal("first validate miss")
-	}
-	mtAfterFirst := mustMtime(t, path)
-
-	// Rapid follow-up validates must NOT re-persist.
-	for i := 0; i < 5; i++ {
-		time.Sleep(2 * time.Millisecond)
+	for i := 0; i < 6; i++ {
 		if _, ok := s.Validate(raw); !ok {
-			t.Fatal("follow-up validate miss")
+			t.Fatalf("validate %d missed", i+1)
 		}
 	}
-	if mt := mustMtime(t, path); mt.After(mtAfterFirst) {
-		t.Errorf("debounce broken: rapid validates rewrote tokens.json (%v → %v)", mtAfterFirst, mt)
+	if n := staged(); n != 0 {
+		t.Errorf("debounce broken: 6 validates inside the window wrote tokens.json %d times, want 0", n)
 	}
 
 	// FlushLastUsed on shutdown must persist pending updates even
 	// though the debounce hasn't elapsed.
-	time.Sleep(5 * time.Millisecond)
 	if err := s.FlushLastUsed(); err != nil {
 		t.Fatalf("FlushLastUsed: %v", err)
 	}
-	if mt := mustMtime(t, path); !mt.After(mtAfterFirst) {
-		t.Errorf("FlushLastUsed did not persist: %v (want > %v)", mt, mtAfterFirst)
+	if n := staged(); n != 1 {
+		t.Errorf("FlushLastUsed wrote tokens.json %d times, want 1", n)
+	}
+	want := s.List()[0].LastUsedAt
+	if got := lastUsedOnDisk(t, path); want.IsZero() || !got.Equal(want) {
+		t.Errorf("tokens.json holds LastUsedAt %v after FlushLastUsed, want the stamp in memory, %v", got, want)
 	}
 }
 
-func mustMtime(t *testing.T, path string) time.Time {
+// lastUsedOnDisk returns the LastUsedAt of the one token a store opened
+// fresh from path holds: what the file says, not what the tested store
+// remembers.
+func lastUsedOnDisk(t *testing.T, path string) time.Time {
 	t.Helper()
-	info, err := os.Stat(path)
+	return onlyTokenOnDisk(t, path).LastUsedAt
+}
+
+// onlyTokenOnDisk returns the one token a store opened fresh from path
+// holds.
+func onlyTokenOnDisk(t *testing.T, path string) Token {
+	t.Helper()
+	s, err := OpenStore(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("reopen %s: %v", path, err)
 	}
-	return info.ModTime()
+	tokens := s.List()
+	if len(tokens) != 1 {
+		t.Fatalf("%s holds %d tokens, want 1", path, len(tokens))
+	}
+	return tokens[0]
 }
 
 func TestPersistenceRoundTrip(t *testing.T) {
@@ -639,27 +664,31 @@ func TestRecordClientVersionUpdatesInMemoryAndFlushPersists(t *testing.T) {
 	// in-memory bump + the FlushLastUsed-driven persist together is
 	// what pins the post-PR-#41-review behaviour: fast in-memory,
 	// debounced disk, no DoS surface from version flip-flopping.
+	// Writes are counted and the file read, never judged by mtime (see
+	// TestValidateDebouncesLastUsedPersist).
 	s, path := newTmpStore(t)
 	_, tok, _ := s.Mint("iPhone 15")
-	mtBefore := mustMtime(t, path)
+	staged, _ := inCommitWindow(t, 0, func() {})
 
-	time.Sleep(10 * time.Millisecond)
 	s.RecordClientVersion(tok.ID, "1.2.3")
 	// In-memory must be live for the updater's compat gate.
 	if got := s.List()[0]; got.LastClientVersion != "1.2.3" {
 		t.Errorf("LastClientVersion = %q, want 1.2.3 (in-memory)", got.LastClientVersion)
 	}
 	// Debounced: no fresh disk write within the 30 s window after Mint.
-	if mt := mustMtime(t, path); mt.After(mtBefore) {
-		t.Errorf("RecordClientVersion within debounce window persisted (mtime %v > %v)", mt, mtBefore)
+	if n := staged(); n != 0 {
+		t.Errorf("RecordClientVersion within the debounce window wrote tokens.json %d times, want 0", n)
 	}
 	// FlushLastUsed forces the deferred update to land — same path the
 	// shutdown defer in cmd/bridge/main.go uses.
 	if err := s.FlushLastUsed(); err != nil {
 		t.Fatalf("FlushLastUsed: %v", err)
 	}
-	if mt := mustMtime(t, path); !mt.After(mtBefore) {
-		t.Errorf("FlushLastUsed did not persist deferred client-version update (mtime %v == %v)", mt, mtBefore)
+	if n := staged(); n != 1 {
+		t.Errorf("FlushLastUsed wrote tokens.json %d times, want 1", n)
+	}
+	if got := onlyTokenOnDisk(t, path).LastClientVersion; got != "1.2.3" {
+		t.Errorf("tokens.json holds LastClientVersion %q after FlushLastUsed, want 1.2.3", got)
 	}
 }
 
@@ -668,33 +697,42 @@ func TestRecordClientVersionDebouncesUnderRapidChanges(t *testing.T) {
 	// malicious client could rotate X-Client-Version on every request
 	// and force tokens.json rewrites under the global lock. The
 	// debounce caps that at one persist per lastUsedFlushInterval.
-	s, path := newTmpStore(t)
+	s, _ := newTmpStore(t)
 	_, tok, _ := s.Mint("iPhone 15")
-	mtAfterMint := mustMtime(t, path)
+	staged, _ := inCommitWindow(t, 0, func() {})
 
 	for i := 0; i < 50; i++ {
 		s.RecordClientVersion(tok.ID, fmt.Sprintf("1.%d.%d", i/10, i%10))
-		time.Sleep(time.Millisecond)
 	}
-	if mt := mustMtime(t, path); mt.After(mtAfterMint) {
-		t.Errorf("flood of distinct versions broke the debounce (mtime %v > %v)", mt, mtAfterMint)
+	if n := staged(); n != 0 {
+		t.Errorf("a flood of 50 distinct versions wrote tokens.json %d times inside the debounce window, want 0", n)
 	}
 }
 
 func TestRecordClientVersionSkipsDiskOnRepeat(t *testing.T) {
 	// Hot-path coverage: same value, request after request, no
 	// in-memory or on-disk churn.
-	s, path := newTmpStore(t)
+	//
+	// The repeats run with the debounce window OPEN, so a write they
+	// made would land: inside the window after Mint every call writes
+	// nothing anyway, and this test would pass with the same-value skip
+	// removed. The last call, a different value, is the positive
+	// control that the window was open.
+	s, _ := newTmpStore(t)
 	_, tok, _ := s.Mint("iPhone 15")
 	s.RecordClientVersion(tok.ID, "1.2.3")
-	mtAfterFirst := mustMtime(t, path)
+	s.setLastUsedFlushForTest(time.Now().Add(-2 * lastUsedFlushInterval))
+	staged, _ := inCommitWindow(t, 0, func() {})
 
 	for i := 0; i < 5; i++ {
-		time.Sleep(2 * time.Millisecond)
 		s.RecordClientVersion(tok.ID, "1.2.3") // same value, should no-op
 	}
-	if mt := mustMtime(t, path); mt.After(mtAfterFirst) {
-		t.Errorf("repeat RecordClientVersion(same value) re-persisted (mtime %v > %v)", mt, mtAfterFirst)
+	if n := staged(); n != 0 {
+		t.Errorf("repeat RecordClientVersion(same value) wrote tokens.json %d times with the window open, want 0", n)
+	}
+	s.RecordClientVersion(tok.ID, "1.2.4")
+	if n := staged(); n != 1 {
+		t.Fatalf("a new version with the window open wrote tokens.json %d times, want 1: the window was not open, so the repeats above proved nothing", n)
 	}
 }
 

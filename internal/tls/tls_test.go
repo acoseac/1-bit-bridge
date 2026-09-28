@@ -228,10 +228,7 @@ func TestReloadsWithoutRegenerating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first LoadOrGenerate: %v", err)
 	}
-	certMtime := mustMtime(t, certPath)
-
-	// Small sleep so any mtime change would be visible on coarse-grained FSes.
-	time.Sleep(10 * time.Millisecond)
+	certBefore, keyBefore := mustStat(t, certPath), mustStat(t, keyPath)
 
 	_, fp2, err := LoadOrGenerate(certPath, keyPath, "host.local")
 	if err != nil {
@@ -240,8 +237,17 @@ func TestReloadsWithoutRegenerating(t *testing.T) {
 	if fp1 != fp2 {
 		t.Errorf("fingerprint changed on reload: %q vs %q", fp1, fp2)
 	}
-	if mustMtime(t, certPath) != certMtime {
+	// A regenerated pair fails the fingerprint check above. A rewrite of
+	// the same bytes is caught by identity: every write here stages a new
+	// file and renames it into place, so a rewritten path names another
+	// file. Never by mtime: two writes inside one clock tick (about 15.6 ms
+	// on Windows, 2 s on FAT) leave it equal, and a 10 ms sleep bridges
+	// neither.
+	if !os.SameFile(certBefore, mustStat(t, certPath)) {
 		t.Error("cert file was rewritten on reload — should have been loaded as-is")
+	}
+	if !os.SameFile(keyBefore, mustStat(t, keyPath)) {
+		t.Error("key file was rewritten on reload — should have been loaded as-is")
 	}
 }
 
@@ -410,13 +416,13 @@ func TestDNSNamesIncludesCustomHost(t *testing.T) {
 
 // ---- helpers ----
 
-func mustMtime(t *testing.T, path string) time.Time {
+func mustStat(t *testing.T, path string) os.FileInfo {
 	t.Helper()
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return info.ModTime()
+	return info
 }
 
 func containsIP(ips []net.IP, want string) bool {
