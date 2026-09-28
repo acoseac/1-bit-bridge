@@ -3177,8 +3177,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("autocert.enabled requires listenAddress on port :443 OR autocert.external443Mapping: true — got listenAddress %q (LE's TLS-ALPN-01 challenge is only validated on TCP/443)", c.ListenAddress)
 			}
 		}
-	} else if err := validateLoopbackAddress(c.AdminAddress); err != nil {
-		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
+	} else if err := ValidateLoopbackAddress("adminAddress", c.AdminAddress); err != nil {
+		return err
 	}
 	// Demo-mode static token: must be a well-formed SHA-256 hex digest
 	// when set. Checked regardless of demo.enabled so a typo'd hash is
@@ -3592,14 +3592,27 @@ func looksLikeServiceName(port string) bool {
 // listenAddress / adminAddress / dlna.listenAddress checks so all three
 // reject the same bogus-port shapes (":99999", ":abc") that
 // net.SplitHostPort alone lets through, and by `bridge init`, which refuses
-// a --listen-address or --admin-address this refuses before its preflight
-// grades the port the address names.
+// a --listen-address this refuses, and a public run's --admin-address,
+// before its preflight grades the port the address names (a loopback run's
+// --admin-address takes ValidateLoopbackAddress, as the file's does).
 func ValidateBindAddress(field, addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("%s %q: %w", field, addr, err)
 	}
 	if err := validatePort(port); err != nil {
+		return fmt.Errorf("%s %q: %w", field, addr, err)
+	}
+	return nil
+}
+
+// ValidateLoopbackAddress is validateLoopbackAddress with the field named in
+// its error, as ValidateBindAddress names it. Validate checks a loopback
+// install's adminAddress with it, and `bridge init` a loopback run's
+// --admin-address, before its preflight grades the port the address names:
+// one rule for the file and for the flag that writes it.
+func ValidateLoopbackAddress(field, addr string) error {
+	if err := validateLoopbackAddress(addr); err != nil {
 		return fmt.Errorf("%s %q: %w", field, addr, err)
 	}
 	return nil

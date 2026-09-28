@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -187,6 +188,26 @@ type Deps struct {
 	// options mechanism for one flag would leave this package with two
 	// ways to say the same sort of thing.
 	OwnedPorts []int
+	// AbandonedPorts lists ports of the install being graded that the
+	// caller's run is about to stop binding: `bridge init --yes --force`
+	// over an install whose config loads, rewriting it with other ports. A
+	// port check whose port is listed answers ok "not checked", without a
+	// probe (abandonedPortCheck).
+	//
+	// That rewrite is certain before the preflight runs, and who holds a
+	// port the new config does not name says nothing about whether the
+	// bridge can start once it is saved. Graded, it refused the rewrite: an
+	// install whose bridge was stopped, a stranger on its old port, and a
+	// run moving off that port exited 1 on "[FAIL] port-api … in use"
+	// (2026-09-28). The ports the rewrite writes in their place are graded
+	// by init's second port pass, before the config is saved
+	// (RunPortChecks), and a port the rewrite keeps is not listed, so it is
+	// graded as the install's, pid file and all.
+	//
+	// It never lists a port the run writes, in either role, which is what
+	// lets the second pass carry these Deps: every port it grades is one the
+	// run writes.
+	AbandonedPorts []int
 	// LibraryWatchEnabled mirrors cfg.LibraryWatch.Enabled. When
 	// true on Linux, the doctor's inotify watch-limit check
 	// activates — the operator gets a warning if their kernel
@@ -357,6 +378,16 @@ func checkPlatform(_ context.Context, d Deps) Check {
 		"bridge ships binaries for darwin/linux/windows on amd64 or arm64; other combos must build from source")
 }
 
+// noConfigDirHint is config-dir's hint when the caller has no directory to
+// hand it: `bridge doctor` that found no config and was named none, on a host
+// where the platform config dir cannot be resolved, which the CLI answers
+// only with a home directory (packaging.DefaultConfigDir). It was "pass
+// Deps.ConfigDir so doctor can verify write access" until 2026-09-28, a note
+// for whoever calls this package.
+const noConfigDirHint = "no config was named or found, and the default config directory could not be " +
+	"resolved: it lives under this user's home directory (HOME, or USERPROFILE on Windows), which is not set. " +
+	"Set it, or name a config with --config"
+
 // checkConfigDir vouches that the bridge can create and write the directory
 // its config lives in, where `bridge init`, config.Save and a relative
 // dataDir all write. Its two probes, a MkdirAll and a write, answer for
@@ -368,7 +399,7 @@ func checkPlatform(_ context.Context, d Deps) Check {
 func checkConfigDir(_ context.Context, d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
-		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
+		return warn(checkNameConfigDir, "no config dir set", noConfigDirHint)
 	}
 	switch d.ConfigFile.ungraded() {
 	case configNotThere:
@@ -436,6 +467,16 @@ func certPaths(d Deps) (certPath, keyPath string) {
 	return servertls.DefaultPaths(d.DataDir)
 }
 
+// noDataDirHint is tls-cert's hint when nothing says where the certificate
+// is: no config that loads names a data dir or a pair. That is `bridge doctor`
+// before `bridge init` (it found no config), or over a config that does not
+// load or that this user cannot read, which config-file reports above it. It
+// was "pass Deps.DataDir so doctor can inspect cert state" until 2026-09-28,
+// a note for whoever calls this package, on every pre-init `bridge doctor`
+// run.
+const noDataDirHint = "no config that loads says where the certificate is, so there is none to inspect " +
+	"(config-file above says why); `bridge init` mints one on a first install"
+
 // checkTLSCert reports the cert pair's presence AND its remaining
 // validity.
 //
@@ -455,8 +496,7 @@ func certPaths(d Deps) (certPath, keyPath string) {
 func checkTLSCert(_ context.Context, d Deps) Check {
 	certPath, keyPath := certPaths(d)
 	if certPath == "" {
-		return warn(checkNameTLSCert, "no data dir set",
-			"pass Deps.DataDir so doctor can inspect cert state")
+		return warn(checkNameTLSCert, "no data dir set", noDataDirHint)
 	}
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)
@@ -627,8 +667,9 @@ func checkAdminPort(ctx context.Context, d Deps) Check {
 // checkListenPort is the ladder both port checks climb, for the port it is
 // handed with the name it is handed: a config that did not load declines
 // (ungradedConfigPortCheck), then a port the caller bound answers
-// (ownedPortCheck), then the bind probe (checkPort, or checkChosenPort when
-// the recorded bridge's ports are unknown). The port is passed, never
+// (ownedPortCheck), then a port the caller's run abandons declines
+// (abandonedPortCheck), then the bind probe (checkPort, or checkChosenPort
+// when the recorded bridge's ports are unknown). The port is passed, never
 // derived from the name, for the reason ownedPortCheck gives.
 func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
 	if c := ungradedConfigPortCheck(name, d.ConfigFile); c != nil {
@@ -636,6 +677,9 @@ func checkListenPort(ctx context.Context, d Deps, name string, port int) Check {
 	}
 	if owned := ownedPortCheck(name, port, d.OwnedPorts); owned != nil {
 		return *owned
+	}
+	if c := abandonedPortCheck(name, port, d.AbandonedPorts); c != nil {
+		return *c
 	}
 	if d.OwnPIDPortsUnknown {
 		return checkChosenPort(ctx, name, port, d.OwnPIDFile)
@@ -720,6 +764,20 @@ func ownedPortCheck(name string, port int, ownedPorts []int) *Check {
 		}
 	}
 	return nil
+}
+
+// abandonedPortCheck answers a port check whose port the caller's run is
+// about to stop binding (Deps.AbandonedPorts), and returns nil for any other.
+// It probes nothing: a port the config being written does not name is not
+// one the bridge will bind, whoever holds it now. Port 0 is matched like any
+// other, unlike ownedPortCheck: here it comes from a config, where `:0` is a
+// legal address the rewrite may be leaving.
+func abandonedPortCheck(name string, port int, abandoned []int) *Check {
+	if !slices.Contains(abandoned, port) {
+		return nil
+	}
+	c := ok(name, fmt.Sprintf("not checked: this rewrite moves off :%d", port))
+	return &c
 }
 
 // listenFunc is the TCP bind probe used by checkPort. A package var so
@@ -957,12 +1015,21 @@ func checkChosenPort(ctx context.Context, name string, port int, ownPIDFile stri
 	}
 }
 
+// portZeroHint is the hint under "no port set", the verdict for a listen port
+// of 0. An address may name that port, since config.validatePort accepts it,
+// and the system then picks a free port each time the bridge starts. It was
+// "pass Deps.port-apiPort" until 2026-09-28, a note for whoever calls this
+// package, which reached every operator whose config, or whose `bridge init`
+// flag, names :0.
+const portZeroHint = "the address names port 0, so the system picks a free port each time the bridge starts " +
+	"and there is none to check; name a fixed port if clients must find this listener at the same one after a restart"
+
 // bindVerdict is the bind probe both port ladders start from (checkPort
 // and checkChosenPort). It returns inUse when something holds the port,
 // and otherwise the check to report: free, not bindable, or no port set.
 func bindVerdict(name string, port int) (Check, bool) {
 	if port == 0 {
-		return warn(name, "no port set", "pass Deps."+name+"Port"), false
+		return warn(name, "no port set", portZeroHint), false
 	}
 	// Probe BOTH address families. Binding only 127.0.0.1 reports a port
 	// as free when something holds it on IPv6 alone — `[::]:port` under

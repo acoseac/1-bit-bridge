@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,12 +79,13 @@ func TestInitOverABrokenConfigIsNotRefusedOverPortsItDoesNotWrite(t *testing.T) 
 // One row per way the run's ports are chosen, which is what makes the
 // preflight's port and the saved one the same by construction
 // (initAddresses): a public run's flags, the admin port a public run defaults
-// to, and a loopback run's defaults.
+// to, a loopback run's defaults, and a loopback run's flags.
 //
 // Before, the first row passed the preflight, which graded 7788 and 7789,
 // and was refused by the second port pass after init had made its data dir;
-// the other two were refused by the preflight with no word on whose ports
-// those were.
+// the second and third were refused by the preflight with no word on whose
+// ports those were. The last passed and saved the defaults: a loopback run
+// read neither address flag until 2026-09-28.
 func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -91,7 +93,6 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 		hold func(t *testing.T) int
 		// args are the run's flags, over cfgDir, writing the admin port held.
 		args func(t *testing.T, cfgDir string, admin int) []string
-		note string
 	}{
 		{
 			name: "a public first install on the ports its flags name",
@@ -103,7 +104,6 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 			args: func(t *testing.T, cfgDir string, admin int) []string {
 				return publicFirstInstallArgs(cfgDir, freeLoopbackPort(t), admin)
 			},
-			note: portsThisInitWrites(true),
 		},
 		{
 			// --listen-address keeps the run off :443, which a test cannot
@@ -120,7 +120,6 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 					"--listen-address", loopbackAddr(freeLoopbackPort(t)),
 				}
 			},
-			note: portsThisInitWrites(true),
 		},
 		{
 			name: "a loopback first install",
@@ -131,7 +130,17 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 			args: func(t *testing.T, cfgDir string, _ int) []string {
 				return []string{"--yes", "--no-service", "--dir", cfgDir, "--library", testLibrary(t)}
 			},
-			note: portsThisInitWrites(false),
+		},
+		{
+			name: "a loopback first install on the ports its flags name",
+			hold: func(t *testing.T) int {
+				port := freeLoopbackPort(t)
+				holdLoopbackPort(t, port)
+				return port
+			},
+			args: func(t *testing.T, cfgDir string, admin int) []string {
+				return loopbackFirstInstallArgs(t, cfgDir, freeLoopbackPort(t), admin)
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,8 +156,8 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 				!strings.Contains(l, ":"+strconv.Itoa(admin)+" in use") {
 				t.Errorf("port-admin says %q, want a FAIL on :%d, the port this run writes", l, admin)
 			}
-			if !strings.Contains(out, tc.note) {
-				t.Errorf("the refusal does not say whose ports these are: no %q", tc.note)
+			if !strings.Contains(out, portsThisInitWrites()) {
+				t.Errorf("the refusal does not say whose ports these are: no %q", portsThisInitWrites())
 			}
 			// The preflight's own probe makes the config dir; the data dir and
 			// the config are init's to write, after the preflight.
@@ -168,22 +177,11 @@ func TestInitPreflightRefusesAPortTheRunWrites(t *testing.T) {
 // here a re-run that keeps the config, whose listen port another process
 // holds while the install's bridge is stopped.
 func TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads(t *testing.T) {
-	tmp := t.TempDir()
 	lib := testLibrary(t)
-	cfgDir := filepath.Join(tmp, "cfg")
-	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
 	api, admin := freeLoopbackPort(t), freeLoopbackPort(t)
 	holdLoopbackPort(t, api)
-	body := "libraryRoots:\n  - " + lib + "\n" +
-		"dataDir: " + filepath.Join(cfgDir, "data") + "\n" +
-		"listenAddress: \"" + loopbackAddr(api) + "\"\n" +
-		"adminAddress: \"" + loopbackAddr(admin) + "\"\n" +
-		"libraryName: Existing\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "bridge.yaml"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeLoopbackInstall(t, cfgDir, lib, api, admin)
 
 	// --yes without --force keeps the config.
 	code, out := runInit(t, "--yes", "--no-service", "--dir", cfgDir, "--library", lib)
@@ -200,32 +198,70 @@ func TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads(t *testing.T) 
 	}
 }
 
-// TestInitRefusesAnAddressFlagTheConfigWouldRefuse: a public run's
-// --listen-address or --admin-address that the config's own check refuses is
-// refused before the preflight, which has no port to grade for it. It was
-// refused at the validation before Save, exit 1, after a preflight that graded
-// 7788 in its place and after init had made its directories.
+// TestInitRefusesAnAddressFlagTheConfigWouldRefuse: a --listen-address or
+// --admin-address that the config's own check refuses, in the posture the run
+// writes, is refused before the preflight, which has no port to grade for it.
+// A public run's was refused at the validation before Save, exit 1, after a
+// preflight that graded 7788 in its place and after init had made its
+// directories. A loopback run's was not refused at all until 2026-09-28: the
+// run read neither flag, and saved the defaults with exit 0.
+//
+// A loopback run's admin address must name a loopback host, as that
+// install's adminAddress must (config.ValidateLoopbackAddress): its console
+// has no login. A public run's may name any interface, which the public
+// tests pin (TestInitPublicAdminAddressOverrideWinsInBothModes).
 func TestInitRefusesAnAddressFlagTheConfigWouldRefuse(t *testing.T) {
+	const noLogin = "without --public the admin console has no login"
 	// The subtests are not named for the flags: t.TempDir's path carries the
 	// test's name, and init prints the path, so an output that named the
 	// flag would prove nothing.
-	for _, tc := range []struct{ name, flag, addr, want string }{
-		{"listen address with no port", "--listen-address", "443", "missing port in address"},
-		{"admin address out of range", "--admin-address", "127.0.0.1:99999", "must be a number between 0 and 65535"},
+	for _, tc := range []struct {
+		name   string
+		public bool
+		flag   string
+		addr   string
+		want   []string
+	}{
+		{"public listen address with no port", true, "--listen-address", "443",
+			[]string{"missing port in address"}},
+		{"public admin address out of range", true, "--admin-address", "127.0.0.1:99999",
+			[]string{"must be a number between 0 and 65535"}},
+		{"loopback listen address with no port", false, "--listen-address", "443",
+			[]string{"missing port in address"}},
+		{"loopback admin address out of range", false, "--admin-address", "127.0.0.1:99999",
+			[]string{"must be a number between 0 and 65535"}},
+		{"loopback admin address on every interface", false, "--admin-address", "0.0.0.0:17789",
+			[]string{`host "0.0.0.0" is not a loopback address`, noLogin}},
+		{"loopback admin address with no host", false, "--admin-address", ":17789",
+			[]string{"an empty host binds all interfaces", noLogin}},
+		{"loopback admin address on a host name", false, "--admin-address", "bridge.example.test:17789",
+			[]string{"must be a loopback address", noLogin}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
-			code, out := runInit(t,
-				"--yes", "--no-service", "--dir", cfgDir,
-				"--public", "--domain", "example.test", "--admin-tls-proxy",
-				tc.flag, tc.addr)
+			args := []string{"--yes", "--no-service", "--dir", cfgDir, tc.flag, tc.addr}
+			if tc.public {
+				args = append(args, "--public", "--domain", "example.test", "--admin-tls-proxy")
+			} else {
+				// A library, so the run's only usage error is the address.
+				args = append(args, "--library", testLibrary(t))
+			}
+			code, out := runInit(t, args...)
 			defer logRunOnFailure(t, out)
 			if code != 2 {
 				t.Errorf("init exited %d on %s %q, want 2, a usage error", code, tc.flag, tc.addr)
 			}
-			if named := tc.flag + " " + strconv.Quote(tc.addr); !strings.Contains(out, named) ||
-				!strings.Contains(out, tc.want) {
-				t.Errorf("the refusal does not name %s and why (%q)", named, tc.want)
+			named := tc.flag + " " + strconv.Quote(tc.addr)
+			for _, want := range append([]string{named}, tc.want...) {
+				if !strings.Contains(out, want) {
+					t.Errorf("the refusal does not name %s and why: no %q", named, want)
+				}
+			}
+			// The loopback line is about the host, and only a host refusal
+			// carries it: a port that does not parse is no question of login.
+			if !slices.Contains(tc.want, noLogin) && strings.Contains(out, noLogin) {
+				t.Errorf("the refusal of %s explains the loopback rule, and the address was refused for "+
+					"something else", named)
 			}
 			if _, err := os.Stat(cfgDir); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("the config dir is there after the refusal (stat: %v): the run was refused after "+
@@ -241,6 +277,16 @@ func publicFirstInstallArgs(cfgDir string, api, admin int) []string {
 	return []string{
 		"--yes", "--no-service", "--dir", cfgDir,
 		"--public", "--domain", "example.test", "--admin-tls-proxy",
+		"--listen-address", loopbackAddr(api),
+		"--admin-address", loopbackAddr(admin),
+	}
+}
+
+// loopbackFirstInstallArgs are a loopback first install's flags, with an
+// empty library, on the two given loopback ports.
+func loopbackFirstInstallArgs(t *testing.T, cfgDir string, api, admin int) []string {
+	return []string{
+		"--yes", "--no-service", "--dir", cfgDir, "--library", testLibrary(t),
 		"--listen-address", loopbackAddr(api),
 		"--admin-address", loopbackAddr(admin),
 	}
