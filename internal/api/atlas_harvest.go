@@ -147,8 +147,11 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 	// is shared deliberately: these two values are compared for EQUALITY, so a
 	// reduction applied to one and not the other turns a correct pin into a
 	// mismatch that fails closed and reads as a broken feature.
+	// A base naming a port and no host (`https://:8443`) survives that
+	// reduction, and the harvest client would dial it, with the token, on
+	// this machine (backlog B36), so it is refused here too.
 	canonicalBase := config.CanonicalHTTPSBase(req.AtlasBaseURL)
-	if canonicalBase == "" {
+	if canonicalBase == "" || !config.BaseURLNamesHost(canonicalBase) {
 		writeError(w, http.StatusBadRequest, "bad_request", "atlasBaseUrl must be a plain https base URL (https://host[:port])")
 		return
 	}

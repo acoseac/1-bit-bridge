@@ -38,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -56,8 +57,17 @@ type RoutingLookup interface {
 // cache. Returns ("", false) when the server isn't currently
 // reachable; callers surface 503 so iOS reconciles on the next play
 // tap.
+//
+// It also returns what approves a connect to that host:port when it
+// resolves to this machine or a link-local address: the approval the
+// cached control URL it comes from was found under (the announcing
+// packet's address, or the operator's manual URL), read in the same lookup
+// so the two cannot come from different writes. Serve dials under it, and
+// the device transport's dial check refuses a connect it does not cover
+// (backlog B36: a name that answered a LAN address at discovery and
+// 127.0.0.1 at the byte fetch took the fetch to the bridge's console).
 type HostResolver interface {
-	LiveHost(udn string) (hostport string, ok bool)
+	LiveHost(udn string) (hostport string, approval discovery.DialApproval, ok bool)
 }
 
 // PreStreamError is returned from `Proxy.Serve` when the proxy
@@ -134,7 +144,7 @@ func (p *Proxy) Serve(ctx context.Context, w http.ResponseWriter, method string,
 			Message: "the bridge tried to proxy a nil routing row",
 		}
 	}
-	hostport, ok := p.hostResolver.LiveHost(rt.ServerUDN)
+	hostport, approval, ok := p.hostResolver.LiveHost(rt.ServerUDN)
 	if !ok {
 		return &PreStreamError{
 			Status:  http.StatusServiceUnavailable,
@@ -152,7 +162,10 @@ func (p *Proxy) Serve(ctx context.Context, w http.ResponseWriter, method string,
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, target, nil)
+	// The approval rides in the request's context, so the dial check judges
+	// the address hostport resolves to NOW, not the one it resolved to when
+	// the server was discovered.
+	req, err := http.NewRequestWithContext(discovery.WithDialApproval(ctx, approval), method, target, nil)
 	if err != nil {
 		return &PreStreamError{
 			Status:  http.StatusInternalServerError,
@@ -321,27 +334,35 @@ func (r *idleTimeoutReader) Close() error {
 
 // defaultClient returns the streaming-tuned HTTP client used for
 // upstream requests. No body-read timeout (a long album track takes
-// minutes); aggressive idle-conn timeout so a stale upstream
-// connection doesn't block the pool. Connection limit matches
-// MiniDLNA's small libmicrohttpd pool — overloading the upstream is
-// documented to cause socket timeouts in real DLNA traffic.
+// minutes). Connection limit matches MiniDLNA's small libmicrohttpd
+// pool — overloading the upstream is documented to cause socket
+// timeouts in real DLNA traffic.
+//
+// The transport is discovery.NewDeviceTransport, so every connect goes
+// through the device dial check under the approval Serve puts in the
+// request's context, and a host:port that names this machine or a
+// link-local address, or resolves to one, is reached only where that
+// approval covers it (backlog B36). The same constructor means the same
+// three settings that keep the check whole: no proxy, no TLS dialer of its
+// own, and no kept-alive connections, so a connection dialed under one
+// server's approval can never carry another request. That last one is a
+// cost this client did not pay before (it kept up to four idle
+// connections per upstream for 30 s): each request now opens its own. A
+// stream is one request and a seek one more, and on a LAN a connect costs
+// about a millisecond.
 func defaultClient() *http.Client {
+	// Explicit connect timeout of 5 s. Without it the zero-value
+	// net.Dialer waits forever on a firewalled or offline upstream,
+	// leaking goroutines per request while the upstream is asleep (Gemini
+	// on PR #352).
+	tr := discovery.NewDeviceTransport(net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	})
+	tr.MaxConnsPerHost = 4 // matches MiniDLNA's typical concurrent-stream ceiling
+	tr.ResponseHeaderTimeout = 10 * time.Second
 	return &http.Client{
-		Transport: &http.Transport{
-			// Explicit DialContext with a 5 s connect timeout. Without
-			// it the zero-value net.Dialer waits forever on a
-			// firewalled or offline upstream, leaking goroutines per
-			// request while the upstream is asleep (Gemini on PR #352).
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          8,
-			MaxIdleConnsPerHost:   4,
-			MaxConnsPerHost:       4, // matches MiniDLNA's typical concurrent-stream ceiling
-			IdleConnTimeout:       30 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-		},
+		Transport: tr,
 		// Relay 3xx verbatim instead of following them. This client fetches from
 		// an SSDP-discovered upstream (a LAN device, possibly rogue or spoofed),
 		// so auto-following a redirect to http://127.0.0.1:7789/… or a

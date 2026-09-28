@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 )
@@ -101,11 +102,11 @@ func wrapSystemUpdateID(id string) string {
 
 type stubResolver struct{ controlURL string }
 
-func (r *stubResolver) ResolveControlURL(_ context.Context, _ config.UPnPUpstreamServerConfig) (string, error) {
+func (r *stubResolver) ResolveControlURL(_ context.Context, _ config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
 	if r.controlURL == "" {
-		return "", errors.New("no controlURL")
+		return "", discovery.DialApproval{}, errors.New("no controlURL")
 	}
-	return r.controlURL, nil
+	return r.controlURL, discovery.DialApproval{}, nil
 }
 
 // --- end-to-end ingest flow tests ---

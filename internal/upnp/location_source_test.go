@@ -53,6 +53,45 @@ func TestServerHostLocalLocationFromAnotherAddressIsNeverFetched(t *testing.T) {
 	}
 }
 
+// TestServerCloudMetadataLocationIsNeverFetched drives the real SSDP path
+// for a server whose LOCATION names a cloud metadata address, announced from
+// a LAN address and from that very address, which a peer on the link can
+// spoof (CodeRabbit on #1074). The same-address exception fetched the
+// second, and a metadata address that is not link-local was fetched from
+// anywhere; had its description named a ContentDirectory, the ingest's SOAP
+// and every byte fetch would have followed, relayed to the unauthenticated
+// DLNA listener. No request, no entry. A server on a direct cable, beside
+// the metadata addresses, is still fetched from its own address.
+func TestServerCloudMetadataLocationIsNeverFetched(t *testing.T) {
+	disp := &controlURLByHost{ctrl: map[string]string{"169.254.7.7:8200": "/ctl/ContentDir"}}
+	cache := NewServerCache()
+	c := newServerDiscoveryTestClient(t, disp, cache)
+	for i, addr := range []string{"169.254.169.254", "169.254.170.2", "fe80::a9fe:a9fe", "fd00:ec2::254", "100.100.100.200"} {
+		location := "http://" + net.JoinHostPort(addr, "80") + "/latest/meta-data/"
+		for j, source := range []string{addr, "192.0.2.7"} {
+			udn := fmt.Sprintf("uuid:metadata-%d-%d", i, j)
+			c.handlePacket(context.Background(), alivePacket(udn, location), udpFrom(source))
+			c.wg.Wait()
+			if info, ok := cache.Get(udn); ok {
+				t.Errorf("LOCATION %q from %s: cached %+v", location, source, info)
+			}
+		}
+	}
+	if reqs := disp.requests(); len(reqs) != 0 {
+		t.Errorf("requests = %q, want none", reqs)
+	}
+
+	c.handlePacket(context.Background(), alivePacket("uuid:direct-cable", "http://169.254.7.7:8200/desc.xml"), udpFrom("169.254.7.7"))
+	c.wg.Wait()
+	info, ok := cache.Get("uuid:direct-cable")
+	if want := "http://169.254.7.7:8200/ctl/ContentDir"; !ok || info.ContentDirectoryControlURL != want {
+		t.Errorf("a server on a direct cable: cached %+v (ok %v), want its control URL %s", info, ok, want)
+	}
+	if got, want := info.DialApproval, discovery.AnnouncedFrom(udpFrom("169.254.7.7")); got != want {
+		t.Errorf("a server on a direct cable: approval %v, want %v", got, want)
+	}
+}
+
 // TestAKnownServerCannotMoveOntoAHostLocalLocation is #1050's move attack one
 // step earlier: a server known at one address is re-announced from another
 // with a LOCATION on the bridge's own console. The move detector must not

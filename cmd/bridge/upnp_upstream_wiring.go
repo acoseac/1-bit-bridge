@@ -204,13 +204,16 @@ func startUPnPUpstreamIfEnabled(
 // probe against its own no-auth admin API. Mirrors
 // internal/upnpproxy's CheckRedirect guard and the discovery
 // dispatchers in internal/{upnp,dlna}/discovery.
+//
+// It is the discovery clients' own client (discovery.NewDeviceFetchClient),
+// so every connect also goes through the device dial check, judged against
+// the approval the ingest puts in each request's context
+// (upnpingest's ResolveControlURL, from upnp.ServerInfo.DialApproval). It
+// used http.DefaultTransport until backlog B36: a control URL naming its
+// host by a name that answered a LAN address at discovery took the Browse
+// to the console once the name answered 127.0.0.1.
 func upnpUpstreamSOAPHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	return discovery.NewDeviceFetchClient(timeout)
 }
 
 // Stop tears down the ingest loop + all discovery clients. Idempotent.
@@ -367,14 +370,17 @@ func withoutStoppedServers(ctx context.Context, res upnpingest.IngestResult) upn
 // tick.
 type discoveryServerResolver struct{ cache *upnp.ServerCache }
 
-func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv config.UPnPUpstreamServerConfig) (string, error) {
+// ResolveControlURL returns the cached control URL and the approval it was
+// found under, from the one cache entry, so the ingest's SOAP requests are
+// judged against the approval that came with the URL they are sent to.
+func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
 	// Trim mirrors lookupUPnPServerRuntime + ConfiguredServers (Gemini on
 	// PR #362) — a hand-edited bridge.yaml UDN with stray whitespace
 	// otherwise splits the brain: admin/health report the server online
 	// (trimmed lookups hit) while the ingest misses the cache every tick.
 	if udn := strings.TrimSpace(srv.UDN); udn != "" {
 		if info, ok := r.cache.Get(udn); ok {
-			return info.ContentDirectoryControlURL, nil
+			return info.ContentDirectoryControlURL, info.DialApproval, nil
 		}
 	}
 	// Manual-URL servers live in the SAME cache, under the ingest's
@@ -395,10 +401,10 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 	// unimplemented.
 	if strings.TrimSpace(srv.ManualDescriptionURL) != "" {
 		if info, ok := r.cache.Get(upnpingest.StableServerKey(srv)); ok {
-			return info.ContentDirectoryControlURL, nil
+			return info.ContentDirectoryControlURL, info.DialApproval, nil
 		}
 	}
-	return "", nil
+	return "", discovery.DialApproval{}, nil
 }
 
 // serverCacheHostResolver implements api.UPnPServerHostResolver against
@@ -407,7 +413,11 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 // IP/port.
 type serverCacheHostResolver struct{ cache *upnp.ServerCache }
 
-func (r *serverCacheHostResolver) LiveHost(udn string) (string, bool) {
+// LiveHost returns the host:port every byte fetch of the server's routed
+// tracks is sent to, and the approval the control URL it comes from was
+// found under (upnp.ServerInfo.DialApproval), both from the one cache
+// entry, so the proxy dials a host under the approval that came with it.
+func (r *serverCacheHostResolver) LiveHost(udn string) (string, discovery.DialApproval, bool) {
 	info, ok := r.cache.Get(udn)
 	if !ok {
 		// The caller passes `upnp_track_routing.server_udn`, which the
@@ -429,16 +439,16 @@ func (r *serverCacheHostResolver) LiveHost(udn string) (string, bool) {
 		info, ok = r.lookupFolded(udn)
 	}
 	if !ok || info.ContentDirectoryControlURL == "" {
-		return "", false
+		return "", discovery.DialApproval{}, false
 	}
 	// Derive host:port from the controlURL (the cache doesn't store
 	// host:port separately; the controlURL is the freshest source).
 	// We use the discovery package's URL-parse path to stay consistent.
 	hostport, ok := hostPortFromURL(info.ContentDirectoryControlURL)
 	if !ok {
-		return "", false
+		return "", discovery.DialApproval{}, false
 	}
-	return hostport, true
+	return hostport, info.DialApproval, true
 }
 
 // lookupFolded finds a cache entry whose UDN matches `key` case-insensitively.
