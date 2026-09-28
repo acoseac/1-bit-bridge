@@ -22694,6 +22694,363 @@ requested address"` on its first send and nothing on the next 19.
   Its cadence is 14 minutes, so the ten-minute escalation would land on the
   second failure.
 
+## 2026-09-28 — the scanner indexes a linked file under its target's stat
+
+Backlog B28. `filepath.WalkDir` hands each entry a stat of the entry itself,
+an lstat, and `walkRoot` and `ScanSubtree` both took the stat they index a
+file under from `DirEntry.Info()`. `enqueueableAudioFile` checks only the
+extension, so a symlinked audio file was scanned: `ExtractWithContext`
+opened the path, which follows the link, and read the TARGET's tags, while
+the row recorded the LINK's size (the length of the target path it stores)
+and the link's mtime. `/v1/list` and `/v1/stat` already describe a link by
+its target (PROTOCOL.md, and `resolveEntryInfo` in internal/api), so the
+manifest was the one surface that did not, and everything that compares a
+row with the file disagreed with it.
+
+Measured on main (99b6d1e6) with the new tests, before the fix:
+
+- A symlinked FLAC recorded 123 bytes and the link's mtime against a
+  116-byte target stamped 2021; a DSF, 122 against 140; the two virtual rows
+  of a symlinked `.iso`, 134 against 1,228,800. The manifest's JSON carried
+  the same numbers. (A link's size is its path's length, so the numbers
+  vary with the temp directory.)
+- Retagging the target, with the link's lstat checked unchanged before and
+  after, was never re-extracted: the title stayed "Before" for FLAC and
+  DSF. A re-authored `.iso` target kept its old album title.
+- A link first scanned while its target was missing minted a row from the
+  path alone (title "01", artist "Music", size 134), and the skip gate then
+  kept it once the target appeared. An audio-named link to a directory was
+  indexed the same way (title "Bonus", size 103).
+- #1061's stated residual: a symlinked container whose target was written
+  after the walk (its mtime moved and its bytes ended at 1 KiB) and was idle
+  while it was read. The guard compared the walk's stat with an lstat, both
+  the link's, saw nothing, and the completed read of the short file retired
+  both virtual rows.
+- On the wire, through a throwaway program over the real `Store`, `Provider`
+  and `api.Server` (a symlinked FLAC with a Vorbis LYRICS tag, a 108-byte
+  target): the manifest row said 83, `GET /v1/stat` said 108, and
+  `GET /v1/lyrics` answered `410 lyrics_stale`, the row's source size (the
+  link's) against the resolver's `os.Stat`. After the fix: 108, 108 and 200.
+
+What the phone does with the link's size, read in the iOS repo (not run).
+`BridgeSyncActor` stores `bt.size` as `Track.fileSize`:
+
+- a manual offline download of the track always fails:
+  `DownloadCoordinator.validateDownloadedSize` wants `actual == expected`,
+  and a job with no variant expects `fileSize`, so the file is discarded as
+  `sizeMismatch` ("The download was incomplete — tap to retry"), and every
+  retry downloads it whole again;
+- the auto-cache (`PredictivePrefetchService`) runs the same check after a
+  full download, discards the file and records nothing, so the track stays a
+  candidate and is downloaded and thrown away on every evaluation, and the
+  overnight smart-mix sync repeats it;
+- a virtual row's demux bounds every container read by the row's
+  `fileSize` (`PlayerService`, `DownloadCoordinator`: reads past it return
+  empty), so the geometry probes at byte 1,044,480 and beyond read nothing
+  and every track of a linked `.iso` fails "Not a plain SACD disc image.";
+- streaming a linked non-SACD track plays in full (the size only seeds the
+  progress total, which the Content-Length replaces), but the hybrid DSD
+  early start and the progressive PCM start read the tiny total and stay
+  off, and the gapless preload lead falls back to its fixed minimum;
+- the phone's waveform and lyrics caches key on (size, mtime), so a retag of
+  the target never invalidated them. After the fix each linked track's key
+  changes once. The phone's enrichers never see a bridge row.
+
+By reading, not measured: an analysis strike is stamped from the manifest
+row and re-checked against the resolver's `os.Stat`, so a linked file that
+never decodes was never suppressed; the auto-optimize sweeper stamps a
+rendition's source from the row, and `serveVariant` compares it with
+`os.Stat`, so a linked track's swept renditions answered 410
+`variant_stale`. The fix makes each of those agree.
+
+### Decisions
+
+- **Stat through anything that is not a regular file**
+  (`walkedFileInfo(typ, own, through)`). A regular file keeps its own stat
+  and pays no second syscall, and nothing else: `-gcflags=-m` reports that
+  neither `d.Info` nor the `os.Stat` closure escapes, in either walk. The
+  test is "not a regular file", the listing's
+  (`resolveEntryInfo`), never "is a symlink": since Go 1.23 a Windows
+  junction is `ModeIrregular` with no `ModeDir`, and a stat through it says
+  it names a directory. A reparse point that names nothing (a cloud
+  placeholder) stats to itself and is indexed under that stat; a FIFO, a
+  socket or a device stats to itself and is refused (the next section).
+  Taken as a function of (type, own, through) so the Windows shapes run on
+  every platform (`TestWalkedFileInfoStatsThroughEverythingButARegularFile`).
+- **A link whose target cannot be stat'ed spares its own row, keyed on the
+  entry itself, and mints none.** Measured on main: a link whose target
+  vanished kept its row only because the skip gate compared the link's
+  unchanged lstat, and one first seen dangling minted a junk row. Three
+  alternatives rejected. (a) Fall back to the lstat, as `/v1/list` does for
+  a dangling link: once the stored stat is the target's, that reads as a
+  change on every flap of the mount, and the worker's failed extract
+  rewrites the row from the path alone. NC7 below produces exactly that
+  rewrite. (b) Spare the parent directory, as a failed stat of a regular
+  file does: a permanently dangling link would then spare its siblings
+  forever, and a deleted neighbour would never be reaped. (c) Mark the
+  entry seen: the deletion pass would skip it too, but the spare is the
+  guard the deletion loop checks first ("we could not see this path"), and
+  it is counted in the spared line.
+- **A link to a directory is not a track**, whatever its name, and the walk
+  still follows no directory link. On main such a link was indexed from its
+  path. A row at its path is reaped, for the reason the next section gives.
+- **One Warn per scan**, never one per link: a mount that goes away takes
+  every link into it at once, on every scan until it returns. The line gives
+  the count, one library-relative example, and the error without the
+  absolute path its `*fs.PathError` names (#1055).
+- **The in-motion guard compares the walk's stat with a stat of the path**
+  (`sacdContainerChange(walk, opened, post)`, the lstat gone). For a file
+  that is no link, a stat and an lstat of the path are the same on every
+  platform: POSIX answers the same inode, and Go's Windows `stat` and
+  `lstat` take the same `GetFileAttributesEx` fast path for a file with no
+  reparse point, and neither follows one that names nothing. So nothing
+  changes for a regular container, a FAT or exFAT one included. For a link
+  both sides are now the target's, which closes #1061's residual. Identity
+  is still never compared against the walk's stat, for #1061's reason.
+  What it still cannot see: an overwrite inside one coarse mtime tick, and
+  a link repointed after the walk at a file of the first one's size and
+  mtime.
+- **No `ExtractorVersion` bump.** The stored stat of each linked row no
+  longer matches the walk's, so the first scan after the change re-extracts
+  exactly those rows, once, through the full upsert: one delta row to every
+  paired device and a re-enrichment, and (by reading) a sweeper-made
+  rendition of a linked track is rendered once more. No other row moves
+  (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows` writes a
+  row as main wrote it and counts `indexed_at`).
+- **No PROTOCOL.md change.** It already says a listing row describes the
+  target and a virtual row carries its container's size; the code now does
+  what it says.
+
+Out of scope, measured with throwaway programs and left for the backlog:
+
+- A library ROOT that is itself a symlink to a directory is never walked.
+  `WalkDir` lstats its root, so it visits one non-directory entry and stops:
+  0 rows, and 1 row with a trailing slash on the root. By reading, not
+  measured: on an install with rows under that root, the empty-root guard
+  then logs "suspected clean-empty mount failure" every scan and suggests
+  `.bridge-allow-empty`, which `hasAllowEmptySentinel` finds through the
+  link, and which would then let the deletion pass reap the root's rows.
+- A FIFO named `01.flac` in the library hung `Scan`: the worker's open
+  blocked, the scan's context expiring at 5 s changed nothing, and
+  `IsScanning` still read true at 15 s. Folded into this change before its
+  review (the next section).
+
+Stale claim corrected on the way. CLAUDE.md said twice (under Scanner, and
+in `## Local test fixture`) that `UPDATE tracks SET mtime_ns = 0` does not
+force a re-extraction, because the skip gate compares the mtime inside
+`tags_json`, read through `GetTrack`. #574 moved the gate to
+`GetTrackStat`, which reads the `size` and `mtime_ns` columns. Measured with
+a throwaway test through the Go store: a scan of an unchanged file left its
+`indexed_at` alone, and after `mtime_ns` was zeroed the next scan
+re-extracted it and advanced `indexed_at`.
+
+### Entries that are not files
+
+Folded in before review, from the FIFO finding above. `walkedFileInfo`
+refuses, after the stat it takes, anything that does not open as a file
+(`notAFile`): a directory, a named pipe, a socket or a device, or a link to
+one. A worker opens what the walk hands it, and opening a named pipe waits
+for a writer, with nothing to cancel the wait.
+
+Measured on this branch before the change (0d8ff285), with the new tests,
+each scan bounded at 10 s and the test then playing the writer so the run
+could finish:
+
+- A FIFO named `01.flac`, and a link to one: the full scan was still running
+  at 10 s. Once a writer came, the row minted was the path's (title "01",
+  0 bytes), and the subtree scan kept it.
+- A FIFO named `01.iso`: the full scan and the subtree scan after it both
+  blocked, since an expansion that finds no album writes no row and the skip
+  gate never passes it.
+- A link to `/dev/null`, and a Unix socket, named `01.flac`: indexed from the
+  path (title "01", 0 bytes) in both walks.
+- A FLAC with a row, replaced by a FIFO (full walk) or by a link to one
+  (subtree walk): each scan blocked, and once a writer came the file's tags
+  were replaced by the path's.
+
+By reading, what a scan that never returns costs: `Scan` holds the scanner's
+mutex for its whole run, so every later `Scan` and `ScanSubtree` waits on it
+and the library stops updating; `IsScanning` stays true, so the Atlas lyrics
+sweep and the booklet GC stand down (`ScanInProgress`), the duplicate
+restamp defers, `/v1/health` reports a scan in progress, and
+`POST /api/database/compact` answers 409 (`ScanInFlight`).
+
+Decisions:
+
+- **A list of kinds refused, never "is a regular file".** On Windows a
+  reparse point that names nothing, a cloud placeholder (OneDrive's files on
+  demand) among them, is `ModeIrregular` after `os.Stat` (the default arm of
+  Go 1.26.6's `fileStat.mode`), and it opens, and hydrates, as a file.
+  Refusing it would empty a library kept in OneDrive and reap its rows. On
+  Windows an AF_UNIX socket reports `ModeSocket` and a pipe or character
+  device handle `ModeNamedPipe` or `ModeDevice|ModeCharDevice`, so the list
+  covers Windows' kinds as well.
+- **Judged on the stat, not the listing.** A regular listing's own stat
+  answers only while it still says regular; an entry replaced since its
+  directory was read is stat'ed through and judged as what it is then: a
+  named pipe is refused, and a symlink is indexed under its target's stat,
+  the rule above. Only POSIX can see this, since on Windows the listing's
+  stat is the one `DirEntry.Info` returns.
+- **A row at such a path is reaped like a deleted file's**, after the usual
+  missing-count grace (`deleteAfterMissingScans`, three by default), and so
+  is a directory link's. Sparing it as a dangling link's row is spared was
+  rejected: the walk stat'ed the entry and knows what is there, while "we
+  could not see this path" answers a stat that failed. A spared row would go
+  on offering the phone a track the bridge cannot serve, whose download
+  blocks in `os.Open` (below). The missing-count debounce still absorbs a
+  type that flickers.
+- **One Warn per scan**, beside the unreadable-links line, with the count, a
+  library-relative example and its kind. The two tallies are one `walkTally`
+  type now. Only an audio-named entry reaches the decision, so the line is
+  about something named like a track.
+- **No `ExtractorVersion` bump for this either.** What the walk admits is not
+  extraction. A row the old walk minted for such an entry (a link to a
+  device, a socket, a FIFO some writer once opened) is no longer seen, so the
+  deletion pass reaps it after the grace, with a tombstone to every paired
+  device, and nothing else moves.
+
+`TestScanner_AnEntryThatIsNotAFileIsNotATrack` (a FIFO, a link to one, an
+`.iso` FIFO, a link to `/dev/null` and a socket, each beside a real file, in
+both walks, with the line) and `TestScanner_AFileReplacedByANamedPipeLosesItsRow`
+make the real entries, so they are `//go:build unix`; a scan still running
+at 10 s fails them, and the helper then writes to each pipe so a failure
+cannot hang the suite. The table test gained a row per kind, a cloud
+placeholder that answers `ModeIrregular`, and two entries replaced after
+the listing; `TestNotAFileNamesEachKindTheWalkRefuses` pins the names.
+Before the change every new case was red, the FIFO ones on the 10 s bound;
+after it each scan takes about 20 ms.
+
+Out of scope, measured with a throwaway program over the real `api.Server`
+and resolver: `/v1/download` and `/v1/read` of a path that is a FIFO block in
+`os.Open`. The client gave up at 2 s, and the handlers were still running
+3 s later, until the program wrote to the pipe (then 500). `/v1/stat` answered
+at once. By reading, the same holds for the web player's audio route, and
+`serveFile` counts the request as a download in flight, so while one is
+pinned the updater's auto-install defers every poll ("active downloads").
+This change keeps such a path out of the manifest, but `/v1/list` still
+lists it and nothing stops a client asking for it.
+
+### The read-fault fuzz target
+
+`FuzzSACDExpandUnderAReadFault`, in `fuzz_sacd_test.go`: the SACD targets'
+reader never fails, so #1061's rule was pinned by unit tests alone. The
+property: an image expanded through a reader that fails where a fuzzed fault
+says answers exactly what it answers fault-free, or an error; never a
+different successful answer, and never "not an SACD" where the fault-free
+read found an album. It holds only for an image carrying one answer, so the
+harness builds it with the fixture builder (identical master and area TOC
+copies, one stereo area, one geometry) and applies each structural damage
+to every copy alike: an image whose copies differ can legitimately expand
+from the second when the first cannot be read, and so can one with two
+different stereo areas or a signature under both geometries. Only failures
+that say so are injected (an EIO, another error, and a short read with none);
+a reader that reports the end of the file early is a truncation no reader
+can tell apart.
+
+The first harness truncated the image at a fuzzed byte, and reviewing it
+before the PR found that this breaks the precondition: a cut inside a later
+copy leaves it short of what the first holds, so with the earlier copies
+unreadable it expands to less. Measured: an image cut 100 bytes into the
+second area copy's TTxt sector, with the first copy unreadable, expands to
+tracks titled "Track 1" where the fault-free read says "T1". That is a copy
+that differs, not a defect, so a cut now lands only between structures
+(`sacdFaultCuts`), where a later copy is either whole or absent. The fuzzer
+could not have reached it in practice (the cut is a uint32 walked by at most
+100 from its seeds' zero), but a nightly crasher from it would have been a
+false alarm. `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` is the
+property's positive control on both things the harness keeps out: the
+lying reader, through which the parser answers "not an SACD", and that cut
+image. Each must be reported as a violation.
+
+Its seeds fault each of the three reads #1061 made fail closed, and a copy
+that survives, and `TestSACDFaultSeedsReachTheFailure` requires each seed's
+fault to be reached and the three sites to answer an error. The seeds are
+what gives the fuzzer its reach. Go's mutator changes one argument per step
+and walks an integer by at most 100, so a fault wanders only from where a
+seed put one. With the DST probe's failure dropped again and that probe's
+own seed left out, the fuzzer found the violation from the other seeds
+within half a second of an empty cache: the whole `go test` took 0.46 s on
+the first harness, and on the final one the fuzz run failed at 0.09 s. From
+one seed whose fault touched no read it ran 468,005 inputs in 90 s without
+finding it. A mapping that started every fault at a sector's first byte or
+its payload found it in 3.2 s from the seeds and not in 90 s from the one
+seed, so the plain byte offset stayed.
+
+Runs, 4 workers, `-fuzzminimizetime 1s`: the first harness 3 min, 724,412
+inputs, no violation; the final one (cuts between structures) 3 min,
+685,566 inputs, no violation; and a minute each of `FuzzParseSACDTOC`
+(935,328 inputs), `FuzzParseSACDArea` (1,052,395) and
+`FuzzSACDVirtualPathRoundTrip` (1,452,394), all passing.
+
+### Tests and negative controls
+
+`scanner_linked_file_test.go` (skipped where a symlink cannot be made):
+`TestScanner_ALinkedTrackIsIndexedUnderItsTargetsStat` (FLAC and DSF, plus
+a subtree scan that must rewrite nothing),
+`TestScanner_ALinkedTrackIsReExtractedWhenOnlyItsTargetChanged`,
+`TestScanner_ALinkedSACDContainerIsExpandedUnderItsTargetsStat`,
+`TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows`,
+`TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow` (two full scans and a
+subtree scan with the mount gone, the test scanner reaping at threshold 1,
+and one log line per scan), `TestScanner_ALinkFirstSeenDanglingIsIndexedOnceItsTargetAppears`,
+`TestScanner_ALinkToADirectoryIsNotATrack`,
+`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`, and
+`TestWalkedFileInfoStatsThroughEverythingButARegularFile`, which runs
+everywhere. `TestSACDContainerChange` gained a symlinked leg that writes the
+target after the walk. All but the dangling-link test (whose rows main kept,
+by the skip gate) were red on main.
+
+Negative controls on the committed fix (87a4ab1f) and fuzz target, each
+restored and re-run green before the next:
+
+| mutation | goes red |
+|---|---|
+| NC1: `walkedFileInfo` takes the entry's own stat for a link | every linked-file test, five `walkedFileInfo` rows, `TestScanner_SACDSymlinkedContainer_Expands` |
+| NC2: the guard compares the walk's stat with an lstat again | the three linked-container tests and `TestScanner_SACDSymlinkedContainer_Expands` |
+| NC3: no spare for an unreadable link, in both walks | `…ALinkWhoseTargetWentAwayKeepsItsRow`: reaped |
+| NC3b: no spare in the subtree walk alone | the same test, at its subtree scan |
+| NC4: a link to a directory indexed under its target's stat | `…ALinkToADirectoryIsNotATrack` and the two directory rows of the table |
+| NC5: the guard's since-the-walk arm removed | the written-after-the-walk test, the matching `…ChangingDuringTheScan…` case, `TestSACDContainerChange` |
+| NC6: the unreadable-links line never reported | the dangling test: 0 lines, want 3 |
+| NC7: the subtree walk takes the entry's own stat | the identity test's subtree leg and the dangling test: rows rewritten |
+| NC-F1: the master-signature probe's failure dropped | fuzz seeds 0-2, the seed test's three probe rows, and the #1061 unit tests of that site |
+| NC-F2: a failed area-TOC read folded into a refusal | fuzz seed 3, its seed-test row, and the #1061 tests of that site |
+| NC-F3: the DST probe's failure dropped | fuzz seed 4, its seed-test row, and the #1061 tests of that site |
+| NC-F4: NC-F3 with its own seed left out, fuzzing | found within half a second of an empty cache, on both harnesses |
+
+Negative controls on the committed not-a-file change (147325c9), each
+restored and the set re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC-S1: the refusal back to a directory alone | six table rows; every case of `…AnEntryThatIsNotAFileIsNotATrack` (the FIFO ones on the 10 s bound); `…AFileReplacedByANamedPipeLosesItsRow` |
+| NC-S2: a regular listing's own stat indexed whatever it says | the two replaced-after-the-listing rows |
+| NC-S3: `ModeIrregular` refused too | the cloud placeholder row, `TestNotAFileNamesEachKindTheWalkRefuses` |
+| NC-S4: the row at such a path spared, in both walks | `…AFileReplacedByANamedPipeLosesItsRow`, both legs: rows kept with their tags |
+| NC-S4b: spared in the subtree walk alone | the same test, its subtree leg only |
+| NC-S5: the full walk does not tally what it refused | the directory-link test (0 lines, want 1), every case of the kinds test (1 line, want 2) |
+| NC-S5b: the subtree walk does not tally | every case of the kinds test |
+
+### Review round 1: describing an error must not panic
+
+Gemini (MEDIUM, twice: on 0d8ff285 and on 4cd01033) noted that
+`noteUnreadable` called `pe.Err.Error()` on an `*fs.PathError` whose cause
+may be nil. Nothing in os builds one, but the call runs in the walk's
+callback, which no recover covers (the workers' per-file recover does not),
+so a panic there ends the scan and the process. Both suggested fixes guard
+`pe.Err` and fall back to `err.Error()`, and that is no fix: a PathError's
+own `Error()` dereferences its cause, so the fallback panics on exactly the
+shape the finding describes. Measured with
+`TestNoteUnreadableDescribesAnyErrorWithoutPanicking`, whose rows recover
+the panic and report it: on 4cd01033, three rows panicked (a PathError
+without a cause, a nil `*fs.PathError`, a nil error), and with the second
+suggestion applied as written the same three still panicked.
+`walkErrReason` now describes the error, through `fmt`, which answers
+`<nil>` for a nil error and recovers a panicking `Error` method; the
+PathError branch also requires a non-nil `pe`, which `errors.As` sets for a
+typed nil. The six rows pass, and none names the absolute path. No other
+dereference of a cause is in the change.
+
 ## 2026-09-28 — a tailnet interface needs the opt-in, the SSDP set leaves out a member with no IPv4, and the mDNS responder rebuilds only when its advertisement changes (backlog B15, #1051's follow-ups)
 
 #1051's entry left three things: Tailscale's interface was eligible through

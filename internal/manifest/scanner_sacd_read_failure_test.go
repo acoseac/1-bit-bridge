@@ -369,35 +369,41 @@ func TestSACDContainerChange(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name                      string
-		walk, opened, post, lpost os.FileInfo
-		want                      string
+		name               string
+		walk, opened, post os.FileInfo
+		want               string
 	}{
-		{"nothing moved", a0, a0, a0, a0, ""},
-		{"another file at the path", a0, fb, a0, a0, sacdChangedIdentity},
-		{"mtime moved while it was read", a1, a0, a1, a1, sacdChangedDuringRead},
-		{"size moved while it was read", a2, a0, a2, a2, sacdChangedDuringRead},
-		{"mtime moved since the walk", a0, a1, a1, a1, sacdChangedSinceWalk},
-		{"size moved since the walk", a0, a2, a2, a2, sacdChangedSinceWalk},
+		{"nothing moved", a0, a0, a0, ""},
+		{"another file at the path", a0, fb, a0, sacdChangedIdentity},
+		{"mtime moved while it was read", a1, a0, a1, sacdChangedDuringRead},
+		{"size moved while it was read", a2, a0, a2, sacdChangedDuringRead},
+		{"mtime moved since the walk", a0, a1, a1, sacdChangedSinceWalk},
+		{"size moved since the walk", a0, a2, a2, sacdChangedSinceWalk},
 	} {
-		if got := sacdContainerChange(tc.walk, tc.opened, tc.post, tc.lpost); got != tc.want {
+		if got := sacdContainerChange(tc.walk, tc.opened, tc.post); got != tc.want {
 			t.Errorf("%s: change = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 
-	// A symlinked container: the walk's stat and the lstat are the link's,
-	// the handle's stat and the stat are the target's, and nothing moved.
+	// A symlinked container: the walk's stat, the handle's stat and the stat
+	// after the read are all the target's (walkedFileInfo follows the link),
+	// and nothing moved. Its target written after the walk is a change,
+	// which a walk's stat of the link itself could not see.
 	link := filepath.Join(dir, "link.iso")
 	if err := os.Symlink(b, link); err != nil {
 		t.Logf("no symlink case on this host: %v", err)
 		return
 	}
-	lw, err := os.Lstat(link)
-	if err != nil {
+	walked := stat(link)
+	if got := sacdContainerChange(walked, stat(b), stat(link)); got != "" {
+		t.Errorf("a symlinked container that did not move reads as %q", got)
+	}
+	if err := os.Chtimes(b, t0.Add(time.Hour), t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got := sacdContainerChange(lw, stat(b), stat(link), lw); got != "" {
-		t.Errorf("a symlinked container that did not move reads as %q", got)
+	if got := sacdContainerChange(walked, stat(b), stat(link)); got != sacdChangedSinceWalk {
+		t.Errorf("a symlinked container whose target was written after the walk reads as %q, want %q",
+			got, sacdChangedSinceWalk)
 	}
 }
 
@@ -432,11 +438,13 @@ func TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones(t *testing.T) {
 	}
 }
 
-// TestScanner_SACDSymlinkedContainer_Expands pins why the guard compares the
-// walk's stat with an LSTAT. The walk's stat of a symlinked container is the
-// link's own, while the expansion reads the target, so a guard comparing it
-// with a stat would read every symlinked container as moved and never expand
-// one.
+// TestScanner_SACDSymlinkedContainer_Expands pins that the guard compares the
+// walk's stat with a stat of the SAME kind. The walk's stat of a symlinked
+// container is its target's (walkedFileInfo), so a guard comparing it with
+// an lstat, the link's own, would read every symlinked container as moved and
+// never expand one. Until 2026-09-28 the walk's stat was the link's own and
+// the guard compared it with an lstat; this test pinned that pairing then,
+// and pins this one now.
 func TestScanner_SACDSymlinkedContainer_Expands(t *testing.T) {
 	root, store, sc := sacdScanFixture(t)
 	target := writeSACDFixture(t, t.TempDir(), "Album.iso", twoFixtureTracks(), sacdFixtureOptions{})
