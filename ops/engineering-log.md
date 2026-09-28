@@ -24052,6 +24052,10 @@ that followed: the rule was applied to four sites of five.
   once per (callback, source) pair, in the observer's set and within its
   bound of 64 (`firstSighting`, now shared). Other refusals stay the Debug
   line they were.
+- A server whose handlers were mounted without Start has no notify
+  context. `NewRequestWithContext` failed quietly on it; wrapping it in the
+  source panics ("cannot create context from nil parent"), so
+  `fireInitialNotify` returns first.
 
 ### Decisions, and what was rejected
 
@@ -24108,9 +24112,11 @@ LAN-peer test running on the container's eth0 rather than skipping.
   `TestGENAInitialNotifyFollowsNoRedirect` (301, 302, 303, 307, 308),
   `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` (the host's own
   LAN address standing in for the peer's; it skips on a host with none),
-  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber` and
+  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber`,
   `TestStartSendsTheNotifyThroughTheCheckedClient` (a Start that fails on an
-  occupied port has built the notify state already).
+  occupied port has built the notify state already) and
+  `TestGENASubscribeOnAnUnstartedServerSendsNothing` (through `mountedMux`,
+  the real handler tree with no Start).
 - `Test_callbackHostAllowed` gained 18 rows (the host-local ones, the
   unspecified address, a name, a numeric spelling, zones, a ULA), and its
   two host-local rows flipped;
@@ -24137,6 +24143,7 @@ LAN-peer test running on the container's eth0 rather than skipping.
   | NC10 | a zoned callback accepted | first run: nothing (see below); then `zoned_private_callback` |
   | NC11 | no unspecified arm | both unspecified rows |
   | NC12 | `WithRequestSource` stores the source as given | the discovery normalization test |
+  | NC13 | no nil-context guard | the unstarted-server test (`panic: cannot create context from nil parent`) |
 
   NC10 went green on its first run: every zoned link-local row is refused by
   the zone-stripped comparison anyway, so the zone refusal in `callbackAddr`
