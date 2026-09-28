@@ -24030,7 +24030,12 @@ render.
   (`sourceIsAtRow`): the scanner's skip-gate comparison, exact size and
   mtime, not the serve path's 2 s tolerance, which is about stamps taken
   through different mounts. A file that fails it is one the next scan
-  re-reads.
+  re-reads. All four stats follow a symlink (the adapter's and the CLI's
+  `os.Stat`, the sweeper's `ResolveChecked`, and the scanner's
+  `walkedFileInfo` since #1070), so a linked file compares its target with
+  its target. A row an older bridge wrote for a linked file holds the link's
+  own stat, so that file reads as changed until the first scan after the
+  upgrade re-reads it.
 - On-demand: refused as `errSourceAheadOfRow`, which wraps
   `api.ErrUpscaleIneligible` (202 with `rejected: 1`, no wire change), and
   the file's directory is queued for a rescan. `sourceRescanner` is one loop
