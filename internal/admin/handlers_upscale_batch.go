@@ -31,14 +31,23 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// Shared upscale-disabled error pair surfaced by every admin handler that
-// gates on `deps.Coordinator.UpscaleEnabled() == false`. Three call sites
-// inside handlers_upscale_batch.go + two in handlers_upscale_delete.go;
-// SonarCloud go:S1192 flagged the duplicates.
+// Shared upscale-disabled error pair. The batch submit answers it when the
+// live upscale gate is off (Server.upscaleActive) or no coordinator is
+// wired; list and cancel answer it only for an unwired coordinator, and
+// the variant delete for an unwired or unavailable deleter. Three call
+// sites in this file and two in handlers_upscale_delete.go; SonarCloud
+// go:S1192 flagged the duplicates.
 const (
 	errCodeUpscaleDisabled    = "upscale-disabled"
 	errMsgUpscalingNotEnabled = "upscaling is not enabled on this bridge"
 )
+
+// upscaleActive reports whether the upscale feature is switched on right
+// now, by the live predicate cmd/bridge wires into Deps.UpscaleActive. A
+// nil predicate reads as off, which is the /v1 server's rule too.
+func (s *Server) upscaleActive() bool {
+	return s.deps.UpscaleActive != nil && s.deps.UpscaleActive()
+}
 
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
 // accepts. Optional `targetRate` / `targetBits` fall back to the
@@ -64,8 +73,27 @@ type adminBatchSubmitRequest struct {
 }
 
 // apiUpscaleBatchSubmit handles POST /api/upscale/batch.
+//
+// Its order is POST /v1/upscale/batch's: the live upscale gate, then the
+// body, then the kind and the optimize kind's own gate, and only then the
+// scope and the coordinator. Nothing that costs work (a catalog build for
+// an identity scope, the coordinator's library walk) runs for a request
+// that a gate will refuse, and a refused request answers 503 whatever its
+// scope would have answered (TestBatchSubmitRefusesBeforeResolvingTheScope).
 func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
-	if s.deps.BatchCoordinator == nil {
+	// The live gate, not the coordinator's nil-ness. cmd/bridge constructs
+	// the coordinator unconditionally (PR #781), so BatchCoordinator is
+	// never nil in production, and until 2026-09-28 that nil check was the
+	// whole gate here: any loopback process or public-mode session could
+	// start a library-wide sox run, plus a whole-library indexed_at delta
+	// to every paired device, on a bridge with `upscale.enabled: false`,
+	// the default. Every earlier pass on this class stopped short of it:
+	// #852 restored the gates on POST /v1/upscale and DELETE
+	// /v1/upscale/variants, and #878 restored the /v1 batch's and left
+	// this admin twin.
+	if s.deps.BatchCoordinator == nil || !s.upscaleActive() {
+		logger.Warn("upscale batch refused: the feature is not active",
+			"reason", "upscale.enabled is false or sox is unusable")
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 			errMsgUpscalingNotEnabled)
 		return
@@ -84,6 +112,18 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if kind != "" && kind != "upscale" && kind != "optimize" {
 		writeError(w, http.StatusBadRequest, "invalid-kind",
 			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
+	// The CarPlay kind has a switch of its own, read the way the projection
+	// endpoint reads it (a nil OptimizeActive means wired == active). The
+	// /v1 batch refuses this kind while the switch is off; this handler
+	// accepted it until 2026-09-28, so the same kind answered 503 there and
+	// 202 here on one bridge. The player keeps "Generate CarPlay" live
+	// whenever upscaling is on, so the message is what the operator reads.
+	if kind == "optimize" && s.deps.OptimizeActive != nil && !s.deps.OptimizeActive() {
+		logger.Warn("optimize batch refused: the CarPlay optimize kind is not active")
+		writeError(w, http.StatusServiceUnavailable, "optimize-disabled",
+			"CarPlay-optimized variants are switched off for this bridge")
 		return
 	}
 	scope, scopeErr := s.resolveVariantScope(r, req.scopeRequest)

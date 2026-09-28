@@ -341,11 +341,20 @@ export function generateVariants(scope, kind) {
  * Delete is a DELETE with query parameters and no body — the shape the
  * endpoint has always had, and the reason the scope travels as an id
  * rather than a path list here too.
+ *
+ * encodeURIComponent, NOT URLSearchParams, for audioURL's reason: the
+ * server reads this query through safeQuery, which keeps a "+" literal,
+ * and URLSearchParams writes a SPACE as "+". A folder scope of
+ * "AC DC/Live" would arrive as "AC+DC/Live", a directory that does not
+ * exist, and the delete would answer "Deleted 0" with every variant
+ * still on disk. The server moved onto safeQuery in the same commit
+ * (2026-09-28), so neither half can change without the other.
  */
 export async function deleteVariants(scope, kind) {
-  const params = new URLSearchParams();
-  if (scope.albumIds) scope.albumIds.forEach((id) => params.append("albumId", id));
-  if (scope.artistId) params.set("artistId", scope.artistId);
+  const params = [];
+  const add = (key, value) => params.push(`${key}=${encodeURIComponent(value)}`);
+  if (scope.albumIds) scope.albumIds.forEach((id) => add("albumId", id));
+  if (scope.artistId) add("artistId", scope.artistId);
   if (scope.path !== undefined) {
     // A folder scope is a prefix. An EMPTY prefix is not "this folder"
     // — it is every variant in the manifest, which the endpoint only
@@ -354,10 +363,10 @@ export async function deleteVariants(scope, kind) {
     // fill in; clearing the whole cache is a deliberate act with its
     // own control, on the Roots page.
     if (!scope.path) throw new Error("Refusing to delete every variant from a folder scope.");
-    params.set("prefix", scope.path);
+    add("prefix", scope.path);
   }
-  if (kind) params.set("kind", kind);
-  const res = await fetch(`/api/upscale/variants?${params.toString()}`, { method: "DELETE" });
+  if (kind) add("kind", kind);
+  const res = await fetch(`/api/upscale/variants?${params.join("&")}`, { method: "DELETE" });
   if (!res.ok) {
     let detail = "";
     try {
