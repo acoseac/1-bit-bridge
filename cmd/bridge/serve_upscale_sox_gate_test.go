@@ -236,7 +236,7 @@ func nudgeAutoOptimize(t *testing.T, client *http.Client, adminBase string) {
 
 // waitForAutoOptimizeSweep waits until more than `before` pre-generation
 // sweeps have finished, by the count serve keeps for the test
-// (servedBridge.autoOptimizeSweeps), and returns the Jobs card read after
+// (consoleBridge.autoOptimizeSweeps), and returns the Jobs card read after
 // that. The count goes up once a sweep's result is on the card, so the
 // card read here shows that sweep or a later one.
 //
@@ -246,7 +246,7 @@ func nudgeAutoOptimize(t *testing.T, client *http.Client, adminBase string) {
 // a time decoded from JSON carries no monotonic reading, so the two compare
 // by wall clock: the finish equals the nudge's instant, "after" never
 // holds, and the wait ran out on test (windows-latest) (2026-09-28).
-func waitForAutoOptimizeSweep(t *testing.T, b *servedBridge, before int64) autoOptimizeCardView {
+func waitForAutoOptimizeSweep(t *testing.T, b *consoleBridge, before int64) autoOptimizeCardView {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for b.autoOptimizeSweeps.Load() <= before {

@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-// servedBridge is a `bridge serve` a test stood up on two loopback ports,
+// consoleBridge is a `bridge serve` a test stood up on two loopback ports,
 // and what the test reaches it with. Serve's own context stays inside
 // startServedBridge, whose drain cancels it; a request the test makes
 // takes the test's, t.Context().
-type servedBridge struct {
+type consoleBridge struct {
 	stderr *safeBuffer
 	// adminBase is the console, over plain HTTP; apiBase is the v1 API,
 	// over TLS, as a paired device reaches it.
@@ -43,7 +43,7 @@ type servedBridge struct {
 // function that launches one, and its t.TempDir comes before the drain,
 // so the drain runs first. A cleanup the caller registered before this
 // call runs after serve has returned.
-func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *servedBridge {
+func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *consoleBridge {
 	t.Helper()
 	root := t.TempDir()
 	lib := filepath.Join(root, "Music")
@@ -62,7 +62,7 @@ func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *se
 		t.Fatal(err)
 	}
 
-	b := &servedBridge{
+	b := &consoleBridge{
 		stderr:    &safeBuffer{},
 		adminBase: "http://" + consoleAddr,
 		console:   &http.Client{Timeout: 30 * time.Second},
