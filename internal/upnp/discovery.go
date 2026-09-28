@@ -252,13 +252,43 @@ type MediaServerDiscoveryClient struct {
 	// internal/dlna/discovery.SSDPDiscoveryClient invariant.
 	wg sync.WaitGroup
 
-	// locMu guards lastLocation. A DEDICATED mutex, not runMu: runMu's
-	// scope is the conn / runCtx lifecycle and Stop() holds it across
-	// cache.Clear(), so borrowing it for per-packet bookkeeping would
+	// sendErrs reports failed M-SEARCH sends: the first of a streak at
+	// Warn, one Error ten minutes in, and a line on recovery.
+	// discovery.SendFailureLog is the policy, the renderer client's too.
+	// Until 2026-09-28 this client discarded every send error, so a dead
+	// multicast route left upstream discovery silent in the log. Its streak
+	// has no mutex: only runTickLoop notes results, so a test that calls its
+	// Note or Reset must do so with no loop live.
+	sendErrs discovery.SendFailureLog
+
+	// writeMSearch writes one M-SEARCH datagram. The constructor sets it to
+	// (*net.UDPConn).WriteToUDP. It is a field so a test can decide what the
+	// tick loop's send returns, rather than this host's multicast route
+	// deciding it (the renderer client's field of the same name says why).
+	// Set before Start, never while a loop runs.
+	writeMSearch func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
+
+	// locMu guards lastLocation and inFlight. A DEDICATED mutex, not runMu:
+	// runMu's scope is the conn / runCtx lifecycle and Stop() holds it
+	// across cache.Clear(), so borrowing it for per-packet bookkeeping would
 	// widen a lock whose ordering contract is already load-bearing.
 	// Lock order is runMu → locMu → cache.mu; nothing takes them the
 	// other way round.
 	locMu sync.Mutex
+
+	// inFlight holds the UDNs with a detail fetch dispatched and not yet
+	// returned, running or queued for detailFetchSem, so a burst of
+	// announcements for one server dispatches one fetch and a flood of them
+	// holds at most discovery.MaxPendingDetailFetches goroutines. A new
+	// server's burst lands in the first-time branch on every packet, and a
+	// moved server's new Location is recorded only once its fetch succeeds,
+	// so every packet from the new address reads as a move until then.
+	// Until 2026-09-28 each of those packets spawned a fetch goroutine of
+	// its own, queued on the two-slot semaphore: 10,000 packets for one UDN
+	// cost 10,000 goroutines, and every queued one fetched the description
+	// again once it ran. The renderer client's field of the same name is the
+	// shape this copies, through the same discovery.DetailFetchClaims.
+	inFlight discovery.DetailFetchClaims
 
 	// lastLocation maps UDN → the SSDP `Location` the last SUCCESSFUL
 	// detail fetch resolved against. It is the host-change reference for
@@ -330,6 +360,9 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		nowFunc:        nowFunc,
 		detailFetchSem: make(chan struct{}, 2),
 		lastLocation:   make(map[string]string),
+		inFlight:       make(discovery.DetailFetchClaims),
+		sendErrs:       discovery.NewSendFailureLog(logger, cfg.Interface.Name, "upstream server discovery", cfg.MSearchInterval),
+		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
 }
 
@@ -350,6 +383,10 @@ func (c *MediaServerDiscoveryClient) Start(parent context.Context) error {
 		return fmt.Errorf("upnp/discovery: ListenUDP: %w", err)
 	}
 	c.conn = conn
+	// Fresh run, fresh streak (discovery.SendFailureLog.Reset says why).
+	// Safe under runMu: runTickLoop, the streak's only other toucher, has
+	// not been spawned yet.
+	c.sendErrs.Reset()
 	// Pin outgoing M-SEARCH multicast to the operator-chosen interface
 	// — same rationale as internal/dlna/discovery (Windows + Tailscale
 	// 2026-05-27 incident). Soft-fail: a failure here means multicast goes
@@ -489,6 +526,10 @@ func (c *MediaServerDiscoveryClient) runTickLoop(ctx context.Context) {
 	}
 }
 
+// sendMSearch sends one M-SEARCH for MediaServers, and hands its result to
+// sendErrs: discovery.SendFailureLog decides which results reach the log,
+// and drops the net.ErrClosed a send meets when Stop closes the socket
+// under it, which only Stop does.
 func (c *MediaServerDiscoveryClient) sendMSearch() {
 	conn := c.snapshotConn()
 	if conn == nil {
@@ -496,7 +537,8 @@ func (c *MediaServerDiscoveryClient) sendMSearch() {
 	}
 	packet := buildMSearchPacket(MediaServerDeviceType)
 	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	_, _ = conn.WriteToUDP(packet, dst)
+	_, err := c.writeMSearch(conn, packet, dst)
+	c.sendErrs.Note(err)
 }
 
 // buildMSearchPacket assembles an SSDP M-SEARCH for the given target.
@@ -671,7 +713,30 @@ func (c *MediaServerDiscoveryClient) pruneLocations() {
 	}
 }
 
-// spawnDetailFetch tracks the fetch in the WaitGroup before launching it.
+// claimFetch reserves udn's one in-flight detail fetch. Returns false when
+// one is already in flight for udn, or when
+// discovery.MaxPendingDetailFetches are, in which case the caller MUST NOT
+// spawn (and MUST NOT release): the next announcement dispatches again.
+func (c *MediaServerDiscoveryClient) claimFetch(udn string) bool {
+	c.locMu.Lock()
+	defer c.locMu.Unlock()
+	return c.inFlight.Claim(udn)
+}
+
+// releaseFetch frees udn's claim. Called from the spawned fetch's defer; see
+// fetchAndCacheDetails for the ordering.
+func (c *MediaServerDiscoveryClient) releaseFetch(udn string) {
+	c.locMu.Lock()
+	c.inFlight.Release(udn)
+	c.locMu.Unlock()
+}
+
+// spawnDetailFetch launches a tracked detail fetch for udn, unless one is
+// already in flight for it or the client holds
+// discovery.MaxPendingDetailFetches already (see the inFlight field). A
+// dropped dispatch records nothing, so the next announcement tries again:
+// a new server is fetched then, and a moved one still reads as moved.
+//
 // wg.Add(1) here (not inside fetchAndCacheDetails) is safe vs Stop()'s
 // wg.Wait(): handlePacket runs ON the runLoop goroutine, which holds its own
 // wg slot for its entire lifetime, so this Add takes the counter ≥1→≥2, never
@@ -679,6 +744,9 @@ func (c *MediaServerDiscoveryClient) pruneLocations() {
 // can't return until runLoop returns, by which time no further fetch Adds are
 // issued.
 func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, src *net.UDPAddr, now time.Time) {
+	if !c.claimFetch(udn) {
+		return
+	}
 	c.wg.Add(1)
 	go c.fetchAndCacheDetails(ctx, udn, location, src, now)
 }
@@ -694,6 +762,13 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 	// so it fires on EVERY return path (including the semaphore-acquire
 	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
 	defer c.wg.Done()
+	// Paired with the claimFetch in spawnDetailFetch. Registered AFTER the
+	// wg.Done defer so it runs FIRST: once Stop()'s wg.Wait() returns, every
+	// claim is released, and a restarted client does not skip a UDN whose
+	// claim outlived the run. The release also comes after the Upsert and
+	// recordLocation below, so a packet that finds the claim free finds the
+	// cache and the recorded Location written.
+	defer c.releaseFetch(udn)
 	select {
 	case c.detailFetchSem <- struct{}{}:
 	case <-runCtx.Done():

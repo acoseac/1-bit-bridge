@@ -22498,6 +22498,202 @@ goroutine the test waits for.
   where `## Build` names five; it now names `FuzzValidateRelPath`, the target
   that covers it, and gives no count.
 
+## 2026-09-28 — upstream discovery deduplicates and bounds its detail fetches, and both discovery clients report failed sends through one log
+
+Backlog B37 and B32, both in the upstream MediaServer client
+(`internal/upnp/discovery.go`), fixed together because the fix for each is
+a piece the renderer client (`internal/dlna/discovery`) already had, and in
+both cases the fix was to move that piece into one shared definition rather
+than copy it. #1064's entry (above) left B32 open under "Left as they are".
+
+### What was measured on main
+
+Probes were throwaway tests in each package, on the unchanged code
+(darwin/arm64, go1.27.1). A dispatcher held every description fetch, so a
+fetch lasted as long as the flood did (in production it lasts up to
+`DetailFetchTimeout`, 5 s, against a LOCATION that never answers), and
+`handlePacket` was called as the read loop calls it.
+
+| Client, flood | goroutines | stack | description fetches |
+|---|---|---|---|
+| upstream, 1,000 packets for one UDN | +1,000 | +4,192 KiB | 1,000 once released |
+| upstream, 10,000 packets for one UDN | +10,000 | +37,664 KiB | |
+| upstream, 10,000 distinct UDNs | +10,000 | +35,840 KiB | |
+| renderer, 10,000 packets for one UDN | +1 | | 1 |
+| renderer, 10,000 distinct UDNs | +10,000 | +37,056 KiB | |
+
+- **Each dispatch was a goroutine from the start.** Both clients acquire
+  their fetch semaphore (two slots upstream, four for the renderer) INSIDE
+  the spawned goroutine, so it bounds the fetches that run and nothing
+  else. The upstream client had no dedup at all: every packet of one new
+  server's burst landed in the first-time branch and queued a fetch, and
+  every queued fetch got the description again once it ran.
+- **The renderer's per-UDN claim covered one shape of two.** The backlog
+  entry described its `claimFetch` / `inFlight` as guarding exactly this.
+  It collapsed one renderer's burst to one fetch and still queued a
+  goroutine per distinct UDN. A LAN peer sees the M-SEARCH's source port,
+  since the M-SEARCH is multicast, and can send that flood to it.
+- **The upstream client's sends failed in silence.** A probe pinned a real
+  client to the dev Mac's `utun0` (up, point-to-point, no IPv4 address):
+  the socket's own `WriteToUDP` answered `sendto: can't assign requested
+  address`, and the client, ticking every 10 ms, logged 0 lines in 20
+  ticks, because `sendMSearch` discarded the error (`_, _ =
+  conn.WriteToUDP`). `en0` was the control: sends go through there.
+
+### What changed
+
+- **`discovery.DetailFetchClaims`** (`internal/dlna/discovery/fetch_claims.go`)
+  is the one set of claimed fetches, a map type with no lock of its own:
+  each client keeps it under its `locMu`, so the renderer's
+  `pruneLocations` still decides from its location records and its claims
+  under one lock. `Claim` refuses a UDN that holds a claim and any claim
+  past `MaxPendingDetailFetches` (64), changing nothing when it refuses.
+  The renderer's `inFlight` became one, and the upstream client gained one
+  with the renderer's `claimFetch` / `releaseFetch` shape: the claim before
+  the spawn, the release as the fetch's last deferred call (registered after
+  `wg.Done`, so it runs first, and after the Upsert and `recordLocation`, so
+  a packet that finds the claim free finds both written).
+- **At the bound a dispatch is dropped, not queued.** A dropped dispatch
+  records nothing, so the next announcement dispatches again: a new device
+  is fetched then, and a moved one still reads as moved. 64 is far above a
+  real LAN's burst (a power cut that brings thirty renderers back claims
+  thirty).
+- **`discovery.SendFailureLog`** (`send_failure_log.go`) is the renderer's
+  policy moved out of the client: `Note(err)`, `Reset()`, `Streak()`. Both
+  clients keep one (`sendErrs`). It drops `net.ErrClosed` (#1064's rule,
+  now in one place), writes the first failure of a streak at Warn, one
+  Error ten minutes in, and the recovery at Info with the streak's length.
+- **The ten minutes became a duration.** The renderer escalated at its
+  20th consecutive failure, a constant whose own docblock reasoned in
+  minutes: ten at the default 30 s cadence. The upstream client sends every
+  60 s by default, and both cadences are configurable
+  (`dlna.discovery.msearchIntervalSeconds`,
+  `upnpUpstream.msearchIntervalSeconds`), so a count of ticks is ten
+  minutes for one client at one setting. `sendErrEscalateAt(interval)` is
+  ten minutes of the client's own ticks, rounded up, never below 2 (so the
+  Warn and the Error stay two lines): 20 at 30 s, the renderer unchanged at
+  its default, and 10 at 60 s.
+- **Every line names the interface.** Both wirings start one client per
+  LAN-eligible interface, and a failure line without it could not say
+  which route was gone. It rides as a record attribute, so a capturing
+  handler that drops `With` attributes (`loggingtest.Recorder`'s) still
+  sees it.
+- **The upstream client** gained the `writeMSearch` seam (the renderer
+  client's since #1064), reports every send through its `SendFailureLog`,
+  and resets the streak in `Start`.
+- **The server-side advertiser's `sendAliveAll`** returns on
+  `net.ErrClosed`: `Stop` closes the sender under a burst the periodic
+  goroutine had begun, and each target left logged "NOTIFY alive send
+  failed … use of closed network connection" at Debug (5 lines for a burst
+  that met the close before its first write). Only `Stop` closes that
+  sender. A write that fails for its own reason still logs a line per
+  target.
+
+Measured after, with the same probes: one UDN's burst, +1 goroutine and 1
+description fetch (was 1,000 fetches for 1,000 packets); 10,000 distinct
+UDNs, +64 goroutines in either client. The `utun0` client logs
+`level=WARN msg="M-SEARCH send failed" component=upnp interface=utun0
+err="write udp4 0.0.0.0:60651->239.255.255.250:1900: sendto: can't assign
+requested address"` on its first send and nothing on the next 19.
+
+### Rejected
+
+- **No queue at all** (a non-blocking semaphore acquire in `handlePacket`,
+  dropping a dispatch when every slot runs). It bounds goroutines at the
+  slot count with no new constant, and it drops most of a genuine burst:
+  thirty renderers answering one M-SEARCH within its 3 s MX spread would be
+  fetched four at a time, the rest a cycle (30 s) later.
+- **A claims type with a mutex of its own.** It works, since every release
+  follows the fetch's cache write, but it gives up the renderer's one-lock
+  argument for `pruneLocations` ("a concurrent fetch can neither record nor
+  release mid-prune") for no gain. The map type keeps each client's lock
+  discipline as it was and shares the policy.
+- **A second copy of the send policy in `internal/upnp`**, or a function
+  on `*int` like `HandleReadErr`: the per-client state (logger, interface,
+  what is degraded, the escalation point) would have been four fields or
+  five parameters at each call site.
+- **A log line when a claim is refused at the bound.** A flood keeps the
+  set full, so a line per refusal is the flood the M-SEARCH streak exists
+  to stop, and a latched line is another streak policy. Refusals are
+  silent; a flood that fills the set delays a genuine new device until the
+  flood stops, where the unbounded queue put it behind every packet the
+  flood had sent.
+
+### Tests
+
+- `TestDetailFetchClaimsDeduplicateAndBound` (the set's two refusals).
+- `TestHandlePacket_FloodOfNewRenderersHoldsAtMostTheBound` and
+  `TestHandlePacket_FloodOfNewServersHoldsAtMostTheBound`: 1,000 distinct
+  UDNs against a held dispatcher; the claims equal the bound, the goroutine
+  count grows by at most the bound plus an allowance of 8 for goroutines of
+  the runtime and of earlier tests (the unbounded code grew by 1,000), and
+  after the drain a dropped UDN's next announcement is fetched.
+- `TestHandlePacket_BurstForOneServerDispatchesOneFetch` (50 packets, 1
+  fetch), `TestHandlePacket_MovedServerRefetchesOnceForABurst` (20 packets
+  from the new address, 1 re-fetch, none once the address is recorded),
+  `TestHandlePacket_FailedRefetchFreesItsClaim` (a failed move re-fetch is
+  retried by the next announcement), and `TestStopWaitsForInFlightFetch`
+  extended: no claim outlives `Stop`, and a restarted client fetches the
+  same server.
+- `TestSendFailureLogEscalatesTenMinutesIntoAStreak` (the tick count at
+  nine cadences), `TestSendFailureLogNamesTheInterfaceOnEveryLine`,
+  `TestSendFailureLogDropsOnlyTheErrorOfItsOwnStop`.
+- `TestSendMSearchReportsFailedUpstreamSends` drives the upstream client's
+  `sendMSearch` 31 times through a failing seam: one Warn by the ninth, the
+  one Error AT the tenth (naming upstream server discovery), nothing more,
+  then the recovery line with `consecutiveFailures=30`, every line with
+  `component=upnp` and the interface. Its first draft checked "no Error by
+  the ninth" and "one Error by the thirtieth", which a client escalating at
+  the renderer's 20th also passes (NC6 below found it).
+  `TestUpstreamSendStreakResetsOnRestart` is the renderer's restart test on
+  this client.
+- `Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause`: a
+  burst through a closed sender logs nothing (red first, 5 lines), and a
+  burst whose every write fails for its own reason (a 70 KB datagram, past
+  the maximum on every platform) logs one line per target.
+- The renderer's existing M-SEARCH tests drive `c.sendErrs` now;
+  `TestSendMSearchEscalatesOnceSustained` pins the literal 20 at its default
+  30 s, which is also the pin that the renderer hands its interval to the
+  log.
+- 100 runs of every new test under `-race` on the dev Mac and on Linux
+  (`golang:1.26.6` on dido): all green.
+
+| Control | Red |
+|---|---|
+| NC1: upstream dispatches whatever `claimFetch` answers | `…BurstForOneServerDispatchesOneFetch` (50 fetches), `…FloodOfNewServersHoldsAtMostTheBound` (+1,000 goroutines, 1,000 cached), `…MovedServerRefetchesOnceForABurst` (20 re-fetches), as predicted |
+| NC2: `Claim` without the bound | the two flood tests and `TestDetailFetchClaimsDeduplicateAndBound`, as predicted |
+| NC3: an upstream fetch never releases its claim | the four predicted (`…BurstForOneServer…`, `…FloodOfNewServers…`, `…FailedRefetchFreesItsClaim`, `TestStopWaitsForInFlightFetch`: a claim outlives Stop and the restart fetches nothing) plus three existing move tests, `TestHandlePacket_GenuineMoveStillRefetches`, `TestServerDiscoveryDefaultClientConnectsToThisHostWhenThePacketCameFromIt` and `TestAMovedServerCannotSteerTheCachedControlURLToAnotherHost`: the first fetch's claim blocks the move's re-fetch |
+| NC4: upstream `sendMSearch` discards the error again | `TestSendMSearchReportsFailedUpstreamSends`, `TestUpstreamSendStreakResetsOnRestart` |
+| NC5: upstream `Start` without `Reset` | `TestUpstreamSendStreakResetsOnRestart` only (streak 16) |
+| NC6: the upstream log built with 30 s, not its interval | `TestSendMSearchReportsFailedUpstreamSends` only ("the tenth failed send logged 0 Errors"); green against the test's first draft |
+| NC7: `Note` without the `net.ErrClosed` drop | `TestSendFailureLogDropsOnlyTheErrorOfItsOwnStop`, `TestSendMSearchCutShortByStopIsNotAFailure` |
+| NC8: `sendErrEscalateAt` returns 20 whatever the cadence | the table test and `TestSendMSearchReportsFailedUpstreamSends`; the renderer's escalation test stays green, 20 being its default's answer |
+| NC9: the floor of 2 removed | the table test's 10 min and 1 h rows only |
+| NC10: the Warn without `interface` | `TestSendFailureLogNamesTheInterfaceOnEveryLine`, `TestSendMSearchReportsFailedUpstreamSends` |
+| NC11: the renderer's `Start` without `Reset` | `TestSendMSearchStreakResetsOnRestart` only (streak 26) |
+| NC12: `sendAliveAll` logs its Stop's close again | the advertiser test, closed half (5 lines) |
+| NC12b: `sendAliveAll` drops every failure | the advertiser test, oversized half (0 lines, want 5) |
+
+### Left as they are
+
+- **The renderer cache still grows under a flood of distinct UDNs whose
+  LOCATION answers 4xx.** A structural failure writes a stub with the
+  year-2999 `LastSeenAt`, which `EvictStale` never ages out, so the claim
+  bounds the goroutines and not the cache: 5,000 such UDNs left 5,000 stubs
+  and 5,000 location records after an eviction pass (a throwaway probe,
+  with the claims drained every 32). The upstream client caches only a
+  server whose description names a ContentDirectory, until `ServerTTL`; a
+  flood of fake servers that serve one grows its cache for that long (not
+  measured). The ingest walks only configured servers.
+- **The upstream client's move detector keeps one Location per UDN**, so a
+  server answering from two addresses alternately reads as moved on every
+  alternation. The renderer keeps a set (`lastLocations`, bounded per UDN).
+  With the claim, one re-fetch runs at a time; they still repeat.
+- **The advertiser's failed NOTIFY sends log only at Debug**, so a dead
+  multicast route on the advertising side is silent at the default level.
+  Its cadence is 14 minutes, so the ten-minute escalation would land on the
+  second failure.
+
 ## 2026-09-28 — the `--gc` sweeps refuse a partial walk, the background sweep walks past files it cannot remove, and the Jobs card shows its refusal
 
 Three leftovers of #1063 (backlog B30 and B26), in one PR.
