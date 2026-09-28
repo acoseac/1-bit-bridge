@@ -24133,11 +24133,12 @@ operator's configured URL named`), and the console saw nothing.
 ### Out of scope
 
 - **An SSDP packet's source is not authenticated.** A peer on the bridge's L2
-  segment can send one from a link-local address, 169.254.169.254 included,
-  and the same-address exception then approves exactly that address, for the
-  description fetch (#1069) and now for the later dials. A loopback source
-  is the case #1069 relies on RFC 1122 for: a host discards 127/8 arriving
-  on any other interface.
+  segment can send one from a link-local address that is not a cloud
+  metadata address, and the same-address exception then approves exactly
+  that address, for the description fetch (#1069) and now for the later
+  dials. The metadata addresses are refused whatever the source (review
+  round 1, `cloudMetadataAddrs`). A loopback source is the case #1069 relies
+  on RFC 1122 for: a host discards 127/8 arriving on any other interface.
 - The harvest client dials a stored base as it is, so a hostless base stored
   before this change (only a paired device could have sent one) is not
   re-checked.
