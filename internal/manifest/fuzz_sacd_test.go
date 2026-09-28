@@ -368,13 +368,17 @@ func FuzzSACDVirtualPathRoundTrip(f *testing.F) {
 // expand from its second copy when the first cannot be read: the three master
 // TOC copies, and the area TOC's two copies, are written identically here, and
 // every damage the harness applies (sacdFaultDamage) is applied to every copy
-// alike. For the same reason the image holds one stereo area and carries the
-// master signature under one geometry: an image valid under both geometries,
-// or holding two different stereo areas, carries two answers, and which one a
-// failed read leaves standing is not a defect. Nor is a reader that reports
-// the end of the file early: that is indistinguishable from a truncated image,
-// which is structural truth (sacdReadOutcome), so the injected failures are
-// ones that say they failed (sacdFaultErrors).
+// alike. A truncation lands only between structures (sacdFaultCuts): one that
+// cuts a later copy short makes it parse to less than the first (a master
+// copy without its text bank, an area copy without its TTxt sector names no
+// titles), which is a copy that differs. For the same reason the image holds
+// one stereo area and carries the master signature under one geometry: an
+// image valid under both geometries, or holding two different stereo areas,
+// carries two answers, and which one a failed read leaves standing is not a
+// defect. Nor is a reader that reports the end of the file early: that is
+// indistinguishable from a truncated image, which is structural truth
+// (sacdReadOutcome), so the injected failures are ones that say they failed
+// (sacdFaultErrors).
 
 // sacdFaultErrors are the failures the harness injects: a transport error, and
 // a short read that reports none (errSACDShortRead's case). Never io.EOF or
@@ -385,6 +389,15 @@ var sacdFaultErrors = []error{sacdReadEIO, errors.New("read: operation timed out
 // geometries at once (about 49 KB), every master copy, and both area copies.
 const sacdFaultMaxLen = 1 << 18
 
+// sacdFaultCuts are the places an image may end, in sectors of its geometry:
+// -1 keeps it whole, 0 leaves nothing, and every other one is a boundary
+// between structures. Before the master copies; after the first, and after
+// the second, so the later ones are absent rather than cut short; before the
+// area TOC; after the first area copy, which leaves the DST probe past the
+// end; after the audio sector; and before, and after, the second area copy.
+var sacdFaultCuts = []int64{-1, 0, 510, 519, 529, 539, fixAudioStart, fixAudioStart + 1,
+	fixAreaEnd, fixAreaEnd + fixTOCSectors}
+
 // sacdFaultCase is one input to the property, in the fuzz target's argument
 // order: how to build the image, and the one read fault.
 type sacdFaultCase struct {
@@ -393,7 +406,7 @@ type sacdFaultCase struct {
 	lengths                    []byte // track i lasts 1 + lengths[i]%250 frames
 	albumTitle                 string // capped at 256 bytes
 	damage                     uint8  // an index into sacdFaultDamage, mod its length
-	cut                        uint32 // non-zero truncates the image to cut%len
+	cut                        uint8  // an index into sacdFaultCuts, mod its length
 	faultFrom, faultLen        uint32 // mapped into the image by fault
 	faultN                     uint16 // bytes a failing read hands back before its error
 	errKind                    uint8  // an index into sacdFaultErrors, mod its length
@@ -491,8 +504,8 @@ func (c sacdFaultCase) image(t *testing.T) []byte {
 	}
 	sector := func(lsn int64) int64 { return lsn*g.stride + g.payloadOffset }
 	sacdFaultDamage[int(c.damage)%len(sacdFaultDamage)](img, sector)
-	if c.cut != 0 {
-		img = img[:int(c.cut%uint32(len(img)))]
+	if cut := sacdFaultCuts[int(c.cut)%len(sacdFaultCuts)]; cut >= 0 {
+		img = img[:cut*g.stride]
 	}
 	return img
 }
@@ -586,7 +599,7 @@ func FuzzSACDExpandUnderAReadFault(f *testing.F) {
 		s.c.add(f)
 	}
 	f.Fuzz(func(t *testing.T, raw, plainDSD, damageFirst bool, tracks uint8, lengths []byte,
-		albumTitle string, damage uint8, cut, faultFrom, faultLen uint32, faultN uint16, errKind uint8) {
+		albumTitle string, damage, cut uint8, faultFrom, faultLen uint32, faultN uint16, errKind uint8) {
 		c := sacdFaultCase{raw, plainDSD, damageFirst, tracks, lengths, albumTitle,
 			damage, cut, faultFrom, faultLen, faultN, errKind}
 		img := c.image(t)
@@ -624,19 +637,37 @@ func TestSACDFaultSeedsReachTheFailure(t *testing.T) {
 	}
 }
 
-// TestSACDFaultPropertySeesALyingReader is the property's positive control:
-// the check can fail. A reader that reports the end of the file early is
-// indistinguishable from a truncated image, so the parser answers "not an
-// SACD" through it, and sacdFaultViolation must say so. If this passes with no
-// violation, the property checks nothing.
-func TestSACDFaultPropertySeesALyingReader(t *testing.T) {
-	img := sacdFaultCase{}.image(t)
-	lie := sacdFault{from: 510 * 2048, to: 530*2064 + 20, err: io.EOF}
-	v, reached := sacdFaultViolation(img, lie)
-	if !reached {
-		t.Fatal("no read reached the lying fault")
-	}
-	if v == "" {
-		t.Fatal("a reader that lies about the end of the file answered \"not an SACD\" and the property saw nothing")
+// TestSACDFaultPropertySeesWhatTheHarnessKeepsOut is the property's positive
+// control: the check can fail, on exactly the two things the harness keeps out
+// of its images. If either passed with no violation, the property would check
+// nothing.
+//
+//   - A reader that reports the end of the file early is indistinguishable
+//     from a truncated image, so the parser answers "not an SACD" through it.
+//   - An image cut inside its second area copy, just short of the TTxt
+//     sector: with the first copy unreadable, the second parses to tracks
+//     with no titles, a different answer from an image whose copies differ.
+//     That is why a cut lands only between structures (sacdFaultCuts).
+func TestSACDFaultPropertySeesWhatTheHarnessKeepsOut(t *testing.T) {
+	whole := sacdFaultCase{}.image(t)
+	for _, tc := range []struct {
+		name  string
+		img   []byte
+		fault sacdFault
+	}{
+		{"a reader that lies about the end of the file", whole,
+			sacdFault{from: 510 * 2048, to: 530*2064 + 20, err: io.EOF}},
+		{"an image cut inside its second area copy", whole[:(fixAreaEnd+fixTOCSectors-1)*2048+100],
+			sacdSectorFault(fixAreaStart, fixTOCSectors, sacdReadEIO)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, reached := sacdFaultViolation(tc.img, tc.fault)
+			if !reached {
+				t.Fatal("no read reached the fault")
+			}
+			if v == "" {
+				t.Fatal("the property saw nothing")
+			}
+		})
 	}
 }
