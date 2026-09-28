@@ -39,9 +39,9 @@ import (
 // queued nothing.
 func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	withoutSoxOnPath(t)
-	// Registered before startServedBridge registers its drain, so it runs
-	// after serve has returned: the loop reads the delay once, when it
-	// starts.
+	// Registered before startConsoleBridge launches serve and registers its
+	// drain, so it runs after serve has returned: the loop reads the delay
+	// once, when it starts.
 	prev := autoOptimizeSettleDelay
 	autoOptimizeSettleDelay = time.Millisecond
 	t.Cleanup(func() { autoOptimizeSettleDelay = prev })
@@ -49,7 +49,7 @@ func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	// minFreeBytes 1: the sweep's free-space floor must not be what keeps
 	// it from queueing on a small CI volume.
 	const upscaleYAML = "upscale:\n  enabled: true\n  autoOptimize:\n    enabled: true\n    minFreeBytes: 1\n"
-	b := startServedBridge(t, upscaleYAML, func(lib string) {
+	b := startConsoleBridge(t, upscaleYAML, func(lib string) {
 		// Two tracks the CarPlay kind takes (96 kHz / 24-bit FLAC), so a
 		// sweep that runs has something to queue.
 		for _, name := range []string{"01 One.flac", "02 Two.flac"} {

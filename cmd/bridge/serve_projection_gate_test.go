@@ -45,7 +45,7 @@ func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
 	stubbedSox := putUsableSoxOnPath(t)
 	for _, bootOn := range []bool{false, true} {
 		t.Run(fmt.Sprintf("booted with upscale.enabled=%t", bootOn), func(t *testing.T) {
-			b := startServedBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil)
+			b := startConsoleBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil)
 			for step, on := range []bool{bootOn, !bootOn, bootOn} {
 				if step > 0 {
 					patchUpscaleEnabled(t, b.console, b.adminBase, on, b.stderr)

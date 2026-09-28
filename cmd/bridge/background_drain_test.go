@@ -152,13 +152,15 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 // tests that launched inline still satisfied it. Two changes that day
 // moved a boot into a helper and widened the scan for it, each unaware of
 // the other: bootServe (#1071, the boot every `serve` test repeated) and
-// startServedBridge (#1067, a boot with the console and a paired client).
-// Two helpers already launched goroutines unaudited then
-// (runOneFingerprintPass, runOneSmartPlaylistPass; both drain). A helper
-// that launches must register the drain itself, which is also where the
-// drain's ordering against the caller's cleanups is decided; one that
-// handed its channel back for the CALLER to drain would be reported, since
-// a drain beside its launch is what one function's AST can check.
+// startConsoleBridge (#1067, a boot with the console and a paired client).
+// Both now start serve through launchServe, so the scan finds one launch
+// where it found two. Two helpers already launched goroutines unaudited
+// then (runOneFingerprintPass, runOneSmartPlaylistPass; both drain). A
+// helper that launches must register the drain itself, which is also
+// where the drain's ordering against the caller's cleanups is decided;
+// one that handed its channel back for the CALLER to drain would be
+// reported, since a drain beside its launch is what one function's AST
+// can check.
 func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -183,8 +185,8 @@ func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 		checked += auditBackgroundLaunchesIn(t, fset, path)
 	}
 	// Thirteen when written, all tests; 45 on 2026-09-28, when helpers
-	// joined (42 tests and three helpers), and 46 once startServedBridge
-	// joined them. Adding a drained launch only raises this, so the floor
+	// joined (42 tests, and three helpers: launchServe and the two sweep
+	// helpers). Adding a drained launch only raises this, so the floor
 	// never needs bumping — it trips when the count DROPS, which is the
 	// scan silently ceasing to match.
 	if checked < 13 {

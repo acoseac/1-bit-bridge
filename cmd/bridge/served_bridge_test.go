@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,12 +13,12 @@ import (
 	"time"
 )
 
-// consoleBridge is a `bridge serve` a test stood up on two loopback ports,
-// and what the test reaches it with. Serve's own context stays inside
-// startServedBridge, whose drain cancels it; a request the test makes
-// takes the test's, t.Context().
+// consoleBridge is a `bridge serve` a test stood up with its console on a
+// loopback port of its own, and what the test reaches it with. Serve's own
+// context stays inside launchServe, whose drain cancels it; a request the
+// test makes takes the test's, t.Context().
 type consoleBridge struct {
-	stderr *safeBuffer
+	servedBridge
 	// adminBase is the console, over plain HTTP; apiBase is the v1 API,
 	// over TLS, as a paired device reaches it.
 	adminBase, apiBase string
@@ -32,18 +33,18 @@ type consoleBridge struct {
 	autoOptimizeSweeps atomic.Int64
 }
 
-// startServedBridge stands up `bridge serve` on a config it writes for a
+// startConsoleBridge stands up `bridge serve` on a config it writes for a
 // library in a directory of the test's own, with yamlTail appended to that
 // config as written, and returns once the v1 API and the console both
 // answer. fill, when not nil, puts files in the library first, so the
 // startup scan finds them.
 //
-// It launches serve and registers the drain in the same function, which
-// is what TestEveryBackgroundGoroutineDrainsOnCleanup asks of every
-// function that launches one, and its t.TempDir comes before the drain,
-// so the drain runs first. A cleanup the caller registered before this
-// call runs after serve has returned.
-func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *consoleBridge {
+// It launches through launchServe, with runServe and the options `serve
+// --config --addr` builds plus the sweep counter, which no flag carries.
+// launchServe registers the drain after this function's t.TempDir, so the
+// drain runs first, and a cleanup the caller registered before this call
+// runs after serve has returned.
+func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string)) *consoleBridge {
 	t.Helper()
 	root := t.TempDir()
 	lib := filepath.Join(root, "Music")
@@ -63,7 +64,6 @@ func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *co
 	}
 
 	b := &consoleBridge{
-		stderr:    &safeBuffer{},
 		adminBase: "http://" + consoleAddr,
 		console:   &http.Client{Timeout: 30 * time.Second},
 		phone: &http.Client{
@@ -71,23 +71,15 @@ func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *co
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		},
 	}
-	serveCtx, stop := context.WithCancel(context.Background())
-	stdout := &safeBuffer{}
-	exitCode, returned := make(chan int, 1), make(chan struct{})
-	// runServe with the options `serve --config --addr` builds, plus the
-	// sweep counter, which no flag carries.
 	opts := serveOpts{
 		configPath:        configPath,
 		addrOverride:      listenAddr,
 		autoOptimizeSwept: func() { b.autoOptimizeSweeps.Add(1) },
 	}
-	go func() {
-		defer close(returned)
-		exitCode <- runServe(serveCtx, opts, stdout, b.stderr)
-	}()
-	drainServeOnCleanup(t, stop, returned, exitCode, b.stderr)
-	apiAddr, _ := waitForListening(t, stdout, 30*time.Second)
-	waitForAdminReady(t, consoleAddr, exitCode, b.stderr)
-	b.apiBase = "https://" + apiAddr
+	b.servedBridge = launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, opts, stdout, stderr)
+	})
+	waitForAdminReady(t, consoleAddr, b.done, b.stderr)
+	b.apiBase = "https://" + b.addr
 	return b
 }

@@ -222,7 +222,7 @@ func waitForListening(t *testing.T, out *safeBuffer, deadline time.Duration) (ad
 	return
 }
 
-// servedBridge is a `bridge serve` bootServe started for one test.
+// servedBridge is a `bridge serve` launchServe started for one test.
 type servedBridge struct {
 	// addr is the API's host:port, from serve's startup banner.
 	addr string
@@ -232,13 +232,27 @@ type servedBridge struct {
 	done <-chan int
 }
 
-// bootServe runs `bridge serve` with args on a goroutine of its own for
-// the rest of the test and returns once the API is listening. The
-// goroutine is drained on cleanup (drainServeOnCleanup), so a failed
-// assertion cannot return while serve still writes under the test's
-// directories. TestEveryBackgroundGoroutineDrainsOnCleanup audits this
-// function as it audits a test that launches serve itself.
+// bootServe runs `bridge serve` with args, through run as a command line
+// would, and returns once the API is listening. It launches through
+// launchServe, like startConsoleBridge, which stands serve up with its
+// console and a paired client.
 func bootServe(t *testing.T, args ...string) servedBridge {
+	t.Helper()
+	return launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return run(ctx, append([]string{"serve"}, args...), stdout, stderr)
+	})
+}
+
+// launchServe runs start, which runs serve by one route or another, on a
+// goroutine of its own for the rest of the test, and returns once the API
+// is listening. It is the one place a boot helper starts serve on a
+// goroutine, and it drains that goroutine on cleanup
+// (drainServeOnCleanup), so a failed assertion cannot return while serve
+// still writes under the test's directories: a directory the caller made
+// with t.TempDir before this call is removed after the drain, since
+// cleanups run last-registered-first. TestEveryBackgroundGoroutineDrainsOnCleanup
+// audits this function as it audits a test that launches serve itself.
+func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io.Writer) int) servedBridge {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
@@ -246,7 +260,7 @@ func bootServe(t *testing.T, args ...string) servedBridge {
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		exitCode <- run(ctx, append([]string{"serve"}, args...), stdout, stderr)
+		exitCode <- start(ctx, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
 	addr, _ := waitForListening(t, stdout, 30*time.Second)

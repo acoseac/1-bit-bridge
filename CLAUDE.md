@@ -5506,12 +5506,14 @@ its twin.** The top list is older, shorter, and read first.
   Test functions alone, so a launch factored into a helper went unaudited,
   and two such helpers already existed. It wants the drain in the function
   that launches. **A serve test boots through a helper**: `bootServe`
-  (main_test.go), or `startServedBridge` when it needs the console and a
-  paired client (it writes the config and builds both clients). Each
-  registers its own drain, and with either drain deleted the Test-only guard
-  stayed green. SonarCloud's gate fails a PR past 3% duplicated new lines
-  and counts new lines that repeat OLD code, and an inline boot block was 16
-  to 23 lines of exactly that.
+  (main_test.go), which runs a command line, or `startConsoleBridge`
+  (served_bridge_test.go), which writes the config, calls `runServe` with
+  a `serveOpts` hook no flag carries, and builds the console and phone
+  clients. Both start serve through `launchServe`, the one launch and the
+  one drain, and with that drain deleted the Test-only guard stayed green.
+  SonarCloud's gate fails a PR past 3% duplicated new lines and counts new
+  lines that repeat OLD code, and an inline boot block was 16 to 23 lines
+  of exactly that.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the
@@ -5561,7 +5563,14 @@ its twin.** The top list is older, shorter, and read first.
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
   (two writes in one tick leave them equal, so the check silently passes on the
   platform most likely to break). Normalize CRLF before any `\n`-literal scan of
-  a static file — there is no `.gitattributes` pinning `eol`.
+  a static file — there is no `.gitattributes` pinning `eol`. **A time decoded
+  from JSON has no monotonic reading**, so `After` against a local
+  `time.Now()` compares wall clocks, which is where the tick bites:
+  `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` waited for the Jobs
+  card's `lastFinishedAt` to pass the instant of its nudge, a sweep the gate
+  refuses finished inside the tick, and the wait ran out on the Windows leg
+  (2026-09-28; 6 runs of 6 under a simulated 15.625 ms clock). A serve test
+  counts through a `serveOpts` hook instead (`autoOptimizeSwept`).
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP
