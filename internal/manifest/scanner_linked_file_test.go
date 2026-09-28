@@ -15,7 +15,9 @@ package manifest
 // A link whose target cannot be stat'ed (dangling, or into a mount that went
 // away) is a path whose content the walk could not see: its row is kept, as
 // it was, and nothing is minted for a link that never had one. A link to a
-// DIRECTORY is not a file, and the walk still follows no directory link.
+// DIRECTORY is not a file, and the walk still follows no directory link; nor
+// is a named pipe, a socket or a device, or a link to one
+// (scanner_not_a_file_test.go makes those, on a POSIX host).
 
 import (
 	"context"
@@ -36,6 +38,44 @@ import (
 // msgUnreadableLinks is the line a walk logs once for the links it could not
 // follow.
 const msgUnreadableLinks = "links whose target could not be read; their rows are kept"
+
+// msgNotFiles is the line a walk logs once for the audio-named entries it
+// found were not files.
+const msgNotFiles = "audio-named entries that are not files; nothing is indexed for them"
+
+// modeInfo is a stat reporting the given mode, for a shape the host cannot
+// make: a Windows cloud placeholder, a block device.
+type modeInfo fs.FileMode
+
+func (m modeInfo) Name() string       { return "entry" }
+func (m modeInfo) Size() int64        { return 0 }
+func (m modeInfo) Mode() fs.FileMode  { return fs.FileMode(m) }
+func (m modeInfo) ModTime() time.Time { return time.Time{} }
+func (m modeInfo) IsDir() bool        { return fs.FileMode(m).IsDir() }
+func (m modeInfo) Sys() any           { return nil }
+
+// requireNotFilesLines asserts want lines about entries that are not files,
+// each counting count of them under example, named library-relative as a log
+// line names a library file (#1055), with the example's kind, and none naming
+// any of the absolute paths given.
+func requireNotFilesLines(t *testing.T, lines []string, want, count int, example, kind string, absolute ...string) {
+	t.Helper()
+	if len(lines) != want {
+		t.Fatalf("%d lines about entries that are not files, want %d:\n%s",
+			len(lines), want, strings.Join(lines, "\n"))
+	}
+	tail := fmt.Sprintf(" count=%d example=%s kind=%s", count, example, kind)
+	for _, line := range lines {
+		if !strings.HasSuffix(line, tail) {
+			t.Errorf("the line does not end %q: %s", tail, line)
+		}
+		for _, abs := range absolute {
+			if strings.Contains(line, abs) {
+				t.Errorf("the line names the absolute path %s: %s", abs, line)
+			}
+		}
+	}
+}
 
 // linkOrSkip makes link a symbolic link to target, and skips the test on a
 // host that cannot make one (Windows without the privilege).
@@ -179,9 +219,17 @@ func TestScanner_ALinkedTrackIsIndexedUnderItsTargetsStat(t *testing.T) {
 // alone, for shapes a host may not be able to make. Since Go 1.23 a Windows
 // junction reports ModeIrregular and no ModeDir, so to the walk it is neither
 // a regular file nor a directory, and only a stat through it says it names a
-// directory; a Windows cloud placeholder is ModeIrregular too, and a stat
-// through it answers for itself. A regular file answers from its own stat and
-// never pays the second one.
+// directory; a Windows cloud placeholder is ModeIrregular too, a stat through
+// it answers for itself, and it opens (and hydrates) as a file, so it is
+// indexed. A regular file answers from its own stat and never pays the second
+// one.
+//
+// Whichever stat the row would carry, what it describes must open as a file:
+// a named pipe, a socket or a device is not indexed, nor is a link to one.
+// Opening a named pipe waits for a writer and nothing cancels the wait, so a
+// FIFO handed to a worker held the scan forever. The last two rows are
+// entries the listing called regular files and that are something else by
+// the time they are stat'ed: each is judged as what it is then, through it.
 func TestWalkedFileInfoStatsThroughEverythingButARegularFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "01.flac")
@@ -189,6 +237,11 @@ func TestWalkedFileInfoStatsThroughEverythingButARegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	fileInfo, dirInfo := statOf(t, file), statOf(t, dir)
+	placeholder := modeInfo(fs.ModeIrregular | 0o666)
+	pipe := modeInfo(fs.ModeNamedPipe | 0o644)
+	socket := modeInfo(fs.ModeSocket | 0o755)
+	charDevice := modeInfo(fs.ModeDevice | fs.ModeCharDevice | 0o666)
+	blockDevice := modeInfo(fs.ModeDevice | 0o660)
 	failed := errors.New("stat failed")
 	type answer struct {
 		info os.FileInfo
@@ -211,10 +264,24 @@ func TestWalkedFileInfoStatsThroughEverythingButARegularFile(t *testing.T) {
 		{"a dangling symlink", fs.ModeSymlink, answer{fileInfo, nil}, answer{nil, failed},
 			walkedFileTargetUnreadable, nil, 1},
 		{"a symlink to a directory", fs.ModeSymlink, answer{fileInfo, nil}, answer{dirInfo, nil},
-			walkedFileNotAFile, nil, 1},
+			walkedFileNotAFile, dirInfo, 1},
 		{"a Windows junction to a directory", fs.ModeIrregular, answer{fileInfo, nil}, answer{dirInfo, nil},
-			walkedFileNotAFile, nil, 1},
-		{"a Windows cloud placeholder", fs.ModeIrregular, answer{nil, failed}, answer{fileInfo, nil},
+			walkedFileNotAFile, dirInfo, 1},
+		{"a Windows cloud placeholder", fs.ModeIrregular, answer{nil, failed}, answer{placeholder, nil},
+			walkedFileIndex, placeholder, 1},
+		{"a named pipe", fs.ModeNamedPipe, answer{nil, failed}, answer{pipe, nil},
+			walkedFileNotAFile, pipe, 1},
+		{"a symlink to a named pipe", fs.ModeSymlink, answer{nil, failed}, answer{pipe, nil},
+			walkedFileNotAFile, pipe, 1},
+		{"a socket", fs.ModeSocket, answer{nil, failed}, answer{socket, nil},
+			walkedFileNotAFile, socket, 1},
+		{"a symlink to a character device", fs.ModeSymlink, answer{nil, failed}, answer{charDevice, nil},
+			walkedFileNotAFile, charDevice, 1},
+		{"a block device", fs.ModeDevice, answer{nil, failed}, answer{blockDevice, nil},
+			walkedFileNotAFile, blockDevice, 1},
+		{"a regular file that is a named pipe by the time it is stat'ed", 0, answer{pipe, nil}, answer{pipe, nil},
+			walkedFileNotAFile, pipe, 1},
+		{"a regular file that is a symlink by the time it is stat'ed", 0, answer{modeInfo(fs.ModeSymlink | 0o777), nil}, answer{fileInfo, nil},
 			walkedFileIndex, fileInfo, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,7 +293,7 @@ func TestWalkedFileInfoStatsThroughEverythingButARegularFile(t *testing.T) {
 				t.Fatalf("verdict %d, want %d", verdict, tc.want)
 			}
 			if info != tc.wantInfo {
-				t.Errorf("indexed under %v, want %v", info, tc.wantInfo)
+				t.Errorf("returned the stat %s, want %s", describeStat(info), describeStat(tc.wantInfo))
 			}
 			if (err != nil) != (tc.want == walkedFileStatFailed || tc.want == walkedFileTargetUnreadable) {
 				t.Errorf("err %v beside verdict %d", err, verdict)
@@ -235,6 +302,38 @@ func TestWalkedFileInfoStatsThroughEverythingButARegularFile(t *testing.T) {
 				t.Errorf("stat through the entry %d times, want %d", throughCalls, tc.wantThrough)
 			}
 		})
+	}
+}
+
+// describeStat names a stat by its mode and size, or "none".
+func describeStat(fi os.FileInfo) string {
+	if fi == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%v, %d bytes", fi.Mode(), fi.Size())
+}
+
+// TestNotAFileNamesEachKindTheWalkRefuses pins the names the scan's line
+// gives what it refused, and that the two kinds it indexes get none: a
+// regular file, and a Windows cloud placeholder (ModeIrregular), which opens
+// as a file. A character device carries ModeDevice too, so the order of the
+// kinds decides its name.
+func TestNotAFileNamesEachKindTheWalkRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		mode fs.FileMode
+		want string
+	}{
+		{0o644, ""},
+		{fs.ModeIrregular | 0o666, ""},
+		{fs.ModeDir | 0o755, "directory"},
+		{fs.ModeNamedPipe | 0o644, "named pipe"},
+		{fs.ModeSocket | 0o755, "socket"},
+		{fs.ModeDevice | fs.ModeCharDevice | 0o666, "character device"},
+		{fs.ModeDevice | 0o660, "device"},
+	} {
+		if got := notAFile(tc.mode); got != tc.want {
+			t.Errorf("notAFile(%v) = %q, want %q", tc.mode, got, tc.want)
+		}
 	}
 }
 
@@ -467,17 +566,19 @@ func TestScanner_ALinkFirstSeenDanglingIsIndexedOnceItsTargetAppears(t *testing.
 
 // TestScanner_ALinkToADirectoryIsNotATrack: an audio-named link to a
 // directory is not a file, whatever its name says. It used to be indexed as
-// one, from its path alone.
+// one, from its path alone. The scan says so once, whatever the number.
 func TestScanner_ALinkToADirectoryIsNotATrack(t *testing.T) {
 	f := newLinkedFixture(t)
 	linkOrSkip(t, f.parked, filepath.Join(f.album, "Bonus.flac"))
 	linkOrSkip(t, f.parked, filepath.Join(f.album, "Bonus.iso"))
+	rec := loggingtest.Record(t)
 	scanOnce(t, f.sc, "initial")
 	for _, rel := range []string{"Music/Album/Bonus.flac", "Music/Album/Bonus.iso/st/01.dff"} {
 		if tr, err := f.store.GetTrack(context.Background(), rel); err != nil || tr != nil {
 			t.Fatalf("a link to a directory was indexed as %s: %+v (err %v)", rel, tr, err)
 		}
 	}
+	requireNotFilesLines(t, rec.Lines(msgNotFiles), 1, 2, "Music/Album/Bonus.flac", "directory", f.root, f.parked)
 }
 
 // TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows bounds the

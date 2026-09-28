@@ -634,12 +634,12 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// global post-loop check) isolates the protection to the failing
 	// mount.
 	var (
-		walkErr    error
-		unreadable unreadableLinks
+		walkErr error
+		tallies walkTallies
 	)
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
-		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, &unreadable, paths)
+		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -691,7 +691,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	if walkErr != nil {
 		return count, walkErr
 	}
-	unreadable.report()
+	tallies.report()
 
 	// Deletion pass: anything in the "before" snapshot that we didn't
 	// see in this walk gets its missing_count bumped; rows whose
@@ -1963,7 +1963,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	seen := make(map[string]struct{}, len(beforeTrackSet))
 	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
 	errorSubtrees := make(map[string]struct{})
-	var unreadable unreadableLinks
+	var tallies walkTallies
 
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
@@ -2083,9 +2083,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			return nil
 		case walkedFileTargetUnreadable:
 			errorSubtrees[rel] = struct{}{}
-			unreadable.note(rel, err)
+			tallies.noteUnreadable(rel, err)
 			return nil
 		case walkedFileNotAFile:
+			tallies.noteNotAFile(rel, info.Mode())
 			return nil
 		}
 		seen[rel] = struct{}{}
@@ -2116,7 +2117,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	if walkErr != nil {
 		return int(committed.Load()), walkErr
 	}
-	unreadable.report()
+	tallies.report()
 
 	// Bounded deletion pass: only rows that were under `relScope`
 	// to begin with are candidates, so a cross-root move (the
@@ -2291,8 +2292,9 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // WalkDir err callback fires — the deletion pass uses it to spare
 // tracks AND folders under transiently-unreachable subtrees from
 // being wiped from the manifest — and for a link whose target the
-// walk could not stat, which `unreadable` also tallies for the one
-// line the caller logs about them (walkedFileInfo).
+// walk could not stat. `tallies` counts those links, and the entries
+// that are not files, for the lines the caller logs about them
+// (walkedFileInfo).
 //
 // Returns the count of entries observed beneath the root (file or
 // dir DirEntries excluding the root itself) and any walk error. The
@@ -2309,7 +2311,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // aborting. In a multi-root deployment (local SSD + remote FUSE
 // archive), a cloud outage on the archive must NOT block cleanup
 // of legitimately-deleted files on the SSD.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, unreadable *unreadableLinks, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	if _, err := os.Stat(root); err != nil {
 		scanLogger.Error("root unreachable", "root", root, "err", err,
 			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")
@@ -2428,9 +2430,14 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			// did until 2026-09-28, and the skip gate then kept
 			// those tags once the target came back.
 			errorSubtrees[rel] = struct{}{}
-			unreadable.note(rel, err)
+			tallies.noteUnreadable(rel, err)
 			return nil
 		case walkedFileNotAFile:
+			// Not a track, and the walk knows what is there: nothing
+			// is minted, and a row at rel is reaped like a deleted
+			// file's. Handing it to a worker is what held a scan
+			// forever on a named pipe until 2026-09-28.
+			tallies.noteNotAFile(rel, info.Mode())
 			return nil
 		}
 
@@ -2794,8 +2801,13 @@ const (
 	// not stat (a dangling link, a link into a mount that went away, a link
 	// loop). The walk spares the entry's own row and mints none for it.
 	walkedFileTargetUnreadable
-	// walkedFileNotAFile: the entry resolves to a directory. It is not a
-	// track, whatever its name says, and the walk follows no directory link.
+	// walkedFileNotAFile: the entry is, or names, something that does not
+	// open as a file (notAFile): a directory, a named pipe, a socket or a
+	// device. It is not a track, whatever its name says, and the walk
+	// follows no directory link. Nothing is minted for it, and a row at its
+	// path is reaped like a deleted file's, after the same missing-count
+	// grace: the walk stat'ed the entry and knows what is there, which is
+	// not "we could not see this path" (walkedFileTargetUnreadable).
 	walkedFileNotAFile
 )
 
@@ -2822,7 +2834,19 @@ const (
 // reports ModeIrregular and no ModeDir, with no symlink bit. The other kinds
 // stat to themselves through os.Stat (a FIFO, a device, and on Windows a
 // reparse point that names nothing, such as a cloud placeholder), so widening
-// the test costs them one syscall and changes nothing they report.
+// the test costs them one syscall.
+//
+// Whatever the stat, it must describe something that opens as a file, or the
+// entry is not indexed (notAFile): a directory, a named pipe, a socket or a
+// device, or a link to one. A worker opens what it is handed, and opening a
+// named pipe waits for a writer, with nothing to cancel the wait, so until
+// 2026-09-28 a FIFO named like a track held a scan worker forever, and the
+// scan with it: Scan holds the scanner's mutex for its whole run, so every
+// later scan waited on it, and IsScanning stayed true. A link to a device or
+// a socket was indexed from its path alone. The refusal reads the stat, not
+// the listing's type bits, and a regular file whose own stat says it is no
+// longer one (replaced since the directory was listed) is judged through,
+// as what it is now.
 //
 // Taken as a function of (type, own, through) so the Windows shape can be
 // driven on any platform.
@@ -2832,54 +2856,110 @@ func walkedFileInfo(typ fs.FileMode, own, through func() (fs.FileInfo, error)) (
 		if err != nil {
 			return nil, walkedFileStatFailed, err
 		}
-		return info, walkedFileIndex, nil
+		if info.Mode().IsRegular() {
+			return info, walkedFileIndex, nil
+		}
 	}
 	info, err := through()
 	if err != nil {
 		return nil, walkedFileTargetUnreadable, err
 	}
-	if info.IsDir() {
-		return nil, walkedFileNotAFile, nil
+	if notAFile(info.Mode()) != "" {
+		return info, walkedFileNotAFile, nil
 	}
 	return info, walkedFileIndex, nil
 }
 
-// unreadableLinks tallies the entries a walk found pointing at content it
-// could not stat, for the one line a scan logs about them
-// (walkedFileTargetUnreadable). One line, not one per entry: a link is
-// unreadable because its target is, and a mount that went away takes every
-// link into it at once, on every scan until it comes back.
-type unreadableLinks struct {
-	count   int
-	example string // library-relative
-	reason  string // the example's error, without the path it names
+// notAFileKinds are the kinds of entry a walk does not index, each with the
+// name the scan's line gives it, checked in order: a character device
+// carries ModeDevice too.
+var notAFileKinds = []struct {
+	bit  fs.FileMode
+	name string
+}{
+	{fs.ModeDir, "directory"},
+	{fs.ModeNamedPipe, "named pipe"},
+	{fs.ModeSocket, "socket"},
+	{fs.ModeCharDevice, "character device"},
+	{fs.ModeDevice, "device"},
 }
 
-// note records the entry at rel, whose target could not be stat'ed.
-func (u *unreadableLinks) note(rel string, err error) {
-	u.count++
-	if u.example != "" {
+// notAFile names the kind of an entry whose stat reports m when a walk does
+// not index it, and answers "" when it does: for a regular file, and for a
+// Windows reparse point that names nothing (ModeIrregular), such as a cloud
+// placeholder, which opens, and hydrates, like a file. That is why the test
+// is a list of kinds refused and not "is a regular file": on Windows a
+// OneDrive library with files on demand is ModeIrregular throughout.
+func notAFile(m fs.FileMode) string {
+	for _, k := range notAFileKinds {
+		if m&k.bit != 0 {
+			return k.name
+		}
+	}
+	return ""
+}
+
+// walkTally counts the audio-named entries a walk passed over for one reason,
+// for the one line a scan logs about them. One line, not one per entry: a
+// link is unreadable because its target is, and a mount that went away takes
+// every link into it at once, on every scan until it comes back.
+type walkTally struct {
+	count   int
+	example string // library-relative
+	detail  string // what the example was
+}
+
+// note records the entry at rel, and what it was.
+func (w *walkTally) note(rel, detail string) {
+	w.count++
+	if w.example == "" {
+		w.example, w.detail = rel, detail
+	}
+}
+
+// report logs the tally as msg, once, when there is one, with the example's
+// detail under key.
+func (w *walkTally) report(msg, key string) {
+	if w.count == 0 {
 		return
 	}
-	u.example = rel
+	scanLogger.Warn(msg, "count", w.count, "example", w.example, key, w.detail)
+}
+
+// walkTallies are the audio-named entries a scan's walk passed over
+// (walkedFileInfo), each reason reported in one line once the walk is done.
+type walkTallies struct {
+	// unreadable: links whose target could not be stat'ed. Their rows are
+	// kept (walkedFileTargetUnreadable).
+	unreadable walkTally
+	// notFiles: entries that are not files. Nothing is indexed for them
+	// (walkedFileNotAFile).
+	notFiles walkTally
+}
+
+// noteUnreadable records the link at rel, whose target the walk could not
+// stat.
+func (w *walkTallies) noteUnreadable(rel string, err error) {
 	// An *fs.PathError names the absolute path it was asked about; a log
 	// line names a library file library-relative (#1055), and rel already
 	// says which.
+	reason := err.Error()
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
-		u.reason = pe.Op + ": " + pe.Err.Error()
-	} else {
-		u.reason = err.Error()
+		reason = pe.Op + ": " + pe.Err.Error()
 	}
+	w.unreadable.note(rel, reason)
 }
 
-// report logs the tally, once, when there is one.
-func (u *unreadableLinks) report() {
-	if u.count == 0 {
-		return
-	}
-	scanLogger.Warn("links whose target could not be read; their rows are kept",
-		"count", u.count, "example", u.example, "err", u.reason)
+// noteNotAFile records the entry at rel, whose stat reports m.
+func (w *walkTallies) noteNotAFile(rel string, m fs.FileMode) {
+	w.notFiles.note(rel, notAFile(m))
+}
+
+// report logs each tally, once, when there is one.
+func (w *walkTallies) report() {
+	w.unreadable.report("links whose target could not be read; their rows are kept", "err")
+	w.notFiles.report("audio-named entries that are not files; nothing is indexed for them", "kind")
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
