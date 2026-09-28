@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -197,19 +198,28 @@ type OrphanSidecarSweeper struct {
 	// (cfg.Integrity.VariantSweepMaxDeletePercent); see MassOrphanRefusal.
 	maxOrphanPercent int
 
-	// refusing and lastRefusalLog are the refusal's log latch, the only
-	// state that crosses ticks. refusing holds the message of the refusal
-	// the current streak logged, "" outside a streak: a refused tick sets
-	// it, and a tick whose walk read the whole tree and whose verdict
-	// proceeds clears it. A tick refused for the OTHER reason starts a new
-	// streak and logs at once, since its advice differs. lastRefusalLog is
-	// when the refusal was last logged. A tick that stops before a verdict
-	// (a listing or a walk that failed or was stopped, an empty catalog)
-	// leaves both alone: it is evidence of nothing, so it neither ends a
-	// streak nor says the catalog recovered. Owned by the run goroutine;
-	// the tests drive tick directly, never beside a running loop.
-	refusing       string
+	// refusing, refusingSince and lastRefusalLog are the refusal's latch,
+	// the only state that crosses ticks. refusing holds the kind of refusal
+	// the current streak is, "" outside a streak: a refused tick sets it,
+	// and a tick whose walk read the whole tree and whose verdict proceeds
+	// clears it. A tick refused for the OTHER reason starts a new streak
+	// and logs at once, since its advice differs. refusingSince is when
+	// the streak started, lastRefusalLog when the refusal was last logged.
+	// A tick that stops before a verdict (a listing or a walk that failed
+	// or was stopped, an empty catalog) leaves all three alone: it is
+	// evidence of nothing, so it neither ends a streak nor says the catalog
+	// recovered. Owned by the run goroutine; the tests drive tick directly,
+	// never beside a running loop. A reader on another goroutine reads
+	// status instead.
+	refusing       OrphanRefusalKind
+	refusingSince  time.Time
 	lastRefusalLog time.Time
+
+	// status is the latch as Status reports it: written by the run
+	// goroutine whenever the latch moves, read by the console's /api/jobs
+	// handler. An immutable snapshot behind an atomic pointer, so the
+	// reader takes no lock the tick holds.
+	status atomic.Pointer[OrphanSweepStatus]
 
 	// onTickComplete is a test-only seam — same convention as
 	// VariantWatcher.SetOnTickComplete. Fires AFTER the per-tick
@@ -534,7 +544,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// The entries the walk could not stat are weighed as what they could
 	// be (MassOrphanRefusalFor): each is at most one file.
 	if reason := MassOrphanRefusalFor(inv, len(rows), s.maxOrphanPercent); reason != "" {
-		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanRefusal, reason, orphanRefusalHint}, inv.OrphanPaths)
+		s.noteRefusal(tickStart, root, orphanRefusal{OrphanRefusalMassOrphans, msgOrphanRefusal, reason, orphanRefusalHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
 	}
@@ -554,7 +564,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// (isFilesystemLostFound); an entry the walk could not stat is
 	// bounded and was weighed above.
 	if reason := PartialWalkRefusal(inv, len(rows), s.maxOrphanPercent); reason != "" {
-		s.noteRefusal(tickStart, root, orphanRefusal{msgOrphanPartialWalk, reason, orphanPartialWalkHint}, inv.OrphanPaths)
+		s.noteRefusal(tickStart, root, orphanRefusal{OrphanRefusalPartialWalk, msgOrphanPartialWalk, reason, orphanPartialWalkHint}, inv.OrphanPaths)
 		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
 		return 0
 	}
@@ -753,10 +763,12 @@ type orphanTally struct {
 // variants move`: that command needs the ROWS, and in the lost-index shape
 // there are none to move (#940).
 func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanRefusal, orphans []string) {
-	if s.refusing == r.msg && now.Sub(s.lastRefusalLog) < orphanRefusalRepeat {
+	if s.refusing != r.kind {
+		s.refusing, s.refusingSince = r.kind, now
+		s.publishStatus()
+	} else if now.Sub(s.lastRefusalLog) < orphanRefusalRepeat {
 		return
 	}
-	s.refusing = r.msg
 	s.lastRefusalLog = now
 	examples := make([]string, 0, orphanRefusalExamples)
 	for _, p := range orphans {
@@ -776,10 +788,65 @@ func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanR
 	)
 }
 
-// orphanRefusal is one refused tick's WARN: the message of its kind, the
-// numbers behind this refusal, and the kind's advice.
+// orphanRefusal is one refused tick's WARN: its kind, the message of the
+// kind, the numbers behind this refusal, and the kind's advice.
 type orphanRefusal struct {
+	kind              OrphanRefusalKind
 	msg, reason, hint string
+}
+
+// OrphanRefusalKind names what a streak of refused ticks of the background
+// orphan sweep refuses. The console receives it as a key and words it
+// itself, the discipline the Jobs page keeps for every bounded reason.
+type OrphanRefusalKind string
+
+// The kinds of refusal the background orphan sweep's latch holds.
+const (
+	// OrphanRefusalMassOrphans: the catalog is far smaller than the tree it
+	// describes, the lost-index shape (MassOrphanRefusalFor).
+	OrphanRefusalMassOrphans OrphanRefusalKind = "massOrphans"
+	// OrphanRefusalPartialWalk: the walk could not list part of the
+	// variants directory (PartialWalkRefusal).
+	OrphanRefusalPartialWalk OrphanRefusalKind = "partialWalk"
+)
+
+// OrphanRefusalKinds is every kind a refusing streak can be, for a caller
+// that has to word each one (the console's Jobs card) and a test that
+// holds it to that.
+func OrphanRefusalKinds() []OrphanRefusalKind {
+	return []OrphanRefusalKind{OrphanRefusalMassOrphans, OrphanRefusalPartialWalk}
+}
+
+// OrphanSweepStatus is what the background orphan sweep's refusal latch
+// says, for a reader on another goroutine: until 2026-09-28 the console's
+// Jobs card said "on" while every tick refused, and only the journal said
+// otherwise.
+type OrphanSweepStatus struct {
+	// Refusing is the kind of refusal the current streak is; empty when
+	// the sweep is not refusing.
+	Refusing OrphanRefusalKind
+	// Since is when the streak started: the first refused tick of it.
+	// Zero when Refusing is empty.
+	Since time.Time
+}
+
+// Status reports the refusal latch as the run goroutine last left it. Safe
+// from any goroutine; the zero value (not refusing) before the first tick
+// that decided anything, and for a nil sweeper.
+func (s *OrphanSidecarSweeper) Status() OrphanSweepStatus {
+	if s == nil {
+		return OrphanSweepStatus{}
+	}
+	if p := s.status.Load(); p != nil {
+		return *p
+	}
+	return OrphanSweepStatus{}
+}
+
+// publishStatus stores the latch for Status, as a fresh value each time so
+// a reader never sees one being written.
+func (s *OrphanSidecarSweeper) publishStatus() {
+	s.status.Store(&OrphanSweepStatus{Refusing: s.refusing, Since: s.refusingSince})
 }
 
 // noteProceeding ends a refusal streak: the first tick whose walk finished
@@ -796,7 +863,8 @@ func (s *OrphanSidecarSweeper) noteProceeding(root string, inv SidecarInventory,
 	if s.refusing == "" {
 		return
 	}
-	s.refusing = ""
+	s.refusing, s.refusingSince = "", time.Time{}
+	s.publishStatus()
 	logger.Info(msgOrphanRefusalLifted,
 		slog.Int("files", inv.Files),
 		slog.Int("orphans", inv.Orphans),
