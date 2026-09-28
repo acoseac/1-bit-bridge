@@ -985,6 +985,11 @@ func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
 // have. A restart would not install sox, so `live` is the honest status —
 // with a reason, or the operator watches a switch they just moved do
 // nothing.
+//
+// The CarPlay kind and its pre-generation read the upscale gate, sox
+// included, since 2026-09-28, so the same holds for their two switches.
+// Before that the sweeper ran without sox and queued jobs that could only
+// fail, and switching either on answered a bare `live`.
 func TestUpscaleDegradedReason(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1006,13 +1011,27 @@ func TestUpscaleDegradedReason(t *testing.T) {
 			srv, _, _ := newTestServer(t)
 			srv.deps.UpscalePrecheck = func() error { return tc.probeErr }
 			srv.deps.UpscaleSoxFLAC = func() (bool, bool) { return tc.hasFLAC, tc.known }
+			// A sweeper to nudge, as on every served bridge: without one
+			// the pre-generation switch reports `restart`, which already
+			// says why.
+			srv.deps.TriggerAutoOptimizeSweep = func() bool { return true }
+			// Both CarPlay switches start off, so the PATCH switches them on.
+			if err := srv.deps.CfgHolder.Update(srv.deps.CfgPath, func(c *config.Config) error {
+				off := false
+				c.Upscale.OptimizeEnabled = &off
+				c.Upscale.AutoOptimize.Enabled = false
+				return nil
+			}); err != nil {
+				t.Fatalf("arrange: %v", err)
+			}
 
 			var resp settingsPatchResponse
 			if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
-				map[string]any{"upscaleEnabled": true, "analysisEnabled": true}, &resp); code != 200 {
+				map[string]any{"upscaleEnabled": true, "analysisEnabled": true,
+					"optimizeEnabled": true, "autoOptimizeEnabled": true}, &resp); code != 200 {
 				t.Fatalf("patch: %d", code)
 			}
-			for _, f := range []string{"upscaleEnabled", "analysisEnabled"} {
+			for _, f := range []string{"upscaleEnabled", "analysisEnabled", "optimizeEnabled", "autoOptimizeEnabled"} {
 				got := resp.Fields[f]
 				if got.Status != applyLive {
 					t.Errorf("%s: status = %q, want %q — a restart cannot install sox",

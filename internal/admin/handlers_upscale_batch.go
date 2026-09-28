@@ -54,10 +54,10 @@ func (s *Server) upscaleActive() bool {
 }
 
 // optimizeActive reports whether the CarPlay kind may be generated right
-// now, by the live switch cmd/bridge wires into Deps.OptimizeActive
-// (`upscale.enabled` and `upscale.optimizeEnabled`). A nil switch reads as
-// on, the meaning Deps.OptimizeActive has always given it (wired is
-// active). The batch submit, the projection endpoint and the player's
+// now, by the live predicate cmd/bridge wires into Deps.OptimizeActive
+// (carPlayOptimizeActiveFn: the upscale gate, which is the flag and a
+// usable sox, and `upscale.optimizeEnabled`). A nil switch reads as on,
+// the meaning Deps.OptimizeActive has always given it (wired is active). The batch submit, the projection endpoint and the player's
 // variant summary all read this one predicate, so the console cannot offer
 // "Generate CarPlay" where the submit would refuse it
 // (TestTheVariantSummaryCarriesTheSwitchTheSubmitReads).
