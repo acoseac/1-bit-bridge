@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -310,20 +309,14 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		cfg.DetailFetchTimeout = defaultMediaServerDetailTimeout
 	}
 	if cfg.Dispatcher == nil {
+		// The fetch URL comes from an SSDP-advertised Location header (a
+		// LAN device, possibly rogue or spoofed), so the client relays a
+		// 3xx verbatim rather than following it toward loopback or a
+		// link-local metadata address, and refuses to connect to either
+		// unless the packet came from that address
+		// (discovery.NewDeviceFetchClient, the renderer client's too).
 		cfg.Dispatcher = &discovery.HTTPClientDispatcher{
-			Client: &http.Client{
-				Timeout: cfg.DetailFetchTimeout,
-				// Relay 3xx verbatim instead of following it. The fetch
-				// URL comes from an SSDP-advertised Location header (a
-				// LAN device, possibly rogue or spoofed), so
-				// auto-following a redirect to loopback or a link-local
-				// metadata address would turn the bridge into an SSRF
-				// probe against its own no-auth admin API. Mirrors
-				// internal/upnpproxy's CheckRedirect guard.
-				CheckRedirect: func(*http.Request, []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			},
+			Client: discovery.NewDeviceFetchClient(cfg.DetailFetchTimeout),
 		}
 	}
 	nowFunc := cfg.NowFunc
@@ -521,7 +514,12 @@ func buildMSearchPacket(searchTarget string) []byte {
 // handlePacket dispatches one SSDP packet — filtering by ST/NT to
 // MediaServer:1 so the renderer-side multicast traffic doesn't pollute
 // the server cache.
-func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []byte, _ *net.UDPAddr) {
+//
+// `src` is the address the packet came from. A LOCATION may lead the
+// bridge to this machine or a link-local address only when it is that
+// address (discovery.LocationFromSource here, and the default client's
+// dial check on the fetch); tests pass nil, which matches no address.
+func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []byte, src *net.UDPAddr) {
 	hdr, err := discovery.ParseSSDPHeaders(packet)
 	if err != nil {
 		return
@@ -541,6 +539,17 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		c.cache.Remove(udn)
 		c.forgetLocation(udn)
 		return
+	}
+	// A LOCATION this packet may not send the bridge to reads as absent,
+	// as ParseSSDPHeaders' own refusals do: a known UDN is still refreshed
+	// and an unknown one skipped, and the move detector never follows it
+	// (backlog B14: a known server re-announced from elsewhere with a
+	// LOCATION on the console was fetched there).
+	location := discovery.LocationFromSource(hdr.Location, src)
+	if location == "" && hdr.Location != "" {
+		logger.Debug("SSDP LOCATION refused: its host may lead to this machine or a link-local "+
+			"address, and the packet did not come from there", "udn", udn, "location", hdr.Location,
+			"source", src.String())
 	}
 	now := c.nowFunc()
 	if existing, exists := c.cache.Get(udn); exists {
@@ -567,20 +576,20 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		// recorded reference and the cached controlURL is absent too —
 		// treat as "no change" rather than guessing, since a false
 		// positive here is a re-fetch storm.
-		if hdr.Location != "" {
+		if location != "" {
 			if prev := c.previousLocation(udn, existing.ContentDirectoryControlURL); prev != "" &&
-				!sameURLHost(hdr.Location, prev) {
+				!sameURLHost(location, prev) {
 				logger.Debug("upstream server moved; re-fetching description",
-					"udn", udn, "from", prev, "to", hdr.Location)
-				c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+					"udn", udn, "from", prev, "to", location)
+				c.spawnDetailFetch(ctx, udn, location, src, now)
 			}
 		}
 		return
 	}
-	if hdr.Location == "" {
+	if location == "" {
 		return
 	}
-	c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+	c.spawnDetailFetch(ctx, udn, location, src, now)
 }
 
 // sameURLHost reports whether two URLs share the same host:port.
@@ -669,16 +678,18 @@ func (c *MediaServerDiscoveryClient) pruneLocations() {
 // 0→1 (the only shape that panics under a concurrent Wait). Stop()'s Wait
 // can't return until runLoop returns, by which time no further fetch Adds are
 // issued.
-func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, now time.Time) {
+func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, src *net.UDPAddr, now time.Time) {
 	c.wg.Add(1)
-	go c.fetchAndCacheDetails(ctx, udn, location, now)
+	go c.fetchAndCacheDetails(ctx, udn, location, src, now)
 }
 
 // fetchAndCacheDetails downloads + parses the device description for a
 // newly-discovered UDN, extracts the ContentDirectory controlURL, and
 // caches it. Bounded by a semaphore so a NOTIFY storm can't fan out
-// unbounded TCP connections.
-func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context, udn, location string, lastSeenAt time.Time) {
+// unbounded TCP connections. The fetch carries src, the address of the
+// packet that named location, so the default client connects to this
+// machine or a link-local address only when that is where it came from.
+func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context, udn, location string, src *net.UDPAddr, lastSeenAt time.Time) {
 	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very top
 	// so it fires on EVERY return path (including the semaphore-acquire
 	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
@@ -698,7 +709,7 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(discovery.WithAnnouncementSource(runCtx, src), c.cfg.DetailFetchTimeout)
 	defer cancel()
 	desc, err := discovery.FetchDeviceDescription(fetchCtx, c.dispatcher, location)
 	// FetchDeviceDescription returns a "no AVTransport service" error
