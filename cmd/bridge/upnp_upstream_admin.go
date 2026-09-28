@@ -11,6 +11,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
@@ -398,6 +399,15 @@ func (a *upnpAdminAdapter) AddServer(_ context.Context, req admin.UPnPServerAddR
 	}
 	if udn == "" && manualURL == "" {
 		return fmt.Errorf("%w: either udn or manualDescriptionURL is required", admin.ErrUPnPValidation)
+	}
+	// A manual URL on a cloud metadata address, typed here, is refused
+	// (backlog B54): no media server serves on one, and the poller would
+	// only refuse to fetch it, in a journal line the console does not show.
+	// A config that already holds one loads as before, and the poller
+	// refuses it at runtime.
+	if discovery.NamesCloudMetadataAddr(manualURL) {
+		return fmt.Errorf("%w: manualDescriptionURL names a cloud metadata address, which no media server serves on",
+			admin.ErrUPnPValidation)
 	}
 	return a.updateCfg(func(next *config.Config) error {
 		// Duplicate-identity check against existing rows. UDN match is
