@@ -967,10 +967,14 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// every source that behaves exactly as it did before the fallback
 	// existed. FFmpegSnapshot is cached the same way ProbeSox is.
 	route := routeSoxDirect
+	// ff is the snapshot the route is decided on, kept so a source it gives
+	// no route can say what this host lacks (missingDecodeTool).
+	var ff FFmpegInfo
 	if needsDecodeRouting(j.SourceAbsPath) {
+		ff = FFmpegSnapshot()
 		route = decodeRouteFor(
 			SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
-			FFmpegSnapshot(), j.SourceAbsPath)
+			ff, j.SourceAbsPath)
 	}
 	if route == routeFFmpegDSDPipe {
 		// The DSD chain owns its own scratch, temp sidecar and publish; see
@@ -983,8 +987,17 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// admit a row on its CODEC, and the probe can say no — so this is the
 	// one place the two views are reconciled. See ErrDSDDecodeUnavailable.
 	if j.SourceIsDSD {
-		return RunResult{}, fmt.Errorf("%w (route %s, source %q)",
+		err := fmt.Errorf("%w (route %s, source %q)",
 			ErrDSDDecodeUnavailable, route, filepath.Base(j.SourceAbsPath))
+		// A .dsf / .dff that did not route to the DSD chain is one this
+		// host's ffmpeg cannot decode: a fact about the host, which strikes
+		// no source (tool_unavailable.go). A DSD-flagged row under another
+		// extension is a fact about the row, and keeps its strike.
+		if class := decodeClassOf(j.SourceAbsPath); class == classDSD {
+			tool, reason := missingDecodeTool(ff, class)
+			return RunResult{}, markToolUnavailable(tool, reason, err)
+		}
+		return RunResult{}, err
 	}
 	input := []string{j.SourceAbsPath}
 	var geo sourceGeometry
@@ -1046,7 +1059,16 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		// debugging "this one file fails".
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return RunResult{}, fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+			err = fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+			// routeNone is the probe saying no decoder on this host reads
+			// the source's format (an MP4 file when sox has no MP4 reader
+			// and ffmpeg or ffprobe is missing), so sox's refusal is about
+			// this host's toolchain, not the file.
+			if route == routeNone {
+				tool, reason := missingDecodeTool(ff, decodeClassOf(j.SourceAbsPath))
+				return RunResult{}, markToolUnavailable(tool, reason, err)
+			}
+			return RunResult{}, err
 		}
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a

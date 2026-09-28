@@ -116,6 +116,16 @@ func TestACountedTranscodeFailureHasAlreadyReleasedItsPath(t *testing.T) {
 			landed:  requireStrikes(0),
 		},
 		{
+			// Parked in the outage's Warn, which only the first job logs;
+			// the retry logs the same message at Debug and passes.
+			name:   "tool unavailable",
+			logMsg: logToolUnavailable,
+			seed:   true,
+			runner: failRunner(soxLookupFailure()),
+			fsync:  noopFsync,
+			landed: requireStrikes(0),
+		},
+		{
 			name:   "fsync failed",
 			logMsg: "pool: fsync sidecar",
 			seed:   true,
@@ -267,6 +277,7 @@ func TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath(t *testing.T) {
 		{name: "success", seed: true, finish: okRunner(1), fsync: noopFsync, wantDone: true},
 		{name: "sox failed", seed: true, finish: failRunner(errors.New("sox FAIL formats: bad header")), fsync: noopFsync},
 		{name: "sox timed out", seed: true, finish: waitForTimeoutRunner, fsync: noopFsync, timeout: 20 * time.Millisecond},
+		{name: "tool unavailable", seed: true, finish: failRunner(soxLookupFailure()), fsync: noopFsync},
 		{name: "fsync failed", seed: true, finish: writeSidecarRunner, fsync: failingFsync},
 		{name: "store failed", finish: writeSidecarRunner, fsync: noopFsync},
 		{name: "panic", seed: true, fsync: noopFsync, finish: func(context.Context, JobSpec) (RunResult, error) {
