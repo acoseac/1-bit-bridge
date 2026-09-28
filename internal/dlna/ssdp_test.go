@@ -133,6 +133,31 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 	}
 }
 
+// loopbackInterface returns this host's loopback interface, which every test
+// that starts a real SSDP advertiser binds it to: the group join, the NOTIFY
+// sends (pinned there by SetMulticastInterface) and the M-SEARCH listener
+// then stay on this host. Until 2026-09-28 two tests bound the OS default,
+// the LAN, and one run of this package multicast about 310 NOTIFYs of a fake
+// MediaServer with a loopback LOCATION to every device and bridge on it
+// (backlog B38; measured with a listener joined on the LAN interface).
+//
+// It skips where the host has no loopback interface that is up, which a test
+// that must not reach the LAN cannot replace with another interface.
+func loopbackInterface(t *testing.T) *net.Interface {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skipf("cannot list interfaces: %v", err)
+	}
+	for i := range ifaces {
+		if ifaces[i].Flags&net.FlagLoopback != 0 && ifaces[i].Flags&net.FlagUp != 0 {
+			return &ifaces[i]
+		}
+	}
+	t.Skip("no loopback interface is up")
+	return nil
+}
+
 // Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
 // capture-local fix closes: with a short advertise interval the periodic
 // NOTIFY goroutine fires `sendAliveAll` rapidly while the M-SEARCH
@@ -142,14 +167,18 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 // detector AND can nil-deref-panic; the fixed shape (goroutines hold
 // captured local copies) is clean.
 //
-// Skips when multicast binding is unavailable (sandboxed CI) — the
-// structural fix stands on its own; this is the on-hardware proof.
+// The advertiser runs on the loopback interface (loopbackInterface), so
+// its NOTIFYs, one burst a millisecond, never leave this host. Skips when
+// multicast binding is unavailable there (sandboxed CI): the structural fix
+// stands on its own; this is the on-hardware proof.
 func Test_SSDPAdvertiser_StartStopRaceFree(t *testing.T) {
+	lo := loopbackInterface(t)
 	for i := 0; i < 5; i++ {
 		a := NewSSDPAdvertiser(SSDPConfig{
 			UDN:         "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c",
 			Location:    "http://127.0.0.1:7790/dlna/description.xml",
 			ServerToken: "test",
+			Interface:   lo,
 		})
 		// White-box: bypass the >=1min constructor clamp so the periodic
 		// NOTIFY goroutine actually ticks during the test window, putting

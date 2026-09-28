@@ -140,6 +140,12 @@ func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
 
 // newTestClient constructs a client with stub dispatcher + fixed
 // clock for deterministic testing of handlePacket dispatch.
+//
+// Its M-SEARCH sends go nowhere (discardMSearch). The interface it names is
+// the zero one, which pins a real send to the OS default, the LAN, so a test
+// that starts this client multicast a search every device there answered,
+// once per run, until 2026-09-28 (backlog B38). A test that wants a send's
+// result sets writeMSearch itself.
 func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient {
 	t.Helper()
 	cfg := DefaultDiscoveryConfig()
@@ -152,8 +158,13 @@ func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
+	c.writeMSearch = discardMSearch
 	return c
 }
+
+// discardMSearch is a writeMSearch that puts nothing on the wire and reports
+// the send as gone out.
+func discardMSearch(_ *net.UDPConn, b []byte, _ *net.UDPAddr) (int, error) { return len(b), nil }
 
 func TestHandlePacket_NotifyByeByeRemovesEntry(t *testing.T) {
 	c := newTestClient(t, &stubDispatcher{})
