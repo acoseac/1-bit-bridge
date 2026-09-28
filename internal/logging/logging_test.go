@@ -254,8 +254,8 @@ func TestMain(m *testing.M) {
 	fresh := false
 	once.Do(func() { fresh = true })
 	if slog.Default() != def || log.Writer() != out || log.Flags() != flags || !fresh {
-		fmt.Fprintf(os.Stderr, "a test left slog's default (put back: %v), the log package's output (%v) "+
-			"or flags (%v), or Init's once (%v) changed; a test here goes through resetOnce(t)\n",
+		fmt.Fprintf(os.Stderr, "a test here left changed what resetOnce(t) puts back: slog's default back=%v, "+
+			"the log package's output back=%v, its flags back=%v, Init's once fresh=%v\n",
 			slog.Default() == def, log.Writer() == out, log.Flags() == flags, fresh)
 		if code == 0 {
 			code = 1
