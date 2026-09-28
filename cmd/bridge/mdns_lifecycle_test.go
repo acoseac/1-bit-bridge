@@ -123,7 +123,9 @@ func TestLANInterfaceSourcePrintsAFailureOncePerStreak(t *testing.T) {
 		t.Fatalf("a success printed a line:\n%s", stderr)
 	}
 
-	answer.iface, answer.err = nil, errors.New("no LAN-eligible interface found")
+	// The same failure as the last one printed: only the success between
+	// them makes it a new streak.
+	answer.iface, answer.err = nil, errors.New("net.Interfaces: operation not permitted")
 	source()
 	if lines() != 3 {
 		t.Fatalf("the failure after a success printed %d lines in all, want 3:\n%s", lines(), stderr)
