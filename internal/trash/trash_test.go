@@ -479,7 +479,7 @@ func TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash(t *testing.T) {
 
 // TestTrashedFileIsNotVisibleToAScanWalk — the dot-directory is what keeps
 // trashed content out of the manifest. Asserted here on the NAME rule the
-// scanner applies (shouldSkipDir returns true for any "."-prefixed name), so a
+// scanner applies (ShouldSkipDir returns true for any "."-prefixed name), so a
 // rename of DirName that dropped the dot fails loudly.
 func TestTrashedFileIsNotVisibleToAScanWalk(t *testing.T) {
 	if !strings.HasPrefix(DirName, ".") {

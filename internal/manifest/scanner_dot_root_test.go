@@ -32,7 +32,7 @@ func scanRootOnce(t *testing.T, root string) (*Store, int) {
 
 // A library root whose OWN basename starts with a dot must still be
 // scanned. `filepath.WalkDir` invokes the walk callback for the root
-// itself, so an unguarded `shouldSkipDir(d.Name())` returned SkipDir on
+// itself, so an unguarded `ShouldSkipDir(d.Name())` returned SkipDir on
 // the very first callback — which terminates the walk and returns nil.
 // The result was 0 files indexed with NO error surfaced anywhere, and
 // on a fresh install not even the `observed == 0` sentinel fires
