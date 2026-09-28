@@ -1736,7 +1736,7 @@ no failing test — which is the shape to expect in this area.
   same row — a live stat makes every variant read stale whenever the scanner
   hasn't caught up.
 - **…and EVERY rendition writer stamps the row, and a render starts only while
-  the file still matches it** (2026-09-28, backlog B24). A rendition records ONE
+  the file still matches it** (#1077, backlog B24). A rendition records ONE
   version (`source_mtime_ns` / `source_size`, and a DSD one's peak in
   `dsd_peaks`) and two clocks judge it: the sweep's candidate queries and
   `FreshDSDPeaks` against the row, the serve path against the file on disk (a

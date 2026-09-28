@@ -23938,7 +23938,7 @@ Each on the committed tree, restored with `git checkout --` before the next.
 
 ## 2026-09-28 — every rendition records its track row's version, and a changed file is not rendered until its row is read again
 
-Backlog B24. A rendition records the version of its source it was made
+Backlog B24; PR #1077. A rendition records the version of its source it was made
 from: `track_variants.source_mtime_ns` / `source_size`, and a DSD
 rendition's Stage B peak, which `UpsertVariant` writes to `dsd_peaks` with
 the same pair. Three readers judge that version, on two clocks. The
