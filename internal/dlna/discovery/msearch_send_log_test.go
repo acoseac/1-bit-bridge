@@ -116,7 +116,7 @@ func TestSendMSearchSuppressesRepeatedFailures(t *testing.T) {
 	// A full day of ticks at the default 30s interval.
 	const ticks = 2 * 60 * 24
 	for i := 0; i < ticks; i++ {
-		c.noteSendResult(sendErr)
+		c.sendErrs.Note(sendErr)
 	}
 
 	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
@@ -140,19 +140,24 @@ func TestSendMSearchSuppressesRepeatedFailures(t *testing.T) {
 // TestSendMSearchEscalatesOnceSustained pins that the Error lands at the
 // threshold and not before: a Wi-Fi transition or a sleep/wake cycle resolves
 // well inside it, and escalating on the second tick would cry wolf.
+//
+// The threshold is ten minutes of the client's own cadence, which at the
+// renderer's default 30 s is the 20 failures it was a constant of until the
+// policy moved into SendFailureLog, so the literal also pins that this
+// client hands its interval to the log.
 func TestSendMSearchEscalatesOnceSustained(t *testing.T) {
 	buf := captureLogs(t)
 	c := newTestClient(t, &stubDispatcher{})
 	err := errors.New("boom")
 
-	for i := 1; i < ssdpSendErrEscalateAt; i++ {
-		c.noteSendResult(err)
+	const at = 20
+	for i := 1; i < at; i++ {
+		c.sendErrs.Note(err)
 	}
 	if got := countLines(buf, "failing persistently"); got != 0 {
-		t.Errorf("escalated after %d failures, before the %d threshold",
-			ssdpSendErrEscalateAt-1, ssdpSendErrEscalateAt)
+		t.Errorf("escalated after %d failures, before the %d threshold", at-1, at)
 	}
-	c.noteSendResult(err) // the threshold tick
+	c.sendErrs.Note(err) // the threshold tick
 	if got := countLines(buf, "failing persistently"); got != 1 {
 		t.Errorf("sustained Error appeared %d times at the threshold, want 1", got)
 	}
@@ -165,9 +170,9 @@ func TestSendMSearchLogsRecoveryOnce(t *testing.T) {
 	buf := captureLogs(t)
 	c := newTestClient(t, &stubDispatcher{})
 	for i := 0; i < 50; i++ {
-		c.noteSendResult(errors.New("boom"))
+		c.sendErrs.Note(errors.New("boom"))
 	}
-	c.noteSendResult(nil)
+	c.sendErrs.Note(nil)
 
 	if got := countLines(buf, "M-SEARCH send recovered"); got != 1 {
 		t.Fatalf("recovery logged %d times, want exactly 1", got)
@@ -177,7 +182,7 @@ func TestSendMSearchLogsRecoveryOnce(t *testing.T) {
 			"stretch in the log is unexplained")
 	}
 	// A second success must be silent — the streak is reset.
-	c.noteSendResult(nil)
+	c.sendErrs.Note(nil)
 	if got := countLines(buf, "M-SEARCH send recovered"); got != 1 {
 		t.Errorf("recovery logged %d times after a second success, want 1", got)
 	}
@@ -189,7 +194,7 @@ func TestSendMSearchSteadyStateIsSilent(t *testing.T) {
 	buf := captureLogs(t)
 	c := newTestClient(t, &stubDispatcher{})
 	for i := 0; i < 1000; i++ {
-		c.noteSendResult(nil)
+		c.sendErrs.Note(nil)
 	}
 	if buf.Len() != 0 {
 		t.Errorf("healthy sends produced log output:\n%s", buf.String())
@@ -202,8 +207,8 @@ func TestSendMSearchReFailsAfterRecovery(t *testing.T) {
 	buf := captureLogs(t)
 	c := newTestClient(t, &stubDispatcher{})
 	for round := 0; round < 3; round++ {
-		c.noteSendResult(errors.New("boom"))
-		c.noteSendResult(nil)
+		c.sendErrs.Note(errors.New("boom"))
+		c.sendErrs.Note(nil)
 	}
 	if got := countLines(buf, "M-SEARCH send failed"); got != 3 {
 		t.Errorf("got %d first-failure Warns across 3 separate outages, want 3 — "+
@@ -215,10 +220,10 @@ func TestSendMSearchReFailsAfterRecovery(t *testing.T) {
 // mode is SILENCE — the worst kind for a diagnostic.
 //
 // A client stopped mid-outage keeps its streak. Carried into a new run, the
-// first failure lands past BOTH arms of noteSendResult's switch (it is neither
-// 1 nor exactly the threshold), so a restarted-and-still-broken client would
-// log nothing at all — the opposite of what the suppression exists for.
-// Reported by Gemini on PR #708.
+// first failure lands past BOTH arms of SendFailureLog.Note's switch (it is
+// neither 1 nor exactly the threshold), so a restarted-and-still-broken
+// client would log nothing at all — the opposite of what the suppression
+// exists for. Reported by Gemini on PR #708.
 //
 // The new run's first failure is the live loop's own first send, which
 // fails through writeMSearch on every host. It used to be a failure the
@@ -233,12 +238,12 @@ func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
 	c := newTestClient(t, &stubDispatcher{})
 
 	// Fail through the escalation so both arms are already spent. No loop
-	// is live yet, and sendErrStreak is deliberately unsynchronised
-	// because runTickLoop is its only production toucher (see the field's
-	// comment), so driving it directly is safe only here, before Start,
-	// or after Stop, which joins the loop.
-	for i := 0; i < ssdpSendErrEscalateAt+5; i++ {
-		c.noteSendResult(errors.New("boom"))
+	// is live yet, and the streak is deliberately unsynchronised because
+	// runTickLoop is its only production toucher (see SendFailureLog), so
+	// driving it directly is safe only here, before Start, or after Stop,
+	// which joins the loop.
+	for i := 0; i < c.sendErrs.escalateAt+5; i++ {
+		c.sendErrs.Note(errors.New("boom"))
 	}
 
 	// Restart, still broken. Capture from here, so the first run's lines
@@ -258,8 +263,8 @@ func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
 	if !strings.Contains(buf.String(), routeGone.Error()) {
 		t.Errorf("the Warn does not carry the failure the restarted loop hit:\n%s", buf.String())
 	}
-	if c.sendErrStreak != 1 {
-		t.Errorf("sendErrStreak = %d after the restarted run's first failure, want 1", c.sendErrStreak)
+	if c.sendErrs.Streak() != 1 {
+		t.Errorf("streak = %d after the restarted run's first failure, want 1", c.sendErrs.Streak())
 	}
 }
 
@@ -286,9 +291,9 @@ func TestSendMSearchCutShortByStopIsNotAFailure(t *testing.T) {
 	if got := countLines(buf, "M-SEARCH send failed"); got != 0 {
 		t.Errorf("a send Stop cut short logged %d send-failure Warns, want 0:\n%s", got, buf.String())
 	}
-	if c.sendErrStreak != 0 {
-		t.Errorf("sendErrStreak = %d after a send Stop cut short, want 0: the stop counted "+
-			"as a failure", c.sendErrStreak)
+	if c.sendErrs.Streak() != 0 {
+		t.Errorf("streak = %d after a send Stop cut short, want 0: the stop counted "+
+			"as a failure", c.sendErrs.Streak())
 	}
 }
 
@@ -312,7 +317,7 @@ func TestSendMSearchReportsAFailureThatLandsDuringStop(t *testing.T) {
 	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
 		t.Errorf("a genuine failure during Stop logged %d send-failure Warns, want 1:\n%s", got, buf.String())
 	}
-	if c.sendErrStreak != 1 {
-		t.Errorf("sendErrStreak = %d after a genuine failure during Stop, want 1", c.sendErrStreak)
+	if c.sendErrs.Streak() != 1 {
+		t.Errorf("streak = %d after a genuine failure during Stop, want 1", c.sendErrs.Streak())
 	}
 }

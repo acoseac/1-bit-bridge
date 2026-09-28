@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,14 +169,19 @@ func TestHandlePacket_MovedHostRefreshesLastSeenAt(t *testing.T) {
 	}
 }
 
-// failingDispatcher fails every description fetch.
-type failingDispatcher struct{}
+// failingDispatcher fails every description fetch, and counts them.
+type failingDispatcher struct {
+	fetches atomic.Int32
+}
 
 func (d *failingDispatcher) Do(_ context.Context, _ *http.Request) (*http.Response, error) {
+	d.fetches.Add(1)
 	rec := httptest.NewRecorder()
 	rec.WriteHeader(http.StatusServiceUnavailable)
 	return rec.Result(), nil
 }
+
+func (d *failingDispatcher) fetchCount() int { return int(d.fetches.Load()) }
 
 // TestHandlePacket_GenuineMoveStillRefetches guards against over-correcting:
 // once a Location has been recorded, an announcement from a DIFFERENT host

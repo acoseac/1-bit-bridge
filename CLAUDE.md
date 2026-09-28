@@ -14,21 +14,22 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **39** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **40** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
   2026-09-10: the sixth stale claim of the kind, and in the paragraph that
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
-  `FuzzTextCandidateClassification`.) They cover
+  `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
+  `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 39 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 38, because
+  **Count them by file:name pair** to get 40 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 39, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -38,14 +39,17 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Thirteen carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Fourteen carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
   `FuzzParseRetryAfter` (the `maxRetryAfter` cap), `FuzzSACDVirtualPathRoundTrip` (a
   rendered virtual path must parse back to the same index and container — the renderer and the
   parser disagreeing is a row-reaping bug, since the deletion pass keys on
-  `IsSACDVirtualPath`), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
+  `IsSACDVirtualPath`), `FuzzSACDExpandUnderAReadFault` (an SACD image expanded through
+  one failing read answers what it answers fault-free, or an error: never "not an SACD"
+  where the fault-free read found an album, the answer that retires its rows; the rule
+  is under **Scanner**), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
   `FuzzPickIsShuffleInvariant`, `FuzzTextCandidateClassification`; their properties are
   under **Lyrics**), `FuzzMatchRelease` (a claimed match is an entry the listing holds),
   `FuzzKeyFor` (the dupe key is deterministic and every field reaches `Key.ID`),
@@ -55,7 +59,8 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   with a host, stays on the description's host when discovered, and names this machine or a
   link-local address only from a description URL that does too; it fuzzes the base URL as
   well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
-  them: **count them by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
+  them, and then "Twelve" and "Thirteen" that same day, as two more joined: **count them
+  by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
@@ -157,7 +162,7 @@ Force re-enrichment if the DB is already populated from a prior run:
 sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
 ```
 
-**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags — the scanner's skip gate at `internal/manifest/scanner.go:511` compares the file's on-disk mtime against `Track.ModTime`, which is stored INSIDE the `tags_json` BLOB column (read back via `GetTrack` from `tags_json` alone, NOT the standalone `mtime_ns` column). A `UPDATE tracks SET mtime_ns = 0` looks like it should work but doesn't, because `GetTrack` never reads that column. To force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes you must wipe the affected `tracks` rows so the next scan re-inserts them from scratch.
+**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags: the scanner's skip gate (`runScanWorker`) compares the walk's size and mtime with the row's `size` and `mtime_ns` COLUMNS, read through `GetTrackStat`. **This paragraph said until 2026-09-28 that the gate compared the mtime inside `tags_json` (through `GetTrack`), so that `UPDATE tracks SET mtime_ns = 0` does not work. It does**: the gate has read the columns since it moved to `GetTrackStat` (#574), and measured through the Go store, a row whose `mtime_ns` was zeroed is re-extracted on the next scan, on the full upsert leg (its `enriched_at` resets, as for a changed file). So to force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes, zero `mtime_ns` on the affected rows or wipe them, either way through the Go helper below. In code, a change to what extraction produces bumps `ExtractorVersion` instead, whose diff-guard bounds the delta to rows that changed.
 
 **The old `sqlite3 … "DELETE FROM tracks;"` form here is BROKEN since migration v4** (corrected 2026-06-23). v4 added the expression index `tracks(unicode_lower(path))` (+ a `track_variants` twin), and `unicode_lower` is a Go-registered scalar (`internal/manifest/sqlfunc.go` `init()`), so an external `sqlite3` CLI `DELETE`/`UPDATE`/`INSERT` on those tables fails at prepare with `unknown function: unicode_lower()`. Dropping the index doesn't help — it's created only by the version-gated migration, so a restart won't recreate it. Two working paths:
 
@@ -246,7 +251,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Ten claims in this list have been wrong and been corrected** — the
+**Eleven claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -256,8 +261,9 @@ the re-init that replaces it", which held for config-file and not for the port
 checks, (2026-09-26) "`os.ReadDir("")` reads the process working
 directory", (2026-09-27) "init never prompts for `customEndpoints`, so
 the old value survives the rewrite", (2026-09-27) "`Load` serves a config
-giving a blank name `DefaultLibraryName`", and (2026-09-28) "`analyze --gc`'s
-`Consider` requires `.1bwf`". The first five cost a later session real
+giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
+`Consider` requires `.1bwf`", and (2026-09-28) "`mtime_ns = 0` does not
+force a re-extraction". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -273,7 +279,10 @@ asserted the opposite (`served: "  "`, as written), and `Load` gave the
 default only to an exactly-empty name until #1042. The tenth named an
 extension the bridge has never written (waveforms have been `.waveform.bin`
 since #395), and survived because its conclusion, that a directory symlink
-is no candidate there, holds for either spelling.
+is no candidate there, holds for either spelling. The eleventh outlived the
+code it described: #574 moved the skip gate to `GetTrackStat`, which reads
+the `mtime_ns` column, and the bullet went on describing `GetTrack`, which
+reads the mtime inside `tags_json`.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -322,14 +331,21 @@ lost my library."
   completed read**, so the scanner also skips, retiring and writing nothing,
   a container that changed during the scan (`expandSACDContainer`): the
   handle's stat before the first read against a stat of the path after it
-  (`os.SameFile`, size, mtime), and the walk's stat against an LSTAT after it
-  (size, mtime). **Never `os.SameFile` against the walk's stat**: on Windows
-  a directory entry carries no file index on FAT or exFAT, so every container
-  there would skip, forever. **Never compare the walk's stat with a stat**:
-  the walk's is an lstat, so every symlinked container would read as moved
-  (`TestScanner_SACDSymlinkedContainer_Expands`). Residual: an in-place
-  overwrite that keeps size and inode inside one coarse mtime tick (FAT's
-  2 s). **No `ExtractorVersion` bump for this**: readable files expand
+  (`os.SameFile`, size, mtime), and the walk's stat against that same STAT
+  (size, mtime), since the walk's stat of a linked container is its TARGET's
+  (the next bullet). **Never `os.SameFile` against the walk's stat**: on
+  Windows a directory entry carries no file index on FAT or exFAT, so every
+  container there would skip, forever. **Never compare the walk's stat with an
+  LSTAT**: for a link the walk's stat is the target's, so every symlinked
+  container would read as moved (`TestScanner_SACDSymlinkedContainer_Expands`).
+  This bullet said the opposite, lstat, until 2026-09-28, when the walk's stat
+  of a link was the link's own; that pairing could not see a write to a
+  symlinked container's target before the open, and the album was retired
+  (`TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows`).
+  Residual: an in-place overwrite that keeps size and inode inside one coarse
+  mtime tick (FAT's 2 s), and a link repointed after the walk at a file with
+  the first one's size and mtime. **No `ExtractorVersion` bump for this**:
+  readable files expand
   byte-identically, a wrongly retired container has no representative row so
   the gate re-expands it anyway, and a bump re-upserts every virtual row (that
   leg has no diff-guard). `TestScanner_SACDReadFailure_RetiresNothing` (a
@@ -338,6 +354,83 @@ lost my library."
   (`Scanner.openSACD`), and
   `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` is the positive
   control: a container read whole as junk still retires, with tombstones.
+  **`FuzzSACDExpandUnderAReadFault` puts the rule under the fuzzer** (the other
+  SACD targets' reader never fails): an image expanded through one failing
+  read must answer what it answers fault-free, or an error. It holds only for
+  an image carrying ONE answer, so the harness builds it with identical TOC
+  copies, one stereo area and one geometry, and truncates it only BETWEEN
+  structures (`sacdFaultCuts`): an image whose copies differ can legitimately
+  expand from the second, and a later copy cut short is one that differs
+  (measured: cut inside the second area copy's TTxt sector, it expands to
+  "Track 1" where the first says "T1"). A reader that reports the end of the
+  file early is a truncation nobody can tell apart, so only failures that say
+  so are injected; `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` shows
+  the property reporting both. Its seeds fault each of the three reads above,
+  and they are what gives the fuzzer its reach: Go's mutator walks an integer
+  by at most 100, one argument per step, so with the DST probe's failure
+  dropped again it found the violation within half a second from the other
+  seeds (on the first harness and on the final one), and not in 90 s
+  (468,005 inputs) from one seed whose fault touched no read.
+- **A file the walk reaches through a link is indexed under its TARGET's
+  stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
+  symlinked audio file was indexed under the LINK's size (the length of the
+  path it stores: in one test run 123 bytes against a 116-byte FLAC, and 134
+  against a 1,228,800-byte `.iso`) and the link's mtime, while its tags came
+  from the target and every endpoint serves the target's bytes. The skip
+  gate compared the same
+  link stat, so a retagged target was never re-extracted (and a re-authored
+  linked `.iso` never re-expanded); `/v1/lyrics` answered 410 `lyrics_stale`
+  forever for its embedded lyrics (the row's stat against the resolver's
+  `os.Stat`); and the phone, which stores the size as `Track.fileSize`, fails
+  every offline download of the file (`validateDownloadedSize` wants an exact
+  match), re-downloads it forever through the auto-cache, and cannot read a
+  linked SACD container at all (its reads clamp to the container size).
+  `walkedFileInfo` is the one decision, in `walkRoot` and `ScanSubtree` alike:
+  a REGULAR file keeps its own stat and pays no second syscall; anything else
+  is stat'ed through (the listing's "not a regular file" test,
+  `resolveEntryInfo`, because a Windows junction is `ModeIrregular` with no
+  `ModeDir`; a cloud placeholder stats to itself). **A link whose target
+  cannot be stat'ed spares its own row, keyed on the entry itself, and mints
+  none**: "could not see" dominates, so a mount that went away keeps its rows
+  as they were, and the old walk's row minted from the path alone (which the
+  skip gate then kept once the target came back) is gone. Keyed on the entry,
+  not its directory, so a permanently dangling link spares nothing beside it.
+  One Warn per scan names them (`links whose target could not be read`),
+  never one per link: a mount takes every link into it at once. **A link to a
+  DIRECTORY is not a track**, whatever its name, and the walk still follows no
+  directory link (loops). **Nor is a named pipe, a socket or a device, or a
+  link to one** (`notAFile`): whatever stat the row would carry must describe
+  something that opens as a file, and a regular file whose own stat says
+  otherwise is judged through. A worker opens what the walk hands it, and
+  opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
+  named `01.flac` held a worker, and the scan with it, forever (measured still
+  running at 10 s, and at 15 s with its context expired at 5 s; an `.iso`
+  FIFO blocked the next scan too, since no row ever let the skip gate pass
+  it). By reading: `Scan` holds the scanner's mutex for its whole run, so
+  every later scan waits on it, and the stuck `IsScanning` stands down the
+  Atlas lyrics sweep, the booklet GC and the duplicate restamp and makes a
+  compaction answer 409. When a writer did come, the row was replaced by one
+  minted from the path (title "01", 0 bytes), and a link to a device or a
+  socket was indexed that way outright. **The refusal is a list of kinds,
+  never "is a regular file"**: a Windows cloud placeholder is
+  `ModeIrregular` after `os.Stat` and opens, and hydrates, as a file, so a
+  OneDrive library with files on demand would vanish. **A row at such a path
+  is reaped like a deleted file's**, after the usual missing-count grace, a
+  directory link's included: the walk stat'ed the entry and knows what is
+  there. That is the dangling link's answer reversed on purpose: a stat that
+  FAILED is "could not see", a stat that answered is a fact. One Warn per
+  scan names them with the example's kind (`audio-named entries that are not
+  files`), and a row the old walk minted for one is reaped the same way.
+  **No `ExtractorVersion` bump**: the stored stat of
+  each linked row no longer matches, so the first scan after the change
+  re-extracts exactly those rows, once, on the full upsert leg (one delta row
+  to every paired device, and a re-enrichment), and nothing else moves
+  (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
+  needed no change: it already said a listing row describes the target, and
+  a virtual row carries the container's size. **Still open: a library ROOT
+  that is itself a symlink to a directory is never walked** (`WalkDir` lstats
+  its root, so it visits one non-directory entry and stops: 0 rows, measured),
+  which is not this rule's shape.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
@@ -528,9 +621,12 @@ lost my library."
   The upsert reset to 0 is load-bearing. Never touch it anywhere else — the
   `WHERE enriched_at = 0` query drives the worker, and a broad reset pushes a
   whole-library delta to every paired device.
-- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and `mtime_ns = 0`
-  looks like it should work but doesn't (`GetTrack` reads mtime from inside
-  `tags_json`). See `## Local test fixture` for the two working paths.
+- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and a zeroed
+  `mtime_ns` IS: the skip gate reads the `size` and `mtime_ns` columns through
+  `GetTrackStat` (measured 2026-09-28). This bullet said until then that
+  `mtime_ns = 0` does not work because `GetTrack` reads the mtime from inside
+  `tags_json`, which described the gate before #574 moved it to `GetTrackStat`. See
+  `## Local test fixture` for the working paths.
 - **The scanner excludes its own variant sidecars** via an ANCHORED filename
   match (`^(upscaled|optimized)-v\d+-\d+-\d+$` on the final dot-segment, with
   the part before it a supported audio ext). Don't loosen to a substring — it
@@ -543,6 +639,12 @@ lost my library."
   `runScanWorker`, not around the loop — a panicking file must skip and let the
   worker continue. A crash found by the extractor fuzz targets is a REAL defect:
   the recover means a panicking file silently never reaches the manifest.
+  **Nothing recovers the WALK's callback** (`walkRoot`, `ScanSubtree`), so a
+  panic there ends the scan and the process with it: what the walk logs about
+  an error goes through `walkErrReason`, which cannot panic. An `*fs.PathError`
+  without a cause panics in its own `Error()`, so a guard on the cause does not
+  help once the text is taken first, which is where the suggested fix put it
+  (Gemini on #1070; measured, the suggestion still panicked).
 - **Shutdown joins every background writer**, and the wait must be written
   INLINE in the defer, never routed through a variable assigned later in
   `runServe` — the first tracked goroutine starts ~1200 lines before the end, so
@@ -2111,32 +2213,72 @@ no failing test — which is the shape to expect in this area.
   the stale `Clear()` wipes them. Every fetch spawn goes through the
   `spawnDetailFetch` helper that does the `Add(1)`; a missed site panics with a
   negative counter.
+- **…and both CLAIM a fetch per UDN from one bounded set, because a
+  semaphore acquired INSIDE the spawned goroutine bounds the fetches that
+  RUN, never the goroutines waiting to** (2026-09-28, backlog B37). The
+  upstream MediaServer client spawned a fetch per announcement, queued on its
+  two-slot semaphore: 10,000 packets cost 10,000 goroutines and 35 to 37 MiB
+  of stack, for one UDN as for many, and a burst for one new server fetched
+  its description once per packet (1,000 GETs for 1,000 packets). The
+  renderer client's per-UDN `claimFetch` collapsed one device's burst and
+  still spawned one goroutine per DISTINCT UDN, the shape a LAN peer that
+  sees the M-SEARCH's source port can send. **A dedup is not a bound**: the
+  backlog entry read that claim as guarding "exactly this", and it guarded
+  one shape of two. `discovery.DetailFetchClaims` is now the one set both
+  clients use, under each one's `locMu`: `Claim` refuses a UDN already
+  claimed and any claim past `MaxPendingDetailFetches` (64). A refused
+  dispatch records nothing, so the next announcement dispatches again (a new
+  device is fetched then, and a moved one still reads as moved). Measured
+  after: 1 goroutine and 1 fetch for one UDN's burst, 64 goroutines for
+  10,000 distinct UDNs, in either client. The claim is taken before the
+  spawn and released by the fetch's last deferred call (registered after
+  `wg.Done`, so it runs first): `Stop`'s join releases every claim, and a
+  restarted client skips no UDN. **The bound is on goroutines, not on the
+  renderer cache**: a flood of distinct renderer UDNs whose LOCATION answers
+  4xx still leaves one year-2999 structural stub per UDN (5,000 of 5,000
+  after an eviction pass, measured).
 - **Both SSDP read loops share `discovery.HandleReadErr`** — timeout resets the
   streak, `net.ErrClosed`/ctx exits, anything else logs with a ctx-aware backoff
   and one escalation. A bare `return` on a transient error kills discovery for
   the process lifetime; no backoff hot-spins a core. Keep the policy in the
   shared helper.
-- **The M-SEARCH SEND failure log is streak-suppressed** (first at Warn, one
-  Error at ~10 min, then silence until recovery). It runs on a ticker and its
-  failure mode is persistent by nature: unsuppressed it produced **199,078 of
-  the last 200,000 log lines**. The cost isn't disk — it's that every other line
-  becomes unfindable.
+- **The M-SEARCH SEND failure log is streak-suppressed, and BOTH discovery
+  clients report through the one `discovery.SendFailureLog`** (first at Warn,
+  one Error ten minutes into the streak, then silence until recovery, which
+  logs the streak's length). It runs on a ticker and its failure mode is
+  persistent by nature: unsuppressed it produced **199,078 of the last
+  200,000 log lines**. The cost isn't disk — it's that every other line
+  becomes unfindable. **The upstream MediaServer client discarded every send
+  error until 2026-09-28** (backlog B32): pinned to the dev Mac's routeless
+  `utun0`, its socket answered `sendto: can't assign requested address` on
+  every tick and the client logged nothing in 20 ticks; it now logs the Warn.
+  **Ten minutes is a DURATION, which each client turns into its own ticks**
+  (`sendErrEscalateAt`: 20 at the renderer's 30 s, 10 at the upstream's
+  60 s, never below 2). It was the renderer's constant 20, ten minutes at one
+  cadence only, and both cadences are configurable. **Every line names the
+  interface**: both wirings start one client per LAN-eligible interface, and
+  a route can be gone on one of them while the others send. `Start` calls
+  `Reset`. Don't give a client its own copy of the policy: this is the send
+  side's one definition, as `HandleReadErr` is the read side's.
 - **…and a send Stop's close cut short is a STOP, not a failure**
   (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
   can close it in between: the write fails with `net.ErrClosed`, which logged
   "M-SEARCH send failed … use of closed network connection" and took the
   streak to 1 on 4 of 6,000 plain Start→Stop cycles on macOS (43 under
-  `-race`) and 24 of 4,000 on Linux under `-race`. It is dropped before
-  `noteSendResult` sees it (0 of 12,000 after, on each host). **The ERROR
+  `-race`) and 24 of 4,000 on Linux under `-race`. `SendFailureLog.Note`
+  drops it before the streak sees it (0 of 12,000 after, on each host). **The ERROR
   decides, never the run's context**: the socket is the client's own and only
   Stop closes it, so `net.ErrClosed` names the stop exactly, while a write
   takes no context and a genuine failure that lands during Stop is still a
   failure (#998's second condition, under The CLI and the serve wiring).
   `TestSendMSearchReportsAFailureThatLandsDuringStop` goes red if the check is
   widened to `ctx.Err() != nil`. `HandleReadErr`'s ctx arm is no precedent: it
-  decides whether the READ loop exits, not what a result means. The upstream
-  MediaServer client (`internal/upnp`) discards every send error, so it has no
-  such line, and no line about a dead route either.
+  decides whether the READ loop exits, not what a result means. The drop is in
+  the shared log, so the upstream client has it too (its socket is likewise
+  its own, and only its Stop closes it). The server-side advertiser's NOTIFY
+  burst (`sendAliveAll`) ends on the same error rather than logging a Debug
+  line per target left, since only its Stop closes its sender; a write that
+  fails for its own reason still logs one per target.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -3574,10 +3716,11 @@ mentions across the four `ops/audit-*.md` files.
   carry the cancellation: a tsnet node the shutdown closed under
   `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
   context alone. Where the stop leaves its OWN mark on the error, ask the
-  error and not the context: the renderer discovery's M-SEARCH send drops
-  `net.ErrClosed`, which only its `Stop`'s close produces, and still reports
-  a genuine failure that lands during the stop (2026-09-28, under DLNA,
-  UPnP and discovery). **A stopped pass reports no failure the stop caused, and
+  error and not the context: both discovery clients' M-SEARCH sends drop
+  `net.ErrClosed`, which only each client's `Stop`'s close produces
+  (`discovery.SendFailureLog`, the advertiser's NOTIFY burst likewise), and
+  still report a genuine failure that lands during the stop (2026-09-28,
+  under DLNA, UPnP and discovery). **A stopped pass reports no failure the stop caused, and
   records no verdict, count or status for the work the stop
   interrupted.** A `ctxerr` site still reports any other failure, even
   one that lands during the shutdown (#998's second condition). The
@@ -5106,11 +5249,13 @@ its twin.** The top list is older, shorter, and read first.
   `"hidden"` in an automated tab, so `loading="lazy"` images never load and any
   perceived-performance claim measured that way is suspect.
 - **A field deliberately left unsynchronised binds TESTS too.**
-  `sendErrStreak` is only ever touched from its own run loop, so a test calling
-  `noteSendResult` directly must do so with no loop live — before `Start`, or
-  after `Stop` (which joins it). One that did neither raced under `-race` on CI
-  and was not reproducible locally in 26 runs. Adding a mutex would pay
-  production for a test's convenience.
+  A `discovery.SendFailureLog`'s streak (each discovery client's `sendErrs`,
+  the renderer's `sendErrStreak` until 2026-09-28) is only ever touched from
+  its own tick loop, so a test calling its `Note` or `Reset` directly must do
+  so with no loop live — before `Start`, or after `Stop` (which joins it).
+  One that did neither raced under `-race` on CI and was not reproducible
+  locally in 26 runs. Adding a mutex would pay production for a test's
+  convenience.
 - **…and a test that starts the loop decides what the loop's own sends do**
   (2026-09-28). `TestSendMSearchStreakResetsOnRestart` kept that ordering and
   still failed 10 of 200 runs on the dev Mac and 17 of 1,000 on Linux under
@@ -5122,7 +5267,9 @@ its twin.** The top list is older, shorter, and read first.
   per-client `writeMSearch` seam makes the restarted loop's own first send
   fail on every host, and the test asserts that send's Warn; with the reset
   deleted it fails 20 of 20 on both. A test whose subject a live loop also
-  moves cannot leave that loop's I/O to the host.
+  moves cannot leave that loop's I/O to the host. The upstream client got
+  the same seam and the same restart test
+  (`TestUpstreamSendStreakResetsOnRestart`) when it gained the report.
 - **Putting back slog's previous default does not put back the `log`
   package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28).
   `slog.SetDefault` points the log package's output at the new handler and
