@@ -1757,8 +1757,14 @@ no failing test — which is the shape to expect in this area.
   `OrphanSidecarSweeper.tick`, `upscale --gc`'s FORWARD sweep and `analyze --gc`
   did not, and `upscale --gc`'s reverse guard fires only after the forward sweep
   has already unlinked. An empty set over an EMPTY directory stays a silent
-  no-op. A BACKGROUND sweeper gets no override (nobody is in the loop to express
-  intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
+  no-op, and "empty" means nothing the reaper would remove, never "no entry at
+  all" (2026-09-28): the background sweep asks its inventory
+  (`emptyCatalogRefusal`), so a directory left holding empty folders, a
+  `.DS_Store`, a Trash or the filesystem's `lost+found` is quiet, and
+  `artwork --gc`'s empty-store guard reads the cache as its walk does. The CLI
+  `--gc` sweeps' own guard (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks
+  for any entry. A BACKGROUND sweeper gets no override (nobody is in the loop to
+  express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
   `--gc` command offers it — which is how `artwork --gc` was found to have
   carried an un-escapable refusal since it was written.
 - **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
@@ -1985,7 +1991,15 @@ no failing test — which is the shape to expect in this area.
   render / analyze (and `--allow-partial-walk` past the refusal of a walk
   that could not list part of the tree, below); `artwork --gc` is exempt
   BY NAME in the sweep test (content/MBID-keyed, no absolute path a
-  relocation can strand). #940 left
+  relocation can strand). **So `artwork --gc` steps over a directory it
+  cannot list** (2026-09-28): its verdict about a file is that file's name
+  against the keys, with no count over the tree for an unseen part to
+  flip, so it names the directory on stderr, counts it on the summary,
+  exits 0 unless a removal failed, and steps over the filesystem's
+  `lost+found` (`IsFilesystemLostFound`) without a word. It stopped at the
+  first such directory with exit 1 and no summary, after removing the
+  orphans that sort ahead of it; a cache root it cannot read still fails.
+  #940 left
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
@@ -2024,10 +2038,11 @@ no failing test — which is the shape to expect in this area.
   a budget carried between passes can be spent on files it never counted.
   The one cross-tick state is a LOG latch, the M-SEARCH rule: the refusal
   WARNs once when a streak starts and at most daily while it lasts; a tick
-  that decided nothing (a failed or stopped listing or walk, an empty
-  catalog) leaves the latch alone; the first tick that proceeds after it
-  logs one Info line. Its hint never names `bridge variants move` (it needs
-  the rows a lost index lacks). **A stranded tree no larger than the
+  that decided nothing (a failed or stopped listing or walk) leaves the
+  latch alone; the first tick that proceeds after it logs one Info line.
+  An empty catalog is a verdict, not a tick that decided nothing: the
+  third kind, under the Jobs-card bullet below. Its hint never names
+  `bridge variants move` (it needs the rows a lost index lacks). **A stranded tree no larger than the
   catalog is still reaped**, exactly as `--gc` reaps it: the refusal needs
   its floor, `orphans > rows` AND the ratio. The shared walker changed one
   behaviour on purpose: a SYMLINKED variants directory is walked now (the
@@ -2076,7 +2091,7 @@ no failing test — which is the shape to expect in this area.
   root-owned `lost+found` of an ext4 volume mounted AS the variants
   directory is not an unknown**: a directory named exactly that, directly
   under the RESOLVED walk root, that a PERMISSION error keeps this user
-  out of, is not counted (`isFilesystemLostFound`). Since #1063 it made
+  out of, is not counted (`IsFilesystemLostFound`). Since #1063 it made
   the background sweep refuse every tick and `bridge doctor` warn on every
   run. Nothing the bridge writes can be in it: a `<variantsDir>/lost+found`
   the bridge made (a single-root library's top-level folder of that name,
@@ -2086,11 +2101,19 @@ no failing test — which is the shape to expect in this area.
   `lost+found` could put sidecars in one the service user cannot list
   (unexamined, as the filesystem's); a volume mounted deeper in the tree
   has its `lost+found` counted, since nothing about the walk root vouches
-  for it; an I/O error on it counts. `TreeHoldsVariantSidecars`, the
-  reverse guard's probe, still fails closed on an unreadable `lost+found`
-  (a refused mass ROW deletion, the safe direction). A Gemini consult was
-  attempted for the `lost+found` trade-off and refused by the API's
-  spending cap; the rule is the narrow one, decided here.
+  for it; an I/O error on it counts. **The reverse guard's probe reads it
+  by the same rule** (2026-09-28; `IsFilesystemLostFound` is exported for
+  it and for `artwork --gc`). `TreeHoldsVariantSidecars` returned that
+  directory's permission error whenever no sidecar sorted ahead of it, so
+  on a fresh volume mounted as the variants directory `MassDeleteRefusal`
+  refused to reap rows whose sidecars really went, on every
+  `VariantWatcher` tick and in `upscale --gc` (exit 1, "could not be
+  read"), and it refused a tree whose sidecars sort after it for the
+  error rather than for the sidecars. It is evidence neither way there
+  now; any other directory the probe cannot list still fails it closed.
+  A Gemini consult was attempted for the `lost+found` trade-off and
+  refused by the API's spending cap; the rule is the narrow one, decided
+  here.
 - **The Jobs card shows the background orphan sweep's refusal**
   (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
   interval was positive, while every tick refused and only the journal
@@ -2106,9 +2129,22 @@ no failing test — which is the shape to expect in this area.
   `TestEveryOrphanRefusalKindIsWorded` runs `describeOrphanGCRefusal`
   under node for every kind, because the leaf guard proves the key is READ,
   not that it is WORDED; `TestServeReportsTheOrphanSweepRefusalOnTheJobsCard`
-  boots serve and is the only test that sees the wiring line. The
-  empty-catalog refusal is not a latch kind (it WARNs every tick and
-  decides nothing about the tree), so the chip does not show it.
+  boots serve and is the only test that sees the wiring line (a new kind
+  also joins `OrphanRefusalKinds`: the `/api/jobs` guard bullet under
+  **Admin console**). **The empty catalog is the third kind**
+  (`emptyCatalog`, 2026-09-28): it WARNed on every tick outside the latch
+  (five lines in eight seconds at a 2 s interval, on a real serve) while
+  the chip said "on". It is decided from the tick's inventory, ahead of
+  the mass-orphan check (which would refuse most of the same trees, but
+  none under its floor of ten): it refuses when the walk found a sidecar
+  file it would remove, or an entry it could not stat, weighed as one
+  (`emptyCatalogRefusal`); a tree with nothing it would remove ends a
+  streak and is otherwise quiet; a directory the walk cannot list, with
+  no file in view, is the partial walk's refusal. **Don't decide it from
+  `dirIsEmpty`**, main's question and this change's first draft: over a
+  directory left holding empty folders, a `.DS_Store`, a Trash or the
+  filesystem's `lost+found`, main WARNed "holds files" on every tick, and
+  the draft kept the card refusing forever (seen in a browser).
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
@@ -4826,7 +4862,11 @@ its twin.** The top list is older, shorter, and read first.
   `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
   comes back blank, `undefined` or `null` (what `console.log` prints for a
   case that returns nothing), as its key, as the fallback, or in another
-  kind's words.
+  kind's words. **And a list that stands for every value is pinned to the
+  declarations**: `TestEveryOrphanRefusalKindIsListed` reads the integrity
+  package's source for every constant of type `OrphanRefusalKind` and
+  requires `OrphanRefusalKinds()` to hold exactly those, since a kind the
+  list omits is worded by nobody and the wording test passes over it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
