@@ -21891,9 +21891,12 @@ built.
 | NC6 | the config built without `initAddresses` (baseConfig's defaults in every posture) | the two "not refused" tests (the second pass then grades the held defaults), and seven existing public-posture tests whose outcome follows the saved addresses (the saved config, the footer's URL, the domain endpoint's port, and the two #970 refusals, whose held port the config no longer names) |
 | NC7 | `PortFailed` answers for any failed check | `TestReportPortFailed`'s "another check failed" row, alone |
 | NC8 | `PortFailed` reads port-api only | the three refusal rows (each fails port-admin alone) and the unit test's port-admin row |
+| NC9 | #1027's NC-C: the second pass clears the pid file in every mode | nothing, as expected: no port of the run reaches that pass where no config loaded |
 
 On dido, the stock `golang:1.26.6` image (no lsof) as uid 1000 with
-`-race`: the same tests pass, and NC1 turns the same four red.
+`-race`: the same tests pass, and NC1 turns the same four red. The whole of
+`cmd/bridge`, `internal/doctor` and `internal/config` under `-race` there:
+ok, 182.9 s, 3.9 s and 1.2 s.
 
 ### Out of scope
 
