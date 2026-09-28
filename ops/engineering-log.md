@@ -24885,6 +24885,855 @@ and re-run green:
 - A strike records no reason, so the console cannot say why a file was
   suppressed, and `suppressedFailures` has no reader in the console at all.
 
+## 2026-09-28 — a GENA callback on this machine or the link gets the initial NOTIFY only from that address, and the NOTIFY follows no redirect (backlog B39, half of #818's step two)
+
+#818 (2026-09-01) was step one of a two-step narrowing of the GENA initial
+NOTIFY's callback guard. `callbackHostAllowed` admitted a callback host that
+is loopback, RFC 1918, link-local, or the SUBSCRIBE's source address; step
+two was to swap its body for `callbackHostMatchesSource` (the callback must
+BE the source, for every address) and delete the observer. #818 held that
+swap "for one release", conditional on `noteCallbackDivergence`'s Warn
+staying silent on the LAN bridges, because "some control points are reported
+to bind their outgoing SUBSCRIBE socket to one interface while requesting
+callbacks on another" and nobody could verify it. This entry closes the
+host-local half of step two, closes a redirect the guard never saw, and
+records why the private-address half stays held.
+
+### Whether the reason to hold still stands
+
+- **The release happened; the observation did not.** The observer shipped in
+  v0.2.0 (2026-09-18) and in the NUC's `-39` and `-58` builds. Every bridge
+  that has run it is either in public mode (bridge.ars.md until 2026-09-22,
+  the three hosted tenants, the demo), where `dlna.ShouldEnableDLNA` refuses
+  the DLNA listener in `startDLNAIfEnabled`, or has the listener off: the
+  NUC's `/v1/health` (one unauthenticated GET, 2026-09-28) lists 24
+  features and no `dlnaServer`. home-pc, the Windows LAN bridge, has not
+  been deployed since the 2026-08-05 "update bridge.ars.md only" default,
+  before #818, and did not answer from the workstation today. So the
+  observer has watched no SUBSCRIBE at all, and the claim it was gated on is
+  as unverified as it was. **The private-address half stays held**; its
+  evidence needs a LAN bridge with `dlna.enabled` running a build with the
+  observer for a release, which is a deploy decision.
+- **The iOS app is no subscriber.** Read in `~/dev/com.acoseac.dsdplayer`
+  (read-only): `DLNARendererTransport.subscribeGENA()` and `renewGENA()` are
+  stubs ("full GENA wiring lands in PR 4"), `unsubscribeGENA()` releases no
+  SID in v1, and `DLNAMediaServer.contentDirectoryEventURL` is stored "for a
+  future GENA subscription". The app sends no SUBSCRIBE to the bridge or to
+  any device. No wire change here, so no Mirror-PR.
+- **The host-local half does not wait on that evidence.** The reported shape
+  puts the callback on the control point's OTHER interface, an address of
+  the control point. A loopback address names the host that sends the
+  NOTIFY, so a loopback callback from any other address reached the bridge's
+  host and never its sender: nothing that worked for a remote control point
+  is refused. For link-local, the source address is kept as #1069 keeps a
+  LOCATION's: a link-local source proves nothing (any device on the segment
+  can take one and reach the bridge's LAN address, since macOS and Windows
+  keep a 169.254/16 route on the primary interface), and the address worth
+  protecting, 169.254.169.254, is never a subscriber's own.
+
+### What was measured on the old code
+
+The new tests, run against the unchanged `internal/dlna` (they build there;
+the GENA test server's client was then the same plain client Start built):
+
+```
+--- FAIL: TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe
+    a LAN subscriber (192.168.1.9:49152) with CALLBACK http://127.0.0.1:59753/api/stats: the loopback listener saw ["NOTIFY /api/stats"]
+    a LAN subscriber, the mapped spelling (192.168.1.9:49152) with CALLBACK http://[::ffff:127.0.0.1]:59753/api/stats: the loopback listener saw ["NOTIFY /api/stats"]
+    a subscriber on a public address (203.0.113.7:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+    a link-local subscriber (169.254.10.20:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+    another loopback address (127.0.0.2:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+--- FAIL: TestGENAInitialNotifyFollowsNoRedirect
+    the redirect target saw ["GET /api/stats" "GET /api/stats" "GET /api/stats" "NOTIFY /api/stats" "NOTIFY /api/stats"]
+--- FAIL: TestGENASubscriberCannotRedirectTheNotifyOntoThisHost
+    the loopback listener saw ["GET /api/stats"], on a LAN peer's redirect
+--- FAIL: TestStartSendsTheNotifyThroughTheCheckedClient
+    Start's notify client followed the callback's redirect to ["GET /api/stats"]
+```
+
+**The real binary, end to end** (origin/main `c6036d4a`, built with
+golang:1.26.6 on dido). The bridge ran in one container on a user-defined
+docker network with `dlna.enabled` and a request-logging listener on its
+own 127.0.0.1:9999; a second container, the LAN peer (`<peer>` below; the
+bridge's own address on that network is `<bridge>`), sent three
+SUBSCRIBEs to the bridge's `:7790/dlna/cds/event`. All three answered 200,
+and the listener on the bridge's loopback logged:
+
+```
+SINK NOTIFY /api/stats from 127.0.0.1:47100     CALLBACK <http://127.0.0.1:9999/api/stats>
+SINK NOTIFY /api/stats from 127.0.0.1:47112     CALLBACK <http://[::ffff:127.0.0.1]:9999/api/stats>
+SINK GET /redirected from 127.0.0.1:47100       CALLBACK <http://<peer>:8080/evt>, answered 302
+```
+
+The third is the wider hole. The peer's callback was its OWN address, which
+every version of the guard admits (#818's narrow one included); the peer
+answered the NOTIFY with a 302, and Go's client turned it into a GET to the
+Location, which the guard never saw. A 307/308 re-sends the NOTIFY instead,
+body and all. The Location can name any host, by address or by name. The
+console's `csrfGuard` answers a NOTIFY with a `text/xml` body 415, but lets
+every GET through, and in loopback mode nothing else stands before the
+console's handlers. The 2026-08-18 CodeQL triage (alert #12, above) called
+the flow "contained three ways: … `csrfGuard` 415s it before any handler":
+true of the NOTIFY and not of the GET a redirect makes of it.
+
+**Every other client that sends to a LAN peer's URL relays a 3xx**:
+`upnpproxy` (proxy.go), `discovery.NewDeviceFetchClient`, the manual
+upstream poller (internal/upnp/manual.go) and `upnpUpstreamSOAPHTTPClient`
+(cmd/bridge). The GENA NOTIFY's `&http.Client{Timeout: 5s}` was the one
+that followed: the rule was applied to four sites of five.
+
+### What changed
+
+- `callbackHostAllowed`: the callback host is an IP literal (a name is still
+  refused outright, and so is a zoned IPv6 literal, as `net.ParseIP` did).
+  It then asks the NOTIFY's dial approval first,
+  `discovery.SubscribedFrom(src).Permits(cb)` (#1074's `DialApproval`, with
+  the SUBSCRIBE as the approving peer): a loopback or link-local address
+  only when it IS the SUBSCRIBE's address (compared unmapped, the source
+  without its zone), never the unspecified address or a cloud metadata
+  address. Of what that admits, a private address from any source (held),
+  any other only when it is the source. `callbackAddr` and `subscriberAddr`
+  are the one parse of each side, shared with `callbackHostMatchesSource`.
+- `newNotifyClient` is `discovery.NewDeviceFetchClient`: no redirect, no
+  proxy, no kept-alive connection, and the dial check, under the approval
+  `fireInitialNotify` puts in the request context
+  (`discovery.WithDialApproval(ctx, discovery.SubscribedFrom(src))`). Start
+  and the GENA test helper both build it, so every GENA test sends through
+  the production client. In `internal/dlna/discovery`, `SubscribedFrom` is
+  new, `DialApproval.permits` is exported as `Permits` (the guard asks it),
+  and the dial check's refusal text names a GENA SUBSCRIBE beside an SSDP
+  packet.
+- `noteCallbackRefusal`: a refused loopback or link-local callback is a Warn
+  once per (callback, source) pair, bounded at 64 like the observer
+  (`firstSighting`, now shared, each warning with a set of its own since
+  review round 1, below). Other refusals stay the Debug line they were.
+- A server whose handlers were mounted without Start has no notify
+  context. `NewRequestWithContext` failed quietly on it; wrapping it in the
+  source panics ("cannot create context from nil parent"), so
+  `fireInitialNotify` returns first.
+
+### Merged with #1074
+
+#1074 landed while this was open, and replaced the dial check's
+"announcement source" with `discovery.DialApproval` (`AnnouncedFrom`,
+`OperatorChose`), adding cloud metadata addresses that no approval permits
+(`cloudMetadataAddrs`: three of them private or public, `fd00:ec2::254`,
+`100.100.100.200` and `168.63.129.16`). The first form of this change
+carried the SUBSCRIBE's address in a context key #1074 removed
+(`WithRequestSource`), and its guard admitted `fd00:ec2::254` from any
+source (a private address) while the dial check would then refuse the
+connect. So the guard now asks the approval itself, and the two cannot
+disagree: `metadata_ula_from_lan_source`, `metadata_from_itself` and
+`metadata_public_from_itself` pin it. One control changed its answer with
+the merge: keeping the zone in `subscriberAddr` (NC9) went green, since the
+approval strips the zone for the host-local decision; what still depended on
+it was the observer, which would have logged every IPv6 link-local
+subscriber calling back on its own unzoned address as a divergence.
+`ipv6_same_zoned_source` pins that, and turns NC9 red again.
+
+### Decisions, and what was rejected
+
+1. **The full step two now.** Rejected: its evidence does not exist (above).
+2. **Loopback by kind** (any loopback callback from any loopback source).
+   As safe, since a loopback source is a process on this host, which reaches
+   loopback services directly. Rejected for #1069's rule ("the subscriber's
+   own address, never any address like it") and so the guard agrees with the
+   dial check, which compares addresses.
+3. **Loopback from any address of this host.** Admits the one shape the
+   change costs (below), but needs an interface enumeration per SUBSCRIBE
+   and trusts every NAT that rewrites a peer's source to a local address.
+   Rejected; the shape is reported instead.
+4. **Link-local by kind.** Rejected for the reason in the first section.
+   The cost: a control point holding a DHCP and a link-local address on one
+   interface that names the link-local one while the kernel sources the
+   SUBSCRIBE from the other (a non-default configuration) is refused, and
+   the Warn names it.
+5. **No dial check, since a callback is a literal.** The two checks agree
+   today, so the second refuses nothing the first admits. Kept: it is
+   exactly what failed here, a string check that a redirect walked around,
+   and reusing the SSDP clients' client costs one line.
+6. **The refusal at Debug.** Rejected: a strict control point (Linn, Naim,
+   #325) waits for its initial NOTIFY, and a refusal is otherwise silent.
+
+### Measured after
+
+The same end-to-end run on the branch build: the three SUBSCRIBEs answered
+200, the peer's own callback got its NOTIFY (`PEER NOTIFY /evt from
+<bridge>`), its 302 was not followed, and the loopback listener logged
+nothing. The bridge logged two refusals, once each:
+
+```
+WARN GENA callback names this machine or a link-local address the SUBSCRIBE did not come from — initial NOTIFY not sent  callbackHost=127.0.0.1  subscribeSource=<peer>
+WARN … callbackHost=::ffff:127.0.0.1  subscribeSource=<peer>
+```
+
+(The merge with #1074 reworded the line to "GENA callback on this machine
+or a link-local address refused — …"; the run below repeats this one on the
+merged build.)
+
+From inside the bridge's container (a control point on the bridge's own
+host): a SUBSCRIBE to `127.0.0.1:7790` with a 127.0.0.1 callback got its
+NOTIFY; one to the container's own LAN address (<bridge>) with a
+127.0.0.1 callback was refused, the Warn naming `subscribeSource=<bridge>`
+(the cost decision 3 accepts); one to that address with a callback on that
+address was sent (nothing listened there). `go test -race -count=1` over
+`internal/dlna` and `internal/dlna/discovery` passed in the same image, the
+LAN-peer test running on the container's eth0 rather than skipping.
+
+The merged build (with #1074), the same run: the three SUBSCRIBEs answered
+200, the peer got its NOTIFY and its 302 was not followed, the two loopback
+callbacks were refused with one Warn each (`GENA callback on this machine
+or a link-local address refused — the NOTIFY goes only to the subscriber's
+own, never to a cloud metadata address`, `subscribeSource=<peer>`), and
+the bridge's loopback listener logged only the NOTIFY a SUBSCRIBE from
+inside the container asked for over `127.0.0.1`.
+
+### Tests and controls
+
+- `internal/dlna/gena_callback_test.go` (new):
+  `TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe` (five
+  sources and spellings), its positive twin
+  `TestGENANotifyReachesThisHostWhenTheSubscribeCameFromIt`,
+  `TestGENAHostLocalRefusalIsReportedOncePerPeer`,
+  `TestGENAInitialNotifyFollowsNoRedirect` (301, 302, 303, 307, 308),
+  `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` (the host's own
+  LAN address standing in for the peer's; it skips on a host with none),
+  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber`,
+  `TestStartSendsTheNotifyThroughTheCheckedClient` (a Start that fails on an
+  occupied port has built the notify state already) and
+  `TestGENASubscribeOnAnUnstartedServerSendsNothing` (through `mountedMux`,
+  the real handler tree with no Start).
+- `Test_callbackHostAllowed` gained 21 rows (the host-local ones, the
+  unspecified address, a name, a numeric spelling, zones, a ULA, three cloud
+  metadata addresses), and its two host-local rows flipped;
+  `Test_callbackHostMatchesSource`'s wide column moved for the two B39 rows,
+  and it gained `ipv6_same_zoned_source`; the divergence log tests became
+  `Test_callbackNotes_*`, run over both warnings.
+  `internal/dlna/discovery/subscribed_from_test.go`:
+  `TestSubscribedFromApprovesTheSubscribersOwnAddress`, on the dial check.
+- **Negative controls**, each applied once to the committed branch by a
+  script that requires its target text exactly once, `-count=1`, restored
+  with `git checkout --`, green again after:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the guard stops asking the approval (loopback, link-local and metadata admitted from any source) | 13 table rows (8 host-local and 3 metadata in `Test_callbackHostAllowed`, 2 in the divergence table), the refusal-report test. **Not** the end-to-end loopback test: the dial check refuses the connect |
+  | NC2 | the notify client keeps no-redirect and no-proxy, loses the dial check | the client test only |
+  | NC3 | fireInitialNotify drops the source from the context | the positive twin, the redirect test, the Start test, `Test_genaHandler_FiresInitialNotify` |
+  | NC4 | the pre-B39 plain client | the redirect test, the LAN-peer test, the client test, the Start test |
+  | NC4b | the checked client, following redirects | the redirect test, the Start test. **Not** the LAN-peer test: the dial check refuses the redirected connect |
+  | NC5 | Start builds its own plain client | the Start test |
+  | NC6 | every refusal at Debug | the refusal-report test |
+  | NC7 | no cap on the shared set | both `CapSuppressesRatherThanFloods` subtests |
+  | NC8 | the refusal keyed on host:port | the refusal-report test, `WarnOncePerPair/refusal` |
+  | NC9 | `subscriberAddr` keeps the zone | before the merge `ipv6_link_local_from_its_zoned_source`; after it nothing, then `ipv6_same_zoned_source` (above) |
+  | NC10 | a zoned callback accepted | first run: nothing (see below); then `zoned_private_callback`, and after the merge `ipv6_link_local_zoned_callback` too |
+  | NC11 | no unspecified arm (before the merge) | both unspecified rows; after it the arm is the approval's (`Permits`), pinned by the same rows and `SubscribedFrom`'s |
+  | NC12 | `SubscribedFrom` keeps the source as given | the discovery table's mapped and zoned rows |
+  | NC13 | no nil-context guard | the unstarted-server test (`panic: cannot create context from nil parent`) |
+
+  NC1, NC2, NC3, NC6, NC8, NC9, NC10 and NC12 ran again on the merged
+  code, with the results above. NC10 went green on its first run: every zoned link-local row is refused by
+  the zone-stripped comparison anyway, so the zone refusal in `callbackAddr`
+  was pinned by nothing, while a zoned private address would have been
+  admitted. The `zoned_private_callback` row was added, and NC10 turns it
+  red.
+
+### Out of scope
+
+- The private-address half of step two needs the observation described
+  above; nothing in the fleet can produce it today.
+- CodeQL alert #12 (`go/request-forgery`, server.go) was dismissed on the
+  containment argument this entry corrects; its dismissal comment should be
+  re-read against this change.
+- GENA to an IPv6 link-local subscriber has never worked: a zoned callback
+  literal is refused (as before), and an unzoned `fe80::` one cannot be
+  dialed on Linux without a scope. Unchanged.
+- No guard finds "a client that sends to a LAN peer's URL": the no-redirect
+  rule reached four of five such clients by hand, and a structural sweep
+  cannot tell one from a MusicBrainz client.
+
+### Review round 1 (CodeRabbit, one finding, taken)
+
+- **The refusal line shared the observer's bound** (Minor). One set of 64
+  held both warnings' pairs, and a peer reaches a refusal at will: 64
+  distinct refused pairs filled it, and the next divergence line, the
+  evidence B56 (the private half of step two) waits for, was suppressed.
+  Each warning has its own set now, under the one mutex, bounded alike.
+  `Test_callbackNotes_ARefusalFloodDoesNotSilenceTheDivergenceObserver`
+  sends 192 refused pairs and then one divergence: red on 4c36f34e ("logged
+  0 lines, want 1"), green on 8ebf29f3, and red again with the refusal
+  pointed back at the shared set (NC, run on the committed fix).
+
+## 2026-09-28 — CodeQL triage: the 27 alerts open on main are false positives (backlog B55)
+
+Open on `refs/heads/main` at `84a3df20`: 27 alerts of two rules, 14
+`go/log-injection` (#87, #88, #94, #95, #96, #97, #100, #103, #111–#115,
+#118) and 13 `go/path-injection` (#89, #90, #91, #119–#126, #131, #132).
+(The backlog entry's 16 and 11 were an estimate.) All 27 are false
+positives and were dismissed as such, each comment naming its barrier and
+the line it sits on. No production code changed. One test was added,
+because the one permanent delete in the trash rested on a barrier nothing
+drove end to end.
+
+### Method
+
+The alert API says only "depends on a user-provided value". The flows are
+in the analysis's SARIF: `gh api -H 'Accept: application/sarif+json'
+repos/acoseac/1-bit-bridge/code-scanning/analyses/<id>` (the latest
+`refs/heads/main` analysis, `1854518657`), whose `codeFlows` name each
+source and every step to the sink. Each alert was matched to its result by
+path and line, and the tainted argument read off the result's column.
+
+### go/log-injection: 14 alerts
+
+The probe (a `_`-prefixed directory, run and deleted, not committed) goes
+through the bridge's own setup: `logging.Init(os.Stdout)`, then
+`logging.Component("probe").Warn("constant message", "path", evil, "err",
+errors.New(evil))` and `.Warn(evil)`, with `evil =
+"a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`. Under
+`BRIDGE_LOG_FORMAT=text`, `=json`, and unset (stdout a file, so JSON): two
+records, two lines, zero CR bytes. Text wrote
+`path="a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`, JSON
+`"path":"a\nb\rc\r\ntime=…"`; the error attribute read the same, and so
+did the message. Every flagged logger resolves through `logging.Component`
+to the default handler (the DLNA server's is
+`logging.Component("bridge").With(component=dlna)`, the API's request
+logger `httpLogger.With(…)`), `main` calls `logging.Init(os.Stderr)` before
+`run`, and `internal/` has no `log.Printf` (handshakelog's `log.Print`
+reaches the same handler through `slog.SetDefault`).
+
+At each site the tainted value is an attribute and the message a constant:
+
+| alert | site | attribute |
+|---|---|---|
+| #87 | admin/handlers_upscale_batch.go:361 | `path` (through `scrubForLog`) |
+| #88 | admin/handlers_upload.go:167 | `err` |
+| #94, #95 | atomicwrite/atomicwrite.go:142 | `path`, `err` |
+| #96 | manifest/store.go:5751 | `path` |
+| #97 | upload/upload.go:722 | `err` (it wraps `dest`) |
+| #100 | dlna/server.go:593 | `callbackHost` (a Debug line) |
+| #103 | transcode/batch.go:1228 | `batchPath` |
+| #111 | api/artwork.go:371 | `mbid` |
+| #112 | api/artwork.go:396 | `mbid` |
+| #113 | api/files.go:445 | `source_path` |
+| #114 | api/files.go:446 | `variant_id` |
+| #115 | transcode/batch.go:515 | `batchPath` |
+| #118 | admin/handlers_api.go:1465 | `path`, through `attrs()`; the message is `scope+": …"`, and `scope` is a constant at both callers |
+
+### go/path-injection: 13 alerts
+
+- **#131, #132** (api/files.go:117 and :313, `os.Open(abs)`) are
+  re-fingerprints of #7 and #8, not new flows. The analysis of `cb9c8718`
+  (#1055, 05:35:13Z) marked #7 and #8 fixed and opened #131 and #132 at the
+  same lines: #1055 replaced `writeErrorLog` with `writeFileErrorLog` on the
+  lines just after both sinks, which moves CodeQL's line-context
+  fingerprint. The sinks still take `abs` from `ResolveChecked`
+  (files.go:108, :283), that is `resolveParts`: NUL and a raw `..` segment
+  refused, joined onto the root, prefix-checked (fs.go:329).
+- **#90** (trash.go:269, `os.Stat(src)`): `src` is `SplitRoot`'s root and
+  suffix, refused unless `fsutil.IsUnderAny(src, root)` (trash.go:263,
+  which resolves links on both sides); the path passed `validRel` first.
+- **#91** (trash.go:282, `MkdirAll`): `dst` is
+  `<root>/.bridge-trash/<stamp>/<rel>`, the stamp made by the server
+  (`UnixNano`), the rel through `validRel`.
+- **#119–#121** (restore.go:72, :85, :97): `dst` is `SplitRoot`'s root and
+  suffix, refused unless `IsUnderAny(dst, root)` (restore.go:66).
+- **#122–#124** (restore.go:152, :155, :175): `locate`'s
+  `<root>/.bridge-trash/<stamp>/<rel>`, which has no containment check of
+  its own (the next section).
+- **#125, #126** (restore.go:202, :203): `pruneEmptyStamp`'s
+  `<root>/.bridge-trash/<stamp>`.
+- **#89** (fsutil/fsync_unix.go:30): three flows, all through
+  `atomicwrite.RenameWithRetry` → `commitDirEntry` → `SyncParentDir`,
+  carrying `Trash`'s `dst` (#91's) and `Restore`'s (#119's). Callers traced
+  past CodeQL's flows: `upload.commitOne` (its `dest` after
+  `ValidateRelPath` and `AssertRootContains`, upload.go:676–682),
+  `fsutil.FsyncFileAndParent` (no production caller), and every other
+  `RenameWithRetry` caller writes a path of the bridge's own (the config,
+  data and cache directories).
+
+### The trash ids, on their own merits
+
+`Restore` and `Purge` take `<stamp>/<rel>` ids from a JSON body. `splitID`
+cuts at the first `/`. The stamp must `ParseInt` (base 10) to a positive
+integer, so it is `[+]?[0-9]+`: no separator, dot or drive letter. The rel
+must pass `validRel`: one leading `/` trimmed, then no NUL, no backslash, no
+empty, `.` or `..` segment, no dot-prefixed segment (which refuses `..` a
+second time), and clean form. The forms asked about:
+
+- `..`: refused in the stamp by `ParseInt`, and twice in the rel.
+- A separator: `/` splits. A backslash is refused in the rel and fails
+  `ParseInt` in the stamp. On Windows this is the barrier, since
+  `filepath.Join` collapses `..\..` there.
+- An absolute path: an id starting with `/` has an empty stamp; `1//etc/x`
+  loses one `/` and is relative, inside the stamp directory.
+- A Windows drive (`1/C:/x`): a legal segment to `validRel`, joined AFTER
+  the trash directory and the stamp, so `…\.bridge-trash\1\C:\x`, which
+  does not name `C:\x`: Go's `Join` and `Clean` read a volume only at the
+  start of a path. That is read from the source; what Win32 then does with
+  a mid-path `C:` was not measured here, and the Windows leg of the new
+  test is the measurement (a Purge that reached the file beside the root
+  would delete it). Win32's trimming of trailing dots and spaces cannot
+  turn a segment into `..` unless it starts with a dot.
+- The stamp's shape, measured: `ParseInt` base 10 with a positive result
+  accepts `+5` and `00012`, and refuses `-5`, `0`, `1_000`, ` 5`, `5 `,
+  `..`, `1\x`, `C:`, `0x1F`, `+` and the empty string.
+- No request can plant a link inside `.bridge-trash`: `Trash` refuses a
+  directory (its `os.Stat` follows links) and a link that resolves outside
+  the root (`IsUnderAny`), and uploads refuse dot-prefixed segments.
+
+`Restore` is guarded twice, since its destination also passes `SplitRoot`
+and `IsUnderAny`. **`Purge`, the one permanent delete, rests on `splitID`
+alone**, because `locate` checks nothing. Nothing drove either with a
+hostile id: `TestSplitIDRejectsMalformedInput` unit-tests the split alone.
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash` sends both operations ids
+aimed at a live library file and at a file beside the root, in each form
+above, and requires one refusal each, both files untouched, an empty
+library directory kept, and the real entry still listed.
+`TestTrashRejectsTraversalAndDotSegments` gained the drive-letter form. The
+backslash and drive rows mean something only on the Windows leg.
+
+Negative controls, the test committed first, each restored with `git
+checkout --`, `-count=1`:
+
+| | mutation | result |
+|---|---|---|
+| NC1 | `splitID` skips the stamp check | red: `Purge("../A/live.flac")` purges the live library file, and `pruneEmptyStamp(root, "..")` then prunes the library's empty directory |
+| NC2 | `validRel` drops `seg == ".."` | green: the dot-prefix rule refuses `..` as well |
+| NC2b | NC2, and the dot-prefix rule lets `..` through | red: `Purge` removes the live file (`<stamp>/../../A/live.flac`) and the file beside the root (`<stamp>/../../../outside.flac`), while `Restore` still refuses both (`SplitRoot` refuses a raw `..`); `TestSplitIDRejectsMalformedInput` red too |
+
+The backslash rule has no control off Windows, where a backslash is an
+ordinary filename byte.
+
+### Dismissals
+
+All 27 dismissed as "false positive" on 2026-09-28 (20:19Z), each with a
+comment under 280 characters naming the barrier and its line: the attribute
+and this probe for the 14 log-injection alerts; `resolveParts` (fs.go:329)
+for #131 and #132, with the #1055 re-fingerprint named; `SplitRoot`,
+`IsUnderAny` and `splitID` for the trash ones, #119–#126 naming
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash`. Nothing is open on
+`refs/heads/main` since. A later change to a line near one of these sinks
+re-fingerprints it, as #1055 did to #7 and #8: read the new alert's flow
+from the SARIF, and dismiss it again only while its barrier still stands.
+
+## 2026-09-28 — every route that serves a file's bytes refuses what is not a file, and never waits on a named pipe (backlog B46)
+
+#1070 stopped the scanner indexing a named pipe, a socket or a device, or a
+link to one. Nothing stopped a client naming one: `/v1/list` still lists
+such an entry (as a zero-byte file), and `/v1/download`, `/v1/read`, the web
+player's audio and download routes and the DLNA file route opened the path
+with `os.Open`. Opening a named pipe waits for a writer, and nothing can
+cancel the wait: open(2) is a blocking system call and Go cannot interrupt
+one.
+
+### The measurement
+
+A throwaway program (never committed) over the real `api.Server` behind
+`httptest`, with a session tracker from `internal/updater`, a regular track
+and a FIFO named `02 Pipe.flac` beside it, and a client timeout of 2 s, on
+unchanged code (4cd133e1), macOS:
+
+```
+/v1/stat?path=Artist/Album/02%20Pipe.flac               -> 200 in 2ms: {"isDir":false,"size":0,...}
+/v1/list?path=Artist/Album                              -> 200 in 0s: [...,{"name":"02 Pipe.flac",...,"isDir":false,"size":0,...}]
+/v1/download?path=Artist/Album/02%20Pipe.flac           -> client gave up after 2.002s: ... (Client.Timeout exceeded while awaiting headers)
+/v1/read?path=Artist/Album/02%20Pipe.flac bytes=0-65535 -> client gave up after 2.002s: ...
+updater sessions in flight right after both clients gave up: 2
+updater sessions in flight 3 s later:                       2
+ERROR http ... path=/v1/download status=500 duration_ms=7005
+ERROR http ... path=/v1/read status=500 duration_ms=5003
+sessions in flight after a writer came and went (11ms): 0
+```
+
+Both handlers, and the two updater sessions they had begun, stayed until
+the program played the writer 7 s in; then ServeContent failed its seek
+("seeker can't seek", 500). A session left in flight keeps auto-install
+deferring on every poll (`Tracker.Inflight`). The same program on the fix:
+400 at once with `{"error":"bad_request","message":"path is a named pipe,
+not a file"}`, no session left, and one Warn line naming the
+library-relative path (`err="named pipe is not a file"`). The red runs of
+the new tests below measured the rest: a link to `/dev/null` was served as
+an empty 200 by all three route families, a socket as a 500 by the two
+resolver-backed ones (the kernel refuses its open), and a rendition whose
+sidecar is a FIFO held its request the same way. The DLNA route serves the
+manifest's path, and a row outlives its file until the scan that reaps it,
+after the missing-count grace, so a track replaced by a FIFO was served
+until then.
+
+### The change
+
+- `fsutil.NotAFile` is #1070's list (`notAFileKinds`, `notAFile`), moved out
+  of `internal/manifest` so the scanner and the routes refuse by one list.
+  `internal/fsutil` imports nothing internal, so every caller can import it.
+- `fsutil.OpenAsFile` opens `O_RDONLY|O_NONBLOCK|O_NOCTTY` on unix, takes
+  the opened file's own stat, refuses a `NotAFile` kind with a
+  `*NotAFileError` inside the `*fs.PathError`, and clears `O_NONBLOCK` again
+  for a file. The nonblocking open is what makes a FIFO's open return, and
+  refusing by the OPENED file's stat is what closes the window between a
+  caller's stat and the open (a path replaced in between is judged as what
+  it is now). Open errors come back exactly as `os.OpenFile` gives them, so
+  every caller's `os.IsNotExist` arm answers as before.
+- The resolver-backed routes (`serveFile`, `servePlayerBytes`) ALSO refuse on
+  the resolver's stat before opening anything. That stat is free (the
+  resolver already took it), keeps a device from being opened at all, and
+  is the only thing that refuses a socket, because the kernel refuses a
+  socket's open itself (EOPNOTSUPP on macOS, ENXIO on Linux) before there is
+  a file to stat. The player stats a rendition's sidecar before opening it
+  for the same reason.
+- Answers, all existing codes: 400 `bad_request` "path is a <kind>, not a
+  file" on `/v1/download` and `/v1/read` (a directory already got 400
+  `bad_request`, and PROTOCOL.md's table gives it a malformed path), 400
+  `bad_path` "not a file" on the player (its directory answer), 404 on DLNA
+  (its answer for a source it cannot open), and 410
+  `variant_missing_on_disk` for a rendition whose sidecar is not a file, on
+  all three ("was here, fall back to the source"; `serveVariant` does not
+  reap for it, since nothing says the file is gone). No wire change, so no
+  PROTOCOL.md edit and no Mirror-PR.
+- Every production declaration that passes `http.ServeContent` a file now
+  opens it through `OpenAsFile`: the four byte routes, and the cache routes
+  (the artwork ladder and the artist image, both booklet routes, playlist
+  covers, waveforms, the console's cache files), which serve files the
+  bridge wrote itself. Converting those costs one fcntl a request and
+  removes each site's separate `f.Stat()` block, and it is what lets
+  `TestEveryServedFileIsOpenedAsAFile` hold with no exceptions.
+
+### Decided against
+
+- A stat before the open alone: the window between the stat and the open
+  stays, and a FIFO swapped in there (a symlink repointed, say) holds the
+  request forever.
+- A plain open on a goroutine with a timeout: the handler returns, but the
+  goroutine and the descriptor it eventually gets stay until a writer
+  comes, since a blocked open cannot be cancelled.
+- `O_NONBLOCK` with no fallback. It changes one answer for a regular file:
+  while another open holds a write lease on it (Samba's kernel oplocks take
+  one, an NFS server's delegation another), a nonblocking open fails with
+  EWOULDBLOCK where a plain open waits for the break, up to
+  lease-break-time (45 s by default). Measured on Linux (NC7 below): without
+  the fallback `OpenAsFile` answers "resource temporarily unavailable" at
+  once; with it, it waits out the test's 300 ms lease and opens (0.30 s). A
+  FIFO's nonblocking open never answers EWOULDBLOCK, so the fallback is no
+  way back to the wait.
+- Leaving `O_NONBLOCK` set on the file served. POSIX gives it no effect on a
+  regular file's reads, but a FUSE daemon (rclone, sshfs) is handed the
+  file's flags with every read, and one that honours the flag can answer
+  EAGAIN mid-stream. `setBlocking` clears it (NC6).
+- A new error code such as `not_a_file`: a wire change, which needs the iOS
+  mirror. `bad_request` already carries the directory case.
+- `O_NOCTTY` is kept and not pinned by a test: it matters only if a
+  terminal is swapped in after the caller's stat, and a systemd service is
+  a session leader with no controlling terminal, which on Linux an open of
+  a terminal without the flag hands it. It is inert for everything else.
+
+### Tests and negative controls
+
+`internal/fsutil`: `TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError`
+(every platform), `TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting` and
+`TestOpenAsFileLeavesTheFileItOpensBlocking` (unix),
+`TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes` (Linux; it takes a
+write lease on its own file and skips where a host refuses one). The route
+tests drive the real handlers through `fsutiltest.ServeWithin`, which
+bounds a request at 5 s and then plays the writer on the test's FIFOs, so a
+red run neither hangs the suite nor leaves a handler behind:
+`TestByteRoutesRefuseWhatIsNotAFile` (api, with a counting session tracker:
+every request must begin one and end it), `TestPlayerByteRoutesRefuseWhatIsNotAFile`
+(admin, the same for playback sessions, with renditions whose sidecars are
+a FIFO and a socket) and `Test_FileHandler_RefusesWhatIsNotAFile` (dlna).
+Each plants the same entries (`fsutiltest.PlantNotAFiles`: a FIFO, a link
+to it, a link to `/dev/null`, a socket) beside a track that must still be
+served. `internal/fsutil/fsutiltest` also took over #1070's scanner test
+helpers (`MakeFIFO`, `BindSocket`, the writer loop as `AwaitPastFIFOs`), so
+there is one copy of each. `TestEveryServedFileIsOpenedAsAFile` (cmd/bridge)
+reads every production file (438 of them, holding 12 `http.ServeContent`
+calls, when its floors were set); `TestServedFileSweepOnFixtures` runs its
+scan over six sources whose findings are known.
+
+On the committed fix (6e0247b2 and a8886f47, which are 86ac29fc and
+e2cc1d21 after the rebase onto 73ef5b58), each restored and re-run
+green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `internal/api/files.go` as on main | `TestByteRoutesRefuseWhatIsNotAFile`: the six requests on the pipe and the link to it, and the FIFO rendition, held 5 s each, then 500; the link to `/dev/null` 200 three times; the socket 500 three times. The sweep names `serveFile` and `serveVariant` |
+| NC2: `internal/admin/player_audio.go` as on main | the player test: the pipe and its link held 5 s on both routes, then 500; `/dev/null` 200 twice; the socket 500 twice; the FIFO rendition held, then 500; the socket rendition 500. The sweep names `servePlayerBytes` |
+| NC3: `internal/dlna/file_handler.go` as on main | the DLNA test: `/dev/null` 200 on GET and HEAD, the pipe and its link held 5 s then 500 on both, the FIFO rendition held then 500 (the socket passed, 404 from the failed open, as before). The sweep names `serveFromFilesystem` |
+| NC4: `openNoWait` without `O_NONBLOCK` | the fsutil test's pipe and link rows (held 5 s); the api test's FIFO rendition only, since its sources are refused on the resolver's stat; the DLNA test's pipe and link rows and its rendition. The player test stayed green: it stats the source and the sidecar before opening |
+| NC5: the api's refusal on the resolver's stat disabled | the api test's three socket rows only (500 from the refused open) |
+| NC5b: the player's refusal on the source's stat disabled | the player test's two socket rows only |
+| NC5c: the player's refusal on the sidecar's stat disabled | the socket rendition only (500) |
+| NC6: `O_NONBLOCK` left set | `TestOpenAsFileLeavesTheFileItOpensBlocking` (flags 0x4) |
+| NC7 (dido, golang:1.26.6): the EWOULDBLOCK fallback removed | `TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes`: "resource temporarily unavailable" |
+| NC8: `internal/api/booklet.go` and `internal/admin/handlers_library_meta.go` as on main | the sweep names `booklet`, `serveCacheFile` and `apiLibraryBooklet` |
+| NC8b: the sweep ignores `os.OpenFile` | `TestServedFileSweepOnFixtures`' `os.OpenFile` row only |
+| NC9: the named pipe dropped from `NotAFile`'s list | both sides: `TestNotAFileNamesEachKindTheWalkRefuses`, `TestScanner_AnEntryThatIsNotAFileIsNotATrack` (the scans held 10 s, a row minted "01" at 0 bytes), the fsutil pipe rows ("opened a named pipe as a file"), and the api pipe rows (500 at once, since the open no longer waits) |
+
+The route tests were red on main for every refusal row but the DLNA
+socket rows, which answered 404 there too, and the track beside the
+entries was served on both.
+
+### Not covered
+
+- `/v1/list` lists such an entry as a zero-byte file. A client that follows
+  the listing now gets the 400 at once; hiding the entry is a listing
+  decision (a dangling link deliberately still appears).
+- The listing's own `os.Open` of a directory has the same window: a
+  directory replaced by a FIFO between the resolver's stat and the open
+  holds the request. An `O_DIRECTORY` open would close it.
+- The scanner's extractors open with `os.Open` what the walk judged a moment
+  earlier, and the background jobs that open manifest paths
+  (`acoustid.ComputeFromPrefix`, `analyze`'s STREAMINFO read) do too; a FIFO
+  reaches them only through a swap after the walk, or a row whose file was
+  replaced before its reap.
+
+## 2026-09-28 — bridge init honours its address flags on a loopback run, a --force rewrite is not refused over a port it moves off, and doctor's hints speak to the operator
+
+Backlog B34: the three leftovers #1066's entry recorded under Out of scope.
+
+### What was measured
+
+Every run below is the real binary on the dev Mac, stdin `/dev/null`: "main"
+is a build of 172d4704, "after" a build of this branch.
+
+**A loopback init read neither address flag.**
+
+| | run | main | after |
+|---|---|---|---|
+| 1a | loopback first install, `--listen-address 127.0.0.1:A --admin-address 127.0.0.1:B`, both free | exit 0, saved `:7788` / `127.0.0.1:7789`, no word | exit 0, saved A / B |
+| 1b | the same with `--admin-address 0.0.0.0:B` | exit 0, saved the defaults | exit 2: `--admin-address "0.0.0.0:B": host "0.0.0.0" is not a loopback address`, and a line saying why (next section) |
+| 1c | the same with `--listen-address 443` | exit 0, saved the defaults | exit 2: `--listen-address "443": address 443: missing port in address` |
+
+**A `--yes --force` rewrite was refused over a port it moves off.** An
+install whose config loads, on 127.0.0.1:X and :Y, no pid file (its bridge
+stopped), X held by a python listener:
+
+| | rewrite | main | after |
+|---|---|---|---|
+| 2a | public, onto A / B | exit 1, `[FAIL] port-api :X in use`, "another process owns this port; stop it or pick a different address in bridge.yaml", config unchanged | exit 0, saved A / B |
+| 2b | loopback, no flags (so the defaults, free on the Mac) | exit 1, the same FAIL | exit 0, saved `:7788` / `127.0.0.1:7789` |
+| 2c | control: public, keeping X for the API | exit 1, the same FAIL, no note | exit 1, the same FAIL, `[ok] port-admin not checked: this rewrite moves off :Y`, and "port-api and port-admin above grade the ports this init would write; --listen-address and --admin-address choose others." |
+
+**Three doctor hints named a `Deps` field.** The task named the first; a
+grep for the pattern (every string literal in `internal/doctor` holding
+`Deps.`) found the other two, and each reached an operator:
+
+| | run | hint on main |
+|---|---|---|
+| 3a | `bridge doctor --config` over `listenAddress: ":0"`, `adminAddress: "127.0.0.1:0"` | `[warn] port-api no port set` / `pass Deps.port-apiPort`, and `pass Deps.port-adminPort` |
+| 3b | a public first install with `--listen-address 127.0.0.1:0` | the same, under "preflight warnings" |
+| 3c | `bridge doctor` with no config anywhere (HOME a fresh directory, an empty working directory): every run before `bridge init` | `[warn] tls-cert no data dir set` / `pass Deps.DataDir so doctor can inspect cert state` |
+| 3d | the same with HOME unset | also `[warn] config-dir no config dir set` / `pass Deps.ConfigDir so doctor can verify write access` |
+
+After, the same runs print, in order: "the address names port 0, so the
+system picks a free port each time the bridge starts, and there is none to
+check; set a fixed port if clients must reach this listener on the same
+port after a restart"; "no config that loads says where the certificate is,
+so there is none to inspect (config-file above says why); `bridge init`
+mints one on a first install"; and "no config was named or found, and the
+default config directory could not be resolved: it lives under this user's
+home directory (HOME, or USERPROFILE on Windows), which is not set. Set it,
+or name a config with --config". Summaries and severities are unchanged.
+
+### Decisions
+
+- **Honour the address flags on a loopback run rather than refuse them.**
+  `initAddresses` already took them; a loopback run returned before reading
+  them. It now reads them in either posture, so the preflight grades and
+  the config saves the same ports by the one definition #1066 made. An
+  operator whose 7788 is taken (a second bridge beside the first) had no
+  init route but to edit bridge.yaml after init had graded and saved the
+  defaults. Refusing was the smaller change and left that operator where
+  they were.
+- **A loopback run's `--admin-address` must name a loopback host**, the
+  rule `Validate` holds that install's adminAddress to: its console has no
+  login. `config.ValidateLoopbackAddress(field, addr)` wraps the unexported
+  `validateLoopbackAddress` with the field in the error, as
+  `ValidateBindAddress` does, and `Validate`'s loopback branch now calls it
+  too, so the file and the flag share one function (the error text is
+  byte-identical to the old `adminAddress %q: %w`). `initAddressFlagsError`
+  runs the bind check on both flags first, then the loopback rule, and adds
+  one line only to a HOST refusal: "without --public the admin console has
+  no login, so it listens on this machine only: reach it from another over
+  an SSH tunnel, or run init with --public for a console with a login". A
+  port that does not parse is no question of login. The unexported function
+  stays, since four comments and the top of CLAUDE.md name it.
+- **One note for both postures.** `portsThisInitWrites(public)` said "…
+  would write, its defaults." for a loopback run, false once the flags are
+  read; it is one sentence now, naming the flags.
+- **A certain rewrite leaves the ports it abandons ungraded.** Only `--yes
+  --force` over a config that loads is certain before the preflight: `--yes`
+  alone keeps the config, and an interactive run asks "Overwrite?" after
+  the preflight, where a no keeps the install's ports. `portsARewriteAbandons`
+  lists the install's ports the rewrite binds in neither role, and
+  `doctor.Deps.AbandonedPorts` answers a listed port ok "not checked: this
+  rewrite moves off :X" without probing it (`abandonedPortCheck`, in
+  `checkListenPort` after the owned-port answer). The shape follows
+  `ungradedConfigPortCheck`'s: a line that says it was not graded, and why.
+  The second pass grades the ports written in their place, as before, and
+  carries the same Deps; the list never names a port the run writes, which
+  is what makes that safe. Port 0 is matched like any other port (unlike
+  `OwnedPorts`, where 0 means unset): here it comes from a config, where
+  `:0` is a legal address a rewrite may leave.
+- **Rejected: a list built per role** (a check's port is abandoned when its
+  own role moves). A rewrite that moves the console onto the install's old
+  API port binds that port again; a per-role list names it, and the second
+  pass, grading it as the new admin port with the same Deps, answers "not
+  checked" and saves a port a stranger holds. NC8 below.
+- **Rejected: the preflight grading the run's ports in place of the
+  install's on a certain rewrite.** A changed port needs the pid file
+  cleared (#970) and a kept one needs it (the running bridge holds it), and
+  `Deps` carries one pid file for both checks. Attribution-only mode
+  (`OwnPIDPortsUnknown`) for both would refuse a capability-bound bridge on
+  its own kept port wherever the probe cannot read it, #1027's documented
+  limit, on the NUC's ordinary shape. The second pass already has the right
+  semantics per port.
+- **Rejected: moving "Overwrite?" ahead of the preflight** so an interactive
+  run is certain too. It reorders the interactive flow for every re-init and
+  still leaves a no-answer grading the install. The residual is recorded in
+  CLAUDE.md: an interactive rewrite moving off a held port is refused before
+  its prompt, and `--yes --force` is the way through.
+- **On a certain rewrite the note prints under a refused kept port.** Every
+  port graded there is one the rewrite writes, and the check's own hint
+  names a bridge.yaml the run is about to replace.
+- **All three `Deps.` hints, not only the port's, and a sweep.** The task
+  named the port hint; the other two are the same defect and reached more
+  operators (3c is every pre-init doctor run). `TestNoStringInThisPackageNamesADepsField`
+  walks the package's string literals by AST (the docblocks that discuss the
+  fields are comments, and not read), with a floor of 10 files and 200
+  literals. Severities stay: whether tls-cert's pre-init warn should decline
+  as an ok "not checked", as #1022's rule would suggest, is a separate
+  change (Out of scope).
+- **Consult**: Gemini is at the project's monthly spending cap; decided
+  without it, on the measurements above.
+
+### Tests
+
+- `cmd/bridge/init_loopback_addresses_test.go`:
+  `TestInitLoopbackRunWritesTheAddressesItIsGiven` (two first-install
+  shapes, both on 127.0.0.1 and the API on every interface with the console
+  on localhost, and a `--force` rewrite of a loopback install); it holds
+  `writeInstallConfig` (an install's config on any two addresses, which the
+  `:0` doctor row uses) and `writeLoopbackInstall` on top of it, which
+  `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads` now uses in
+  place of its own copy. The keep and moves-to tests share
+  `assertRewriteRefused` (exit 1, the FAIL on the held port, the config
+  untouched): SonarCloud fails a PR whose new lines are more than 3 %
+  duplicated.
+- `cmd/bridge/init_run_ports_test.go`: `TestInitPreflightRefusesAPortTheRunWrites`
+  gained a loopback-flags row and lost its per-row note;
+  `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` gained five loopback
+  rows (a listen address with no port, an admin port out of range, and an
+  admin host that is every interface, empty, or a name), requires the "no
+  login" line on exactly the three host rows, and passes `--library` so the
+  address is the run's only usage error.
+- `cmd/bridge/init_force_rewrite_ports_test.go`, each row in both postures:
+  `TestInitForceRewriteIsNotRefusedOverAPortItMovesOff`,
+  `TestInitForceRewriteStillRefusesAPortItKeeps` (kept as the listen port,
+  and as the admin port: the other-role shape),
+  `TestInitForceRewriteGradesThePortItMovesTo` (a stranger on the old port
+  and the new one: the second pass refuses the new one, and nothing names
+  the old), `TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt`
+  (the control that pins the residual), and `TestPortsARewriteAbandons`
+  (nine shapes, the swaps included; no row abandons a port the run writes).
+- `cmd/bridge/doctor_operator_hints_test.go`: `TestPrintedHintsSpeakToTheOperator`
+  drives `doctorCmd` and `initCmd` into 3a to 3d and a loopback init naming
+  `:0`, and requires the check's warn with no `Deps.` anywhere in the output.
+- `internal/doctor`: `TestHintsWithNothingToGradeSpeakToTheOperator`,
+  `TestNoStringInThisPackageNamesADepsField`, `TestAnAbandonedPortIsNotProbed`
+  (a held, listed port answers ok "not checked" on both checks with zero
+  calls to the bind probe; the same port unlisted FAILs).
+- **Red first, on the unchanged tree.** The new and changed test files were
+  copied into an archive of 172d4704 (a grep for `AbandonedPorts` and
+  `abandonedPortCheck` there found none), with `portsThisInitWrites()`
+  spelled as main's public variant, whose words the new note keeps, and a
+  stub `portsARewriteAbandons` returning nil so the package compiled. Red:
+  both new `internal/doctor` hint tests (the sweep naming `doctor.go:371`,
+  `:459` and `:965`), `TestPrintedHintsSpeakToTheOperator` 5 of 5, every
+  row of the three `TestInitForceRewrite…` tests, `TestInitLoopbackRunWritesTheAddressesItIsGiven`
+  3 of 3, the five loopback rows of the address-flag test, and the
+  loopback-flags row of the preflight-refusal table. Also red, by the
+  note's words only: that table's loopback-defaults row and
+  `TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`,
+  whose loopback note was "…, its defaults.". Green, as controls should be:
+  the interactive test, the keep test, and #1066's tests.
+
+### Negative controls
+
+Each on the committed tree (690fff79), restored with `git checkout --` and
+the tree confirmed clean after each; `-count=1` over `TestInit|TestDoctor|TestMenuDoctor|TestConfiguredPort|TestAutoStart|TestPrintedHints|TestPortsARewrite`
+in `cmd/bridge` and all of `internal/doctor`. Every mutation matched once
+and built.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | a loopback run reads neither address flag again | every loopback-flag test: the three `TestInitLoopbackRunWritesTheAddressesItIsGiven` rows, the loopback-flags row of the refusal table, the loopback init naming `:0`, and the loopback row of each `TestInitForceRewrite…` test (the run writes the free defaults and saves) |
+| NC2 | a loopback run's admin address skips the loopback rule | the three admin-host rows of the address-flag test, alone |
+| NC3 | the flags checked on a public run only, as before | the five loopback rows of the address-flag test |
+| NC4 | no abandoned list set | the not-refused test and the new-port test, both postures |
+| NC5 | the ladder never asks `abandonedPortCheck` | NC4's four rows and `TestAnAbandonedPortIsNotProbed` |
+| NC6 | `--yes` without `--force` abandons ports too | `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`, alone |
+| NC7 | any run over a loaded config abandons ports | that test and the interactive test |
+| NC8 | the list built per role | the two other-role rows of the keep test, and three `TestPortsARewriteAbandons` rows (the swap, and a port moving onto the other role's, each way) |
+| NC9 | the note only where no config loaded, as before | the four keep-test rows |
+| NC10 | no second pass on a `--force` rewrite | the new-port test (both postures), `TestInitRefusesToSaveAPortItNeverGraded`, `TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID` |
+| NC11 | the port-0 hint back to `"pass Deps."+name+"Port"` | the two port rows of the hint test, the sweep, and the three `:0` rows of the printed-hints test |
+| NC12 | the tls-cert hint back | its hint row, the sweep, and the two printed rows with no config (the no-home run has no data dir either) |
+| NC13 | the config-dir hint back | its hint row, the sweep, and the no-home printed row |
+| NC14 | the sweep reads no file | the sweep, on its floor |
+| NC15 | the admin address skips the bind check | the two admin-out-of-range rows, public and loopback (the loopback one then carries the "no login" line) |
+| NC16 | `abandonedPortCheck` probes the port before answering | `TestAnAbandonedPortIsNotProbed`, alone |
+
+### Gate
+
+On the dev Mac (host Go 1.27.1), over the branch merged with main at
+84a3df20 (#1074):
+
+- `go vet ./...`: clean.
+- The pinned gofmt (`go1.26.6`'s `gofmt -l`) over the ten Go files the
+  branch touches: nothing listed. `make fmt` was not run (the host's
+  gofmt 1.27 rewrites two files CI calls clean).
+- `go test -race -count=1 -p 2 -timeout 30m`: `internal/doctor` and
+  `internal/config` ok, and `cmd/bridge` ok on the PR head, the tree-wide
+  sweeps included (the citation guard reads this entry).
+- `make build-all P=2`: all six binaries. The three packages' test binaries
+  also compile for `windows/amd64` and `linux/amd64`.
+- NC4, NC8, NC9 and NC10 re-run after the helper refactor
+  (`assertRewriteRefused`, `writeInstallConfig`), each red on exactly the
+  tests the table above lists for it.
+
+The full Linux race suite runs in CI, and on dido for the PR head.
+
+### Out of scope
+
+- **`--domain`, `--email` and `--admin-tls-proxy` are still ignored,
+  silently, without `--public`**: a loopback init given all three exits 0,
+  and none reaches the saved config (measured with this branch's binary).
+  Their help says "required with --public" and "with --public:", so an
+  operator who forgets `--public` gets a loopback install and no word.
+- **tls-cert's "no data dir set" is a warn on every `bridge doctor` run
+  before `bridge init`**, where #1022's rule for a check that declines for
+  a reason another line reports (config-file's "none found") would make it
+  an ok "not checked". Its hint is an operator sentence now; the severity
+  is a separate change, which moves every first-run report's warn count.
+- **A loopback `--force` rewrite keeps a loopback install's
+  `customEndpoints` while writing the run's ports**, so a kept endpoint can
+  name the port the rewrite moves off. This predates the change (a loopback
+  rewrite always wrote the defaults, whatever port the install used), and
+  `printKept` lists the kept endpoints; the flags now at least let the
+  rewrite keep the port.
+- **An interactive rewrite moving off a held port is still refused before
+  its "Overwrite?" prompt** (recorded in CLAUDE.md as the residual).
+
+### Review round 1 (CodeRabbit, one finding, taken)
+
+- **The printed-hints test passed a report that printed no hint at all**
+  (Minor): it required the check's warn and no "Deps." anywhere, and a
+  report without hints satisfies both. Each case now names a phrase of its
+  hint, and `hintUnder` requires it on the line printReport puts under the
+  check. With both hint printers in cmd/bridge/doctor.go removed (NC, on the
+  committed test), all five cases are red; restored, green.
+
 ## 2026-09-28 — the auth and tls tests count writes and compare file identity, never a clock tick apart (backlog B52)
 
 `TestValidateUpdatesLastUsedAt` took `time.Now().UTC()`, slept 5 ms and asserted

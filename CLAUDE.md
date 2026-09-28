@@ -399,7 +399,8 @@ lost my library."
   never one per link: a mount takes every link into it at once. **A link to a
   DIRECTORY is not a track**, whatever its name, and the walk still follows no
   directory link (loops). **Nor is a named pipe, a socket or a device, or a
-  link to one** (`notAFile`): whatever stat the row would carry must describe
+  link to one** (`fsutil.NotAFile`, the list every byte route refuses by too:
+  the next bullet): whatever stat the row would carry must describe
   something that opens as a file, and a regular file whose own stat says
   otherwise is judged through. A worker opens what the walk hands it, and
   opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
@@ -431,6 +432,44 @@ lost my library."
   that is itself a symlink to a directory is never walked** (`WalkDir` lstats
   its root, so it visits one non-directory entry and stops: 0 rows, measured),
   which is not this rule's shape.
+- **…and a route that serves a file's bytes opens it with
+  `fsutil.OpenAsFile`, never `os.Open`** (2026-09-28, B46). Keeping such
+  entries out of the manifest stopped nothing a client names:
+  `/v1/download`, `/v1/read`, the player's audio and download routes and the
+  DLNA file route opened the path with `os.Open`, and opening a named pipe
+  waits for a writer with nothing that can cancel the wait (a blocked
+  open(2) cannot be interrupted from Go). Measured over the real
+  `api.Server`: the client gave up at 2 s, and both handlers, and the two
+  updater sessions they had begun (a pinned one keeps auto-install
+  deferring on every poll), stayed until a writer came 7 s in; `/v1/stat`
+  and `/v1/list` answered at once. A link to `/dev/null` was served as an
+  empty 200, a socket as a 500. The DLNA route serves the MANIFEST's path,
+  and a row outlives its file until the scan that reaps it. **One list**:
+  `fsutil.NotAFile` is #1070's, moved out of the scanner, so the manifest and
+  the routes cannot disagree about what a track can be; never a second copy.
+  `OpenAsFile` opens `O_NONBLOCK|O_NOCTTY` on unix, refuses by the OPENED
+  file's own stat (so a path replaced after a caller's stat is judged as
+  what it is now), and clears `O_NONBLOCK` again for a file, because a FUSE
+  daemon is handed the flags with every read. **Its EWOULDBLOCK fallback to
+  a plain open is load-bearing**: a nonblocking open of a file under another
+  process's write lease (Samba's kernel oplocks, an NFS delegation) fails
+  where a plain open waits for the break (up to lease-break-time, 45 s),
+  and a FIFO's nonblocking open never answers EWOULDBLOCK. The
+  resolver-backed routes ALSO refuse on the resolver's stat before any open:
+  that is what refuses a socket (the kernel refuses its open itself,
+  EOPNOTSUPP on macOS, ENXIO on Linux, so `OpenAsFile` cannot name it) and
+  keeps a device from being opened at all. The answers reuse existing codes,
+  so there is no wire change and no Mirror-PR: 400 `bad_request` "path is a
+  <kind>, not a file" (what a directory already got), 400 `bad_path` on the
+  player, 404 on DLNA, 410 `variant_missing_on_disk` for a rendition whose
+  sidecar is not a file. **`TestEveryServedFileIsOpenedAsAFile` fails on any
+  production declaration that passes `http.ServeContent` a file it opened
+  with `os.Open`/`os.OpenFile`**, so the cache routes (artwork, booklets,
+  playlist covers, waveforms) open through it too and the rule has no
+  exceptions; it reads one declaration at a time, so an open in one function
+  served from another goes unseen. Still `os.Open`: the scanner's
+  extractors, which open what the walk judged a moment earlier (a swap in
+  between is a race), and the background jobs that open manifest paths.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
@@ -2389,7 +2428,7 @@ no failing test — which is the shape to expect in this area.
   ones; Alibaba's 100.100.100.200; Azure's 168.63.129.16). `addrKind` names
   them first (`hostMetadata`), so the string check (`LocationFromSource`),
   the service-URL rule (`resolveServiceURL`, for every source) and the dial
-  check (`DialApproval.permits`) refuse them whatever approved the request.
+  check (`DialApproval.Permits`) refuse them whatever approved the request.
   **Exact addresses, never a range**: a direct-cable device self-assigns
   anywhere in 169.254/16 and fe80::/10, and a /24 around 169.254.169.254
   would refuse one such device in 254 (the tests keep one at 169.254.7.7).
@@ -2420,6 +2459,60 @@ no failing test — which is the shape to expect in this area.
   whole, and a dropped custom endpoint was quoted whole, a parse failure
   twice (the parse error quotes it). `url.URL.Redacted` is not enough: it
   keeps a token written as the user name, and the query.
+- **…and a GENA callback on THIS machine or a link-local address gets the
+  initial NOTIFY only when the SUBSCRIBE came from that address, and the
+  NOTIFY follows no redirect** (backlog B39, 2026-09-28). The DLNA listener
+  binds every interface, and `callbackHostAllowed` admitted a loopback or
+  link-local callback from ANY source, so a LAN peer could aim the NOTIFY at
+  the bridge's own loopback services, the unauthenticated console among
+  them. Measured with the real binary (two containers on dido): a peer
+  container's `CALLBACK: <http://127.0.0.1:9999/…>`, or the
+  `[::ffff:127.0.0.1]` spelling, made the bridge NOTIFY a listener on its own
+  loopback. **The redirect was the wider hole**: the NOTIFY client followed
+  the callback's 3xx, a 307/308 re-sending the NOTIFY and a 301/302/303
+  turning it into a GET, which the console's `csrfGuard` passes. A peer whose
+  callback is its OWN address, which every rule admits (#818's narrow one
+  included), steered the bridge to any URL, by address or by name (measured:
+  `GET /redirected` on the bridge's loopback). **It was the one client
+  sending to a LAN peer's URL that followed redirects**: `upnpproxy`, both
+  discovery dispatchers, the upstream SOAP client and the manual poller all
+  relay a 3xx. Now `callbackHostAllowed` asks the NOTIFY's own dial approval
+  FIRST (`discovery.SubscribedFrom(src).Permits(cb)`, #1074's
+  `DialApproval` with the SUBSCRIBE as the approving peer), so the guard and
+  the dial check cannot disagree: a loopback or link-local callback only
+  when it IS the SUBSCRIBE's address (#1069's rule for a LOCATION, and for
+  the same reason: the subscriber's own address, never "any address like
+  it"; a loopback callback names the host that SENDS the NOTIFY, and a
+  link-local source proves nothing, since any device on the segment can take
+  one), never the unspecified address or a cloud metadata address (#1074's
+  list; `fd00:ec2::254` is a ULA, which the private arm admitted from any
+  source before), and still a private address from any source. The NOTIFY goes out through
+  `discovery.NewDeviceFetchClient` (no redirect, no proxy, no kept-alive
+  connection, the dial check) under that approval
+  (`discovery.WithDialApproval`), so each layer holds without the other:
+  with the predicate reverted, `TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe`
+  stays green on the dial check, and with redirects followed,
+  `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` does;
+  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber` and
+  `TestGENAInitialNotifyFollowsNoRedirect` pin each alone. **Don't drop the
+  dial check because a callback is an IP literal**: it is what still holds
+  when a later change lets a name or a redirect past the string check, as
+  the redirect did. **Don't widen loopback to "any address of this host"**:
+  the one shape that costs is a control point ON the bridge's host that
+  subscribes over the host's LAN address with a loopback callback (measured:
+  refused), and admitting it trusts every NAT that rewrites a peer's source
+  to a local address. A refusal is a Warn once per (callback, source) pair
+  (`noteCallbackRefusal`, bounded at 64 in a set of its own, since a peer
+  reaches a refusal at will and a shared bound let refusals silence the
+  divergence lines step two waits for), so a control
+  point that needs the shape names itself. **#818's step two is only HALF
+  done**: refusing a private callback other than the source stays held,
+  because the observer it was gated on (`noteCallbackDivergence`, shipped in
+  v0.2.0) has watched no SUBSCRIBE: public mode never starts the DLNA
+  listener, the NUC's `/v1/health` carries no `dlnaServer` (2026-09-28), and
+  home-pc has not been updated since before #818. The evidence needs a LAN
+  bridge with `dlna.enabled` running the observer for a release. The iOS app
+  subscribes to nothing (`subscribeGENA` is a stub), so no Mirror-PR.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
@@ -3221,7 +3314,10 @@ what it claimed**, and none of it had a failing test.
   `withExistingInstallDeps` carries ports and pid file too, and is named
   for what it does rather than for certs — a name that says otherwise is
   how the next field gets left out. The first-install skip keeps its own
-  control. (#963)
+  control. (#963) The one part of that install it leaves ungraded is a
+  port a `--yes --force` rewrite moves off (2026-09-28, the "…on a `--yes
+  --force` rewrite" bullet below); the certificate and the data dir are
+  graded as ever.
 - **…and grades the ports it is about to SAVE, which is a different
   question** (#970). The preflight runs BEFORE the keep-or-overwrite
   decision, so where the install's config loads it grades the install's
@@ -3253,15 +3349,47 @@ what it claimed**, and none of it had a failing test.
   nothing, and its `OwnPIDPortsUnknown` exception (the "…over a config
   that is there and does not load" bullet) stays for a port that could
   differ. **A refusal on the run's ports says so under the report**
-  (`portsThisInitWrites`, printed only when a port check FAILed and no
-  config loaded): those lines are the run's choice, not a verdict about an
-  install, and the checks' own hint names a bridge.yaml, where a public
-  run chooses its ports with `--listen-address` and `--admin-address`.
-  **A public run's address flag that `config.ValidateBindAddress` refuses
-  is refused before the preflight** (exit 2), which has no port to grade
-  for it; it was refused only at the validation before Save, after a
-  preflight that graded 7788 in its place. Both flags are still ignored,
-  silently, without `--public`.
+  (`portsThisInitWrites`, printed only when a port check FAILed on the
+  run's ports: where no config loaded, or on a `--yes --force` rewrite,
+  the next bullet): those lines are the run's choice, not a verdict about
+  an install, and the checks' own hint names a bridge.yaml, where a run
+  chooses its ports with `--listen-address` and `--admin-address`. **An
+  address flag the config would refuse is refused before the preflight**
+  (exit 2, `initAddressFlagsError`), which has no port to grade for it; a
+  public run's was refused only at the validation before Save, after a
+  preflight that graded 7788 in its place. **Both flags apply in either
+  posture** since 2026-09-28: a loopback run read neither, and saved
+  `:7788` / `127.0.0.1:7789` with exit 0 and no word, whatever it was
+  given, `0.0.0.0` and an address with no port included. **A loopback
+  run's `--admin-address` must name a loopback host**
+  (`config.ValidateLoopbackAddress`, the rule `Validate` holds that
+  install's adminAddress to, now one function for the file and the flag):
+  its console has no login, so binding loopback is its whole trust
+  boundary. Don't honour a non-loopback one there and let `Validate` refuse
+  it after the preflight, and don't widen the rule for the flag.
+- **…and on a `--yes --force` rewrite of an install whose config loads,
+  the preflight grades only the install's ports the rewrite KEEPS**
+  (2026-09-28). That run is the one rewrite certain before the preflight,
+  and the preflight graded the install's old ports all the same: an
+  install on `:X` / `:Y`, its bridge stopped, another process on X, and a
+  rewrite moving the API off X exited 1 on `[FAIL] port-api :X in use`
+  (measured with the real binary, as a public run and as a loopback one),
+  about a port the saved config never binds. `portsARewriteAbandons` lists
+  the install's ports the rewrite binds in NEITHER role, and
+  `doctor.Deps.AbandonedPorts` answers each ok "not checked: this rewrite
+  moves off :X", with no probe; the second pass grades what the rewrite
+  writes in their place, as before. **Build that list over both roles,
+  never per role**: a rewrite moving the console onto the old API port
+  binds that port again, and a per-role list names it, so the second pass,
+  which carries the same Deps while it grades that port as the new admin
+  port, answers "not checked" and saves a port a stranger holds. **A kept
+  port is graded as the install's, pid file and all**, and its refusal says
+  it is a port this init would write (`portsThisInitWrites`). **An
+  interactive run grades them all, as before**: its "Overwrite?" comes
+  after the preflight, and a no keeps the install's ports, as `--yes`
+  without `--force` does, so a stranger on one refuses a run that may keep
+  it. That is the residual: an interactive rewrite moving off such a port
+  is refused before its prompt, and `--yes --force` is the way through.
 - **The "is it us?" fallback must NOT reach a port the run is choosing.**
   `checkPort` answers ok or warn — never fail — whenever the pid in
   `OwnPIDFile` is alive and the owner probe could not rule it out (one it
@@ -3698,6 +3826,22 @@ what it claimed**, and none of it had a failing test.
   legal as `"0"`. `autoStartProbeTarget` is the same question for
   `spawnNowOrWarn` — extracted because the other branch starts a real
   detached process, so the behaviour otherwise has no test at all.
+- **A doctor hint is read by an OPERATOR, so no string in `internal/doctor`
+  names a `Deps` field** (2026-09-28). Three hints were notes for whoever
+  calls the package, and each reached operators, measured with the real
+  binary: `pass Deps.port-apiPort` under "no port set" for every config or
+  init flag naming `:0` (the answer the bullet above says `checkPort` "has
+  always had"), `pass Deps.DataDir so doctor can inspect cert state` on
+  EVERY `bridge doctor` run before `bridge init`, and `pass Deps.ConfigDir
+  …` on one with no home directory. Each is a sentence about the install
+  now (`portZeroHint`, `noDataDirHint`, `noConfigDirHint`), severities
+  unchanged. `TestNoStringInThisPackageNamesADepsField` walks the package's
+  string LITERALS by AST, so the docblocks that discuss the fields are not
+  read, and a hint built from pieces (`"pass Deps."+name+"Port"`) is caught
+  by its first; a floor of files and literals keeps a sweep that read
+  nothing from passing. A caller's mistake (a zero `Deps`) and an operator's
+  choice (`:0`) arrive at the same branch, and only the operator reads the
+  report.
 - **`bridge init` decides every refusal BEFORE it writes `bridge.yaml`, and
   keeps what an install already has: its TLS pair and a public install's
   admin ACCOUNT** (#1038). A public `--force` re-init over a public install
