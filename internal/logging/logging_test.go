@@ -229,9 +229,9 @@ func TestDynamicHandlerCacheInvalidatesOnSetDefault(t *testing.T) {
 // Test-only — production calls Init exactly once at startup.
 //
 // It also puts back, when the test ends, everything a test here changes,
-// which is what a test binary that never ran Init has: slog's default and
-// the log package's output and flags (loggingtest.SetDefault, which the
-// test's own Init and slog.SetDefault calls happen after), and a fresh
+// as a test binary that never ran Init has them: slog's default and the log
+// package's output and flags, through loggingtest.SetDefault, which runs
+// before the test's own Init or swap and so undoes those too; and a fresh
 // once. Before, it put back nothing: every later line in this binary went
 // into the last test's buffer. TestMain checks the four are back.
 func resetOnce(t *testing.T) {
