@@ -96,13 +96,17 @@ const structuralStubHold = 5 * time.Minute
 
 // structuralStubLastSeen is the LastSeenAt a structural stub is stamped
 // with. EvictStale drops an entry ttl after its LastSeenAt, so the stub is
-// stamped structuralStubHold - ttl past the failure (never before it), and
-// goes structuralStubHold after it. Only stubs carry such a future
-// LastSeenAt, and Snapshot never serves a stub.
+// stamped structuralStubHold - ttl from the failure and goes
+// structuralStubHold after it, whatever the TTL: after the failure under a
+// TTL shorter than the hold (the default 60 s), before it under a longer one
+// (dlna.discovery.rendererTTLSeconds admits up to a year). The first form
+// clamped the stamp to the failure, so under a TTL longer than the hold the
+// stub lived the whole TTL (CodeRabbit on #1086).
+//
+// Nothing but eviction reads the stamp. Snapshot never serves a stub, and
+// makeRoomLocked's earliest-LastSeenAt-first is still the order of expiry,
+// since every entry expires ttl after its stamp.
 func structuralStubLastSeen(failedAt time.Time, ttl time.Duration) time.Time {
-	if structuralStubHold <= ttl {
-		return failedAt
-	}
 	return failedAt.Add(structuralStubHold - ttl)
 }
 
