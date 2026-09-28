@@ -87,11 +87,12 @@ func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	}
 
 	// The pre-generation sweeper and its card. Wait for the startup scan,
-	// so the sweep has the two tracks to offer, then ask for one.
+	// so the sweep has the two tracks to offer, then ask for one and wait
+	// until one more sweep has finished than had before the nudge.
 	waitForTracksIndexed(t, b.console, b.adminBase, 2, b.stderr)
-	since := time.Now()
+	before := b.autoOptimizeSweeps.Load()
 	nudgeAutoOptimize(t, b.console, b.adminBase)
-	card := waitForAutoOptimizeSweep(t, b.console, b.adminBase, since, b.stderr)
+	card := waitForAutoOptimizeSweep(t, b, before)
 	if !card.Enabled {
 		t.Fatalf("fixture broken: the card says the pre-generation switches are off: %+v", card)
 	}
@@ -209,10 +210,9 @@ func v1UpscaleStatsEnabled(t *testing.T, client *http.Client, apiBase, token str
 
 // autoOptimizeCardView is the Jobs card this test reads from GET /api/jobs.
 type autoOptimizeCardView struct {
-	Enabled        bool       `json:"enabled"`
-	Active         bool       `json:"active"`
-	DegradedReason string     `json:"degradedReason"`
-	LastFinishedAt *time.Time `json:"lastFinishedAt"`
+	Enabled        bool   `json:"enabled"`
+	Active         bool   `json:"active"`
+	DegradedReason string `json:"degradedReason"`
 	Last           *struct {
 		Disabled bool `json:"disabled"`
 		Enqueued int  `json:"enqueued"`
@@ -234,25 +234,36 @@ func nudgeAutoOptimize(t *testing.T, client *http.Client, adminBase string) {
 	}
 }
 
-// waitForAutoOptimizeSweep polls the Jobs card until it reports a sweep
-// that finished after since, and returns the card.
-func waitForAutoOptimizeSweep(t *testing.T, client *http.Client, adminBase string, since time.Time, stderr *safeBuffer) autoOptimizeCardView {
+// waitForAutoOptimizeSweep waits until more than `before` pre-generation
+// sweeps have finished, by the count serve keeps for the test
+// (servedBridge.autoOptimizeSweeps), and returns the Jobs card read after
+// that. The count goes up once a sweep's result is on the card, so the
+// card read here shows that sweep or a later one.
+//
+// It counts rather than comparing the card's lastFinishedAt with the time
+// of the nudge. A sweep the gate refuses finishes within a millisecond,
+// which on Windows is inside one tick of the wall clock (about 15.6 ms), and
+// a time decoded from JSON carries no monotonic reading, so the two compare
+// by wall clock: the finish equals the nudge's instant, "after" never
+// holds, and the wait ran out on test (windows-latest) (2026-09-28).
+func waitForAutoOptimizeSweep(t *testing.T, b *servedBridge, before int64) autoOptimizeCardView {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		var jobs struct {
-			AutoOptimize *autoOptimizeCardView `json:"autoOptimize"`
-		}
-		getJSON(t, client, adminBase+"/api/jobs", "", &jobs)
-		if card := jobs.AutoOptimize; card != nil && card.LastFinishedAt != nil && card.LastFinishedAt.After(since) {
-			return *card
-		}
+	for b.autoOptimizeSweeps.Load() <= before {
 		if time.Now().After(deadline) {
-			t.Fatalf("no pre-generation sweep finished within 30 s of the nudge; card=%+v stderr=%s",
-				jobs.AutoOptimize, stderr.String())
+			t.Fatalf("no pre-generation sweep finished within 30 s of the nudge (%d finished before it, %d now); stderr=%s",
+				before, b.autoOptimizeSweeps.Load(), b.stderr.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	var jobs struct {
+		AutoOptimize *autoOptimizeCardView `json:"autoOptimize"`
+	}
+	getJSON(t, b.console, b.adminBase+"/api/jobs", "", &jobs)
+	if jobs.AutoOptimize == nil {
+		t.Fatalf("GET /api/jobs carries no pre-generation card after a sweep finished; stderr=%s", b.stderr.String())
+	}
+	return *jobs.AutoOptimize
 }
 
 // waitForTracksIndexed polls the console's stats until the library holds

@@ -2318,6 +2318,14 @@ type serveOpts struct {
 	// request's context, to hold a drain open across a shutdown. Per
 	// invocation for tailscaleCLI's reason.
 	wrapAPIHandler func(http.Handler) http.Handler
+	// autoOptimizeSwept is called after each pre-generation sweep has
+	// recorded its result on the Jobs card. Nil everywhere but the boot
+	// tests, which count sweeps with it: a sweep the gate refuses ends
+	// inside the clock tick it started in on Windows (about 15.6 ms), so
+	// a finish time read off the card cannot say whether the sweep ran
+	// after a nudge the test sent. Per invocation for tailscaleCLI's
+	// reason.
+	autoOptimizeSwept func()
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -4054,6 +4062,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 					}
 					return 1
 				},
+				swept: opts.autoOptimizeSwept,
 			}
 			autoOptimizeRearm := make(chan struct{}, 1)
 			cadenceRearms = append(cadenceRearms, autoOptimizeRearm)

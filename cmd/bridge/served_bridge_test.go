@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -24,6 +25,11 @@ type servedBridge struct {
 	// phone skips certificate verification: the bridge presents the
 	// self-signed pair it minted at boot, which this test has no pin for.
 	phone *http.Client
+	// autoOptimizeSweeps counts the pre-generation sweeps that have
+	// finished and been recorded on the Jobs card, through
+	// serveOpts.autoOptimizeSwept: a count a test can wait on where a
+	// finish time cannot be compared (waitForAutoOptimizeSweep).
+	autoOptimizeSweeps atomic.Int64
 }
 
 // startServedBridge stands up `bridge serve` on a config it writes for a
@@ -68,9 +74,16 @@ func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *se
 	serveCtx, stop := context.WithCancel(context.Background())
 	stdout := &safeBuffer{}
 	exitCode, returned := make(chan int, 1), make(chan struct{})
+	// runServe with the options `serve --config --addr` builds, plus the
+	// sweep counter, which no flag carries.
+	opts := serveOpts{
+		configPath:        configPath,
+		addrOverride:      listenAddr,
+		autoOptimizeSwept: func() { b.autoOptimizeSweeps.Add(1) },
+	}
 	go func() {
 		defer close(returned)
-		exitCode <- run(serveCtx, []string{"serve", "--config", configPath, "--addr", listenAddr}, stdout, b.stderr)
+		exitCode <- runServe(serveCtx, opts, stdout, b.stderr)
 	}()
 	drainServeOnCleanup(t, stop, returned, exitCode, b.stderr)
 	apiAddr, _ := waitForListening(t, stdout, 30*time.Second)
