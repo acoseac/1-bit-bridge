@@ -24908,11 +24908,23 @@ and built.
 
 ### Gate
 
-See the PR body: `go vet ./...`, the pinned gofmt on every file touched,
-`go test -race -count=1` over `cmd/bridge`, `internal/doctor` and
-`internal/config` on the dev Mac, and `make build-all P=2`. The full Linux
-race suite runs on dido for the PR head, and CI's macOS and Windows legs
-run the rest.
+On the dev Mac (host Go 1.27.1), over the branch merged with main at
+84a3df20 (#1074):
+
+- `go vet ./...`: clean.
+- The pinned gofmt (`go1.26.6`'s `gofmt -l`) over the ten Go files the
+  branch touches: nothing listed. `make fmt` was not run (the host's
+  gofmt 1.27 rewrites two files CI calls clean).
+- `go test -race -count=1 -p 2 -timeout 30m`: `internal/doctor` and
+  `internal/config` ok, and `cmd/bridge` ok on the PR head, the tree-wide
+  sweeps included (the citation guard reads this entry).
+- `make build-all P=2`: all six binaries. The three packages' test binaries
+  also compile for `windows/amd64` and `linux/amd64`.
+- NC4, NC8, NC9 and NC10 re-run after the helper refactor
+  (`assertRewriteRefused`, `writeInstallConfig`), each red on exactly the
+  tests the table above lists for it.
+
+The full Linux race suite runs in CI, and on dido for the PR head.
 
 ### Out of scope
 
