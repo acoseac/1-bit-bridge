@@ -24885,6 +24885,608 @@ and re-run green:
 - A strike records no reason, so the console cannot say why a file was
   suppressed, and `suppressedFailures` has no reader in the console at all.
 
+## 2026-09-28 — a GENA callback on this machine or the link gets the initial NOTIFY only from that address, and the NOTIFY follows no redirect (backlog B39, half of #818's step two)
+
+#818 (2026-09-01) was step one of a two-step narrowing of the GENA initial
+NOTIFY's callback guard. `callbackHostAllowed` admitted a callback host that
+is loopback, RFC 1918, link-local, or the SUBSCRIBE's source address; step
+two was to swap its body for `callbackHostMatchesSource` (the callback must
+BE the source, for every address) and delete the observer. #818 held that
+swap "for one release", conditional on `noteCallbackDivergence`'s Warn
+staying silent on the LAN bridges, because "some control points are reported
+to bind their outgoing SUBSCRIBE socket to one interface while requesting
+callbacks on another" and nobody could verify it. This entry closes the
+host-local half of step two, closes a redirect the guard never saw, and
+records why the private-address half stays held.
+
+### Whether the reason to hold still stands
+
+- **The release happened; the observation did not.** The observer shipped in
+  v0.2.0 (2026-09-18) and in the NUC's `-39` and `-58` builds. Every bridge
+  that has run it is either in public mode (bridge.ars.md until 2026-09-22,
+  the three hosted tenants, the demo), where `dlna.ShouldEnableDLNA` refuses
+  the DLNA listener in `startDLNAIfEnabled`, or has the listener off: the
+  NUC's `/v1/health` (one unauthenticated GET, 2026-09-28) lists 24
+  features and no `dlnaServer`. home-pc, the Windows LAN bridge, has not
+  been deployed since the 2026-08-05 "update bridge.ars.md only" default,
+  before #818, and did not answer from the workstation today. So the
+  observer has watched no SUBSCRIBE at all, and the claim it was gated on is
+  as unverified as it was. **The private-address half stays held**; its
+  evidence needs a LAN bridge with `dlna.enabled` running a build with the
+  observer for a release, which is a deploy decision.
+- **The iOS app is no subscriber.** Read in `~/dev/com.acoseac.dsdplayer`
+  (read-only): `DLNARendererTransport.subscribeGENA()` and `renewGENA()` are
+  stubs ("full GENA wiring lands in PR 4"), `unsubscribeGENA()` releases no
+  SID in v1, and `DLNAMediaServer.contentDirectoryEventURL` is stored "for a
+  future GENA subscription". The app sends no SUBSCRIBE to the bridge or to
+  any device. No wire change here, so no Mirror-PR.
+- **The host-local half does not wait on that evidence.** The reported shape
+  puts the callback on the control point's OTHER interface, an address of
+  the control point. A loopback address names the host that sends the
+  NOTIFY, so a loopback callback from any other address reached the bridge's
+  host and never its sender: nothing that worked for a remote control point
+  is refused. For link-local, the source address is kept as #1069 keeps a
+  LOCATION's: a link-local source proves nothing (any device on the segment
+  can take one and reach the bridge's LAN address, since macOS and Windows
+  keep a 169.254/16 route on the primary interface), and the address worth
+  protecting, 169.254.169.254, is never a subscriber's own.
+
+### What was measured on the old code
+
+The new tests, run against the unchanged `internal/dlna` (they build there;
+the GENA test server's client was then the same plain client Start built):
+
+```
+--- FAIL: TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe
+    a LAN subscriber (192.168.1.9:49152) with CALLBACK http://127.0.0.1:59753/api/stats: the loopback listener saw ["NOTIFY /api/stats"]
+    a LAN subscriber, the mapped spelling (192.168.1.9:49152) with CALLBACK http://[::ffff:127.0.0.1]:59753/api/stats: the loopback listener saw ["NOTIFY /api/stats"]
+    a subscriber on a public address (203.0.113.7:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+    a link-local subscriber (169.254.10.20:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+    another loopback address (127.0.0.2:49152) ...: the loopback listener saw ["NOTIFY /api/stats"]
+--- FAIL: TestGENAInitialNotifyFollowsNoRedirect
+    the redirect target saw ["GET /api/stats" "GET /api/stats" "GET /api/stats" "NOTIFY /api/stats" "NOTIFY /api/stats"]
+--- FAIL: TestGENASubscriberCannotRedirectTheNotifyOntoThisHost
+    the loopback listener saw ["GET /api/stats"], on a LAN peer's redirect
+--- FAIL: TestStartSendsTheNotifyThroughTheCheckedClient
+    Start's notify client followed the callback's redirect to ["GET /api/stats"]
+```
+
+**The real binary, end to end** (origin/main `c6036d4a`, built with
+golang:1.26.6 on dido). The bridge ran in one container on a user-defined
+docker network with `dlna.enabled` and a request-logging listener on its
+own 127.0.0.1:9999; a second container, the LAN peer (`<peer>` below; the
+bridge's own address on that network is `<bridge>`), sent three
+SUBSCRIBEs to the bridge's `:7790/dlna/cds/event`. All three answered 200,
+and the listener on the bridge's loopback logged:
+
+```
+SINK NOTIFY /api/stats from 127.0.0.1:47100     CALLBACK <http://127.0.0.1:9999/api/stats>
+SINK NOTIFY /api/stats from 127.0.0.1:47112     CALLBACK <http://[::ffff:127.0.0.1]:9999/api/stats>
+SINK GET /redirected from 127.0.0.1:47100       CALLBACK <http://<peer>:8080/evt>, answered 302
+```
+
+The third is the wider hole. The peer's callback was its OWN address, which
+every version of the guard admits (#818's narrow one included); the peer
+answered the NOTIFY with a 302, and Go's client turned it into a GET to the
+Location, which the guard never saw. A 307/308 re-sends the NOTIFY instead,
+body and all. The Location can name any host, by address or by name. The
+console's `csrfGuard` answers a NOTIFY with a `text/xml` body 415, but lets
+every GET through, and in loopback mode nothing else stands before the
+console's handlers. The 2026-08-18 CodeQL triage (alert #12, above) called
+the flow "contained three ways: … `csrfGuard` 415s it before any handler":
+true of the NOTIFY and not of the GET a redirect makes of it.
+
+**Every other client that sends to a LAN peer's URL relays a 3xx**:
+`upnpproxy` (proxy.go), `discovery.NewDeviceFetchClient`, the manual
+upstream poller (internal/upnp/manual.go) and `upnpUpstreamSOAPHTTPClient`
+(cmd/bridge). The GENA NOTIFY's `&http.Client{Timeout: 5s}` was the one
+that followed: the rule was applied to four sites of five.
+
+### What changed
+
+- `callbackHostAllowed`: the callback host is an IP literal (a name is still
+  refused outright, and so is a zoned IPv6 literal, as `net.ParseIP` did).
+  It then asks the NOTIFY's dial approval first,
+  `discovery.SubscribedFrom(src).Permits(cb)` (#1074's `DialApproval`, with
+  the SUBSCRIBE as the approving peer): a loopback or link-local address
+  only when it IS the SUBSCRIBE's address (compared unmapped, the source
+  without its zone), never the unspecified address or a cloud metadata
+  address. Of what that admits, a private address from any source (held),
+  any other only when it is the source. `callbackAddr` and `subscriberAddr`
+  are the one parse of each side, shared with `callbackHostMatchesSource`.
+- `newNotifyClient` is `discovery.NewDeviceFetchClient`: no redirect, no
+  proxy, no kept-alive connection, and the dial check, under the approval
+  `fireInitialNotify` puts in the request context
+  (`discovery.WithDialApproval(ctx, discovery.SubscribedFrom(src))`). Start
+  and the GENA test helper both build it, so every GENA test sends through
+  the production client. In `internal/dlna/discovery`, `SubscribedFrom` is
+  new, `DialApproval.permits` is exported as `Permits` (the guard asks it),
+  and the dial check's refusal text names a GENA SUBSCRIBE beside an SSDP
+  packet.
+- `noteCallbackRefusal`: a refused loopback or link-local callback is a Warn
+  once per (callback, source) pair, bounded at 64 like the observer
+  (`firstSighting`, now shared, each warning with a set of its own since
+  review round 1, below). Other refusals stay the Debug line they were.
+- A server whose handlers were mounted without Start has no notify
+  context. `NewRequestWithContext` failed quietly on it; wrapping it in the
+  source panics ("cannot create context from nil parent"), so
+  `fireInitialNotify` returns first.
+
+### Merged with #1074
+
+#1074 landed while this was open, and replaced the dial check's
+"announcement source" with `discovery.DialApproval` (`AnnouncedFrom`,
+`OperatorChose`), adding cloud metadata addresses that no approval permits
+(`cloudMetadataAddrs`: three of them private or public, `fd00:ec2::254`,
+`100.100.100.200` and `168.63.129.16`). The first form of this change
+carried the SUBSCRIBE's address in a context key #1074 removed
+(`WithRequestSource`), and its guard admitted `fd00:ec2::254` from any
+source (a private address) while the dial check would then refuse the
+connect. So the guard now asks the approval itself, and the two cannot
+disagree: `metadata_ula_from_lan_source`, `metadata_from_itself` and
+`metadata_public_from_itself` pin it. One control changed its answer with
+the merge: keeping the zone in `subscriberAddr` (NC9) went green, since the
+approval strips the zone for the host-local decision; what still depended on
+it was the observer, which would have logged every IPv6 link-local
+subscriber calling back on its own unzoned address as a divergence.
+`ipv6_same_zoned_source` pins that, and turns NC9 red again.
+
+### Decisions, and what was rejected
+
+1. **The full step two now.** Rejected: its evidence does not exist (above).
+2. **Loopback by kind** (any loopback callback from any loopback source).
+   As safe, since a loopback source is a process on this host, which reaches
+   loopback services directly. Rejected for #1069's rule ("the subscriber's
+   own address, never any address like it") and so the guard agrees with the
+   dial check, which compares addresses.
+3. **Loopback from any address of this host.** Admits the one shape the
+   change costs (below), but needs an interface enumeration per SUBSCRIBE
+   and trusts every NAT that rewrites a peer's source to a local address.
+   Rejected; the shape is reported instead.
+4. **Link-local by kind.** Rejected for the reason in the first section.
+   The cost: a control point holding a DHCP and a link-local address on one
+   interface that names the link-local one while the kernel sources the
+   SUBSCRIBE from the other (a non-default configuration) is refused, and
+   the Warn names it.
+5. **No dial check, since a callback is a literal.** The two checks agree
+   today, so the second refuses nothing the first admits. Kept: it is
+   exactly what failed here, a string check that a redirect walked around,
+   and reusing the SSDP clients' client costs one line.
+6. **The refusal at Debug.** Rejected: a strict control point (Linn, Naim,
+   #325) waits for its initial NOTIFY, and a refusal is otherwise silent.
+
+### Measured after
+
+The same end-to-end run on the branch build: the three SUBSCRIBEs answered
+200, the peer's own callback got its NOTIFY (`PEER NOTIFY /evt from
+<bridge>`), its 302 was not followed, and the loopback listener logged
+nothing. The bridge logged two refusals, once each:
+
+```
+WARN GENA callback names this machine or a link-local address the SUBSCRIBE did not come from — initial NOTIFY not sent  callbackHost=127.0.0.1  subscribeSource=<peer>
+WARN … callbackHost=::ffff:127.0.0.1  subscribeSource=<peer>
+```
+
+(The merge with #1074 reworded the line to "GENA callback on this machine
+or a link-local address refused — …"; the run below repeats this one on the
+merged build.)
+
+From inside the bridge's container (a control point on the bridge's own
+host): a SUBSCRIBE to `127.0.0.1:7790` with a 127.0.0.1 callback got its
+NOTIFY; one to the container's own LAN address (<bridge>) with a
+127.0.0.1 callback was refused, the Warn naming `subscribeSource=<bridge>`
+(the cost decision 3 accepts); one to that address with a callback on that
+address was sent (nothing listened there). `go test -race -count=1` over
+`internal/dlna` and `internal/dlna/discovery` passed in the same image, the
+LAN-peer test running on the container's eth0 rather than skipping.
+
+The merged build (with #1074), the same run: the three SUBSCRIBEs answered
+200, the peer got its NOTIFY and its 302 was not followed, the two loopback
+callbacks were refused with one Warn each (`GENA callback on this machine
+or a link-local address refused — the NOTIFY goes only to the subscriber's
+own, never to a cloud metadata address`, `subscribeSource=<peer>`), and
+the bridge's loopback listener logged only the NOTIFY a SUBSCRIBE from
+inside the container asked for over `127.0.0.1`.
+
+### Tests and controls
+
+- `internal/dlna/gena_callback_test.go` (new):
+  `TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe` (five
+  sources and spellings), its positive twin
+  `TestGENANotifyReachesThisHostWhenTheSubscribeCameFromIt`,
+  `TestGENAHostLocalRefusalIsReportedOncePerPeer`,
+  `TestGENAInitialNotifyFollowsNoRedirect` (301, 302, 303, 307, 308),
+  `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` (the host's own
+  LAN address standing in for the peer's; it skips on a host with none),
+  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber`,
+  `TestStartSendsTheNotifyThroughTheCheckedClient` (a Start that fails on an
+  occupied port has built the notify state already) and
+  `TestGENASubscribeOnAnUnstartedServerSendsNothing` (through `mountedMux`,
+  the real handler tree with no Start).
+- `Test_callbackHostAllowed` gained 21 rows (the host-local ones, the
+  unspecified address, a name, a numeric spelling, zones, a ULA, three cloud
+  metadata addresses), and its two host-local rows flipped;
+  `Test_callbackHostMatchesSource`'s wide column moved for the two B39 rows,
+  and it gained `ipv6_same_zoned_source`; the divergence log tests became
+  `Test_callbackNotes_*`, run over both warnings.
+  `internal/dlna/discovery/subscribed_from_test.go`:
+  `TestSubscribedFromApprovesTheSubscribersOwnAddress`, on the dial check.
+- **Negative controls**, each applied once to the committed branch by a
+  script that requires its target text exactly once, `-count=1`, restored
+  with `git checkout --`, green again after:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the guard stops asking the approval (loopback, link-local and metadata admitted from any source) | 13 table rows (8 host-local and 3 metadata in `Test_callbackHostAllowed`, 2 in the divergence table), the refusal-report test. **Not** the end-to-end loopback test: the dial check refuses the connect |
+  | NC2 | the notify client keeps no-redirect and no-proxy, loses the dial check | the client test only |
+  | NC3 | fireInitialNotify drops the source from the context | the positive twin, the redirect test, the Start test, `Test_genaHandler_FiresInitialNotify` |
+  | NC4 | the pre-B39 plain client | the redirect test, the LAN-peer test, the client test, the Start test |
+  | NC4b | the checked client, following redirects | the redirect test, the Start test. **Not** the LAN-peer test: the dial check refuses the redirected connect |
+  | NC5 | Start builds its own plain client | the Start test |
+  | NC6 | every refusal at Debug | the refusal-report test |
+  | NC7 | no cap on the shared set | both `CapSuppressesRatherThanFloods` subtests |
+  | NC8 | the refusal keyed on host:port | the refusal-report test, `WarnOncePerPair/refusal` |
+  | NC9 | `subscriberAddr` keeps the zone | before the merge `ipv6_link_local_from_its_zoned_source`; after it nothing, then `ipv6_same_zoned_source` (above) |
+  | NC10 | a zoned callback accepted | first run: nothing (see below); then `zoned_private_callback`, and after the merge `ipv6_link_local_zoned_callback` too |
+  | NC11 | no unspecified arm (before the merge) | both unspecified rows; after it the arm is the approval's (`Permits`), pinned by the same rows and `SubscribedFrom`'s |
+  | NC12 | `SubscribedFrom` keeps the source as given | the discovery table's mapped and zoned rows |
+  | NC13 | no nil-context guard | the unstarted-server test (`panic: cannot create context from nil parent`) |
+
+  NC1, NC2, NC3, NC6, NC8, NC9, NC10 and NC12 ran again on the merged
+  code, with the results above. NC10 went green on its first run: every zoned link-local row is refused by
+  the zone-stripped comparison anyway, so the zone refusal in `callbackAddr`
+  was pinned by nothing, while a zoned private address would have been
+  admitted. The `zoned_private_callback` row was added, and NC10 turns it
+  red.
+
+### Out of scope
+
+- The private-address half of step two needs the observation described
+  above; nothing in the fleet can produce it today.
+- CodeQL alert #12 (`go/request-forgery`, server.go) was dismissed on the
+  containment argument this entry corrects; its dismissal comment should be
+  re-read against this change.
+- GENA to an IPv6 link-local subscriber has never worked: a zoned callback
+  literal is refused (as before), and an unzoned `fe80::` one cannot be
+  dialed on Linux without a scope. Unchanged.
+- No guard finds "a client that sends to a LAN peer's URL": the no-redirect
+  rule reached four of five such clients by hand, and a structural sweep
+  cannot tell one from a MusicBrainz client.
+
+### Review round 1 (CodeRabbit, one finding, taken)
+
+- **The refusal line shared the observer's bound** (Minor). One set of 64
+  held both warnings' pairs, and a peer reaches a refusal at will: 64
+  distinct refused pairs filled it, and the next divergence line, the
+  evidence B56 (the private half of step two) waits for, was suppressed.
+  Each warning has its own set now, under the one mutex, bounded alike.
+  `Test_callbackNotes_ARefusalFloodDoesNotSilenceTheDivergenceObserver`
+  sends 192 refused pairs and then one divergence: red on 4c36f34e ("logged
+  0 lines, want 1"), green on 8ebf29f3, and red again with the refusal
+  pointed back at the shared set (NC, run on the committed fix).
+
+## 2026-09-28 — CodeQL triage: the 27 alerts open on main are false positives (backlog B55)
+
+Open on `refs/heads/main` at `84a3df20`: 27 alerts of two rules, 14
+`go/log-injection` (#87, #88, #94, #95, #96, #97, #100, #103, #111–#115,
+#118) and 13 `go/path-injection` (#89, #90, #91, #119–#126, #131, #132).
+(The backlog entry's 16 and 11 were an estimate.) All 27 are false
+positives and were dismissed as such, each comment naming its barrier and
+the line it sits on. No production code changed. One test was added,
+because the one permanent delete in the trash rested on a barrier nothing
+drove end to end.
+
+### Method
+
+The alert API says only "depends on a user-provided value". The flows are
+in the analysis's SARIF: `gh api -H 'Accept: application/sarif+json'
+repos/acoseac/1-bit-bridge/code-scanning/analyses/<id>` (the latest
+`refs/heads/main` analysis, `1854518657`), whose `codeFlows` name each
+source and every step to the sink. Each alert was matched to its result by
+path and line, and the tainted argument read off the result's column.
+
+### go/log-injection: 14 alerts
+
+The probe (a `_`-prefixed directory, run and deleted, not committed) goes
+through the bridge's own setup: `logging.Init(os.Stdout)`, then
+`logging.Component("probe").Warn("constant message", "path", evil, "err",
+errors.New(evil))` and `.Warn(evil)`, with `evil =
+"a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`. Under
+`BRIDGE_LOG_FORMAT=text`, `=json`, and unset (stdout a file, so JSON): two
+records, two lines, zero CR bytes. Text wrote
+`path="a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`, JSON
+`"path":"a\nb\rc\r\ntime=…"`; the error attribute read the same, and so
+did the message. Every flagged logger resolves through `logging.Component`
+to the default handler (the DLNA server's is
+`logging.Component("bridge").With(component=dlna)`, the API's request
+logger `httpLogger.With(…)`), `main` calls `logging.Init(os.Stderr)` before
+`run`, and `internal/` has no `log.Printf` (handshakelog's `log.Print`
+reaches the same handler through `slog.SetDefault`).
+
+At each site the tainted value is an attribute and the message a constant:
+
+| alert | site | attribute |
+|---|---|---|
+| #87 | admin/handlers_upscale_batch.go:361 | `path` (through `scrubForLog`) |
+| #88 | admin/handlers_upload.go:167 | `err` |
+| #94, #95 | atomicwrite/atomicwrite.go:142 | `path`, `err` |
+| #96 | manifest/store.go:5751 | `path` |
+| #97 | upload/upload.go:722 | `err` (it wraps `dest`) |
+| #100 | dlna/server.go:593 | `callbackHost` (a Debug line) |
+| #103 | transcode/batch.go:1228 | `batchPath` |
+| #111 | api/artwork.go:371 | `mbid` |
+| #112 | api/artwork.go:396 | `mbid` |
+| #113 | api/files.go:445 | `source_path` |
+| #114 | api/files.go:446 | `variant_id` |
+| #115 | transcode/batch.go:515 | `batchPath` |
+| #118 | admin/handlers_api.go:1465 | `path`, through `attrs()`; the message is `scope+": …"`, and `scope` is a constant at both callers |
+
+### go/path-injection: 13 alerts
+
+- **#131, #132** (api/files.go:117 and :313, `os.Open(abs)`) are
+  re-fingerprints of #7 and #8, not new flows. The analysis of `cb9c8718`
+  (#1055, 05:35:13Z) marked #7 and #8 fixed and opened #131 and #132 at the
+  same lines: #1055 replaced `writeErrorLog` with `writeFileErrorLog` on the
+  lines just after both sinks, which moves CodeQL's line-context
+  fingerprint. The sinks still take `abs` from `ResolveChecked`
+  (files.go:108, :283), that is `resolveParts`: NUL and a raw `..` segment
+  refused, joined onto the root, prefix-checked (fs.go:329).
+- **#90** (trash.go:269, `os.Stat(src)`): `src` is `SplitRoot`'s root and
+  suffix, refused unless `fsutil.IsUnderAny(src, root)` (trash.go:263,
+  which resolves links on both sides); the path passed `validRel` first.
+- **#91** (trash.go:282, `MkdirAll`): `dst` is
+  `<root>/.bridge-trash/<stamp>/<rel>`, the stamp made by the server
+  (`UnixNano`), the rel through `validRel`.
+- **#119–#121** (restore.go:72, :85, :97): `dst` is `SplitRoot`'s root and
+  suffix, refused unless `IsUnderAny(dst, root)` (restore.go:66).
+- **#122–#124** (restore.go:152, :155, :175): `locate`'s
+  `<root>/.bridge-trash/<stamp>/<rel>`, which has no containment check of
+  its own (the next section).
+- **#125, #126** (restore.go:202, :203): `pruneEmptyStamp`'s
+  `<root>/.bridge-trash/<stamp>`.
+- **#89** (fsutil/fsync_unix.go:30): three flows, all through
+  `atomicwrite.RenameWithRetry` → `commitDirEntry` → `SyncParentDir`,
+  carrying `Trash`'s `dst` (#91's) and `Restore`'s (#119's). Callers traced
+  past CodeQL's flows: `upload.commitOne` (its `dest` after
+  `ValidateRelPath` and `AssertRootContains`, upload.go:676–682),
+  `fsutil.FsyncFileAndParent` (no production caller), and every other
+  `RenameWithRetry` caller writes a path of the bridge's own (the config,
+  data and cache directories).
+
+### The trash ids, on their own merits
+
+`Restore` and `Purge` take `<stamp>/<rel>` ids from a JSON body. `splitID`
+cuts at the first `/`. The stamp must `ParseInt` (base 10) to a positive
+integer, so it is `[+]?[0-9]+`: no separator, dot or drive letter. The rel
+must pass `validRel`: one leading `/` trimmed, then no NUL, no backslash, no
+empty, `.` or `..` segment, no dot-prefixed segment (which refuses `..` a
+second time), and clean form. The forms asked about:
+
+- `..`: refused in the stamp by `ParseInt`, and twice in the rel.
+- A separator: `/` splits. A backslash is refused in the rel and fails
+  `ParseInt` in the stamp. On Windows this is the barrier, since
+  `filepath.Join` collapses `..\..` there.
+- An absolute path: an id starting with `/` has an empty stamp; `1//etc/x`
+  loses one `/` and is relative, inside the stamp directory.
+- A Windows drive (`1/C:/x`): a legal segment to `validRel`, joined AFTER
+  the trash directory and the stamp, so `…\.bridge-trash\1\C:\x`, which
+  does not name `C:\x`: Go's `Join` and `Clean` read a volume only at the
+  start of a path. That is read from the source; what Win32 then does with
+  a mid-path `C:` was not measured here, and the Windows leg of the new
+  test is the measurement (a Purge that reached the file beside the root
+  would delete it). Win32's trimming of trailing dots and spaces cannot
+  turn a segment into `..` unless it starts with a dot.
+- The stamp's shape, measured: `ParseInt` base 10 with a positive result
+  accepts `+5` and `00012`, and refuses `-5`, `0`, `1_000`, ` 5`, `5 `,
+  `..`, `1\x`, `C:`, `0x1F`, `+` and the empty string.
+- No request can plant a link inside `.bridge-trash`: `Trash` refuses a
+  directory (its `os.Stat` follows links) and a link that resolves outside
+  the root (`IsUnderAny`), and uploads refuse dot-prefixed segments.
+
+`Restore` is guarded twice, since its destination also passes `SplitRoot`
+and `IsUnderAny`. **`Purge`, the one permanent delete, rests on `splitID`
+alone**, because `locate` checks nothing. Nothing drove either with a
+hostile id: `TestSplitIDRejectsMalformedInput` unit-tests the split alone.
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash` sends both operations ids
+aimed at a live library file and at a file beside the root, in each form
+above, and requires one refusal each, both files untouched, an empty
+library directory kept, and the real entry still listed.
+`TestTrashRejectsTraversalAndDotSegments` gained the drive-letter form. The
+backslash and drive rows mean something only on the Windows leg.
+
+Negative controls, the test committed first, each restored with `git
+checkout --`, `-count=1`:
+
+| | mutation | result |
+|---|---|---|
+| NC1 | `splitID` skips the stamp check | red: `Purge("../A/live.flac")` purges the live library file, and `pruneEmptyStamp(root, "..")` then prunes the library's empty directory |
+| NC2 | `validRel` drops `seg == ".."` | green: the dot-prefix rule refuses `..` as well |
+| NC2b | NC2, and the dot-prefix rule lets `..` through | red: `Purge` removes the live file (`<stamp>/../../A/live.flac`) and the file beside the root (`<stamp>/../../../outside.flac`), while `Restore` still refuses both (`SplitRoot` refuses a raw `..`); `TestSplitIDRejectsMalformedInput` red too |
+
+The backslash rule has no control off Windows, where a backslash is an
+ordinary filename byte.
+
+### Dismissals
+
+All 27 dismissed as "false positive" on 2026-09-28 (20:19Z), each with a
+comment under 280 characters naming the barrier and its line: the attribute
+and this probe for the 14 log-injection alerts; `resolveParts` (fs.go:329)
+for #131 and #132, with the #1055 re-fingerprint named; `SplitRoot`,
+`IsUnderAny` and `splitID` for the trash ones, #119–#126 naming
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash`. Nothing is open on
+`refs/heads/main` since. A later change to a line near one of these sinks
+re-fingerprints it, as #1055 did to #7 and #8: read the new alert's flow
+from the SARIF, and dismiss it again only while its barrier still stands.
+
+## 2026-09-28 — every route that serves a file's bytes refuses what is not a file, and never waits on a named pipe (backlog B46)
+
+#1070 stopped the scanner indexing a named pipe, a socket or a device, or a
+link to one. Nothing stopped a client naming one: `/v1/list` still lists
+such an entry (as a zero-byte file), and `/v1/download`, `/v1/read`, the web
+player's audio and download routes and the DLNA file route opened the path
+with `os.Open`. Opening a named pipe waits for a writer, and nothing can
+cancel the wait: open(2) is a blocking system call and Go cannot interrupt
+one.
+
+### The measurement
+
+A throwaway program (never committed) over the real `api.Server` behind
+`httptest`, with a session tracker from `internal/updater`, a regular track
+and a FIFO named `02 Pipe.flac` beside it, and a client timeout of 2 s, on
+unchanged code (4cd133e1), macOS:
+
+```
+/v1/stat?path=Artist/Album/02%20Pipe.flac               -> 200 in 2ms: {"isDir":false,"size":0,...}
+/v1/list?path=Artist/Album                              -> 200 in 0s: [...,{"name":"02 Pipe.flac",...,"isDir":false,"size":0,...}]
+/v1/download?path=Artist/Album/02%20Pipe.flac           -> client gave up after 2.002s: ... (Client.Timeout exceeded while awaiting headers)
+/v1/read?path=Artist/Album/02%20Pipe.flac bytes=0-65535 -> client gave up after 2.002s: ...
+updater sessions in flight right after both clients gave up: 2
+updater sessions in flight 3 s later:                       2
+ERROR http ... path=/v1/download status=500 duration_ms=7005
+ERROR http ... path=/v1/read status=500 duration_ms=5003
+sessions in flight after a writer came and went (11ms): 0
+```
+
+Both handlers, and the two updater sessions they had begun, stayed until
+the program played the writer 7 s in; then ServeContent failed its seek
+("seeker can't seek", 500). A session left in flight keeps auto-install
+deferring on every poll (`Tracker.Inflight`). The same program on the fix:
+400 at once with `{"error":"bad_request","message":"path is a named pipe,
+not a file"}`, no session left, and one Warn line naming the
+library-relative path (`err="named pipe is not a file"`). The red runs of
+the new tests below measured the rest: a link to `/dev/null` was served as
+an empty 200 by all three route families, a socket as a 500 by the two
+resolver-backed ones (the kernel refuses its open), and a rendition whose
+sidecar is a FIFO held its request the same way. The DLNA route serves the
+manifest's path, and a row outlives its file until the scan that reaps it,
+after the missing-count grace, so a track replaced by a FIFO was served
+until then.
+
+### The change
+
+- `fsutil.NotAFile` is #1070's list (`notAFileKinds`, `notAFile`), moved out
+  of `internal/manifest` so the scanner and the routes refuse by one list.
+  `internal/fsutil` imports nothing internal, so every caller can import it.
+- `fsutil.OpenAsFile` opens `O_RDONLY|O_NONBLOCK|O_NOCTTY` on unix, takes
+  the opened file's own stat, refuses a `NotAFile` kind with a
+  `*NotAFileError` inside the `*fs.PathError`, and clears `O_NONBLOCK` again
+  for a file. The nonblocking open is what makes a FIFO's open return, and
+  refusing by the OPENED file's stat is what closes the window between a
+  caller's stat and the open (a path replaced in between is judged as what
+  it is now). Open errors come back exactly as `os.OpenFile` gives them, so
+  every caller's `os.IsNotExist` arm answers as before.
+- The resolver-backed routes (`serveFile`, `servePlayerBytes`) ALSO refuse on
+  the resolver's stat before opening anything. That stat is free (the
+  resolver already took it), keeps a device from being opened at all, and
+  is the only thing that refuses a socket, because the kernel refuses a
+  socket's open itself (EOPNOTSUPP on macOS, ENXIO on Linux) before there is
+  a file to stat. The player stats a rendition's sidecar before opening it
+  for the same reason.
+- Answers, all existing codes: 400 `bad_request` "path is a <kind>, not a
+  file" on `/v1/download` and `/v1/read` (a directory already got 400
+  `bad_request`, and PROTOCOL.md's table gives it a malformed path), 400
+  `bad_path` "not a file" on the player (its directory answer), 404 on DLNA
+  (its answer for a source it cannot open), and 410
+  `variant_missing_on_disk` for a rendition whose sidecar is not a file, on
+  all three ("was here, fall back to the source"; `serveVariant` does not
+  reap for it, since nothing says the file is gone). No wire change, so no
+  PROTOCOL.md edit and no Mirror-PR.
+- Every production declaration that passes `http.ServeContent` a file now
+  opens it through `OpenAsFile`: the four byte routes, and the cache routes
+  (the artwork ladder and the artist image, both booklet routes, playlist
+  covers, waveforms, the console's cache files), which serve files the
+  bridge wrote itself. Converting those costs one fcntl a request and
+  removes each site's separate `f.Stat()` block, and it is what lets
+  `TestEveryServedFileIsOpenedAsAFile` hold with no exceptions.
+
+### Decided against
+
+- A stat before the open alone: the window between the stat and the open
+  stays, and a FIFO swapped in there (a symlink repointed, say) holds the
+  request forever.
+- A plain open on a goroutine with a timeout: the handler returns, but the
+  goroutine and the descriptor it eventually gets stay until a writer
+  comes, since a blocked open cannot be cancelled.
+- `O_NONBLOCK` with no fallback. It changes one answer for a regular file:
+  while another open holds a write lease on it (Samba's kernel oplocks take
+  one, an NFS server's delegation another), a nonblocking open fails with
+  EWOULDBLOCK where a plain open waits for the break, up to
+  lease-break-time (45 s by default). Measured on Linux (NC7 below): without
+  the fallback `OpenAsFile` answers "resource temporarily unavailable" at
+  once; with it, it waits out the test's 300 ms lease and opens (0.30 s). A
+  FIFO's nonblocking open never answers EWOULDBLOCK, so the fallback is no
+  way back to the wait.
+- Leaving `O_NONBLOCK` set on the file served. POSIX gives it no effect on a
+  regular file's reads, but a FUSE daemon (rclone, sshfs) is handed the
+  file's flags with every read, and one that honours the flag can answer
+  EAGAIN mid-stream. `setBlocking` clears it (NC6).
+- A new error code such as `not_a_file`: a wire change, which needs the iOS
+  mirror. `bad_request` already carries the directory case.
+- `O_NOCTTY` is kept and not pinned by a test: it matters only if a
+  terminal is swapped in after the caller's stat, and a systemd service is
+  a session leader with no controlling terminal, which on Linux an open of
+  a terminal without the flag hands it. It is inert for everything else.
+
+### Tests and negative controls
+
+`internal/fsutil`: `TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError`
+(every platform), `TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting` and
+`TestOpenAsFileLeavesTheFileItOpensBlocking` (unix),
+`TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes` (Linux; it takes a
+write lease on its own file and skips where a host refuses one). The route
+tests drive the real handlers through `fsutiltest.ServeWithin`, which
+bounds a request at 5 s and then plays the writer on the test's FIFOs, so a
+red run neither hangs the suite nor leaves a handler behind:
+`TestByteRoutesRefuseWhatIsNotAFile` (api, with a counting session tracker:
+every request must begin one and end it), `TestPlayerByteRoutesRefuseWhatIsNotAFile`
+(admin, the same for playback sessions, with renditions whose sidecars are
+a FIFO and a socket) and `Test_FileHandler_RefusesWhatIsNotAFile` (dlna).
+Each plants the same entries (`fsutiltest.PlantNotAFiles`: a FIFO, a link
+to it, a link to `/dev/null`, a socket) beside a track that must still be
+served. `internal/fsutil/fsutiltest` also took over #1070's scanner test
+helpers (`MakeFIFO`, `BindSocket`, the writer loop as `AwaitPastFIFOs`), so
+there is one copy of each. `TestEveryServedFileIsOpenedAsAFile` (cmd/bridge)
+reads every production file (438 of them, holding 12 `http.ServeContent`
+calls, when its floors were set); `TestServedFileSweepOnFixtures` runs its
+scan over six sources whose findings are known.
+
+On the committed fix (6e0247b2 and a8886f47, which are 86ac29fc and
+e2cc1d21 after the rebase onto 73ef5b58), each restored and re-run
+green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `internal/api/files.go` as on main | `TestByteRoutesRefuseWhatIsNotAFile`: the six requests on the pipe and the link to it, and the FIFO rendition, held 5 s each, then 500; the link to `/dev/null` 200 three times; the socket 500 three times. The sweep names `serveFile` and `serveVariant` |
+| NC2: `internal/admin/player_audio.go` as on main | the player test: the pipe and its link held 5 s on both routes, then 500; `/dev/null` 200 twice; the socket 500 twice; the FIFO rendition held, then 500; the socket rendition 500. The sweep names `servePlayerBytes` |
+| NC3: `internal/dlna/file_handler.go` as on main | the DLNA test: `/dev/null` 200 on GET and HEAD, the pipe and its link held 5 s then 500 on both, the FIFO rendition held then 500 (the socket passed, 404 from the failed open, as before). The sweep names `serveFromFilesystem` |
+| NC4: `openNoWait` without `O_NONBLOCK` | the fsutil test's pipe and link rows (held 5 s); the api test's FIFO rendition only, since its sources are refused on the resolver's stat; the DLNA test's pipe and link rows and its rendition. The player test stayed green: it stats the source and the sidecar before opening |
+| NC5: the api's refusal on the resolver's stat disabled | the api test's three socket rows only (500 from the refused open) |
+| NC5b: the player's refusal on the source's stat disabled | the player test's two socket rows only |
+| NC5c: the player's refusal on the sidecar's stat disabled | the socket rendition only (500) |
+| NC6: `O_NONBLOCK` left set | `TestOpenAsFileLeavesTheFileItOpensBlocking` (flags 0x4) |
+| NC7 (dido, golang:1.26.6): the EWOULDBLOCK fallback removed | `TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes`: "resource temporarily unavailable" |
+| NC8: `internal/api/booklet.go` and `internal/admin/handlers_library_meta.go` as on main | the sweep names `booklet`, `serveCacheFile` and `apiLibraryBooklet` |
+| NC8b: the sweep ignores `os.OpenFile` | `TestServedFileSweepOnFixtures`' `os.OpenFile` row only |
+| NC9: the named pipe dropped from `NotAFile`'s list | both sides: `TestNotAFileNamesEachKindTheWalkRefuses`, `TestScanner_AnEntryThatIsNotAFileIsNotATrack` (the scans held 10 s, a row minted "01" at 0 bytes), the fsutil pipe rows ("opened a named pipe as a file"), and the api pipe rows (500 at once, since the open no longer waits) |
+
+The route tests were red on main for every refusal row but the DLNA
+socket rows, which answered 404 there too, and the track beside the
+entries was served on both.
+
+### Not covered
+
+- `/v1/list` lists such an entry as a zero-byte file. A client that follows
+  the listing now gets the 400 at once; hiding the entry is a listing
+  decision (a dangling link deliberately still appears).
+- The listing's own `os.Open` of a directory has the same window: a
+  directory replaced by a FIFO between the resolver's stat and the open
+  holds the request. An `O_DIRECTORY` open would close it.
+- The scanner's extractors open with `os.Open` what the walk judged a moment
+  earlier, and the background jobs that open manifest paths
+  (`acoustid.ComputeFromPrefix`, `analyze`'s STREAMINFO read) do too; a FIFO
+  reaches them only through a swap after the walk, or a row whose file was
+  replaced before its reap.
+
 ## 2026-09-28 — bridge init honours its address flags on a loopback run, a --force rewrite is not refused over a port it moves off, and doctor's hints speak to the operator
 
 Backlog B34: the three leftovers #1066's entry recorded under Out of scope.

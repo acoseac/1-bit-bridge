@@ -21,13 +21,12 @@ package manifest
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil/fsutiltest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -35,72 +34,22 @@ import (
 // under a second, with room for a loaded race runner.
 const scanBound = 10 * time.Second
 
-// mkfifo makes a named pipe at p.
-func mkfifo(t *testing.T, p string) {
-	t.Helper()
-	if err := syscall.Mkfifo(p, 0o644); err != nil {
-		t.Fatalf("mkfifo %s: %v", p, err)
-	}
-}
-
-// bindSocket makes a Unix socket at p. A socket's address holds at most 104
-// bytes on macOS, which a test's temp dir overruns, so it is bound by its
-// name from inside its directory.
-func bindSocket(t *testing.T, p string) {
-	t.Helper()
-	t.Chdir(filepath.Dir(p))
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Base(p), Net: "unix"})
-	if err != nil {
-		t.Fatalf("listen on %s: %v", p, err)
-	}
-	// Closing a listener removes its socket unless told not to, and the
-	// entry has to outlive it.
-	l.SetUnlinkOnClose(false)
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // scanPastFIFOs runs scan and waits at most scanBound for it. A scan still
 // running then has a worker blocked opening one of fifos, which is the
-// defect: the helper reports it, then plays the writer (opens each named pipe
-// for writing, which lets a blocked open return, and closes it at once) until
+// defect: fsutiltest.AwaitPastFIFOs reports it, then plays the writer until
 // the scan returns, so the failure neither hangs the suite nor leaves a scan
 // running under the test's cleanups.
 func scanPastFIFOs(t *testing.T, label string, fifos []string, scan func() error) {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- scan() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("%s: %v", label, err)
-		}
-		return
-	case <-time.After(scanBound):
-	}
-	t.Errorf("%s: still running after %v, a worker blocked opening a named pipe", label, scanBound)
-	giveUp := time.After(30 * time.Second)
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("%s: %v", label, err)
-			}
-			return
-		case <-giveUp:
-			t.Fatalf("%s: still running 30 s after its named pipes were first written to", label)
-		case <-tick.C:
-			for _, p := range fifos {
-				// Nonblocking, so that with no reader waiting it fails
-				// at once (ENXIO) rather than waiting for one.
-				if w, err := os.OpenFile(p, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-					_ = w.Close()
-				}
-			}
-		}
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err = scan()
+	}()
+	fsutiltest.AwaitPastFIFOs(t, label, scanBound, done, fifos...)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
 	}
 }
 
@@ -132,17 +81,17 @@ func TestScanner_AnEntryThatIsNotAFileIsNotATrack(t *testing.T) {
 		create func(t *testing.T, f linkedFixture, p string) string
 	}{
 		{"a named pipe", "01.flac", "named pipe", func(t *testing.T, _ linkedFixture, p string) string {
-			mkfifo(t, p)
+			fsutiltest.MakeFIFO(t, p)
 			return p
 		}},
 		{"a link to a named pipe", "01.flac", "named pipe", func(t *testing.T, f linkedFixture, p string) string {
 			pipe := filepath.Join(f.parked, "pipe")
-			mkfifo(t, pipe)
+			fsutiltest.MakeFIFO(t, pipe)
 			linkOrSkip(t, pipe, p)
 			return pipe
 		}},
 		{"an SACD container that is a named pipe", "01.iso", "named pipe", func(t *testing.T, _ linkedFixture, p string) string {
-			mkfifo(t, p)
+			fsutiltest.MakeFIFO(t, p)
 			return p
 		}},
 		{"a link to a device", "01.flac", "character device", func(t *testing.T, _ linkedFixture, p string) string {
@@ -150,7 +99,7 @@ func TestScanner_AnEntryThatIsNotAFileIsNotATrack(t *testing.T) {
 			return ""
 		}},
 		{"a socket", "01.flac", "socket", func(t *testing.T, _ linkedFixture, p string) string {
-			bindSocket(t, p)
+			fsutiltest.BindSocket(t, p)
 			return ""
 		}},
 	} {
@@ -198,13 +147,13 @@ func TestScanner_AFileReplacedByANamedPipeLosesItsRow(t *testing.T) {
 	if err := os.Remove(first); err != nil {
 		t.Fatal(err)
 	}
-	mkfifo(t, first)
+	fsutiltest.MakeFIFO(t, first)
 	scanPastFIFOs(t, "full scan", []string{first}, func() error { _, err := f.sc.Scan(ctx); return err })
 	requireNoRowsAt(t, f.store, "full scan", "Music/Album/01.flac")
 
 	second := filepath.Join(f.album, "02.flac")
 	pipe := filepath.Join(f.parked, "pipe")
-	mkfifo(t, pipe)
+	fsutiltest.MakeFIFO(t, pipe)
 	if err := os.Remove(second); err != nil {
 		t.Fatal(err)
 	}

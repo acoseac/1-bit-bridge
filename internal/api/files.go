@@ -14,6 +14,7 @@ import (
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // Entry is the JSON shape of a single directory entry returned by /v1/list.
@@ -288,6 +289,16 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
 		return
 	}
+	// A named pipe, a socket or a device, or a link to one, is refused on
+	// the resolver's stat, before anything opens it: opening a named pipe
+	// waits for a writer, so until 2026-09-28 a FIFO named like a track held
+	// this request, and the updater session begun above, until one came.
+	// The open below refuses the same kinds again, for a path replaced
+	// since that stat (fsutil.OpenAsFile).
+	if kind := fsutil.NotAFile(info.Mode()); kind != "" {
+		writeNotAFile(w, r, clientPath, kind)
+		return
+	}
 
 	// Variant branch: take over before the source-file open if the
 	// caller asked for a variant. The source-path resolve above is
@@ -310,7 +321,11 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(abs)
+	f, opened, err := fsutil.OpenAsFile(abs)
+	if kind := fsutil.NotAFileKind(err); kind != "" {
+		writeNotAFile(w, r, clientPath, kind)
+		return
+	}
 	if err != nil {
 		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't open this file", clientPath, err)
@@ -328,7 +343,18 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	// http.ServeContent handles Range, If-Modified-Since, and the 206
 	// partial-content bookkeeping for us. It also skips the body on HEAD
 	// requests automatically.
-	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+	http.ServeContent(w, r, opened.Name(), opened.ModTime(), f)
+}
+
+// writeNotAFile refuses a path that does not open as a file
+// (fsutil.NotAFile) with the 400 bad_request this handler already gives a
+// directory, which PROTOCOL.md's error table gives a malformed path: the
+// request names something no client can fetch as a file, and asking again
+// changes nothing. The log line names the path the client asked for, as
+// every other refusal of a library file does (#1055).
+func writeNotAFile(w http.ResponseWriter, r *http.Request, clientPath, kind string) {
+	writeFileErrorLog(w, r, http.StatusBadRequest, "bad_request",
+		"path is a "+kind+", not a file", clientPath, &fsutil.NotAFileError{Kind: kind})
 }
 
 // serveVariant resolves (clientPath, variantID) → on-disk sidecar
@@ -392,7 +418,21 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
 		return
 	}
-	f, err := os.Open(rec.SidecarPath)
+	f, info, err := fsutil.OpenAsFile(rec.SidecarPath)
+	if kind := fsutil.NotAFileKind(err); kind != "" {
+		// The rendition's path holds something that is not a file. 410,
+		// as for a rendition that is gone, so the client falls back to the
+		// source; and no reap, since nothing here says the file is gone,
+		// only that what is at its path is not it.
+		LoggerFromContext(r.Context()).Warn(
+			"variant sidecar is not a file; keeping the row",
+			slog.String("source_path", sourcePath),
+			slog.String("variant_id", variantID),
+			slog.String("kind", kind),
+		)
+		writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+		return
+	}
 	if err != nil {
 		// Distinguish the "file genuinely gone" case (410 Gone,
 		// iOS falls back to original, --gc reconciles) from
@@ -489,12 +529,6 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't stat the variant sidecar", err)
-		return
-	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
