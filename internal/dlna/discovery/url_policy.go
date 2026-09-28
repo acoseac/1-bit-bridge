@@ -481,8 +481,9 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 // every byte fetch of a routed track. Comparable, so a cache can store it and
 // a test can compare it.
 type DialApproval struct {
-	// source is the announcing packet's address, unmapped and without a
-	// zone, or the zero Addr for an approval that came from no packet.
+	// source is the approving peer's address (the announcing packet's, or
+	// the SUBSCRIBE's), unmapped and without a zone, or the zero Addr for an
+	// approval that came from no peer.
 	source netip.Addr
 	// chosen is the kind of host an operator's URL named: hostThisMachine
 	// or hostLinkLocal, or hostElsewhere (the zero value) when it named
