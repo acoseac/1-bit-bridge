@@ -30,7 +30,7 @@ type defaultLoggerSetter struct {
 // defaultLoggerSetters are the two ways into slog.SetDefault a test file
 // can name. loggingtest's own tests call slog.SetDefault by hand because
 // loggingtest.SetDefault is their subject: they build the prior default it
-// has to put back. internal/logging's tests call Init for the same reason,
+// has to put back. internal/logging's tests call Init, their subject,
 // unqualified, which this scan does not read; there resetOnce puts back
 // what Init changes, and that package's TestMain checks it did.
 var defaultLoggerSetters = []defaultLoggerSetter{
@@ -58,10 +58,10 @@ var defaultLoggerSetters = []defaultLoggerSetter{
 // handler and zeroes its flags, and putting back slog's own default (the
 // one every test binary starts with) undoes neither, while that handler
 // writes THROUGH the log package. When this scan was written it found 29
-// references in 12 files (backlog B31), and after each file's capturing
-// test, a later test's slog.Info and log.Print both went into the finished
-// test's handler: 0 of 2 lines reached the output, where 2 of 2 did with
-// the later test run alone (go1.26.6, 2026-09-28).
+// references in 12 files, and after each file's capturing test, a later
+// test's slog.Info and log.Print both went into the finished test's
+// handler: 0 of 2 lines reached the output, where 2 of 2 did with the
+// later test run alone (go1.26.6, 2026-09-28).
 //
 // It reads test files only, since every capture in the tree is in one, and
 // production code has one call, logging.Init's. A reference counts whether
