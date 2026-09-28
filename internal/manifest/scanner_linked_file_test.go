@@ -20,6 +20,7 @@ package manifest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -357,12 +358,53 @@ func TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows(t *testing.
 	}
 }
 
+// requireLinkedRowsKept asserts that every row in indexed is still there and
+// unrewritten (its indexed_at as recorded), and that the linked FLAC's row
+// kept its tag. label names the moment, so a failure says which one broke.
+func requireLinkedRowsKept(t *testing.T, store *Store, label string, indexed map[string]int64) {
+	t.Helper()
+	for rel, was := range indexed {
+		if st, err := store.GetTrackStat(context.Background(), rel); err != nil || st == nil {
+			t.Fatalf("%s: the row of %s was reaped while its target was out of sight (err %v)", label, rel, err)
+		}
+		if got := indexedAt(t, store, rel); got != was {
+			t.Fatalf("%s: the row of %s was rewritten (indexed_at %d, was %d)", label, rel, got, was)
+		}
+	}
+	if got := titleOf(t, store, "Music/Album/01.flac"); got != "On the NAS" {
+		t.Fatalf("%s: the row's tags were replaced: title %q", label, got)
+	}
+}
+
+// requireUnreadableLinksLines asserts want lines about links that could not
+// be followed, each counting links links under an example named
+// library-relative, as a log line names a library file (#1055), and none
+// naming any of the absolute paths given.
+func requireUnreadableLinksLines(t *testing.T, lines []string, want, links int, absolute ...string) {
+	t.Helper()
+	if len(lines) != want {
+		t.Fatalf("%d lines about links that could not be followed, want %d:\n%s",
+			len(lines), want, strings.Join(lines, "\n"))
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, fmt.Sprintf("count=%d", links)) || !strings.Contains(line, "example=Music/Album/") {
+			t.Errorf("the line does not count %d links, library-relative: %s", links, line)
+		}
+		for _, abs := range absolute {
+			if strings.Contains(line, abs) {
+				t.Errorf("the line names the absolute path %s: %s", abs, line)
+			}
+		}
+	}
+}
+
 // TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow: "we could not see this
 // path" dominates. A link into a mount that went away keeps its row as it
 // was, tags and all, however many scans run while the mount is gone (the test
 // scanner reaps a missing row at the first scan), and nothing is rewritten
 // when the mount returns. The same holds for a subtree scan, and for the
-// virtual rows of a linked SACD container.
+// virtual rows of a linked SACD container. The walks say so once per scan,
+// whatever the number of links: three scans, two links behind each.
 func TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow(t *testing.T) {
 	f := newLinkedFixture(t)
 	flacTarget := filepath.Join(f.parked, "01.flac")
@@ -373,25 +415,9 @@ func TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow(t *testing.T) {
 	linkOrSkip(t, isoTarget, filepath.Join(f.album, "Album.iso"))
 	scanOnce(t, f.sc, "initial")
 
-	rows := []string{"Music/Album/01.flac", "Music/Album/Album.iso/st/01.dff", "Music/Album/Album.iso/st/02.dff"}
-	indexed := make(map[string]int64, len(rows))
-	for _, rel := range rows {
+	indexed := make(map[string]int64, 3)
+	for _, rel := range []string{"Music/Album/01.flac", "Music/Album/Album.iso/st/01.dff", "Music/Album/Album.iso/st/02.dff"} {
 		indexed[rel] = indexedAt(t, f.store, rel)
-	}
-	requireKept := func(label string) {
-		t.Helper()
-		for _, rel := range rows {
-			st, err := f.store.GetTrackStat(context.Background(), rel)
-			if err != nil || st == nil {
-				t.Fatalf("%s: the row of %s was reaped while its target was out of sight (err %v)", label, rel, err)
-			}
-			if got := indexedAt(t, f.store, rel); got != indexed[rel] {
-				t.Fatalf("%s: the row of %s was rewritten (indexed_at %d, was %d)", label, rel, got, indexed[rel])
-			}
-		}
-		if got := titleOf(t, f.store, "Music/Album/01.flac"); got != "On the NAS" {
-			t.Fatalf("%s: the row's tags were replaced: title %q", label, got)
-		}
 	}
 
 	gone := f.parked + ".unmounted"
@@ -405,29 +431,14 @@ func TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow(t *testing.T) {
 	if _, err := f.sc.ScanSubtree(context.Background(), f.album); err != nil {
 		t.Fatalf("subtree scan with the mount gone: %v", err)
 	}
-	requireKept("while the mount is gone")
-	// One line per scan, whatever the number of links: three scans, two
-	// links behind each. Named library-relative, as a log line names a
-	// library file (#1055).
-	lines := rec.Lines(msgUnreadableLinks)
-	if len(lines) != 3 {
-		t.Fatalf("%d lines about links that could not be followed over three scans, want 3:\n%s",
-			len(lines), strings.Join(lines, "\n"))
-	}
-	for _, line := range lines {
-		if !strings.Contains(line, "count=2") || !strings.Contains(line, "example=Music/Album/") {
-			t.Errorf("the line does not count both links library-relative: %s", line)
-		}
-		if strings.Contains(line, f.root) || strings.Contains(line, gone) || strings.Contains(line, f.parked) {
-			t.Errorf("the line names an absolute path: %s", line)
-		}
-	}
+	requireLinkedRowsKept(t, f.store, "while the mount is gone", indexed)
+	requireUnreadableLinksLines(t, rec.Lines(msgUnreadableLinks), 3, 2, f.root, f.parked, gone)
 
 	if err := os.Rename(gone, f.parked); err != nil {
 		t.Fatal(err)
 	}
 	scanOnce(t, f.sc, "scan with the mount back")
-	requireKept("once the mount is back")
+	requireLinkedRowsKept(t, f.store, "once the mount is back", indexed)
 }
 
 // TestScanner_ALinkFirstSeenDanglingIsIndexedOnceItsTargetAppears: a link
