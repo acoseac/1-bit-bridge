@@ -24736,9 +24736,10 @@ second half only.
 
 ### Reproduction, on a coarse filesystem
 
-A FAT32 disk image keeps 2 s mtimes, which stands in for the tick on any Mac
-(`hdiutil create -size 200m -fs MS-DOS`, attached with `-nobrowse`, `TMPDIR`
-pointed into it so `t.TempDir()` lands there). On main (84a3df20), unchanged
+A FAT32 disk image keeps 2 s mtimes, so a Mac can reproduce the coarse-tick
+case with one (`hdiutil create -size 200m -fs MS-DOS`, attached with
+`-nobrowse`, `TMPDIR` pointed into it so `t.TempDir()` lands there). APFS
+keeps nanosecond mtimes, which is why these tests pass on a Mac's own disk. On main (84a3df20), unchanged
 code:
 
 ```
