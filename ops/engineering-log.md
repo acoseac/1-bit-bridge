@@ -21750,6 +21750,754 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — bridge init's preflight grades the ports the run writes where no config loads
+
+#1027's entry recorded this under Out of scope: "The preflight grades init's
+defaults on a public run (a first install or, now, a broken config), ports a
+public init does not write. Another process on 7788 refuses such a run."
+
+### What was measured
+
+- **The mechanism.** initCmd seeded the preflight's `doctor.Deps` with
+  `APIPort: 7788, AdminPort: 7789`, and `withExistingInstallDeps` replaced
+  them only from a config at the target path that loads. On a first install,
+  and over a config that is there and does not load, the preflight graded
+  7788 / 7789 whatever the run wrote. A `--public` run writes `:443` (or
+  `--listen-address`) and `0.0.0.0:7789` / `127.0.0.1:7789` behind
+  `--admin-tls-proxy` (or `--admin-address`), which only the second port
+  pass graded, after the preflight had already refused on 7788.
+- **End to end, the real binary** (`go build` at 99b6d1e6 and at this
+  change, the dev Mac, every run with stdin `/dev/null`), 127.0.0.1:7788
+  held by a python listener, not a bridge:
+
+  | | run | 99b6d1e6 | this change |
+  |---|---|---|---|
+  | 1 | public first install, `--admin-tls-proxy --listen-address 127.0.0.1:A --admin-address 127.0.0.1:B`, A and B free | exit 1, `[FAIL] port-api :7788 in use`, "another process owns this port; stop it or pick a different address in bridge.yaml", nothing written | exit 0, config on A / B |
+  | 2 | public first install on its defaults (`--email`, so `:443` and `0.0.0.0:7789`) | exit 1, the same FAIL | exit 0, one warn: `port-api :443 not bindable` (EACCES for this user there) |
+  | 3 | a config that does not load (`libraryNmae: typo`), the public re-init on A / B with `--force` | exit 1, the same FAIL, config unchanged | exit 0, config replaced |
+  | 4 | control: loopback first install, which writes `:7788` | exit 1, the same FAIL | exit 1, the same FAIL, and "port-api and port-admin above grade the ports this init would write, its defaults." |
+  | 1b | row 1 with 7788 free | exit 0 | exit 0 |
+
+- **Not a defect of the preflight, found beside it (row 5):** a loopback
+  first install given `--listen-address` and `--admin-address` exits 0 and
+  saves `:7788` / `127.0.0.1:7789`. The flags are read on a public run only
+  (their help says "with --public"), so there the preflight's 7788 / 7789 are
+  the ports the run writes. Left as it is; see Out of scope.
+
+### Decisions
+
+- **Seed the preflight with the ports the run writes** where no config
+  loads. `initAddresses(public, proxy, listenFlag, adminFlag)` is the one
+  definition of the two addresses: initCmd builds the config from it (in
+  both postures, so on a loopback run baseConfig's defaults are overwritten
+  with the same values), and the preflight's `Deps` are seeded with its
+  ports before `withExistingInstallDeps`, which replaces them with the
+  install's own where the config loads (unchanged) and now reports whether
+  it did (`loaded`). The preflight then grades exactly what the second pass
+  would have, and that pass finds nothing changed where no config loaded.
+- **Rejected: leave the preflight's port checks out where no config loads
+  and let the second pass grade the run's ports.** doctor.Run has no way to
+  leave a check out, so it needs a new `Deps` knob, and the second pass runs
+  after the name and "Overwrite?" prompts and after `os.MkdirAll(dataDir)`:
+  a refused first install would leave its data dir behind. Seeded, the
+  refusal comes before any prompt and before init writes anything (the
+  preflight's own config-dir probe still makes the config dir, as it always
+  has).
+- **The second pass still compares, and keeps its `OwnPIDPortsUnknown`
+  exception.** No path through initCmd reaches it in that mode now, since
+  the preflight graded the same ports. Rejected: gating the pass on
+  `loaded`, which would stop grading a port the config could come to hold
+  apart from `initAddresses` (a later change keeping a broken file's ports,
+  say), where comparing still catches it, in the right mode. #1027's NC-C
+  (the pass clears the pid file as before) no longer bites, as expected:
+  its row C is decided by the preflight.
+- **A refusal on the run's ports says so under the report.** The preflight
+  report grades an install in every other line, and the port checks' own
+  hint ("stop it or pick a different address in bridge.yaml") is written
+  for an install whose bridge.yaml names the port, which a first install
+  has not got. `portsThisInitWrites` prints one line, only when no config
+  loaded and a port check FAILed (`doctor.Report.PortFailed`, new): on a
+  public run "port-api and port-admin above grade the ports this init would
+  write; --listen-address and --admin-address choose others.", on a
+  loopback run "… would write, its defaults.". Where a config loads, the
+  lines are a verdict about the install and nothing is added. Over a config
+  that does not load with `--yes` and no `--force` the run keeps the config
+  and writes nothing, so "would write" is conditional there; the preflight
+  graded init's defaults for that run before, which the kept config need
+  not use either. Left.
+- **A public run's address flag the config's own check refuses is refused
+  before the preflight**, exit 2 (`config.ValidateBindAddress`, the
+  unexported `validateBindAddress` renamed so init and Validate share it).
+  The preflight has no port to grade for an address that does not parse.
+  Measured under NC5 below, without the check: `--listen-address 443`
+  printed `[warn] port-api no port set` with the hint `pass
+  Deps.port-apiPort`, then exited 1 at the validation before Save
+  (`validate: listenAddress "443": address 443: missing port in address`)
+  with the config and data dirs made. Rejected: keep 7788 / 7789 for such an
+  address (the defect this change removes, for one more input), or seed 0
+  (that warn).
+- **Consult**: a direct Gemini consult (`consult.py`) on the design was
+  refused, HTTP 429, the project's monthly spending cap. Decided without it.
+
+### Tests
+
+- `cmd/bridge/init_run_ports_test.go`, all through the real `initCmd`:
+  `TestInitPublicFirstInstallIsNotRefusedOverPortsItDoesNotWrite` (7788 and
+  7789 held with `holdLoopbackPort`: bound by the test, or found held),
+  `TestInitOverABrokenConfigIsNotRefusedOverPortsItDoesNotWrite` (the same
+  over a config that does not load, the data dir recording this binary's
+  parent, alive and holding nothing), `TestInitPreflightRefusesAPortTheRunWrites`
+  (one row per way the run's ports are chosen: a public run's flags, the
+  admin port a public run defaults to, a loopback run's defaults; each must
+  FAIL port-admin on the held port, print the line, and leave no data dir
+  and no config), `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`
+  (the control: a config that loads, its listen port held, a keep; no line),
+  `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` (exit 2, the flag named
+  with its value, no config dir at all).
+- `internal/doctor`: `TestReportPortFailed`.
+- Adapted: `TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding`
+  asserted "these are the ports this init would write", the second pass's
+  line; the preflight refuses there now, so it asserts the preflight's line
+  and a FAIL on each held port. It and
+  `TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites` lost
+  `requireDefaultPortsFreeOrSkip` (deleted): the preflight no longer grades
+  the defaults on a public run, so a host where something holds them runs
+  both instead of skipping. `TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`
+  also asserts the loopback line. The three helper tests
+  (`…PointsAnUnloadableConfigAtItsDataDirsPidFile`,
+  `…LeavesAFirstInstallsPortsAlone`, `…GradesTheInstallsOwnPortsAndPidFile`)
+  assert what `withExistingInstallDeps` reports.
+- The first version of the flag test named its subtests for the flags, and
+  init prints `t.TempDir`'s path, which carries the subtest's name: its
+  "names the flag" half passed under NC5 on the path alone. The subtests
+  are named for the shape now, and the assertion wants the flag with its
+  quoted value.
+
+### Negative controls
+
+Each on the committed tree, and restored from it before the next. Run on the
+dev Mac with `-count=1` over `TestInit|TestMenuDoctor` in `cmd/bridge` and
+`TestReportPortFailed` in `internal/doctor`; every mutation matched once and
+built.
+
+| | mutation | goes red |
+|---|---|---|
+| NC1 | the preflight seeded from `config.DefaultListenAddress` / `DefaultAdminAddress` again | the public first install and the broken-config "not refused" tests, the flags row of the refusal table, and the adapted broken-config refusal (4) |
+| NC2 | the line never printed | the three refusal rows and both broken-config refusals (loopback and public) |
+| NC3 | the line printed whether or not a config loaded | the no-line control, alone |
+| NC4 | `withExistingInstallDeps` reports a missing or broken config as loaded | both unloadable-config rows, the first-install helper test, the three refusal rows, both broken-config refusals |
+| NC5 | no check of the address flags | the flag test, both rows, on all three assertions (after the fix above) |
+| NC6 | the config built without `initAddresses` (baseConfig's defaults in every posture) | the two "not refused" tests (the second pass then grades the held defaults), and seven existing public-posture tests whose outcome follows the saved addresses (the saved config, the footer's URL, the domain endpoint's port, and the two #970 refusals, whose held port the config no longer names) |
+| NC7 | `PortFailed` answers for any failed check | `TestReportPortFailed`'s "another check failed" row, alone |
+| NC8 | `PortFailed` reads port-api only | the three refusal rows (each fails port-admin alone) and the unit test's port-admin row |
+| NC9 | #1027's NC-C: the second pass clears the pid file in every mode | nothing, as expected: no port of the run reaches that pass where no config loaded |
+
+On dido, the stock `golang:1.26.6` image (no lsof) as uid 1000 with
+`-race`: the same tests pass, and NC1 turns the same four red. The whole of
+`cmd/bridge`, `internal/doctor` and `internal/config` under `-race` there:
+ok, 182.9 s, 3.9 s and 1.2 s.
+
+### Out of scope
+
+- **`--listen-address` and `--admin-address` are ignored, silently, without
+  `--public`** (row 5). An operator who passes them to a loopback init gets
+  the defaults and no word. Refusing them there, or honouring them, is a
+  behaviour change of its own.
+- **Where the install's config loads, the preflight grades the install's
+  ports, and a `--force` rewrite that moves off them is refused on the old
+  one.** Measured with this change's binary: an install on 127.0.0.1:X / :Y
+  whose bridge is stopped, a stranger on X, and `init --yes --force --public
+  … --listen-address 127.0.0.1:A --admin-address 127.0.0.1:B` exits 1 on
+  `[FAIL] port-api :X in use`, a port the rewrite abandons. #963 grades the
+  install that is there on purpose, and a `--force` run is the one case
+  where the rewrite is certain before the preflight runs (an interactive run
+  decides at the "Overwrite?" prompt, after it).
+- **`bindVerdict`'s hint for port 0 is `pass Deps.port-apiPort`**, a
+  developer's note that reaches an operator whose config (or public init)
+  names `:0`, the ephemeral-port mode `validatePort` accepts.
+
+## 2026-09-28 — an SSDP LOCATION leads the bridge to this machine or the link only from that address (backlog B14, #1050's follow-ups)
+
+#1050 kept a discovered description's service URLs on the host that served
+it and recorded three follow-ups it measured and left: nothing bounded which
+host the LOCATION names; `hostPortFromURL` read `url.URL.Host`; a manual
+upstream (`SourceUserChosen`) could name a loopback control URL. This entry
+closes the three, and adds #1050's rule to `FuzzParseDeviceDescription` as a
+property (the second half of B16).
+
+### What was measured on the old code
+
+The new tests, compiled against the unchanged handlers with only the new API
+surface stubbed to the old behaviour, all failed on their assertions:
+
+- **Renderer client, through `handlePacket`** with a recording dispatcher,
+  every packet from 192.0.2.7: each of sixteen LOCATIONs naming this machine
+  or a link-local address was fetched, and each fetch was followed by the
+  GetProtocolInfo POST to the same host, `http://127.0.0.1:7789/cm/control`
+  among them. A renderer known at 192.0.2.7, re-announced from 192.0.2.99
+  with `LOCATION: http://127.0.0.1:7789/api/stats`, was read as a move: the
+  console was fetched and the cached ControlURL became
+  `http://127.0.0.1:7789/avtransport/control`.
+- **Upstream client**, the same way: seven such LOCATIONs fetched, and the
+  move replaced the cached ContentDirectory control URL with
+  `http://127.0.0.1:7789/api/stats` (the description on "the console" named
+  a relative control URL, which the same-host rule accepts). `LiveHost`
+  derives every routed byte fetch from that URL.
+- **Both default clients** connected to a listener on 127.0.0.1 for a
+  request that named it by `localhost` or by its address, with the packet
+  from 192.0.2.7 and with no packet at all.
+- **Manual upstream**: a description at `http://192.0.2.50:8200/rootDesc.xml`
+  naming its ContentDirectory on `127.0.0.1:7789`, `localhost:7789`,
+  `[::1]:7789`, `0.0.0.0:7789`, `127.1:7789` or `169.254.169.254` was cached
+  in all six cases.
+- **`LiveHost`** returned `":7789"` for `http://:7789/ctl`.
+
+**What reaches a loopback listener** (a probe program, Go 1.27.1, an
+`http.Client` GET to each spelling of a listener on 127.0.0.1). On macOS and
+on Linux (`CGO_ENABLED=0`): `127.0.0.1`, `localhost` in any case,
+`foo.localhost`, `127.0.0.1.localhost`, `localhost.`, `0.0.0.0`, `[::]`, `[::ffff:127.0.0.1]`,
+`[0:0:0:0:0:ffff:7f00:1]`, and two PUBLIC DNS names that resolve to
+127.0.0.1. On macOS only, whose libc resolver takes inet_aton's spellings:
+`127.1`, `127.0.1`, `2130706433`, `0x7f000001`, `0X7F000001`, `0x7f.1`,
+`0x7f.0.0.1`, `017700000001`, `0177.1`, `127.000.000.001`, `127.0.0.01`,
+`127.0x0.1`, `0`, `0.0` and `0x0`. Linux's pure-Go resolver fails every
+one of those. Neither reached it with `127.0.0.1.`, `127.0.0.1..`,
+`localhost..` or `[::127.0.0.1]`. So a check of the host STRING against
+`netip` misses a dozen spellings, and a public DNS name defeats it on every
+platform.
+
+**What devices send.** A probe program sent M-SEARCH (`ssdp:all`,
+`upnp:rootdevice`, MediaServer:1, MediaRenderer:1) every 20 to 60 s on
+every multicast IPv4 interface, pinned with `IP_MULTICAST_IF` as the
+bridge's clients are, listened for NOTIFY on 239.255.255.250:1900, and
+recorded each packet's source address against its LOCATION host. Runs of 4,
+1.5 and 30 minutes on dido's LAN, and of 4 and 30 minutes on the dev Mac's
+(a phone hotspot, then a home LAN when the Mac changed networks during the
+second run). Reception was checked by counting the M-SEARCH packets heard,
+our own included.
+
+- On the home LAN, three root devices answered, on two hosts (one exposed
+  two UDNs). All 1,891 of their packets (1,827 M-SEARCH answers and 64
+  NOTIFYs) carried a LOCATION on the packet's source address, as an IP
+  literal. No device used a hostname.
+- dido's LAN and the hotspot had no device at all.
+- The only LOCATIONs off their source address were this repo's own
+  `internal/dlna` test advertisers (`Test_SSDPAdvertiser_StartStopRaceFree`,
+  UDN `uuid:f1b3a5c2-…`, server token `test`, LOCATION
+  `http://127.0.0.1:7790/dlna/description.xml`; and
+  `Test_Server_StartStop_LifecycleBindsLoopbackPort`, `uuid:test-lifecycle`),
+  which other sessions' test runs multicast from the Mac's LAN address and
+  from the golang containers on dido's docker0. They are the shape the new
+  rule refuses.
+
+Device identities and addresses stay out of this file.
+
+### Decisions
+
+- **The rule**: a LOCATION may lead the bridge to this machine (loopback,
+  the unspecified address, a localhost name) or to a link-local address only
+  when the SSDP packet came from that same address. A loopback source was
+  sent on this machine, whose processes reach the console directly, and a
+  device on a zero-configuration LAN announces from its link-local address.
+  The unspecified address is never a packet's source, so it is always
+  refused.
+- **Enforced twice, because the string shows only part of it.**
+  `LocationFromSource` runs in both handlers before any fetch and refuses
+  what the host string shows: an IP literal (unmapped, one trailing dot
+  ignored), a localhost name (unless the source is loopback), and a host
+  that ends in a number without being an IP literal. A refused LOCATION
+  reads as an absent one, exactly as `ParseSSDPHeaders`' refusals do: a
+  known UDN is refreshed, an unknown one skipped, and the move detector
+  never sees it, so no fetch goroutine, stub or Location record is spent.
+  `NewDeviceFetchClient`, the default client of both SSDP clients, refuses a
+  connect to a loopback, unspecified or link-local address unless the
+  request's context says the packet came from it. `net.Dialer.ControlContext`
+  sees the address of each connect attempt after resolution, and net/http
+  dials under `context.WithoutCancel` of the request context, so the value
+  arrives. DNS lookups do not go through that dialer (net's `Resolver.dial`
+  uses a Dialer of its own), so a stub resolver on 127.0.0.53 keeps working.
+- **Numeric spellings are refused, not parsed.** Parsing inet_aton's forms
+  would say which address `10.1` means, but no device writes one, and the
+  two resolvers the bridge runs on disagree about them (macOS resolves,
+  Linux fails), so refusing them wherever the bridge judges a device URL is
+  simpler and loses nothing measured. The test is the WHATWG URL standard's
+  "ends in a number" (decimal digits, or 0x and hex digits, in the last
+  label).
+- **No proxy, no kept-alive connections, no TLS dialer.** Through a proxy
+  the connect goes to the proxy, so the check would judge the proxy's
+  address, and a proxy on 127.0.0.1 in `HTTP_PROXY` would refuse every fetch
+  (the old client used `http.DefaultTransport`, which honours the
+  environment; a LOCATION names a device on the link the packet arrived on,
+  which a proxy cannot stand in for). A kept-alive connection could carry a
+  later request that another packet's source had not allowed. A
+  `DialTLSContext` would connect around the check.
+  `TestDefaultClient_ChecksTheDevicesAddressNotAProxys` pins the three.
+- **The same host kinds bound a service URL, whatever the source.**
+  `resolveServiceURL` keeps a URL on this machine or a link-local address
+  only from a description URL of the same kind, and refuses a numeric
+  spelling outright. For a discovered description the same-host rule
+  already implies it. For a manual upstream it is the bound on the
+  operator's approval: a manual URL elsewhere cannot make the console, or a
+  cloud VM's metadata service at 169.254.169.254, its `LiveHost` (whose
+  answers the unauthenticated DLNA listener relays), while a manual URL on
+  this machine keeps its local control URL, by any spelling. The manual
+  poller keeps its own client, without the dial check: its URL is the
+  operator's choice.
+- **`hostPortFromURL` reads `Hostname()`**, as #1050 recorded.
+- **Not the general rule** (the LOCATION host equals the packet's source
+  for every address). It would bound names and tailnet or public addresses
+  too, and all three devices measured pass it. Three devices on one LAN are
+  not the evidence it needs: multi-homed hosts and some NAS firmware are
+  reported to announce another of their addresses, a renderer has no escape
+  hatch on the bridge, and none of the devices measured was multi-homed.
+- **Gemini consult**: the API refused (the project's monthly spending cap).
+  The design questions (whether `ControlContext` sees every attempt, whether
+  a dial can bypass `DialContext`, the proxy and keep-alive interplay, the
+  same-address exception) were settled against the Go source instead
+  (`net/sock_posix.go`'s `fd.dial` calls the control function with the
+  resolved remote address, on unix and windows; `net/http/transport.go`
+  dials under `context.WithoutCancel(ctx)`; `net/lookup.go`'s
+  `Resolver.dial` uses a zero `Dialer`) and by the tests.
+- **The `.Host` sweep** (item 2's "grep the tree"). The other reads are
+  `internal/dlna/server.go`'s GENA callback, already safe (it hands
+  `Hostname()` to `callbackHostAllowed`, which refuses an empty host); the
+  `upnpproxy` rewrite, whose dial target is `LiveHost`'s; and three
+  validators whose values come from the operator's file or an authenticated
+  device. `CanonicalHTTPSBase` (the harvest base URL) passes `https://:8443`,
+  which would dial this machine, but an explicit `https://127.0.0.1:8443`
+  passes as well off-demo by design, and changing the reduction turns a
+  nonsense pin into "unpinned". `normalizeBaseURL` (the enrich override
+  bases) would need a `Validate` refusal, which stops a bridge from starting
+  after an update. `customEndpoints` are advertised to phones, not dialled.
+  All three left.
+
+### Tests and controls
+
+- `internal/dlna/discovery/location_source_test.go`: sixteen host-local
+  LOCATIONs from a LAN source never fetched; link-local and loopback
+  LOCATIONs fetched from their own address; a known renderer not moved onto
+  the console; the default client refusing a loopback name and address
+  announced from elsewhere or not announced at all; the transport settings;
+  the positive twin through `handlePacket` from 127.0.0.1, including the
+  move path; the dial-check and `LocationFromSource` tables.
+- `internal/upnp/location_source_test.go`: the same for the upstream
+  client, and the manual poller refusing six host-local control URLs from a
+  description elsewhere and keeping a local one from a description on this
+  machine, in three spellings.
+- `service_url_policy_test.go` (discovery): the host-kind table for service
+  URLs. `service_url_policy_test.go` (upnp):
+  `TestDiscoveredServerWithAnOffHostControlURLIsNotCached` gained a LAN-host
+  case. Its console case is now also refused by the host-kind rule, so it no
+  longer showed that the upstream SSDP path parses with the strict source
+  (#1050's NC5b passed it until the case was added).
+- `cmd/bridge/upnp_livehost_test.go`:
+  `TestLiveHostRefusesAControlURLThatNamesNoHost`.
+- `FuzzParseDeviceDescription` fuzzes the base URL beside the XML and
+  checks every kept URL, re-parsed from the string the parser returned,
+  against the policy stated apart from the parser's own helpers. Its seeds
+  cover each rule from both sides. Sixty seconds each afterwards,
+  `-fuzzminimizetime 1s`, `-parallel 4`: `FuzzParseDeviceDescription`
+  1,233,873 executions, `FuzzParseSSDPHeaders` 1,981,900,
+  `FuzzParseGetProtocolInfoResponse` 2,673,667, no failure. The target's
+  signature gained an argument, and the nightly job restores a Go build
+  cache that can hold corpus entries of the old one; an entry of the old
+  signature planted in the local fuzz cache was skipped and the run passed,
+  so a restored cache cannot fail the job.
+- The existing redirect tests of both default clients now send their
+  request with a loopback source in its context: their two servers listen
+  on 127.0.0.1, which the dial check otherwise refuses.
+- Negative controls on the committed tree, each restored with
+  `git checkout --` and checked green, `-count=1` over both packages
+  (`cmd/bridge` for NC8):
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | `LocationFromSource` keeps host-local LOCATIONs | the handler, move and table tests, both packages (5) |
+  | NC2 | the dial check allows every address | the default-client refusals (2 + 1) and the dial table |
+  | NC3a | the renderer fetch drops the source | the renderer's positive twin |
+  | NC3b | only the GetProtocolInfo POST drops it | the same test, on the missing POST and sinks |
+  | NC3c | the upstream fetch drops it | the upstream positive twin |
+  | NC3d | the move branch drops it (both clients) | both positive twins, on the move step only |
+  | NC4 | the dial check never honours the source | both positive twins, the dial table, both redirect tests |
+  | NC5 | `LocationFromSource` drops the same-address exception | the same-address test, the table, both positive twins |
+  | NC6 | no host-kind rule for service URLs | the host-kind table, fuzz seeds #2 and #3, the manual refusal |
+  | NC7 | no same-kind exception | 11 tests, six of them existing ones served from 127.0.0.1 or a link-local base (four manual-poller tests, the IPv6 parser test, the fetcher round trip) |
+  | NC8 | `hostPortFromURL` reads `Host` | the LiveHost test |
+  | NC9 | numeric spellings read as names | the handler and table tests, the host-kind table, fuzz seeds #4 and #5, both packages' refusals |
+  | NC10 | a proxy and kept-alive connections | the transport test only |
+  | NC11 | no same-host rule for discovered descriptions | #1050's five discovery tests, fuzz seeds #2 and #3, the upstream LAN-host case |
+  | NC12 | `FetchDeviceDescription` parses as user-chosen | the two renderer handler tests and the upstream LAN-host case |
+  | NC13 | any scheme passes | fuzz seed #2 (`ftp://…` kept) |
+  | NC14 | a port-only host passes | fuzz seed #2 (`http://:8080/x` kept) |
+
+  NC11 first ran before the LAN-host case existed, and the upstream tests
+  stayed green: the host-kind rule held them. That is what added the case.
+
+### Out of scope
+
+- **A hostname control URL is resolved again at every later dial.** The
+  ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`) and the `upnpproxy`
+  byte fetch dial the cached control URL's host with clients of their own,
+  which have no dial check. A peer that re-announces a configured server's
+  UDN with a LOCATION on a name it controls passes both checks while the
+  name resolves to its own LAN address; a rebinding answer later sends the
+  Browse and the byte fetches to 127.0.0.1, whose answers the DLNA listener
+  relays. Closing it needs the cached server's announced source (or the
+  manual URL's kind) carried to those two clients, or IP-literal LOCATIONs
+  for SSDP upstreams.
+- A LOCATION on a tailnet or public address is still fetched.
+- The iOS app's SSDP path has no LOCATION-versus-source check.
+- `internal/dlna`'s SSDP tests multicast real NOTIFY announcements from the
+  host's LAN address while the suite runs (above).
+
+## 2026-09-28 — an M-SEARCH send a Stop cut short is not a failure, and the restart test decides its loop's send
+
+`TestSendMSearchStreakResetsOnRestart` (`internal/dlna/discovery`) failed
+under load, and two earlier entries recorded it and left it: the #993 entry
+(2026-09-24), which guessed at a send the host refused, and the #1051 entry
+(2026-09-27), which read the closed-socket mechanism from the code and noted
+the `captureLogs` defect beside it. This change measures both, fixes the
+product half, and makes the test decide what the live loop's sends do.
+
+### What was measured on main
+
+- **The flake.** 10 of 200 runs failed under `-race` on the dev Mac with
+  other sessions loading it, "a restarted client logged 0 first-failure
+  Warns, want 1". A probe copy of the test that captured from before
+  `Start` showed what the live loop logged: 5 of 400 runs failed on the
+  Mac and 17 of 1,000 on Linux (`golang:1.26.6` on dido, `-race`), and in
+  every failing run, and in no passing one, the tick loop had logged
+  `M-SEARCH send failed … err="write udp4 0.0.0.0:PORT->239.255.255.250:1900:
+  use of closed network connection"`. `Start` spawns the tick loop, whose
+  first send runs at once: it took its `snapshotConn()` before the test's
+  `Stop` closed the socket and wrote after, and its failure took the streak
+  to 1, so the failure the test drove next took it to 2, which logs nothing.
+  Sends go through on both hosts (a probe's `WriteToUDP` answered nil), so
+  the #993 entry's "a send the host refuses" was not what happened here; it
+  is the same mechanism's other door on a host whose multicast route is gone.
+- **The shutdown line.** Counting over plain `Start` then `Stop` cycles with
+  nothing failing on purpose, "M-SEARCH send failed … use of closed network
+  connection" appeared in 2, 1 and 1 of three runs of 2,000 cycles on the Mac
+  (9, 11 and 23 under `-race`), and in 0 of 2,000 and 12 and 12 of 2,000
+  under `-race` on Linux. No other send-failure line appeared. Each is a
+  false report of a failed send at shutdown, and it moved the streak.
+- **The swallowed lines.** In the 200-run reproduction only the first run's
+  log lines reached stderr: 1 of 200 runs printed the pre-capture
+  "failing persistently" line. `slog.SetDefault` points the log package's
+  output at the new handler and sets its flags to 0; `captureLogs` put back
+  the previous default, which was slog's own, and `SetDefault` does not
+  undo the redirect for that handler, which writes THROUGH the log package
+  (`log/slog/logger.go`, the same in 1.26.6 and 1.27.1). Every later line in
+  the binary went into the first test's buffer, which is also why the failing
+  runs above showed no Warn.
+
+### What changed
+
+- **`sendMSearch` drops `net.ErrClosed`** before `noteSendResult`: no Warn,
+  no count. The socket is the client's own and only `Stop` closes it, so the
+  error names the stop exactly. 0 of 12,000 cycles after (6,000 with and
+  6,000 without `-race`) on the Mac, and 0 of 12,000 on Linux. A UDP write
+  that races a close returns either its own result or `ErrNetClosing` on
+  every platform (`internal/poll`'s `WriteTo` takes the write lock, and
+  Windows' `execIO` puts `waitIO`'s `ErrNetClosing` in place of the aborted
+  operation), so there is no second spelling to catch.
+- **Rejected: classifying by the run's context.** `HandleReadErr` exits its
+  read loop on `ctx.Err() != nil || errors.Is(err, net.ErrClosed)`, and the
+  same test here was proposed in the task. A write takes no context and fails
+  for the same reasons during a shutdown as at any other time, so a context
+  check would drop a genuine failure that lands while `Stop` runs, the #998
+  rule's second condition. The read side is not a precedent: there the
+  context decides whether the LOOP returns.
+- **`writeMSearch`**, a per-client seam set to `(*net.UDPConn).WriteToUDP`
+  by the constructor, lets a test decide what the tick loop's send returns
+  and when. Set before `Start`, never while a loop runs, like `sendErrStreak`.
+- **The restart test** pre-fails through the escalation before `Start`,
+  makes every send fail through the seam, captures from before `Start`, waits
+  for the loop's first send, stops, and requires exactly one Warn carrying the
+  seam's error, and a streak of 1. The first failure of the new run is now the
+  loop's own, which is the case the test's docblock describes.
+- **Rejected: moving the capture before `Start` and counting Warns**, with
+  the loop's real send left to the host. With `Start`'s reset deleted it
+  passed 5 of 5 on the Mac and 5 of 5 on Linux (a probe that let the loop's
+  first send land before `Stop`): where a send goes through, the loop's
+  success resets the streak, "recovered", and the driven failure is again the
+  first. It cannot guard the rule on the hosts CI runs.
+- **`loggingtest.SetDefault(t, l)`** installs `l` and puts back the default,
+  the log package's output and its flags. `Record` and `ParkOn` go through it
+  (their `install` restored only the default), and so do the two capture
+  helpers in `internal/dlna` (`captureLogs` in `discovery`,
+  `captureDLNALogs`). `internal/upnp` has no such helper: its tests inject a
+  logger. `handshaketest` already put back output, flags and prefix.
+  1 of 200 runs printed its lines before; 200 of 200 after.
+
+### Tests
+
+- `TestSendMSearchStreakResetsOnRestart`, rewritten as above.
+- `TestSendMSearchCutShortByStopIsNotAFailure`: `holdPastStop` holds the
+  loop's send until `Stop` has closed the socket (it waits on the run's
+  context, then takes `runMu`'s read lock, which `Stop` holds across its
+  cancel and close), and then writes with the socket's own `WriteToUDP`, so
+  the error is the real one. Requires no Warn and a streak of 0. It failed
+  red-first on the tree with the seam and without the drop, with exactly the
+  shutdown line above.
+- `TestSendMSearchReportsAFailureThatLandsDuringStop`: the same hold, then a
+  genuine error. Requires one Warn and a streak of 1.
+- `TestSetDefaultPutsBackTheLogPackage` and
+  `TestRecordAndParkOnPutBackTheLogPackage` run an installer in a subtest
+  over a log output of the test's own, then require the output and flags
+  back and a line logged afterwards to reach that output. Both first check
+  that the default is slog's own, since with any other handler
+  `slog.SetDefault(prev)` re-points the log package itself and the defect
+  cannot show.
+- 300 runs of the three M-SEARCH tests under `-race` and 10 of the
+  `internal/dlna/...` and `internal/logging/...` packages: all green.
+
+| Control | Red |
+|---|---|
+| NC1: `Start` no longer resets `sendErrStreak` | `TestSendMSearchStreakResetsOnRestart` only, 20 of 20 on the Mac and 20 of 20 on Linux, where sends go through ("logged 0 first-failure Warns", streak 26) |
+| NC2: `sendMSearch` no longer drops `net.ErrClosed` | `TestSendMSearchCutShortByStopIsNotAFailure` only; the restart test stays green, since its seam's error is not the close's |
+| NC3: the drop widened to "the run's context is done" | `TestSendMSearchReportsAFailureThatLandsDuringStop` only |
+| NC4: `SetDefault` puts back the slog default alone | `TestSetDefaultPutsBackTheLogPackage` and both subtests of `TestRecordAndParkOnPutBackTheLogPackage` (output `*slog.handlerWriter`, flags 0) |
+| NC5: `install` back to its old body | the two subtests of `TestRecordAndParkOnPutBackTheLogPackage` only |
+
+### Left as they are
+
+- **Eleven test files elsewhere still restore only the slog default**, and
+  where the default they put back is slog's own, as it is at the start of
+  every test binary, they leave the same redirect: `internal/api`
+  (`errors_test.go`, three tests, and `middleware_test.go`),
+  `internal/updater/verify_darwin_test.go`,
+  `internal/transcode/pool_log_redaction_test.go`,
+  `internal/pairing/store_test.go`,
+  `internal/manifest/store_probe_ctx_log_test.go` and
+  `log_library_paths_test.go`, `internal/integrity/relocation_test.go`,
+  `internal/analyze/pool_failure_test.go`,
+  `internal/albumgain/mate_log_redaction_test.go`, and
+  `internal/metrics/metrics_test.go` (after `logging.Init`).
+  `internal/logging/logging_test.go` sets defaults and restores none, which
+  its own tests of `SetDefault` may mean. Moving them onto
+  `loggingtest.SetDefault` and a sweep that refuses a bare `slog.SetDefault`
+  in a test file are one change of their own.
+- **The upstream MediaServer client's `sendMSearch` discards every send
+  error** (`_, _ = conn.WriteToUDP`), so it has no shutdown line, and also
+  no line at all when the multicast route is gone: upstream discovery goes
+  quiet with nothing in the log. Giving it the streak is a feature of its own.
+- **The server-side advertiser's `sendAliveAll` logs a failed NOTIFY at
+  Debug**, so a periodic send that meets `Stop`'s close there is a Debug
+  line, which the default Info level does not print.
+
+### Review round 1 (Gemini, #1064)
+
+- Gemini (MEDIUM) asked for a docblock warning that a test calling
+  `SetDefault`, `Record` or `ParkOn` must not use `t.Parallel`, citing data
+  races. The wording is inaccurate: slog keeps its default in an atomic
+  pointer, `log.SetOutput` takes the logger's mutex and `log.SetFlags` stores
+  an atomic, so `-race` has nothing to report. The interference is real and
+  worse than a mixed-up capture. Each capture saves what it finds and puts it
+  back at its end, so with A and B overlapping (A saves D0 and installs DA, B
+  saves DA and installs DB), A's cleanup puts back D0 and then B's puts back
+  DA, and the default stays on A's finished handler for the rest of the
+  binary: the defect this change fixes, reached through parallelism.
+- **Enforced, not only documented.** `SetDefault` calls
+  `t.Setenv("LOGGINGTEST_SETDEFAULT", t.Name())` before anything else. In
+  go1.26.6, `T.Setenv` runs `checkParallel`, which panics when the test or
+  any ancestor is parallel and otherwise sets `denyParallel`, which makes a
+  later `T.Parallel` panic. Both panics carry `testing: test using t.Setenv,
+  t.Chdir, or cryptotest.SetGlobalRandom can not use t.Parallel` (1.27.1 the
+  same). The call comes first, so a refused `SetDefault` has changed nothing.
+  The value names the test that holds the default. A rule stated only in
+  prose, the `omitempty` time rule, was broken in ten fields before a guard
+  went in, which is why a docblock warning alone was not taken.
+- **No existing caller was parallel.** 13 test files call `Parallel()`, and
+  none of them calls `Record`, `ParkOn`, `SetDefault`, `captureLogs` in
+  `discovery` or `captureDLNALogs`. Three packages hold both kinds
+  (`internal/config`, `internal/enrich`, `internal/transcode`), and there
+  every capture is reached from a test that is not parallel and has no
+  parallel parent (`transcode`'s through `runParkedExit`, from subtests of a
+  sequential test). The 17 packages holding a caller, `cmd/bridge`
+  included, then ran under `-race` on Linux with the enforcement in place,
+  all green (`internal/admin` 524 s, `internal/manifest` 537 s).
+- `TestSetDefaultRefusesAParallelTest`: a parallel subtest that calls
+  `SetDefault`, and a subtest that calls `t.Parallel` after it, each
+  recovering the panic and requiring the testing package's refusal (a panic
+  naming `t.Parallel`, which every Go release's wording does). The first
+  also requires the default logger and the log package's output unchanged
+  by the refused call.
+- **The restore ORDER was right and unpinned.** A parallel session that had
+  started the same `loggingtest` fix found it: `SetDefault` puts the log
+  package's output and flags back AFTER the previous default, and every
+  test above installs over slog's own default, whose restore leaves the log
+  package alone. Over a default whose handler is NOT slog's own, putting it
+  back points the log package at that handler again and zeroes its flags,
+  so in the swapped order that restore has the last word. Its
+  `TestInstallersRestoreTheStandardLogger` drives `Record` and `ParkOn`
+  over both priors (slog's own default, and a TextHandler the test set),
+  and checks the writer by identity, the flags, where a `log.Print` and a
+  `slog.Info` land, and the slog default, with its premises asserted first.
+  It is adopted here unchanged as `standard_logger_test.go` (an external
+  test package, so it drives the exported API only), and `SetDefault`'s
+  docblock now names the order and the test.
+
+| Control | Red |
+|---|---|
+| NC6: no `t.Setenv` | both subtests of `TestSetDefaultRefusesAParallelTest` (the parallel one also on the changed default). Re-run with the adopted test present, its two "over slog's own default" cases went red too, on their premise: the two subtests, no longer refused, ran in parallel, put back each other's state, and left the default off slog's own for the rest of the binary. That is the interference Gemini's comment is about, happening in this package |
+| NC7: `t.Setenv` moved after the install | the parallel subtest only, on the changed default: the refused call had installed its logger and registered no cleanup, so the default stayed on it |
+| NC8: the two restores swapped | the two "over a default the test set" cases of `TestInstallersRestoreTheStandardLogger` only (writer `*slog.handlerWriter`, flags 0, the `log.Print` lost); every test over slog's own default stays green |
+
+## 2026-09-28 — the reachability probe's stat seam lives on the cache, so no test puts one back
+
+CI run 36347287307 (gate, on #1049's head 9784ef91) failed its first attempt
+in `test -race (rest)`: `WARNING: DATA RACE`, a write at
+`reachability_inflight_test.go:130` (the cleanup `statFunc = orig` in
+`TestReachabilityProbe_InflightGuardIsPerRoot`) against a previous read at
+`reachability.go:190` (the probe's stat goroutine, `probeLocked.func1`). The
+second attempt passed. Backlog B18; PR #1065.
+
+The probe's `os.Stat` seam was then a package variable, `statFunc`. The test
+called `hangingStat`, which registers its release as a cleanup, and
+registered the restore after it. Cleanups run last-registered-first, so the
+restore ran BEFORE the release, while the goroutine that had read `statFunc`
+for the hung root was still parked in the stand-in. Nothing that goroutine
+had done orders its read before the write: it reads the seam, bumps an
+atomic counter the test never loads, and blocks.
+
+Measured on the old code (darwin/arm64, a `-race` test binary per toolchain):
+
+| run | reported the race |
+|---|---|
+| the test alone, go1.26.6 | 10 of 10, then 3 of 3 twice |
+| the test alone, go1.27.1 | 3 of 3 |
+| after `TestReachabilityProbe_HungMountDoesNotStackGoroutines` | 0 of 10, then 0 of 3 |
+| the whole package | 0 of 3 |
+| after the sibling, with the healthy probe removed | 5 of 5 |
+| the whole package, with the healthy probe removed | 2 of 2 |
+
+On Linux (dido, `golang:1.26.6`, linux/amd64) the test alone reported it 10
+runs of 10.
+
+So the race is certain and the report is not. The detector keeps four
+accesses per memory word (TSan's shadow cells), and once they are full an
+access from another goroutine overwrites one of them. A 30-line probe shows
+the cut-off: a goroutine reads a package-level func var and parks, N other
+goroutines read it and synchronise with main, and main writes it. With N of
+0, 1 or 2 the race is reported in 10 runs of 10; with N of 3, 4, 5, 6 or 8,
+in 0 of 10. Run alone, the test's accesses fit and the hung read is still
+there at the restore. After the sibling, whose goroutines' accesses are
+already in the word, the healthy probe's read is what displaces it: with
+that probe removed the report comes back every time (the last two rows).
+CI's Linux runner reported it on one attempt. **A whole-package run cannot
+show a fix for this works**, on either platform: the old code passes it
+too, nearly always. Every reproduction and control below runs the one test
+alone.
+
+### Round 1 (88dee232): order the restore after the goroutines
+
+`swapStatFunc(t, c, fn, release)` installed the stand-in and registered ONE
+cleanup that released the parked stats, waited until `c.inflight` was empty
+(`statsReturned`, polling under `c.mu`), and only then restored. Each stat
+goroutine deletes its in-flight flag under `c.mu` after its stat returns, so
+the waiter seeing the map empty orders every read of the seam before the
+restore. The hung-mount test's success path had been ordered already, by its
+`entered.Load()` (an atomic the stand-in wrote after the read) and its
+mid-test wait on the flag; its failure path (a `Fatalf` before that wait)
+had the per-root test's shape.
+
+Two orderings that look sufficient are not, and each was run as a control:
+a release followed at once by the restore raced 5 runs in 5 (the release is
+the test's own `close`, which orders the test before the stat goroutine and
+not after it), and so did a release, a 50 ms sleep, then the restore (the
+goroutine has finished in wall-clock time and nothing orders its read). The
+round-1 controls, each a mutation of the cleanup unless named, restored
+before the next:
+
+| mutation | result |
+|---|---|
+| restore only (no release, no wait), the old order | per-root test: race and FAIL, 5 of 5; hung-mount test: 0 of 3 (its body orders the read) |
+| release, then restore at once | per-root test: race and FAIL, 5 of 5 |
+| release, sleep 50 ms, restore | per-root test: race and FAIL, 5 of 5 |
+| production never clears the in-flight flag | both tests FAIL in bounded time |
+
+Fixed, the per-root test alone reported no race in 25 runs on darwin and
+none in 10 on Linux.
+
+Round 1 rejected moving the seam onto the cache because it changed
+production code for a test-only defect. Round 2 withdrew that.
+
+### Round 2: the seam moves onto the cache
+
+CodeRabbit (inline comment 4123438449 on 9bb9fe38, Minor): when
+`statsReturned` timed out, the cleanup restored `statFunc` anyway, which
+could still race a probe goroutine that had not yet read the seam or cleared
+its flag, and a later test could see the shared change. It proposed waiting
+for the goroutine or a per-cache seam. The finding is right, and it is not
+about the length of the wait: any bound can be passed, a failing test is
+exactly when a stat does not return, and past the bound the cleanup still
+has to choose between restoring (the race) and leaving the stand-in for
+every later test. The per-instance seam removes the choice. It is the
+2026-09-09 rule ("a test seam is per-server, never a package var"), met a
+second time.
+
+`reachabilityCache` now carries `stat func(string) (os.FileInfo, error)`,
+which `newReachabilityCache` sets to `os.Stat`. `probeLocked` reads it under
+`c.mu`, in the critical section that marks the root in flight, and the stat
+goroutine calls that local. `statFunc`, `swapStatFunc` and the restore are
+gone. A test sets `c.stat` once, before its first probe, on a cache only it
+holds, so nothing is ever put back. `hangingStat` takes the cache: its
+cleanup releases the parked stats and waits (`statsReturned`) until the
+cache has no stat goroutine running, so none outlives the test and a stat
+that never returns fails the test rather than leaking. Round 1's residual
+went with it: a probe goroutine left over from an EARLIER test calls its own
+cache's stat, and can no longer meet this test's writes. No production
+behaviour changes: every cache is built by `newReachabilityCache`, and
+nothing assigns `stat` outside the tests.
+
+Round-2 controls, on the round-2 commit, restored before the next:
+
+| mutation | result |
+|---|---|
+| the stat goroutine reads `c.stat` itself (no copy under `c.mu`), under `-race`, each test alone | no race: per-root test 0 of 10, hung-mount test 0 of 5 |
+| the in-flight guard removed | hung-mount test FAILS: stat entered 26 times across 26 probes, then 27 |
+| the guard keyed on any root instead of this one | per-root test FAILS: the healthy root reported offline |
+| `hangingStat`'s cleanup waits without releasing | per-root test FAILS in bounded time ("a probe's stat had not returned 2s after its release") |
+| the probe runs on the caller's context (no `context.WithoutCancel`) | `TestReachabilityProbe_ACancelledCallerCachesTheRealVerdict` FAILS 20 of 20 |
+
+The first row does not bite, by construction: every write to `c.stat`
+precedes the `go` statement that starts the goroutine, so the goroutine's
+read of the field is ordered whether or not it takes the copy. The copy is
+there for a later test that changes a cache's stat while a stat it started
+may still be running; the cache-per-test is what the fix rests on. With the
+tree restored, the per-root test alone passed 10 runs of 10 with no race,
+the hung-mount test 5 of 5, and the two together 3 of 3.
+
+About fifty other package-level seams are restored in one-line cleanups
+across the tree (`grep` for `t.Cleanup(func() { X = orig… })` finds 52);
+they were not audited here. Two spot checks were ordered already:
+`TestRunIngestLoopRereadsItsIntervalEveryIteration` registers its
+`upnpIngestWarmup` restore before its drain, so the drain runs first, and
+`TestStopIsGraceBoundedNotUnconditional`'s `stopGrace` is read by a stop
+goroutine the test waits for.
+
+### Also in the PR
+
+- `FuzzAcceptedExt`'s docblock said the target had "no property beyond
+  termination" while its body asserts one (an extension the classifier calls
+  audio is always accepted). Both landed in #823, so the sentence was never
+  true; `## Build` has listed the target among the twelve property-carrying
+  ones since 99b6d1e6, and the docblock now names the property.
+- `…Probe_TimeoutRespected` described #198's design, where
+  the probe ran on the caller's context and an "offline" produced by a
+  caller's cancel was returned but not cached. #373 detached the probe
+  (`context.WithoutCancel`) and dropped that exception, and the test's
+  comments were not updated. Its premise changed, not only its prose: it now
+  pins the detach (a cancelled caller waits for the real stat, and the cache
+  stores what it found), under the name
+  `TestReachabilityProbe_ACancelledCallerCachesTheRealVerdict`, since no
+  timeout fires in it. With `context.WithoutCancel` removed it fails 50 runs
+  of 50, and it is the only test in `internal/api` that does.
+- `IsUnderStaging`'s docblock counted "the three untrusted-input surfaces"
+  where `## Build` names five; it now names `FuzzValidateRelPath`, the target
+  that covers it, and gives no count.
+
 ## 2026-09-28 — the variant panel disables Generate CarPlay while the CarPlay switch is off
 
 Backlog B29, first half (a follow-up from #1060; the second half, the
