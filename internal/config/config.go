@@ -539,6 +539,14 @@ type AtlasConfig struct {
 // The default port is stripped so `https://host:443` and `https://host` are
 // the same pin — they address the same endpoint, and an operator may write
 // either (gemini-code-assist on PR #724).
+//
+// "Host-less" here means an empty url.URL.Host. A base naming a port and no
+// host (`https://:8443`) reduces to itself, and deliberately so: reducing it
+// to "" would turn a pin written that way into "unpinned" (or, through
+// Validate, stop the bridge from starting). What names no host is refused
+// where it would be USED instead: the credential endpoint refuses such a
+// wire value (BaseURLNamesHost), so a pin written that way matches no
+// credential, and Normalize warns about it.
 func CanonicalHTTPSBase(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -552,6 +560,25 @@ func CanonicalHTTPSBase(raw string) string {
 	}
 	return u.Scheme + "://" + strings.TrimSuffix(u.Host, ":443")
 }
+
+// BaseURLNamesHost reports whether raw parses as a URL whose host names a
+// machine: url.URL.Hostname is not empty. A URL naming a port and no host
+// (`https://:8443`, `http://:5000`) has a Host and no hostname, and Go's
+// client dials such a URL on THIS machine (measured in #1069), so a check of
+// url.URL.Host passes a value that leads to the bridge's own ports. The
+// harvest credential endpoint refuses a base that names no host, and
+// Normalize warns about a configured one, which it cannot refuse: the value
+// loaded before, and a refusal would stop the bridge from starting after an
+// update (backlog B36).
+func BaseURLNamesHost(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && u.Hostname() != ""
+}
+
+// baseURLNamesNoHostWarning is what Normalize logs for a configured base URL
+// that BaseURLNamesHost refuses.
+const baseURLNamesNoHostWarning = "base URL names a port and no host, which reaches this machine; " +
+	"write the host (localhost for this machine)"
 
 // LyricsTierActive is the ONE definition of whether the network lyrics tier
 // should be doing anything.
@@ -2823,6 +2850,21 @@ func (c *Config) Normalize() error {
 	// here can fail, hoist its computation above the first assignment so the
 	// all-or-nothing contract survives.
 
+	// A base URL naming a port and no host (`http://:5000`) is dialled on
+	// THIS machine. Warned about, not refused (backlog B36): the value
+	// loaded before, and a refusal here would stop the bridge from starting
+	// after an update. The harvest pin is checked in its canonical form, so
+	// a malformed one (which Validate refuses anyway) is not reported twice.
+	for _, base := range []struct{ field, value string }{
+		{"enrich.musicbrainzBaseURL", mbBase},
+		{"enrich.coverArtBaseURL", caaBase},
+		{"atlas.harvestBaseUrl", c.Atlas.CanonicalHarvestBaseURL()},
+	} {
+		if base.value != "" && !BaseURLNamesHost(base.value) {
+			validateLogger.Warn(baseURLNamesNoHostWarning, "field", base.field, "value", base.value)
+		}
+	}
+
 	// autocert.domain is only consumed in public mode (tlsacme.New, the
 	// admin Origin allowlist, the SNI gate), and Validate only enforces it
 	// there — so the trim stays gated on IsPublic to keep this a pure
@@ -3395,7 +3437,12 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: scheme must be https, got %q", raw, u.Scheme))
 			continue
 		}
-		if u.Host == "" {
+		// Hostname, never Host: `https://:8443` has Host ":8443" and no
+		// host at all, and it was kept and advertised to every phone
+		// until backlog B36. A phone cannot reach an address that names
+		// no machine, and Go's own client dials one on the machine it
+		// runs on (#1069).
+		if u.Hostname() == "" {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: missing host", raw))
 			continue
 		}
