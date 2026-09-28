@@ -35,10 +35,11 @@ package discovery
 // description there could name loopback service URLs the same-host rule
 // then accepts. So a LOCATION may lead the bridge to this machine (loopback
 // or the unspecified address) or to a link-local address only when the SSDP
-// packet came from that same address, which a real device's LOCATION does
-// (UDA: "normally ... a literal IP address") and a peer elsewhere cannot
-// arrange. It is enforced twice, because a host STRING shows only part of
-// it. LocationFromSource refuses what the string shows (an IP literal, a
+// packet came from that same address. Every device measured announced a
+// LOCATION on its own source address (three of three, 2026-09-28), and a
+// packet with a loopback source was sent on this machine (RFC 1122 has a
+// host discard 127/8 arriving on any other interface). It is enforced
+// twice, because a host STRING shows only part of it. LocationFromSource refuses what the string shows (an IP literal, a
 // localhost name, a numeric spelling no device writes) before any fetch.
 // NewDeviceFetchClient's dial check refuses the rest at the connect, where
 // the address a name resolved to is known: measured with Go 1.27.1, a public
