@@ -26179,7 +26179,17 @@ requests used. No wire change, no PROTOCOL.md change, no Mirror-PR.
   normalized one. `bridge init --public --domain` refuses a domain carrying
   one (exit 2, before anything is written, and the value is not echoed):
   init writes it into `customEndpoints` and `autocert.domain`, and public
-  mode synthesises an endpoint from the latter too.
+  mode synthesises an endpoint from the latter too. It also refuses a domain
+  that does not parse: `HasCredentialParts` answers false for a value it
+  cannot parse, and the check's first form, asking it alone, let
+  `--domain 'user:s3cret-Pw x@bridge.example.test'` (a space in the
+  password) through, exit 0, printing `Admin console:
+  https://user:s3cret-Pw x@bridge.example.test/` and writing the value into
+  `autocert.domain`, from which public mode builds its URL as a string. The
+  domain is trimmed first, as `Normalize` trims the autocert host, so a
+  padded plain domain is still taken, as it was: measured on the old binary
+  and on the branch, ` bridge.example.test` exits 0 with
+  `autocert.domain: bridge.example.test`.
 - **Which parts.** A user name or password, an empty one included
   (`https://@host`); a query, a bare `?` included; a fragment. The one
   predicate is `config.HasCredentialParts`, which the prune, the PATCH and
@@ -26256,7 +26266,8 @@ requests used. No wire change, no PROTOCOL.md change, no Mirror-PR.
 - `cmd/bridge`: `TestServePublishesNoCustomEndpointCredential` boots serve
   and checks health, a minted link and every log line;
   `TestAStartupRefusalNamesAURLWithoutItsCredential` runs serve and doctor
-  over four refused values; `TestInitRefusesADomainCarryingACredential`;
+  over four refused values; `TestInitRefusesADomainCarryingACredential`
+  (six domains refused, a plain and a padded one taken);
   `TestTheConsoleRefusesAManualUpstreamOnACloudMetadataAddress`;
   `TestHealthDoesNotPublishTheOperatorsManualURL` (the real poller, the
   cache and the public adapter).
@@ -26305,13 +26316,16 @@ restored with `git checkout --` and checked clean.
 | NC22 | the ingest says "not answered yet" | the ingest test |
 | NC23 | the public adapter publishes the manual URL again | `TestHealthDoesNotPublishTheOperatorsManualURL` |
 | NC24 | the adapter leaves out every URL of a server with a manual URL | the same test, its control half: the device's LOCATION is gone |
+| NC25 | init's check drops its parse arm | the init test's "a password that does not parse" row |
+| NC26 | init's check reads the domain untrimmed | the init test's padded control (refused, exit 2). Not the "a password behind a space" row: untrimmed it does not parse, and the parse arm refuses it |
 
 NC1 to NC22 ran on the branch before its rebase onto #1080, which renamed
 `DialApproval.permits` to `Permits` in the file NC14 and NC15 mutate; both
 ran again on the rebased branch, with the results above (NC15 turned the
 ingest test red too, a package its first run did not include). No other
 file a control mutates changed in the rebase. NC23 and NC24 ran on the
-commit that added the fourth site's fix.
+commit that added the fourth site's fix, NC25 and NC26 on the commits that
+added init's parse arm and its controls, after the rebase onto #1081.
 
 ### Out of scope
 

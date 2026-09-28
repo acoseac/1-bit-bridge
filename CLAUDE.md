@@ -982,8 +982,10 @@ lost my library."
   and warns once per entry under its own message, never "dropped"; the
   settings PATCH refuses a typed one whole (`config.CheckCustomEndpoints`,
   400 `validate`, nothing written), and `bridge init --public --domain`
-  refuses a domain carrying one (exit 2, nothing written), since the domain
-  is also the autocert host that health and the QR build a URL from.
+  refuses a domain carrying one, or one that does not parse (a password
+  with a space in it, which the predicate cannot read; exit 2, nothing
+  written), since the domain is also the autocert host that health and the
+  QR build a URL from, as a string.
   **Don't drop such an entry**: its host and port still reach the bridge,
   and a loaded config must not lose a route over a part nothing reads.
   **Don't strip at the publish sites**: every enumeration
