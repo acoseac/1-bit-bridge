@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // errCountCapReached is the internal sentinel countDirs uses to stop the
@@ -85,9 +86,9 @@ func readInotifyLimit() (int, error) {
 }
 
 // countDirs walks every configured root and counts directories,
-// honouring filepath.SkipDir on dotfiles and well-known noise
-// folders so the count matches what the watcher will actually
-// register. Per-subdir errors are non-fatal (a permission flap
+// skipping what manifest.ShouldSkipDir names, the one rule the watcher
+// and the scanner skip by, so the count matches what the watcher will
+// actually register. Per-subdir errors are non-fatal (a permission flap
 // shouldn't kill the check), but a root-level failure (the root
 // itself can't be opened) propagates so the doctor check warns
 // rather than reporting a false OK with zero count (CodeRabbit
@@ -121,7 +122,7 @@ func countDirs(roots []string, stopAt int) (int, error) {
 				return nil
 			}
 			name := d.Name()
-			if path != walkFrom && shouldSkipNoiseDir(name) {
+			if path != walkFrom && manifest.ShouldSkipDir(name) {
 				return filepath.SkipDir
 			}
 			total++
@@ -138,21 +139,4 @@ func countDirs(roots []string, stopAt int) (int, error) {
 		}
 	}
 	return total, nil
-}
-
-// shouldSkipNoiseDir mirrors the manifest scanner's
-// `shouldSkipDir` for the well-known FS-noise folders the watcher
-// won't register. Kept local to avoid an internal package cycle —
-// this list rarely changes.
-func shouldSkipNoiseDir(name string) bool {
-	switch name {
-	case ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
-		"$RECYCLE.BIN", "System Volume Information",
-		".git", ".hg", ".svn":
-		return true
-	}
-	if strings.HasPrefix(name, ".") {
-		return true
-	}
-	return false
 }

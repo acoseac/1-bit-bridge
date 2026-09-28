@@ -6,7 +6,7 @@
 // more than the rest:
 //
 //   - Staging happens INSIDE the target root, under a dot-directory the
-//     scanner skips (manifest.shouldSkipDir returns true for any "."-prefixed
+//     scanner skips (manifest.ShouldSkipDir returns true for any "."-prefixed
 //     name and the walker returns SkipDir before it upserts a folder row). That
 //     makes commit a same-filesystem rename. The obvious alternative — staging
 //     under the data dir — is a cross-device copy wherever the library is a

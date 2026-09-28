@@ -92,28 +92,64 @@ func seedLinkedRootLibrary(t *testing.T, dir string) {
 
 // indexedRoot is a root holding linkedRootTracks, indexed while it is still a
 // directory, by a scanner that reaps a missing row at the production
-// threshold (three scans), not the test default of one.
+// threshold (three scans), not the test default of one. In multi-root mode a
+// second root, `other`, holds one track of its own, and the first root's
+// rows lead with its basename (prefix).
 type indexedRoot struct {
 	root    string
+	prefix  string // "" single-root, "music/" multi-root
 	store   *Store
 	sc      *Scanner
-	indexed map[string]int64 // indexed_at of each row after the first scan
+	indexed map[string]int64 // indexed_at of each row under root after the first scan
 	since   time.Time        // before the first scan, for the deletion journal
+	other   string           // the second root's row, multi-root only
 }
 
 func newIndexedRoot(t *testing.T) indexedRoot {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "music")
+	return newIndexedRootIn(t, false)
+}
+
+// newIndexedRootIn builds an indexedRoot, single- or multi-root.
+func newIndexedRootIn(t *testing.T, multiRoot bool) indexedRoot {
+	t.Helper()
+	base := t.TempDir()
+	root := filepath.Join(base, "music")
 	seedLinkedRootLibrary(t, root)
-	store, sc := newScanFixture(t, root)
-	sc.SetDeleteThreshold(3)
-	since := time.Now().Add(-time.Minute)
-	scanOnce(t, sc, "while the root is a directory")
-	f := indexedRoot{root: root, store: store, sc: sc, indexed: map[string]int64{}, since: since}
+	roots := []string{root}
+	f := indexedRoot{root: root, indexed: map[string]int64{}}
+	if multiRoot {
+		other := filepath.Join(base, "other")
+		otherTrack := filepath.Join(other, "Other", "Album", "01.flac")
+		if err := os.MkdirAll(filepath.Dir(otherTrack), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeMinimalFLAC(t, otherTrack, 44100, 16, map[string]string{"TITLE": "Other"})
+		roots = append(roots, other)
+		f.prefix, f.other = "music/", "other/Other/Album/01.flac"
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	f.store, f.sc = store, NewScanner(roots, store, "")
+	f.sc.SetDeleteThreshold(3)
+	f.since = time.Now().Add(-time.Minute)
+	scanOnce(t, f.sc, "while the root is a directory")
 	for _, rel := range linkedRootTracks {
-		f.indexed[rel] = indexedAt(t, store, rel)
+		f.indexed[f.prefix+rel] = indexedAt(t, store, f.prefix+rel)
+	}
+	if f.other != "" {
+		mustIndexed(t, store, f.other)
 	}
 	return f
+}
+
+// scanRoot runs a full scan, or with subtree a subtree scan of the root.
+func (f indexedRoot) scanRoot(t *testing.T, subtree bool) {
+	t.Helper()
+	scanTheRoot(t, f.sc, f.root, subtree)
 }
 
 // moveBehindLink moves the library to a sibling directory and leaves the
@@ -426,9 +462,11 @@ func TestWatcherWatchesALinkedLibraryRoot(t *testing.T) {
 		t.Fatalf("NewWatcher: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); _ = w.Run(ctx) }()
-	// Registered after the store's Close, so it runs first.
+	// Registered after the store's Close, so it runs first: the watcher
+	// is joined before the store it writes to is closed.
 	t.Cleanup(func() {
 		cancel()
 		select {

@@ -179,7 +179,7 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // event under it dispatched ScanSubtree INSIDE it (whose own walker
 // exempts the directory it was pointed at), and its files were indexed
 // as `.Trashes/501/Album/track.flac`. The full Scan never sees those
-// paths — shouldSkipDir prunes them as descendants — so they accrued
+// paths — ShouldSkipDir prunes them as descendants — so they accrued
 // missing_count and were reaped three scans later, then reappeared:
 // deleted albums cycling in and out of /v1/manifest.
 //
@@ -208,15 +208,12 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // a directory that appears at runtime is walked as the scanner walks it, and
 // the scanner walks no link below a root.
 func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
-	walkFrom := root
-	if isConfiguredRoot {
-		var err error
-		if walkFrom, err = fsutil.WalkableRoot(root); err != nil {
-			// The root cannot be seen through: the caller logs it as a
-			// failed initial watch, which is the "root-level walk failure
-			// surfaces" rule above.
-			return err
-		}
+	walkFrom, err := watchWalkStart(root, isConfiguredRoot)
+	if err != nil {
+		// The root cannot be seen through: the caller logs it as a
+		// failed initial watch, which is the "root-level walk failure
+		// surfaces" rule above.
+		return err
 	}
 	limitHit := false
 	return filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
@@ -247,7 +244,7 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 		// walkFrom (never root: a linked root's walkFrom carries the
 		// separator WalkableRoot appended). A runtime-discovered
 		// directory gets no exemption — see the docblock.
-		if (!isConfiguredRoot || path != walkFrom) && shouldSkipDir(d.Name()) {
+		if (!isConfiguredRoot || path != walkFrom) && ShouldSkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		watchPath := path
@@ -263,30 +260,46 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 			// periodic full scan covers the gap.
 			return filepath.SkipAll
 		}
-		if addErr := wt.w.Add(watchPath); addErr != nil {
-			switch {
-			case isWatchLimitError(addErr):
-				watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
-					"path", watchPath, "err", addErr,
-					"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
-				limitHit = true
-				return nil
-			case isOpenFileLimitError(addErr):
-				// fd-exhaustion (EMFILE) is a DIFFERENT limit from the
-				// watch budget — pointing the operator at
-				// max_user_watches here would send them down the wrong
-				// path. Same degrade-to-periodic fallback, different hint.
-				watcherLogger.Error("open-file limit reached — periodic scan covers the gap; raise the open-files limit to fix",
-					"path", watchPath, "err", addErr,
-					"hint", "raise the process open-files limit (ulimit -n, or LimitNOFILE= in the systemd unit) or the system-wide fs.file-max")
-				limitHit = true
-				return nil
-			default:
-				watcherLogger.Warn("watch add", "path", watchPath, "err", addErr)
-			}
-		}
+		limitHit = wt.addWatch(watchPath)
 		return nil
 	})
+}
+
+// watchWalkStart is where addTree's walk starts: a configured root is walked
+// through (fsutil.WalkableRoot), a directory that appeared at runtime as it
+// is.
+func watchWalkStart(root string, isConfiguredRoot bool) (string, error) {
+	if !isConfiguredRoot {
+		return root, nil
+	}
+	return fsutil.WalkableRoot(root)
+}
+
+// addWatch registers one directory's watch, and reports whether the attempt
+// met a kernel limit that every later Add would meet too.
+func (wt *Watcher) addWatch(path string) (limitHit bool) {
+	addErr := wt.w.Add(path)
+	switch {
+	case addErr == nil:
+		return false
+	case isWatchLimitError(addErr):
+		watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
+			"path", path, "err", addErr,
+			"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
+		return true
+	case isOpenFileLimitError(addErr):
+		// fd-exhaustion (EMFILE) is a DIFFERENT limit from the
+		// watch budget — pointing the operator at
+		// max_user_watches here would send them down the wrong
+		// path. Same degrade-to-periodic fallback, different hint.
+		watcherLogger.Error("open-file limit reached — periodic scan covers the gap; raise the open-files limit to fix",
+			"path", path, "err", addErr,
+			"hint", "raise the process open-files limit (ulimit -n, or LimitNOFILE= in the systemd unit) or the system-wide fs.file-max")
+		return true
+	default:
+		watcherLogger.Warn("watch add", "path", path, "err", addErr)
+		return false
+	}
 }
 
 // handleEvent debounces and dispatches one fsnotify event. We

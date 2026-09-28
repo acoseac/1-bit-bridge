@@ -13,10 +13,13 @@ import (
 // itself a link to a directory through it (fsutil.WalkableRoot). Walked as
 // the link, the count was zero while the watcher registered a watch per
 // directory behind it, so the check could call a budget safe that the
-// watcher then exhausted.
+// watcher then exhausted. It skips what the watcher skips, by the one rule
+// (manifest.ShouldSkipDir): its own copy of the list counted a Synology
+// @eaDir, one directory per file it describes, which the watcher never
+// watches.
 func TestCountDirsCountsThroughALinkedRoot(t *testing.T) {
 	target := t.TempDir()
-	for _, sub := range []string{"Artist/Album", "Other", ".Trash/Old"} {
+	for _, sub := range []string{"Artist/Album", "Other", ".Trash/Old", "@eaDir/01.flac", "#recycle/Old", "lost+found"} {
 		if err := os.MkdirAll(filepath.Join(target, filepath.FromSlash(sub)), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -26,8 +29,8 @@ func TestCountDirsCountsThroughALinkedRoot(t *testing.T) {
 		t.Skipf("this host cannot create a symlink: %v", err)
 	}
 
-	// The root, Artist, Artist/Album and Other; .Trash is noise the
-	// watcher skips.
+	// The root, Artist, Artist/Album and Other; .Trash, @eaDir, #recycle
+	// and lost+found are what the watcher skips.
 	const want = 4
 	for _, root := range []string{target, link} {
 		got, err := countDirs([]string{root}, 0)

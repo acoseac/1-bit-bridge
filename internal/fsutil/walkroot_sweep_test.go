@@ -30,7 +30,7 @@ import (
 var libraryRootWalks = map[string]string{
 	"internal/manifest/scanner.go (*Scanner).walkRoot":    "",
 	"internal/manifest/scanner.go (*Scanner).ScanSubtree": "",
-	"internal/manifest/watcher.go (*Watcher).addTree":     "",
+	"internal/manifest/watcher.go (*Watcher).addTree":     "watchWalkStart",
 	"internal/doctor/inotify_linux.go countDirs":          "",
 	"internal/api/upscale.go (*Server).upscaleRequest":    "folderWalkPath",
 }
