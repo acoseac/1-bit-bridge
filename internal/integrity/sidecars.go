@@ -2,48 +2,53 @@ package integrity
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
-// gcChunkSize bounds the number of filesystem entries the orphan
-// sidecar sweeper processes per tick. Operators on libraries with
-// hundreds of thousands of variant files get a chunked sweep
-// (multiple ticks to fully cover the tree) rather than one
-// long-running pass that could compete with library-scan I/O.
+// gcChunkSize bounds how many orphans ONE tick of the background sweep
+// unlinks. It no longer bounds the walk.
 //
-// 5000 trades off two concerns: each tick processes a meaningful
-// slice in well under 100 ms wall-clock on a warm-cache SSD walk
-// (~5-10 µs per entry once the OS dirent cache is hot), AND a
-// 100k-variant library completes one full sweep in ~20 ticks
-// rather than the ~1000 ticks the original 100-floor required.
-// Pre-fix the chunk-size-100 + per-tick AllVariants SELECT
-// produced O(N × N/chunk) total DB read on every full sweep — for
-// a 100k-variant library, ~100M rows per cycle. Gemini medium on
-// PR #282 caught the quadratic blow-up.
+// Every tick takes the whole tree's inventory (TakeSidecarInventory,
+// read-only), because the mass-orphan refusal has to see the whole tree's
+// count: a 5,000-entry slice of it cannot tell a lost index from a crop.
+// Measured on the dev Mac (Apple silicon, APFS, warm cache, 2026-09-28):
+// 128 ms median over 100,001 files in 111 directories against a
+// 100,001-row known set, 117 ms over the same tree against 200 rows (the
+// lost-index shape); building that known set is another 50 ms, a cost the
+// tick already paid. This docblock has long carried ~50 µs per entry for
+// the pathological tier (cold cache, NTFS or exFAT on USB-attached
+// spinning rust) — an estimate, not a measurement — which puts the same
+// tree at ~5 s a tick. The cadence (`cfg.Integrity.
+// OrphanSidecarSweepIntervalSec`, typically minutes to hours) is what
+// spaces that from library scans and serving.
 //
-// `filepath.WalkDir` is single-threaded so the per-tick budget is
-// strictly bounded by chunk × per-entry-cost — at 5000 entries +
-// 50 µs/entry (cold cache, NTFS / exFAT on USB-attached spinning
-// rust, the pathological tier) the per-tick wall-clock tops out
-// around 250 ms. That still leaves the next ticker fire (interval
-// is operator-configured, typically minutes to hours) with full
-// headroom for library scans + serving.
+// What the chunk still bounds: how many files a tick unlinks, so a
+// legitimate backlog drains over several ticks rather than in one burst,
+// and how many orphan paths the inventory retains (MaxOrphanPaths: ~750 KB
+// at 150 bytes a path). `SidecarInventory.Orphans` is counted in full
+// either way, and the refusal reads that count, never the retained list —
+// a count capped at the chunk would read 5,000 orphans where there are
+// 10,048, and against a catalog of 10,000 rows it would proceed.
 //
-// Pure constant, not configurable — the operator-facing knob is
-// the SWEEP CADENCE (`cfg.Integrity.OrphanSidecarSweepIntervalSec`),
-// not the chunk size. A future review that wants per-deploy
-// chunk tuning should add it as a sibling config field rather
-// than ripping this out, so the default-shape semantics stay
-// stable for existing operators.
+// A failed unlink keeps its slot, so the retained list is the tree's first
+// `gcChunkSize` orphans in walk order on every tick: fewer than that many
+// files this user cannot remove only shrink each tick's share, while that
+// many or more at the head of the walk stall the rest until the operator
+// fixes them — each tick's sampled WARN names them.
+//
+// 5000 was chosen when the chunk bounded the WALK (Gemini on PR #282: the
+// 100 it replaced made a full sweep O(N × N/chunk) in AllVariants reads).
+// Pure constant, not configurable — the operator-facing knob is the SWEEP
+// CADENCE, not the chunk size.
 const gcChunkSize = 5000
 
 // gcGracePeriod gates orphan detection on file modification time:
@@ -65,6 +70,11 @@ const gcChunkSize = 5000
 // at most one extra sweep cycle (operator-tolerable for the opt-in
 // feature), and uniform across deploys regardless of disk speed.
 //
+// Measured against the TICK's start (sampled after the catalog listing,
+// before the walk), not against the moment of the unlink: the walk
+// between them makes every file look older, and the earlier instant is
+// the conservative one.
+//
 // **Test seam**: production reads the constant; the
 // `gracePeriodForTest` field on OrphanSidecarSweeper overrides it
 // per-instance so the regression test can use a millisecond-scale
@@ -72,16 +82,25 @@ const gcChunkSize = 5000
 // uses for the sox subprocess.
 const gcGracePeriod = 10 * time.Minute
 
-// OrphanSidecarSweeper walks `outputDir/transcoded/` on a cadence
-// (configured via `cfg.Integrity.OrphanSidecarSweepIntervalSec`)
-// and unlinks `.flac` files whose absolute path is NOT present in
-// the current `track_variants` snapshot — neither as a row's
-// recorded `sidecar_path` nor as its canonical path under the tree
-// being walked (KnownSidecarSet). The forward
-// half of the operator-triggered `bridge upscale --gc` sweep,
-// which `VariantWatcher` (in variants.go) does NOT cover — that
-// type handles the REVERSE direction (rows whose sidecar file
-// disappeared on disk).
+// orphanRefusalRepeat is how often a refusal that goes on is logged
+// again: once when a streak of refused ticks starts, then at most once
+// per this interval while it lasts.
+const orphanRefusalRepeat = 24 * time.Hour
+
+// orphanRefusalExamples bounds how many orphan paths the refusal line
+// names — enough to recognise the files as renditions, few enough to keep
+// the numbers readable.
+const orphanRefusalExamples = 3
+
+// OrphanSidecarSweeper walks the variants directory on a cadence
+// (configured via `cfg.Integrity.OrphanSidecarSweepIntervalSec`) and
+// unlinks `.flac` files whose path is NOT present in the current
+// `track_variants` snapshot — neither as a row's recorded `sidecar_path`
+// nor as its canonical path under the tree being walked
+// (KnownSidecarSet). The forward half of the operator-triggered
+// `bridge upscale --gc` sweep, which `VariantWatcher` (in variants.go)
+// does NOT cover — that type handles the REVERSE direction (rows whose
+// sidecar file disappeared on disk).
 //
 // **Disabled by default** — opt-in via a non-zero interval. The
 // existing operator workflow of "run `--gc` manually when storage
@@ -98,19 +117,52 @@ const gcGracePeriod = 10 * time.Minute
 // SELECT a consistent snapshot natively, so `AllVariants` is
 // safe to call without an explicit transaction wrapper.
 //
-// **Chunked walking**: at most `gcChunkSize` files are stat'd /
-// unlinked per tick. Operators on libraries with hundreds of
-// thousands of variants get steady progress across multiple ticks
-// rather than one long-running pass that competes with library
-// scanning. Per-tick wall-clock stays bounded.
+// **Each tick decides alone, as `bridge upscale --gc` does**
+// (2026-09-28). A tick lists the catalog, takes ONE read-only inventory
+// of the whole tree (TakeSidecarInventory — the walker `upscale --gc`,
+// `analyze --gc` and `bridge doctor`'s variants-index share), asks
+// MassOrphanRefusal of the whole tree's counts, and only then unlinks: at
+// most gcChunkSize files, each re-checked first (reclaimOrphan). Until
+// then this sweep unlinked INSIDE a walk chunked at 5,000 entries with a
+// cursor across ticks, and its only guard was "is the known set EMPTY?" —
+// so #940's shape, a catalog of 200 rows over a stranded tree of 10,048
+// files after a lost index, passed it, and the sweep unlinked the whole
+// tree in three ticks (4,800, 5,000 and 248, measured on the old code)
+// while `--gc` refused the same tree. A verdict tallied
+// ACROSS ticks was considered and rejected: it can come from a partial
+// walk (an unmount, a cancel, a pruned root) or from a catalog that
+// changed mid-pass, and a budget carried between passes can be spent on
+// files it never counted. So no verdict crosses a tick; the one state
+// that does is the refusal's log latch.
 //
-// **Walk pointer survives across ticks**: when a tick hits the
-// chunk cap, the next tick's walk picks up from where the prior
-// tick stopped via filename-relative-ordering — `filepath.Walk`
-// is deterministic in lexical order, so we can track the
-// `lastProcessedPath` cursor and skip-until on the next pass.
-// Pre-cursor the sweeper would re-walk the same first 100 files
-// every tick forever on libraries with >100 sidecars.
+// **No override.** A background sweeper has nobody in the loop to express
+// intent — the reason `--allow-empty` and `--allow-mass-orphans` exist on
+// the CLI and not here — so a refused tick unlinks nothing and says why:
+// one WARN when a streak of refused ticks starts, repeated at most once a
+// day while it lasts (the M-SEARCH rule: an identical line every tick
+// makes every other line unfindable), and one Info line when a tick
+// proceeds again. `bridge upscale --gc --allow-mass-orphans` is the way
+// past it. The threshold is `cfg.Integrity.VariantSweepMaxDeletePercent`,
+// the reverse sweep's knob with the same meaning at this end (100
+// disables both guards).
+//
+// **What the refusal does NOT cover.** MassOrphanRefusal refuses only when
+// its floor of ten, `orphans > rows` AND the ratio all hold, so a stranded
+// tree NO LARGER than the catalog is reaped here exactly as `--gc` reaps
+// it. `orphans > rows` is the term that knows a lost index; a tree the
+// catalog could still describe does not trip it.
+//
+// **Parity with `--gc` by construction**, because the walker is shared:
+// the root is resolved before the walk and paths are reported under the
+// configured one (#959) — so a SYMLINKED variants directory is walked
+// now, where this sweep's own WalkDir used to Lstat the link, see one
+// non-directory entry and sweep nothing; dot-directories are pruned at
+// the walk; a link to a directory or a Windows junction is never a
+// candidate ("not a REGULAR file", #969); and a walk error fails closed.
+// One difference is deliberate: this sweep considers `.flac` files only
+// (shouldConsiderSidecarFile) where `upscale --gc` passes a nil Consider
+// and counts and removes every file, so the ratio here is over the files
+// this sweep would remove, as `analyze --gc`'s is over waveform files.
 //
 // Threading: one long-lived goroutine spun up by Start; stops on
 // ctx cancellation OR the stopFn closing the done channel.
@@ -122,21 +174,20 @@ type OrphanSidecarSweeper struct {
 	// TICK — see NewOrphanSidecarSweeper.
 	outputDir func() string
 	interval  time.Duration
+	// maxOrphanPercent is the mass-orphan refusal's threshold
+	// (cfg.Integrity.VariantSweepMaxDeletePercent); see MassOrphanRefusal.
+	maxOrphanPercent int
 
-	// lastRoot is the tree the cursor below was taken in. A cursor is
-	// a position in ONE tree; when the provider answers a different
-	// root the cursor is dropped with the old tree (see tick).
-	lastRoot string
-
-	// lastProcessedPath is the cursor across chunked ticks. The
-	// next tick starts its walk at the first path > this value.
-	// Empty string at boot → start from the beginning.
-	//
-	// Owned by the run goroutine; no concurrent reads (the test
-	// seam below is the only out-of-run accessor and it's
-	// gated through SetOnTickComplete which fires from the run
-	// goroutine itself).
-	lastProcessedPath string
+	// refusing and lastRefusalLog are the refusal's log latch, the only
+	// state that crosses ticks. refusing is true from a refused tick until
+	// a tick whose walk finished proceeds; lastRefusalLog is when the
+	// refusal was last logged. A tick that stops before a verdict (a
+	// listing or a walk that failed or was stopped, an empty catalog)
+	// leaves both alone: it is evidence of nothing, so it neither ends a
+	// streak nor says the catalog recovered. Owned by the run goroutine;
+	// the tests drive tick directly, never beside a running loop.
+	refusing       bool
+	lastRefusalLog time.Time
 
 	// onTickComplete is a test-only seam — same convention as
 	// VariantWatcher.SetOnTickComplete. Fires AFTER the per-tick
@@ -154,18 +205,11 @@ type OrphanSidecarSweeper struct {
 	// constant (defensive against accidental negative).
 	gracePeriodForTest time.Duration
 
-	// chunkSizeForTest overrides gcChunkSize when positive. Lets the
-	// chunk-cap regression test exercise the cursor / split-tick
-	// behaviour with a small chunk (~100) instead of seeding the
-	// production chunk size (5000) of files. Production leaves it
+	// chunkSizeForTest overrides gcChunkSize when positive, so the tests
+	// can exercise the per-tick unlink cap and the full-count refusal with
+	// a chunk of ~100 instead of seeding 5,000 files. Production leaves it
 	// zero.
 	chunkSizeForTest int
-
-	// skippedDirsForTest counts directory subtrees short-circuited via
-	// filepath.SkipDir during chunk resumption (see dirEntirelyBehindCursor).
-	// Diagnostic only — read by the SkipDir-fires regression test; the
-	// unconditional atomic Add is negligible against the walk's I/O.
-	skippedDirsForTest atomic.Int64
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -212,6 +256,8 @@ func (s *OrphanSidecarSweeper) effectiveChunkSize() int {
 // grace first. The sweep projects the rows into a
 // `map[string]struct{}` itself (O(1) lookup against thousands of
 // filesystem entries; a slice would O(n²)-walk on every tick).
+// The ROW COUNT matters too: it is the `rows` MassOrphanRefusal weighs
+// the orphans against.
 type SidecarLister interface {
 	AllVariants(ctx context.Context) ([]VariantSnapshot, error)
 }
@@ -229,18 +275,22 @@ type SidecarLister interface {
 // the tree the operator had moved away from, for the rest of the
 // process, while new sidecars landed somewhere it never looked. (An
 // earlier docblock here recorded that a restart was required, which
-// was true, and was the defect.) A root change also drops the
-// chunk-resume cursor — a cursor is a position in one tree, and
-// compared against another it can prune that whole tree as "already
-// swept". An empty answer is a REFUSAL (tick). WalkDir("") only reports
-// ENOENT, but a root resolved first is "." (filepath.EvalSymlinks("")
-// and filepath.Clean("") both answer it), the working directory, and
-// this sweep unlinks.
-func NewOrphanSidecarSweeper(lister SidecarLister, outputDir func() string, interval time.Duration) *OrphanSidecarSweeper {
+// was true, and was the defect.) An empty answer is a REFUSAL (tick).
+// WalkDir("") only reports ENOENT, but a root resolved first is "."
+// (filepath.EvalSymlinks("") and filepath.Clean("") both answer it), the
+// working directory, and this sweep unlinks — and it DOES resolve its
+// root first, through TakeSidecarInventory.
+//
+// `maxOrphanPercent` is the mass-orphan refusal's threshold
+// (cfg.Integrity.VariantSweepMaxDeletePercent, already bounded to
+// 0..100 by config validation) — the same number, taken the same way, as
+// NewVariantWatcher's `maxDeletePercent`; see MassOrphanRefusal.
+func NewOrphanSidecarSweeper(lister SidecarLister, outputDir func() string, interval time.Duration, maxOrphanPercent int) *OrphanSidecarSweeper {
 	return &OrphanSidecarSweeper{
-		lister:    lister,
-		outputDir: outputDir,
-		interval:  interval,
+		lister:           lister,
+		outputDir:        outputDir,
+		interval:         interval,
+		maxOrphanPercent: maxOrphanPercent,
 	}
 }
 
@@ -332,32 +382,27 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 	}
 }
 
-// tick performs one chunked sweep. Returns the count of files
-// unlinked (NOT the count of orphans observed — a stat-but-unlink-
-// failed file counts 0). Logs WARN on per-file unlink failures;
-// logs ERROR only on the outer snapshot fetch failure.
+// tick performs one sweep and returns the count of files it unlinked (NOT
+// the count of orphans observed: an orphan it left, for any reason,
+// counts 0). In order:
 //
-// **Uses `filepath.WalkDir`** (NOT `filepath.Walk`) so the per-entry
-// callback receives a cheap `fs.DirEntry` instead of `fs.FileInfo`
-// — `os.Stat`-per-entry is deferred until we actually need ModTime
-// for the grace-period check, AND `WalkDir` natively handles
-// `filepath.SkipAll` as the "stop the walk cleanly" sentinel.
-// `filepath.Walk` (legacy form) treats SkipAll as a generic error
-// and logs the misleading "walk aborted" warning — caught by Gemini
-// HIGH on PR #282.
+//  1. Resolve the tree and refuse an empty answer, before anything could
+//     resolve "" to the working directory.
+//  2. List the catalog (AllVariants) BEFORE the walk — snapshot-then-walk,
+//     see the type's docblock — and refuse an EMPTY known set over a
+//     directory that holds files, every tick, as it always has.
+//  3. Take the whole tree's inventory, with no MaxEntries: a sweep that
+//     deletes on a truncated inventory would be deleting on a ratio
+//     measured from part of the tree. A walk that fails or is stopped
+//     unlinks nothing.
+//  4. Ask MassOrphanRefusal of the whole-tree counts — `inv.Orphans`, the
+//     full count, never the retained list — and unlink nothing on a
+//     refusal.
+//  5. Unlink at most the chunk's worth of the retained orphans, each
+//     re-checked first (reclaimOrphan).
 //
-// **Grace-period gate**: files modified within `effectiveGracePeriod()`
-// of the tick start are skipped. Closes the race between
-// `UpsertVariant` writers (file on disk before row commit) and the
-// sweeper — without it, a sweep that takes its snapshot DURING the
-// writer's transaction window would treat the brand-new sidecar as
-// orphan and unlink it.
-//
-// Walk order is lexical via filepath.WalkDir; the `lastProcessedPath`
-// cursor lets successive ticks pick up where the prior tick
-// stopped. The cursor resets to empty when the walk completes
-// without hitting the chunk cap — that's the "we've covered the
-// whole tree this tick, next tick should start over" signal.
+// Every tick that reaches the walk logs one summary line (orphanTick.log);
+// a refused one logs its refusal through the latch (noteRefusal).
 func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	root := ""
 	if s.outputDir != nil {
@@ -368,16 +413,6 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		// "." (the working directory; WalkDir("") itself only errors).
 		logger.Warn("orphan sidecar sweep: refusing — no variants directory resolved")
 		return 0
-	}
-	if root != s.lastRoot {
-		if s.lastRoot != "" && s.lastProcessedPath != "" {
-			logger.Info("orphan sidecar sweep: variants directory moved; dropping the resume cursor",
-				slog.String("from", s.lastRoot),
-				slog.String("to", root),
-			)
-		}
-		s.lastRoot = root
-		s.lastProcessedPath = ""
 	}
 	rows, err := s.lister.AllVariants(ctx)
 	if err != nil {
@@ -392,9 +427,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// Case-fold + clean the known-set keys so a casing delta between the
 	// DB SidecarPath and the on-disk WalkDir path can't misclassify a live
 	// sidecar as orphan (and unlink it) on a case-insensitive FS — the same
-	// hazard fixed in `bridge upscale --gc` (CodeRabbit on PR #477). The
-	// cursor-resume comparisons (pathWalkCompare / dirEntirelyBehindCursor)
-	// below stay on RAW paths; they must track WalkDir's byte-order traversal.
+	// hazard fixed in `bridge upscale --gc` (CodeRabbit on PR #477).
 	//
 	// Both spellings of every row go in: the recorded path AND the canonical
 	// one under the tree being walked (KnownSidecarSet). A relocated catalog
@@ -406,29 +439,31 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	known := KnownSidecarSet(root, rows)
 
 	// FAIL CLOSED on an empty known-set. Every file under the variants dir
-	// misses an empty `known`, so the walk below would classify the whole
-	// rendition tree as orphaned and unlink it — hours of sox/ffmpeg on a real
-	// library, and nothing regenerates it until the operator asks again.
+	// misses an empty `known`, so the whole rendition tree would read as
+	// orphaned — hours of sox/ffmpeg on a real library, and nothing
+	// regenerates it until the operator asks again.
 	//
-	// The error arm above fails closed already; a query that SUCCEEDS and
-	// returns no rows did not, and the routes to it are ordinary. The reset
-	// procedure this repo's own CLAUDE.md documents is `rm -f bridge.db*` +
-	// restart, and `run` takes a tick at boot. A single<->multi root flip runs
-	// WipeFilesystemTracks, and `track_variants` CASCADEs on `tracks`, so the
-	// window between the wipe and the re-transcode reads zero rows too.
+	// The listing's error arm above fails closed already; a query that
+	// SUCCEEDS and returns no rows did not, and the routes to it are
+	// ordinary. The reset procedure this repo's own CLAUDE.md documents is
+	// `rm -f bridge.db*` + restart, and `run` takes a tick at boot. A
+	// single<->multi root flip runs WipeFilesystemTracks, and
+	// `track_variants` CASCADEs on `tracks`, so the window between the wipe
+	// and the re-transcode reads zero rows too.
 	//
-	// The reverse direction of this same mechanism has had both guards since
-	// it was written (VariantWatcher.tick: `len(rows) == 0` plus the mount
-	// probe), with a test. The forward direction had neither. Same asymmetry
-	// runArtworkGC records in its own docblock, where the deletion shipped
-	// once.
+	// Kept, and AHEAD of the mass-orphan refusal below. That one refuses
+	// most of the same trees (with no rows, every orphan is more than the
+	// catalog holds) but not one under its floor of ten, which it would
+	// unlink whole; and this one costs no walk, says what is actually
+	// wrong (the catalog is empty), and WARNs every tick as it always has.
+	// It is not a verdict about the tree, so it leaves the refusal's latch
+	// alone.
 	//
 	// An empty set over an EMPTY directory is not an error — there is nothing
-	// to protect and nothing to do — so that returns quietly, as before. The
-	// refusal is only for "the catalog says nothing exists, but files do".
-	// Deliberately no operator override here: a background sweeper has nobody
-	// in the loop to express intent, which is what the two CLI GCs' explicit
-	// --allow-empty is for.
+	// to protect and nothing to do — so that returns quietly, as before.
+	// Deliberately no operator override here: a background sweeper has
+	// nobody in the loop to express intent, which is what the two CLI GCs'
+	// explicit --allow-empty is for.
 	if len(known) == 0 {
 		empty, emptyErr := dirIsEmpty(root)
 		if emptyErr == nil && !empty {
@@ -440,202 +475,320 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		return 0
 	}
 
-	grace := s.effectiveGracePeriod()
-	chunkSize := s.effectiveChunkSize()
 	tickStart := time.Now()
-	walkStartCursor := s.lastProcessedPath
-	var (
-		examined    int
-		unlinked    int
-		hitChunkCap bool
-		newCursor   string
-	)
-
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		// Honour cancellation between entries — a shutdown
-		// during a long walk on a multi-TB variant tree should
-		// return promptly.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if walkErr != nil {
-			// Per-entry I/O fault (permission denied, transient
-			// unmount, etc.) — log + continue. Caller's overall
-			// loop tolerates this.
-			logger.Warn("orphan sidecar sweep: walk entry error",
-				slog.String("path", path),
-				slog.Any("err", walkErr),
-			)
-			return nil
-		}
-		// Cheap pre-check via DirEntry (no stat syscall) — directories
-		// + non-FLAC entries skip without touching the filesystem.
-		// This is the load-bearing reason WalkDir wins over Walk on a
-		// 100k-variant library: most entries don't need ModTime.
-		if d.IsDir() {
-			// Chunk-resume short-circuit: when resuming after a prior
-			// tick's chunk cap, prune whole subtrees already lexically
-			// behind the cursor instead of re-descending them. Without
-			// this, tick N re-ReadDir's every directory covered by ticks
-			// 1..N-1 only to `return nil` on each file below — O(N²) walk
-			// I/O over a full sweep on a large variant tree (external
-			// review r3; predicate via Gemini consult, see
-			// dirEntirelyBehindCursor for the .-vs-/ collation gotcha).
-			if dirEntirelyBehindCursor(path, walkStartCursor) {
-				s.skippedDirsForTest.Add(1)
-				return filepath.SkipDir
-			}
-			// Foreign tenants under the variants volume are not ours to reap.
-			// `bridge upscale --gc` has pruned these since it was written and
-			// this sweeper — the same walk, unattended, on a timer — did not:
-			// with `variantsDir` on a dedicated volume, `.Trashes/<uid>/`,
-			// `.Trash-1000/` and an rclone VFS cache all sit under the walk
-			// root, and any `.flac` inside one is missing from `known` and
-			// older than the grace. Files an operator put in the Trash
-			// specifically so they could get them back.
-			//
-			// At the WALK rather than beside the known-set check, so it holds
-			// whatever the database says. Gated on d.IsDir(): SkipDir returned
-			// for a FILE skips the rest of its parent directory, which would
-			// silently end the sweep early. A symlinked .Trashes needs nothing
-			// extra — filepath.WalkDir does not follow symlinks, so it arrives
-			// as a non-directory entry and is never descended.
-			if path != root && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !shouldConsiderSidecarFile(path) {
-			return nil
-		}
-		// Skip past the cursor: only process entries whose WALK order
-		// is STRICTLY AFTER the prior tick's last processed path. Empty
-		// cursor = start of tree. Uses pathWalkCompare (NOT a raw string
-		// compare) so a sibling like "A-Bonus/x.flac" — which WalkDir
-		// visits AFTER "A/…" but which sorts BEFORE it as a raw string
-		// (`-` < `/`) — isn't wrongly skipped.
-		if walkStartCursor != "" && pathWalkCompare(path, walkStartCursor) <= 0 {
-			return nil
-		}
-
-		examined++
-		// Every entry past the cursor advances the next-tick
-		// cursor, even when the entry was a known sidecar
-		// (otherwise the cursor would stall on the first known
-		// file and we'd re-walk every previous tick's set).
-		newCursor = path
-
-		if _, isKnown := known[strings.ToLower(filepath.Clean(path))]; isKnown {
-			// Sidecar is in the DB — nothing to do. No ModTime read
-			// needed; the known-set check already proved consistency.
-			if examined >= chunkSize {
-				hitChunkCap = true
-				return filepath.SkipAll
-			}
-			return nil
-		}
-
-		// Candidate orphan: present on disk, NOT in track_variants.
-		// Before unlinking, gate on file ModTime — a concurrent
-		// UpsertVariant writer could have landed this file in the
-		// gap between the SELECT snapshot above and the walk below,
-		// and unlinking it would corrupt the writer's in-flight
-		// transaction. Files newer than the grace period stay put;
-		// the next sweep cycle re-evaluates them once the writer's
-		// row has had time to commit.
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			logger.Warn("orphan sidecar sweep: stat failed",
-				slog.String("path", path),
-				slog.Any("err", infoErr),
-			)
-			// Don't unlink a file we can't stat — same defensive
-			// shape the existing VariantWatcher uses for stat
-			// failures (skip and continue).
-			if examined >= chunkSize {
-				hitChunkCap = true
-				return filepath.SkipAll
-			}
-			return nil
-		}
-		if tickStart.Sub(info.ModTime()) < grace {
-			// Too new to risk unlinking — UpsertVariant writer may
-			// still be in flight. Skip; next sweep re-checks.
-			if examined >= chunkSize {
-				hitChunkCap = true
-				return filepath.SkipAll
-			}
-			return nil
-		}
-
-		// Confirmed orphan: old enough to rule out the writer race.
-		if rmErr := os.Remove(path); rmErr != nil {
-			logger.Warn("orphan sidecar sweep: unlink failed",
-				slog.String("path", path),
-				slog.Any("err", rmErr),
-			)
-		} else {
-			unlinked++
-			logger.Info("orphan sidecar sweep: unlinked orphan",
-				slog.String("path", path),
-			)
-		}
-		if examined >= chunkSize {
-			hitChunkCap = true
-			return filepath.SkipAll
-		}
-		return nil
+	chunk := s.effectiveChunkSize()
+	inv, err := TakeSidecarInventory(ctx, root, known, SidecarInventoryOptions{
+		Consider:       shouldConsiderSidecarFile,
+		MaxOrphanPaths: chunk,
 	})
-
-	stopped := false
 	if err != nil {
-		// Walk-level error: the callback returns one only for its
-		// context. A shutdown's cancellation is not reported; a deadline
-		// is a failure, logged at WARN — the sweeper can resume on the
-		// next tick.
+		// The walk stops only for its context or for a tree it could not
+		// read. A shutdown's cancellation is not reported; a deadline or a
+		// read failure is, at WARN. Either way nothing is unlinked, and the
+		// latch is untouched: a walk that did not finish is evidence of
+		// nothing about the tree.
 		failure := ctxerr.WithoutCancellation(ctx, err)
-		stopped = failure == nil
 		if failure != nil {
 			logger.Warn("orphan sidecar sweep: walk aborted",
 				slog.String("outputDir", root),
 				slog.Any("err", failure),
 			)
 		}
+		orphanTick{root: root, cutShort: true, cancelled: failure == nil}.log()
+		return 0
 	}
 
-	// Cursor update: if we hit the chunk cap, the next tick
-	// resumes after `newCursor`. Otherwise we've walked the
-	// entire tree past the prior cursor — reset to empty so
-	// the next tick starts fresh from the top.
-	if hitChunkCap {
-		s.lastProcessedPath = newCursor
-	} else {
-		s.lastProcessedPath = ""
+	// An entry the walk could not read (inv.Unreadable) is missing from
+	// every count, and so from the orphans this tick could unlink: the
+	// verdict is taken over what the walk could see, as `upscale --gc`'s is,
+	// and the summary line carries the count.
+	if reason := MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), s.maxOrphanPercent); reason != "" {
+		s.noteRefusal(tickStart, root, reason, inv.OrphanPaths)
+		orphanTick{root: root, walked: true, inv: inv, refused: true}.log()
+		return 0
 	}
+	s.noteProceeding(root, inv, len(rows))
 
-	// A walk that did not finish does not call its tick complete. Its
-	// summary still carries what the tick examined and unlinked before
-	// it ended, as the variant sweep's does, and says whether the
-	// shutdown stopped it (Gemini API review, #1004).
-	msg := msgOrphanTickComplete
-	if err != nil {
-		msg = msgOrphanTickCutShort
+	paths := inv.OrphanPaths
+	if len(paths) > chunk {
+		// MaxOrphanPaths already capped the list; the cap is restated where
+		// the unlinks happen so it cannot quietly depend on an option.
+		paths = paths[:chunk]
 	}
-	logger.Info(msg,
-		slog.Int("examined", examined),
-		slog.Int("unlinked", unlinked),
-		slog.Bool("hit_chunk_cap", hitChunkCap),
-		slog.Bool("cancelled", stopped),
-		slog.String("next_cursor", s.lastProcessedPath),
-	)
-	return unlinked
+	tally, stopErr := s.reclaimOrphans(ctx, paths, tickStart)
+	t := orphanTick{root: root, walked: true, inv: inv, tally: tally}
+	if stopErr != nil {
+		// Only the context stops the unlinks. As for the walk: a shutdown is
+		// not reported, a deadline is; the files unlinked before it stay
+		// counted.
+		failure := ctxerr.WithoutCancellation(ctx, stopErr)
+		if failure != nil {
+			logger.Warn("orphan sidecar sweep: unlinking aborted",
+				slog.String("outputDir", root),
+				slog.Any("err", failure),
+			)
+		}
+		t.cutShort, t.cancelled = true, failure == nil
+	}
+	t.log()
+	return tally.unlinked
 }
 
-// The orphan sweep's summary line, one per tick: complete when its walk
-// finished, cut short when a shutdown or a failure ended the walk first.
+// reclaimOrphans hands each of paths to reclaimOrphan, counting and logging
+// what it did, and stops at a cancelled context with the context's error.
+// Per-path lines are sampled at logSampleCap per message per tick, the rest
+// at Debug: a legitimate backlog is a chunk of 5,000 unlinks a tick, and
+// the summary line carries the totals.
+func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, paths []string, tickStart time.Time) (orphanTally, error) {
+	grace := s.effectiveGracePeriod()
+	var (
+		tally  orphanTally
+		sample logSampler
+	)
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return tally, err
+		}
+		outcome, err := reclaimOrphan(p, tickStart, grace, os.Lstat, os.Stat)
+		switch outcome {
+		case orphanUnlinked:
+			tally.unlinked++
+			sample.log(slog.LevelInfo, "orphan sidecar sweep: unlinked orphan",
+				slog.String("path", p),
+			)
+		case orphanGone:
+			tally.gone++
+		case orphanInGrace:
+			tally.inGrace++
+		case orphanNotAFile:
+			tally.notAFile++
+			sample.log(slog.LevelInfo, "orphan sidecar sweep: left an orphan that is no longer a file",
+				slog.String("path", p),
+			)
+		case orphanUnreadable:
+			tally.failed++
+			sample.log(slog.LevelWarn, "orphan sidecar sweep: stat failed",
+				slog.String("path", p),
+				slog.Any("err", err),
+			)
+		case orphanUnlinkFailed:
+			tally.failed++
+			sample.log(slog.LevelWarn, "orphan sidecar sweep: unlink failed",
+				slog.String("path", p),
+				slog.Any("err", err),
+			)
+		}
+	}
+	return tally, nil
+}
+
+// orphanOutcome is what reclaimOrphan did with one path the inventory
+// classified as an orphan.
+type orphanOutcome uint8
+
+const (
+	// orphanUnlinked — removed.
+	orphanUnlinked orphanOutcome = iota
+	// orphanGone — not there when it was re-checked or removed: something
+	// else took it between the walk and the unlink, which is the outcome
+	// the sweep wanted, so it is done rather than failed (`upscale --gc`
+	// reads ENOENT the same way). Not counted as unlinked: this sweep did
+	// not remove it.
+	orphanGone
+	// orphanInGrace — modified inside the grace period of the tick's
+	// start: a writer may have put the file down before its row committed
+	// (gcGracePeriod). Left for a later tick.
+	orphanInGrace
+	// orphanNotAFile — no longer something this sweep may unlink: a link
+	// to a directory, or a Windows junction, stands at the path now (the
+	// #969 rule, asked again). Left alone.
+	orphanNotAFile
+	// orphanUnreadable — the re-check could not tell what is at the path.
+	// Left alone: "could not find out" is not "junk".
+	orphanUnreadable
+	// orphanUnlinkFailed — the re-check passed and os.Remove failed.
+	orphanUnlinkFailed
+)
+
+// reclaimOrphan re-checks one path the tick's inventory classified as an
+// orphan, and removes it only if it is still a file this sweep may reclaim.
+//
+// The inventory and the unlink are separate steps, as in `upscale --gc`,
+// because the refusal has to see the whole tree before anything goes; so
+// the path is asked again, freshly, before os.Remove. An Lstat first (and
+// the tick needs one anyway: the inventory keeps no mtimes), then the SAME
+// classifyWalkEntry the inventory used, so the two cannot disagree about
+// what a candidate is: an entry that is not a REGULAR file is stat'd, and
+// a link to a directory or a Windows junction (ModeIrregular without
+// ModeDir, since Go 1.23) is never unlinked, because it may be the only
+// reference to an album parked on another volume. A dangling link still
+// classifies, as in the walk: it is junk in this tree. Then the grace
+// check against the tick's start (gcGracePeriod), then os.Remove.
+//
+// lstat and stat are parameters so the Windows junction shape, which no
+// other platform can construct, is drivable on every CI leg; production
+// passes os.Lstat and os.Stat.
+func reclaimOrphan(path string, tickStart time.Time, grace time.Duration, lstat, stat func(string) (fs.FileInfo, error)) (orphanOutcome, error) {
+	info, err := lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return orphanGone, nil
+	case err != nil:
+		return orphanUnreadable, err
+	}
+	var statErr error
+	switch classifyWalkEntry(info.Mode(), func() (fs.FileInfo, error) {
+		target, err := stat(path)
+		statErr = err
+		return target, err
+	}) {
+	case walkEntrySkip:
+		return orphanNotAFile, nil
+	case walkEntryUnreadable:
+		return orphanUnreadable, statErr
+	}
+	if tickStart.Sub(info.ModTime()) < grace {
+		return orphanInGrace, nil
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return orphanGone, nil
+		}
+		return orphanUnlinkFailed, err
+	}
+	return orphanUnlinked, nil
+}
+
+// orphanTally counts what reclaimOrphans did with a tick's orphans, one
+// field per outcome; failed covers orphanUnreadable and orphanUnlinkFailed.
+type orphanTally struct {
+	unlinked, gone, inGrace, notAFile, failed int
+}
+
+// noteRefusal logs a refused tick through the latch: one WARN when a streak
+// of refused ticks starts, then at most one per orphanRefusalRepeat while
+// it lasts. Measured between tick starts on the monotonic clock, so a
+// stepped wall clock neither repeats it early nor holds it back.
+//
+// The reason carries the numbers (MassOrphanRefusal); the examples are
+// relative to the variants directory, the form the doctor names them in.
+// The hint never names `bridge variants move`: that command needs the
+// ROWS, and in the lost-index shape there are none to move (#940).
+func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root, reason string, orphans []string) {
+	if s.refusing && now.Sub(s.lastRefusalLog) < orphanRefusalRepeat {
+		return
+	}
+	s.refusing = true
+	s.lastRefusalLog = now
+	examples := make([]string, 0, orphanRefusalExamples)
+	for _, p := range orphans {
+		if len(examples) == orphanRefusalExamples {
+			break
+		}
+		if rel, err := filepath.Rel(root, p); err == nil {
+			p = rel
+		}
+		examples = append(examples, p)
+	}
+	logger.Warn(msgOrphanRefusal,
+		slog.String("reason", reason),
+		slog.String("variants_dir", root),
+		slog.Any("examples", examples),
+		slog.String("hint", orphanRefusalHint),
+	)
+}
+
+// noteProceeding ends a refusal streak: the first tick whose walk finished
+// and whose verdict proceeds says so, once, with the counts it proceeded
+// on. Outside a streak it says nothing.
+//
+// The line claims only that the check passed, because the counts it passed
+// on need not be a recovered catalog: a variants volume unmounted during a
+// streak leaves a missing or empty directory, an inventory of nothing, and
+// a verdict that proceeds (MassOrphanRefusal has no files to weigh). The
+// counts say which it was, and a tree that comes back still stranded
+// starts a new streak with a WARN of its own rather than waiting out a day.
+func (s *OrphanSidecarSweeper) noteProceeding(root string, inv SidecarInventory, rows int) {
+	if !s.refusing {
+		return
+	}
+	s.refusing = false
+	logger.Info(msgOrphanRefusalLifted,
+		slog.Int("files", inv.Files),
+		slog.Int("orphans", inv.Orphans),
+		slog.Int("rows", rows),
+		slog.String("variants_dir", root),
+	)
+}
+
+// orphanRefusalHint is the refusal line's advice, the CLI refusal's
+// (`gcRefuseMassOrphans`) in one line.
+const orphanRefusalHint = "nothing was unlinked. A catalog this much smaller than the tree it describes usually " +
+	"means the INDEX was lost (a bridge.db restored from an older snapshot, or reset, or rows reaped after a host " +
+	"move), not that the files are junk, and they cannot be re-derived from disk. Check `bridge doctor` " +
+	"(variants-index) and restore the rows if they are recoverable. Only if the files really are junk: " +
+	"`bridge upscale --gc --allow-mass-orphans`. This sweep has no override; it logs this when it starts " +
+	"refusing and once a day while it keeps refusing."
+
+// The orphan sweep's refusal lines: the latched WARN, and the Info line a
+// tick logs when it proceeds after a streak of refusals.
+const (
+	msgOrphanRefusal       = "orphan sidecar sweep: refusing to unlink — the catalog is far smaller than the tree it describes"
+	msgOrphanRefusalLifted = "orphan sidecar sweep: no longer refusing — this tick's counts pass the mass-orphan check"
+)
+
+// orphanTick is one tick's account, for its summary line.
+type orphanTick struct {
+	root string
+	// walked is true once the inventory finished, so inv holds the whole
+	// tree's counts. A walk that did not finish has none worth printing:
+	// TakeSidecarInventory returns none, and zeros would read as an empty
+	// tree.
+	walked bool
+	inv    SidecarInventory
+	// refused is true when MassOrphanRefusal refused the unlinks.
+	refused bool
+	tally   orphanTally
+	// cutShort is true when a stop or a failure ended the walk or the
+	// unlinks before they finished; cancelled, when that was the shutdown.
+	cutShort, cancelled bool
+}
+
+// log writes the tick's one summary line, at Info: complete when its walk
+// and its unlinks finished (a refused tick included: it finished
+// deciding), cut short when a shutdown or a failure ended either first. It
+// still carries what the tick unlinked before it ended, and says whether
+// the shutdown stopped it (Gemini API review, #1004).
+func (t orphanTick) log() {
+	msg := msgOrphanTickComplete
+	if t.cutShort {
+		msg = msgOrphanTickCutShort
+	}
+	attrs := make([]slog.Attr, 0, 12)
+	if t.walked {
+		attrs = append(attrs,
+			slog.Int("files", t.inv.Files),
+			slog.Int("known", t.inv.Known),
+			slog.Int("orphans", t.inv.Orphans),
+			slog.Int("unreadable", t.inv.Unreadable),
+			slog.Bool("refused", t.refused),
+		)
+	}
+	attrs = append(attrs,
+		slog.Int("unlinked", t.tally.unlinked),
+		slog.Int("gone", t.tally.gone),
+		slog.Int("in_grace", t.tally.inGrace),
+		slog.Int("not_a_file", t.tally.notAFile),
+		slog.Int("failed", t.tally.failed),
+		slog.Bool("cancelled", t.cancelled),
+		slog.String("variants_dir", t.root),
+	)
+	logger.LogAttrs(context.Background(), slog.LevelInfo, msg, attrs...)
+}
+
+// The orphan sweep's summary line, one per tick that reached the walk:
+// complete when its walk and its unlinks finished, cut short when a
+// shutdown or a failure ended one of them first.
 const (
 	msgOrphanTickComplete = "orphan sidecar sweep: tick complete"
 	msgOrphanTickCutShort = "orphan sidecar sweep: tick cut short"
@@ -661,12 +814,18 @@ func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]stru
 	return known
 }
 
-// shouldConsiderSidecarFile is the pure-helper predicate that
-// decides whether a filesystem entry observed during the walk is a
-// candidate for orphan-check. Today the answer is "any `.flac`
-// extension"; the operator-triggered `--gc` uses the same shape
-// (see cmd/bridge/upscale.go::runGCForwardSweep). Extracted as a
-// pure function for unit testing without a real walk.
+// shouldConsiderSidecarFile is the background sweep's Consider: whether
+// an entry is a candidate for the orphan check at all. Today the answer
+// is "any `.flac` extension", asked of the entry's BASENAME by
+// TakeSidecarInventory (a basename and its full path have the same
+// filepath.Ext, so it answers for either). Extracted as a pure function
+// for unit testing without a real walk.
+//
+// Narrower than `upscale --gc` on purpose, and this docblock said the
+// opposite until 2026-09-28 ("the operator-triggered `--gc` uses the same
+// shape"): `--gc` passes a nil Consider and counts and removes EVERY file
+// in the variants directory, while this sweep never unlinks anything but a
+// `.flac`, and so measures its mass-orphan ratio over `.flac` files only.
 //
 // Future variant formats (FLAC-only today; opus / wavpack are
 // hypothetical follow-ups) would extend the predicate rather than
@@ -674,109 +833,4 @@ func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]stru
 // place.
 func shouldConsiderSidecarFile(path string) bool {
 	return filepath.Ext(path) == ".flac"
-}
-
-// dirEntirelyBehindCursor reports whether the directory `dirPath` — and
-// therefore its entire subtree — has been fully walked already (it sorts
-// entirely BEFORE `cursor` in filepath.WalkDir traversal order) and can be
-// pruned with filepath.SkipDir during a chunk-resumed walk. `cursor` is the
-// last path processed by the prior tick (empty on a fresh, from-the-top pass).
-//
-// Prune iff `dirPath` is NOT an ancestor of the cursor AND it sorts before the
-// cursor in WALK order (via pathWalkCompare, NOT a raw string compare):
-//
-//   - A subtree is contiguous in walk order and — when it doesn't contain the
-//     cursor — lies entirely on one side of it. `pathWalkCompare(dir, cursor)
-//     < 0` means the whole subtree precedes the cursor → already swept → prune.
-//   - The ancestor guard keeps a parent of the cursor (e.g. dir "A/B", cursor
-//     "A/B/c.flac") descended so the walk can reach the resume point. It ALSO
-//     covers the walk root (always an ancestor of an in-tree cursor) and is
-//     what makes the raw-string compare unnecessary for the trailing-slash /
-//     volume-root cases the prior implementation special-cased.
-//   - An empty cursor (fresh pass) never skips.
-//
-// **Why walk order, not raw string order** (external review bridge02-04, Gemini
-// consult ×2): filepath.WalkDir reads each dir's entries sorted by BASE name
-// and visits a dir before its children, so "A/…" is fully walked before sibling
-// "A-Bonus/…" (base names "A" < "A-Bonus"). But the separator sorts AFTER '-',
-// ' ', '.', '&', "'", … so "A-Bonus/…" < "A/…" as a RAW string — the prior
-// `withSep < cursor` compare therefore wrongly pruned the still-unwalked
-// "A-Bonus" subtree. pathWalkCompare compares segment-by-segment and matches
-// WalkDir order exactly.
-func dirEntirelyBehindCursor(dirPath, cursor string) bool {
-	if cursor == "" {
-		return false
-	}
-	sep := string(filepath.Separator)
-	// Trim a trailing separator (volume/filesystem root "/", "C:\", or a
-	// trailing-slash outputDir) so the ancestor prefix below can't build a
-	// double separator that no in-tree cursor matches — which would wrongly
-	// prune the walk root and halt the whole sweep.
-	trimmed := strings.TrimSuffix(dirPath, sep)
-	// Keep an ancestor of the cursor (incl. the walk root) descended so the
-	// walk can reach the resume point.
-	if cursor == trimmed || strings.HasPrefix(cursor, trimmed+sep) {
-		return false
-	}
-	// Not an ancestor → the whole subtree is on one side of the cursor. Prune
-	// iff it precedes the cursor in walk order.
-	return pathWalkCompare(trimmed, cursor) < 0
-}
-
-// pathWalkCompare compares two clean filesystem paths in filepath.WalkDir
-// traversal order and returns -1, 0, or +1. The comparison is segment-by-
-// segment (splitting on the OS separator), with a shorter path — an ancestor —
-// ordering BEFORE a longer path that extends it (WalkDir visits a directory
-// node before its children).
-//
-// **Why not a raw string compare**: WalkDir orders siblings by BASE name, so
-// "A-Bonus/x.flac" is visited AFTER everything under "A/", yet the raw strings
-// sort "A-Bonus/…" < "A/…" because the separator ('/' 0x2F, '\' 0x5C) sorts
-// AFTER '-'(0x2D), ' '(0x20), '.'(0x2E), '&'(0x26), "'"(0x27), … — all common
-// in music directory names. Segment comparison sidesteps that collation trap.
-//
-// **Zero-alloc** (Gemini review on bridge02-04): the function runs on every walk
-// entry until the resume cursor clears, so on a 50k–100k-sidecar library a
-// `strings.Split`-per-call form would be real GC pressure. This scans segment
-// boundaries by index; string slicing yields a view, not a copy, so no heap
-// allocation occurs. Pinned by TestPathWalkCompare_ZeroAlloc.
-func pathWalkCompare(a, b string) int {
-	if a == b {
-		return 0 // fast path: the resume cursor re-encounters its own path once per tick
-	}
-	sep := byte(filepath.Separator) // ASCII '/' or '\'; string indexing yields bytes
-	ia, ib := 0, 0
-	for ia < len(a) && ib < len(b) {
-		ea := ia
-		for ea < len(a) && a[ea] != sep {
-			ea++
-		}
-		eb := ib
-		for eb < len(b) && b[eb] != sep {
-			eb++
-		}
-		if segA, segB := a[ia:ea], b[ib:eb]; segA != segB {
-			if segA < segB {
-				return -1
-			}
-			return 1
-		}
-		// Advance past the evaluated segment and its trailing separator.
-		ia = ea
-		if ia < len(a) {
-			ia++
-		}
-		ib = eb
-		if ib < len(b) {
-			ib++
-		}
-	}
-	switch {
-	case ia < len(a):
-		return 1
-	case ib < len(b):
-		return -1
-	default:
-		return 0
-	}
 }

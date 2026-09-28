@@ -148,7 +148,7 @@ func TestAnOrphanSweepStoppedWhileListingReportsNothing(t *testing.T) {
 	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(ctx context.Context) ([]VariantSnapshot, error) {
 		cancel()
 		return nil, fmt.Errorf("manifest: all variants: %w", ctx.Err())
-	}), staticDir(t.TempDir()), time.Hour)
+	}), staticDir(t.TempDir()), time.Hour, sweepPercent)
 
 	rec := loggingtest.Record(t)
 	s.tick(ctx)
@@ -160,7 +160,7 @@ func TestAnOrphanSweepStoppedWhileListingReportsNothing(t *testing.T) {
 func TestAnOrphanSweepWhoseListingFailsStillReportsIt(t *testing.T) {
 	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(context.Context) ([]VariantSnapshot, error) {
 		return nil, errors.New("database is locked")
-	}), staticDir(t.TempDir()), time.Hour)
+	}), staticDir(t.TempDir()), time.Hour, sweepPercent)
 
 	rec := loggingtest.Record(t)
 	s.tick(context.Background())
@@ -179,7 +179,7 @@ func TestAnOrphanSweepWhoseWalkIsStoppedReportsNothing(t *testing.T) {
 	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(context.Context) ([]VariantSnapshot, error) {
 		defer cancel()
 		return []VariantSnapshot{{SidecarPath: filepath.Join(dir, "live-row.upscaled-v1-96000-24.flac")}}, nil
-	}), staticDir(dir), time.Hour)
+	}), staticDir(dir), time.Hour, sweepPercent)
 
 	rec := loggingtest.Record(t)
 	s.tick(ctx)
@@ -197,7 +197,7 @@ func TestAnOrphanSweepWhoseWalkRunsOutOfTimeStillReportsIt(t *testing.T) {
 	defer cancel()
 	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(context.Context) ([]VariantSnapshot, error) {
 		return []VariantSnapshot{{SidecarPath: filepath.Join(dir, "live-row.upscaled-v1-96000-24.flac")}}, nil
-	}), staticDir(dir), time.Hour)
+	}), staticDir(dir), time.Hour, sweepPercent)
 
 	rec := loggingtest.Record(t)
 	s.tick(ctx)
@@ -212,7 +212,7 @@ func TestAnOrphanSweepThatFinishesCallsItsTickComplete(t *testing.T) {
 	dir := orphanTree(t)
 	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(context.Context) ([]VariantSnapshot, error) {
 		return []VariantSnapshot{{SidecarPath: filepath.Join(dir, "live-row.upscaled-v1-96000-24.flac")}}, nil
-	}), staticDir(dir), time.Hour)
+	}), staticDir(dir), time.Hour, sweepPercent)
 
 	rec := loggingtest.Record(t)
 	s.tick(context.Background())

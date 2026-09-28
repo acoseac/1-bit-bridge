@@ -649,8 +649,9 @@ type IntegrityConfig struct {
 	VariantSweepIntervalSec *int `yaml:"variantSweepIntervalSec,omitempty"`
 
 	// OrphanSidecarSweepIntervalSec controls how often the
-	// integrity.OrphanSidecarSweeper walks `<variantsDir>/transcoded/`
-	// for sidecar files that have no matching `track_variants` row
+	// integrity.OrphanSidecarSweeper walks the variants directory
+	// (`upscale.variantsDir`, default `<dataDir>/transcoded/`) for
+	// `.flac` sidecar files that have no matching `track_variants` row
 	// and unlinks them. The forward-sweep half of what the operator-
 	// triggered `bridge upscale --gc` does today; the existing
 	// VariantWatcher above handles the reverse half (DB rows whose
@@ -663,20 +664,21 @@ type IntegrityConfig struct {
 	// the SAME relative path but produce different `track_variants.id`
 	// rows) opt in via a non-zero value here.
 	//
-	// **Chunked + low-priority**: each tick processes at most
-	// `gcChunkSize` filesystem entries (100, defined in the integrity
-	// package). The operator-triggered `--gc` keeps its existing
-	// unbounded-sweep semantics; this knob exists for the
-	// hands-off-operator profile where chunking + cadence-spacing
-	// matters.
+	// **Each tick decides as `--gc` does, and unlinks a chunk**: it
+	// walks the whole tree read-only (128 ms per 100k files, warm, on
+	// the dev Mac), refuses a mass orphaning with no override (the
+	// VariantSweepMaxDeletePercent threshold below, via
+	// integrity.MassOrphanRefusal), and otherwise unlinks at most
+	// `gcChunkSize` (5,000, in the integrity package) orphans. Until
+	// 2026-09-28 the chunk bounded the WALK instead, with a cursor
+	// across ticks, which is why this sweep could not see a lost index.
 	//
-	// **Snapshot semantics**: each tick takes a `BEGIN DEFERRED`
-	// snapshot of `track_variants.sidecar_path` BEFORE the
-	// filesystem walk so a concurrent `UpsertVariant` writer can't
-	// produce a false-positive orphan (the new sidecar lands on disk
-	// before its row commits to the snapshot; pre-snapshot the
-	// reverse race would have the sweeper unlink the file before the
-	// row caught up).
+	// **Snapshot semantics**: each tick lists `track_variants` BEFORE
+	// the filesystem walk (a plain SELECT, which WAL gives a
+	// consistent snapshot) so a concurrent `UpsertVariant` writer
+	// can't produce a false-positive orphan, and files modified within
+	// a 10-minute grace of the tick's start are never unlinked (a
+	// sidecar lands on disk before its row commits).
 	//
 	// Pointer-typed to distinguish "missing field → use default
 	// (disabled)" from "explicit zero → also disabled" — kept
@@ -710,6 +712,13 @@ type IntegrityConfig struct {
 	// missing); 0 refuses any mass deletion while sidecars remain. A
 	// sweep that would delete fewer than ten rows is never refused —
 	// the guard is for the whole-tree move, not the odd deleted file.
+	//
+	// The same number bounds the FILE side (integrity.MassOrphanRefusal,
+	// #940): `bridge upscale --gc` refuses to unlink more than this share
+	// of the files in the variants directory when there are also more
+	// unreferenced files than rows (`--allow-mass-orphans` passes it),
+	// and since 2026-09-28 the background orphan sweep above does too,
+	// with no way past it. 100 disables that guard as well.
 	// Pointer-typed like its siblings; read via
 	// Config.VariantSweepMaxDeletePercent(). Config-file / env only, as
 	// the two intervals above are: none of the integrity knobs are on
