@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -55,16 +56,17 @@ func firstInstallName() string {
 }
 
 // initAddresses is the API and admin address a run of `bridge init` writes:
-// the loopback defaults, or a public run's. It is the one definition of both.
-// The preflight grades their ports wherever no install's config names its
-// own, and initCmd builds the config from them, so the preflight cannot grade
-// one port while the config gets another. Until 2026-09-28 the preflight
-// graded 7788 and 7789 there whatever the run wrote, so another process on
-// 7788 refused a public first install that would never bind it.
+// its defaults, or the addresses its flags name. It is the one definition of
+// both. The preflight grades their ports wherever no install's config names
+// its own, and initCmd builds the config from them, so the preflight cannot
+// grade one port while the config gets another. Until 2026-09-28 the
+// preflight graded 7788 and 7789 there whatever the run wrote, so another
+// process on 7788 refused a public first install that would never bind it.
 //
-// A public run listens on :443, which ACME's TLS-ALPN-01 challenge needs. Its
-// admin console's default depends on the TLS posture (CodeRabbit Major review
-// post-PR-#295):
+// A loopback run's defaults are config's: the API on :7788 and the admin
+// console on 127.0.0.1:7789. A public run listens on :443, which ACME's
+// TLS-ALPN-01 challenge needs. Its admin console's default depends on the TLS
+// posture (CodeRabbit Major review post-PR-#295):
 //
 //   - The bridge terminating the console's TLS itself (no --admin-tls-proxy):
 //     0.0.0.0:7789, so the operator's iOS management surface can reach it
@@ -75,16 +77,19 @@ func firstInstallName() string {
 //     the firewall is mis-wired or the proxy is briefly down. The 0.0.0.0
 //     default before that review was an unsafe shape.
 //
-// --listen-address and --admin-address win over both defaults. They are read
-// on a public run only, and initCmd refuses a value the config's own check
-// refuses before it calls this.
+// --listen-address and --admin-address win over the defaults, in either
+// posture. initCmd refuses a value the config's own check refuses before it
+// calls this (initAddressFlagsError), a loopback run's --admin-address
+// included, which must name a loopback host as that install's adminAddress
+// must. Until 2026-09-28 a loopback run read neither flag: it saved :7788 and
+// 127.0.0.1:7789, without a word, whatever it was given, 0.0.0.0 included.
 func initAddresses(public, proxy bool, listenFlag, adminFlag string) (listen, admin string) {
-	if !public {
-		return config.DefaultListenAddress, config.DefaultAdminAddress
-	}
-	listen, admin = ":443", "0.0.0.0:7789"
-	if proxy {
-		admin = "127.0.0.1:7789"
+	listen, admin = config.DefaultListenAddress, config.DefaultAdminAddress
+	if public {
+		listen, admin = ":443", "0.0.0.0:7789"
+		if proxy {
+			admin = "127.0.0.1:7789"
+		}
 	}
 	if listenFlag != "" {
 		listen = listenFlag
@@ -95,20 +100,65 @@ func initAddresses(public, proxy bool, listenFlag, adminFlag string) (listen, ad
 	return listen, admin
 }
 
-// portsThisInitWrites is what init prints under a preflight report whose
-// port-api or port-admin check FAILed on the ports this run writes, which the
-// preflight grades wherever no install's config names its own
-// (initAddresses). Those lines are about the run's choice, not a verdict
-// about an install that is there. A public run chooses its ports with the
-// address flags, which the check's own hint, written for an install that has
-// a bridge.yaml, cannot name; a loopback run writes the defaults, which that
-// hint's bridge.yaml changes once init has written it.
-func portsThisInitWrites(public bool) string {
-	const lead = "port-api and port-admin above grade the ports this init would write"
-	if public {
-		return lead + "; --listen-address and --admin-address choose others."
+// initAddressFlagsError is the refusal of a --listen-address or
+// --admin-address the config's own validation would refuse in the posture
+// this run writes, or nil. initCmd asks it before the preflight, which grades
+// the port an address names and has none to grade for one that does not
+// parse. Both must parse with a port (config.ValidateBindAddress), in either
+// posture. A loopback run's admin address must also name a loopback host
+// (config.ValidateLoopbackAddress), as that install's adminAddress must: its
+// console has no login, so binding loopback is its whole trust boundary. A
+// public run's console has a login and may bind any interface.
+func initAddressFlagsError(public bool, listen, admin string) error {
+	for _, f := range []struct{ flag, addr string }{
+		{"--listen-address", listen},
+		{"--admin-address", admin},
+	} {
+		if f.addr == "" {
+			continue
+		}
+		if err := config.ValidateBindAddress(f.flag, f.addr); err != nil {
+			return err
+		}
 	}
-	return lead + ", its defaults."
+	if public || admin == "" {
+		return nil
+	}
+	if err := config.ValidateLoopbackAddress("--admin-address", admin); err != nil {
+		return fmt.Errorf("%w\nwithout --public the admin console has no login, so it listens on this machine only: "+
+			"reach it from another over an SSH tunnel, or run init with --public for a console with a login", err)
+	}
+	return nil
+}
+
+// portsThisInitWrites is what init prints under a preflight report whose
+// port-api or port-admin check FAILed on the ports this run writes. The
+// preflight grades those wherever no install's config names its own
+// (initAddresses), and on a --yes --force rewrite of one whose config does,
+// which grades only the ports it keeps (doctor.Deps.AbandonedPorts). Those
+// lines are then about the run's choice, not only a verdict about an install
+// that is there, and the check's own hint, written for an install whose
+// bridge.yaml names the port, cannot name the flags that choose the run's.
+func portsThisInitWrites() string {
+	return "port-api and port-admin above grade the ports this init would write; " +
+		"--listen-address and --admin-address choose others."
+}
+
+// portsARewriteAbandons are the ports of the install at the target path
+// (installAPI, installAdmin, which its config names) that a rewrite writing
+// runAPI and runAdmin binds in neither role, once each: what the preflight
+// leaves ungraded on a --yes --force rewrite (doctor.Deps.AbandonedPorts). A
+// port the rewrite keeps in the other role, the API moving onto the old admin
+// port say, is not abandoned: the bridge binds it again after a restart. So
+// every port the second pass grades, one the run writes, is outside the list.
+func portsARewriteAbandons(installAPI, installAdmin, runAPI, runAdmin int) []int {
+	var out []int
+	for _, p := range []int{installAPI, installAdmin} {
+		if p != runAPI && p != runAdmin && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // initCmd walks a first-time operator through the minimum answers needed
@@ -148,8 +198,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	publicMode := fs.Bool("public", false, "configure as a public-VPS deployment (admin auth, no mDNS, no Tailscale by default)")
 	publicDomain := fs.String("domain", "", "public hostname iOS clients dial (required with --public)")
 	publicEmail := fs.String("email", "", "ACME contact email for Let's Encrypt (required with --public)")
-	publicAdminAddress := fs.String("admin-address", "", "with --public: bind address for the admin console (e.g. 0.0.0.0:7789)")
-	publicListenAddress := fs.String("listen-address", "", "with --public: bind for the iOS-facing API (default :443 for ACME)")
+	// The two address flags apply in either posture (initAddresses).
+	adminAddressFlag := fs.String("admin-address", "", "bind address for the admin console (default 127.0.0.1:7789; "+
+		"with --public 0.0.0.0:7789, or 127.0.0.1:7789 with --admin-tls-proxy). Without --public it must be a "+
+		"loopback address: that console has no login")
+	listenAddressFlag := fs.String("listen-address", "", "bind address for the iOS-facing API "+
+		"(default :7788; with --public :443, which ACME needs)")
 	publicProxy := fs.Bool("admin-tls-proxy", false, "with --public: a reverse proxy (Caddy/nginx) fronts admin TLS — disables native ACME wrapping of the admin listener")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -177,27 +231,20 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "--public requires --email <addr> (used for Let's Encrypt account registration)\n")
 			return 2
 		}
-		// An address the config's own check refuses is refused here, before
-		// the preflight, which grades the port an address names and has no
-		// port to grade for one that does not parse. Until 2026-09-28 it was
-		// refused only at the validation before Save, after a preflight that
-		// had graded 7788 in its place.
-		for _, f := range []struct{ flag, addr string }{
-			{"--listen-address", *publicListenAddress},
-			{"--admin-address", *publicAdminAddress},
-		} {
-			if f.addr == "" {
-				continue
-			}
-			if err := config.ValidateBindAddress(f.flag, f.addr); err != nil {
-				fmt.Fprintf(stderr, "%v\n", err)
-				return 2
-			}
-		}
+	}
+	// An address the config's own check refuses is refused here, before the
+	// preflight, which grades the port an address names and has no port to
+	// grade for one that does not parse. Until 2026-09-28 it was refused only
+	// at the validation before Save, after a preflight that had graded 7788 in
+	// its place, and on a loopback run, which read neither flag, not at all.
+	if err := initAddressFlagsError(*publicMode, *listenAddressFlag, *adminAddressFlag); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
 	}
 	// The addresses this run writes, which the preflight grades wherever no
-	// install's config names its own (initAddresses).
-	listenAddr, adminAddr := initAddresses(*publicMode, *publicProxy, *publicListenAddress, *publicAdminAddress)
+	// install's config names its own, and on a --yes --force rewrite where
+	// they replace its own (initAddresses).
+	listenAddr, adminAddr := initAddresses(*publicMode, *publicProxy, *listenAddressFlag, *adminAddressFlag)
 
 	cfgDir := *cfgDirFlag
 	if cfgDir == "" {
@@ -331,15 +378,27 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// a port it would never bind. A refusal on those ports says whose they
 	// are, since it is not a verdict about an install (portsThisInitWrites).
 	//
+	// A --yes --force run over a config that loads is the one rewrite that
+	// is certain before the preflight runs, and the preflight grades only
+	// the install's ports that rewrite keeps. One it moves off is left
+	// ungraded (portsARewriteAbandons, doctor.Deps.AbandonedPorts): who holds
+	// a port the new config does not name says nothing about whether the
+	// bridge can start. Until 2026-09-28 it was graded, and a stranger on
+	// the old port, the install's bridge stopped, refused a rewrite moving
+	// off it. The second pass below grades the ports that rewrite writes in
+	// their place. An interactive run keeps grading them all: its
+	// "Overwrite?" comes after the preflight, and a no keeps these ports,
+	// as `--yes` without `--force` does. #963 is unchanged for everything
+	// else, the certificate and the data dir, which a rewrite keeps.
+	//
 	// preflightDeps is kept for the SECOND port pass below: where the
 	// config loads, the ports graded here are the install's CURRENT ones,
 	// and a run that goes on to overwrite the config may be about to save
 	// different ones. Where none loads they are this run's already.
 	var preflightDeps doctor.Deps
 	if !*skipDoctor {
-		// Both addresses parse: the defaults and a public run's own do, and
-		// a flag's value was refused above unless it passes the config's
-		// check.
+		// Both addresses parse: the defaults do, and a flag's value was
+		// refused above unless it passes the config's check.
 		apiPort, _ := configuredPort(listenAddr)
 		adminPort, _ := configuredPort(adminAddr)
 		d := doctor.Deps{
@@ -350,11 +409,17 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			AdminPort:    adminPort,
 		}
 		installPorts := withExistingInstallDeps(&d, cfgPath)
+		rewriting := installPorts && *nonInteractive && *force
+		if rewriting {
+			d.AbandonedPorts = portsARewriteAbandons(d.APIPort, d.AdminPort, apiPort, adminPort)
+		}
 		preflightDeps = d
 		if report, code := ensureDoctorClean(stdout, d); code != 0 {
-			if !installPorts && report.PortFailed() {
+			// Every port graded is one this run writes, unless a config that
+			// loads is being kept (or may be, at the prompt).
+			if (!installPorts || rewriting) && report.PortFailed() {
 				fmt.Fprintln(stdout)
-				fmt.Fprintln(stdout, portsThisInitWrites(*publicMode))
+				fmt.Fprintln(stdout, portsThisInitWrites())
 			}
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
@@ -517,6 +582,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// operator learns it from a `bridge serve` that cannot bind, having
 	// just been told the host was fine. Where no config loads, the
 	// preflight graded this run's ports already, and nothing here differs.
+	// On a --yes --force rewrite the preflight left the install's ports
+	// this run moves off ungraded (doctor.Deps.AbandonedPorts), and this
+	// pass grades what it writes in their place: d carries that list, and
+	// it never names a port the run writes (portsARewriteAbandons).
 	//
 	// Before Save, so a refusal leaves the existing config intact, and
 	// only over the ports that actually CHANGED: an unchanged one was

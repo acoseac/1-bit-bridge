@@ -74,7 +74,7 @@ func TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding(t *te
 	}
 	// The defaults are the ports this loopback run writes, and no config
 	// that loads says what the install's are.
-	if !strings.Contains(out, portsThisInitWrites(false)) {
+	if !strings.Contains(out, portsThisInitWrites()) {
 		t.Errorf("the refusal does not say these are the ports this init would write:\n%s", out)
 	}
 	assertConfigUnchanged(t, cfgDir)
@@ -123,7 +123,7 @@ func TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding(t *te
 		t.Fatalf("public init exited 0 over a config that does not load, saving ports another process "+
 			"holds, because the bridge recorded in the data dir is alive:\n%s", out)
 	}
-	if !strings.Contains(out, portsThisInitWrites(true)) {
+	if !strings.Contains(out, portsThisInitWrites()) {
 		t.Errorf("the preflight did not refuse the ports this run writes and say they are the run's:\n%s", out)
 	}
 	for _, held := range []struct{ check, port string }{{"port-api", api}, {"port-admin", admin}} {
