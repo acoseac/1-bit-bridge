@@ -4995,9 +4995,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// The image's HEALTHCHECK (`bridge health`) connects and closes before
 	// any ClientHello, and net/http logs every failed handshake: one line
 	// per probe, every 30 s. Wrap drops exactly that line (see
-	// internal/handshakelog). It needs a RAW listener, so the tsnet one
-	// below, which yields *tls.Conn and never sees a local peer, goes
-	// without.
+	// internal/handshakelog), and takes the peer's address out of every
+	// line it keeps. It needs a RAW listener, so the tsnet server, whose
+	// listener yields *tls.Conn and never sees a local peer, takes
+	// handshakelog.ErrorLog for the redaction alone.
 	lis, httpSrv.ErrorLog = handshakelog.Wrap(lis)
 
 	// Format string uses bare %s — ServerVersion already carries the

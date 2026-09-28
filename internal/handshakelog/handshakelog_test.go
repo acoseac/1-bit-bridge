@@ -1,6 +1,7 @@
 package handshakelog
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -48,7 +49,10 @@ func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 			filtered := startServerOn(t, host, true, 0)
 			probe = silentProbe(t, filtered.addr)
 			filtered.waitUntilClosed(t, probe)
-			if got := linesFrom(logs, probe); len(got) != 0 {
+			// Looked up by shape as well as by address: the filtered
+			// server redacts the address, so a lookup by address alone
+			// would pass even if the probe were logged.
+			if got := append(linesFrom(logs, probe), redactedLines(logs)...); len(got) != 0 {
 				t.Errorf("the silent loopback probe was logged: %q", got)
 			}
 		})
@@ -57,7 +61,8 @@ func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 
 // TestEveryOtherHandshakeFailureIsLoggedAsBefore runs each failing client
 // shape against the oracle and the wrapped server, and requires the same
-// line from both, addresses aside.
+// line from both, addresses aside: the wrapped server's line carries
+// ClientPlaceholder where the oracle's carries the peer.
 func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 	cases := []struct {
 		name string
@@ -95,8 +100,15 @@ func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 			filtered := startServer(t, true, tc.handshakeTimeout)
 			from = tc.run(t, filtered.addr)
 			filtered.waitUntilClosed(t, from)
-			if got := oneLineFrom(t, logs, from); shape(got) != shape(oracle) {
-				t.Errorf("the forwarded line differs from net/http's own:\n got %q\nwant %q", got, oracle)
+			if leaked := linesFrom(logs, from); len(leaked) != 0 {
+				t.Errorf("the peer's address reached the log: %q", leaked)
+			}
+			got := redactedLines(logs)
+			if len(got) != 1 {
+				t.Fatalf("want exactly one redacted handshake-error line, got %q; the log holds:\n%s", got, logs.String())
+			}
+			if shape(got[0]) != shape(oracle) {
+				t.Errorf("the forwarded line differs from net/http's own:\n got %q\nwant %q", got[0], oracle)
 			}
 		})
 	}
@@ -117,8 +129,11 @@ func TestASilentPeerFromElsewhereIsLogged(t *testing.T) {
 
 	silentProbe(t, s.addr)
 	s.waitUntilClosed(t, remote.String())
-	if got, want := linesFrom(logs, remote.String()), handshakeErrorPrefix+remote.String()+silentPeerReason; len(got) != 1 || got[0] != want {
-		t.Errorf("a silent close from %v was not logged as net/http logs it: got %q, want %q", remote, got, want)
+	if got, want := redactedLines(logs), handshakeErrorPrefix+ClientPlaceholder+silentPeerReason; len(got) != 1 || got[0] != want {
+		t.Errorf("a silent close from %v was not logged as net/http logs it, less the address: got %q, want %q", remote, got, want)
+	}
+	if strings.Contains(logs.String(), remote.IP.String()) {
+		t.Errorf("the peer's address reached the log:\n%s", logs.String())
 	}
 	s.lis.local.Range(func(k, _ any) bool {
 		t.Errorf("a connection from elsewhere was registered under %v", k)
@@ -142,7 +157,7 @@ func TestAProbeOfASpecificBoundIPIsNotLogged(t *testing.T) {
 		t.Skipf("the kernel sourced the probe from %s, not %s; nothing to pin here", host, ip)
 	}
 	s.waitUntilClosed(t, probe)
-	if got := linesFrom(logs, probe); len(got) != 0 {
+	if got := append(linesFrom(logs, probe), redactedLines(logs)...); len(got) != 0 {
 		t.Errorf("a probe of the bound IP from this host was logged: %q", got)
 	}
 }
@@ -257,12 +272,18 @@ func startServerOn(t *testing.T, host string, filtered bool, handshakeTimeout ti
 // through Wrap when filtered. handshakeTimeout 0 means the API's 5 s.
 func serveOn(t *testing.T, inner net.Listener, filtered bool, handshakeTimeout time.Duration) *server {
 	t.Helper()
+	return serveOnWith(t, inner, filtered, handshakeTimeout, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+}
+
+// serveOnWith is serveOn with the handler given.
+func serveOnWith(t *testing.T, inner net.Listener, filtered bool, handshakeTimeout time.Duration, h http.Handler) *server {
+	t.Helper()
 	if handshakeTimeout == 0 {
 		handshakeTimeout = 5 * time.Second
 	}
 	s := &server{addr: inner.Addr().String()}
 	srv := &http.Server{
-		Handler:           http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Handler:           h,
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{testCert(t)}, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: handshakeTimeout,
 		ConnState: func(c net.Conn, state http.ConnState) {
@@ -545,9 +566,107 @@ func oneLineFrom(t *testing.T, logs *handshaketest.Buffer, peer string) string {
 	return got[0]
 }
 
-var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]):\d+`)
+var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[^\]\s]+\]):\d+`)
 
-// shape is a line with its addresses blanked: two servers on different
-// ports, probed from different ports, must otherwise log byte for byte
-// the same.
-func shape(line string) string { return addrPattern.ReplaceAllString(line, "ADDR") }
+// shape is a line with its addresses, and the placeholder that replaces a
+// peer's, blanked: two servers on different ports, probed from different
+// ports, must otherwise log byte for byte the same.
+func shape(line string) string {
+	return strings.ReplaceAll(addrPattern.ReplaceAllString(line, "ADDR"), ClientPlaceholder, "ADDR")
+}
+
+// redactedLines returns the handshake-error lines whose peer was redacted,
+// which only a server through Wrap writes.
+func redactedLines(logs *handshaketest.Buffer) []string {
+	return linesFrom(logs, ClientPlaceholder)
+}
+
+// TestRedactPeers pins every line shape net/http and its bundled HTTP/2
+// server give a peer's address (Go 1.26), and the two it must leave alone:
+// a listen address is the operator's configuration, not a client.
+func TestRedactPeers(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"http: TLS handshake error from 192.168.1.5:54321: remote error: tls: bad certificate",
+			"http: TLS handshake error from " + ClientPlaceholder + ": remote error: tls: bad certificate"},
+		{"http: TLS handshake error from [2001:db8::1]:443: EOF",
+			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
+		{"http: TLS handshake error from [fe80::1%en0]:50000: EOF",
+			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
+		{"http: panic serving 100.64.0.7:41000: boom\ngoroutine 7 [running]:",
+			"http: panic serving " + ClientPlaceholder + ": boom\ngoroutine 7 [running]:"},
+		{"http2: server: error reading preface from client 10.0.0.2:5000: EOF",
+			"http2: server: error reading preface from client " + ClientPlaceholder + ": EOF"},
+		{"timeout waiting for SETTINGS frames from 10.0.0.2:5000",
+			"timeout waiting for SETTINGS frames from " + ClientPlaceholder},
+		{"http2: server connection error from [2001:db8::2]:6000: connection error: PROTOCOL_ERROR",
+			"http2: server connection error from " + ClientPlaceholder + ": connection error: PROTOCOL_ERROR"},
+		{"http2: panic serving 192.168.1.9:7000: boom",
+			"http2: panic serving " + ClientPlaceholder + ": boom"},
+		// A local address is kept.
+		{"http: Accept error: accept tcp 0.0.0.0:7788: too many open files; retrying in 5ms",
+			"http: Accept error: accept tcp 0.0.0.0:7788: too many open files; retrying in 5ms"},
+		{"http: Accept error: accept tcp [::]:7788: too many open files; retrying in 5ms",
+			"http: Accept error: accept tcp [::]:7788: too many open files; retrying in 5ms"},
+	} {
+		got := RedactPeers(tc.in)
+		if got != tc.want {
+			t.Errorf("RedactPeers(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+		if again := RedactPeers(got); again != got {
+			t.Errorf("RedactPeers is not idempotent on %q: %q", got, again)
+		}
+	}
+}
+
+// A handler that panics is the other net/http line that names the peer,
+// and it goes through the same logger: the real server, recovering the
+// panic, must log it without the client's address.
+func TestAPanicLineLosesThePeerAddress(t *testing.T) {
+	logs := handshaketest.CaptureStdLog(t)
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serveOnWith(t, inner, true, 0, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	roots := x509.NewCertPool()
+	roots.AddCert(testCert(t).Leaf)
+	var from string
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+			if err == nil {
+				from = c.LocalAddr().String()
+			}
+			return c, err
+		},
+	}}
+	if resp, err := client.Get("https://" + s.addr + "/"); err == nil {
+		_ = resp.Body.Close()
+	}
+	client.CloseIdleConnections()
+	s.waitUntilClosed(t, from)
+	out := logs.String()
+	if !strings.Contains(out, "http: panic serving "+ClientPlaceholder+": boom") {
+		t.Fatalf("no redacted panic line; the log holds:\n%s", out)
+	}
+	if strings.Contains(out, from) {
+		t.Errorf("the client's address %s reached the log:\n%s", from, out)
+	}
+}
+
+// ErrorLog, for a server whose listener Wrap cannot take, drops nothing and
+// redacts every line.
+func TestErrorLogRedactsAndDropsNothing(t *testing.T) {
+	logs := handshaketest.CaptureStdLog(t)
+	l := ErrorLog()
+	l.Print("http: TLS handshake error from 127.0.0.1:41418: EOF")
+	l.Print("http: TLS handshake error from 100.64.0.3:5000: remote error: tls: bad certificate")
+	want := "http: TLS handshake error from " + ClientPlaceholder + ": EOF\n" +
+		"http: TLS handshake error from " + ClientPlaceholder + ": remote error: tls: bad certificate\n"
+	if got := logs.String(); got != want {
+		t.Errorf("ErrorLog wrote\n%q\nwant\n%q", got, want)
+	}
+}

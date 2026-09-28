@@ -407,6 +407,19 @@ func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
 }
 
+// trackLogPath is how an extractor names its file in a log line: the
+// library-relative path the scanner set on the track before extracting, or
+// the base name when a caller set none, never the absolute path. The
+// bridge's privacy page promises that paths into the library appear
+// library-relative. The older extractor warnings still name the absolute
+// path, and the page says so.
+func trackLogPath(absPath string, t *Track) string {
+	if t != nil && t.Path != "" {
+		return t.Path
+	}
+	return filepath.Base(absPath)
+}
+
 // ExtractWithContext extracts tags for absPath into t (format-dispatched via
 // extractByFormat), then backfills a MISSING track number from the filename's
 // leading "NN" (e.g. ".../06. Congeniality.flac" → 6). Many files carry the
@@ -553,7 +566,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// only a genuine I/O failure is worth an operator's attention.
 	if d, err := extractMP4Duration(f); err != nil {
 		scanLogger.Warn("mp4 duration walk failed; manifest will carry nil duration",
-			"path", absPath, "err", err)
+			"path", trackLogPath(absPath, t), "err", err)
 	} else if plausibleDuration(d) {
 		t.Duration = &d
 	}
@@ -573,7 +586,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if t.Genre == "" {
 		if genre, err := extractMP4PredefinedGenre(f); err != nil {
 			scanLogger.Warn("mp4 predefined-genre walk failed; manifest will carry no genre",
-				"path", absPath, "err", err)
+				"path", trackLogPath(absPath, t), "err", err)
 		} else if genre != "" {
 			t.Genre = genre
 		}
@@ -642,7 +655,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		defer f.Close()
 		if fmtInfo, err := extractMP3Format(f); err != nil {
 			scanLogger.Warn("mp3 frame parse failed; manifest will carry nil sampleRate + duration",
-				"path", absPath, "err", err)
+				"path", trackLogPath(absPath, t), "err", err)
 		} else {
 			if fmtInfo.sampleRate > 0 {
 				rate := fmtInfo.sampleRate
@@ -2828,7 +2841,7 @@ func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 			setDuration(float64(sound.dstFrames) / float64(sound.dstFrameRate))
 		}
 		scanLogger.Info("dff: DST-compressed DSDIFF — typed as DST (playback needs the DST decoder)",
-			"path", absPath)
+			"path", trackLogPath(absPath, t))
 	case dffCompressionUnknown:
 		// Default-deny: unknown compression variants stay untyped so
 		// clients classify the row as unknown audio rather than DSD

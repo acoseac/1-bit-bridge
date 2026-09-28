@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/quic-go/quic-go/http3"
 	"tailscale.com/ipn/ipnstate"
@@ -224,11 +225,15 @@ func (f *tsnetFront) run(ctx context.Context) {
 	// read/write timeout shape mirrors it (see the rationale there),
 	// down to the slow-loris defence (PR-C tightened ReadHeaderTimeout
 	// 10s → 5s).
+	// Its listener yields *tls.Conn, which handshakelog.Wrap cannot take,
+	// so it gets the redacting logger alone: a tailnet peer's address is a
+	// client IP too, and net/http prints it in every failed handshake.
 	srv := &http.Server{
 		Handler:           f.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		ErrorLog:          handshakelog.ErrorLog(),
 	}
 	if !f.publishHTTPS(srv) {
 		_ = lis.Close()
