@@ -21886,3 +21886,61 @@ product half, and makes the test decide what the live loop's sends do.
   Debug**, so a periodic send that meets `Stop`'s close there is a Debug
   line, which the default Info level does not print.
 
+### Review round 1 (Gemini, #1064)
+
+- Gemini (MEDIUM) asked for a docblock warning that a test calling
+  `SetDefault`, `Record` or `ParkOn` must not use `t.Parallel`, citing data
+  races. The wording is inaccurate: slog keeps its default in an atomic
+  pointer, `log.SetOutput` takes the logger's mutex and `log.SetFlags` stores
+  an atomic, so `-race` has nothing to report. The interference is real and
+  worse than a mixed-up capture. Each capture saves what it finds and puts it
+  back at its end, so with A and B overlapping (A saves D0 and installs DA, B
+  saves DA and installs DB), A's cleanup puts back D0 and then B's puts back
+  DA, and the default stays on A's finished handler for the rest of the
+  binary: the defect this change fixes, reached through parallelism.
+- **Enforced, not only documented.** `SetDefault` calls
+  `t.Setenv("LOGGINGTEST_SETDEFAULT", t.Name())` before anything else. In
+  go1.26.6, `T.Setenv` runs `checkParallel`, which panics when the test or
+  any ancestor is parallel and otherwise sets `denyParallel`, which makes a
+  later `T.Parallel` panic. Both panics carry `testing: test using t.Setenv,
+  t.Chdir, or cryptotest.SetGlobalRandom can not use t.Parallel` (1.27.1 the
+  same). The call comes first, so a refused `SetDefault` has changed nothing.
+  The value names the test that holds the default. A rule stated only in
+  prose, the `omitempty` time rule, was broken in ten fields before a guard
+  went in, which is why a docblock warning alone was not taken.
+- **No existing caller was parallel.** 13 test files call `Parallel()`, and
+  none of them calls `Record`, `ParkOn`, `SetDefault`, `captureLogs` in
+  `discovery` or `captureDLNALogs`. Three packages hold both kinds
+  (`internal/config`, `internal/enrich`, `internal/transcode`), and there
+  every capture is reached from a test that is not parallel and has no
+  parallel parent (`transcode`'s through `runParkedExit`, from subtests of a
+  sequential test). The 17 packages holding a caller, `cmd/bridge`
+  included, then ran under `-race` on Linux with the enforcement in place,
+  all green (`internal/admin` 524 s, `internal/manifest` 537 s).
+- `TestSetDefaultRefusesAParallelTest`: a parallel subtest that calls
+  `SetDefault`, and a subtest that calls `t.Parallel` after it, each
+  recovering the panic and requiring the testing package's refusal (a panic
+  naming `t.Parallel`, which every Go release's wording does). The first
+  also requires the default logger and the log package's output unchanged
+  by the refused call.
+- **The restore ORDER was right and unpinned.** A parallel session that had
+  started the same `loggingtest` fix found it: `SetDefault` puts the log
+  package's output and flags back AFTER the previous default, and every
+  test above installs over slog's own default, whose restore leaves the log
+  package alone. Over a default whose handler is NOT slog's own, putting it
+  back points the log package at that handler again and zeroes its flags,
+  so in the swapped order that restore has the last word. Its
+  `TestInstallersRestoreTheStandardLogger` drives `Record` and `ParkOn`
+  over both priors (slog's own default, and a TextHandler the test set),
+  and checks the writer by identity, the flags, where a `log.Print` and a
+  `slog.Info` land, and the slog default, with its premises asserted first.
+  It is adopted here unchanged as `standard_logger_test.go` (an external
+  test package, so it drives the exported API only), and `SetDefault`'s
+  docblock now names the order and the test.
+
+| Control | Red |
+|---|---|
+| NC6: no `t.Setenv` | both subtests of `TestSetDefaultRefusesAParallelTest` (the parallel one also on the changed default). Re-run with the adopted test present, its two "over slog's own default" cases went red too, on their premise: the two subtests, no longer refused, ran in parallel, put back each other's state, and left the default off slog's own for the rest of the binary. That is the interference Gemini's comment is about, happening in this package |
+| NC7: `t.Setenv` moved after the install | the parallel subtest only, on the changed default: the refused call had installed its logger and registered no cleanup, so the default stayed on it |
+| NC8: the two restores swapped | the two "over a default the test set" cases of `TestInstallersRestoreTheStandardLogger` only (writer `*slog.handlerWriter`, flags 0, the `log.Print` lost); every test over slog's own default stays green |
+

@@ -3,6 +3,7 @@ package loggingtest
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"strings"
@@ -30,6 +31,49 @@ func TestRecordAndParkOnPutBackTheLogPackage(t *testing.T) {
 	t.Run("ParkOn", func(t *testing.T) {
 		leavesTheLogPackageAsItFoundIt(t, func(t testing.TB, _ *bytes.Buffer) { ParkOn(t, "never logged") })
 	})
+}
+
+// TestSetDefaultRefusesAParallelTest pins that SetDefault cannot be used in
+// a test that runs in parallel, in either order. Two such tests that
+// overlap put back each other's state and leave the default on a finished
+// test's handler; -race cannot see it, because slog's default is an atomic
+// pointer and the log package locks its output. The refusal must also come
+// BEFORE anything is changed, so a refused call leaves the default and the
+// log package as they were.
+func TestSetDefaultRefusesAParallelTest(t *testing.T) {
+	prevDefault, prevOut := slog.Default(), log.Writer()
+	discard := func() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+	t.Run("SetDefault in a parallel test", func(t *testing.T) {
+		t.Parallel()
+		r := panicOf(func() { SetDefault(t, discard()) })
+		if !refusesParallel(r) {
+			t.Errorf("SetDefault in a parallel test did not refuse it: recovered %v", r)
+		}
+		if slog.Default() != prevDefault || log.Writer() != prevOut {
+			t.Error("a refused SetDefault changed the default logger or the log package's output")
+		}
+	})
+	t.Run("t.Parallel after SetDefault", func(t *testing.T) {
+		SetDefault(t, discard())
+		if r := panicOf(t.Parallel); !refusesParallel(r) {
+			t.Errorf("t.Parallel after SetDefault did not refuse it: recovered %v", r)
+		}
+	})
+}
+
+// panicOf runs f and returns what it panicked with, or nil.
+func panicOf(f func()) (r any) {
+	defer func() { r = recover() }()
+	f()
+	return nil
+}
+
+// refusesParallel reports whether r is the testing package's refusal of a
+// parallel test, as opposed to no panic or some other one. Its wording has
+// changed between Go releases, and names t.Parallel in all of them.
+func refusesParallel(r any) bool {
+	return r != nil && strings.Contains(fmt.Sprint(r), "t.Parallel")
 }
 
 // leavesTheLogPackageAsItFoundIt runs install inside a subtest, logs a line

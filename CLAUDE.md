@@ -4997,11 +4997,25 @@ its twin.** The top list is older, shorter, and read first.
   200 runs of one discovery test, 1 printed its lines (200 after), and a
   failing test's diagnostics are what that swallows. It is also why the
   restart flake above showed no Warn. `SetDefault` puts back the default, the
-  output and the flags; `Record`, `ParkOn` and both capture helpers in
-  `internal/dlna` use it (`handshaketest`, which redirects the log package
-  itself, already put back its output, flags and prefix).
+  output and the flags, **the output and flags AFTER the default**: putting
+  back a default whose handler is NOT slog's own points the log package at
+  that handler again and zeroes its flags, so the other order ends on that
+  handler, and only a test whose prior default is one it set can see it
+  (`TestInstallersRestoreTheStandardLogger`, written in a parallel session
+  and adopted here; swapped, its two such cases go red and every test over
+  slog's own default stays green). `Record`, `ParkOn` and both capture
+  helpers in `internal/dlna` use it (`handshaketest`, which redirects the
+  log package itself, already put back its output, flags and prefix).
   Eleven test files elsewhere still restore only the default, listed in the
-  log's 2026-09-28 entry.
+  log's 2026-09-28 entry. **It refuses a parallel test, and a refusal changes
+  nothing**: it calls `t.Setenv` before anything else, so a parallel test (or
+  one with a parallel ancestor) panics there, and a later `t.Parallel`
+  panics too. Two overlapping captures put back each other's state and leave
+  the default on a finished test's handler, and `-race` cannot see it, since
+  slog's default is an atomic pointer and the log package locks its output.
+  Gemini on #1064 asked for a docblock warning; a rule stated only in prose
+  (the `omitempty` time rule) was broken in ten fields before a guard went
+  in, so this one is enforced.
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
   a `defer cancel()` plus a cancel-and-assert tail.** The tail runs only when
   the body completes: a `t.Fatalf` above it Goexits, the deferred cancel fires,
