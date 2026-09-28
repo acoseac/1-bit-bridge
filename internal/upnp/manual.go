@@ -96,11 +96,15 @@ func NewManualPoller(cfg ManualPollerConfig) *ManualPoller {
 		cfg.Timeout = defaultMediaServerDetailTimeout
 	}
 	if cfg.Dispatcher == nil {
-		// Same guarded client the SSDP detail fetch uses, built here so
-		// the SSRF guard lives in one place rather than at each wiring
-		// site. The URL is operator-configured and therefore more
-		// trusted than an SSDP Location header — but "more trusted" is
-		// not "trusted", and an operator can paste a URL that redirects.
+		// The SSDP detail fetch's redirect guard, built here so it lives
+		// in one place rather than at each wiring site. The URL is
+		// operator-configured and therefore more trusted than an SSDP
+		// Location header — but "more trusted" is not "trusted", and an
+		// operator can paste a URL that redirects. NOT the SSDP client's
+		// dial check (discovery.NewDeviceFetchClient): a manual URL on
+		// this machine is the operator pointing at a local server, and
+		// the control URLs its description names are bounded by
+		// discovery's host-kind rule instead.
 		cfg.Dispatcher = &discovery.HTTPClientDispatcher{
 			Client: &http.Client{
 				Timeout: cfg.Timeout,
