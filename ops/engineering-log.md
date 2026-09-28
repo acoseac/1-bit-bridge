@@ -24835,8 +24835,13 @@ or name a config with --config". Summaries and severities are unchanged.
   `TestInitLoopbackRunWritesTheAddressesItIsGiven` (two first-install
   shapes, both on 127.0.0.1 and the API on every interface with the console
   on localhost, and a `--force` rewrite of a loopback install); it holds
-  `writeLoopbackInstall`, which `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`
-  now uses in place of its own copy.
+  `writeInstallConfig` (an install's config on any two addresses, which the
+  `:0` doctor row uses) and `writeLoopbackInstall` on top of it, which
+  `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads` now uses in
+  place of its own copy. The keep and moves-to tests share
+  `assertRewriteRefused` (exit 1, the FAIL on the held port, the config
+  untouched): SonarCloud fails a PR whose new lines are more than 3 %
+  duplicated.
 - `cmd/bridge/init_run_ports_test.go`: `TestInitPreflightRefusesAPortTheRunWrites`
   gained a loopback-flags row and lost its per-row note;
   `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` gained five loopback
