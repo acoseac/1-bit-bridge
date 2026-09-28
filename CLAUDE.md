@@ -4990,6 +4990,31 @@ its twin.** The top list is older, shorter, and read first.
   landed at whatever moment the goroutine was scheduled, which can be AFTER the
   drain and so invert the very ordering the drain establishes. Neither is
   visible to an AST shape check, so the guard does not claim them.
+- **A cleanup that restores a package-level seam runs after every goroutine
+  that READ the seam has finished, and a released goroutine has not
+  finished** (2026-09-28). `TestReachabilityProbe_InflightGuardIsPerRoot`
+  restored `statFunc` in a cleanup registered after `hangingStat`'s
+  release, so it ran FIRST (last registered, first run) while the probe
+  goroutine that had read `statFunc` was still parked in the stand-in; CI
+  reported the race once and the rerun passed. Releasing first does not
+  order the read: the release is the test's own close, which puts the test
+  before the goroutine, not after it, so release-then-restore raced 5 runs
+  in 5, and so did release, a 50 ms sleep, then restore. Only something the
+  goroutine does AFTER its read, observed through synchronisation, orders
+  it: `swapStatFunc` releases, waits under `c.mu` until `c.inflight` is
+  empty (each stat goroutine deletes its flag there after its stat
+  returns), and restores, all in ONE cleanup so no registration order can
+  split the steps. **A race report is only as good as the detector's
+  history**: it keeps four accesses per memory word, and a racing read was
+  reported in 10 runs of 10 when two synchronised reads from other
+  goroutines followed it, and in 0 of 10 when three did (a 30-line probe,
+  go1.26.6). Here the healthy probe's read displaced the hung one's once
+  the sibling test's accesses were in the word: 0 of 10 runs after the
+  sibling and 0 of 3 whole-package runs reported it, against 10 of 10 run
+  alone.
+  **Reproduce and negative-control such a race with the one test alone**
+  (`-run '^Name$'`). The tree restores about fifty other package-level
+  seams in one-line cleanups; they were not audited for this shape.
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes

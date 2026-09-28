@@ -21750,3 +21750,111 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — the reachability tests restore statFunc only after every stat goroutine has returned
+
+CI run 36347287307 (gate, on #1049's head 9784ef91) failed its first attempt
+in `test -race (rest)`: `WARNING: DATA RACE`, a write at
+`reachability_inflight_test.go:130` (the cleanup `statFunc = orig` in
+`TestReachabilityProbe_InflightGuardIsPerRoot`) against a previous read at
+`reachability.go:190` (the probe's stat goroutine, `probeLocked.func1`). The
+second attempt passed. Backlog B18.
+
+The test called `hangingStat`, which registers its release as a cleanup, and
+registered the restore after it. Cleanups run last-registered-first, so the
+restore ran BEFORE the release, while the goroutine that had read `statFunc`
+for the hung root was still parked in the stand-in. Nothing that goroutine
+had done orders its read before the write: it reads the seam, bumps an
+atomic counter the test never loads, and blocks.
+
+Measured on the old code (darwin/arm64, a `-race` test binary per toolchain):
+
+| run | reported the race |
+|---|---|
+| the test alone, go1.26.6 | 10 of 10, then 3 of 3 twice |
+| the test alone, go1.27.1 | 3 of 3 |
+| after `TestReachabilityProbe_HungMountDoesNotStackGoroutines` | 0 of 10, then 0 of 3 |
+| the whole package | 0 of 3 |
+| after the sibling, with the healthy probe removed | 5 of 5 |
+| the whole package, with the healthy probe removed | 2 of 2 |
+
+So the race is certain and the report is not. The detector keeps four
+accesses per memory word (TSan's shadow cells), and once they are full an
+access from another goroutine overwrites one of them. A 30-line probe shows
+the cut-off: a goroutine reads a package-level func var and parks, N other
+goroutines read it and synchronise with main, and main writes it. With N of
+0, 1 or 2 the race is reported in 10 runs of 10; with N of 3, 4, 5, 6 or 8,
+in 0 of 10. Run alone, the test's accesses fit and the hung read is still
+there at the restore. After the sibling, whose goroutines' accesses are
+already in the word, the healthy probe's read is what displaces it: with
+that probe removed the report comes back every time (the last two rows).
+CI's Linux runner reported it on one attempt.
+
+The fix is test-only. `swapStatFunc(t, c, fn, release)` installs the
+stand-in and registers ONE cleanup that releases the parked stats, waits
+until `c.inflight` is empty (`statsReturned`, polling under `c.mu`), and only
+then restores. Each stat goroutine deletes its in-flight flag under `c.mu`
+after its stat returns, so the waiter seeing the map empty orders every
+read of `statFunc` the cache's goroutines made before the restore. Both
+in-flight tests use it. The hung-mount test's success path was already
+ordered, by its `entered.Load()` (an atomic the stand-in wrote after the
+read) and its mid-test wait on the flag, which now calls `statsReturned`
+too; its failure path (a `Fatalf` before that wait) had the same shape as
+the per-root test. `statFunc`'s docblock said tests override it "and
+restore via t.Cleanup"; it now says through `swapStatFunc`, and why the
+restore waits. Production never assigns it.
+
+Rejected:
+
+- Registering the restore before `hangingStat`, so the release runs first.
+  The release is the test's own `close`, which orders the test before the
+  stat goroutine and not after it: release-then-restore still raced (NC2).
+- A sleep between the release and the restore. The goroutine finishes in
+  wall-clock time and nothing orders its read (NC4).
+- Waiting on the hung root's flag alone. The healthy probe's goroutine is
+  normally ordered by `probeLocked` receiving its result, but not when its
+  stat outlives the 2 s probe timeout; waiting for the map to be empty
+  covers every goroutine the cache started for no extra cost.
+- Moving the seam onto the cache, the 2026-09-09 rule for the export cap
+  ("a test seam is per-server, never a package var"). It would remove this
+  seam's hazard outright, but it changes production code for a test-only
+  defect, the production read here happens once per goroutine (the export
+  cap was read twice), and the tree restores about fifty other
+  package-level seams in one-line cleanups (`grep` for
+  `t.Cleanup(func() { X = orig… })` finds 52), which need the ordering rule
+  whatever this one does. They were not audited here. Two spot checks
+  were ordered already: `TestRunIngestLoopRereadsItsIntervalEveryIteration`
+  registers its `upnpIngestWarmup` restore before its drain, so the drain
+  runs first, and `TestStopIsGraceBoundedNotUnconditional`'s `stopGrace` is
+  read by a stop goroutine the test waits for.
+
+Residual: a probe goroutine left over from an EARLIER test, one whose stat
+outlived its 2 s timeout, would still race these tests' first write of
+`statFunc`. The other tests stat temp directories, which return in
+microseconds, so it needs a 2 s scheduling stall.
+
+Negative controls, on the committed tree (88dee232), each a mutation of
+`swapStatFunc`'s cleanup unless named, built into a `-race` binary and run
+with the one test alone, restored before the next:
+
+| mutation | result |
+|---|---|
+| NC1: restore only (no release, no wait), the old order | per-root test: race and FAIL, 5 of 5; hung-mount test: 0 of 3 (its body orders the read) |
+| NC2: release, then restore at once | per-root test: race and FAIL, 5 of 5 |
+| NC4: release, sleep 50 ms, restore | per-root test: race and FAIL, 5 of 5 |
+| NC5: production never clears the in-flight flag | both tests FAIL in bounded time ("a probe's stat had not returned 2s after its release", and the hung-mount test's own "in-flight flag never cleared") |
+
+With the tree restored: the per-root test alone reported no race in 25 runs,
+and none of the 15 whose exit status was recorded failed; the two in-flight
+tests together passed 3 of 3; and every reachability test passes under
+`-race`. On Linux (dido, `golang:1.26.6`, linux/amd64, a `-race` binary per
+tree), the per-root test alone reported the race in 10 runs of 10 on the old
+tree and in 0 of 10 on the fixed one, and the fixed package passed whole.
+**A whole-package run cannot show this fix works**, on either platform: the
+old code passes it too, nearly always.
+
+Also in the PR: `FuzzAcceptedExt`'s docblock said the target had "no
+property beyond termination" while its body asserts one (an extension the
+classifier calls audio is always accepted). Both landed in #823, so the
+sentence was never true; `## Build` has listed the target among the twelve
+property-carrying ones since 99b6d1e6, and the docblock now names the
+property.
