@@ -19,15 +19,17 @@ import (
 // UNBOUNDED unknown and refuses (PartialWalkRefusal); a link it could not
 // stat is at most one file and is weighed (MassOrphanRefusalFor); and the
 // root-owned lost+found of an ext4 volume mounted as the variants directory
-// is the filesystem's, not an unknown at all (isFilesystemLostFound).
+// is the filesystem's, not an unknown at all (IsFilesystemLostFound).
 
-// lockDir makes dir unlistable by this user until the test ends.
-func lockDir(t *testing.T, dir string) {
+// lockDir makes dir unlistable by this user until the test ends, and
+// returns it.
+func lockDir(t *testing.T, dir string) string {
 	t.Helper()
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	return dir
 }
 
 // linkThroughALockedDir plants, at link, a symlink to a directory behind a
@@ -108,7 +110,7 @@ func TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut(t *testing.T) {
 	}
 }
 
-// fakeDirEntry is the fs.DirEntry isFilesystemLostFound reads: a name.
+// fakeDirEntry is the fs.DirEntry IsFilesystemLostFound reads: a name.
 type fakeDirEntry struct {
 	fs.DirEntry
 	name string
@@ -136,10 +138,17 @@ func TestIsFilesystemLostFoundReadsAllThreeTerms(t *testing.T) {
 		{"another name at the top", filepath.Join(root, "Artist"), "Artist", denied, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isFilesystemLostFound(root, c.path, fakeDirEntry{name: c.entry}, c.err); got != c.want {
-				t.Errorf("isFilesystemLostFound(%q, %v) = %v, want %v", c.path, c.err, got, c.want)
+			if got := IsFilesystemLostFound(root, c.path, fakeDirEntry{name: c.entry}, c.err); got != c.want {
+				t.Errorf("IsFilesystemLostFound(%q, %v) = %v, want %v", c.path, c.err, got, c.want)
 			}
 		})
+	}
+	// The walk root is compared cleaned, since filepath.WalkDir cleans every
+	// path below its root: a caller that hands the root over with a trailing
+	// separator (the artwork GC takes its directory as a parameter) keeps
+	// the rule.
+	if !IsFilesystemLostFound(root+string(filepath.Separator), filepath.Join(root, "lost+found"), fakeDirEntry{name: "lost+found"}, denied) {
+		t.Error("a walk root with a trailing separator lost the rule")
 	}
 }
 

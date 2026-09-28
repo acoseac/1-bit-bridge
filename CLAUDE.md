@@ -428,10 +428,9 @@ lost my library."
   to every paired device, and a re-enrichment), and nothing else moves
   (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
   needed no change: it already said a listing row describes the target, and
-  a virtual row carries the container's size. **Still open: a library ROOT
-  that is itself a symlink to a directory is never walked** (`WalkDir` lstats
-  its root, so it visits one non-directory entry and stops: 0 rows, measured),
-  which is not this rule's shape.
+  a virtual row carries the container's size. A library ROOT that is itself
+  a link is not this rule's shape: that is the `fsutil.WalkableRoot` bullet
+  below (this one said "still open" until the same day).
 - **…and a route that serves a file's bytes opens it with
   `fsutil.OpenAsFile`, never `os.Open`** (2026-09-28, B46). Keeping such
   entries out of the manifest stopped nothing a client names:
@@ -470,6 +469,106 @@ lost my library."
   served from another goes unseen. Still `os.Open`: the scanner's
   extractors, which open what the walk judged a moment earlier (a swap in
   between is a race), and the background jobs that open manifest paths.
+- **A library ROOT that is itself a link to a directory is walked THROUGH,
+  and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
+  backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
+  configured `/music -> /mnt/nas/music`, and on Windows a junction or a
+  volume mounted in a folder (`ModeIrregular` without `ModeDir` since Go
+  1.23), was one entry that is not a directory. Measured on main: Scan and a
+  subtree scan of the root indexed 0 rows (2 with the same root spelled with
+  a trailing slash), a multi-root scan indexed nothing under the linked root,
+  the watcher registered 0 watches and returned nil, the doctor's inotify
+  count saw 0 directories, and `POST /v1/upscale` of the root enqueued the
+  folder itself.
+  **The half that deleted a library**: an install whose root BECAME a link
+  after it was indexed logged `suspected clean-empty mount failure` every
+  scan, with the hint to place `.bridge-allow-empty`; the sentinel, created
+  through the link, lands beside the files, and at the production threshold
+  the third scan deleted every row and sent the tombstones, every file on
+  disk. A subtree scan of the root (the watcher's, an upload's, the trash
+  tidy-scan) reaped every row with no line at all, and so it did when the
+  link DANGLED, where Scan spared them. `WalkableRoot` answers the root with
+  a separator appended when it is a link to a directory: POSIX resolves a
+  trailing slash through a symlink, chains included, and Go's `os.Lstat` on
+  Windows follows a name surrogate when the path ends in a separator. So
+  every path below keeps the CONFIGURED spelling: `relPath` stores what it
+  always stored, a multi-root prefix is the configured root's basename and
+  never the target's, and `fs.Resolver`, which joins lexically, serves each
+  row from the file the scanner read. **Compare the root entry against the
+  WALKED string, never the root**: WalkDir hands its callback the string it
+  was given, separator included, so `abs != root` counts the root as an
+  entry and can prune it. **Not `filepath.EvalSymlinks`**, which the sidecar
+  walks use (`resolveSidecarRoot`): since Go 1.23 it resolves no Windows
+  junction or mounted folder, which are not `ModeSymlink`, so the "resolved"
+  root is the junction again; and it respells every path, which each caller
+  would have to map back. A root that cannot be stat'ed through (missing, a
+  dangling link, a link into a mount that went away) is an error and "",
+  never the unresolved root: Scan logs `root unreachable` and spares it,
+  ScanSubtree of the root returns before its deletion pass, the watcher and
+  the doctor report it. **Only the root is followed**: a link to a directory
+  BELOW a root is still not walked by any of them, and the upscale folder
+  walk follows a folder only when it IS a root, so it enqueues nothing the
+  manifest does not hold. `TestEveryWalkOfALibraryRootStartsFromWalkableRoot`
+  requires every production function that calls `filepath.WalkDir`,
+  `filepath.Walk` or `fs.WalkDir` to be classified: the five root walks
+  (`walkRoot`, `ScanSubtree`, the watcher's `addTree`, the doctor's
+  `countDirs`, the upscale folder walk) must reach `WalkableRoot`, and every
+  other names what it walks. It sees the call, not that its answer is what
+  gets walked; the tests of each walk drive a linked root through it. No
+  `ExtractorVersion` bump and no PROTOCOL.md change: an install whose root
+  became a link rewrites nothing, and one whose root was always a link
+  indexes its library for the first time (a whole-library delta and
+  enrichment, once).
+- **A subtree scan OF the root runs the clean-empty guard Scan runs, and a
+  line about a linked root names what it links to** (2026-09-28). The
+  owning-root audit answers a SUBTREE that is not there; nothing covered the
+  root itself, so a subtree scan of an emptied mount point reaped every row
+  at the threshold while Scan spared them (measured on a plain root: three
+  subtree scans, every row deleted, no line). `emptyRootMustBeSpared` runs
+  there now, after a walk of the root that saw nothing and did not fail. For
+  a linked root the directory found empty, and the one the sentinel is
+  looked for in, is the link's target, so `suspected clean-empty mount
+  failure` and `root unreachable` carry `links_to` (`rootLinkTarget`:
+  `EvalSymlinks` for a live symlink, `os.Readlink` for a dangling one or a
+  junction) and the hint says to check that volume is mounted. What the
+  guard counts is the next bullet's.
+- **…and the guard counts only LIBRARY CONTENT, by the walk's own rule**
+  (2026-09-28, CodeRabbit on #1076). The walks counted every entry they were
+  handed, dot-files included, so a `.DS_Store` Finder wrote into an emptied
+  mount point, or a Synology `@eaDir`, made the root non-empty: no line, and
+  the third scan deleted every row, in Scan and in a subtree scan of the
+  root, single- and multi-root (measured, 8 cases of 8). The owning-root
+  audit a subtree scan runs when its subtree is missing counted
+  `len(entries)` the same way, and the bounded pass reaped the subtree.
+  `isLibraryEntry` is the one predicate: a directory the walk descends into
+  (`ShouldSkipDir` says no) or a file it indexes (not a dot-file, an audio
+  file `enqueueableAudioFile` takes). Both walks skip by it and count by
+  it, and the audit asks it of the root's listing (`holdsLibraryContent`).
+  **Every file the walk does not index counts as nothing**, not a list of
+  named ones (`Thumbs.db`, `desktop.ini`, a `NOT_MOUNTED` marker, a cover
+  image): a second list is a second rule, and a file the walk ignores is no
+  evidence the volume is there. The cost: a mounted root whose last audio
+  file went, with only such files left, reads as emptied too and keeps its
+  rows, with a line per scan, until the sentinel is placed, as an emptied
+  root always did (`TestScannerThreshold1PreservesImmediateDelete` kept its
+  database inside the root and passed only because that file counted; it
+  keeps a second track now). **The sentinel is asked for by name, in the
+  audit too**: it used to work by being an entry like any other, which is
+  why a review on #289 called the audit's explicit check redundant, and it
+  is now the only thing that says a root is empty on purpose. **`ShouldSkipDir`
+  also names the directories operating systems and NAS firmware leave in a
+  volume**, exactly, case included: `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `System Volume Information`, `lost+found`, Synology's `@eaDir`,
+  `#recycle` and `#snapshot`, QNAP's `@Recycle` and `@Recently-Snapshot`,
+  NetApp's `~snapshot`. The walk descended them, so a recycle bin's deleted
+  files and a snapshot's copies were indexed as tracks of their own (the
+  old walk indexed six of the test's fixtures on macOS), and their rows now
+  go after the usual missing-count grace. It is exported so the doctor's
+  inotify count skips by it: that count kept a copy of the old list, which
+  would have gone on counting what the watcher now skips.
+  `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
+  `TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused`,
+  `TestScanner_OSAndNASDetritusIsNotLibraryContent`.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
@@ -1894,8 +1993,14 @@ no failing test — which is the shape to expect in this area.
   `OrphanSidecarSweeper.tick`, `upscale --gc`'s FORWARD sweep and `analyze --gc`
   did not, and `upscale --gc`'s reverse guard fires only after the forward sweep
   has already unlinked. An empty set over an EMPTY directory stays a silent
-  no-op. A BACKGROUND sweeper gets no override (nobody is in the loop to express
-  intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
+  no-op, and "empty" means nothing the reaper would remove, never "no entry at
+  all" (2026-09-28): the background sweep asks its inventory
+  (`emptyCatalogRefusal`), so a directory left holding empty folders, a
+  `.DS_Store`, a Trash or the filesystem's `lost+found` is quiet, and
+  `artwork --gc`'s empty-store guard reads the cache as its walk does. The CLI
+  `--gc` sweeps' own guard (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks
+  for any entry. A BACKGROUND sweeper gets no override (nobody is in the loop to
+  express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
   `--gc` command offers it — which is how `artwork --gc` was found to have
   carried an un-escapable refusal since it was written.
 - **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
@@ -2122,7 +2227,15 @@ no failing test — which is the shape to expect in this area.
   render / analyze (and `--allow-partial-walk` past the refusal of a walk
   that could not list part of the tree, below); `artwork --gc` is exempt
   BY NAME in the sweep test (content/MBID-keyed, no absolute path a
-  relocation can strand). #940 left
+  relocation can strand). **So `artwork --gc` steps over a directory it
+  cannot list** (2026-09-28): its verdict about a file is that file's name
+  against the keys, with no count over the tree for an unseen part to
+  flip, so it names the directory on stderr, counts it on the summary,
+  exits 0 unless a removal failed, and steps over the filesystem's
+  `lost+found` (`IsFilesystemLostFound`) without a word. It stopped at the
+  first such directory with exit 1 and no summary, after removing the
+  orphans that sort ahead of it; a cache root it cannot read still fails.
+  #940 left
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
@@ -2161,10 +2274,11 @@ no failing test — which is the shape to expect in this area.
   a budget carried between passes can be spent on files it never counted.
   The one cross-tick state is a LOG latch, the M-SEARCH rule: the refusal
   WARNs once when a streak starts and at most daily while it lasts; a tick
-  that decided nothing (a failed or stopped listing or walk, an empty
-  catalog) leaves the latch alone; the first tick that proceeds after it
-  logs one Info line. Its hint never names `bridge variants move` (it needs
-  the rows a lost index lacks). **A stranded tree no larger than the
+  that decided nothing (a failed or stopped listing or walk) leaves the
+  latch alone; the first tick that proceeds after it logs one Info line.
+  An empty catalog is a verdict, not a tick that decided nothing: the
+  third kind, under the Jobs-card bullet below. Its hint never names
+  `bridge variants move` (it needs the rows a lost index lacks). **A stranded tree no larger than the
   catalog is still reaped**, exactly as `--gc` reaps it: the refusal needs
   its floor, `orphans > rows` AND the ratio. The shared walker changed one
   behaviour on purpose: a SYMLINKED variants directory is walked now (the
@@ -2213,7 +2327,7 @@ no failing test — which is the shape to expect in this area.
   root-owned `lost+found` of an ext4 volume mounted AS the variants
   directory is not an unknown**: a directory named exactly that, directly
   under the RESOLVED walk root, that a PERMISSION error keeps this user
-  out of, is not counted (`isFilesystemLostFound`). Since #1063 it made
+  out of, is not counted (`IsFilesystemLostFound`). Since #1063 it made
   the background sweep refuse every tick and `bridge doctor` warn on every
   run. Nothing the bridge writes can be in it: a `<variantsDir>/lost+found`
   the bridge made (a single-root library's top-level folder of that name,
@@ -2223,11 +2337,19 @@ no failing test — which is the shape to expect in this area.
   `lost+found` could put sidecars in one the service user cannot list
   (unexamined, as the filesystem's); a volume mounted deeper in the tree
   has its `lost+found` counted, since nothing about the walk root vouches
-  for it; an I/O error on it counts. `TreeHoldsVariantSidecars`, the
-  reverse guard's probe, still fails closed on an unreadable `lost+found`
-  (a refused mass ROW deletion, the safe direction). A Gemini consult was
-  attempted for the `lost+found` trade-off and refused by the API's
-  spending cap; the rule is the narrow one, decided here.
+  for it; an I/O error on it counts. **The reverse guard's probe reads it
+  by the same rule** (2026-09-28; `IsFilesystemLostFound` is exported for
+  it and for `artwork --gc`). `TreeHoldsVariantSidecars` returned that
+  directory's permission error whenever no sidecar sorted ahead of it, so
+  on a fresh volume mounted as the variants directory `MassDeleteRefusal`
+  refused to reap rows whose sidecars really went, on every
+  `VariantWatcher` tick and in `upscale --gc` (exit 1, "could not be
+  read"), and it refused a tree whose sidecars sort after it for the
+  error rather than for the sidecars. It is evidence neither way there
+  now; any other directory the probe cannot list still fails it closed.
+  A Gemini consult was attempted for the `lost+found` trade-off and
+  refused by the API's spending cap; the rule is the narrow one, decided
+  here.
 - **The Jobs card shows the background orphan sweep's refusal**
   (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
   interval was positive, while every tick refused and only the journal
@@ -2243,9 +2365,22 @@ no failing test — which is the shape to expect in this area.
   `TestEveryOrphanRefusalKindIsWorded` runs `describeOrphanGCRefusal`
   under node for every kind, because the leaf guard proves the key is READ,
   not that it is WORDED; `TestServeReportsTheOrphanSweepRefusalOnTheJobsCard`
-  boots serve and is the only test that sees the wiring line. The
-  empty-catalog refusal is not a latch kind (it WARNs every tick and
-  decides nothing about the tree), so the chip does not show it.
+  boots serve and is the only test that sees the wiring line (a new kind
+  also joins `OrphanRefusalKinds`: the `/api/jobs` guard bullet under
+  **Admin console**). **The empty catalog is the third kind**
+  (`emptyCatalog`, 2026-09-28): it WARNed on every tick outside the latch
+  (five lines in eight seconds at a 2 s interval, on a real serve) while
+  the chip said "on". It is decided from the tick's inventory, ahead of
+  the mass-orphan check (which would refuse most of the same trees, but
+  none under its floor of ten): it refuses when the walk found a sidecar
+  file it would remove, or an entry it could not stat, weighed as one
+  (`emptyCatalogRefusal`); a tree with nothing it would remove ends a
+  streak and is otherwise quiet; a directory the walk cannot list, with
+  no file in view, is the partial walk's refusal. **Don't decide it from
+  `dirIsEmpty`**, main's question and this change's first draft: over a
+  directory left holding empty folders, a `.DS_Store`, a Trash or the
+  filesystem's `lost+found`, main WARNed "holds files" on every tick, and
+  the draft kept the card refusing forever (seen in a browser).
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
@@ -5069,7 +5204,11 @@ its twin.** The top list is older, shorter, and read first.
   `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
   comes back blank, `undefined` or `null` (what `console.log` prints for a
   case that returns nothing), as its key, as the fallback, or in another
-  kind's words.
+  kind's words. **And a list that stands for every value is pinned to the
+  declarations**: `TestEveryOrphanRefusalKindIsListed` reads the integrity
+  package's source for every constant of type `OrphanRefusalKind` and
+  requires `OrphanRefusalKinds()` to hold exactly those, since a kind the
+  list omits is worded by nobody and the wording test passes over it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and

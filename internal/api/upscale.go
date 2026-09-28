@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // UpscaleEnqueuer is the interface POST /v1/upscale uses to hand
@@ -165,6 +166,20 @@ func (s *Server) refuseUpscaleMutationInDemoMode(w http.ResponseWriter) bool {
 	return true
 }
 
+// folderWalkPath is where a folder request's walk starts: abs, unless the
+// folder is a library root, which is walked through when it is a link to a
+// directory (or a Windows junction), as the scanner walks it
+// (fsutil.WalkableRoot). Walked as the link, the root was one entry that is
+// not a directory, and the request's only candidate was the folder itself.
+// Only a root is followed: the scanner indexes nothing behind a link to a
+// directory below one, so there is nothing there to enqueue.
+func (s *Server) folderWalkPath(libraryRel, abs string) (string, error) {
+	if _, suffix, err := s.resolver.SplitRoot(libraryRel); err != nil || suffix != "" {
+		return abs, nil
+	}
+	return fsutil.WalkableRoot(abs)
+}
+
 func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUpscaleMutationInDemoMode(w) {
 		return
@@ -279,7 +294,12 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	// Single file vs folder.
 	candidates := []string{}
 	if info.IsDir() {
-		walkErr := filepath.WalkDir(abs, func(p string, d os.DirEntry, walkErr error) error {
+		walkFrom, walkErr := s.folderWalkPath(libraryRel, abs)
+		if walkErr != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "walk folder: "+redactWalkErr(walkErr))
+			return
+		}
+		walkErr = filepath.WalkDir(walkFrom, func(p string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				// Log the path that failed so the operator has
 				// something to act on. Returning the error

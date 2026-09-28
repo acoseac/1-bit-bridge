@@ -231,6 +231,18 @@ func resolveSidecarRoot(dir string) (string, error) {
 // Any walk error other than the sentinel counts as "unknown" and is
 // returned so the caller can fail closed: a directory it cannot read is
 // not evidence the sidecars are gone.
+//
+// Except one directory, which is evidence of nothing either way: the
+// root-owned `lost+found` of an ext4 volume mounted AS the variants
+// directory, which this user cannot list (IsFilesystemLostFound, the rule
+// TakeSidecarInventory reads it by, so the reverse guard and the forward
+// sweeps read that directory the same way). Nothing the bridge writes can
+// be in it. Until 2026-09-28 the walk returned its permission error
+// whenever no sidecar sorted ahead of it: on a fresh volume, where every
+// row's sidecar really went, MassDeleteRefusal refused the reap on every
+// tick ("the variants directory could not be read"), and a volume whose
+// sidecars all sort after it was refused for that error rather than for
+// its sidecars.
 func TreeHoldsVariantSidecars(dir string) (bool, error) {
 	if dir == "" {
 		// Refused before resolveSidecarRoot: filepath.EvalSymlinks("") is
@@ -243,6 +255,9 @@ func TreeHoldsVariantSidecars(dir string) (bool, error) {
 	}
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if d != nil && d.IsDir() && IsFilesystemLostFound(root, path, d, walkErr) {
+				return nil
+			}
 			return walkErr
 		}
 		if d.IsDir() {
@@ -292,7 +307,9 @@ const massDeleteFloor = 10
 // the signature of a tree that is there but not where the rows say. A
 // tree that holds no sidecars is a library whose files really went, and
 // the sweep proceeds as it always has; a tree that cannot be read is
-// treated as holding them (fail closed, with the error in the reason).
+// treated as holding them (fail closed, with the error in the reason),
+// except the filesystem's own lost+found at its top, which is no evidence
+// either way (TreeHoldsVariantSidecars).
 //
 // The reason is empty on "proceed". It names the numbers, so a WARN built
 // from it tells the operator what was seen rather than that something

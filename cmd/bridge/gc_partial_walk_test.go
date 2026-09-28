@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -31,11 +32,22 @@ func lockedStrandedFiles(t *testing.T, dir string, n int, sidecarAt func(root, s
 	for i := 0; i < n; i++ {
 		writeFixtureFile(t, sidecarAt(locked, fmt.Sprintf("Artist/Hidden %d/%03d.flac", i%4, i)), 10)
 	}
-	if err := os.Chmod(locked, 0o000); err != nil {
+	lockDir(t, locked)
+	return locked
+}
+
+// lockDir makes dir, created if it is not there, unlistable by this user
+// until the test ends, and returns it.
+func lockDir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	return locked
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	return dir
 }
 
 // regularFilesUnder counts the regular files under dir, unlocking locked
@@ -161,23 +173,57 @@ func TestRunGCProceedsPastTheFilesystemsLostFound(t *testing.T) {
 	store, stranded := strandedTree(t, dir, 20, 15)
 	lostFound := filepath.Join(dir, "lost+found")
 	writeFixtureFile(t, filepath.Join(lostFound, "#12345"), 10)
-	if err := os.Chmod(lostFound, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(lostFound, 0o755) })
+	lockDir(t, lostFound)
 
-	var stdout, stderr bytes.Buffer
-	if rc := runGC(context.Background(), &stdout, &stderr, store, dir, t.TempDir(), gcOptions{maxDeletePercent: 20}); rc != 0 {
-		t.Fatalf("--gc refused over the filesystem's lost+found: rc=%d\nstderr: %s", rc, stderr.String())
-	}
+	stderr := runGCExpectingSuccess(t, store, dir, "--gc refused over the filesystem's lost+found")
 	for _, p := range stranded {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("orphan %s survived (%v)", p, err)
 		}
 	}
-	if strings.Contains(stderr.String(), "could not be read") {
-		t.Errorf("the filesystem's lost+found was reported as unreadable:\n%s", stderr.String())
+	if strings.Contains(stderr, "could not be read") {
+		t.Errorf("the filesystem's lost+found was reported as unreadable:\n%s", stderr)
 	}
+}
+
+// TestRunGCReapsTheRowsOfAFreshVolume is the reverse twin: the variants
+// volume was replaced by a fresh ext4 one, which holds nothing but its
+// locked lost+found, so every row's sidecar really went. The relocation
+// pre-flight asks TreeHoldsVariantSidecars whether the tree still holds
+// sidecars, and until 2026-09-28 the probe answered lost+found's
+// permission error: `--gc` refused to reap the rows ("the variants
+// directory could not be read"), advised a relocation, and only
+// --allow-mass-delete got past it. The probe reads that directory as the
+// inventory does now (integrity.IsFilesystemLostFound), so the rows go.
+func TestRunGCReapsTheRowsOfAFreshVolume(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root lists lost+found, so there would be nothing to exempt")
+	dir := t.TempDir()
+	store, _ := strandedTree(t, dir, 30, 0)
+	// The old volume and its files are gone; the rows are left.
+	if err := os.RemoveAll(filepath.Join(dir, "Artist")); err != nil {
+		t.Fatal(err)
+	}
+	lockDir(t, filepath.Join(dir, "lost+found"))
+
+	runGCExpectingSuccess(t, store, dir, "--gc refused to reap the rows of a fresh volume")
+	rows, err := store.AllVariants(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("%d of 30 rows whose sidecars are gone survived the --gc", len(rows))
+	}
+}
+
+// runGCExpectingSuccess runs `--gc` over dir at the default threshold and
+// fails the test, saying what, unless it exits 0. It returns the stderr.
+func runGCExpectingSuccess(t *testing.T, store *manifest.Store, dir, what string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if rc := runGC(context.Background(), &stdout, &stderr, store, dir, t.TempDir(), gcOptions{maxDeletePercent: 20}); rc != 0 {
+		t.Fatalf("%s: rc=%d\nstdout: %s\nstderr: %s", what, rc, stdout.String(), stderr.String())
+	}
+	return stderr.String()
 }
 
 // TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed — the waveform twin, in

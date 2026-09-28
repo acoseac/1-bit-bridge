@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -144,13 +145,19 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 //
 // A missing directory is "no files", not an error: a bridge that has never
 // cached artwork is the normal empty case, and the caller must not turn it
-// into a failure.
+// into a failure. A directory inside the cache that it cannot list is
+// stepped over, silently, as the GC's own walk steps over it (and reports
+// it): the question is whether the GC would remove files, and it cannot
+// remove what it cannot list (artworkUnlistedDir).
 func artworkCacheHasFiles(artworkDir string) (bool, error) {
 	found := false
 	err := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if errors.Is(walkErr, os.ErrNotExist) {
 				return filepath.SkipDir
+			}
+			if unlisted, _ := artworkUnlistedDir(artworkDir, path, d, walkErr); unlisted {
+				return nil
 			}
 			return walkErr
 		}
@@ -167,6 +174,31 @@ func artworkCacheHasFiles(artworkDir string) (bool, error) {
 		return false, err
 	}
 	return found, nil
+}
+
+// artworkUnlistedDir reports whether a walk error is a directory inside the
+// artwork cache that the walk could not list, which both walks of the cache
+// step over and go on; and quiet when that directory is the filesystem's
+// own lost+found (integrity.IsFilesystemLostFound), which the GC steps over
+// without a word. The cache directory itself is not inside the cache: a
+// walk that cannot list it can do nothing, and fails as it always has.
+//
+// Stepping over is sound here, and would not be in the sidecar sweeps
+// (2026-09-28). The GC's verdict about a file is that file's name against
+// the referenced keys and nothing else: no count over the tree, no ratio,
+// nothing a missing directory could change about a file it can see. So a
+// directory it cannot list hides the files in it from the GC and changes
+// nothing else. The sidecar sweeps decide from a mass-orphan ratio over
+// the whole tree, which a directory they cannot list can flip, and refuse
+// such a walk (integrity.PartialWalkRefusal). Until then this walk stopped
+// at the first such directory with exit 1, the orphans before it already
+// removed and the ones after it never examined, and no flag past it; on a
+// cache that is an ext4 volume's mount root that was every run.
+func artworkUnlistedDir(artworkDir, path string, d os.DirEntry, walkErr error) (unlisted, quiet bool) {
+	if d == nil || !d.IsDir() || path == artworkDir {
+		return false, false
+	}
+	return true, integrity.IsFilesystemLostFound(artworkDir, path, d, walkErr)
 }
 
 func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun, allowEmpty bool) int {
@@ -224,7 +256,7 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		}
 	}
 
-	var removed, kept, failed, skipped int
+	var removed, kept, failed, skipped, unlisted int
 	walkErr := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
 		// Honor ctx cancellation so SIGINT actually stops the
 		// sweep mid-walk instead of churning through the rest of
@@ -238,6 +270,16 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			// upscale GC (`runGC` in upscale.go).
 			if errors.Is(walkErr, os.ErrNotExist) {
 				return filepath.SkipDir
+			}
+			// A directory it cannot list is stepped over and named, and
+			// the filesystem's lost+found without a word: see
+			// artworkUnlistedDir for why this GC may go on.
+			if isUnlisted, quiet := artworkUnlistedDir(artworkDir, path, d, walkErr); isUnlisted {
+				if !quiet {
+					unlisted++
+					fmt.Fprintf(stderr, "artwork gc: could not list a directory, so the files in it were neither examined nor removed: %v\n", walkErr)
+				}
+				return nil
 			}
 			return walkErr
 		}
@@ -282,12 +324,19 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		fmt.Fprintf(stderr, "walk artwork dir: %v\n", walkErr)
 		return 1
 	}
+	// A directory it could not list is counted on the summary, and does not
+	// fail the run: nothing the run decided depended on it (see
+	// artworkUnlistedDir), and the walk named each one on stderr.
+	unlistedNote := ""
+	if unlisted > 0 {
+		unlistedNote = fmt.Sprintf(", %d director(y/ies) it could not list", unlisted)
+	}
 	if dryRun {
-		fmt.Fprintf(stdout, "GC dry-run: %d orphan(s) would be removed, %d kept, %d skipped (non-cache file).\n",
-			removed, kept, skipped)
+		fmt.Fprintf(stdout, "GC dry-run: %d orphan(s) would be removed, %d kept, %d skipped (non-cache file)%s.\n",
+			removed, kept, skipped, unlistedNote)
 	} else {
-		fmt.Fprintf(stdout, "GC: removed %d orphan(s), kept %d known cache file(s), %d skipped, %d failure(s).\n",
-			removed, kept, skipped, failed)
+		fmt.Fprintf(stdout, "GC: removed %d orphan(s), kept %d known cache file(s), %d skipped, %d failure(s)%s.\n",
+			removed, kept, skipped, failed, unlistedNote)
 	}
 	if failed > 0 {
 		return 1

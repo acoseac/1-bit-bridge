@@ -394,7 +394,7 @@ func TestWatcherStaleTimerDoesNotEvictFreshEntry(t *testing.T) {
 // starts with a dot.
 //
 // filepath.WalkDir calls the callback for the root itself, so an
-// unguarded shouldSkipDir(d.Name()) returned SkipDir on entry and the
+// unguarded ShouldSkipDir(d.Name()) returned SkipDir on entry and the
 // whole root got ZERO watches. Worse, addTree then returns nil, so the
 // caller's "initial watch add failed (partial coverage)" warning never
 // fired either — the library silently lost instant-update coverage with
@@ -431,7 +431,7 @@ func TestWatcherWatchesDotNamedLibraryRoot(t *testing.T) {
 // ScanSubtree INSIDE it (whose own walker exempts the directory it was
 // pointed at), and its files were indexed as
 // `.Trashes/501/Album/track.flac`. The full Scan never sees those paths —
-// shouldSkipDir prunes them as descendants — so they accrued
+// ShouldSkipDir prunes them as descendants — so they accrued
 // missing_count, were reaped three scans later, and reappeared on the
 // next drop: deleted albums cycling in and out of /v1/manifest.
 //
