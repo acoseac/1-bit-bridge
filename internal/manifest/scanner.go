@@ -633,10 +633,13 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// row under the dropped root. Per-root interrogation (not a
 	// global post-loop check) isolates the protection to the failing
 	// mount.
-	var walkErr error
+	var (
+		walkErr error
+		tallies walkTallies
+	)
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
-		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, paths)
+		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -688,6 +691,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	if walkErr != nil {
 		return count, walkErr
 	}
+	tallies.report()
 
 	// Deletion pass: anything in the "before" snapshot that we didn't
 	// see in this walk gets its missing_count bumped; rows whose
@@ -1630,15 +1634,19 @@ const (
 //     Windows os.SameFile compares file indexes from
 //     GetFileInformationByHandle; a handle's stat carries its index, and a
 //     path's stat loads it when asked.
-//   - The walk's stat against an lstat of the path after the read: the same
-//     size and mtime. This covers the time before the open, which is long
-//     (the walk runs ahead of the workers): a copy that truncated the file
-//     then, and was idle while it was read, is caught only here. An lstat,
-//     because the walk's stat is one (on Windows, a directory entry, which
-//     likewise describes a symlink itself), so a symlinked container
-//     compares its link with its link. Identity is NOT compared here: on
-//     Windows a directory entry carries a file index only where the volume
-//     supports object IDs, and none on FAT or exFAT (os/dir_windows.go), so
+//   - The walk's stat against that same stat of the path after the read: the
+//     same size and mtime. This covers the time before the open, which is
+//     long (the walk runs ahead of the workers): a copy that truncated the
+//     file then, and was idle while it was read, is caught only here. A
+//     stat, because that is what the walk's stat is of the file read: a
+//     regular file's own (its lstat, or on Windows its directory entry,
+//     which for a file that is no link is what a stat of the path answers
+//     too), and a linked container's TARGET's (walkedFileInfo), so a
+//     symlinked container compares its target with its target. Compared
+//     with an lstat, every symlinked container would read as moved, and
+//     none would ever expand. Identity is NOT compared here: on Windows a
+//     directory entry carries a file index only where the volume supports
+//     object IDs, and none on FAT or exFAT (os/dir_windows.go), so
 //     os.SameFile would call every container there moved, and none would
 //     ever expand.
 //
@@ -1647,12 +1655,14 @@ const (
 // change: the guard cannot vouch for a file it cannot see.
 //
 // What it cannot see: an in-place overwrite that keeps the size and the
-// inode inside one coarse mtime tick (FAT's 2 s); and, for a symlinked
-// container, a write to the target before the open, since the walk's stat is
-// the link's own. Where a directory listing and a stat of an unchanged file
-// disagree (Windows documents that a listing's attributes on NTFS may lag
-// the file's), the container reads as changed, and keeps its rows,
-// unwritten, until the two agree.
+// inode inside one coarse mtime tick (FAT's 2 s), and a link repointed,
+// after the walk, at another file with the size and mtime of the first.
+// Until 2026-09-28 it could not see a write to a symlinked container's
+// target before the open either: the walk's stat was then the link's own,
+// and it was compared with the link's lstat. Where a directory listing and a
+// stat of an unchanged file disagree (Windows documents that a listing's
+// attributes on NTFS may lag the file's), the container reads as changed,
+// and keeps its rows, unwritten, until the two agree.
 func (s *Scanner) expandSACDContainer(pi pathInfo) (tracks []*Track, changed string, err error) {
 	src, err := s.openSACDContainer(pi.abs)
 	if err != nil {
@@ -1679,29 +1689,24 @@ func (s *Scanner) expandSACDContainer(pi pathInfo) (tracks []*Track, changed str
 		return tracks, "stat of the container after the read failed: " +
 			sacdLibraryRelative(statErr.Error(), pi), nil
 	}
-	lpost, statErr := os.Lstat(pi.abs)
-	if statErr != nil {
-		return tracks, "lstat of the container after the read failed: " +
-			sacdLibraryRelative(statErr.Error(), pi), nil
-	}
-	return tracks, sacdContainerChange(pi.info, opened, post, lpost), nil
+	return tracks, sacdContainerChange(pi.info, opened, post), nil
 }
 
 // sacdContainerChange is the in-motion guard's decision, apart from the stats
 // it is made from so a test can drive every arm: walk is the walk's stat of
-// the path, opened the stat of the handle the expansion read (taken before
-// its first read), post and lpost the path's stat and lstat after the read.
-// It returns "" when nothing moved, and otherwise the first change it finds
-// (expandSACDContainer says why these pairs, and not others).
-func sacdContainerChange(walk, opened, post, lpost fs.FileInfo) string {
+// the path (for a link, its target's), opened the stat of the handle the
+// expansion read (taken before its first read), and post the path's stat
+// after the read. It returns "" when nothing moved, and otherwise the first
+// change it finds (expandSACDContainer says why these pairs, and not others).
+func sacdContainerChange(walk, opened, post fs.FileInfo) string {
 	switch {
 	case !os.SameFile(opened, post):
 		return sacdChangedIdentity
 	case opened.Size() != post.Size() ||
 		opened.ModTime().UnixNano() != post.ModTime().UnixNano():
 		return sacdChangedDuringRead
-	case walk.Size() != lpost.Size() ||
-		walk.ModTime().UnixNano() != lpost.ModTime().UnixNano():
+	case walk.Size() != post.Size() ||
+		walk.ModTime().UnixNano() != post.ModTime().UnixNano():
 		return sacdChangedSinceWalk
 	}
 	return ""
@@ -1958,6 +1963,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	seen := make(map[string]struct{}, len(beforeTrackSet))
 	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
 	errorSubtrees := make(map[string]struct{})
+	var tallies walkTallies
 
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
@@ -2066,13 +2072,23 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if !enqueueableAudioFile(abs, d.Name()) {
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
+		// The same decision walkRoot makes (walkedFileInfo), and the same
+		// answer to each verdict.
+		rel := relPath(owningRoot, abs, multiRoot)
+		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
+		switch verdict {
+		case walkedFileStatFailed:
 			scanLogger.Warn("subtree stat", "path", abs, "err", err)
 			errorSubtrees[relPath(owningRoot, filepath.Dir(abs), multiRoot)] = struct{}{}
 			return nil
+		case walkedFileTargetUnreadable:
+			errorSubtrees[rel] = struct{}{}
+			tallies.noteUnreadable(rel, err)
+			return nil
+		case walkedFileNotAFile:
+			tallies.noteNotAFile(rel, info.Mode())
+			return nil
 		}
-		rel := relPath(owningRoot, abs, multiRoot)
 		seen[rel] = struct{}{}
 		select {
 		case paths <- pathInfo{abs: abs, rel: rel, info: info}:
@@ -2101,6 +2117,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	if walkErr != nil {
 		return int(committed.Load()), walkErr
 	}
+	tallies.report()
 
 	// Bounded deletion pass: only rows that were under `relScope`
 	// to begin with are candidates, so a cross-root move (the
@@ -2274,7 +2291,10 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // case) or persists. `errorSubtrees` is also written here when the
 // WalkDir err callback fires — the deletion pass uses it to spare
 // tracks AND folders under transiently-unreachable subtrees from
-// being wiped from the manifest.
+// being wiped from the manifest — and for a link whose target the
+// walk could not stat. `tallies` counts those links, and the entries
+// that are not files, for the lines the caller logs about them
+// (walkedFileInfo).
 //
 // Returns the count of entries observed beneath the root (file or
 // dir DirEntries excluding the root itself) and any walk error. The
@@ -2291,7 +2311,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // aborting. In a multi-root deployment (local SSD + remote FUSE
 // archive), a cloud outage on the archive must NOT block cleanup
 // of legitimately-deleted files on the SSD.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	if _, err := os.Stat(root); err != nil {
 		scanLogger.Error("root unreachable", "root", root, "err", err,
 			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")
@@ -2388,20 +2408,39 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			return nil
 		}
 
-		info, err := d.Info()
-		if err != nil {
+		rel := relPath(root, abs, multiRoot)
+		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
+		switch verdict {
+		case walkedFileStatFailed:
 			scanLogger.Warn("stat", "path", abs, "err", err)
 			// Stat failure on a known audio extension — record the
 			// parent so the file isn't wiped from the manifest.
 			// Same containment rationale as the err-callback branch
 			// above: a transient I/O hiccup shouldn't trigger a
 			// delete.
-			rel := relPath(root, filepath.Dir(abs), multiRoot)
+			errorSubtrees[relPath(root, filepath.Dir(abs), multiRoot)] = struct{}{}
+			return nil
+		case walkedFileTargetUnreadable:
+			// A link whose content the walk could not see: its row,
+			// if it has one, is spared as it was (the key is the
+			// entry itself, so its siblings are not, and a linked
+			// SACD container's virtual rows sit under it), and
+			// nothing is minted for it. Minting one from its path
+			// alone under the link's own stat is what the scanner
+			// did until 2026-09-28, and the skip gate then kept
+			// those tags once the target came back.
 			errorSubtrees[rel] = struct{}{}
+			tallies.noteUnreadable(rel, err)
+			return nil
+		case walkedFileNotAFile:
+			// Not a track, and the walk knows what is there: nothing
+			// is minted, and a row at rel is reaped like a deleted
+			// file's. Handing it to a worker is what held a scan
+			// forever on a named pipe until 2026-09-28.
+			tallies.noteNotAFile(rel, info.Mode())
 			return nil
 		}
 
-		rel := relPath(root, abs, multiRoot)
 		seen[rel] = struct{}{}
 
 		select {
@@ -2746,6 +2785,193 @@ func isVariantSidecarName(name string) bool {
 // lives in ONE place.
 func enqueueableAudioFile(abs, name string) bool {
 	return Ext[strings.ToLower(filepath.Ext(abs))] && !isVariantSidecarName(name)
+}
+
+// walkedFileVerdict is what a walk does with an audio-named entry that is not
+// a directory (walkedFileInfo).
+type walkedFileVerdict int
+
+const (
+	// walkedFileIndex: hand the entry to the workers under the stat returned.
+	walkedFileIndex walkedFileVerdict = iota
+	// walkedFileStatFailed: the entry's own stat failed. The walk spares the
+	// entry's directory, as it always has for a file it could not stat.
+	walkedFileStatFailed
+	// walkedFileTargetUnreadable: the entry points at content the walk could
+	// not stat (a dangling link, a link into a mount that went away, a link
+	// loop). The walk spares the entry's own row and mints none for it.
+	walkedFileTargetUnreadable
+	// walkedFileNotAFile: the entry is, or names, something that does not
+	// open as a file (notAFile): a directory, a named pipe, a socket or a
+	// device. It is not a track, whatever its name says, and the walk
+	// follows no directory link. Nothing is minted for it, and a row at its
+	// path is reaped like a deleted file's, after the same missing-count
+	// grace: the walk stat'ed the entry and knows what is there, which is
+	// not "we could not see this path" (walkedFileTargetUnreadable).
+	walkedFileNotAFile
+)
+
+// walkedFileInfo decides the stat under which a walk indexes an audio-named
+// entry that is not a directory, from the entry's type bits and two stats of
+// it: own, the entry's own (DirEntry.Info, an lstat), and through, a stat that
+// follows a link (os.Stat).
+//
+// A regular file is indexed under its own stat, as it always was. Anything
+// else is stat'ed through, so that the row describes the file whose bytes are
+// served: /v1/read, /v1/download and /v1/stat reach it through the resolver's
+// os.Stat, and /v1/list reports a link by its target (PROTOCOL.md). The walk's
+// own stat of a symlink is the LINK's, the length of the path it stores and
+// the link's mtime, and until 2026-09-28 a symlinked file was indexed under
+// it: the phone stored the length of the link's path as the file's size, the
+// skip gate never saw a change to the target, and a check that compares a
+// stat taken from the row with a stat of the file disagreed with it (the
+// /v1/lyrics drift check answered 410 for its embedded lyrics). That stat is
+// also the identity of a symlinked SACD container, its rows' and the
+// in-motion guard's (expandSACDContainer).
+//
+// The test is "not a regular file", never "is a symlink", for the listing's
+// reason (resolveEntryInfo in internal/api): since Go 1.23 a Windows junction
+// reports ModeIrregular and no ModeDir, with no symlink bit. The other kinds
+// stat to themselves through os.Stat (a FIFO, a device, and on Windows a
+// reparse point that names nothing, such as a cloud placeholder), so widening
+// the test costs them one syscall.
+//
+// Whatever the stat, it must describe something that opens as a file, or the
+// entry is not indexed (notAFile): a directory, a named pipe, a socket or a
+// device, or a link to one. A worker opens what it is handed, and opening a
+// named pipe waits for a writer, with nothing to cancel the wait, so until
+// 2026-09-28 a FIFO named like a track held a scan worker forever, and the
+// scan with it: Scan holds the scanner's mutex for its whole run, so every
+// later scan waited on it, and IsScanning stayed true. A link to a device or
+// a socket was indexed from its path alone. The refusal reads the stat, not
+// the listing's type bits, and a regular file whose own stat says it is no
+// longer one (replaced since the directory was listed) is judged through,
+// as what it is now.
+//
+// Taken as a function of (type, own, through) so the Windows shape can be
+// driven on any platform.
+func walkedFileInfo(typ fs.FileMode, own, through func() (fs.FileInfo, error)) (fs.FileInfo, walkedFileVerdict, error) {
+	if typ.IsRegular() {
+		info, err := own()
+		if err != nil {
+			return nil, walkedFileStatFailed, err
+		}
+		if info.Mode().IsRegular() {
+			return info, walkedFileIndex, nil
+		}
+	}
+	info, err := through()
+	if err != nil {
+		return nil, walkedFileTargetUnreadable, err
+	}
+	if notAFile(info.Mode()) != "" {
+		return info, walkedFileNotAFile, nil
+	}
+	return info, walkedFileIndex, nil
+}
+
+// notAFileKinds are the kinds of entry a walk does not index, each with the
+// name the scan's line gives it, checked in order: a character device
+// carries ModeDevice too.
+var notAFileKinds = []struct {
+	bit  fs.FileMode
+	name string
+}{
+	{fs.ModeDir, "directory"},
+	{fs.ModeNamedPipe, "named pipe"},
+	{fs.ModeSocket, "socket"},
+	{fs.ModeCharDevice, "character device"},
+	{fs.ModeDevice, "device"},
+}
+
+// notAFile names the kind of an entry whose stat reports m when a walk does
+// not index it, and answers "" when it does: for a regular file, and for a
+// Windows reparse point that names nothing (ModeIrregular), such as a cloud
+// placeholder, which opens, and hydrates, like a file. That is why the test
+// is a list of kinds refused and not "is a regular file": on Windows a
+// OneDrive library with files on demand is ModeIrregular throughout.
+func notAFile(m fs.FileMode) string {
+	for _, k := range notAFileKinds {
+		if m&k.bit != 0 {
+			return k.name
+		}
+	}
+	return ""
+}
+
+// walkTally counts the audio-named entries a walk passed over for one reason,
+// for the one line a scan logs about them. One line, not one per entry: a
+// link is unreadable because its target is, and a mount that went away takes
+// every link into it at once, on every scan until it comes back.
+type walkTally struct {
+	count   int
+	example string // library-relative
+	detail  string // what the example was
+}
+
+// note records the entry at rel, and what it was.
+func (w *walkTally) note(rel, detail string) {
+	w.count++
+	if w.example == "" {
+		w.example, w.detail = rel, detail
+	}
+}
+
+// report logs the tally as msg, once, when there is one, with the example's
+// detail under key.
+func (w *walkTally) report(msg, key string) {
+	if w.count == 0 {
+		return
+	}
+	scanLogger.Warn(msg, "count", w.count, "example", w.example, key, w.detail)
+}
+
+// walkTallies are the audio-named entries a scan's walk passed over
+// (walkedFileInfo), each reason reported in one line once the walk is done.
+type walkTallies struct {
+	// unreadable: links whose target could not be stat'ed. Their rows are
+	// kept (walkedFileTargetUnreadable).
+	unreadable walkTally
+	// notFiles: entries that are not files. Nothing is indexed for them
+	// (walkedFileNotAFile).
+	notFiles walkTally
+}
+
+// noteUnreadable records the link at rel, whose target the walk could not
+// stat.
+func (w *walkTallies) noteUnreadable(rel string, err error) {
+	w.unreadable.note(rel, walkErrReason(err))
+}
+
+// walkErrReason describes err for a scan's line: an *fs.PathError by its
+// operation and cause, without the absolute path it names (a log line names a
+// library file library-relative, #1055, and the line's example already says
+// which).
+//
+// It must not panic, whatever err holds: it runs in the walk's callback,
+// which no recover covers (the workers' per-file recover does not), so a
+// panic there ends the scan and the process with it. An *fs.PathError's own
+// Error() dereferences its cause, so one without a cause (none that os
+// builds) panics in anything that asks it for its text, a guard on the cause
+// included when the text is taken first. Hence fmt, which answers "<nil>"
+// for a nil error and recovers a panicking Error method.
+func walkErrReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe != nil {
+		return pe.Op + ": " + fmt.Sprint(pe.Err)
+	}
+	return fmt.Sprint(err)
+}
+
+// noteNotAFile records the entry at rel, whose stat reports m.
+func (w *walkTallies) noteNotAFile(rel string, m fs.FileMode) {
+	w.notFiles.note(rel, notAFile(m))
+}
+
+// report logs each tally, once, when there is one.
+func (w *walkTallies) report() {
+	w.unreadable.report("links whose target could not be read; their rows are kept", "err")
+	w.notFiles.report("audio-named entries that are not files; nothing is indexed for them", "kind")
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
