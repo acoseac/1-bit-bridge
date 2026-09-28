@@ -5,21 +5,89 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // captureLogs redirects the default slog handler into a buffer for the test.
 //
 // packageLogger resolves slog.Default() at log time (the dynamicHandler shim),
-// so swapping the default is enough — no re-construction needed.
+// so swapping the default is enough — no re-construction needed. It goes
+// through loggingtest.SetDefault, which puts back the log package's output
+// and flags as well as the previous default. Putting back the default alone
+// left the log package writing into the first test's buffer, and slog's own
+// default handler writes through it, so every later line in the binary went
+// there too, a failing test's diagnostics included.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return &buf
+}
+
+// msearchWriter is the shape of SSDPDiscoveryClient.writeMSearch.
+type msearchWriter func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
+
+// sendFails returns a writeMSearch that fails every send with err and puts
+// nothing on the wire: a host whose multicast route is gone, on every host.
+func sendFails(err error) msearchWriter {
+	return func(*net.UDPConn, []byte, *net.UDPAddr) (int, error) { return 0, err }
+}
+
+// signalFirst closes entered when the tick loop first reaches send, and
+// then runs it. The test waits on entered before it calls Stop, so the
+// loop's first send has certainly begun: a test that called Stop first
+// would find sendMSearch returning on a nil socket and assert nothing.
+func signalFirst(entered chan struct{}, send msearchWriter) msearchWriter {
+	var once sync.Once
+	return func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error) {
+		once.Do(func() { close(entered) })
+		return send(conn, b, dst)
+	}
+}
+
+// holdPastStop holds the tick loop's send until Stop has closed the socket,
+// and then finishes it with send. sendMSearch has taken its snapshot of the
+// socket by then, so this is the window a send loses to Stop's close by a
+// hair, held open on every run instead of a few in a thousand.
+func holdPastStop(c *SSDPDiscoveryClient, send msearchWriter) msearchWriter {
+	return func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error) {
+		c.runMu.RLock()
+		ctx := c.runCtx
+		c.runMu.RUnlock()
+		<-ctx.Done()
+		// Stop cancels the run and closes the socket in one critical
+		// section under runMu, so once this read lock is granted the close
+		// has happened.
+		c.snapshotConn()
+		return send(conn, b, dst)
+	}
+}
+
+// waitEntered fails the test if the tick loop has not reached its send.
+func waitEntered(t *testing.T, entered chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the tick loop never reached its first M-SEARCH send")
+	}
+}
+
+// startClient starts c on a socket of its own, and stops it when the test
+// ends, which a test that fails before its own Stop needs: the held sends
+// above wait on the run's context, and only Stop cancels it.
+func startClient(t *testing.T, c *SSDPDiscoveryClient) {
+	t.Helper()
+	if err := c.Start(context.Background()); err != nil {
+		t.Skipf("cannot bind a UDP socket in this environment: %v", err)
+	}
+	t.Cleanup(c.Stop)
 }
 
 func countLines(buf *bytes.Buffer, needle string) int {
@@ -151,40 +219,100 @@ func TestSendMSearchReFailsAfterRecovery(t *testing.T) {
 // 1 nor exactly the threshold), so a restarted-and-still-broken client would
 // log nothing at all — the opposite of what the suppression exists for.
 // Reported by Gemini on PR #708.
+//
+// The new run's first failure is the live loop's own first send, which
+// fails through writeMSearch on every host. It used to be a failure the
+// test drove itself after Stop, with the loop's real send left to the
+// host, and that failed 10 of 200 runs on the dev Mac and 17 of 1,000 on
+// Linux under -race (2026-09-28): the loop's send lost a race with Stop's
+// close, logged the new run's first-failure Warn before the test captured
+// anything, and made the driven failure the second. Moving the capture
+// before Start does not fix that where sends go through, because there
+// the loop's SUCCESS resets the streak, which hides a Start that did not.
 func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
 	c := newTestClient(t, &stubDispatcher{})
 
-	// Fail through the escalation so both arms are already spent.
+	// Fail through the escalation so both arms are already spent. No loop
+	// is live yet, and sendErrStreak is deliberately unsynchronised
+	// because runTickLoop is its only production toucher (see the field's
+	// comment), so driving it directly is safe only here, before Start,
+	// or after Stop, which joins the loop.
 	for i := 0; i < ssdpSendErrEscalateAt+5; i++ {
 		c.noteSendResult(errors.New("boom"))
 	}
 
-	// Restart. Start() is what re-arms the streak; capture only what the new
-	// run logs so the first run's lines cannot satisfy the assertion.
-	if err := c.Start(context.Background()); err != nil {
-		t.Skipf("cannot bind a UDP socket in this environment: %v", err)
-	}
-	// Stop BEFORE driving the failure. sendErrStreak is deliberately
-	// unsynchronised because runTickLoop is its only production toucher
-	// (see the field's comment), and Stop joins that goroutine — so
-	// calling noteSendResult after it respects the single-owner invariant
-	// instead of racing the live loop. Calling it while the loop ran was a
-	// genuine data race, caught by -race on CI and not reproducible
-	// locally in 26 runs.
-	//
-	// The assertion is unaffected: Start is what resets the streak and Stop
-	// does not touch it.
-	c.Stop()
-	// Capture AFTER Stop, not before: Stop logs its own line, and a window
-	// that contains it makes "only the new run's lines" a slightly loose
-	// claim. The count is on a specific message so it would pass either
-	// way — this just makes the buffer exactly what the comment says it
-	// is. (Gemini MEDIUM.)
+	// Restart, still broken. Capture from here, so the first run's lines
+	// cannot satisfy the assertion.
+	routeGone := errors.New("sendto: can't assign requested address")
+	entered := make(chan struct{})
+	c.writeMSearch = signalFirst(entered, sendFails(routeGone))
 	buf := captureLogs(t)
-	c.noteSendResult(errors.New("boom"))
+	startClient(t, c)
+	waitEntered(t, entered)
+	c.Stop() // joins the loop, so its failure has been noted by now
 
 	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
 		t.Errorf("a restarted client logged %d first-failure Warns, want 1 — with a "+
 			"carried-over streak it logs NOTHING, so a still-broken bridge looks healthy", got)
+	}
+	if !strings.Contains(buf.String(), routeGone.Error()) {
+		t.Errorf("the Warn does not carry the failure the restarted loop hit:\n%s", buf.String())
+	}
+	if c.sendErrStreak != 1 {
+		t.Errorf("sendErrStreak = %d after the restarted run's first failure, want 1", c.sendErrStreak)
+	}
+}
+
+// TestSendMSearchCutShortByStopIsNotAFailure pins that a send Stop's close
+// interrupted is a stop: no Warn, and the streak left as it was.
+//
+// sendMSearch takes a snapshot of the socket and then writes to it, and
+// Stop can close the socket between the two. The write then fails with
+// net.ErrClosed, which is the stop's own doing and says nothing about the
+// multicast route. Measured on main (2026-09-28), a plain Start then Stop
+// logged "M-SEARCH send failed … use of closed network connection" in 4 of
+// 6,000 cycles on the dev Mac and 43 of 6,000 under -race, and in 0 of
+// 2,000 and 24 of 4,000 on Linux. holdPastStop makes that window certain,
+// and the write is the socket's own, not a fabricated error.
+func TestSendMSearchCutShortByStopIsNotAFailure(t *testing.T) {
+	buf := captureLogs(t)
+	c := newTestClient(t, &stubDispatcher{})
+	entered := make(chan struct{})
+	c.writeMSearch = signalFirst(entered, holdPastStop(c, (*net.UDPConn).WriteToUDP))
+	startClient(t, c)
+	waitEntered(t, entered)
+	c.Stop()
+
+	if got := countLines(buf, "M-SEARCH send failed"); got != 0 {
+		t.Errorf("a send Stop cut short logged %d send-failure Warns, want 0:\n%s", got, buf.String())
+	}
+	if c.sendErrStreak != 0 {
+		t.Errorf("sendErrStreak = %d after a send Stop cut short, want 0: the stop counted "+
+			"as a failure", c.sendErrStreak)
+	}
+}
+
+// TestSendMSearchReportsAFailureThatLandsDuringStop is the other half: only
+// the error Stop's close produces is a stop. A send whose own failure lands
+// while Stop runs still reports it, as a live loop's would, since the
+// multicast route being gone is true whether or not a shutdown is under
+// way (the #998 rule: a stopped pass reports no failure the stop CAUSED,
+// and every other failure as before). A classification by the run's
+// context instead of by the error would make this test fail.
+func TestSendMSearchReportsAFailureThatLandsDuringStop(t *testing.T) {
+	buf := captureLogs(t)
+	c := newTestClient(t, &stubDispatcher{})
+	routeGone := errors.New("sendto: can't assign requested address")
+	entered := make(chan struct{})
+	c.writeMSearch = signalFirst(entered, holdPastStop(c, sendFails(routeGone)))
+	startClient(t, c)
+	waitEntered(t, entered)
+	c.Stop()
+
+	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
+		t.Errorf("a genuine failure during Stop logged %d send-failure Warns, want 1:\n%s", got, buf.String())
+	}
+	if c.sendErrStreak != 1 {
+		t.Errorf("sendErrStreak = %d after a genuine failure during Stop, want 1", c.sendErrStreak)
 	}
 }

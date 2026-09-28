@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // captureDLNALogs redirects slog.Default for the duration of a test and returns
@@ -16,12 +18,14 @@ import (
 // time (the dynamicHandler contract). A captured-handler shape would make this
 // untestable — and would also break the Windows-service log redirect, which is
 // why the indirection exists.
+//
+// It goes through loggingtest.SetDefault, which puts back the log package's
+// output and flags as well as the previous default: putting back the default
+// alone left every later line in the binary writing into this test's buffer.
 func captureDLNALogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return &buf
 }
 
