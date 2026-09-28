@@ -34,14 +34,6 @@ const reachabilityTTL = 5 * time.Second
 // not per concurrent caller.
 const reachabilityProbeTimeout = 2 * time.Second
 
-// statFunc is the os.Stat seam. Production code MUST NOT reassign it;
-// only tests override it (and restore via t.Cleanup) so they can
-// simulate a hard-mount NFS stat that never returns — the one failure
-// mode the in-flight guard exists for, and one there is no portable
-// way to stage with a real filesystem. Same convention as
-// atomicwrite.renameFunc and tailscale.commandContext.
-var statFunc = os.Stat
-
 // reachabilityStatus is the cached per-root probe result.
 //
 // Reason is a STABLE machine-readable code, not free text. iOS maps the
@@ -104,12 +96,26 @@ type reachabilityCache struct {
 	entries  map[string]reachabilityStatus
 	inflight map[string]bool
 	group    singleflight.Group
+
+	// stat is the os.Stat seam, and it lives on the cache so that a test's
+	// stand-in reaches only the cache that test built. The stand-in is how
+	// a test stages a hard-mount NFS stat that never returns, the one
+	// failure mode the in-flight guard exists for, which no real
+	// filesystem stages portably. newReachabilityCache sets os.Stat and
+	// production never changes it; a test sets it once, before its first
+	// probe. probeLocked reads it under mu and hands the stat goroutine
+	// that copy, so a goroutine parked in the stat never reads the field
+	// again. Until 2026-09-28 this was a package variable, statFunc, which
+	// a test had to put back after every goroutine that read it had
+	// returned, and one test put it back first.
+	stat func(string) (os.FileInfo, error)
 }
 
 func newReachabilityCache() *reachabilityCache {
 	return &reachabilityCache{
 		entries:  make(map[string]reachabilityStatus),
 		inflight: make(map[string]bool),
+		stat:     os.Stat,
 	}
 }
 
@@ -177,6 +183,7 @@ func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) rea
 		return status
 	}
 	c.inflight[absRoot] = true
+	stat := c.stat
 	c.mu.Unlock()
 
 	type probeResult struct {
@@ -187,7 +194,7 @@ func (c *reachabilityCache) probeLocked(ctx context.Context, absRoot string) rea
 	// the timeout branch already abandoned this channel.
 	resultCh := make(chan probeResult, 1)
 	go func() {
-		info, err := statFunc(absRoot)
+		info, err := stat(absRoot)
 		c.mu.Lock()
 		delete(c.inflight, absRoot)
 		c.mu.Unlock()
