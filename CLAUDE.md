@@ -2116,7 +2116,9 @@ no failing test — which is the shape to expect in this area.
   `CheckRedirect: ErrUseLastResponse` — without it a rogue LAN upstream can aim
   a `<res>` fetch at the bridge's own no-auth loopback admin API, reachable
   unauthenticated. A caller needing a different Content-Type wraps the writer;
-  don't change the package.
+  don't change the package. Its client dials through
+  `discovery.NewDeviceTransport` under the server's approval (the B36 bullet
+  below), with no kept-alive connections.
 - **A DISCOVERED description's service URLs stay on its own host** (external
   audit 2026-09-23, M3). `resolveServiceURL`
   (`internal/dlna/discovery/url_policy.go`) is the one home: every
@@ -2199,12 +2201,60 @@ no failing test — which is the shape to expect in this area.
   support the general rule (LOCATION host == source for every address, which
   would also bound names and tailnet addresses): multi-homed hosts and some
   NAS firmware are reported to break it, and a renderer has no escape hatch,
-  so **measure before tightening further**. **Not covered**: a HOSTNAME control
-  URL is resolved again at every later dial (the ingest's SOAP Browse, the
-  `upnpproxy` byte fetch), which a discovery-time check cannot pin, so DNS
-  rebinding can still steer a configured upstream's fetches; and a LOCATION
-  on a tailnet or public address is still fetched. The app's SSDP path has
-  no LOCATION-versus-source check either.
+  so **measure before tightening further**. **Not covered**: a LOCATION on a
+  tailnet or public address is still fetched, and the app's SSDP path has no
+  LOCATION-versus-source check either. (This bullet also said the later dials
+  of a HOSTNAME control URL were not covered; the next bullet covers them.)
+- **…and every LATER request to a device dials under the approval its URL
+  came with, because a NAME in it resolves again at each dial** (backlog B36,
+  2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, on
+  `http.DefaultTransport`) and every `upnpproxy` byte fetch dialled the cached
+  control URL's host with no dial check, so a peer that passed discovery with
+  a name answering its own LAN address and then answered 127.0.0.1 took both
+  to the console, and the proxy relayed its 200 (measured, macOS and Linux:
+  `CONSOLE POST /ctl`, `CONSOLE GET /api/stats`). What approved a local
+  connect is `discovery.DialApproval`: `AnnouncedFrom(src)` (the packet's own
+  address, #1069's rule) or `OperatorChose(manualURL)` (every address of the
+  kind the URL's host names; **a NAME approves no local address**, so a manual
+  URL naming this host by its host name, which Debian maps to 127.0.1.1, is
+  refused; write `localhost`). It is recorded as `upnp.ServerInfo.DialApproval`
+  beside the control URL, and **`Upsert` keeps and replaces the two together,
+  never the approval alone**: a merged-alone approval outlives the URL it
+  came with, or pairs one writer's URL with another's approval.
+  `ResolveControlURL` and `LiveHost` return both from ONE lookup, and the
+  ingest and the proxy carry the approval in each request's context. **Every
+  client that sends a device a request is built on
+  `discovery.NewDeviceTransport`**: the dial check (it replaces any
+  `ControlContext` the dialer template carries), no proxy, **no kept-alive
+  connections**, no TLS dialer. The keep-alive rule is measured, not
+  argued: with the proxy's old pool a second fetch, approved only for a LAN
+  address, rode the first fetch's idle connection to 127.0.0.1 past the check
+  (`TestProxy_Serve_NeverCarriesARequestOnAConnectionAnotherApprovalOpened`),
+  and net/http also hands a connection dialed for one request to another
+  waiting one. Cost: about 65 µs a request on loopback, one round trip on a
+  LAN. **Declined, on evidence**: requiring SSDP control URLs to be IP
+  literals. Three devices on one LAN (#1069) are thin evidence against names,
+  UDA 1.1 says LOCATION hosts are "normally" literals, not always, the dial
+  check already covers the dangerous targets, and a literal can name a
+  tailnet host anyway (the previous bullet), so the rule would bound no third
+  host either. Tests resolve through `discovery.UseResolverForTest` (atomic)
+  and `internal/dnstest`, **never by replacing `net.DefaultResolver`**, which
+  every goroutine in the process reads unsynchronised. **Residual**: an SSDP
+  source is not authenticated, and a peer on the same L2 segment can send a
+  packet FROM a link-local address (169.254.169.254 included); the
+  same-address exception then approves exactly that address, for the
+  description fetch and now for the later dials. A loopback source is what
+  RFC 1122 has a host discard from any other interface.
+- **A URL that names a port and no host (`https://:8443`) is not a URL of any
+  host, and Go dials it on THIS machine**, so every validator reads
+  `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
+  to every phone); the harvest credential endpoint answers 400
+  (`config.BaseURLNamesHost`); a configured enrich or harvest base URL of that
+  shape is WARNED about in `Normalize`, never refused, because it loaded
+  before and a refusal stops a bridge from starting after an update. **Don't
+  move the host test into `CanonicalHTTPSBase`'s reduction**: a hostless pin
+  would reduce to "" (unpinned) or, through `Validate`, refuse to load; as it
+  stands it pins to a value no accepted credential can carry.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
