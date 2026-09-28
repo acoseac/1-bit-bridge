@@ -2,10 +2,10 @@ package dlna
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
 
@@ -24,7 +24,9 @@ const FilePathPrefix = "/dlna/file/"
 //     bytes bit-exact via `proxy.Serve`. The DLNA renderer never
 //     learns the bytes live elsewhere — to it this is just a normal
 //     bridge file fetch.
-//  4. Otherwise: open the resolved `AbsolutePath`. Open failure → 500.
+//  4. Otherwise: open the resolved `AbsolutePath` (fsutil.OpenAsFile,
+//     which refuses what is not a file and never waits on a named pipe).
+//     A source that cannot be opened → 404, a variant → 410.
 //     For a VARIANT segment whose sidecar is not where the index says,
 //     `locate` gets one chance to answer before that becomes a 410 —
 //     see VariantLocator.
@@ -113,7 +115,7 @@ func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnp
 // convention, a track with `AbsolutePath == ""` is the routed
 // sentinel — `bridgefs.Resolver.Resolve` failed AND the path is in
 // `upnp_track_routing`. For that track a transient routing-lookup
-// error MUST NOT fall through to `os.Open("")`: the filesystem path
+// error MUST NOT fall through to opening `""`: the filesystem path
 // would surface as a false 404, which iOS caches as
 // `lastErrorRescanShareID` and surfaces as the "track is missing,
 // rescan share?" affordance — wrong for a transient DB error. Serving
@@ -121,7 +123,7 @@ func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnp
 //
 // For a filesystem-backed track (`AbsolutePath != ""`) a transient
 // routing-lookup error is benign: the lookup is purely informational
-// for filesystem paths, and the os.Open would succeed against the
+// for filesystem paths, and the open would succeed against the
 // real file. Falling through preserves playback under the same
 // transient DB error condition.
 //
@@ -148,7 +150,7 @@ func tryServeViaUPnPProxy(
 	if lookupErr != nil {
 		if info.AbsolutePath == "" {
 			// Routed sentinel + transient DB error → 500 (renderer
-			// retries) instead of falling through to `os.Open("")`
+			// retries) instead of falling through to opening `""`
 			// which would surface as a false 404 (CodeRabbit MAJOR on
 			// PR #356 round-3).
 			http.Error(w, "UPnP routing lookup failed", http.StatusInternalServerError)
@@ -193,7 +195,12 @@ func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo,
 		return
 	}
 
-	f, err := os.Open(servePath)
+	// Opened through fsutil.OpenAsFile, never os.Open: the path is the
+	// manifest's, and a manifest row outlives the file it was minted for
+	// until the scan that reaps it, so what is at the path now may be a
+	// named pipe. A plain open of one waits for a writer, and until
+	// 2026-09-28 held this request until one came.
+	f, stat, err := fsutil.OpenAsFile(servePath)
 	if err != nil && isVariant && locate != nil {
 		// The index baked in the path the row RECORDED, which is a
 		// claim about where the sidecar was and not proof that it is
@@ -204,31 +211,26 @@ func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo,
 			r.Context(), info.RelativePath, extractVariantID(r.URL.Path), servePath,
 		); moved != "" && moved != servePath {
 			servePath = moved
-			f, err = os.Open(servePath)
+			f, stat, err = fsutil.OpenAsFile(servePath)
 		}
 	}
 	if err != nil {
 		if isVariant {
 			// The DB row pointed at a sidecar that's no longer on
-			// disk (GC'd, manually deleted). Mirror the api
-			// /v1/download?variant= contract: 410 Gone, distinct from
-			// a 404 "unknown object".
+			// disk (GC'd, manually deleted), or at something that is
+			// not one. Mirror the api /v1/download?variant= contract:
+			// 410 Gone, distinct from a 404 "unknown object".
 			http.Error(w, "variant sidecar missing", http.StatusGone)
 			return
 		}
-		// Source file vanished between scan and serve, or permissions
-		// changed. Return 404 — indistinguishable to the renderer from
-		// "track doesn't exist".
+		// Source file vanished between scan and serve, permissions
+		// changed, or what is at its path is not a file (fsutil.NotAFile).
+		// Return 404 — indistinguishable to the renderer from "track
+		// doesn't exist".
 		http.NotFound(w, r)
 		return
 	}
 	defer f.Close()
-
-	stat, err := f.Stat()
-	if err != nil {
-		http.Error(w, "stat failed", http.StatusInternalServerError)
-		return
-	}
 
 	ua := r.Header.Get("User-Agent")
 	if ext == "" {

@@ -391,7 +391,7 @@ type manifestLibraryAdapter struct {
 	// Resolver-miss tracks backed by an upstream UPnP MediaServer (e.g.
 	// a Chord 2Go's microSD card) are kept in the cache with an empty
 	// `AbsolutePath` sentinel — the dlna file handler's upnp fast-path
-	// proxies the bytes BEFORE `os.Open(servePath)` runs. Membership
+	// proxies the bytes BEFORE the file handler opens `servePath`. Membership
 	// resolved per rebuild from a single `AllUPnPRoutingPaths` bulk
 	// read (previously a per-track `GetUPnPRouting` point query that
 	// N+1'd under the 10 s rebuild context deadline — Gemini HIGH on
@@ -558,7 +558,7 @@ func (a *manifestLibraryAdapter) rebuild() {
 			// an upstream UPnP MediaServer (upnp_track_routing has a
 			// row, looked up via the pre-built routedPaths map),
 			// include it with an empty `AbsolutePath` so the dlna
-			// file handler's upnp fast-path can take over. `os.Open("")`
+			// file handler's upnp fast-path can take over. An open of `""`
 			// would never be reached for these tracks because the
 			// fast-path returns before the filesystem-serve branch.
 			// Without this, casting a 2Go-routed track to any DLNA

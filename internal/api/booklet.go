@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -82,7 +83,7 @@ func (s *Server) booklet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no booklet for release")
 		return
 	}
-	f, err := os.Open(BookletPath(s.bookletDir, mbid))
+	f, info, err := fsutil.OpenAsFile(BookletPath(s.bookletDir, mbid))
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Known + available but not downloaded yet: nudge the fetch
@@ -101,12 +102,6 @@ func (s *Server) booklet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat booklet", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
-		return
-	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `inline; filename="booklet-`+mbid+`.pdf"`)
 	w.Header().Set("Cache-Control", "private, max-age=86400")

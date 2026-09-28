@@ -45,6 +45,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -988,7 +989,7 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 // given content type. Missing file → plain 404 (the tile/card falls
 // back — no 202 dance for admin cover/portrait requests).
 func serveCacheFile(w http.ResponseWriter, r *http.Request, path, contentType, cacheControl string) {
-	f, err := os.Open(path)
+	f, info, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "not_found", errMsgNotCached)
@@ -999,12 +1000,6 @@ func serveCacheFile(w http.ResponseWriter, r *http.Request, path, contentType, c
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat cache file", "path", path, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
-		return
-	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", cacheControl)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
@@ -1179,7 +1174,7 @@ func (s *Server) apiLibraryBooklet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no booklet for release")
 		return
 	}
-	f, err := os.Open(s.deps.BookletPath(mbid))
+	f, info, err := fsutil.OpenAsFile(s.deps.BookletPath(mbid))
 	if err != nil {
 		if os.IsNotExist(err) {
 			if s.deps.BookletNudge != nil {
@@ -1195,12 +1190,6 @@ func (s *Server) apiLibraryBooklet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat booklet", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
-		return
-	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `inline; filename="booklet-`+mbid+`.pdf"`)
 	w.Header().Set("Cache-Control", cacheControlPrivateDay)

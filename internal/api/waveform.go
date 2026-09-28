@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // AnalysisStore is the optional interface GET /v1/waveform uses to look
@@ -142,7 +144,7 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(rec.WaveformPath)
+	f, fi, err := fsutil.OpenAsFile(rec.WaveformPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// Sidecar gone (manual wipe, partial --gc) — 410 so iOS
@@ -156,12 +158,6 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't stat this waveform", err)
-		return
-	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if rec.WaveformTag != "" {
