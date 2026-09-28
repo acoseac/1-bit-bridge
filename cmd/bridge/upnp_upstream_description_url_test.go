@@ -164,7 +164,13 @@ func TestResolveControlURLResolvesAManualServer(t *testing.T) {
 		t.Fatalf("cold cache: got %q err=%v; want an empty resolution", got, err)
 	}
 
-	chosen := discovery.OperatorChose(srv.ManualDescriptionURL)
+	// Any approval the entry holds: the resolver hands back the cached one,
+	// whoever wrote it. Not OperatorChose of this LAN URL, which is the zero
+	// approval and so could not tell "returned" from "dropped".
+	chosen := discovery.OperatorChose("http://localhost:8200/rootDesc.xml")
+	if chosen == (discovery.DialApproval{}) {
+		t.Fatal("fixture: the approval is the zero one, so the check below cannot tell returned from dropped")
+	}
 	cache.Upsert(upnp.ServerInfo{
 		UDN:                        key,
 		FriendlyName:               "Cellar",

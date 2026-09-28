@@ -432,6 +432,19 @@ func OperatorChose(rawURL string) DialApproval {
 	return DialApproval{}
 }
 
+// String names what the approval covers, for a log line or a test failure.
+func (d DialApproval) String() string {
+	switch {
+	case d.chosen == hostThisMachine:
+		return "an operator's URL on this machine"
+	case d.chosen == hostLinkLocal:
+		return "an operator's link-local URL"
+	case d.source.IsValid():
+		return "announced from " + d.source.String()
+	}
+	return "no local address"
+}
+
 // permits reports whether the approval lets a connect reach a, the address a
 // dial resolved to: always for an address elsewhere; and for this machine or
 // a link-local address when an operator's URL named that kind of host, or
