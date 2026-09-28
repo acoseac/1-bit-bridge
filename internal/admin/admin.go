@@ -621,6 +621,25 @@ type Deps struct {
 	// Nil-safe alongside OptimizeEligible.
 	TargetRateForOptimize func(sourceRate int) int
 
+	// UpscaleActive is the LIVE upscale gate: `upscale.enabled` AND a
+	// usable sox, read per request so the toggle hot-applies. cmd/bridge
+	// wires the same closure the /v1 server receives through
+	// `api.Server.WithUpscale` (`upscaleActiveFn`), so the console and
+	// /v1/health cannot disagree about whether the feature is on.
+	//
+	// BatchCoordinator cannot answer this. The pool and its coordinator
+	// are constructed unconditionally (PR #781's "always construct, never
+	// stop"), so that adapter is never nil in production and its nil-ness
+	// gates nothing. POST /api/upscale/batch reads this instead, before it
+	// decodes a scope or walks anything.
+	//
+	// Nil reads as OFF, failing closed: the /v1 rule, pinned there by
+	// `TestNilFeatureGatesReadAsOff`. That is the opposite of
+	// OptimizeActive's nil below, which keeps its pre-existing
+	// wired == active reading; the optimize kind needs both gates, so a nil
+	// here refuses it too.
+	UpscaleActive func() bool
+
 	// OptimizeActive is the LIVE on/off gate for kind="optimize".
 	//
 	// Distinct from the two closures above, which say whether the feature
@@ -664,8 +683,12 @@ type Deps struct {
 	// to the transcode.Coordinator. Wired to a closure-based adapter
 	// in cmd/bridge/main.go (same decoupling pattern as
 	// UpscaleStats / UpscaleEnqueuer). Nil-safe — when absent the
-	// admin Library Inspector renders the folder tree but the
-	// "Upscale this folder" trigger surfaces a 503.
+	// batch submit, list and cancel handlers answer 503.
+	//
+	// WIRED, not ACTIVE. cmd/bridge constructs the coordinator whatever
+	// `upscale.enabled` says, so a non-nil value here says only that the
+	// pool exists. Whether a submit may start work is UpscaleActive's
+	// question.
 	BatchCoordinator AdminBatchCoordinator
 
 	// VariantDeleter is the admin-side gateway to the same
@@ -674,10 +697,15 @@ type Deps struct {
 	// cmd/bridge to an adapter around `api.Server.RunVariantDelete`
 	// so the admin console and the iOS app go through exactly one
 	// code path on the way out — no risk of drift between the two
-	// destructive surfaces. Nil-safe: when absent (upscale disabled
-	// on this bridge OR pre-feature build) the admin handler
-	// surfaces 503 service_unavailable, matching the
-	// `BatchCoordinator == nil` shape on the same page.
+	// destructive surfaces. Nil-safe: when absent (a test harness;
+	// cmd/bridge always wires it) the admin handler surfaces 503
+	// service_unavailable, matching the `BatchCoordinator == nil` shape
+	// on the same page.
+	//
+	// Wired whatever `upscale.enabled` says, and deliberately NOT gated
+	// on UpscaleActive: an operator who switches upscaling off must still
+	// be able to reclaim the disk its renditions use (see
+	// apiUpscaleVariantsDelete).
 	VariantDeleter AdminVariantDeleter
 
 	// IsSupervised reports whether the current process is running

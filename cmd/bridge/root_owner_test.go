@@ -20,9 +20,10 @@ const serviceUID = 4242
 // to another uid, and requires every file to belong to that uid afterwards:
 // `bridge pair` (tokens.json), `bridge admin reset-password` and
 // `sign-out-everywhere` (adminauth.json), `bridge admin login-link` (the
-// login-ticket sidecar), `bridge cert rotate` (the TLS pair) and a
-// `bridge init --force` rewrite (bridge.yaml). Before fsutil.KeepOwner each
-// of those left a root-owned 0600 file the service could not read. It needs
+// ticket's own file, which is new and so takes the data dir's owner),
+// `bridge cert rotate` (the TLS pair) and a `bridge init --force` rewrite
+// (bridge.yaml). Before fsutil.KeepOwner each of those left a root-owned
+// 0600 file the service could not read. It needs
 // root, so CI skips it; run it in a container as root (CLAUDE.md, dido):
 // `go test ./cmd/bridge/ -run TestCLIRunAsRootKeepsTheInstallOwner -count=1`.
 func TestCLIRunAsRootKeepsTheInstallOwner(t *testing.T) {

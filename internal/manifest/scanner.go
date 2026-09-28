@@ -168,6 +168,24 @@ type Scanner struct {
 	// (scanner_dupes.go). Same atomic.Pointer rationale as postScanHook:
 	// boot-time wiring must not race a startup scan already in flight.
 	dupePolicy atomic.Pointer[func() dupes.Policy]
+
+	// openSACD, when set, opens an `.iso` container for processSACDISO in
+	// place of os.Open. It is a TEST seam, and per scanner rather than a
+	// package var: a scanner test installs a reader that fails where the
+	// test says, which no file on disk can be made to do, and the scanners
+	// of other tests never see it. Nil in production. Set it before Scan,
+	// never while one runs.
+	openSACD func(abs string) (sacdContainer, error)
+}
+
+// sacdContainer is what processSACDISO reads an `.iso` container through:
+// its bytes, the stat of the file the handle has open (the file the
+// expansion READ, which the in-motion guard compares with what the path
+// names once the read is done), and the close. *os.File is one.
+type sacdContainer interface {
+	io.ReaderAt
+	io.Closer
+	Stat() (fs.FileInfo, error)
 }
 
 // SetPostScanHook installs a callback invoked after every SUCCESSFUL
@@ -1499,15 +1517,26 @@ func mergePostScanFields(fresh, old *Track) {
 // processSACDISO is the worker leg for an `.iso` container: its own
 // skip-gate (the generic gate keys `GetTrackStat` on `pi.rel`, and a
 // container has NO row — the representative FIRST virtual row carries
-// the container's size+mtime instead), then TOC parse + expansion via
-// ExpandSACDISO, then a journaled retire of any STALE virtual rows the
-// fresh expansion no longer covers — a re-rip that SHRINKS (or an image
+// the container's size+mtime instead), then TOC parse + expansion
+// (expandSACDContainer), then a journaled retire of any STALE virtual rows
+// the fresh expansion no longer covers — a re-rip that SHRINKS (or an image
 // that stopped being SACD) must not leave trailing rows alive forever
 // behind the deletion pass's container-seen sparing.
 //
+// That retire runs at threshold 1, so the answer it acts on must be a
+// completed one: "we could not see this file" dominates "it looks like it
+// stopped being an SACD". A read that did not complete (an EIO, ETIMEDOUT
+// or ESTALE from a NAS still serving the file) is an expansion ERROR, never
+// the empty answer (sacdReadOutcome); a container that changed during the
+// scan is skipped (expandSACDContainer), since a copy being written in place
+// reads as a file that ends early. Either one leaves the rows exactly as
+// they were, retired by nothing and rewritten by nothing, until a later scan
+// reads the file whole.
+//
 // Runs inside the worker's panic-recovery closure; returns nil for an
-// unchanged image, a non-SACD/plain-DSD/multichannel-only image, or a
-// parse failure (logged — the image simply contributes no rows).
+// unchanged image, a non-SACD/plain-DSD/multichannel-only image, a parse or
+// read failure (logged — the image contributes no rows), or a container that
+// changed during the scan (logged, and left for the next one).
 func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 	rep := SACDVirtualTrackPath(pi.rel, 1)
 	existing, statErr := s.store.GetTrackStat(ctx, rep)
@@ -1523,9 +1552,14 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 		return nil
 	}
 
-	tracks, err := ExpandSACDISO(pi.abs, pi.rel, pi.info.Size(), pi.info.ModTime().UTC())
+	tracks, changed, err := s.expandSACDContainer(pi)
 	if err != nil {
-		scanLogger.Error("sacd expand", "path", pi.abs, "err", err)
+		scanLogger.Error("sacd expand", "path", pi.rel, "err", sacdLibraryRelative(err.Error(), pi))
+		return nil
+	}
+	if changed != "" {
+		scanLogger.Info("sacd container changed during the scan; left for the next one",
+			"path", pi.rel, "change", changed)
 		return nil
 	}
 
@@ -1568,6 +1602,133 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 		return nil
 	}
 	return tracks
+}
+
+// What processSACDISO logs as the change when a container is not the file
+// the walk saw, or not still (sacdContainerChange).
+const (
+	sacdChangedIdentity   = "the path names another file than the one read"
+	sacdChangedDuringRead = "its size or mtime moved while it was read"
+	sacdChangedSinceWalk  = "its size or mtime moved since the walk saw it"
+)
+
+// expandSACDContainer opens pi's container through the scanner's opener,
+// expands it (expandSACD), and says whether the file it read is the one the
+// walk saw and still there. changed is empty when it is; otherwise it says
+// what moved, and processSACDISO then neither retires nor writes a row.
+//
+// The guard exists because a container being written in place (cp over it,
+// a download to its final name, a NAS sync) reads as a file that ends early,
+// and a read that stops at the end of a file is a COMPLETED read, whose
+// answer, "not an SACD", retires every virtual row at threshold 1. It makes
+// two comparisons, each between two stats that describe one thing the same
+// way (sacdContainerChange):
+//
+//   - The handle's stat, taken before the first read, against a stat of the
+//     path after it: the same file (os.SameFile), size and mtime. A write
+//     during the read, or a rename over the path, moves one of them. On
+//     Windows os.SameFile compares file indexes from
+//     GetFileInformationByHandle; a handle's stat carries its index, and a
+//     path's stat loads it when asked.
+//   - The walk's stat against an lstat of the path after the read: the same
+//     size and mtime. This covers the time before the open, which is long
+//     (the walk runs ahead of the workers): a copy that truncated the file
+//     then, and was idle while it was read, is caught only here. An lstat,
+//     because the walk's stat is one (on Windows, a directory entry, which
+//     likewise describes a symlink itself), so a symlinked container
+//     compares its link with its link. Identity is NOT compared here: on
+//     Windows a directory entry carries a file index only where the volume
+//     supports object IDs, and none on FAT or exFAT (os/dir_windows.go), so
+//     os.SameFile would call every container there moved, and none would
+//     ever expand.
+//
+// The path is stat'ed after the handle is closed, so nothing of the
+// expansion's is open while the guard looks. A stat that fails counts as a
+// change: the guard cannot vouch for a file it cannot see.
+//
+// What it cannot see: an in-place overwrite that keeps the size and the
+// inode inside one coarse mtime tick (FAT's 2 s); and, for a symlinked
+// container, a write to the target before the open, since the walk's stat is
+// the link's own. Where a directory listing and a stat of an unchanged file
+// disagree (Windows documents that a listing's attributes on NTFS may lag
+// the file's), the container reads as changed, and keeps its rows,
+// unwritten, until the two agree.
+func (s *Scanner) expandSACDContainer(pi pathInfo) (tracks []*Track, changed string, err error) {
+	src, err := s.openSACDContainer(pi.abs)
+	if err != nil {
+		return nil, "", err
+	}
+	var (
+		opened    fs.FileInfo
+		openedErr error
+	)
+	func() {
+		defer func() { _ = src.Close() }()
+		opened, openedErr = src.Stat()
+		tracks, err = expandSACD(src, pi.rel, pi.info.Size(), pi.info.ModTime().UTC())
+	}()
+	if err != nil {
+		return nil, "", err
+	}
+	if openedErr != nil {
+		return tracks, "stat of the opened container failed: " +
+			sacdLibraryRelative(openedErr.Error(), pi), nil
+	}
+	post, statErr := os.Stat(pi.abs)
+	if statErr != nil {
+		return tracks, "stat of the container after the read failed: " +
+			sacdLibraryRelative(statErr.Error(), pi), nil
+	}
+	lpost, statErr := os.Lstat(pi.abs)
+	if statErr != nil {
+		return tracks, "lstat of the container after the read failed: " +
+			sacdLibraryRelative(statErr.Error(), pi), nil
+	}
+	return tracks, sacdContainerChange(pi.info, opened, post, lpost), nil
+}
+
+// sacdContainerChange is the in-motion guard's decision, apart from the stats
+// it is made from so a test can drive every arm: walk is the walk's stat of
+// the path, opened the stat of the handle the expansion read (taken before
+// its first read), post and lpost the path's stat and lstat after the read.
+// It returns "" when nothing moved, and otherwise the first change it finds
+// (expandSACDContainer says why these pairs, and not others).
+func sacdContainerChange(walk, opened, post, lpost fs.FileInfo) string {
+	switch {
+	case !os.SameFile(opened, post):
+		return sacdChangedIdentity
+	case opened.Size() != post.Size() ||
+		opened.ModTime().UnixNano() != post.ModTime().UnixNano():
+		return sacdChangedDuringRead
+	case walk.Size() != lpost.Size() ||
+		walk.ModTime().UnixNano() != lpost.ModTime().UnixNano():
+		return sacdChangedSinceWalk
+	}
+	return ""
+}
+
+// openSACDContainer opens the container at abs: os.Open, or the opener a
+// test installed (Scanner.openSACD).
+func (s *Scanner) openSACDContainer(abs string) (sacdContainer, error) {
+	if s.openSACD != nil {
+		return s.openSACD(abs)
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err // never a nil *os.File inside a non-nil interface
+	}
+	return f, nil
+}
+
+// sacdLibraryRelative writes msg's mentions of pi's absolute path
+// library-relative: the rule for a log line that names a library file
+// (#1055). processSACDISO logs read and stat failures through it, and the
+// *os.PathError an *os.File returns names the file's absolute path.
+func sacdLibraryRelative(msg string, pi pathInfo) string {
+	if pi.abs == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, pi.abs, pi.rel)
 }
 
 // runScanWriter is the single writer goroutine that consumes Tracks

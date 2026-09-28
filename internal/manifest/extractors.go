@@ -617,7 +617,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	switch ext {
 	case ".iso":
 		// SACD ISO expansion happens in the scanner worker via
-		// ExpandSACDISO (one container → N virtual rows — this 1:1
+		// processSACDISO (one container → N virtual rows — this 1:1
 		// dispatcher cannot express it). The case exists to satisfy
 		// the Ext↔dispatcher lockstep above; reaching it means a
 		// non-scanner caller fed an ISO — extract nothing, no error.

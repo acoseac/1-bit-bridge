@@ -90,6 +90,12 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 		StartedAt:   time.Now().UTC(),
 		Restart:     func() {}, // no-op in tests
 		ScanCtx:     scanCtx,
+		// The live upscale gate, ON: a production bridge with the feature
+		// enabled, which is what every batch-submit test here describes.
+		// A nil gate reads as off, so leaving it out would describe a
+		// different bridge. The tests of the gate itself override it both
+		// ways (handlers_upscale_gate_test.go).
+		UpscaleActive: func() bool { return true },
 	})
 	if err != nil {
 		t.Fatal(err)

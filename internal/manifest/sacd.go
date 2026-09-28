@@ -28,6 +28,7 @@ package manifest
 // change that basis.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -230,16 +231,53 @@ func sacdDecodeText(d []byte) string {
 	return strings.TrimSpace(s)
 }
 
+// errSACDShortRead is the failure a ReadAt reports when it returned fewer
+// bytes than asked and no error. That breaks the io.ReaderAt contract, so it
+// says nothing about the file, and it is read as a failed read, never as the
+// end of the file.
+var errSACDShortRead = errors.New("sacd: read returned fewer bytes than asked, and no error")
+
+// sacdReadOutcome classifies one ReadAt that asked for want bytes and got n.
+// It is the whole of the rule "only a COMPLETED read may answer": a verdict
+// of "not an SACD" retires every virtual row of the container at threshold 1
+// (processSACDISO), so a read that failed must never be able to reach one.
+//
+// full reports that every byte the parse needs arrived. n is checked BEFORE
+// err, because io.ReaderAt permits (len(p), io.EOF) at the end of the
+// source. A short read that stopped at the end of the source (io.EOF, or
+// io.ErrUnexpectedEOF) is a fact about the FILE, so it comes back as
+// (false, nil): the bytes are absent, and the parse may conclude from their
+// absence (sacdReadSectors' "physical end" rule). Any other short read did
+// not complete, and it comes back as the failure: a transport error (EIO,
+// ETIMEDOUT or ESTALE from a NAS), or errSACDShortRead.
+func sacdReadOutcome(n, want int, err error) (full bool, failure error) {
+	if n >= want {
+		return true, nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, nil
+	}
+	if err == nil {
+		return false, fmt.Errorf("%w (%d of %d bytes)", errSACDShortRead, n, want)
+	}
+	return false, err
+}
+
+// sacdReadSectors reads the payloads of count consecutive logical sectors
+// from first. It stops, with what it has and no error, at the end of the
+// image (a truncated image is structural truth), and returns an error for a
+// sector whose read did not complete (sacdReadOutcome).
 func sacdReadSectors(r io.ReaderAt, g sacdGeometry, first int64, count int) ([]byte, error) {
 	out := make([]byte, 0, count*sacdSectorPayload)
 	buf := make([]byte, g.stride)
 	for i := 0; i < count; i++ {
 		off := (first + int64(i)) * g.stride
 		n, err := r.ReadAt(buf, off)
-		if n < int(g.payloadOffset)+sacdSectorPayload {
-			if err != nil && err != io.EOF {
-				return nil, err
-			}
+		full, failure := sacdReadOutcome(n, int(g.payloadOffset)+sacdSectorPayload, err)
+		if failure != nil {
+			return nil, fmt.Errorf("sacd: read sector %d: %w", first+int64(i), failure)
+		}
+		if !full {
 			break // physical end — structural truth, not a transport error
 		}
 		out = append(out, buf[g.payloadOffset:g.payloadOffset+sacdSectorPayload]...)
@@ -249,31 +287,73 @@ func sacdReadSectors(r io.ReaderAt, g sacdGeometry, first int64, count int) ([]b
 
 var sacdMasterSignature = []byte("SACDMTOC")
 
-// parseSACDTOC reads the disc's TOC through an io.ReaderAt. Returns
-// (nil, nil) when the image is not a plain SACD (no master signature at
-// either geometry) — the scanner then upserts nothing. A signature match
-// with no usable structure returns an error (a damaged rip, logged).
-func parseSACDTOC(r io.ReaderAt) (*sacdTOC, error) {
-	// Geometry detect: probe every master-copy position per geometry so
-	// a disc whose FIRST copy is damaged still detects — the copies
-	// exist exactly for this (the doubled-TOC mechanism).
-	var geom sacdGeometry
-	found := false
+// sacdDetectGeometry finds the geometry whose master-TOC positions carry the
+// master signature. It probes every copy position under both geometries, so
+// a disc whose FIRST copy is damaged or unreadable still detects: the copies
+// exist exactly for this (the doubled-TOC mechanism).
+//
+// found=false with a nil error is the one answer that means "not an SACD
+// image", and it needs every probe to have COMPLETED (all eight bytes, or
+// the end of the file) without finding the signature. A probe that failed
+// does not stop the rest, since a later copy can still answer, but when none
+// answers, the first failure comes back in place of the verdict: an image
+// whose probes did not all complete has not been shown to be anything.
+func sacdDetectGeometry(r io.ReaderAt) (sacdGeometry, bool, error) {
+	var firstFailure error
+	probe := make([]byte, len(sacdMasterSignature))
 	for _, g := range []sacdGeometry{sacdPlain2048, sacdRaw2064} {
 		for _, lsn := range sacdMasterTOCSectors {
-			probe := make([]byte, 8)
-			if n, _ := r.ReadAt(probe, lsn*g.stride+g.payloadOffset); n == 8 &&
-				string(probe) == string(sacdMasterSignature) {
-				geom, found = g, true
-				break
+			off := lsn*g.stride + g.payloadOffset
+			n, err := r.ReadAt(probe, off)
+			full, failure := sacdReadOutcome(n, len(probe), err)
+			if failure != nil {
+				if firstFailure == nil {
+					firstFailure = fmt.Errorf("sacd: master TOC probe at byte %d: %w", off, failure)
+				}
+				continue
+			}
+			if full && string(probe) == string(sacdMasterSignature) {
+				return g, true, nil
 			}
 		}
-		if found {
-			break
-		}
+	}
+	return sacdGeometry{}, false, firstFailure
+}
+
+// sacdProbeDST reads the header byte of a stereo area's first audio sector,
+// whose bit 0 is the DST flag. A read that stops at the end of the file (a
+// truncated image, or a track area placed past its end) answers "not DST",
+// which is a fact about the file. A read that fails answers nothing: its
+// error comes back.
+func sacdProbeDST(r io.ReaderAt, g sacdGeometry, trackAreaStart uint32) (bool, error) {
+	probe := make([]byte, 1)
+	off := int64(trackAreaStart)*g.stride + g.payloadOffset
+	n, err := r.ReadAt(probe, off)
+	full, failure := sacdReadOutcome(n, len(probe), err)
+	if failure != nil {
+		return false, fmt.Errorf("sacd: DST probe at byte %d: %w", off, failure)
+	}
+	return full && probe[0]&0x01 == 1, nil
+}
+
+// parseSACDTOC reads the disc's TOC through an io.ReaderAt.
+//
+// It returns (nil, nil) only when the image is not a plain SACD AND every
+// probe for the master signature completed (sacdDetectGeometry); the scanner
+// then retires every virtual row the container had, so that answer must
+// never come from a read that failed. A TOC without a stereo DST area comes
+// back with hasStereo or stereoIsDST false, which expandSACD turns into the
+// same retiring (nil, nil), and so it too rests on completed reads: an
+// area TOC whose reads failed, or a DST probe that failed, is an error. An
+// error is also what a signature match with no usable master TOC gets (a
+// damaged rip). The scanner logs an error and retires nothing.
+func parseSACDTOC(r io.ReaderAt) (*sacdTOC, error) {
+	geom, found, err := sacdDetectGeometry(r)
+	if err != nil {
+		return nil, err
 	}
 	if !found {
-		return nil, nil // not an SACD image
+		return nil, nil // not an SACD image: every probe completed and none matched
 	}
 
 	// Master TOC unit with copy fallback: a copy must parse AND carry at
@@ -342,25 +422,38 @@ func parseSACDTOC(r io.ReaderAt) (*sacdTOC, error) {
 	}
 
 	// Area TOCs: adopt the first STEREO area (each pointer tried at both
-	// its start and end copy).
+	// its start and end copy). A copy whose read failed is passed over like
+	// a damaged one, since the other copy can still answer, but its error is
+	// kept: "this disc has no stereo area" is only true if every read that
+	// looked for one completed.
+	var areaFailure error
 	for _, ap := range areas {
 		for _, candidate := range []int64{int64(ap.start), int64(ap.end)} {
-			area, ok := parseSACDArea(r, geom, candidate)
+			area, ok, err := parseSACDArea(r, geom, candidate)
+			if err != nil {
+				if areaFailure == nil {
+					areaFailure = fmt.Errorf("sacd: area TOC at sector %d: %w", candidate, err)
+				}
+				continue
+			}
 			if !ok {
 				continue
 			}
+			isDST, err := sacdProbeDST(r, geom, area.trackAreaStart)
+			if err != nil {
+				return nil, err
+			}
 			toc.hasStereo = true
 			toc.stereoTracks = area.tracks
-			// DST probe: the first audio sector's header byte, bit 0.
-			probe := make([]byte, 1)
-			if n, _ := r.ReadAt(probe, int64(area.trackAreaStart)*geom.stride+geom.payloadOffset); n == 1 {
-				toc.stereoIsDST = probe[0]&0x01 == 1
-			}
+			toc.stereoIsDST = isDST
 			break
 		}
 		if toc.hasStereo {
 			break
 		}
+	}
+	if !toc.hasStereo && areaFailure != nil {
+		return nil, areaFailure
 	}
 	return &toc, nil
 }
@@ -378,55 +471,70 @@ var (
 )
 
 // parseSACDArea reads + validates one STEREO area TOC starting at lsn.
-// ok=false for multichannel areas, damaged structures, or non-TOC sectors
-// (the caller falls back to the area's second copy). Validation mirrors
-// the iOS reader: trackCount 1–255; start timecodes strictly increasing;
-// durations > 0; track i's normative span never overlaps track i+1's
-// start.
-func parseSACDArea(r io.ReaderAt, g sacdGeometry, lsn int64) (sacdArea, bool) {
+// It answers in three ways, and the caller must keep them apart:
+//
+//   - (area, true, nil): a stereo area TOC, adopted.
+//   - (_, false, nil): a STRUCTURAL refusal, a fact about the bytes: a
+//     multichannel area, a damaged structure, a non-TOC sector, or a TOC
+//     that lies past the end of the image. The caller falls back to the
+//     area's second copy.
+//   - (_, false, err): a read of the area TOC did not complete, so the bytes
+//     were never seen. The error is only ever a read failure; nothing here
+//     is known about the area.
+//
+// Validation mirrors the iOS reader: trackCount 1–255; start timecodes
+// strictly increasing; durations > 0; track i's normative span never
+// overlaps track i+1's start.
+func parseSACDArea(r io.ReaderAt, g sacdGeometry, lsn int64) (sacdArea, bool, error) {
 	var out sacdArea
 	header, err := sacdReadSectors(r, g, lsn, 1)
-	if err != nil || len(header) < sacdSectorPayload {
-		return out, false
+	if err != nil {
+		return out, false, err
+	}
+	if len(header) < sacdSectorPayload {
+		return out, false, nil // past the end of the image
 	}
 	if string(header[:8]) != string(sacdStereoSignature) {
-		return out, false // MULCHTOC (recognized, never minted in v1) or junk
+		return out, false, nil // MULCHTOC (recognized, never minted in v1) or junk
 	}
 	tocSize := int(sacdReadU16(header, 10))
 	if tocSize < 3 {
-		return out, false
+		return out, false, nil
 	}
 	if tocSize > 255 {
 		tocSize = 255
 	}
 	body, err := sacdReadSectors(r, g, lsn, tocSize)
-	if err != nil || len(body) < 3*sacdSectorPayload {
-		return out, false
+	if err != nil {
+		return out, false, err
+	}
+	if len(body) < 3*sacdSectorPayload {
+		return out, false, nil
 	}
 	d := body
 
 	channels := int(d[32])
 	if channels != 2 {
-		return out, false
+		return out, false, nil
 	}
 	trackOffset := int(d[68])
 	trackCount := int(d[69])
 	if trackCount < 1 || trackCount > 255 {
-		return out, false
+		return out, false, nil
 	}
 	trackAreaStart := sacdReadU32(d, 72)
 	trackAreaEnd := sacdReadU32(d, 76)
 	if trackAreaEnd <= trackAreaStart {
-		return out, false
+		return out, false, nil
 	}
 
 	trl1 := sacdSectorPayload
 	if string(d[trl1:trl1+8]) != string(sacdTRL1Signature) {
-		return out, false
+		return out, false, nil
 	}
 	trl2 := 2 * sacdSectorPayload
 	if string(d[trl2:trl2+8]) != string(sacdTRL2Signature) {
-		return out, false
+		return out, false, nil
 	}
 
 	starts := make([]int, trackCount)
@@ -435,25 +543,25 @@ func parseSACDArea(r io.ReaderAt, g sacdGeometry, lsn int64) (sacdArea, bool) {
 		s := trl2 + 8 + 4*i
 		f, ok := sacdTimecodeFrames(d[s], d[s+1], d[s+2])
 		if !ok {
-			return out, false
+			return out, false, nil
 		}
 		starts[i] = f
 		o := trl2 + 8 + 1020 + 4*i
 		dur, ok := sacdTimecodeFrames(d[o], d[o+1], d[o+2])
 		if !ok || dur <= 0 {
-			return out, false
+			return out, false, nil
 		}
 		durations[i] = dur
 		startLSN := sacdReadU32(d, trl1+8+4*i)
 		if startLSN < trackAreaStart || startLSN >= trackAreaEnd {
-			return out, false
+			return out, false, nil
 		}
 		if i > 0 {
 			if starts[i] <= starts[i-1] {
-				return out, false
+				return out, false, nil
 			}
 			if starts[i-1]+durations[i-1] > starts[i] {
-				return out, false
+				return out, false, nil
 			}
 		}
 	}
@@ -518,24 +626,41 @@ func parseSACDArea(r io.ReaderAt, g sacdGeometry, lsn int64) (sacdArea, bool) {
 			performer:      performers[i],
 		}
 	}
-	return out, true
+	return out, true, nil
 }
 
 // --- Expansion ---
 
-// ExpandSACDISO parses the container at absPath and mints one *Track per
-// stereo DST track. Returns (nil, nil) for a non-SACD image, a plain-DSD
-// (non-DST) stereo area, or a multichannel-only disc — v1 expands stereo
-// DST only, matching the iOS envelope; the scanner then upserts nothing
-// and the image stays invisible to clients (its file still lists in the
-// folder browser, where the client's own refusal copy covers taps).
+// ExpandSACDISO opens the container at absPath and expands it (expandSACD,
+// which says what each answer means). The scanner does not come through
+// here: processSACDISO opens through its own opener, so it can stat the
+// handle it read.
 func ExpandSACDISO(absPath, relPath string, size int64, mtime time.Time) ([]*Track, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	toc, err := parseSACDTOC(f)
+	return expandSACD(f, relPath, size, mtime)
+}
+
+// expandSACD parses the container read through r and mints one *Track per
+// stereo DST track. It returns (nil, nil) for a non-SACD image, a plain-DSD
+// (non-DST) stereo area, or a multichannel-only disc — v1 expands stereo
+// DST only, matching the iOS envelope; the scanner then upserts nothing and
+// the image stays invisible to clients (its file still lists in the folder
+// browser, where the client's own refusal copy covers taps).
+//
+// (nil, nil) is also the answer on which processSACDISO RETIRES every
+// virtual row the container had, at threshold 1 and journaled, so a
+// tombstone reaches every paired device. That is why it is given only when
+// every read it rests on COMPLETED (sacdReadOutcome): a read that failed,
+// the EIO, ETIMEDOUT or ESTALE of a NAS that is still serving the file,
+// comes back as an error, and an error retires nothing. A read that stopped
+// at the end of the file is an answer: a truncated image yields (nil, nil)
+// as before, as the iOS reader's short reads do.
+func expandSACD(r io.ReaderAt, relPath string, size int64, mtime time.Time) ([]*Track, error) {
+	toc, err := parseSACDTOC(r)
 	if err != nil || toc == nil {
 		return nil, err
 	}
