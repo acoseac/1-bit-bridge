@@ -639,6 +639,12 @@ lost my library."
   `runScanWorker`, not around the loop — a panicking file must skip and let the
   worker continue. A crash found by the extractor fuzz targets is a REAL defect:
   the recover means a panicking file silently never reaches the manifest.
+  **Nothing recovers the WALK's callback** (`walkRoot`, `ScanSubtree`), so a
+  panic there ends the scan and the process with it: what the walk logs about
+  an error goes through `walkErrReason`, which cannot panic. An `*fs.PathError`
+  without a cause panics in its own `Error()`, so a guard on the cause does not
+  help once the text is taken first, which is where the suggested fix put it
+  (Gemini on #1070; measured, the suggestion still panicked).
 - **Shutdown joins every background writer**, and the wait must be written
   INLINE in the defer, never routed through a variable assigned later in
   `runServe` — the first tracked goroutine starts ~1200 lines before the end, so

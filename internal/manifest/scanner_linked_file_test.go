@@ -337,6 +337,51 @@ func TestNotAFileNamesEachKindTheWalkRefuses(t *testing.T) {
 	}
 }
 
+// TestNoteUnreadableDescribesAnyErrorWithoutPanicking: the unreadable-links
+// line gives the example's error by its operation and cause, never the
+// absolute path an *fs.PathError names (#1055), and describing it must not
+// panic, whatever the error holds. noteUnreadable runs in the walk's
+// callback, which no recover covers (the workers' per-file recover does
+// not), so a panic there ends the scan and the process with it. os.Stat
+// builds none of the last three rows, but an *fs.PathError's own Error()
+// dereferences its cause, so a hand-built one without a cause panics in any
+// code that asks it for its text, a guard on pe.Err included when the text
+// is taken first.
+func TestNoteUnreadableDescribesAnyErrorWithoutPanicking(t *testing.T) {
+	const abs = "/srv/music/parked/01.flac"
+	notThere := &fs.PathError{Op: "stat", Path: abs, Err: fs.ErrNotExist}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"what os.Stat returns", notThere, "stat: file does not exist"},
+		{"the same, wrapped", fmt.Errorf("walk: %w", notThere), "stat: file does not exist"},
+		{"an error that names no path", errors.New("too many links"), "too many links"},
+		{"a PathError without a cause", &fs.PathError{Op: "stat", Path: abs}, "stat: <nil>"},
+		{"a nil *PathError", (*fs.PathError)(nil), "<nil>"},
+		{"no error at all", nil, "<nil>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var w walkTallies
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("noteUnreadable panicked: %v", r)
+					}
+				}()
+				w.noteUnreadable("Music/Album/01.flac", tc.err)
+			}()
+			if w.unreadable.detail != tc.want {
+				t.Errorf("described as %q, want %q", w.unreadable.detail, tc.want)
+			}
+			if strings.Contains(w.unreadable.detail, abs) {
+				t.Errorf("the description names the absolute path: %q", w.unreadable.detail)
+			}
+		})
+	}
+}
+
 // TestScanner_ALinkedTrackIsReExtractedWhenOnlyItsTargetChanged: the skip
 // gate compares the row with the walk's stat, so while that stat was the
 // link's, retagging the target (which leaves the link as it was) was never

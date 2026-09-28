@@ -2940,15 +2940,27 @@ type walkTallies struct {
 // noteUnreadable records the link at rel, whose target the walk could not
 // stat.
 func (w *walkTallies) noteUnreadable(rel string, err error) {
-	// An *fs.PathError names the absolute path it was asked about; a log
-	// line names a library file library-relative (#1055), and rel already
-	// says which.
-	reason := err.Error()
+	w.unreadable.note(rel, walkErrReason(err))
+}
+
+// walkErrReason describes err for a scan's line: an *fs.PathError by its
+// operation and cause, without the absolute path it names (a log line names a
+// library file library-relative, #1055, and the line's example already says
+// which).
+//
+// It must not panic, whatever err holds: it runs in the walk's callback,
+// which no recover covers (the workers' per-file recover does not), so a
+// panic there ends the scan and the process with it. An *fs.PathError's own
+// Error() dereferences its cause, so one without a cause (none that os
+// builds) panics in anything that asks it for its text, a guard on the cause
+// included when the text is taken first. Hence fmt, which answers "<nil>"
+// for a nil error and recovers a panicking Error method.
+func walkErrReason(err error) string {
 	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		reason = pe.Op + ": " + pe.Err.Error()
+	if errors.As(err, &pe) && pe != nil {
+		return pe.Op + ": " + fmt.Sprint(pe.Err)
 	}
-	w.unreadable.note(rel, reason)
+	return fmt.Sprint(err)
 }
 
 // noteNotAFile records the entry at rel, whose stat reports m.

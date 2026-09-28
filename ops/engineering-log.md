@@ -22834,3 +22834,23 @@ restored and the set re-run green:
 | NC-S4b: spared in the subtree walk alone | the same test, its subtree leg only |
 | NC-S5: the full walk does not tally what it refused | the directory-link test (0 lines, want 1), every case of the kinds test (1 line, want 2) |
 | NC-S5b: the subtree walk does not tally | every case of the kinds test |
+
+### Review round 1: describing an error must not panic
+
+Gemini (MEDIUM, twice: on 0d8ff285 and on 4cd01033) noted that
+`noteUnreadable` called `pe.Err.Error()` on an `*fs.PathError` whose cause
+may be nil. Nothing in os builds one, but the call runs in the walk's
+callback, which no recover covers (the workers' per-file recover does not),
+so a panic there ends the scan and the process. Both suggested fixes guard
+`pe.Err` and fall back to `err.Error()`, and that is no fix: a PathError's
+own `Error()` dereferences its cause, so the fallback panics on exactly the
+shape the finding describes. Measured with
+`TestNoteUnreadableDescribesAnyErrorWithoutPanicking`, whose rows recover
+the panic and report it: on 4cd01033, three rows panicked (a PathError
+without a cause, a nil `*fs.PathError`, a nil error), and with the second
+suggestion applied as written the same three still panicked.
+`walkErrReason` now describes the error, through `fmt`, which answers
+`<nil>` for a nil error and recovers a panicking `Error` method; the
+PathError branch also requires a non-nil `pe`, which `errors.As` sets for a
+typed nil. The six rows pass, and none names the absolute path. No other
+dereference of a cause is in the change.
