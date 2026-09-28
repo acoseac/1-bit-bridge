@@ -2399,9 +2399,9 @@ no failing test — which is the shape to expect in this area.
   the same reason: the subscriber's own address, never "any address like
   it"; a loopback callback names the host that SENDS the NOTIFY, and a
   link-local source proves nothing, since any device on the segment can take
-  one), never the unspecified address or a cloud metadata address (three of
-  those are private or public, and were admitted before), and still a
-  private address from any source. The NOTIFY goes out through
+  one), never the unspecified address or a cloud metadata address (#1074's
+  list; `fd00:ec2::254` is a ULA, which the private arm admitted from any
+  source before), and still a private address from any source. The NOTIFY goes out through
   `discovery.NewDeviceFetchClient` (no redirect, no proxy, no kept-alive
   connection, the dial check) under that approval
   (`discovery.WithDialApproval`), so each layer holds without the other:
