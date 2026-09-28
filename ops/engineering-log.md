@@ -21903,9 +21903,22 @@ from the second when the first cannot be read, and so can one with two
 different stereo areas or a signature under both geometries. Only failures
 that say so are injected (an EIO, another error, and a short read with none);
 a reader that reports the end of the file early is a truncation no reader
-can tell apart. `TestSACDFaultPropertySeesALyingReader` is the positive
-control: through such a reader the parser answers "not an SACD", and the
-property must say so.
+can tell apart.
+
+The first harness truncated the image at a fuzzed byte, and reviewing it
+before the PR found that this breaks the precondition: a cut inside a later
+copy leaves it short of what the first holds, so with the earlier copies
+unreadable it expands to less. Measured: an image cut 100 bytes into the
+second area copy's TTxt sector, with the first copy unreadable, expands to
+tracks titled "Track 1" where the fault-free read says "T1". That is a copy
+that differs, not a defect, so a cut now lands only between structures
+(`sacdFaultCuts`), where a later copy is either whole or absent. The fuzzer
+could not have reached it in practice (the cut is a uint32 walked by at most
+100 from its seeds' zero), but a nightly crasher from it would have been a
+false alarm. `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` is the
+property's positive control on both things the harness keeps out: the
+lying reader, through which the parser answers "not an SACD", and that cut
+image. Each must be reported as a violation.
 
 Its seeds fault each of the three reads #1061 made fail closed, and a copy
 that survives, and `TestSACDFaultSeedsReachTheFailure` requires each seed's
@@ -21919,10 +21932,11 @@ own seed left out, the fuzzer found the violation from the other seeds in
 fault at a sector's first byte or its payload found it in 3.2 s from the
 seeds and not in 90 s from the one seed, so the plain byte offset stayed.
 
-Runs on the committed tree, 4 workers, `-fuzzminimizetime 1s`:
-`FuzzSACDExpandUnderAReadFault` 3 min, 724,412 inputs, no violation; then
-a minute each of `FuzzParseSACDTOC` (935,328 inputs), `FuzzParseSACDArea`
-(1,052,395) and `FuzzSACDVirtualPathRoundTrip` (1,452,394), all passing.
+Runs, 4 workers, `-fuzzminimizetime 1s`: the first harness 3 min, 724,412
+inputs, no violation; the final one (cuts between structures) 3 min, 685,566 inputs, no violation;
+and a minute each of `FuzzParseSACDTOC` (935,328 inputs),
+`FuzzParseSACDArea` (1,052,395) and `FuzzSACDVirtualPathRoundTrip`
+(1,452,394), all passing.
 
 ### Tests and negative controls
 

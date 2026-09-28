@@ -526,8 +526,9 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 // manifest — a pre-existing property of the walk, not of this decision,
 // and widening it would raise the cycle question. A FILE behind a link is
 // indexed, and since 2026-09-28 under its target's stat (the manifest's
-// walkedFileInfo, which makes this function's "not a regular file" test),
-// so the manifest's size and mtime for it agree with this listing's.
+// walkedFileInfo, which asks resolveEntryInfo's question: is the entry a
+// regular file), so the manifest's size and mtime for it agree with this
+// listing's.
 //
 // **CodeQL `go/path-injection` on the Join below is a false positive of
 // the class dismissed for alerts #1-4** (see CLAUDE.md v0.1.4). Both

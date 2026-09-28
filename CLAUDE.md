@@ -159,7 +159,7 @@ Force re-enrichment if the DB is already populated from a prior run:
 sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
 ```
 
-**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags — the scanner's skip gate at `internal/manifest/scanner.go:511` compares the file's on-disk mtime against `Track.ModTime`, which is stored INSIDE the `tags_json` BLOB column (read back via `GetTrack` from `tags_json` alone, NOT the standalone `mtime_ns` column). A `UPDATE tracks SET mtime_ns = 0` looks like it should work but doesn't, because `GetTrack` never reads that column. To force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes you must wipe the affected `tracks` rows so the next scan re-inserts them from scratch.
+**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags: the scanner's skip gate (`runScanWorker`) compares the walk's size and mtime with the row's `size` and `mtime_ns` COLUMNS, read through `GetTrackStat`. **This paragraph said until 2026-09-28 that the gate compared the mtime inside `tags_json` (through `GetTrack`), so that `UPDATE tracks SET mtime_ns = 0` does not work. It does**: the gate has read the columns since it moved to `GetTrackStat` (#574), and measured through the Go store, a row whose `mtime_ns` was zeroed is re-extracted on the next scan, on the full upsert leg (its `enriched_at` resets, as for a changed file). So to force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes, zero `mtime_ns` on the affected rows or wipe them, either way through the Go helper below. In code, a change to what extraction produces bumps `ExtractorVersion` instead, whose diff-guard bounds the delta to rows that changed.
 
 **The old `sqlite3 … "DELETE FROM tracks;"` form here is BROKEN since migration v4** (corrected 2026-06-23). v4 added the expression index `tracks(unicode_lower(path))` (+ a `track_variants` twin), and `unicode_lower` is a Go-registered scalar (`internal/manifest/sqlfunc.go` `init()`), so an external `sqlite3` CLI `DELETE`/`UPDATE`/`INSERT` on those tables fails at prepare with `unknown function: unicode_lower()`. Dropping the index doesn't help — it's created only by the version-gated migration, so a restart won't recreate it. Two working paths:
 
@@ -351,14 +351,18 @@ lost my library."
   SACD targets' reader never fails): an image expanded through one failing
   read must answer what it answers fault-free, or an error. It holds only for
   an image carrying ONE answer, so the harness builds it with identical TOC
-  copies, one stereo area and one geometry; an image whose copies differ can
-  legitimately expand from the second, and a reader that reports the end of
-  the file early is a truncation nobody can tell apart, so only failures that
-  say so are injected. Its seeds fault each of the three reads above, and they
-  are what gives the fuzzer its reach: Go's mutator walks an integer by at
-  most 100, one argument per step, so with the DST probe's failure dropped
-  again it found the violation in 0.46 s from the other seeds, and not in
-  90 s (468,005 inputs) from one seed whose fault touched no read.
+  copies, one stereo area and one geometry, and truncates it only BETWEEN
+  structures (`sacdFaultCuts`): an image whose copies differ can legitimately
+  expand from the second, and a later copy cut short is one that differs
+  (measured: cut inside the second area copy's TTxt sector, it expands to
+  "Track 1" where the first says "T1"). A reader that reports the end of the
+  file early is a truncation nobody can tell apart, so only failures that say
+  so are injected; `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` shows
+  the property reporting both. Its seeds fault each of the three reads above,
+  and they are what gives the fuzzer its reach: Go's mutator walks an integer
+  by at most 100, one argument per step, so with the DST probe's failure
+  dropped again it found the violation in 0.46 s from the other seeds, and
+  not in 90 s (468,005 inputs) from one seed whose fault touched no read.
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the
@@ -586,9 +590,12 @@ lost my library."
   The upsert reset to 0 is load-bearing. Never touch it anywhere else — the
   `WHERE enriched_at = 0` query drives the worker, and a broad reset pushes a
   whole-library delta to every paired device.
-- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and `mtime_ns = 0`
-  looks like it should work but doesn't (`GetTrack` reads mtime from inside
-  `tags_json`). See `## Local test fixture` for the two working paths.
+- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and a zeroed
+  `mtime_ns` IS: the skip gate reads the `size` and `mtime_ns` columns through
+  `GetTrackStat` (measured 2026-09-28). This bullet said until then that
+  `mtime_ns = 0` does not work because `GetTrack` reads the mtime from inside
+  `tags_json`, which described the gate before #574 moved it to `GetTrackStat`. See
+  `## Local test fixture` for the working paths.
 - **The scanner excludes its own variant sidecars** via an ANCHORED filename
   match (`^(upscaled|optimized)-v\d+-\d+-\d+$` on the final dot-segment, with
   the part before it a supported audio ext). Don't loosen to a substring — it
