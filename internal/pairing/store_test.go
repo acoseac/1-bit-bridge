@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // helpers ---------------------------------------------------------------
@@ -1153,16 +1155,14 @@ func (h recordingLogHandler) WithGroup(string) slog.Handler      { return h }
 // captureLogs installs a recording slog handler as the default for the
 // duration of the test and returns a reader for the captured records. The
 // pairing package's `logger` (logging.Component) resolves slog.Default() at
-// log time, so this intercepts its output. Restored via t.Cleanup. Pairing
-// tests run sequentially (none call t.Parallel), so the process-global
-// SetDefault swap is safe here.
+// log time, so this intercepts its output. loggingtest.SetDefault puts back
+// the previous default and the log package's output and flags when the test
+// ends, and refuses a parallel test, since the default is one per process.
 func captureLogs(t *testing.T) func() []slog.Record {
 	t.Helper()
 	mu := &sync.Mutex{}
 	var recs []slog.Record
-	prev := slog.Default()
-	slog.SetDefault(slog.New(recordingLogHandler{mu: mu, records: &recs}))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(recordingLogHandler{mu: mu, records: &recs}))
 	return func() []slog.Record {
 		mu.Lock()
 		defer mu.Unlock()

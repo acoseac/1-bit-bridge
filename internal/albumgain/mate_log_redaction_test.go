@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative pins the one line the
@@ -19,9 +21,7 @@ import (
 // so it names the mate library-relative, as the privacy page promises.
 func TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative(t *testing.T) {
 	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&logs, nil)))
 
 	refs := album(3)
 	h := newHarness(t, refs...)

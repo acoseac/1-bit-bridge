@@ -3,10 +3,16 @@ package logging
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // TestComponentBeforeInit pins: a logger created before Init()
@@ -14,7 +20,7 @@ import (
 // panicking. This is the "package init logs from a test that
 // imports without calling Init" scenario.
 func TestComponentBeforeInit(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 	logger := Component("scanner")
 	if logger == nil {
 		t.Fatal("Component returned nil")
@@ -27,7 +33,7 @@ func TestComponentBeforeInit(t *testing.T) {
 // `component=<name>` attribute when written through the configured
 // handler.
 func TestComponentAttributesIncluded(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 
 	var buf bytes.Buffer
 	Init(&buf)
@@ -52,7 +58,7 @@ func TestComponentAttributesIncluded(t *testing.T) {
 // redirect scenario). Pre-fix this regressed because Component
 // captured the pre-Init handler and stuck with it.
 func TestPostInitRedirect(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 
 	// 1. Create a component logger BEFORE Init — simulates a
 	//    package-level `var logger = logging.Component(...)`.
@@ -81,7 +87,7 @@ func TestPostInitRedirect(t *testing.T) {
 // indirection: chained .With(...) calls must accumulate the
 // attrs into the published record.
 func TestWithAttrsAndGroup(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 	var buf bytes.Buffer
 	Init(&buf)
 
@@ -103,9 +109,9 @@ func TestWithAttrsAndGroup(t *testing.T) {
 // is inspectable. The pre-fix shim replayed all-groups-then-all-attrs, which
 // pushed the root `component` (and any pre-group attr) inside the later group.
 func TestDynamicHandler_PreservesGroupAttrInterleaving(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	loggingtest.SetDefault(t, slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	// component (root) → attr "a" (root) → group "g" → attr "b" (inside g).
 	Component("scanner").With("a", 1).WithGroup("g").With("b", 2).Info("hi")
@@ -144,7 +150,7 @@ func TestDynamicHandler_PreservesGroupAttrInterleaving(t *testing.T) {
 // calls and the resolved chain object is `==` between calls — same
 // pointer means no rebuild fired.
 func TestDynamicHandlerCachesResolvedChain(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 	var buf bytes.Buffer
 	Init(&buf)
 
@@ -178,7 +184,7 @@ func TestDynamicHandlerCachesResolvedChain(t *testing.T) {
 // this, post-Init / post-redirect logs would route to the old
 // handler indefinitely.
 func TestDynamicHandlerCacheInvalidatesOnSetDefault(t *testing.T) {
-	resetOnce()
+	resetOnce(t)
 	var buf1, buf2 bytes.Buffer
 	Init(&buf1) // base 1: writes to buf1
 
@@ -191,8 +197,9 @@ func TestDynamicHandlerCacheInvalidatesOnSetDefault(t *testing.T) {
 		t.Fatal("cache empty after first log call")
 	}
 
-	// Swap the default to a handler writing to buf2.
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf2, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// Swap the default to a handler writing to buf2. loggingtest.SetDefault
+	// is slog.SetDefault with the restore registered.
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf2, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	// Next log should detect the base change, rebuild, and route to buf2.
 	logger.Info("to-buf2")
@@ -216,12 +223,43 @@ func TestDynamicHandlerCacheInvalidatesOnSetDefault(t *testing.T) {
 	}
 }
 
-// resetOnce zeroes the package-level sync.Once so a subsequent
-// Init() reconfigures the handler. Test-only — production calls
-// Init exactly once at startup. We also reset slog.Default() so
-// post-test pollution doesn't bleed into TestComponentBeforeInit's
-// expectation that nothing has been configured yet.
-func resetOnce() {
+// resetOnce zeroes the package-level sync.Once so a subsequent Init()
+// reconfigures the handler, and points slog.Default() at a handler that
+// discards, so nothing configured by an earlier test reaches this one.
+// Test-only — production calls Init exactly once at startup.
+//
+// It also puts back, when the test ends, everything a test here changes,
+// which is what a test binary that never ran Init has: slog's default and
+// the log package's output and flags (loggingtest.SetDefault, which the
+// test's own Init and slog.SetDefault calls happen after), and a fresh
+// once. Before, it put back nothing: every later line in this binary went
+// into the last test's buffer. TestMain checks the four are back.
+func resetOnce(t *testing.T) {
+	t.Helper()
 	once = sync.Once{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { once = sync.Once{} })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})))
+}
+
+// TestMain checks, once every test here has run, that each put back what
+// Init and slog.SetDefault change: slog's default, the log package's output
+// and flags, and Init's once. These tests call Init unqualified, so the
+// scan that refuses a hand-rolled capture elsewhere
+// (TestNoTestSetsTheDefaultLoggerByHand, in cmd/bridge) cannot see them,
+// and a test that called Init without resetOnce(t) would leave the default
+// on its own buffer for every later test in this binary.
+func TestMain(m *testing.M) {
+	def, out, flags := slog.Default(), log.Writer(), log.Flags()
+	code := m.Run()
+	fresh := false
+	once.Do(func() { fresh = true })
+	if slog.Default() != def || log.Writer() != out || log.Flags() != flags || !fresh {
+		fmt.Fprintf(os.Stderr, "a test left slog's default (put back: %v), the log package's output (%v) "+
+			"or flags (%v), or Init's once (%v) changed; a test here goes through resetOnce(t)\n",
+			slog.Default() == def, log.Writer() == out, log.Flags() == flags, fresh)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }

@@ -263,16 +263,16 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// captureLogs points slog.Default at a buffer for the duration of a test.
-// logging.Component resolves slog.Default() at LOG time (never at
-// construction — see its docblock), so redirecting the default handler
-// reaches this package's package-level logger without a seam.
+// captureLogs points slog.Default at a buffer for the duration of a test,
+// through loggingtest.SetDefault, which puts back the previous default and
+// the log package's output and flags. logging.Component resolves
+// slog.Default() at LOG time (never at construction — see its docblock), so
+// redirecting the default handler reaches this package's package-level
+// logger without a seam.
 func captureLogs(t *testing.T) *syncBuffer {
 	t.Helper()
 	buf := &syncBuffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return buf
 }
 

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // lockedBuffer is a bytes.Buffer safe for the worker goroutine to write and
@@ -42,9 +44,7 @@ func (b *lockedBuffer) String() string {
 // `logging.Component` resolves at log time.
 func TestPoolLogsTheRedactedFailure(t *testing.T) {
 	buf := &lockedBuffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
