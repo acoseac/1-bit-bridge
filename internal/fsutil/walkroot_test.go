@@ -46,6 +46,19 @@ func walkedNames(t *testing.T, root string) (names []string, foreign []string) {
 	return names, foreign
 }
 
+// requireWalksLibraryTree asserts that a walk from WalkableRoot's answer for
+// root visits exactly wantLibraryTree, every path under root's own spelling.
+func requireWalksLibraryTree(t *testing.T, root string) {
+	t.Helper()
+	names, foreign := walkedNames(t, root)
+	if strings.Join(names, " ") != strings.Join(wantLibraryTree, " ") {
+		t.Errorf("walk through %s visited %v, want %v", root, names, wantLibraryTree)
+	}
+	if len(foreign) > 0 {
+		t.Errorf("walk through %s reported paths outside its spelling: %v", root, foreign)
+	}
+}
+
 // libraryTree makes a directory holding Artist/Album/01.flac.
 func libraryTree(t *testing.T) string {
 	t.Helper()
@@ -94,13 +107,7 @@ func TestWalkableRootDescendsALinkedRoot(t *testing.T) {
 			t.Fatalf("premise: a walk of the link %s itself visited %v, want the link alone", root, raw)
 		}
 
-		names, foreign := walkedNames(t, root)
-		if strings.Join(names, " ") != strings.Join(wantLibraryTree, " ") {
-			t.Errorf("walk through %s visited %v, want %v", root, names, wantLibraryTree)
-		}
-		if len(foreign) > 0 {
-			t.Errorf("walk through %s reported paths outside its spelling: %v", root, foreign)
-		}
+		requireWalksLibraryTree(t, root)
 	}
 }
 

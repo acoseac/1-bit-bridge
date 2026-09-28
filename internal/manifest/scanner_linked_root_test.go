@@ -189,6 +189,19 @@ func requireRowsResolveTo(t *testing.T, store *Store, roots []string, prefix, di
 	}
 }
 
+// scanTheRoot runs a full scan, or with subtree a subtree scan of root, and
+// fails the test on an error.
+func scanTheRoot(t *testing.T, sc *Scanner, root string, subtree bool) {
+	t.Helper()
+	if !subtree {
+		scanOnce(t, sc, "full scan")
+		return
+	}
+	if _, err := sc.ScanSubtree(context.Background(), root); err != nil {
+		t.Fatalf("subtree scan of %s: %v", root, err)
+	}
+}
+
 // TestScanner_ALinkedRootIsWalkedThrough is the defect: a root that is a link
 // to a directory, or a link to such a link, indexed nothing (measured: 0 rows
 // against 2 with the same root spelled with a trailing slash), by Scan or by
@@ -214,13 +227,7 @@ func TestScanner_ALinkedRootIsWalkedThrough(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store, sc := newScanFixture(t, c.root)
-			if c.subtree {
-				if _, err := sc.ScanSubtree(context.Background(), c.root); err != nil {
-					t.Fatalf("subtree scan: %v", err)
-				}
-			} else {
-				scanOnce(t, sc, c.name)
-			}
+			scanTheRoot(t, sc, c.root, c.subtree)
 			requireRowsResolveTo(t, store, []string{c.root}, "", target)
 		})
 	}
@@ -250,13 +257,7 @@ func TestScanner_ALinkedRootInMultiRootModeKeepsItsConfiguredName(t *testing.T) 
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			sc := NewScanner(roots, store, "")
-			if subtree {
-				if _, err := sc.ScanSubtree(context.Background(), link); err != nil {
-					t.Fatalf("subtree scan: %v", err)
-				}
-			} else {
-				scanOnce(t, sc, "multi-root scan")
-			}
+			scanTheRoot(t, sc, link, subtree)
 			requireRowsResolveTo(t, store, roots, "music/", target)
 		})
 	}

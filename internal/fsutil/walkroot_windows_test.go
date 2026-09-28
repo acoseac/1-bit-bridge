@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -30,11 +29,5 @@ func TestWalkableRootDescendsARealJunction(t *testing.T) {
 	if own.IsDir() || own.Mode()&fs.ModeIrregular == 0 {
 		t.Fatalf("premise: os.Lstat of a junction is %v, want ModeIrregular without ModeDir", own.Mode())
 	}
-	names, foreign := walkedNames(t, junction)
-	if strings.Join(names, " ") != strings.Join(wantLibraryTree, " ") {
-		t.Errorf("walk through the junction visited %v, want %v", names, wantLibraryTree)
-	}
-	if len(foreign) > 0 {
-		t.Errorf("walk through the junction reported paths outside its spelling: %v", foreign)
-	}
+	requireWalksLibraryTree(t, junction)
 }
