@@ -26867,8 +26867,9 @@ and was left: what it inserts there is a stub, which ages out after RendererTTL.
   drop first, and refuses when none is left.
 - `structuralStubHold` (5 minutes): a structural stub is stamped
   `structuralStubLastSeen(failedAt, ttl)` = failedAt + hold - ttl, so the
-  existing `EvictStale` drops it on time. Only stubs carry a future
-  LastSeenAt, and `Snapshot` never serves a stub.
+  existing `EvictStale` drops it at the hold. The stamp falls after the
+  failure under the default TTL and before it under a TTL longer than the
+  hold (review round 1, below); `Snapshot` never serves a stub.
 - The renderer client: `store` (a refused result drops the location record the
   fetch had just written) and a reap of its records whenever they reach
   `maxLocationUDNs` (2 × (256 + 64)), since the cache is shared by one client
@@ -26963,10 +26964,62 @@ On the committed branch, one mutation at a time, the file restored after each:
 | NC15: the wiring compares case | the same test |
 | B38: the loopback binding and the discarding `writeMSearch` undone | not a test: the listener, as above (899 NOTIFYs and 7 M-SEARCHes on en0 against 0) |
 
+### Review round 1 (CodeRabbit on 80fb2f4c)
+
+**The hold clamped to the TTL (Major, taken).** The first
+`structuralStubLastSeen` returned the failure time itself whenever the TTL
+was at least the hold, so under a longer TTL the stub lived the whole TTL.
+That is reachable: `dlna.discovery.rendererTTLSeconds` is validated between
+0 and a year (`maxIntervalSeconds`) and only has to exceed the M-SEARCH
+interval, and `EffectiveRendererTTL` passes it through. A bridge configured
+at ten minutes held a renderer whose description answered 404 once out of
+`/v1/renderers` for ten minutes, and one configured at a day for a day: the
+year-2999 stub's hiding of a real renderer, bounded by the TTL rather than
+by nothing. The stamp is now failedAt + hold - ttl always, which is BEFORE
+the failure there. What reads a stub's LastSeenAt, checked: `EvictStale`
+(stale once now - stamp > ttl, so at the hold), `makeRoomLocked` (earliest
+stamp first; every entry expires a TTL after its stamp, so that is still
+the order of expiry, and under a long TTL a structural stub now goes before
+a transient one that failed earlier), and nothing else: `Snapshot` skips an
+entry with no ControlURL, `rendererCacheAdapter.Snapshot`, the only source
+of `/v1/renderers`, reads only `Snapshot` (the console has no renderer
+view), and the handler's exists-branch returns on a stub without reading
+its stamp.
+
+**The advertiser tests and a failed pin (Minor, taken test-side).** Start
+only warns when `SetMulticastInterface` fails and then sends on the OS
+default interface, and the three advertiser tests skipped only on Start's
+error, so on a host where the pin to loopback fails they would multicast
+onto the LAN again. CodeRabbit proposed making Start return the error. That
+was declined: the fallback is documented and deliberate (a single-NIC host
+where the OS default IS the LAN should not lose DLNA over an unbindable
+option), and on a host where the pin fails for the interface the join just
+succeeded on, the default interface is the only way that advertiser's
+NOTIFYs go anywhere. `loopbackInterface` instead pins a socket of its own
+first, dialed as Start dials its sender, with Start's own call
+(`pinMulticastInterface`, extracted with no behaviour change), and skips
+where that fails.
+
+The Windows leg of 80fb2f4c settles what the entry above left open there:
+its log shows every advertiser test starting on "Loopback Pseudo-Interface
+1" with no pin warning, so on the runner the join and the pin both take and
+the tests run, not skip. What leaves a Windows host was still not measured.
+
+Tests: `TestAStructuralStubGoesAtTheHoldWhateverTheTTL` (TTLs of one
+minute, five minutes, twenty minutes and a year: present a second before the
+hold, gone a second after), `TestARendererWhoseDescriptionFailedOnceComesBackAfterTheHold`
+now under the default TTL and twenty minutes, and
+`TestAStubMakesRoomInTheOrderItWouldExpireUnderALongTTL`.
+
+| mutation | result |
+|---|---|
+| NC-R1: the stamp clamped to the failure again | red: the twenty-minute and one-year subtests of the first test, the twenty-minute subtest of the second, and the order test; the one- and five-minute subtests stay green |
+| NC-R2a: `pinMulticastInterface` always fails, the check in place | all three advertiser tests SKIP; the en0 listener hears none of their datagrams (two unrelated LAN M-SEARCHes in the window) |
+| NC-R2b: the same, with the check removed | the lifecycle test (run alone, to keep the traffic small) PASSES after Start logs the fallback warning, and 10 of its datagrams (5 alive, 5 byebye) reach en0 |
+
 ### Left open
 
-- Windows: loopback multicast was not measured there; the two advertiser
-  tests skip if its loopback refuses the join, as they did where multicast was
-  unavailable.
+- Windows: what leaves the host was not measured; on the runner the join
+  and the pin to loopback both take (review round 1, above).
 - B71: `IP_MULTICAST_ALL` and a multi-homed Linux bridge's advertisers.
 - (3) and (5), as decided above.

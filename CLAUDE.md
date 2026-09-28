@@ -2759,9 +2759,14 @@ no failing test — which is the shape to expect in this area.
   hours of healthy announcements). The upstream cache kept every MediaServer
   serving a valid description (100,000 held 45 MB, and LiveHost's folded
   fallback copied all of them per routed byte fetch: 7.7 ms, 18 MB).
-  **A structural stub lasts `structuralStubHold` (5 minutes)**, stamped
-  `hold - ttl` past the failure so `EvictStale` drops it on time; it still
-  costs a broken device one GET per hold, not per cycle. **The renderer
+  **A structural stub lasts `structuralStubHold` (5 minutes) whatever the
+  TTL**, stamped `hold - ttl` from the failure so `EvictStale` drops it at
+  the hold: BEFORE the failure under a TTL longer than the hold, which
+  `dlna.discovery.rendererTTLSeconds` admits up to a year. The first form
+  clamped the stamp to the failure there and held the stub for the whole
+  TTL (CodeRabbit on #1086). Nothing but eviction reads the stamp, and the
+  earliest stamp is still the earliest expiry. A stub still costs a broken
+  device one GET per hold, not per cycle. **The renderer
   cache makes room by evicting the stub that expires first**, and refuses a
   new UDN once only renderers it serves are left (`makeRoomLocked`): a
   served renderer is what a phone may be driving, and a new UDN is what any
@@ -2862,15 +2867,24 @@ no failing test — which is the shape to expect in this area.
   Measured after: 0 datagrams on en0 in three runs of each package, while a
   lo0 listener heard the advertisers' NOTIFYs; on Linux 0 on the Docker
   bridge, where main put 299. **A new test that starts an advertiser or a
-  client does the same.** **Measure what leaves a Linux host from ANOTHER
-  network namespace, or with tcpdump on the bridge, never with a listener
+  client does the same.** **The skip is decided by the PIN, not only by
+  Start's error**: Start only warns when `SetMulticastInterface` fails, and
+  sends on the OS default interface, so a test whose Start succeeded would
+  multicast onto the LAN on such a host. `loopbackInterface` first pins a
+  socket of its own with Start's own call (`pinMulticastInterface`) and
+  skips where that fails (CodeRabbit on #1086). The fallback itself stays:
+  a production advertiser whose pin fails still advertises. **Measure what
+  leaves a Linux host from ANOTHER network namespace, or with tcpdump on
+  the bridge, never with a listener
   in the same one**: Go binds a multicast listener to the group address, and
   with Linux's default `IP_MULTICAST_ALL` a socket joined on one interface
   also receives the group's datagrams arriving on any interface another
   socket joined (a listener on eth0 heard the loopback advertisers' NOTIFYs,
   and one on lo heard eth0's). The same default reaches a multi-homed Linux
-  bridge's advertisers (backlog B71). Windows was not measured; the tests
-  skip there if its loopback refuses the join.
+  bridge's advertisers (backlog B71). On the Windows runner the join and
+  the pin both take on "Loopback Pseudo-Interface 1": the tests run there,
+  and its log shows them starting with no pin warning. What leaves a
+  Windows host was not measured.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
