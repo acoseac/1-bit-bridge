@@ -54,6 +54,63 @@ func firstInstallName() string {
 	return config.DefaultLibraryName
 }
 
+// initAddresses is the API and admin address a run of `bridge init` writes:
+// the loopback defaults, or a public run's. It is the one definition of both.
+// The preflight grades their ports wherever no install's config names its
+// own, and initCmd builds the config from them, so the preflight cannot grade
+// one port while the config gets another. Until 2026-09-28 the preflight
+// graded 7788 and 7789 there whatever the run wrote, so another process on
+// 7788 refused a public first install that would never bind it.
+//
+// A public run listens on :443, which ACME's TLS-ALPN-01 challenge needs. Its
+// admin console's default depends on the TLS posture (CodeRabbit Major review
+// post-PR-#295):
+//
+//   - The bridge terminating the console's TLS itself (no --admin-tls-proxy):
+//     0.0.0.0:7789, so the operator's iOS management surface can reach it
+//     from any interface. The TLS wrap via certManager is the trust boundary.
+//   - --admin-tls-proxy: 127.0.0.1:7789. The reverse proxy talks to it on
+//     loopback, and the bridge MUST NOT serve a plain-HTTP console on another
+//     interface, which would leak session cookies and login credentials if
+//     the firewall is mis-wired or the proxy is briefly down. The 0.0.0.0
+//     default before that review was an unsafe shape.
+//
+// --listen-address and --admin-address win over both defaults. They are read
+// on a public run only, and initCmd refuses a value the config's own check
+// refuses before it calls this.
+func initAddresses(public, proxy bool, listenFlag, adminFlag string) (listen, admin string) {
+	if !public {
+		return config.DefaultListenAddress, config.DefaultAdminAddress
+	}
+	listen, admin = ":443", "0.0.0.0:7789"
+	if proxy {
+		admin = "127.0.0.1:7789"
+	}
+	if listenFlag != "" {
+		listen = listenFlag
+	}
+	if adminFlag != "" {
+		admin = adminFlag
+	}
+	return listen, admin
+}
+
+// portsThisInitWrites is what init prints under a preflight report whose
+// port-api or port-admin check FAILed on the ports this run writes, which the
+// preflight grades wherever no install's config names its own
+// (initAddresses). Those lines are about the run's choice, not a verdict
+// about an install that is there. A public run chooses its ports with the
+// address flags, which the check's own hint, written for an install that has
+// a bridge.yaml, cannot name; a loopback run writes the defaults, which that
+// hint's bridge.yaml changes once init has written it.
+func portsThisInitWrites(public bool) string {
+	const lead = "port-api and port-admin above grade the ports this init would write"
+	if public {
+		return lead + "; --listen-address and --admin-address choose others."
+	}
+	return lead + ", its defaults."
+}
+
 // initCmd walks a first-time operator through the minimum answers needed
 // to get a running bridge: config dir, library root, then writes
 // bridge.yaml, mints the TLS cert, installs a launchd/systemd user unit,
@@ -120,7 +177,27 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "--public requires --email <addr> (used for Let's Encrypt account registration)\n")
 			return 2
 		}
+		// An address the config's own check refuses is refused here, before
+		// the preflight, which grades the port an address names and has no
+		// port to grade for one that does not parse. Until 2026-09-28 it was
+		// refused only at the validation before Save, after a preflight that
+		// had graded 7788 in its place.
+		for _, f := range []struct{ flag, addr string }{
+			{"--listen-address", *publicListenAddress},
+			{"--admin-address", *publicAdminAddress},
+		} {
+			if f.addr == "" {
+				continue
+			}
+			if err := config.ValidateBindAddress(f.flag, f.addr); err != nil {
+				fmt.Fprintf(stderr, "%v\n", err)
+				return 2
+			}
+		}
 	}
+	// The addresses this run writes, which the preflight grades wherever no
+	// install's config names its own (initAddresses).
+	listenAddr, adminAddr := initAddresses(*publicMode, *publicProxy, *publicListenAddress, *publicAdminAddress)
 
 	cfgDir := *cfgDirFlag
 	if cfgDir == "" {
@@ -244,21 +321,41 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// the data dir init writes, excusing only a port that bridge is seen
 	// listening on.
 	//
-	// preflightDeps is kept for the SECOND port pass below: the ports
-	// graded here are the install's CURRENT ones, and a run that goes on
-	// to overwrite the config may be about to save different ones.
+	// The ports graded are the install's where its config loads, and
+	// otherwise the ones this run writes (initAddresses): on a first
+	// install, or over a config that does not load, nothing says which
+	// ports an install binds, and this run's are the ones its bridge will.
+	// They were init's defaults there, 7788 and 7789, until 2026-09-28,
+	// which a public run does not write: another process on 7788 (a second
+	// bridge beside the operator's, say) refused a public first install over
+	// a port it would never bind. A refusal on those ports says whose they
+	// are, since it is not a verdict about an install (portsThisInitWrites).
+	//
+	// preflightDeps is kept for the SECOND port pass below: where the
+	// config loads, the ports graded here are the install's CURRENT ones,
+	// and a run that goes on to overwrite the config may be about to save
+	// different ones. Where none loads they are this run's already.
 	var preflightDeps doctor.Deps
 	if !*skipDoctor {
+		// Both addresses parse: the defaults and a public run's own do, and
+		// a flag's value was refused above unless it passes the config's
+		// check.
+		apiPort, _ := configuredPort(listenAddr)
+		adminPort, _ := configuredPort(adminAddr)
 		d := doctor.Deps{
 			ConfigDir:    cfgDir,
 			DataDir:      dataDir,
 			LibraryRoots: namedRoots,
-			APIPort:      7788,
-			AdminPort:    7789,
+			APIPort:      apiPort,
+			AdminPort:    adminPort,
 		}
-		withExistingInstallDeps(&d, cfgPath)
+		installPorts := withExistingInstallDeps(&d, cfgPath)
 		preflightDeps = d
-		if code := ensureDoctorClean(stdout, d); code != 0 {
+		if report, code := ensureDoctorClean(stdout, d); code != 0 {
+			if !installPorts && report.PortFailed() {
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, portsThisInitWrites(*publicMode))
+			}
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
 			return 1
@@ -368,10 +465,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	cfg := baseConfig(roots, name, dataDir)
+	// The addresses the preflight graded, where no install's config named
+	// its own: one definition for both (initAddresses).
+	cfg.ListenAddress, cfg.AdminAddress = listenAddr, adminAddr
 	if *publicMode {
 		// Public-mode YAML shape (PR 5). Defaults:
-		//   listenAddress: :443       (ACME prerequisite — TLS-ALPN-01)
-		//   adminAddress:  :7789      (operator can override via --admin-address)
+		//   listenAddress / adminAddress: initAddresses
 		//   tailscale.mode: disabled  (applyDefaults sets this; explicit
 		//                              for readability of saved YAML)
 		//   mdns.enabled:   false     (no LAN to advertise on)
@@ -379,33 +478,6 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		//   autocert: { enabled, domain, email } OR
 		//             { domain } + AdminTLSTerminatedByProxy when --admin-tls-proxy
 		cfg.Deployment.Mode = "public"
-		cfg.ListenAddress = ":443"
-		if *publicListenAddress != "" {
-			cfg.ListenAddress = *publicListenAddress
-		}
-		// Admin bind default depends on TLS posture
-		// (CodeRabbit Major review post-PR-#295). Operator
-		// override via --admin-address ALWAYS wins.
-		//   - autocert-direct-TLS (no --admin-tls-proxy):
-		//     defaults 0.0.0.0:7789 so the operator's iOS
-		//     management surface can reach it from any
-		//     interface. The TLS wrap via certManager is the
-		//     trust boundary.
-		//   - --admin-tls-proxy: defaults 127.0.0.1:7789. The
-		//     reverse proxy talks to it on loopback; the
-		//     bridge MUST NOT serve plain-HTTP admin on
-		//     non-loopback interfaces (would leak session
-		//     cookies / login creds if firewall is mis-wired
-		//     or proxy is briefly down). The 0.0.0.0 default
-		//     pre-fix was an unsafe shape.
-		if *publicProxy {
-			cfg.AdminAddress = "127.0.0.1:7789"
-		} else {
-			cfg.AdminAddress = "0.0.0.0:7789"
-		}
-		if *publicAdminAddress != "" {
-			cfg.AdminAddress = *publicAdminAddress
-		}
 		cfg.Autocert.Domain = *publicDomain
 		// customEndpoint: append the listen port unless it's
 		// :443 (port 443 is the https default — iOS dials
@@ -434,16 +506,17 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
 	}
-	// The ports this run is about to SAVE, which the preflight could not
-	// have graded: it ran before the keep-or-overwrite decision, against
-	// the config already on disk. For the certificate that reading is
-	// right and deliberate — init does not rewrite the cert, so the pair
-	// on disk IS the pair. The ports are the opposite: baseConfig always
-	// seeds the loopback defaults and --public replaces them, so an
-	// install on :9090/:9091 was graded on 9090/9091 and then handed
+	// The ports this run is about to SAVE, where the preflight graded
+	// others: it ran before the keep-or-overwrite decision, against the
+	// config already on disk when that config loads. For the certificate
+	// that reading is right and deliberate — init does not rewrite the
+	// cert, so the pair on disk IS the pair. The ports are the opposite:
+	// a rewrite writes this run's (initAddresses), so an install on
+	// :9090/:9091 was graded on 9090/9091 and then handed
 	// :7788/127.0.0.1:7789 — and if something else holds 7789, the
 	// operator learns it from a `bridge serve` that cannot bind, having
-	// just been told the host was fine.
+	// just been told the host was fine. Where no config loads, the
+	// preflight graded this run's ports already, and nothing here differs.
 	//
 	// Before Save, so a refusal leaves the existing config intact, and
 	// only over the ports that actually CHANGED: an unchanged one was
@@ -463,13 +536,16 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// the defect this whole pass exists for (CodeRabbit on #970).
 	//
 	// Except where the install's config did not load
-	// (OwnPIDPortsUnknown). Then the preflight graded init's defaults, so
-	// "changed" means only "not a default", and the port may well be the
-	// running bridge's own, as on a public re-init over a broken public
-	// config. Cleared, the pid file would refuse the bridge's own listeners
-	// here, as the preflight used to. It is kept, and it already excuses
-	// nothing but the recorded bridge seen listening on the port, the one
-	// arm of the ladder a port the run is choosing may be excused by.
+	// (OwnPIDPortsUnknown), where the pid file is kept for any port this
+	// pass grades. No config says which ports that bridge binds, so a port
+	// this run chooses may well be its own, as on a public re-init over a
+	// broken public config, and cleared, the pid file would refuse the
+	// bridge's own listeners. Kept, it excuses nothing but the recorded
+	// bridge seen listening on the port, the one arm of the ladder a port
+	// the run is choosing may be excused by. The preflight grades that
+	// mode's ports from the one definition this config is built from, so
+	// no port reaches this pass there today; until 2026-09-28 it graded
+	// init's defaults, and a public re-init's own ports were graded here.
 	if !*skipDoctor {
 		d := preflightDeps
 		apiPort, apiOK := configuredPort(cfg.ListenAddress)
@@ -1150,22 +1226,27 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 //
 // A config that is there and does not load (a misspelt key, say) is the
 // re-init that exists to replace it, often while the install's bridge is
-// still serving. config.Load cannot read it, so the preflight grades init's
-// default ports, as for a first install, and the pair the file names as
-// written (readPriorInstall), the one the rewrite keeps. It graded the
-// default pair in init's data dir until 2026-09-27, and over a config
-// naming its own answered ok, "absent (init will mint)". But the ports are
-// not the only fact here: `bridge serve` records its pid in the data dir,
-// the one d.DataDir names (the file's, which the rewrite keeps, or init's
-// own where the file cannot be read), so the bridge this run replaces is
-// known without the config. Without it, that bridge's own listeners read
-// as another process's, both port checks FAILed, and the re-init refused
-// (measured on 2026-09-25, #1022's log entry). Its ports are unknown,
-// though, so only the probe seeing it listen on a port excuses that port
-// (doctor's checkChosenPort), never its being alive: an install that had
-// moved off the defaults has a live bridge on its own ports while another
-// process may hold the one init writes.
-func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
+// still serving. config.Load cannot read it, so the preflight grades the
+// ports the caller seeded d with, the ones this run writes (initAddresses),
+// as for a first install, and the pair the file names as written
+// (readPriorInstall), the one the rewrite keeps. It graded the default pair
+// in init's data dir until 2026-09-27, and over a config naming its own
+// answered ok, "absent (init will mint)". But the ports are not the only
+// fact here: `bridge serve` records its pid in the data dir, the one
+// d.DataDir names (the file's, which the rewrite keeps, or init's own where
+// the file cannot be read), so the bridge this run replaces is known without
+// the config. Without it, that bridge's own listeners read as another
+// process's, both port checks FAILed, and the re-init refused (measured on
+// 2026-09-25, #1022's log entry). Its ports are unknown, though, so only the
+// probe seeing it listen on a port excuses that port (doctor's
+// checkChosenPort), never its being alive: an install that had moved off the
+// defaults has a live bridge on its own ports while another process may hold
+// the one init writes.
+//
+// It reports whether the install's config loaded, which is whether the
+// ports in d are now the install's. Where it did not, they are still the
+// caller's.
+func withExistingInstallDeps(d *doctor.Deps, cfgPath string) (loaded bool) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		// A first install has nothing at cfgPath and stays as it is. With
@@ -1178,7 +1259,7 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 				d.TLSCertPath, d.TLSKeyPath = prior.TLSCertPath, prior.TLSKeyPath
 			}
 		}
-		return
+		return false
 	}
 	d.TLSCertPath, d.TLSKeyPath = resolveCertPaths(cfg)
 	// The same helper `bridge serve`, `bridge cert rotate` and `bridge
@@ -1220,6 +1301,7 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 	// than fixed, in the command whose whole job here is to grade the
 	// install that is there.
 	d.OwnPIDFile = filepath.Join(cfg.DataDir, "server.pid")
+	return true
 }
 
 // maxLibraryPrompts bounds the interactive library-path re-prompt loop so a

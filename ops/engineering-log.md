@@ -21750,6 +21750,172 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — bridge init's preflight grades the ports the run writes where no config loads
+
+#1027's entry recorded this under Out of scope: "The preflight grades init's
+defaults on a public run (a first install or, now, a broken config), ports a
+public init does not write. Another process on 7788 refuses such a run."
+
+### What was measured
+
+- **The mechanism.** initCmd seeded the preflight's `doctor.Deps` with
+  `APIPort: 7788, AdminPort: 7789`, and `withExistingInstallDeps` replaced
+  them only from a config at the target path that loads. On a first install,
+  and over a config that is there and does not load, the preflight graded
+  7788 / 7789 whatever the run wrote. A `--public` run writes `:443` (or
+  `--listen-address`) and `0.0.0.0:7789` / `127.0.0.1:7789` behind
+  `--admin-tls-proxy` (or `--admin-address`), which only the second port
+  pass graded, after the preflight had already refused on 7788.
+- **End to end, the real binary** (`go build` at 99b6d1e6 and at this
+  change, the dev Mac, every run with stdin `/dev/null`), 127.0.0.1:7788
+  held by a python listener, not a bridge:
+
+  | | run | 99b6d1e6 | this change |
+  |---|---|---|---|
+  | 1 | public first install, `--admin-tls-proxy --listen-address 127.0.0.1:A --admin-address 127.0.0.1:B`, A and B free | exit 1, `[FAIL] port-api :7788 in use`, "another process owns this port; stop it or pick a different address in bridge.yaml", nothing written | exit 0, config on A / B |
+  | 2 | public first install on its defaults (`--email`, so `:443` and `0.0.0.0:7789`) | exit 1, the same FAIL | exit 0, one warn: `port-api :443 not bindable` (EACCES for this user there) |
+  | 3 | a config that does not load (`libraryNmae: typo`), the public re-init on A / B with `--force` | exit 1, the same FAIL, config unchanged | exit 0, config replaced |
+  | 4 | control: loopback first install, which writes `:7788` | exit 1, the same FAIL | exit 1, the same FAIL, and "port-api and port-admin above grade the ports this init would write, its defaults." |
+  | 1b | row 1 with 7788 free | exit 0 | exit 0 |
+
+- **Not a defect of the preflight, found beside it (row 5):** a loopback
+  first install given `--listen-address` and `--admin-address` exits 0 and
+  saves `:7788` / `127.0.0.1:7789`. The flags are read on a public run only
+  (their help says "with --public"), so there the preflight's 7788 / 7789 are
+  the ports the run writes. Left as it is; see Out of scope.
+
+### Decisions
+
+- **Seed the preflight with the ports the run writes** where no config
+  loads. `initAddresses(public, proxy, listenFlag, adminFlag)` is the one
+  definition of the two addresses: initCmd builds the config from it (in
+  both postures, so on a loopback run baseConfig's defaults are overwritten
+  with the same values), and the preflight's `Deps` are seeded with its
+  ports before `withExistingInstallDeps`, which replaces them with the
+  install's own where the config loads (unchanged) and now reports whether
+  it did (`loaded`). The preflight then grades exactly what the second pass
+  would have, and that pass finds nothing changed where no config loaded.
+- **Rejected: leave the preflight's port checks out where no config loads
+  and let the second pass grade the run's ports.** doctor.Run has no way to
+  leave a check out, so it needs a new `Deps` knob, and the second pass runs
+  after the name and "Overwrite?" prompts and after `os.MkdirAll(dataDir)`:
+  a refused first install would leave its data dir behind. Seeded, the
+  refusal comes before any prompt and before init writes anything (the
+  preflight's own config-dir probe still makes the config dir, as it always
+  has).
+- **The second pass still compares, and keeps its `OwnPIDPortsUnknown`
+  exception.** No path through initCmd reaches it in that mode now, since
+  the preflight graded the same ports. Rejected: gating the pass on
+  `loaded`, which would stop grading a port the config could come to hold
+  apart from `initAddresses` (a later change keeping a broken file's ports,
+  say), where comparing still catches it, in the right mode. #1027's NC-C
+  (the pass clears the pid file as before) no longer bites, as expected:
+  its row C is decided by the preflight.
+- **A refusal on the run's ports says so under the report.** The preflight
+  report grades an install in every other line, and the port checks' own
+  hint ("stop it or pick a different address in bridge.yaml") is written
+  for an install whose bridge.yaml names the port, which a first install
+  has not got. `portsThisInitWrites` prints one line, only when no config
+  loaded and a port check FAILed (`doctor.Report.PortFailed`, new): on a
+  public run "port-api and port-admin above grade the ports this init would
+  write; --listen-address and --admin-address choose others.", on a
+  loopback run "… would write, its defaults.". Where a config loads, the
+  lines are a verdict about the install and nothing is added. Over a config
+  that does not load with `--yes` and no `--force` the run keeps the config
+  and writes nothing, so "would write" is conditional there; the preflight
+  graded init's defaults for that run before, which the kept config need
+  not use either. Left.
+- **A public run's address flag the config's own check refuses is refused
+  before the preflight**, exit 2 (`config.ValidateBindAddress`, the
+  unexported `validateBindAddress` renamed so init and Validate share it).
+  The preflight has no port to grade for an address that does not parse.
+  Measured under NC5 below, without the check: `--listen-address 443`
+  printed `[warn] port-api no port set` with the hint `pass
+  Deps.port-apiPort`, then exited 1 at the validation before Save
+  (`validate: listenAddress "443": address 443: missing port in address`)
+  with the config and data dirs made. Rejected: keep 7788 / 7789 for such an
+  address (the defect this change removes, for one more input), or seed 0
+  (that warn).
+- **Consult**: a direct Gemini consult (`consult.py`) on the design was
+  refused, HTTP 429, the project's monthly spending cap. Decided without it.
+
+### Tests
+
+- `cmd/bridge/init_run_ports_test.go`, all through the real `initCmd`:
+  `TestInitPublicFirstInstallIsNotRefusedOverPortsItDoesNotWrite` (7788 and
+  7789 held with `holdLoopbackPort`: bound by the test, or found held),
+  `TestInitOverABrokenConfigIsNotRefusedOverPortsItDoesNotWrite` (the same
+  over a config that does not load, the data dir recording this binary's
+  parent, alive and holding nothing), `TestInitPreflightRefusesAPortTheRunWrites`
+  (one row per way the run's ports are chosen: a public run's flags, the
+  admin port a public run defaults to, a loopback run's defaults; each must
+  FAIL port-admin on the held port, print the line, and leave no data dir
+  and no config), `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`
+  (the control: a config that loads, its listen port held, a keep; no line),
+  `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` (exit 2, the flag named
+  with its value, no config dir at all).
+- `internal/doctor`: `TestReportPortFailed`.
+- Adapted: `TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding`
+  asserted "these are the ports this init would write", the second pass's
+  line; the preflight refuses there now, so it asserts the preflight's line
+  and a FAIL on each held port. It and
+  `TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites` lost
+  `requireDefaultPortsFreeOrSkip` (deleted): the preflight no longer grades
+  the defaults on a public run, so a host where something holds them runs
+  both instead of skipping. `TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`
+  also asserts the loopback line. The three helper tests
+  (`…PointsAnUnloadableConfigAtItsDataDirsPidFile`,
+  `…LeavesAFirstInstallsPortsAlone`, `…GradesTheInstallsOwnPortsAndPidFile`)
+  assert what `withExistingInstallDeps` reports.
+- The first version of the flag test named its subtests for the flags, and
+  init prints `t.TempDir`'s path, which carries the subtest's name: its
+  "names the flag" half passed under NC5 on the path alone. The subtests
+  are named for the shape now, and the assertion wants the flag with its
+  quoted value.
+
+### Negative controls
+
+Each on the committed tree, and restored from it before the next. Run on the
+dev Mac with `-count=1` over `TestInit|TestMenuDoctor` in `cmd/bridge` and
+`TestReportPortFailed` in `internal/doctor`; every mutation matched once and
+built.
+
+| | mutation | goes red |
+|---|---|---|
+| NC1 | the preflight seeded from `config.DefaultListenAddress` / `DefaultAdminAddress` again | the public first install and the broken-config "not refused" tests, the flags row of the refusal table, and the adapted broken-config refusal (4) |
+| NC2 | the line never printed | the three refusal rows and both broken-config refusals (loopback and public) |
+| NC3 | the line printed whether or not a config loaded | the no-line control, alone |
+| NC4 | `withExistingInstallDeps` reports a missing or broken config as loaded | both unloadable-config rows, the first-install helper test, the three refusal rows, both broken-config refusals |
+| NC5 | no check of the address flags | the flag test, both rows, on all three assertions (after the fix above) |
+| NC6 | the config built without `initAddresses` (baseConfig's defaults in every posture) | the two "not refused" tests (the second pass then grades the held defaults), and seven existing public-posture tests whose outcome follows the saved addresses (the saved config, the footer's URL, the domain endpoint's port, and the two #970 refusals, whose held port the config no longer names) |
+| NC7 | `PortFailed` answers for any failed check | `TestReportPortFailed`'s "another check failed" row, alone |
+| NC8 | `PortFailed` reads port-api only | the three refusal rows (each fails port-admin alone) and the unit test's port-admin row |
+| NC9 | #1027's NC-C: the second pass clears the pid file in every mode | nothing, as expected: no port of the run reaches that pass where no config loaded |
+
+On dido, the stock `golang:1.26.6` image (no lsof) as uid 1000 with
+`-race`: the same tests pass, and NC1 turns the same four red. The whole of
+`cmd/bridge`, `internal/doctor` and `internal/config` under `-race` there:
+ok, 182.9 s, 3.9 s and 1.2 s.
+
+### Out of scope
+
+- **`--listen-address` and `--admin-address` are ignored, silently, without
+  `--public`** (row 5). An operator who passes them to a loopback init gets
+  the defaults and no word. Refusing them there, or honouring them, is a
+  behaviour change of its own.
+- **Where the install's config loads, the preflight grades the install's
+  ports, and a `--force` rewrite that moves off them is refused on the old
+  one.** Measured with this change's binary: an install on 127.0.0.1:X / :Y
+  whose bridge is stopped, a stranger on X, and `init --yes --force --public
+  … --listen-address 127.0.0.1:A --admin-address 127.0.0.1:B` exits 1 on
+  `[FAIL] port-api :X in use`, a port the rewrite abandons. #963 grades the
+  install that is there on purpose, and a `--force` run is the one case
+  where the rewrite is certain before the preflight runs (an interactive run
+  decides at the "Overwrite?" prompt, after it).
+- **`bindVerdict`'s hint for port 0 is `pass Deps.port-apiPort`**, a
+  developer's note that reaches an operator whose config (or public init)
+  names `:0`, the ephemeral-port mode `validatePort` accepts.
+
 ## 2026-09-28 — the scanner indexes a linked file under its target's stat
 
 Backlog B28. `filepath.WalkDir` hands each entry a stat of the entry itself,
@@ -21986,4 +22152,3 @@ restored and re-run green before the next:
 | NC-F2: a failed area-TOC read folded into a refusal | fuzz seed 3, its seed-test row, and the #1061 tests of that site |
 | NC-F3: the DST probe's failure dropped | fuzz seed 4, its seed-test row, and the #1061 tests of that site |
 | NC-F4: NC-F3 with its own seed left out, fuzzing | found within half a second of an empty cache, on both harnesses |
-

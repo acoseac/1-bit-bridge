@@ -436,3 +436,28 @@ func TestCheckPortIPv6UnavailableIsStillFree(t *testing.T) {
 			"report its free port as a problem", c.Status, c.Summary)
 	}
 }
+
+// TestReportPortFailed pins the question `bridge init` asks of a refused
+// preflight before it says the port lines graded the ports it would write:
+// did a listen-port check fail? A warn is no refusal, and another check's
+// failure is not about ports.
+func TestReportPortFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		checks []Check
+		want   bool
+	}{
+		{"no checks", nil, false},
+		{"port-api failed", []Check{ok("config-dir", "ok"), fail(checkNamePortAPI, ":7788 in use", "")}, true},
+		{"port-admin failed", []Check{fail(checkNamePortAdmin, ":7789 in use", "")}, true},
+		{"a port check warned", []Check{warn(checkNamePortAPI, ":443 not bindable", "")}, false},
+		{"another check failed", []Check{fail("config-dir", "/x", "not writable"), ok(checkNamePortAdmin, "free (:7789)")}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Report{Checks: tc.checks}
+			if got := r.PortFailed(); got != tc.want {
+				t.Errorf("PortFailed() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

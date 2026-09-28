@@ -3054,7 +3054,7 @@ func (c *Config) Validate() error {
 	// substitutes the default for an empty value, so this validates
 	// what is actually bound.
 	if c.DLNA.Enabled {
-		if err := validateBindAddress("dlna.listenAddress", c.DLNA.EffectiveDLNAListenAddress()); err != nil {
+		if err := ValidateBindAddress("dlna.listenAddress", c.DLNA.EffectiveDLNAListenAddress()); err != nil {
 			return err
 		}
 	}
@@ -3109,7 +3109,7 @@ func (c *Config) Validate() error {
 	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
 		return errors.New("tlsCertPath and tlsKeyPath: must be set together, or both empty")
 	}
-	if err := validateBindAddress("listenAddress", c.ListenAddress); err != nil {
+	if err := ValidateBindAddress("listenAddress", c.ListenAddress); err != nil {
 		return err
 	}
 	// AdminAddress: loopback installs enforce the historical loopback
@@ -3124,7 +3124,7 @@ func (c *Config) Validate() error {
 		if c.AdminAddress == "" {
 			return errors.New("adminAddress: must not be empty in public mode")
 		}
-		if err := validateBindAddress("adminAddress", c.AdminAddress); err != nil {
+		if err := ValidateBindAddress("adminAddress", c.AdminAddress); err != nil {
 			return err
 		}
 		// Trim before the empty check so a whitespace-only
@@ -3582,12 +3582,15 @@ func looksLikeServiceName(port string) bool {
 	return true
 }
 
-// validateBindAddress checks that addr parses as host:port and that its port
-// (when present) is a decimal number in the valid TCP range. `field` is used
-// only for the error prefix. Shared by the listenAddress / adminAddress /
-// dlna.listenAddress checks so all three reject the same bogus-port shapes
-// (":99999", ":abc") that net.SplitHostPort alone lets through.
-func validateBindAddress(field, addr string) error {
+// ValidateBindAddress checks that addr parses as host:port and that its port
+// is a decimal number in the valid TCP range (validatePort, which refuses an
+// empty one too). `field` is used only for the error prefix. Shared by the
+// listenAddress / adminAddress / dlna.listenAddress checks so all three
+// reject the same bogus-port shapes (":99999", ":abc") that
+// net.SplitHostPort alone lets through, and by `bridge init`, which refuses
+// a --listen-address or --admin-address this refuses before its preflight
+// grades the port the address names.
+func ValidateBindAddress(field, addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("%s %q: %w", field, addr, err)
