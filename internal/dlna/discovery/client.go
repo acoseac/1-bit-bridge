@@ -212,6 +212,16 @@ type SSDPDiscoveryClient struct {
 	// costs nothing.
 	sendErrStreak int
 
+	// writeMSearch writes one M-SEARCH datagram. NewSSDPDiscoveryClient sets
+	// it to (*net.UDPConn).WriteToUDP. It is a field so a test can decide
+	// what the tick loop's send returns, and when, rather than this host's
+	// multicast route deciding it: a send that goes through RESETS
+	// sendErrStreak, one that fails moves it, and one that loses a race with
+	// Stop's close meets a closed socket. A test of the streak that lets a
+	// real send reach the wire therefore measures the host. Like
+	// sendErrStreak, it is set before Start, never while a loop runs.
+	writeMSearch func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
+
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
 	// AND every in-flight per-renderer detail fetch, so Stop() can
 	// block until the cache can no longer be mutated BEFORE it calls
@@ -368,6 +378,7 @@ func NewSSDPDiscoveryClient(
 		nowFunc:        nowFunc,
 		lastLocations:  make(map[string][]locationRecord),
 		inFlight:       make(map[string]struct{}),
+		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
 }
 
@@ -642,6 +653,26 @@ func (c *SSDPDiscoveryClient) pruneLocations() {
 // days. A ticker has no backoff to bound it, so suppression has to do that
 // job. Recovery logs once, carrying the suppressed count so the gap in the
 // log is explained rather than mysterious.
+//
+// # A send Stop cut short is a stop, not a failure
+//
+// The socket is snapshotted and then written to, and Stop can close it in
+// between: the write then fails with net.ErrClosed. That error is the
+// stop's own doing and says nothing about the multicast route, so it is
+// dropped before the streak sees it: no Warn, and no count a restart would
+// have to reset. Measured on main (2026-09-28), a plain Start then Stop
+// logged "M-SEARCH send failed … use of closed network connection" in 4 of
+// 6,000 cycles on macOS, 43 of 6,000 under -race, and 24 of 4,000 on Linux
+// under -race.
+//
+// Only that error is dropped, never a failure that merely lands while a
+// shutdown is under way: the run's context is not consulted. The socket is
+// this client's own and only Stop closes it, so net.ErrClosed identifies
+// the stop exactly, while a write takes no context and fails for the same
+// reasons whether or not the run is ending. A route that is gone at
+// shutdown is still gone, and still reported (the #998 rule the serve
+// loops follow). HandleReadErr's read side also exits on the context, but
+// that decides whether its LOOP returns; this decides what a result means.
 func (c *SSDPDiscoveryClient) sendMSearch() {
 	conn := c.snapshotConn()
 	if conn == nil {
@@ -650,7 +681,10 @@ func (c *SSDPDiscoveryClient) sendMSearch() {
 	target := "urn:schemas-upnp-org:device:MediaRenderer:1"
 	packet := buildMSearchRequest(target)
 	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	_, err := conn.WriteToUDP(packet, dst)
+	_, err := c.writeMSearch(conn, packet, dst)
+	if errors.Is(err, net.ErrClosed) {
+		return
+	}
 	c.noteSendResult(err)
 }
 
