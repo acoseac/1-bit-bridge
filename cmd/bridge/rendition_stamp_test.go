@@ -603,7 +603,8 @@ func TestTheCLIRendersOnlyAFileItsRowStillDescribes(t *testing.T) {
 
 	c, counters, _ := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, cliCapsDSD)
 	if c == nil || !c.needsRun || counters.changedSinceScan != 0 {
-		t.Fatalf("a scanned file: candidate %+v, counters %+v, want one to render", c, counters)
+		t.Fatalf("a scanned file: candidate %v, needs a run %v, changedSinceScan %d, want one to render",
+			c != nil, c != nil && c.needsRun, counters.changedSinceScan)
 	}
 	rowStamped("a scanned file's spec", c.spec)
 
@@ -619,9 +620,12 @@ func TestTheCLIRendersOnlyAFileItsRowStillDescribes(t *testing.T) {
 	forced.force = true
 	var counters2 upscaleSkipCounters
 	c, exit := classifyUpscaleTrack(context.Background(), io.Discard, store, resolver, track, forced, &counters2)
-	if exit != 0 || c == nil || c.needsRun || counters2.changedSinceScan != 1 {
-		t.Fatalf("a changed file under --force: candidate %+v, counters %+v, exit %d, want it listed and not run",
-			c, counters2, exit)
+	if exit != 0 || c == nil {
+		t.Fatalf("a changed file under --force: candidate %v, exit %d, want it listed", c != nil, exit)
+	}
+	if c.needsRun || counters2.changedSinceScan != 1 {
+		t.Errorf("a changed file under --force: needsRun %v, changedSinceScan %d, want it listed and not run",
+			c.needsRun, counters2.changedSinceScan)
 	}
 	rowStamped("a changed file's spec", c.spec)
 
