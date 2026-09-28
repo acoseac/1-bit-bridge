@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,24 +17,10 @@ import (
 // channels, duration, DSDIFF compression).
 func (f *autoOptimizeFixture) seedDSDTrack(t *testing.T, rel, codec string, rate float64, sizeBytes int, compression string, durationSec float64, channels int) {
 	t.Helper()
-	abs := filepath.Join(f.libDir, rel)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
-		t.Fatalf("mkdir for %q: %v", rel, err)
-	}
-	fh, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		t.Fatalf("create %q: %v", rel, err)
-	}
-	if err := fh.Truncate(int64(sizeBytes)); err != nil {
-		_ = fh.Close()
-		t.Fatalf("truncate %q: %v", rel, err)
-	}
-	if err := fh.Close(); err != nil {
-		t.Fatalf("close %q: %v", rel, err)
-	}
+	scanned := f.scannedSparseFile(t, rel, sizeBytes)
 	isDSD, bits := true, 1
 	tr := &manifest.Track{
-		Path: rel, Size: int64(sizeBytes), ModTime: time.Unix(1700000000, 0),
+		Path: rel, Size: int64(sizeBytes), ModTime: scanned,
 		Codec: codec, IsDSD: &isDSD, SampleRate: &rate, BitsPerSample: &bits,
 		Compression: compression,
 	}

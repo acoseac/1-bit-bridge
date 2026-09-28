@@ -59,8 +59,10 @@ func (f *adapterFixture) withCaps(caps transcode.DSDRenderCaps) *adapterFixture 
 	return f
 }
 
-// seed writes a real (sparse) file — FreshnessFromFile stats it — and the
-// manifest row the adapter looks up. Returns the row.
+// seed writes a real (sparse) file and the manifest row the adapter looks
+// up, as a scan leaves them: the file's mtime is the row's, since the
+// adapter refuses a file that changed after its row was written
+// (sourceIsAtRow). Returns the row.
 func (f *adapterFixture) seed(t *testing.T, rel, codec string, rate float64, bits int, isDSD bool, compression string, durationSec float64, channels int) *manifest.Track {
 	t.Helper()
 	abs := filepath.Join(f.libDir, rel)
@@ -78,8 +80,12 @@ func (f *adapterFixture) seed(t *testing.T, rel, codec string, rate float64, bit
 	if err := fh.Close(); err != nil {
 		t.Fatal(err)
 	}
+	scanned := time.Unix(1700000000, 0)
+	if err := os.Chtimes(abs, scanned, scanned); err != nil {
+		t.Fatal(err)
+	}
 	tr := &manifest.Track{
-		Path: rel, Size: 1 << 20, ModTime: time.Unix(1700000000, 0),
+		Path: rel, Size: 1 << 20, ModTime: scanned,
 		Codec: codec, IsDSD: &isDSD, SampleRate: &rate, Compression: compression,
 	}
 	if bits > 0 {

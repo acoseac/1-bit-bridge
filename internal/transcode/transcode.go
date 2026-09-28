@@ -239,6 +239,13 @@ func OutputDirFor(dataDir string) string {
 type JobSpec struct {
 	SourceAbsPath    string
 	SourceLibraryRel string
+	// SourceMTimeNS / SourceSize are the version of the source the
+	// rendition records (`track_variants.source_mtime_ns` / `source_size`,
+	// and a DSD rendition's `dsd_peaks` row). Every writer takes them from
+	// the TRACK ROW, never from a stat of the file: the auto-optimize sweep
+	// and the album gain judge them against the row, and a writer on the
+	// other clock is one the other side keeps re-rendering (cmd/bridge
+	// rendition_stamp.go).
 	SourceMTimeNS    int64
 	SourceSize       int64
 	SourceSampleRate int // Hz; 0 if unknown (won't be used in target-rate selection)
@@ -1236,21 +1243,6 @@ func parseSoxFileFormats(text string) ([]string, bool) {
 // targeted install-hint message vs the generic "something went
 // wrong" path.
 var ErrSoxMissing = errors.New("sox binary not found on PATH")
-
-// FreshnessFromFile populates the SourceMTimeNS / SourceSize
-// fields on a JobSpec by stat-ing SourceAbsPath. Used by the CLI
-// to capture "what version of the source did we convert from" at
-// the moment of conversion, which the variant-resolve path later
-// uses to detect drift.
-func (j *JobSpec) FreshnessFromFile() error {
-	info, err := os.Stat(j.SourceAbsPath)
-	if err != nil {
-		return err
-	}
-	j.SourceMTimeNS = info.ModTime().UnixNano()
-	j.SourceSize = info.Size()
-	return nil
-}
 
 // CreatedAtNow returns wall-clock UTC nanoseconds — the value
 // callers stamp into `track_variants.created_at` on insert.
