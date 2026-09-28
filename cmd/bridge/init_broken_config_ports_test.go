@@ -126,9 +126,10 @@ func TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding(t *te
 	if !strings.Contains(out, portsThisInitWrites(true)) {
 		t.Errorf("the preflight did not refuse the ports this run writes and say they are the run's:\n%s", out)
 	}
-	for _, port := range []struct{ name, port string }{{"port-api", api}, {"port-admin", admin}} {
-		if l := reportLine(out, port.name); !strings.Contains(l, "[FAIL]") || !strings.Contains(l, ":"+port.port+" in use") {
-			t.Errorf("%s says %q, want a FAIL on :%s, the port this run writes:\n%s", port.name, l, port.port, out)
+	for _, held := range []struct{ check, port string }{{"port-api", api}, {"port-admin", admin}} {
+		if l := reportLine(out, held.check); !strings.Contains(l, "[FAIL]") ||
+			!strings.Contains(l, ":"+held.port+" in use") {
+			t.Errorf("%s says %q, want a FAIL on :%s, the port this run writes:\n%s", held.check, l, held.port, out)
 		}
 	}
 	assertConfigUnchanged(t, cfgDir)
