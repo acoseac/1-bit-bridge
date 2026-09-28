@@ -23056,7 +23056,7 @@ dereference of a cause is in the change.
 #1064 added `loggingtest.SetDefault(t, l)` and listed, under "Left as they
 are", the test files that still put back only slog's default after swapping
 it. This change moves every one onto it and adds the sweep that entry named.
-Backlog B31.
+Backlog B31; PR #1075.
 
 ### What was measured on main (37807845)
 
