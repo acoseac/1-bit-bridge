@@ -24903,6 +24903,14 @@ address was sent (nothing listened there). `go test -race -count=1` over
 `internal/dlna` and `internal/dlna/discovery` passed in the same image, the
 LAN-peer test running on the container's eth0 rather than skipping.
 
+The merged build (with #1074), the same run: the three SUBSCRIBEs answered
+200, the peer got its NOTIFY and its 302 was not followed, the two loopback
+callbacks were refused with one Warn each (`GENA callback on this machine
+or a link-local address refused — the NOTIFY goes only to the subscriber's
+own, never to a cloud metadata address`, `subscribeSource=172.19.0.3`), and
+the bridge's loopback listener logged only the NOTIFY a SUBSCRIBE from
+inside the container asked for over `127.0.0.1`.
+
 ### Tests and controls
 
 - `internal/dlna/gena_callback_test.go` (new):
