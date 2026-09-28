@@ -85,6 +85,13 @@ func (r *Recorder) Lines(msg string) []string {
 	return r.render(func(rec slog.Record) bool { return rec.Message == msg })
 }
 
+// All returns, rendered one per line, every record logged so far, at any
+// level and under any message: what a test searches when the question is
+// whether ANY line carries a value (a credential that must reach no line).
+func (r *Recorder) All() []string {
+	return r.render(func(slog.Record) bool { return true })
+}
+
 // render formats the records match accepts as "LEVEL message key=value ...",
 // in the order they were logged.
 func (r *Recorder) render(match func(slog.Record) bool) []string {

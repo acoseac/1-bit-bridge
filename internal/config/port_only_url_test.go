@@ -73,7 +73,9 @@ func TestNormalizeWarnsOfABaseURLThatNamesNoHostAndStillLoads(t *testing.T) {
 // twice (the parse error quotes it too). Each warning still fires, still
 // says which entry, and none carries the secret: not a password, not a token
 // written as the user name (which url.URL.Redacted would have kept), not a
-// query.
+// query. Nor a user name written WITHOUT a scheme (backlog B54):
+// `s3cret-Pw:x@host` parses with the user name as its scheme, and the
+// warning named the entry by that "scheme" and quoted it.
 func TestNoConfigWarningCarriesAURLsCredentials(t *testing.T) {
 	const secret = "s3cret-Pw"
 	rec := loggingtest.Record(t)
@@ -85,6 +87,7 @@ func TestNoConfigWarningCarriesAURLsCredentials(t *testing.T) {
 		"http://user:" + secret + "@bridge.example:7788", // not https
 		"https://user:" + secret + " x@bridge.example",   // does not parse
 		"https://bridge.example:8443",                    // kept
+		secret + ":x@bridge.example:7788",                // no scheme: the user name parses as one
 	}
 	if err := c.NormalizeAndValidate(); err != nil {
 		t.Fatalf("NormalizeAndValidate: %v; the bridge would not start", err)
@@ -99,6 +102,7 @@ func TestNoConfigWarningCarriesAURLsCredentials(t *testing.T) {
 		"customEndpoints[0] (https://:8443): missing host",
 		"customEndpoints[1] (http://bridge.example:7788): scheme must be https",
 		"customEndpoints[2]: does not parse as a URL",
+		"customEndpoints[4]: scheme must be https",
 	} {
 		found := false
 		for _, l := range lines {
@@ -108,8 +112,10 @@ func TestNoConfigWarningCarriesAURLsCredentials(t *testing.T) {
 			t.Errorf("no warning says %q; warnings: %q", want, lines)
 		}
 	}
+	// In any case: url.Parse lowercases a scheme, so the secret written as
+	// one leaked as "s3cret-pw", which a case-sensitive search misses.
 	for _, l := range lines {
-		if strings.Contains(l, secret) {
+		if strings.Contains(strings.ToLower(l), strings.ToLower(secret)) {
 			t.Errorf("a warning carries the URL's secret: %s", l)
 		}
 	}

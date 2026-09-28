@@ -471,6 +471,10 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 //     from that very address (internal/dlna's initial NOTIFY). AnnouncedFrom's
 //     rule, for a TCP source.
 //
+// A fourth form is for one request only, a manual upstream's own
+// description fetch (ManualDescriptionFetch): every address but a metadata
+// one, since the operator typed that URL in full.
+//
 // None approves a cloud metadata address (cloudMetadataAddrs), not even a
 // peer's own: a peer on the link can send from 169.254.169.254.
 //
@@ -489,6 +493,10 @@ type DialApproval struct {
 	// or hostLinkLocal, or hostElsewhere (the zero value) when it named
 	// neither.
 	chosen hostKind
+	// manualDescription is ManualDescriptionFetch's approval: every address
+	// but a cloud metadata one. Never recorded with a URL in a cache; it
+	// travels with the one fetch it is for.
+	manualDescription bool
 }
 
 // AnnouncedFrom is the approval an SSDP packet from src gives the URLs it
@@ -530,9 +538,43 @@ func OperatorChose(rawURL string) DialApproval {
 	return DialApproval{}
 }
 
+// ManualDescriptionFetch is the approval of a manual upstream's own
+// description fetch (internal/upnp's ManualPoller; backlog B54): a connect
+// to any address but a cloud metadata one. The operator typed that URL's
+// host, path and port, and what it returns is parsed and never relayed, so
+// #1069 left it without a dial check, and a URL on this machine, or a name
+// that resolves to it, is legitimate there. That left it the one request to
+// a device #1074's metadata rule did not reach: every later dial of the
+// server it finds runs under OperatorChose, which approves no metadata
+// address. So this approves what the fetch reached before, less the
+// metadata addresses, whatever the URL names: a literal (which the poller
+// refuses before any fetch, NamesCloudMetadataAddr) or a name that resolves
+// to one (metadata.google.internal, AWS's instance-data), which only the
+// dial check can see. No media server serves on one.
+func ManualDescriptionFetch() DialApproval {
+	return DialApproval{manualDescription: true}
+}
+
+// NamesCloudMetadataAddr reports whether rawURL's host is a cloud metadata
+// address written as an IP literal (cloudMetadataAddrs, in any spelling a
+// URL can carry one: bracketed, zoned, IPv4-mapped, a trailing dot). A NAME
+// answers false: what it resolves to is the dial check's to judge. The
+// manual upstream's poller asks it before any fetch, and the console asks
+// it of a manual URL an operator types.
+func NamesCloudMetadataAddr(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	kind, _ := classifyHost(u.Hostname())
+	return kind == hostMetadata
+}
+
 // String names what the approval covers, for a log line or a test failure.
 func (d DialApproval) String() string {
 	switch {
+	case d.manualDescription:
+		return "an operator's description URL, any address but a cloud metadata one"
 	case d.chosen == hostThisMachine:
 		return "an operator's URL on this machine"
 	case d.chosen == hostLinkLocal:
@@ -545,7 +587,8 @@ func (d DialApproval) String() string {
 
 // Permits reports whether the approval lets a connect reach a, the address a
 // dial resolved to: never for a cloud metadata address; always for any other
-// address elsewhere; and for this machine or a link-local address when an
+// address under ManualDescriptionFetch, and for any other address elsewhere
+// under every approval; and for this machine or a link-local address when an
 // operator's URL named that kind of host, or when a is the approving peer's
 // own address (never the unspecified address). The dial check asks it at
 // every connect, and internal/dlna's GENA callback guard asks it before it
@@ -555,6 +598,9 @@ func (d DialApproval) Permits(a netip.Addr) bool {
 	kind := addrKind(a)
 	if kind == hostMetadata {
 		return false
+	}
+	if d.manualDescription {
+		return true
 	}
 	if hostKindAllowed(kind, d.chosen) {
 		return true
@@ -587,9 +633,11 @@ func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Conte
 var errUnapprovedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
 	"that neither the peer the URL came from (an SSDP packet, a GENA SUBSCRIBE) nor the operator's configured URL named")
 
-// errCloudMetadataAddr is the dial check's refusal of a connect to a cloud
-// metadata address, which no approval covers.
-var errCloudMetadataAddr = errors.New("refusing to connect to a cloud metadata address, which no device serves on")
+// ErrCloudMetadataAddr is the dial check's refusal of a connect to a cloud
+// metadata address, which no approval covers. Exported so a caller can tell
+// that refusal from a device that did not answer: the manual upstream's
+// poller warns about it, where a fetch that merely failed is a Debug line.
+var ErrCloudMetadataAddr = errors.New("refusing to connect to a cloud metadata address, which no device serves on")
 
 // refuseUnapprovedHostLocal is the ControlContext of every NewDeviceTransport
 // dialer. net passes it the address each connect attempt targets, after name
@@ -612,7 +660,7 @@ func refuseUnapprovedHostLocal(ctx context.Context, _, address string, _ syscall
 		return nil
 	}
 	if isCloudMetadataAddr(ap.Addr()) {
-		return errCloudMetadataAddr
+		return ErrCloudMetadataAddr
 	}
 	return errUnapprovedHostLocal
 }
@@ -636,8 +684,9 @@ func UseResolverForTest(r *net.Resolver) (restore func()) {
 // NewDeviceTransport returns the http.Transport for every request the bridge
 // sends a UPnP device, at a URL a device or the operator's configuration
 // supplied: the discovery clients' description and GetProtocolInfo fetches
-// (NewDeviceFetchClient), the upstream ingest's SOAP Browse, and every byte
-// fetch internal/upnpproxy makes for a routed track. d is the dialer
+// (NewDeviceFetchClient), a manual upstream's description fetch
+// (internal/upnp's ManualPoller), the upstream ingest's SOAP Browse, and
+// every byte fetch internal/upnpproxy makes for a routed track. d is the dialer
 // template (timeouts, TCP keep-alive), and its ControlContext is replaced by
 // the dial check, which judges every connect against the DialApproval the
 // request's context carries.
@@ -677,9 +726,11 @@ func NewDeviceTransport(d net.Dialer) *http.Transport {
 // SOAP with it, and internal/dlna sends its GENA initial NOTIFY with it
 // (backlog B39: that NOTIFY once followed a callback's redirect anywhere, the
 // bridge's own console included). A manual upstream's description is
-// fetched with a client of its own (internal/upnp's ManualPoller), without
-// the dial check: its URL is the operator's choice, and a URL on this
-// machine is legitimate there.
+// fetched with a client of its own (internal/upnp's ManualPoller) over the
+// same transport, under ManualDescriptionFetch: its URL is the operator's
+// choice, so a URL on this machine is legitimate there, and only a cloud
+// metadata address is refused (backlog B54; until then that fetch had no
+// dial check at all).
 func NewDeviceFetchClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
