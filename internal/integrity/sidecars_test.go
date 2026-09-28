@@ -513,28 +513,35 @@ func TestOrphanSidecarSweeperRefusesAStrandedTree(t *testing.T) {
 }
 
 // TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount — the inventory keeps
-// only a chunk's worth of orphan PATHS (MaxOrphanPaths) and counts all of
-// them. The refusal must read the COUNT: 1,000 orphans against a catalog of
-// 150 rows is a lost index, while the 100 paths a chunk of 100 retains are
-// fewer than the rows, and a refusal fed that number would proceed and
-// unlink them.
+// only gcRetainedPerUnlink chunks of orphan PATHS (MaxOrphanPaths) and
+// counts all of them. The refusal must read the COUNT: 1,000 orphans
+// against a catalog of 500 rows is a lost index, while the 400 paths a
+// chunk of 100 retains are fewer than the rows, and a refusal fed that
+// number would proceed and unlink them. The catalog was 150 rows when a
+// tick kept one chunk of paths; at four chunks the retained 400 outnumber
+// 150 and the refusal fed them still refused, so only this test's wording
+// check caught that mutation (2026-09-28), and the fixture moved.
 func TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount(t *testing.T) {
 	dir := t.TempDir()
-	live := seedTestSidecarTree(t, dir, "live-", 150)
+	live := seedTestSidecarTree(t, dir, "live-", 500)
 	seedTestSidecarTree(t, dir, "orphan-", 1000)
 	ageFixtures(t, dir)
 	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond
 	s.chunkSizeForTest = 100
+	if retained := s.chunkSizeForTest * gcRetainedPerUnlink; retained >= len(live) {
+		t.Fatalf("the tick retains %d paths, not fewer than the %d rows, so a refusal fed the retained count "+
+			"would refuse too and this test would pin nothing", retained, len(live))
+	}
 
 	rec := loggingtest.Record(t)
 	if n := s.tick(context.Background()); n != 0 {
 		t.Errorf("unlinked %d, want 0 — the refusal read the retained paths, not the count", n)
 	}
-	if got := countFiles(t, dir); got != 1150 {
-		t.Errorf("%d of 1,150 files survive", got)
+	if got := countFiles(t, dir); got != 1500 {
+		t.Errorf("%d of 1,500 files survive", got)
 	}
-	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 || !strings.Contains(lines[0], "1000 of 1150 file(s)") {
+	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 || !strings.Contains(lines[0], "1000 of 1500 file(s)") {
 		t.Errorf("want one refusal naming the full count, got %q", lines)
 	}
 }
