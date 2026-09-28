@@ -2356,8 +2356,9 @@ no failing test — which is the shape to expect in this area.
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
 - **A Tailscale interface is eligible ONLY through the opt-in
   (`EligibilityOpts.TsnetIfaceName`), and its ULA is what had defeated it**
-  (2026-09-28). Every Tailscale interface carries an address in 100.64/10,
-  which always counted as public, and one in `fd7a:115c:a1e0::/48`, which is
+  (2026-09-28). A Tailscale interface carries an address in
+  `fd7a:115c:a1e0::/48`, and one in 100.64/10 where the tailnet has IPv4. The
+  100.64/10 address always counted as public; the ULA is
   inside fc00::/7, so `net.IP.IsPrivate` counted it as a LAN address and
   admitted the interface with no opt-in (and no production caller sets one).
   Measured: the dev Mac's `utun12` and dido's `tailscale0` were eligible with
