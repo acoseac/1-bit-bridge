@@ -9,8 +9,10 @@
 //
 // # Posture and gating
 //
-// The DLNA listener is bound ONLY to LAN-eligible interfaces (RFC1918,
-// link-local, and the operator-opted-in Tailscale tsnet interface). Public
+// SSDP advertises and discovers ONLY on LAN-eligible interfaces (RFC1918,
+// IPv6 ULA other than Tailscale's, link-local, and the operator-opted-in
+// Tailscale tsnet interface; IsLANEligibleInterface), and the HTTP
+// listener binds the address `dlna.listenAddress` names. Public
 // deployment mode REFUSES to bind DLNA regardless of the operator-supplied
 // `cfg.DLNA.Enabled` value — exposing an unauthenticated ContentDirectory
 // + file endpoint on a public-internet bridge would let any internet user

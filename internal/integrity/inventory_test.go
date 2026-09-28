@@ -260,8 +260,9 @@ func TestTakeSidecarInventoryCountsADirectoryItCannotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an unreadable subdirectory aborted the walk: %v", err)
 	}
-	if inv.Unreadable != 1 {
-		t.Errorf("unreadable=%d, want 1", inv.Unreadable)
+	if inv.Unreadable != 1 || inv.UnlistedDirs != 1 {
+		t.Errorf("unreadable=%d unlistedDirs=%d, want 1 and 1: a directory it could not list is the unbounded kind",
+			inv.Unreadable, inv.UnlistedDirs)
 	}
 	if inv.Files != 1 {
 		t.Errorf("files=%d, want only the readable one — the locked subtree is absent from every count", inv.Files)
@@ -685,6 +686,10 @@ func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
 	}
 	if inv.Unreadable != 1 {
 		t.Errorf("Unreadable = %d, want 1 — an entry that could not be resolved is reported, not classified", inv.Unreadable)
+	}
+	if inv.UnlistedDirs != 0 {
+		t.Errorf("UnlistedDirs = %d, want 0 — a link the walk could not stat is at most one file, never an unlisted directory",
+			inv.UnlistedDirs)
 	}
 	if inv.Files != 1 {
 		t.Errorf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)

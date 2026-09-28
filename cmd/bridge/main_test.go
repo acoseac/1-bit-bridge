@@ -222,6 +222,37 @@ func waitForListening(t *testing.T, out *safeBuffer, deadline time.Duration) (ad
 	return
 }
 
+// servedBridge is a `bridge serve` bootServe started for one test.
+type servedBridge struct {
+	// addr is the API's host:port, from serve's startup banner.
+	addr string
+	// stdout and stderr hold what serve has printed so far.
+	stdout, stderr *safeBuffer
+	// done delivers serve's exit code once it returns.
+	done <-chan int
+}
+
+// bootServe runs `bridge serve` with args on a goroutine of its own for
+// the rest of the test and returns once the API is listening. The
+// goroutine is drained on cleanup (drainServeOnCleanup), so a failed
+// assertion cannot return while serve still writes under the test's
+// directories. TestEveryBackgroundGoroutineDrainsOnCleanup audits this
+// function as it audits a test that launches serve itself.
+func bootServe(t *testing.T, args ...string) servedBridge {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stdout, stderr := &safeBuffer{}, &safeBuffer{}
+	exitCode := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		exitCode <- run(ctx, append([]string{"serve"}, args...), stdout, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
+	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode}
+}
+
 func TestServeMissingConfigReturns2(t *testing.T) {
 	_, stderr, code := runCapture(t, "serve", "--config", "/nonexistent/bridge.yaml")
 	if code != 2 {
