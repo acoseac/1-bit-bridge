@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 )
 
 // TestUPnPUpstreamSOAPHTTPClientRefusesRedirects pins the blind-SSRF
@@ -25,7 +29,17 @@ func TestUPnPUpstreamSOAPHTTPClientRefusesRedirects(t *testing.T) {
 	defer redirector.Close()
 
 	client := upnpUpstreamSOAPHTTPClient(2 * time.Second)
-	resp, err := client.Get(redirector.URL)
+	// Both servers listen on 127.0.0.1, which the client's dial check
+	// refuses unless the request's approval covers it; approve it the way a
+	// server announcing from 127.0.0.1 is, so the redirect (which would be
+	// followed to the same address) is what this test measures.
+	req, err := http.NewRequestWithContext(
+		discovery.WithAnnouncementSource(context.Background(), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}),
+		http.MethodGet, redirector.URL, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

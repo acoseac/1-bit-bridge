@@ -13,8 +13,10 @@
 // #1050; and the host-local bound after it), stated here independently of the
 // helpers that enforce it: every URL the parser keeps is http(s) with a host,
 // re-parses to the host it was judged on, stays on the description's host
-// when the description was discovered, and names this host or a link-local
-// address only when the description URL does too.
+// when the description was discovered, names this host or a link-local
+// address only when the description URL does too, and never names a cloud
+// metadata address. The one thing it takes from the code under test is that
+// list of addresses (cloudMetadataAddrs), which is data, not a decision.
 package discovery
 
 import (
@@ -63,6 +65,23 @@ func FuzzParseDeviceDescription(f *testing.F) {
 	f.Add([]byte(`<root><device><serviceList><service>`+
 		`<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>`+
 		`<controlURL>/avt</controlURL></service></serviceList></device></root>`), "http://0x7f.1:8080/d.xml")
+	// The cloud metadata addresses, each where a rule beside it keeps a URL:
+	// a link-local description the operator chose (the host-kind rule keeps
+	// a link-local service), a LAN one (another host is kept), and a
+	// description found at one (its own host is kept).
+	f.Add([]byte(`<root><device><serviceList><service>`+
+		`<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>`+
+		`<controlURL>http://169.254.169.254/latest/meta-data/</controlURL></service></serviceList></device></root>`),
+		"http://169.254.7.7:8200/d.xml")
+	f.Add([]byte(`<root><device><serviceList><service>`+
+		`<serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>`+
+		`<controlURL>http://100.100.100.200/latest/meta-data/</controlURL>`+
+		`<eventSubURL>http://[fd00:ec2::254]/e</eventSubURL></service></serviceList></device></root>`),
+		"http://192.168.1.42:8200/d.xml")
+	f.Add([]byte(`<root><device><serviceList><service>`+
+		`<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>`+
+		`<controlURL>/latest/meta-data/</controlURL></service></serviceList></device></root>`),
+		"http://[fe80::a9fe:a9fe%25en0]/d.xml")
 	f.Fuzz(func(t *testing.T, b []byte, baseURL string) {
 		base, baseErr := url.Parse(baseURL)
 		for _, source := range []DescriptionSource{SourceDiscovered, SourceUserChosen} {
@@ -105,20 +124,28 @@ func checkKeptServiceURL(t *testing.T, kept string, base *url.URL, source Descri
 	if k == "a numeric spelling" {
 		t.Fatalf("%s: kept %q, whose host ends in a number without being an IP address", stype, kept)
 	}
+	if k == "a cloud metadata address" {
+		t.Fatalf("%s: kept %q, which names a cloud metadata address, from a description at %q (source %d)",
+			stype, kept, base, source)
+	}
 	if k != "elsewhere" && k != fuzzHostKind(base.Hostname()) {
 		t.Fatalf("%s: kept %q, which names %s, from a description at %q (source %d)",
 			stype, kept, k, base, source)
 	}
 }
 
-// fuzzHostKind says whether a host names this machine, a link-local address,
-// a number that is no IP address, or anything else. Written apart from the
-// classifier the parser uses, so the property does not borrow the code it
-// checks.
+// fuzzHostKind says whether a host names a cloud metadata address, this
+// machine, a link-local address, a number that is no IP address, or anything
+// else. Written apart from the classifier the parser uses, so the property
+// does not borrow the code it checks; it reads the list of metadata
+// addresses, which is data.
 func fuzzHostKind(host string) string {
 	h := strings.TrimSuffix(host, ".")
 	if a, err := netip.ParseAddr(h); err == nil {
 		a = a.Unmap()
+		if _, listed := cloudMetadataAddrs[a.WithZone("")]; listed {
+			return "a cloud metadata address"
+		}
 		if a.IsLoopback() || a.IsUnspecified() {
 			return "this host"
 		}

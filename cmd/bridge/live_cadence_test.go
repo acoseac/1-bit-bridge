@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
@@ -45,8 +46,8 @@ func testLogger() *slog.Logger {
 
 type stubServerResolver struct{}
 
-func (stubServerResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, error) {
-	return "", nil
+func (stubServerResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
+	return "", discovery.DialApproval{}, nil
 }
 
 // disabledIngester returns an Ingester whose Run exits immediately (the config

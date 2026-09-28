@@ -24375,3 +24375,336 @@ row note and no tray. Red on the merge commit, as above.
 | the summary's `soxAvailable` back to the precheck alone | the new test's "without FLAC" case, and the panel test's fourth state (the CarPlay row's "switched off", the hi-res Generate live), both red |
 | `soxUsable` counting an unread build as without FLAC (`_ = known`, or it does not build) | the new test's "could not be read" case and `TestAlbumDetailVariantSummarySeparatesOffFromNoSox` red; the panel test green, its probe always known |
 | the panel's sox note back to its old words | the panel test's fourth state red (no note naming FLAC) |
+
+## 2026-09-28 — the ingest's SOAP and the byte proxy dial an upstream under the approval its control URL came with (backlog B36)
+
+#1069 checked every connect of the discovery clients' description fetch and
+recorded what it left: a routed server's control URL is checked once, when
+the server is found, and dialled for as long as it is cached, by two clients
+with no dial check. The ingest's SOAP Browse used `upnpUpstreamSOAPHTTPClient`
+(`http.DefaultTransport`), and every byte fetch of a routed track goes through
+`internal/upnpproxy` to the host:port `LiveHost` derives from the control
+URL. A NAME in that URL resolves again at each dial. This entry closes that,
+and the three validators #1069 left accepting a URL that names a port and no
+host.
+
+### What was measured on the old code
+
+Two throwaway tests on main at 37807845, with `net.DefaultResolver` replaced
+by a DNS server the test controlled (`internal/dnstest`, below), a stand-in
+for the console on 127.0.0.1 and a stand-in for the attacker on this host's
+LAN address at the same port.
+
+- **The later dials** (cmd/bridge: `discoveryServerResolver`,
+  `upnpUpstreamSOAPHTTPClient` under `upnp.ContentDirectoryClient`, and
+  `upnpproxy.New` over `serverCacheHostResolver`). A cache entry holding
+  `http://upstream.rebind.test:<port>/ctl`, the name answering the LAN
+  address: the attacker stand-in saw `POST /ctl` and `GET /api/stats`. The
+  name then answering 127.0.0.1: the console stand-in saw `POST /ctl` and
+  `GET /api/stats`, and the proxy relayed its `200` with its body. macOS
+  (Go 1.27.1) and Linux (the golang:1.26.6 image on dido, the container's
+  eth0 as the LAN address), the same sequence. The first attempt, whose
+  stand-ins kept connections alive, showed nothing in the second phase: both
+  clients reused the first phase's idle connections to the attacker (four
+  DNS queries in all, against eight). A rebinding server closes each
+  connection, or waits out the idle timeout (30 s for the proxy's old pool,
+  90 s for `http.DefaultTransport`).
+- **The discovery half** (internal/upnp, `handlePacket` with the production
+  default client). A known server's UDN, re-announced from this host's LAN
+  address with `LOCATION: http://upstream.rebind.test:<port>/desc.xml`, the
+  name answering that address: the move detector re-fetched (#1069's dial
+  check allows a LAN address) and the cached control URL became
+  `http://upstream.rebind.test:7789/ctl`. The same-host rule compares host
+  names and ignores the port, so the name's console port passes it. macOS and
+  Linux.
+
+After the fix the same throwaway test refused both second-phase requests
+(`dial tcp 127.0.0.1:<port>: refusing to connect to this machine or a
+link-local address that neither the SSDP packet the URL came from nor the
+operator's configured URL named`), and the console saw nothing.
+
+### Decisions
+
+- **The approval travels with the URL.** `discovery.DialApproval` is what
+  lets a request to a device connect to this machine or a link-local
+  address: `AnnouncedFrom(src)`, the announcing packet's own address and no
+  other (#1069's rule), or `OperatorChose(url)` for a manual upstream, every
+  address of the kind the operator's URL names. `upnp.ServerInfo.DialApproval`
+  records it beside `ContentDirectoryControlURL`; the SSDP fetch writes
+  `AnnouncedFrom(src)` and the manual poller `OperatorChose(url)`.
+  `discoveryServerResolver.ResolveControlURL` and
+  `serverCacheHostResolver.LiveHost` return URL and approval from one cache
+  entry, and `upnpingest` and `upnpproxy` put the approval in each request's
+  context (`WithDialApproval`), where the dial check reads it.
+- **The source, not the string's kind.** A rule that needed no new state was
+  considered: allow a local connect only when the control URL's host STRING
+  is of that kind. It refuses a zero-configuration device that announces from
+  its link-local address with a `.local` name resolving to that address:
+  #1069 fetches its description (the name resolves to the packet's source),
+  and its later dials would have been refused. The recorded source keeps
+  every flow #1069 allows.
+- **`Upsert` keeps and replaces the approval with the control URL, never
+  alone.** An update carrying a control URL carries that URL's approval, a
+  zero one included; one that keeps the cached URL keeps the cached approval.
+  Merged like the other fields (keep the old one when the update's is zero),
+  an old approval outlives the URL it came with (NC8). A server configured
+  with both a UDN and a manual URL is written by both writers under one key,
+  so the pairing is also what keeps their approvals apart.
+- **A NAME in an operator's URL approves no local address.** The operator
+  chose the name, not an answer another LAN host can give for it (mDNS
+  answers anyone's query), and a name answered with 127.0.0.1 at a later
+  dial is the rebinding itself. So `localhost` or a loopback literal keeps a
+  manual upstream's local services, and this host's own host name does not:
+  Debian maps it to 127.0.1.1, and such a manual upstream now fails its walk
+  with the dial check's error (at Warn, every ingest tick) until its URL
+  says `localhost`. Nothing measured uses that shape. The manual poller's own
+  description fetch keeps #1069's decision (no dial check): the operator
+  chose its path and port, and what it returns is parsed, never relayed.
+- **No kept-alive connections, measured rather than argued.** With the
+  proxy's old pool, a fetch approved on this machine followed by one approved
+  only from a LAN address reached 127.0.0.1 twice: the second rode the idle
+  connection past the check (NC12,
+  `TestProxy_Serve_NeverCarriesARequestOnAConnectionAnotherApprovalOpened`).
+  net/http also hands a connection dialed for one request to another that is
+  waiting (`tryPutIdleConn`'s late binding), so partitioning by request would
+  not have been enough; `DisableKeepAlives` returns before that hand-off.
+  Cost, 2,000 sequential POSTs to a loopback server on macOS: 38 to 43 µs
+  each kept alive, 102 to 108 µs each not. On a LAN add a round trip. A
+  stream is one request, a seek one more, and an ingest walk one connection
+  per 200-item Browse page.
+- **One constructor.** `discovery.NewDeviceTransport(dialer)` is the
+  transport of `NewDeviceFetchClient` (both discovery clients and, now, the
+  ingest's SOAP) and of the proxy, which adds its streaming settings
+  (`MaxConnsPerHost` 4, `ResponseHeaderTimeout` 10 s, no whole-request
+  timeout). It replaces any `ControlContext` its template carries (NC13).
+- **Declined: requiring SSDP control URLs to be IP literals.** It would pin
+  every later dial to the address checked at discovery. Against it: #1069's
+  three devices on one LAN are thin evidence that no device announces a
+  name; UDA 1.1 says a LOCATION host is "normally" a literal, which is not
+  "always"; the dial check already covers the dangerous targets for names;
+  and a literal can name a tailnet or public host (#1069's "still fetched"),
+  so the rule would not bound a third host either.
+- **The test resolver is a seam, not `net.DefaultResolver`.**
+  `discovery.UseResolverForTest` sets an atomic pointer that
+  `NewDeviceTransport`'s dials read. Replacing `net.DefaultResolver` (what the
+  throwaway reproduction did) writes a global that every goroutine in the
+  process reads with no synchronisation, which the race detector reports
+  whenever another test's goroutine resolves a name meanwhile. The price: a
+  client swapped away from `NewDeviceTransport` resolves through the system
+  resolver, fails to resolve the test's name, and the end-to-end test goes
+  red as "the LAN stand-in saw nothing" rather than as the console reached
+  (NC2, NC3). The literal-address tests in `internal/upnpproxy` and #1069's
+  in `internal/dlna/discovery` show the check itself.
+- **A URL naming a port and no host.** `customEndpoints` kept
+  `https://:8443` and advertised it to every phone (it read `u.Host`);
+  it now prunes it with the other entries a phone cannot use. The harvest
+  credential endpoint accepted it as the base its client dials with the
+  token; it now answers 400 (`config.BaseURLNamesHost`). A configured enrich
+  or harvest base URL of that shape is warned about in `Normalize` and still
+  loads: a refusal there stops a bridge that loaded it before.
+  `CanonicalHTTPSBase`'s reduction is unchanged on purpose: with the host test
+  in it, a hostless pin reduced to "" and `Validate` refused the config (NC18),
+  and without `Validate` it would read as unpinned. As it stands the pin keeps
+  pinning, to a value no accepted credential can carry. No wire change:
+  PROTOCOL.md's `atlasBaseUrl` rule is an https URL, and the refusal is the
+  existing `400 bad_request`.
+- **Gemini consult**: not available (the API's monthly cap). The mechanisms
+  were settled against the Go 1.26.6 source: `net/http/transport.go`
+  (`dialConnFor` puts an undelivered connection in the idle pool;
+  `tryPutIdleConn` hands it to a waiting request unless `DisableKeepAlives`),
+  `net/conf.go` (`PreferGo` with a `Dial` selects the Go resolver on darwin
+  and windows too, which the stub server needs).
+
+### Tests and controls
+
+- `cmd/bridge/upnp_rebinding_test.go`:
+  `TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine`, four
+  servers cached as discovery leaves them, each driven through a real
+  `Ingester.Run` and a proxy byte fetch, with the name answering this host's
+  LAN address (skipped with a log line on a host without one) and then
+  127.0.0.1. A server announcing from a LAN address and a manual server
+  named by a name reach nothing; one announcing from 127.0.0.1 and a manual
+  server on `localhost` reach this machine, which is what shows the refusal
+  is the check and that both paths carry the approval.
+- `internal/upnp/dial_approval_test.go`: the SSDP path records the packet's
+  address with the URL (first sighting, a move, a refresh from elsewhere, a
+  move to a description with no control URL); the merge; the manual poller.
+- `internal/dlna/discovery/dial_approval_test.go`: `OperatorChose`'s table
+  on the address a connect targets, and `NewDeviceTransport`.
+- `internal/upnpproxy/dial_check_test.go`: a server approved from the LAN
+  refused on 127.0.0.1, one approved there served; the kept-alive test; the
+  streaming settings.
+- `internal/config/port_only_url_test.go`,
+  `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost`, and a row in
+  `TestAtlasHarvestBaseURLValidation`.
+- `internal/dnstest`, a DNS server on 127.0.0.1 for one name, with its own
+  test. Existing stubs of the two resolver interfaces gained the approval;
+  the api, dlna and proxy stubs answer with a server announcing from
+  127.0.0.1, where their stub upstreams listen.
+- Negative controls on the committed tree, each restored with
+  `git checkout --` and checked green, `-count=1`:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the dial check permits every address | the E2E's two refusals (the console saw `POST /ctl`, `POST /ctl`, `GET /MediaItems/1.flac`), the proxy's refusal and kept-alive tests, `OperatorChose`'s table, the transport test, and #1069's `TestDefaultClientDialCheck`, `TestDefaultClient_NeverConnectsToThisHostOnAnotherAddressesSay`, `TestServerDiscoveryDefaultClientNeverConnectsToThisHostOnAnotherAddressesSay` |
+  | NC2 | the SOAP client back on `http.DefaultTransport` | the E2E, all four cases (the ingest's name no longer resolves through the test's DNS) |
+  | NC3 | the proxy back on its old transport | the proxy's three new tests, and the E2E's four cases (as NC2) |
+  | NC4 | the ingest does not put the approval in the context | the E2E's two positive cases, ingest half only |
+  | NC5 | the proxy does not | the E2E's two positive cases (proxy half), the proxy's two new behaviour tests, and every existing proxy test with a stub upstream (5 in upnpproxy, 4 in api, 3 in dlna) |
+  | NC6 | `LiveHost` returns a zero approval | the E2E's positive cases (proxy half), `TestLiveHostResolvesRoutingKeySpelling` |
+  | NC7 | `ResolveControlURL` returns a zero approval | the E2E's positive cases (ingest half), `TestResolveControlURLResolvesAManualServer` |
+  | NC8 | `Upsert` merges the approval alone | the merge test, two steps |
+  | NC9 | the SSDP fetch records no approval | the SSDP recording test, four steps |
+  | NC10 | the manual poller records none | the manual poller test |
+  | NC11 | a name in an operator's URL approves this machine | `OperatorChose`'s two name rows, the E2E's manual-by-name case |
+  | NC12 | the device transport keeps connections alive | the proxy's kept-alive and settings tests, the transport test, #1069's `TestDefaultClient_ChecksTheDevicesAddressNotAProxys` |
+  | NC13 | a template's `ControlContext` survives | the transport test only |
+  | NC14 | the dials ignore the test resolver | the E2E, all four cases |
+  | NC15 | `customEndpoints` reads `Host` | the prune test |
+  | NC16 | the credential endpoint takes a base with no host | its test, three cases |
+  | NC17 | `Normalize` does not warn | the three "names no host" subtests |
+  | NC18 | the host test moves into `CanonicalHTTPSBase` | the pin row (reduces to "" and `Validate` refuses it), the harvest warning subtest |
+
+  NC7 first ran with the resolver test's fixture on a LAN manual URL, whose
+  `OperatorChose` is the zero approval, and that test stayed green: the
+  assertion could not tell "returned" from "dropped". The fixture now holds a
+  non-zero approval, with a guard that fails if it ever does not.
+
+### Out of scope
+
+- **An SSDP packet's source is not authenticated.** A peer on the bridge's L2
+  segment can send one from a link-local address that is not a cloud
+  metadata address, and the same-address exception then approves exactly
+  that address, for the description fetch (#1069) and now for the later
+  dials. The metadata addresses are refused whatever the source (review
+  round 1, `cloudMetadataAddrs`). A loopback source is the case #1069 relies
+  on RFC 1122 for: a host discards 127/8 arriving on any other interface.
+- The harvest client dials a stored base as it is, so a hostless base stored
+  before this change (only a paired device could have sent one) is not
+  re-checked.
+- The manual poller's description fetch still has no dial check (above).
+
+### Review round 1 (CodeRabbit, three findings, all taken)
+
+- **CLAUDE.md named `http.DefaultTransport` as the SOAP client's transport
+  in the present tense** (Minor). It says "then on" now.
+- **The port-only warning logged the base URL whole** (Major).
+  `normalizeBaseURL` accepts userinfo, so `http://user:password@:5000` put
+  the password in the journal. `url.URL.Redacted` is not the fix, measured:
+  it masks the password and returned `http://s3cret-token@:5001/?apikey=s3cret`
+  whole (a token written as the user name, and the query). So the warning
+  logs `urlOriginForLog`, the scheme and host alone (`http://:5000`), which
+  is what it is about. The custom-endpoint drop warnings had the same leak,
+  and a parse failure quoted the entry twice (`customEndpoints["https://user:s3cret x@…"]:
+  parse "https://user:s3cret x@…": net/url: invalid userinfo`); they name an
+  entry by position and origin now, and a parse failure by position alone,
+  since the parse error quotes the value. The harvest-base warning cannot
+  carry userinfo: `CanonicalHTTPSBase` refuses a URL with one, so such a pin
+  reduces to "" and is never warned about (`Validate` refuses it).
+  `ValidateCustomEndpoints`' docblock said the admin PATCH handler shows its
+  warnings to the operator; nothing but `Normalize` calls it, and they reach
+  the journal only. `TestNoConfigWarningCarriesAURLsCredentials` puts a
+  secret in each URL a warning names (a password, a token as the user name,
+  a query) and requires every warning, and the secret in none.
+- **The same-address exception approved a spoofed cloud metadata address**
+  (Major). An SSDP source is not authenticated, so a peer on the link can
+  send a packet from 169.254.169.254, and the exception approved exactly
+  that address: for the description fetch (#1069), and since B36 for the
+  ingest's SOAP and every byte fetch, whose answer the proxy relays to the
+  unauthenticated DLNA listener. The chain, on a cloud VM: the peer answers
+  the LOCATION's name with its own address while discovery fetches the
+  description, then with 169.254.169.254 (IMDSv1 answers a plain GET with
+  the instance's credentials). Reproduced through the real ingest and proxy
+  with the rule off (NC M1 below): both dialled
+  `169.254.169.254:63371: connect: host is down` on the dev Mac, which is
+  the connect the exception approved.
+
+  `cloudMetadataAddrs` in `url_policy.go` is one list, from each provider's
+  documentation (2026-09-28):
+
+  | address | what | source |
+  |---|---|---|
+  | 169.254.169.254 | instance metadata on AWS, Azure, Google Cloud, Oracle Cloud, OpenStack, DigitalOcean, Hetzner, IBM Cloud, Linode | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
+  | fd00:ec2::254 | AWS instance metadata, IPv6 (Nitro) | same |
+  | 169.254.169.253, fd00:ec2::253 | AWS Route 53 Resolver | https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html |
+  | 169.254.169.123, fd00:ec2::123 | AWS Time Sync Service | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html |
+  | 169.254.170.2 | AWS ECS task metadata and credentials | https://docs.aws.amazon.com/sdkref/latest/guide/feature-container-credentials.html |
+  | 169.254.170.23, fd00:ec2::23 | AWS EKS Pod Identity Agent | https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html |
+  | fd20:ce::254 | Google Cloud metadata, IPv6-only instances | https://docs.cloud.google.com/compute/docs/metadata/querying-metadata |
+  | fd00:c1::a9fe:a9fe | Oracle Cloud instance metadata, IPv6 | https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/gettingmetadata.htm, cloud-init issue 6849 |
+  | fe80::a9fe:a9fe | OpenStack (since Victoria) and Linode metadata, IPv6 | https://docs.openstack.org/nova/latest/admin/metadata-service.html |
+  | fd00:a9fe:a9fe::1 | Linode metadata, IPv6 | https://linode.com/docs/products/compute/compute-instances/guides/metadata-api |
+  | 169.254.42.42, fd00:42::42 | Scaleway metadata | https://www.scaleway.com/en/developers/api/instance/user-data |
+  | 169.254.0.23, 169.254.10.10 | Tencent Cloud metadata (metadata.tencentyun.com) | https://www.tencentcloud.com/document/product/213/4934 |
+  | 100.100.100.200 | Alibaba Cloud metadata | https://www.alibabacloud.com/help/en/ecs/user-guide/view-instance-metadata/ |
+  | 168.63.129.16 | Azure WireServer (the host's endpoint: agent, DHCP, DNS, health probes) | https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16 |
+
+  `addrKind` names them first (`hostMetadata`), so the string check
+  (`LocationFromSource`), the service-URL rule (`resolveServiceURL`, for
+  every source, with its own error) and the dial check (`permits`, before
+  its same-address arm) refuse them whatever approved the request, and
+  `OperatorChose` approves nothing for a URL on one. Ten are not link-local
+  (the eight in fd00::/8, 100.100.100.200 and 168.63.129.16), so they were
+  fetched on ANY device's say-so, exception or not, and no string rule saw
+  them. **Exact addresses, never a range**: a direct-cable device
+  self-assigns anywhere in 169.254/16 or fe80::/10, and a /24 around
+  169.254.169.254 would refuse one such device in 254 (NC M8 shows the
+  cost: the direct-cable rows at 169.254.7.7 and #1069's own link-local
+  rows go red). Costs accepted: a tailnet node may hold 100.100.100.200
+  (it is in 100.64/10, where Tailscale assigns node addresses: one address
+  in 4,194,304) and would lose its routed dials. Azure's DNS on 168.63.129.16 is unaffected: the resolver dials
+  with a dialer of its own, which the check does not see. Left out: Oracle
+  Cloud Classic's 192.0.0.192, a retired service. CI runs on Azure VMs,
+  where 169.254.169.254 and 168.63.129.16 answer: the tests' refusals come
+  before any connect, and the controls that connect ran on the dev Mac only.
+
+  Tests, each through a real entry point: the list against its sources
+  (`TestCloudMetadataAddrsAreTheDocumentedOnes`, which also fails on an
+  address added without a row); both SSDP clients' packet paths, from each
+  address and from a LAN address
+  (`TestHandlePacket_NeverFetchesACloudMetadataLocation`,
+  `TestServerCloudMetadataLocationIsNeverFetched`, the second with a
+  direct-cable server at 169.254.7.7 fetched and approved); the production
+  client resolving a name to a metadata address under four approvals,
+  through `internal/dnstest`
+  (`TestDefaultClient_RefusesACloudMetadataAddressWhateverApprovedTheFetch`);
+  the service URLs, for every source
+  (`TestParseDeviceDescription_NeverKeepsACloudMetadataServiceURL`); the
+  chain end to end, through the real ingest and proxy
+  (`TestAPacketFromAMetadataAddressApprovesNoLaterDialThere`); rows in the
+  dial check's, the string check's and `OperatorChose`'s tables; and a
+  property in `FuzzParseDeviceDescription` (no kept service URL names a
+  metadata address; it reads the list, which is data) with three seeds.
+  One existing row asserted the defect: `OperatorChose`'s "link-local URL,
+  another link-local address" connected to 169.254.169.254 and wanted it
+  allowed. It dials 169.254.7.7 now, with the metadata address its own
+  refused row.
+
+  Negative controls, each committed first, restored with `git checkout --`
+  and checked green, `-count=1`:
+
+  | | mutation | red |
+  |---|---|---|
+  | M1 | `addrKind` never names a metadata address (the rule off) | the string check (both packet paths, its table), the dial check (its table, `OperatorChose`'s, the transport test, which ran 9.0 s against 0.0 s green, its connects running into the 3 s fetch timeout; the E2E, `connect: host is down`), the service-URL test, the fuzz seeds. Green: the list test, the list being intact |
+  | M2 | `LocationFromSource` sends a metadata literal on to the source comparison | the string check only: both packet paths, its table |
+  | M3 | `permits` keeps its same-address arm for a metadata address | the dial check only: its table, the transport test, the E2E |
+  | M4 | `resolveServiceURL` loses its metadata case | the refusal's reason only: every row still refused, as "names this machine or a link-local address", by `hostKindAllowed` |
+  | M4b | `hostKindAllowed` loses its metadata arm | nothing: a belt, since both callers check first. With M4 as well, a description at a metadata address keeps its own service URLs (the service-URL test, the fuzz seed at fe80::a9fe:a9fe) |
+  | M5 | the base-URL warning logs the value | the redaction test: the password, the token and the query in the line |
+  | M6 | the endpoint warnings quote the entry | the redaction test, three lines, the parse failure's twice. Its first form did not build (the naming closure unused) and was redone with the closure kept |
+  | M7 | 100.100.100.200 dropped from the list | the list test, and every row naming it (string check, dial check, service URLs, the transport test, the upnp packet path) |
+  | M8 | the range: every IPv4 link-local address counts as metadata | the direct-cable rows at 169.254.7.7 (both packet paths, the dial check, `OperatorChose`, the service-URL test's positive), the list test's neighbours, and #1069's link-local rows |
+
+### Out of scope (round 1)
+
+- Two REFUSALS still quote a configured URL whole, userinfo included:
+  `normalizeBaseURL`'s (`must be an absolute http(s) URL, got %q`) and
+  `Validate`'s harvest-pin one (`must be a plain https base URL …, got %q`).
+  They stop the bridge from starting and print to its log; they were not
+  warnings and were not changed here.
+- A custom endpoint that carries userinfo and is otherwise valid
+  (`https://user:password@host:7788`) is KEPT, and `/v1/health` advertises
+  it as written, to a caller with no token too.
+- A manual upstream's own description fetch has no metadata check (the
+  operator's URL; upstream ingest is refused in public mode), though no
+  later dial of one reaches a metadata address.
