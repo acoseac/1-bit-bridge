@@ -23,6 +23,10 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 		{"a token as the user name", secret + "@bridge.example.test"},
 		{"a query", "bridge.example.test?token=" + secret},
 		{"a fragment", "bridge.example.test#" + secret},
+		// url.Parse refuses a space in the userinfo, so HasCredentialParts
+		// answers false for it: the value is refused for not parsing.
+		{"a password that does not parse", "user:" + secret + " x@bridge.example.test"},
+		{"a password behind a space", " user:" + secret + "@bridge.example.test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
