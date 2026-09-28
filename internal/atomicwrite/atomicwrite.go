@@ -254,6 +254,13 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 // from prior deployments stay at their previous mode (operators
 // upgrade by `rmdir`-ing the cache).
 //
+// Run as root (a `sudo bridge scan` over a service install writes the
+// scanner's covers here), the directories it creates and the file it
+// writes keep the install's owner: fsutil.MkdirAll gives a new directory
+// its parent's owner, and fsutil.KeepOwner the staged file the owner of
+// what it replaces, or of its directory. Without them the artwork cache
+// was root's 0700 and the service could neither read a cover nor add one.
+//
 // On rename failure the function reads the existing destination
 // and accepts the write as already-committed if the bytes match
 // `data`. Same rationale the original `writeArtworkAtomic` /
@@ -269,7 +276,7 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 // as appropriate.
 func WriteBytes(path string, data []byte, tmpPrefix string) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	// Same directory as `path` so the rename is a same-filesystem atomic op.
@@ -289,6 +296,9 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 	// closes explicitly below; the defer is the unwind path for
 	// the error branches.
 	defer func() { _ = tmp.Close() }()
+	if err := fsutil.KeepOwner(tmp, path); err != nil {
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
