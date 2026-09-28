@@ -249,6 +249,65 @@ func TestTreeHoldsVariantSidecars(t *testing.T) {
 			t.Fatal("want an error for an empty directory path — never walk the working directory")
 		}
 	})
+	// A variants directory that is an ext4 volume's mount root holds the
+	// volume's root-owned, 0700 lost+found, which the bridge's user cannot
+	// list. It is evidence neither way, the reading TakeSidecarInventory
+	// gives it (IsFilesystemLostFound): a fresh volume holding nothing else
+	// holds no sidecars, and a tree whose only sidecars sort after it holds
+	// them. Until 2026-09-28 the probe returned the listing's permission
+	// error for both, so the reverse guard refused to reap the rows of a
+	// replaced volume, every tick, and refused the second with "could not
+	// be read" where the tree was readable.
+	t.Run("the filesystem's lost+found at the top is evidence neither way", func(t *testing.T) {
+		skipWhereModesDenyNothing(t)
+		fresh := t.TempDir()
+		lockDir(t, mkdirAllUnder(t, fresh, "lost+found"))
+		if got, err := TreeHoldsVariantSidecars(fresh); err != nil || got {
+			t.Errorf("a fresh volume: got %v, %v — want false, nil", got, err)
+		}
+		late := t.TempDir()
+		write(t, late, "mozart/Requiem/01.flac.upscaled-v2-176400-24.flac")
+		lockDir(t, mkdirAllUnder(t, late, "lost+found"))
+		if got, err := TreeHoldsVariantSidecars(late); err != nil || !got {
+			t.Errorf("sidecars that sort after it: got %v, %v — want true, nil", got, err)
+		}
+	})
+	// Only that one directory. Anything else the walk cannot list could
+	// hold sidecars, so the probe still fails closed on it: a lost+found
+	// further down (a volume mounted inside the tree), a top-level
+	// directory of another name, and the root itself. And a readable
+	// lost+found is walked like any directory: the rule is about what the
+	// walk cannot see, not a prune.
+	t.Run("any other directory it cannot list still fails closed", func(t *testing.T) {
+		skipWhereModesDenyNothing(t)
+		for _, rel := range []string{"Artist/lost+found", "Locked"} {
+			dir := t.TempDir()
+			lockDir(t, mkdirAllUnder(t, dir, rel))
+			if got, err := TreeHoldsVariantSidecars(dir); err == nil {
+				t.Errorf("%s locked: got %v with no error, want the listing's error", rel, got)
+			}
+		}
+		root := filepath.Join(t.TempDir(), "lost+found")
+		lockDir(t, mkdirAllUnder(t, root, ""))
+		if got, err := TreeHoldsVariantSidecars(root); err == nil {
+			t.Errorf("an unreadable root named lost+found: got %v with no error, want the listing's error", got)
+		}
+		readable := t.TempDir()
+		write(t, readable, "lost+found/01.flac.upscaled-v2-176400-24.flac")
+		if got, err := TreeHoldsVariantSidecars(readable); err != nil || !got {
+			t.Errorf("a readable lost+found holding a sidecar: got %v, %v — want true, nil", got, err)
+		}
+	})
+}
+
+// mkdirAllUnder creates rel under dir and returns its path.
+func mkdirAllUnder(t *testing.T, dir, rel string) string {
+	t.Helper()
+	p := filepath.Join(dir, rel)
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // TestMassDeleteRefusal pins the guard's three conditions and both

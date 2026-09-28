@@ -549,39 +549,52 @@ func TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount(t *testing.T) {
 // TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing
 // — the refusal is logged once per streak, and a tick that never reached a
 // verdict is evidence of nothing: a listing that failed, a walk that failed
-// or was stopped, a catalog that read empty. None of them may end the
-// streak, which would have the next refused tick WARN again, and none may
-// claim the check passed.
+// or was stopped, a catalog that read empty over a directory the sweep
+// could not read. None of them may end the streak, which would have the
+// next refused tick WARN again, and none may claim the check passed. (An
+// empty catalog over a directory it CAN read is a verdict: a refusal of its
+// own kind over files, nothing to protect over none. Until 2026-09-28 every
+// empty catalog was a tick that decided nothing.)
 func TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// middle runs the second of three ticks, the one that decides
 		// nothing, and puts the lister back.
-		middle func(s *OrphanSidecarSweeper, l *switchableLister)
+		middle func(t *testing.T, s *OrphanSidecarSweeper, l *switchableLister)
+		// locks is true for a middle that locks a directory by its mode,
+		// which denies nothing on Windows or to root.
+		locks bool
 	}{
-		{"the listing fails", func(s *OrphanSidecarSweeper, l *switchableLister) {
+		{"the listing fails", func(_ *testing.T, s *OrphanSidecarSweeper, l *switchableLister) {
 			l.err = errors.New("database is locked")
 			s.tick(context.Background())
 			l.err = nil
-		}},
-		{"the walk fails", func(s *OrphanSidecarSweeper, _ *switchableLister) {
+		}, false},
+		{"the walk fails", func(_ *testing.T, s *OrphanSidecarSweeper, _ *switchableLister) {
 			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			defer cancel()
 			s.tick(ctx)
-		}},
-		{"the walk is stopped", func(s *OrphanSidecarSweeper, _ *switchableLister) {
+		}, false},
+		{"the walk is stopped", func(_ *testing.T, s *OrphanSidecarSweeper, _ *switchableLister) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			s.tick(ctx)
-		}},
-		{"the catalog reads empty", func(s *OrphanSidecarSweeper, l *switchableLister) {
+		}, false},
+		{"the catalog reads empty over a directory the sweep cannot read", func(t *testing.T, s *OrphanSidecarSweeper, l *switchableLister) {
 			rows := l.rows
 			l.rows = nil
+			dir := lockDir(t, s.outputDir())
 			s.tick(context.Background())
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			l.rows = rows
-		}},
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.locks {
+				skipWhereModesDenyNothing(t)
+			}
 			dir, live := strandedTree(t)
 			l := &switchableLister{rows: rowsNaming(live)}
 			s := NewOrphanSidecarSweeper(l, staticDir(dir), time.Hour, sweepPercent)
@@ -589,12 +602,15 @@ func TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing
 
 			rec := loggingtest.Record(t)
 			s.tick(context.Background())
-			tc.middle(s, l)
+			tc.middle(t, s, l)
 			s.tick(context.Background())
 
 			if got := rec.Lines(msgOrphanRefusal); len(got) != 1 {
 				t.Errorf("refusal logged %d times over refuse / %s / refuse, want once:\n%s",
 					len(got), tc.name, strings.Join(got, "\n"))
+			}
+			if got := append(rec.Lines(msgOrphanEmptyCatalog), rec.Lines(msgOrphanPartialWalk)...); len(got) != 0 {
+				t.Errorf("a tick that decided nothing logged a refusal of another kind:\n%s", strings.Join(got, "\n"))
 			}
 			if got := rec.Lines(msgOrphanRefusalLifted); len(got) != 0 {
 				t.Errorf("a tick that decided nothing ended the streak:\n%s", strings.Join(got, "\n"))
@@ -1296,6 +1312,86 @@ func TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir(t *testing.T) {
 	}
 	if got := rec.Failures(); len(got) != 0 {
 		t.Errorf("an empty catalog over an empty directory warned:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal — the refusal of an
+// empty catalog over a directory that holds files WARNed on every tick (the
+// M-SEARCH shape: measured on a real serve with a 2 s interval, five lines
+// in ten seconds) and was not part of the latch the Jobs card reads, so the
+// card said "on" while every tick refused. It is a latched kind now: one
+// WARN when a streak starts, again at most once a day while it lasts, the
+// status the card reads, and one Info line when a tick proceeds again.
+// Nothing is unlinked on any tick.
+func TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal(t *testing.T) {
+	dir := t.TempDir()
+	files := seedTestSidecarTree(t, dir, "rendition-", 5)
+	ageFixtures(t, dir)
+	l := &switchableLister{}
+	s := NewOrphanSidecarSweeper(l, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	rec := loggingtest.Record(t)
+
+	requireTicksUnlinkNothing(t, s, 3, "the catalog is empty")
+	requireLinesSay(t, rec.Failures(msgOrphanEmptyCatalog), 1,
+		"the empty-catalog WARN, once for three ticks, naming the directory and what to do", " variants_dir="+dir, "--allow-empty")
+	first := s.Status()
+	if first.Refusing != OrphanRefusalEmptyCatalog || first.Since.IsZero() {
+		t.Fatalf("an empty catalog over a directory that holds files: status %+v, want emptyCatalog with a start", first)
+	}
+
+	s.lastRefusalLog = s.lastRefusalLog.Add(-orphanRefusalRepeat)
+	requireTicksUnlinkNothing(t, s, 2, "the catalog is still empty a day later")
+	requireLinesSay(t, rec.Failures(msgOrphanEmptyCatalog), 2, "the streak logged again a day on, once")
+	if got := s.Status(); got != first {
+		t.Errorf("the streak's repeat moved the status: %+v, want %+v", got, first)
+	}
+
+	l.rows = rowsNaming(files)
+	requireTicksUnlinkNothing(t, s, 2, "every file has its row again")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once, with the counts it passed on", " rows=5")
+	if got := s.Status(); got != (OrphanSweepStatus{}) {
+		t.Errorf("after the rows came back: status %+v, want not refusing", got)
+	}
+	if got := countFiles(t, dir); got != 5 {
+		t.Errorf("%d of 5 files survive", got)
+	}
+}
+
+// TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakWithNothingLeftToProtect
+// — an empty catalog over an EMPTY or MISSING variants directory has
+// nothing to refuse, so it ends a streak as a tick that proceeds does: the
+// operator emptied the tree, or it went with its volume, and the card must
+// not go on saying the sweep refuses. It says so once, at Info.
+func TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakWithNothingLeftToProtect(t *testing.T) {
+	for name, clear := range map[string]func(dir string) error{
+		"the directory is emptied": func(dir string) error {
+			entries, err := os.ReadDir(dir)
+			for _, e := range entries {
+				if err == nil {
+					err = os.Remove(filepath.Join(dir, e.Name()))
+				}
+			}
+			return err
+		},
+		"the directory is removed": os.RemoveAll,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			seedTestSidecarTree(t, dir, "rendition-", 5)
+			ageFixtures(t, dir)
+			s := NewOrphanSidecarSweeper(&switchableLister{}, staticDir(dir), time.Hour, sweepPercent)
+			rec := loggingtest.Record(t)
+			requireTicksUnlinkNothing(t, s, 1, "the catalog is empty")
+			if err := clear(dir); err != nil {
+				t.Fatal(err)
+			}
+			requireTicksUnlinkNothing(t, s, 2, name)
+			requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once", " files=0", " rows=0")
+			if got := s.Status(); got != (OrphanSweepStatus{}) {
+				t.Errorf("status %+v, want not refusing", got)
+			}
+		})
 	}
 }
 

@@ -28,8 +28,11 @@ func TestEveryOrphanRefusalKindIsWorded(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; this test executes the shipped console source")
 	}
+	// Three kinds: the lost index, the partial walk and the empty catalog
+	// (2026-09-28). integrity's TestEveryOrphanRefusalKindIsListed holds
+	// the list to every kind the sweep declares.
 	kinds := integrity.OrphanRefusalKinds()
-	if len(kinds) < 2 {
+	if len(kinds) < 3 {
 		t.Fatalf("only %d refusal kind(s) listed; the list is broken, so this test proves nothing", len(kinds))
 	}
 	names := make([]string, 0, len(kinds)+1)
