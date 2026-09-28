@@ -67,10 +67,17 @@ func sourceIsAtRow(info os.FileInfo, rowMTimeNS, rowSize int64) bool {
 // and the phone plays the source as it does for any refusal.
 var errSourceAheadOfRow = fmt.Errorf("the file changed on disk after its last scan: %w", api.ErrUpscaleIneligible)
 
-// sourceRescanQueueCap bounds the directories waiting for a rescan. A
-// request that finds the queue full drops its directory: the periodic scan
-// reads it anyway, and a request never waits on a scan.
-const sourceRescanQueueCap = 64
+// sourceRescanQueueCap bounds the directories waiting for a rescan, and so
+// the work one burst of requests can queue. Each costs one ScanSubtree, and
+// one that re-reads a changed file also runs the whole-library duplicate
+// restamp: on the dev Mac, 1.1 s for an album with one changed file over
+// 50,012 rows (7 ms with nothing changed), so a full queue there is about
+// nineteen minutes of work. Ordinary use stays far below it: the app asks
+// for one file at a time, and a folder POST names one directory per album
+// under it. A request that finds the queue full is dropped, and its
+// directory waits for the periodic scan, or for a later request once there
+// is room; a request never waits on a scan.
+const sourceRescanQueueCap = 1024
 
 // sourceRescan is one queued directory, under both spellings: the absolute
 // one to scan and the library-relative one to log (a log line names a
@@ -86,50 +93,78 @@ type sourceRescan struct {
 // writes the row the next request stamps from.
 //
 // A directory is queued at most once at a time, and scanned by one loop
-// (run), one after another and behind any scan in progress: ScanSubtree
-// takes the scanner's lock.
+// (run), oldest first, one after another and behind any scan in progress:
+// ScanSubtree takes the scanner's lock. The queue is the pending set
+// itself, so a directory asked for while others wait is kept until the
+// loop reaches it, up to sourceRescanQueueCap.
 type sourceRescanner struct {
-	queue   chan sourceRescan
+	wake    chan struct{} // one slot: something was queued since run last looked
 	mu      sync.Mutex
-	pending map[string]struct{} // absolute directories queued, not yet started
+	waiting []sourceRescan      // queued, oldest first
+	pending map[string]struct{} // the absolute directories in waiting
 }
 
 func newSourceRescanner() *sourceRescanner {
 	return &sourceRescanner{
-		queue:   make(chan sourceRescan, sourceRescanQueueCap),
+		wake:    make(chan struct{}, 1),
 		pending: map[string]struct{}{},
 	}
 }
 
 // request queues the directory holding the file at abs (library-relative
-// rel) unless it is already waiting. It never blocks.
+// rel) unless it is already waiting or the queue is full. It never blocks.
 func (r *sourceRescanner) request(abs, rel string) {
 	dir := sourceRescan{abs: filepath.Dir(abs), rel: path.Dir(rel)}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, waiting := r.pending[dir.abs]; waiting {
-		return
-	}
-	select {
-	case r.queue <- dir:
+	_, waiting := r.pending[dir.abs]
+	queued := !waiting && len(r.waiting) < sourceRescanQueueCap
+	if queued {
 		r.pending[dir.abs] = struct{}{}
-	default:
+		r.waiting = append(r.waiting, dir)
+	}
+	r.mu.Unlock()
+	if queued {
+		select {
+		case r.wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// run scans each queued directory until ctx ends. A directory leaves the
-// pending set when its scan STARTS, so a file that changes again while its
-// directory is being read is queued again rather than folded into a scan
-// that may already have passed it.
+// next takes the oldest waiting directory. It leaves the pending set here,
+// as its scan starts, so a file that changes again while its directory is
+// being read is queued again rather than folded into a scan that may
+// already have passed it.
+func (r *sourceRescanner) next() (sourceRescan, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.waiting) == 0 {
+		return sourceRescan{}, false
+	}
+	dir := r.waiting[0]
+	r.waiting[0] = sourceRescan{}
+	r.waiting = r.waiting[1:]
+	if len(r.waiting) == 0 {
+		r.waiting = nil
+	}
+	delete(r.pending, dir.abs)
+	return dir, true
+}
+
+// run scans every queued directory until ctx ends. One wake can stand for
+// many requests, since its slot holds one, so each wake drains the queue.
 func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case dir := <-r.queue:
-			r.mu.Lock()
-			delete(r.pending, dir.abs)
-			r.mu.Unlock()
+		case <-r.wake:
+		}
+		for ctx.Err() == nil {
+			dir, ok := r.next()
+			if !ok {
+				break
+			}
 			if _, err := scan(ctx, dir.abs); err != nil {
 				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 					logger.Warn("rescan of a changed source's directory failed",

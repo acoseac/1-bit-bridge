@@ -490,9 +490,9 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a request blocked on the full queue: it runs inside an HTTP request, and must drop instead")
 	}
-	if len(full.queue) != sourceRescanQueueCap || len(full.pending) != sourceRescanQueueCap {
+	if len(full.waiting) != sourceRescanQueueCap || len(full.pending) != sourceRescanQueueCap {
 		t.Errorf("queue %d, pending %d after %d directories, want both at the cap %d",
-			len(full.queue), len(full.pending), sourceRescanQueueCap+5, sourceRescanQueueCap)
+			len(full.waiting), len(full.pending), sourceRescanQueueCap+5, sourceRescanQueueCap)
 	}
 
 	// Queued before the loop runs, so which requests share a scan does not
@@ -504,8 +504,8 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	r.request(filepath.Join(dirA, "01.flac"), "A/01.flac")
 	r.request(filepath.Join(dirA, "02.flac"), "A/02.flac")
 	r.request(filepath.Join(dirB, "01.flac"), "B/01.flac")
-	if len(r.queue) != 2 {
-		t.Fatalf("%d scans queued for two directories, want 2: two files of one directory share a scan", len(r.queue))
+	if len(r.waiting) != 2 {
+		t.Fatalf("%d scans queued for two directories, want 2: two files of one directory share a scan", len(r.waiting))
 	}
 
 	// Every scan waits for the test to release it, so the loop takes the
@@ -548,11 +548,84 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	// The third scan is held, so the loop takes nothing more: what is
 	// still queued now would be a fourth.
 	r.mu.Lock()
-	queued, pending := len(r.queue), len(r.pending)
+	queued, pending := len(r.waiting), len(r.pending)
 	r.mu.Unlock()
 	if queued != 0 || pending != 0 {
 		t.Errorf("%d queued, %d pending after the second scan of A started, want none: "+
 			"two requests made during A's first scan are one more scan", queued, pending)
+	}
+}
+
+// TestSourceRescannerScansEveryDirectoryABurstAsksFor: one burst of
+// requests can name more directories than the loop takes in the time they
+// arrive: a folder POST over an artist's albums after a retag, or a
+// household's plays while a long full scan holds the scanner's lock. Every
+// directory is queued once and scanned once. Before, the queue took 64 and
+// dropped the rest, and a dropped directory was rescanned only if a later
+// request named a file in it, so a client that asked once waited for the
+// periodic scan (six hours by default), the cost the rescan exists to spare.
+func TestSourceRescannerScansEveryDirectoryABurstAsksFor(t *testing.T) {
+	const dirs = 200
+	lib := filepath.FromSlash("/lib")
+	r := newSourceRescanner()
+	for i := 0; i < dirs; i++ {
+		for _, file := range []string{"01.flac", "02.flac"} {
+			name := fmt.Sprintf("D%03d", i)
+			r.request(filepath.Join(lib, name, file), name+"/"+file)
+		}
+	}
+
+	var mu sync.Mutex
+	scanned := map[string]int{}
+	all := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.run(ctx, func(_ context.Context, dir string) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			scanned[dir]++
+			if len(scanned) == dirs && scanned[dir] == 1 {
+				close(all)
+			}
+			return 0, nil
+		})
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
+
+	select {
+	case <-all:
+	case <-time.After(5 * time.Second):
+	}
+	// Nothing is left waiting once the loop has taken the last directory,
+	// so any second scan of one would already be in the count.
+	r.mu.Lock()
+	left := len(r.pending)
+	r.mu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
+	var missing, twice []string
+	for i := 0; i < dirs; i++ {
+		dir := filepath.Join(lib, fmt.Sprintf("D%03d", i))
+		switch scanned[dir] {
+		case 0:
+			missing = append(missing, filepath.Base(dir))
+		case 1:
+		default:
+			twice = append(twice, filepath.Base(dir))
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("%d of %d directories asked for in one burst were never scanned (first: %s): "+
+			"a request past the queue's end was dropped", len(missing), dirs, missing[0])
+	}
+	if len(twice) > 0 {
+		t.Errorf("%d directories were scanned more than once (first: %s): two files of one directory share its scan",
+			len(twice), twice[0])
+	}
+	if left != 0 {
+		t.Errorf("%d directories still pending after the loop drained the burst", left)
 	}
 }
 
