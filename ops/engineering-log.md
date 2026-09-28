@@ -25408,7 +25408,7 @@ render.
 - Every writer stamps the row. `JobSpec.FreshnessFromFile` had no other
   caller and is removed, and the JobSpec fields' docblock says where the
   stamp comes from.
-- A render starts only while the file still matches its row
+- A render is queued only while the file still matches its row
   (`sourceIsAtRow`): the scanner's skip-gate comparison, exact size and
   mtime, not the serve path's 2 s tolerance, which is about stamps taken
   through different mounts. A file that fails it is one the next scan
@@ -25574,3 +25574,36 @@ which opened nothing in that test; the same head passed on a re-run; and the
 failed attempt ran every package about three times slower than the re-run
 (`cmd/bridge` 400 s against 127 s, and `internal/adminauth`, which the branch
 does not touch, 182 s against 50 s). Filed as backlog B63.
+
+### Review round 2: the check runs at enqueue, and the queue window stays open
+
+CodeRabbit's second pass left two findings. Inline on CLAUDE.md: the rule's
+lead said a render STARTS only while the file matches its row, which the same
+bullet contradicts further down for the batch coordinator. The lead now
+names the three entry points that check (the on-demand path, the sweeper, the
+CLI) and says they QUEUE a render only while the file matches, and the bullet,
+this entry's design list and `rendition_stamp.go`'s docblock say when the
+check runs: when a render is queued, not when the pool starts it.
+
+Outside the diff, on `finalizeAndEnqueue`: a file that changes while its job
+waits in the pool's queue is rendered from new bytes under the row's older
+stamp, and the serve path refuses the result; stat and compare again in
+`processJob` before `Run`. Declined for this PR, with the evidence:
+
+- It is not new. Main's `finalizeAndEnqueue` took the stamp with
+  `FreshnessFromFile` when it queued the job, and `processJob` then ran it
+  with no check (this PR does not touch the pool), so the same change in the
+  same window gave the same refused rendition.
+- A check before `Run` narrows the window without closing it: `Run` reads
+  the source for as long as it renders (minutes for a DSD file's Stage A
+  decode), so closing it takes a second stat after `Run`, and removing the
+  sidecar `Run` has already renamed into place.
+- An unconditional check in the pool changes every enqueuer. The batch
+  coordinator stamps the row without checking (B53 item 1), so its changed
+  files would start failing at run time. 27 specs in six of the pool's test
+  files point at `/dev/null/missing` with no stamp, so either they all change or
+  the check becomes an optional hook, a gate a nil handle drops (the
+  construction-guard rule in CLAUDE.md). The new exit also has to fit the
+  pool's ordered tail (#988) and strike nothing (#1078).
+
+It stays backlog B53 item (2), now noting this review.

@@ -19,7 +19,7 @@ package main
 //
 //   - Every writer stamps the ROW: the on-demand requests (POST /v1/upscale),
 //     the CLI, the sweeper, the batch coordinator and the album survey.
-//   - A render is started only while the file still matches its row
+//   - A render is queued only while the file still matches its row
 //     (sourceIsAtRow). The on-demand path refuses otherwise, and asks for a
 //     rescan of the file's directory so the next request can render; the
 //     sweeper and the CLI pass the file over until a scan reads it. The
@@ -30,6 +30,11 @@ package main
 //     The album survey measures a changed album-mate all the same, since a
 //     peak describes the bytes on disk and its row stamp makes the next
 //     version measure it again.
+//   - The check is made when a render is queued, not when the pool starts
+//     it: a file that changes while its job waits, or while it renders, is
+//     rendered from new bytes under the row's older stamp, and the serve
+//     path refuses the result. The live stamp this replaced was taken at
+//     enqueue too, so the window is not new (backlog B53).
 //
 // Before this, the on-demand path and the CLI stamped a live stat while the
 // rest stamped the row, and each writer undid the other: measured on a real

@@ -1781,8 +1781,9 @@ no failing test — which is the shape to expect in this area.
   Staleness compares against the TRACK ROW, and the sweeper stamps from that
   same row — a live stat makes every variant read stale whenever the scanner
   hasn't caught up.
-- **…and EVERY rendition writer stamps the row, and a render starts only while
-  the file still matches it** (#1077, backlog B24). A rendition records ONE
+- **…and EVERY rendition writer stamps the row, and the on-demand path, the
+  sweeper and the CLI queue a render only while the file still matches it**
+  (#1077, backlog B24). A rendition records ONE
   version (`source_mtime_ns` / `source_size`, and a DSD one's peak in
   `dsd_peaks`) and two clocks judge it: the sweep's candidate queries and
   `FreshDSDPeaks` against the row, the serve path against the file on disk (a
@@ -1824,7 +1825,11 @@ no failing test — which is the shape to expect in this area.
   changed mate (a peak describes the bytes on disk; `cliAlbumMateSpec` ignores
   needsRun). The batch coordinator stamps the row but does not check, so a
   render it makes of a changed file stays refused until something renders it
-  again after the scan. `TestAChangedFileIsNotRenderedUntilItsRowIsReRead`
+  again after the scan. **The check is made when a render is queued, not when
+  the pool starts it**: a file that changes while its job waits, or while it
+  renders, is rendered from new bytes under the row's older stamp, and the
+  serve path refuses the result (main's live stamp, taken at enqueue, had the
+  same window; backlog B53). `TestAChangedFileIsNotRenderedUntilItsRowIsReRead`
   drives the loop through the real handler, sweeper and download path, with
   `committingQueue` committing each job as `Pool.processJob` does (the adapter
   takes its pool through `renditionQueue` for that).
