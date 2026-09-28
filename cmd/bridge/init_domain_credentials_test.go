@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,9 +14,12 @@ import (
 // customEndpoints, and /v1/health (answering any caller) and every pairing
 // QR publish that list (backlog B54). A domain carrying a user name, a
 // password, a query or a fragment is refused before anything is written,
-// exit 2, as any other bad flag is, and the refusal does not echo it. A
-// config that already holds such an endpoint is published without the part
-// instead (config.ValidateCustomEndpoints): the operator typed this one.
+// exit 2, as any other bad flag is, and the refusal does not echo it. So is
+// one that does not parse (a password with a space in it), whose parts no
+// predicate can read, while public mode still builds the autocert host's URL
+// from the string. A config that already holds such an endpoint is
+// published without the part instead (config.ValidateCustomEndpoints): the
+// operator typed this one.
 func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 	const secret = "s3cret-Pw"
 	for _, tc := range []struct{ name, domain string }{
@@ -49,6 +53,28 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 			}
 			if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
 				t.Errorf("the refused init made its config dir (stat: %v)", err)
+			}
+		})
+	}
+
+	// The controls: a plain domain is taken, and so is one padded with
+	// whitespace, as it was before the check, which reads the domain
+	// trimmed (Normalize trims the autocert host the same way). Untrimmed,
+	// the padded one does not parse and would be refused.
+	for _, domain := range []string{"bridge.example.test", " bridge.example.test "} {
+		t.Run("accepts "+strings.TrimSpace(domain)+" as given "+strconv.Quote(domain), func(t *testing.T) {
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			var out, errOut bytes.Buffer
+			code := initCmd([]string{
+				"--yes", "--no-service", "--skip-doctor",
+				"--dir", cfgDir, "--library", testLibrary(t),
+				"--public", "--domain", domain, "--admin-tls-proxy",
+			}, strings.NewReader(""), &out, &errOut)
+			if code != 0 {
+				t.Errorf("init exited %d for --domain %q, want 0:\n%s", code, domain, stripANSI(out.String()+errOut.String()))
+			}
+			if _, err := os.Stat(filepath.Join(cfgDir, "bridge.yaml")); err != nil {
+				t.Errorf("init wrote no config for --domain %q: %v", domain, err)
 			}
 		})
 	}
