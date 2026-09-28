@@ -200,10 +200,13 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // still returned nil — the library had no instant updates and nothing said
 // so. Every watch is registered under the configured spelling, so an event
 // names a directory ScanSubtree finds under its configured root; the root's
-// own watch is added as the configured path, which inotify, kqueue (one
-// level of link) and ReadDirectoryChangesW each resolve. Only a configured
-// root is followed: a directory that appears at runtime is walked as the
-// scanner walks it, and the scanner walks no link below a root.
+// own watch is added as the configured path, which inotify and
+// ReadDirectoryChangesW resolve through any chain of links. fsnotify's kqueue
+// backend resolves one level, so on macOS a root that is a link to a link
+// sees files dropped directly into it only at the periodic scan (its
+// subdirectories are watched as usual). Only a configured root is followed:
+// a directory that appears at runtime is walked as the scanner walks it, and
+// the scanner walks no link below a root.
 func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	walkFrom := root
 	if isConfiguredRoot {
