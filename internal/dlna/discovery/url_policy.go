@@ -532,11 +532,12 @@ func UseResolverForTest(r *net.Resolver) (restore func()) {
 // proxy: through one the connect goes to the proxy, so the check would judge
 // the proxy's address (and refuse every request on a host whose HTTP_PROXY
 // is on 127.0.0.1), while a device is on the link, which a proxy cannot stand
-// in for. No kept-alive connections: net/http can hand a connection it
-// dialed for one request to another (a dial finishing after its request
-// found another connection goes to the idle pool), so a request could use a
-// connection another request's approval allowed. And no TLS dialer of its
-// own, which would connect around the check.
+// in for. No kept-alive connections: a pooled connection carries the next
+// request to the same host:port without a dial, so without a check (measured
+// on upnpproxy's old pool: a fetch approved only for a LAN address rode an
+// idle connection to 127.0.0.1), and net/http also hands a connection it
+// dialed for one request to another that is waiting. And no TLS dialer of
+// its own, which would connect around the check.
 func NewDeviceTransport(d net.Dialer) *http.Transport {
 	d.ControlContext = refuseUnapprovedHostLocal
 	return &http.Transport{

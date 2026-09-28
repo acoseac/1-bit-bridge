@@ -122,7 +122,7 @@ func rebindingLANAddr(t *testing.T) netip.Addr {
 	if err != nil {
 		return netip.Addr{}
 	}
-	var any netip.Addr
+	var global netip.Addr
 	for _, a := range addrs {
 		n, ok := a.(*net.IPNet)
 		if !ok {
@@ -139,11 +139,11 @@ func rebindingLANAddr(t *testing.T) netip.Addr {
 		if ip.IsPrivate() {
 			return ip
 		}
-		if !any.IsValid() {
-			any = ip
+		if !global.IsValid() {
+			global = ip
 		}
 	}
-	return any
+	return global
 }
 
 // rebindingHosts is the stage the tests share: the DNS server every device
@@ -158,6 +158,8 @@ type rebindingHosts struct {
 	port    string
 }
 
+// newRebindingHosts sets the stage up until the test ends. The name answers
+// 127.0.0.1 until the test says otherwise.
 func newRebindingHosts(t *testing.T) *rebindingHosts {
 	t.Helper()
 	h := &rebindingHosts{lan: rebindingLANAddr(t)}
