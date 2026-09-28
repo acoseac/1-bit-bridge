@@ -648,11 +648,11 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	case "optimize":
 		// Optimize requires both eligibility + target-rate closures AND
 		// the live on/off gate — the closures say the feature is wired on
-		// this bridge, OptimizeActive says the operator has it switched
+		// this bridge, optimizeActive says the operator has it switched
 		// on. Both, or the endpoint would keep projecting optimize work
 		// for a feature /v1/health has stopped advertising.
 		if s.deps.OptimizeEligible == nil || s.deps.TargetRateForOptimize == nil ||
-			(s.deps.OptimizeActive != nil && !s.deps.OptimizeActive()) {
+			!s.optimizeActive() {
 			writeError(w, http.StatusServiceUnavailable, "optimize-disabled",
 				"carplay-optimize feature is not configured on this bridge")
 			return

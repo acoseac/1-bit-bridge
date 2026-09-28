@@ -2115,11 +2115,13 @@ function folderSummary(r, path) {
     variantBytes: 0,
     // The browse endpoint carries no feature/toolchain state, and
     // guessing would either hide working buttons or offer broken ones.
-    // Both true means the panel renders its controls and lets the
+    // All three true means the panel renders its controls and lets the
     // endpoint answer — a 503 with a real message beats a disabled
-    // button with an invented one.
+    // button with an invented one. That includes the CarPlay switch,
+    // which the album and artist summaries do carry.
     enabled: true,
     soxAvailable: true,
+    optimizeActive: true,
   };
   const heading = el("p", { class: "muted small", text: tracksAndSize(total, r.subtreeSizeBytes) });
   const wrap = el("div", {}, heading);
