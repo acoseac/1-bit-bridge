@@ -169,28 +169,7 @@ func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 // cancel that the "no advertiser could bind" (SSDP) error path relies on,
 // without depending on multicast permissions that vary across hosts.
 func Test_Server_Start_CancelsNotifyContextOnFailure(t *testing.T) {
-	// Occupy a loopback port and keep it bound so the server's own
-	// net.Listen on the same address fails with "address already in use".
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("occupy port: %v", err)
-	}
-	defer occupied.Close()
-	addr := occupied.Addr().String()
-
-	s, err := NewServer(ServerConfig{
-		Library:       newTestLib(),
-		UDN:           "uuid:test-notify-leak",
-		ListenAddress: addr,
-		ServerURL:     "http://" + addr,
-	})
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-
-	if err := s.Start(context.Background()); err == nil {
-		t.Fatal("expected Start to fail binding an occupied port, got nil")
-	}
+	s := failedStartServer(t, "uuid:test-notify-leak")
 
 	if s.notifyCtx == nil {
 		t.Fatal("notifyCtx should be set even on a failed Start")
@@ -198,6 +177,35 @@ func Test_Server_Start_CancelsNotifyContextOnFailure(t *testing.T) {
 	if err := s.notifyCtx.Err(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("notifyCtx not cancelled after failed Start (leaked): Err() = %v, want context.Canceled", err)
 	}
+}
+
+// failedStartServer returns a Server whose Start failed deterministically:
+// a loopback port is occupied (and stays bound for the test) so the
+// server's own net.Listen on it fails with "address already in use". Start
+// builds the GENA notify state before that bind, and cancels the notify
+// context on the way out.
+func failedStartServer(t *testing.T, udn string) *Server {
+	t.Helper()
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	t.Cleanup(func() { _ = occupied.Close() })
+	addr := occupied.Addr().String()
+
+	s, err := NewServer(ServerConfig{
+		Library:       newTestLib(),
+		UDN:           udn,
+		ListenAddress: addr,
+		ServerURL:     "http://" + addr,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail binding an occupied port, got nil")
+	}
+	return s
 }
 
 func Test_Server_StopBeforeStartIsSafe(t *testing.T) {
@@ -226,7 +234,8 @@ func Test_Server_StopBeforeStartIsSafe(t *testing.T) {
 // directly. The notify context is PRE-CANCELLED by default so any
 // initial-NOTIFY goroutine spawned by a SUBSCRIBE fails fast without real
 // network I/O. Pass `live=true` for the integration test that exercises a
-// real loopback callback.
+// real loopback callback. The client is Start's own (newNotifyClient), so
+// every GENA test sends through the checked client production uses.
 func newGENATestServer(live bool) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	if !live {
@@ -237,7 +246,7 @@ func newGENATestServer(live bool) *Server {
 		cfg:          ServerConfig{ModelNumber: "TestModel"},
 		notifyCtx:    ctx,
 		notifyCancel: cancel,
-		notifyClient: &http.Client{Timeout: time.Second},
+		notifyClient: newNotifyClient(),
 	}
 }
 
@@ -378,10 +387,37 @@ func Test_callbackHostAllowed(t *testing.T) {
 		remoteAddr string
 		want       bool
 	}{
-		{"loopback", "127.0.0.1", "10.0.0.1:5", true},
+		// This machine and the link: the subscriber's own address only
+		// (backlog B39). Each of the first two was admitted before.
+		{"loopback_from_lan_source", "127.0.0.1", "10.0.0.1:5", false},
+		{"link_local_from_public_source", "169.254.1.1", "8.8.8.8:5", false},
+		{"link_local_metadata_from_lan_source", "169.254.169.254", "192.168.1.9:5", false},
+		{"link_local_from_another_link_local", "169.254.169.254", "169.254.10.20:5", false},
+		{"link_local_from_itself", "169.254.10.20", "169.254.10.20:5", true},
+		{"ipv6_link_local_from_its_zoned_source", "fe80::1", "[fe80::1%en0]:5", true},
+		{"ipv6_link_local_zoned_callback", "fe80::1%en0", "[fe80::1%en0]:5", false},
+		{"zoned_private_callback", "fd00::5%en0", "192.168.1.9:5", false}, // refused before B39 too (net.ParseIP took no zone)
+		{"loopback_from_itself", "127.0.0.1", "127.0.0.1:5", true},
+		{"loopback_from_another_loopback_address", "127.0.0.1", "127.0.0.2:5", false},
+		{"ipv6_loopback_from_itself", "::1", "[::1]:5", true},
+		{"ipv6_loopback_from_ipv4_loopback", "::1", "127.0.0.1:5", false},
+		{"mapped_loopback_from_its_source", "::ffff:127.0.0.1", "127.0.0.1:5", true},
+		{"mapped_loopback_from_lan_source", "::ffff:127.0.0.1", "10.0.0.1:5", false},
+		{"loopback_with_no_source", "127.0.0.1", "", false},
+		{"unspecified", "0.0.0.0", "0.0.0.0:5", false},
+		{"ipv6_unspecified", "::", "[::]:5", false},
+		{"localhost_name", "localhost", "127.0.0.1:5", false},
+		{"numeric_spelling", "127.1", "127.0.0.1:5", false},
+		// A cloud metadata address, never: the NOTIFY's dial check refuses
+		// every connect to one (#1074), so the guard refuses it first.
+		{"metadata_from_itself", "169.254.169.254", "169.254.169.254:5", false},
+		{"metadata_ula_from_lan_source", "fd00:ec2::254", "192.168.1.9:5", false},
+		{"metadata_public_from_itself", "168.63.129.16", "168.63.129.16:5", false},
+
+		// Unchanged by B39.
 		{"rfc1918_192", "192.168.1.4", "8.8.8.8:5", true},
 		{"rfc1918_10", "10.1.2.3", "8.8.8.8:5", true},
-		{"link_local", "169.254.1.1", "8.8.8.8:5", true},
+		{"ula", "fd00::5", "192.168.1.9:5", true},
 		{"public_rejected", "8.8.8.8", "192.168.0.5:1234", false},
 		{"public_but_matches_source", "8.8.8.8", "8.8.8.8:1234", true},
 		{"public_matches_source_no_port", "8.8.8.8", "8.8.8.8", true}, // bare-host fallback
