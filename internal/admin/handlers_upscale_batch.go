@@ -12,10 +12,14 @@
 // transcoded-cache panel. The endpoints themselves did not change —
 // only who calls them, and with which scope (see variantScope).
 //
-// All loopback-only (enforced upstream at the listener layer). The
-// Submit / Cancel / list handlers proxy through to the
-// `AdminBatchCoordinator` deps closure so the admin package stays
-// decoupled from internal/transcode.
+// Who can reach them is decided upstream of these handlers: in loopback
+// mode the listener is loopback-only with no auth, and in public mode
+// every route here sits behind a console session (middleware_auth.go).
+// This header said "All loopback-only" until 2026-09-28, which public
+// mode made false. The submit also answers to the live upscale gate
+// (apiUpscaleBatchSubmit). The Submit / Cancel / list handlers proxy
+// through to the `AdminBatchCoordinator` deps closure so the admin
+// package stays decoupled from internal/transcode.
 
 package admin
 
