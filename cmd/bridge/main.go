@@ -1388,6 +1388,11 @@ func (a *upscaleBatchCoordinatorAdapter) Throughput() api.BatchThroughput {
 // over a *transcode.Coordinator. Translates between the two
 // packages' equivalent value types so the admin package stays free
 // of internal/transcode (mirrors UpscaleEnqueuer / UpscaleStats).
+//
+// Built on every bridge, because the coordinator is (the "Constructed
+// UNCONDITIONALLY" block in runServe), so its presence gates nothing: a
+// submit through it is refused by admin.Deps.UpscaleActive, the live
+// predicate /v1 reads, before the adapter is reached.
 type adminBatchCoordinatorAdapter struct {
 	coord *transcode.Coordinator
 	store *manifest.Store
@@ -1529,10 +1534,15 @@ func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatc
 // three surfaces — paired clients reconcile their local state
 // regardless of origin.
 //
-// Nil-safe at construction: when `apiSrv` is nil (test harness,
-// pre-feature build) the admin Deps field is set to nil, and the
-// admin handler's `s.deps.VariantDeleter == nil` short-circuit
-// surfaces 503. The adapter itself never panics on a nil server.
+// Nil-safe at construction: when `apiSrv` is nil (a test harness)
+// the admin Deps field is set to nil, and the admin handler's
+// `s.deps.VariantDeleter == nil` short-circuit surfaces 503. The
+// adapter itself never panics on a nil server.
+//
+// In serve it is wired whatever `upscale.enabled` says, and that is
+// deliberate: it calls RunVariantDelete, which checks only that a
+// deleter is wired, not the upscale flag the /v1 handler checks, so an
+// operator who switched upscaling off can still reclaim the disk.
 type adminVariantDeleterAdapter struct {
 	apiSrv *api.Server
 }
@@ -4880,6 +4890,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return transcode.TargetRateForOptimize
 		}(),
+		// The LIVE upscale gate for POST /api/upscale/batch: the same
+		// closure WithUpscale hands the /v1 server, so the console refuses
+		// a batch exactly when /v1/health reports `upscaleEnabled: false`.
+		// BatchCoordinator below cannot say this; it is always wired.
+		UpscaleActive: upscaleActiveFn,
 		OptimizeActive: func() bool {
 			live := liveCfg()
 			return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
@@ -4916,12 +4931,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			return dsdRenderToolchainVerdict(transcode.FFmpegSnapshot())
 		},
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
-			// Closure-resolved so admin doesn't see a typed-nil
-			// pointer when upscale is disabled at boot — returning
-			// the interface as untyped-nil keeps the admin handler's
-			// `nil` check honest. Returns a real adapter only when
-			// the Coordinator was constructed (i.e. cfg.Upscale.Enabled
-			// AND the sox precheck passed).
+			// WIRED, not ACTIVE. The coordinator is constructed
+			// unconditionally above, whatever `upscale.enabled` says, so
+			// this returns a real adapter on every bridge that booted;
+			// the nil arm survives only to hand admin an untyped nil
+			// rather than a typed-nil pointer if that ever changes.
+			// Whether a submit may start work is UpscaleActive's answer
+			// (above). Until 2026-09-28 this comment said the adapter
+			// existed only with the flag on and sox usable: true before
+			// PR #781, and after it this nil check was the admin batch's
+			// whole gate.
 			if upscaleCoordinator == nil {
 				return nil
 			}
@@ -4941,14 +4960,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}(),
 		VariantDeleter: func() admin.AdminVariantDeleter {
-			// Same untyped-nil pattern as BatchCoordinator: when the
-			// api.Server was constructed without
-			// `WithVariantDeleter` (pre-feature build, sox precheck
-			// failed, etc.), surface untyped-nil so the admin
-			// handler's `s.deps.VariantDeleter == nil` short-circuit
-			// returns 503. The adapter itself defends against this
-			// too — both layers gate so a misconfigured boot can't
-			// reach a panicking call site.
+			// Same untyped-nil pattern as BatchCoordinator, and wired on
+			// every bridge for the same reason: apiSrv always exists
+			// here and its deleter is wired unconditionally, so the
+			// admin delete answers whatever `upscale.enabled` says. That
+			// is deliberate (the owner's decision, 2026-09-28): an
+			// operator who switched upscaling off can still reclaim the
+			// disk. The adapter maps a deleter the api server lacks to
+			// ErrAdminVariantDeleterUnavailable, which admin answers
+			// with 503, so neither layer reaches a panicking call site.
 			if apiSrv == nil {
 				return nil
 			}

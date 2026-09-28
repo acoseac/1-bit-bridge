@@ -20870,6 +20870,328 @@ absolute path would have missed one. Found while merging main into #1055.
 - Gemini did not review it: its GitHub app was out of quota and the API project had
   reached its monthly spending cap.
 
+## 2026-09-28 — the console's batch submit honours the live upscale gate, and its variant delete reads paths with safeQuery
+
+`POST /api/upscale/batch` gated on `s.deps.BatchCoordinator == nil` alone.
+runServe constructs the upscale pool and its coordinator whatever
+`upscale.enabled` says (#781), so the adapter is never nil and the check gated
+nothing. Every pass on the class stopped short of it: #781 converted the
+readers, #852 restored `POST /v1/upscale` and `DELETE /v1/upscale/variants`,
+and #878 (the 2026-09-09 LOUPE) restored `POST /v1/upscale/batch`. The
+optimize kind had a second hole: the /v1 batch refuses it while the CarPlay
+switch is off, and the console accepted it. The admin variant delete was also
+still reading its paths through `r.URL.Query()`.
+
+### Measured
+
+The real `serve`, built once from `ec20ac1c` (the six production files restored
+from that commit in this worktree, and the tree checked for the new identifiers
+before building) and once from the branch, over a two-track library synthesised
+with sox (96 kHz/24 in `Test Artist/Test Album/`, 44.1 kHz/16 in
+`AC+DC/Live/`), with mDNS and HTTP/3 off:
+
+- Upscale off, the default. main: `/v1/health` said `upscaleEnabled: false`,
+  `POST /api/upscale/batch {"path":""}` answered 202 with `enqueuedCount: 2`,
+  the batch completed, and two `upscaled-v2-192000-24.flac` renditions were
+  written. Branch: 503 `upscale-disabled`, no batch, no file.
+- Upscale on, `optimizeEnabled: false`. main: `{"path":"Test Artist",
+  "kind":"optimize"}` answered 202 and wrote an `optimized-v2-48000-16.flac`.
+  Branch: 503 `optimize-disabled`.
+- On that bridge, after an upscale of `AC+DC`: `curl -X DELETE
+  '…/api/upscale/variants?prefix=AC+DC'`. main answered `deletedCount: 0` and
+  the rendition stayed (the handler read `AC DC`). Branch: `deletedCount: 1`,
+  363,808 bytes freed.
+
+### Decisions
+
+- `admin.Deps.UpscaleActive`, wired to `upscaleActiveFn`, the closure
+  `WithUpscale` gives /v1: one predicate, so the console refuses exactly when
+  `/v1/health` says the feature is off. A nil gate reads as off, /v1's rule
+  (`TestNilFeatureGatesReadAsOff`).
+- The submit takes /v1's order: the gate (with /v1's WARN line), the body, the
+  kind, the optimize switch, and only then `resolveVariantScope` and the
+  coordinator. The optimize switch reads `OptimizeActive` as
+  `apiLibraryBrowseProjection` does (nil means wired is active), so the
+  console's two optimize surfaces share one reading; its 503 carries
+  `optimize-disabled`, the projection endpoint's code. The player keeps
+  "Generate CarPlay" live whenever upscaling is on, so that message is what an
+  operator reads.
+- The delete, cancel, list and failure retry stay ungated: the owner's decision,
+  so an operator who switched upscaling off, or whose sox went missing, can
+  reclaim the disk. `RunVariantDelete` checks only that a deleter is wired, so
+  the console's delete works in that state while `DELETE /v1/upscale/variants`
+  refuses. None of the four starts sox work.
+- The delete's query is read once, through `safeQuery`, and `deleteVariants`
+  moved from `URLSearchParams` to `encodeURIComponent` in the same commit. The
+  old pair handled spaces only because both halves form-coded; either change
+  alone breaks every path with a space. A census of the admin package's
+  remaining `r.URL.Query()` reads found no other library path (ids, tokens,
+  sizes, limits, a search query, the login `next`).
+- No boot test. cmd/bridge's race leg is the race job's floor, and the one line
+  no admin test can see, the wiring, is pinned by AST instead
+  (`TestConsoleBatchGateIsTheV1UpscaleGate`). The end-to-end behaviour was
+  measured once, above.
+
+### Tests and controls
+
+`internal/admin/handlers_upscale_gate_test.go`; the base fixture now wires the
+gate on, since a nil gate would describe a bridge with the feature off.
+
+- `TestBatchSubmitRefusesBeforeResolvingTheScope` runs eight bodies with the
+  gate on, where each earns its own answer (202; 400 for a traversal, an
+  unknown kind or bad JSON; 404 for an album id nothing has), then off, where
+  each must get 503 with zero Submit calls. The admin folder form never stats
+  its path, so a folder that does not exist earns 202 with the gate on, not
+  404: the order is shown by the cases resolution refuses, not by the missing
+  folder.
+- `TestBatchSubmitReadsANilUpscaleGateAsOff` (and exactly one WARN line),
+  `TestBatchSubmitAnswersTheUpscaleGateLive` (on, off, on), and
+  `TestBatchSubmitOptimizeKindReadsItsOwnGate` (three refusals before the
+  scope, the upscale kind unaffected, a nil switch read as wired).
+- `TestVariantDeleteStaysOpenWithUpscaleOff` (folder, album and confirm forms,
+  with the gate off and unwired), `TestVariantDeleteReadsAPlusInAPathLiterally`,
+  and `TestDeleteVariantsClientRoundTripsThroughTheServer`, which runs the
+  shipped `deleteVariants` under node and sends the URL it builds to the
+  handler.
+- `TestEveryBatchSubmitReadsTheUpscaleGateFirst`: every function that calls a
+  `Submit*` on a `….BatchCoordinator` selector must read `s.upscaleActive()`
+  before `resolveVariantScope` and its first submit, and one that submits the
+  optimize kind must read `OptimizeActive` before both. It has a floor of one
+  submitter, and `TestBatchSubmitGateSweepReportsEveryMisorder` runs it over
+  synthetic source holding each misorder it exists to catch.
+- cmd/bridge: `TestConsoleBatchGateIsTheV1UpscaleGate`.
+
+Negative controls on the committed tree, each restored with `git checkout --`:
+
+1. The gate reduced to main's `BatchCoordinator == nil`: the ordering test (all
+   eight cases), the nil-gate test, the live test and the AST sweep went red;
+   the optimize, delete and round-trip tests stayed green.
+2. `deleteVariants` back on `URLSearchParams`: the round trip alone went red.
+   The client wrote `prefix=AC+DC%2FA%2BB+Album`, which reached the deleter as
+   `AC+DC/A+B+Album`.
+3. The handler back on `r.URL.Query()`: the `+` test alone went red, all three
+   rows (`AC+DC/Live` read as `AC DC/Live`). The round trip stayed green, as it
+   must: the new client never writes a literal `+`.
+4. The gate moved below `resolveVariantScope`: the four ordering cases whose
+   gate-on answer is not 202 (traversal, unknown album, unknown kind, bad JSON)
+   and the AST sweep went red. The missing folder stayed green, for the reason
+   above.
+5. The optimize switch removed: its three refusal cases and the AST sweep went
+   red.
+6. The wiring line deleted, then replaced by a flag-only closure without the
+   sox half: `TestConsoleBatchGateIsTheV1UpscaleGate` went red both times.
+7. The base fixture's gate removed: eight submit tests went red (KindDispatch,
+   NormalisesPath, the optimize test and five variant-scope submit tests), and
+   every delete test stayed green.
+
+## 2026-09-28 — a survey releases its album-mate claim on every exit, a panic included
+
+An external severity review (2026-09-28, finding 3) found that
+`albumgain.survey.measureClaimed` released the claim it holds on an album-mate
+with plain calls placed after the measurement, while the render's own claim has
+resolved on every exit since #1053 (`renderDSD` defers it). The measurement is a
+decode (`MeasureDSDPeak`), and `transcode.Pool.processJob` recovers a panic in its
+runner and keeps the worker. So a panic there left the claim registered and its
+`done` channel open for the life of the process: every later render whose album
+included that mate found the claim held, waited on it until its job deadline,
+failed, and did the same on retry, until the bridge restarted. Latent (it needs a
+panic in the decode path), but the cost was persistent.
+
+- The fix is `defer s.r.release(key, c)` as `measureClaimed`'s first statement,
+  in the direct call form, so the arguments are bound at entry. The explicit
+  releases stay where they were, in the documented release-before-record order.
+  `release` is idempotent (a pointer-checked map delete and a `sync.Once` on
+  `close(done)`), so the deferred call does nothing after them.
+- Test: `TestAMateWhoseMeasurementPanicsReleasesItsClaim`. A fake measurement
+  takes the claim the survey holds through `tryClaim`, then panics, and the test
+  recovers the panic the way the pool does. It then requires the claim's `done`
+  closed, and requires the next render of the album (a different track) to
+  measure the mate itself inside a 2 s deadline.
+- Before the fix the test failed on both counts: the claim was still open, and
+  the next render waited the full 2 s and answered `context deadline exceeded`.
+  The negative control on the committed tree (the defer removed) failed the same
+  two assertions.
+
+## 2026-09-28 — a failed SACD read keeps the album's rows instead of retiring them
+
+`processSACDISO` retires every virtual row under an `.iso` container that a
+fresh expansion no longer mints, at threshold 1, through
+`IncrementMissingTracksAndDeleteAtThreshold`, which journals each deletion:
+a tombstone reaches every paired device. When the expansion answers
+`(nil, nil)`, that is every row. Three reads in `sacd.go` answered `(nil, nil)`
+when they FAILED:
+
+1. the geometry probe in `parseSACDTOC`, `if n, _ := r.ReadAt(probe, …); n ==
+   8 && …`: the error dropped, no signature found, `return nil, nil // not an
+   SACD image`;
+2. `parseSACDArea`, which folded a failed `sacdReadSectors` into `ok=false`, so
+   no copy yielded a stereo area and `ExpandSACDISO` returned `(nil, nil)` on
+   `!toc.hasStereo`;
+3. the DST probe, `if n, _ := r.ReadAt(probe, …); n == 1 {…}`: a failed read
+   left `stereoIsDST` false, and `(nil, nil)` followed.
+
+So an EIO, ETIMEDOUT or ESTALE from a NAS still serving the file deleted the
+album's rows and tombstoned them to every device. The skip gate re-enters the
+path on any size or mtime change and on every `ExtractorVersion` bump, so a
+flaky mount could do it on any such scan. The master-TOC loop already failed
+closed ("no readable master TOC copy") and is unchanged. The iOS reader
+(`SACDISOFormat.swift`) already made the split: its `ByteReader` contract
+returns short data past EOF and THROWS a transport failure, which propagates
+out of `load` as transient and demotes nothing.
+
+### Decisions
+
+- **Only a COMPLETED read may answer.** `sacdReadOutcome(n, want, err)` is the
+  one classifier. A read is full when `n >= want`, judged BEFORE the error,
+  because `io.ReaderAt` permits `(len(p), io.EOF)`. A short read ending in
+  `io.EOF` or `io.ErrUnexpectedEOF` (`errors.Is`) is the end of the file:
+  structural, so a truncated image still answers `(nil, nil)` and a re-rip
+  that stopped being an SACD still retires. Any other short read is a failure,
+  a nil error included (`errSACDShortRead`: it breaks the `io.ReaderAt`
+  contract, so it says nothing about the file). `sacdReadSectors` takes the
+  same classifier; its one behaviour change is `(short, nil)`, which it used to
+  read as the end of the file.
+- **A phase keeps its FIRST failure and returns it only if it ends with
+  nothing found**: the geometry probe over its six positions, the area loop
+  over each pointer's two copies (`parseSACDArea` returns `(area, ok, err)`,
+  err only for a read failure), and the DST probe, one read. Returning at the
+  first failure would also keep the rows, and would lose every disc with one
+  bad sector on the copy the doubled TOC exists to stand in for (NC13, NC14).
+- **The in-motion guard** (`expandSACDContainer`, `sacdContainerChange`). A
+  container being written in place (cp over it, a download to its final name,
+  a NAS sync) reads as a file that ends early, which is a COMPLETED read and
+  retires as surely as a junk image. Two comparisons, each between two stats
+  that describe one thing the same way: the handle's stat, taken before the
+  first read, against a stat of the path after it (`os.SameFile`, size,
+  mtime); and the walk's stat against an lstat of the path after it (size,
+  mtime), which covers the time between the walk and the open, long because
+  the walk runs ahead of the workers. Any difference, or a stat that fails,
+  skips the retire AND the upsert: a torn read's tracks would carry the walk's
+  size and mtime over content from another version, and the next scan
+  re-expands either way.
+- **Rejected: `os.SameFile(pi.info, post)`**, the obvious form. `pi.info` is
+  `fs.DirEntry.Info()`, and on Windows that is the directory listing's
+  `fileStat` (Go 1.26.6, `os/dir_windows.go`). On a volume without
+  `FILE_SUPPORTS_OBJECT_IDS` (FAT, exFAT) the listing carries no file index and
+  no path to load one from, so `sameFile` compares zero with the file's real
+  index and answers false for every file: every container on an exFAT drive
+  would skip, forever. Read from the source; this host cannot show it. The
+  handle's stat (`File.Stat`, `GetFileInformationByHandle`, the index set at
+  once) against a path's stat (the index loaded at `SameFile` time, from the
+  same call on a fresh handle) compares like with like.
+- **Rejected: the walk's stat against a STAT after the read.** The walk's is
+  an lstat (`DirEntry.Info()` on Unix; on Windows a directory entry, which
+  likewise describes a link itself), so every symlinked container would read
+  as moved and never expand (NC9, `TestScanner_SACDSymlinkedContainer_Expands`).
+- **The path is stat'ed after the handle is closed.** The zero-access open
+  `os.SameFile` makes on Windows skips the share check, so holding the handle
+  should not matter; closing first means that argument never has to be right.
+- **Residuals, in the docblock**: an in-place overwrite that keeps size and
+  inode inside one coarse mtime tick (FAT's 2 s); a write to a symlinked
+  container's target before the open (the walk's stat is the link's own); and
+  where a listing and a stat of an unchanged file disagree (Windows documents
+  that a listing's attributes on NTFS may lag the file's), the container reads
+  as changed and keeps its rows, unwritten, until they agree.
+- **The "sacd expand" line** names `pi.rel` and rewrites the absolute path an
+  `*os.File` read error carries (`sacdLibraryRelative`), #1055's rule. It was
+  one of the older lines #1055 disclosed rather than fixed; it is the line a
+  NAS read failure lands on now, where the failure used to retire rows under
+  a line that already named `pi.rel`.
+- **No `ExtractorVersion` bump.** Every readable file expands byte-identically,
+  and a container whose rows the old code retired has no representative row,
+  so the skip gate re-expands it on the next scan regardless. A bump would
+  re-expand every container and re-upsert every virtual row (that leg has no
+  diff-guard, the v17 entry records), and the upsert's conflict arm sets
+  `enriched_at = 0` and advances `indexed_at`: a re-enrichment wave and a delta
+  to every device for rows that do not change. #779's note that its bump
+  "makes any FUTURE sacd.go fix re-expand" says what a bump does, not that
+  every sacd.go change needs one.
+- **The opener is a per-scanner seam** (`Scanner.openSACD`, nil means
+  `os.Open`), not a package var, per the 2026-09-09 export-cap lesson.
+  `ExpandSACDISO` stays as open + `expandSACD` for callers that have a path;
+  the scanner no longer calls it.
+
+### Tests and controls
+
+- `sacd_read_failure_test.go`: `TestSACDExpand_AReadThatDidNotCompleteIsAnError`
+  (each failure site, and short reads with and without an error, come back as
+  an error wrapping what failed; every case asserts a fault was reached),
+  `TestSACDExpand_AFailedCopyFallsBackToTheNext` (an unreadable 510 master copy
+  and an unreadable first area-TOC copy still expand), and
+  `TestSACDExpand_AReadThatStopsAtTheEndIsStillAnAnswer` (images cut before the
+  area TOC and before the first audio sector answer `(nil, nil)`, as EOF and as
+  ErrUnexpectedEOF; a reader that returns io.EOF beside every full read still
+  expands).
+- `scanner_sacd_read_failure_test.go`: `TestScanner_SACDReadFailure_RetiresNothing`
+  (per site: both rows remain, no tombstone in `DeletedSince` or in the
+  `manifest_deletions` table, the first row keeps the initial scan's mtime so
+  nothing was rewritten, and one "sacd expand" line names the container
+  library-relative); `TestScanner_SACDContainerChangingDuringTheScan_KeepsItsRows`
+  (a write during the read, a write after the walk and idle during the read,
+  and a same-size, same-mtime rename over the path during the read; each keeps
+  the rows and logs the arm that caught it; the rename case skips on Windows,
+  where `os.Open` shares no DELETE access and the rename is refused);
+  `TestSACDContainerChange` (every arm alone, from real stats, since
+  `os.SameFile` answers only for the platform's own FileInfo);
+  `TestScanner_SACDSymlinkedContainer_Expands`; and the positive control
+  `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` (a container
+  read whole as junk retires both rows with both tombstones, so the
+  "untouched" assertions can see a retire when one happens). Tombstones are
+  read from the epoch, not from a `time.Now()` taken before the rescan: the
+  initial scan journals none, and a Windows clock tick could put the retire in
+  the same instant as the bound (`DeletedSince` is strictly after).
+- Red-first by negative control on the committed tree (the scanner tests
+  cannot run on main, which has no seam), each run with `-count=1` and each
+  turning exactly the predicted tests red:
+  - NC1, the geometry probe swallowing its failure: the three probe cases and
+    the scanner's probe case (rows retired).
+  - NC2, the area loop swallowing its failure: the area case and the scanner's
+    area case (rows retired).
+  - NC3, the DST probe swallowing its failure: the DST case and the scanner's
+    DST case (rows retired).
+  - NC4, `sacdReadOutcome` never failing (the old `n, _ :=` everywhere): all
+    five unit failure cases and all three scanner cases.
+  - NC5, the in-motion guard removed: all three in-motion cases (rows retired).
+  - NC6, the walk arm removed: the walk-window case (rows retired) and two
+    table rows.
+  - NC7, the during-read arm removed: the during-read case through its log
+    assertion (the walk arm still kept the rows, as predicted) and two table
+    rows. The table test is what isolates this arm.
+  - NC8, the identity arm removed: the rename case (rows retired) and the
+    table's identity row. That row first used a file with another mtime, which
+    the during-read arm caught; it now matches `a0`'s size and mtime, so the
+    row differs in identity alone (`change = ""` under NC8).
+  - NC9, the walk's stat against a stat instead of the lstat: the symlinked
+    container never expands, and the table's symlink case.
+  - NC10, `(short, nil)` read as the end of the file: the no-error short read.
+  - NC11, the error judged before the byte count: the io.EOF-beside-full-reads
+    case.
+  - NC12, `io.ErrUnexpectedEOF` not the end: the two ErrUnexpectedEOF cuts.
+  - NC13 and NC14, the geometry and area phases returning their first failure
+    at once: the master-copy and the area-copy fallback cases, one each.
+  - NC15, the raw error logged: the three scanner failure cases, through the
+    library-relative assertion.
+- `go test -count=1 -race ./internal/manifest/ -run 'SACD|Sacd|Scanner'` (69
+  tests): ok, 40.8 s.
+
+### Fuzz
+
+Run after the change, before the PR, at `-fuzztime 60s -fuzzminimizetime 1s
+-parallel 4` (four workers, the host being shared): `FuzzParseSACDTOC`
+603,027 execs, 110 new interesting, no crasher; `FuzzParseSACDArea` 710,384
+execs, 103 new interesting, no crasher. Nothing to commit under
+`testdata/fuzz/`.
+
+### Out of scope, noticed
+
+- A symlinked container's virtual rows carry the LINK's size and mtime:
+  `pi.info` is an lstat and the expansion stamps it (`Size: size, // the
+  CONTAINER's size`). The generic path stamps every symlinked file the same
+  way. Whether the app reads a virtual row's `size` as the container's byte
+  count for its ranged reads was not checked.
+- The fuzz targets read through `sacdFuzzImage`, which never fails a read, so
+  they do not reach the new failure paths; the unit tests do.
+
 ## 2026-09-28 — each console login ticket is its own file, so no write can restore a spent one
 
 Every live console login ticket shared one file, `adminauth-tickets.json`,

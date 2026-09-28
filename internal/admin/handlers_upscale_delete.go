@@ -54,6 +54,26 @@ import (
 // `api.Server.RunVariantDelete` so the destructive path is shared
 // with the public endpoint — the admin console adds the UI but
 // never duplicates the underlying delete loop.
+//
+// Deliberately NOT gated on the live upscale flag, where
+// `DELETE /v1/upscale/variants` refuses while the feature is off. The
+// repo owner's decision (2026-09-28): an operator who switches upscaling
+// off, or whose sox went missing, must still be able to reclaim the disk
+// its renditions use from the console. A delete starts no sox work, which
+// is what the submit's gate (apiUpscaleBatchSubmit) exists to stop, and
+// the player keeps its Delete button live with the feature off for the
+// same reason. The /v1 refusal answers a bearer-token holder acting on a
+// bridge that advertises the feature as off; this route is the operator's
+// own console. Cancel, list and the failure retry start no work either
+// and stay ungated too. `TestVariantDeleteStaysOpenWithUpscaleOff` pins
+// the decision.
+//
+// The query is read ONCE, through safeQuery: `prefix` and `path` carry
+// library paths, and url.Values would read a literal "+" in one as a
+// space, so `?prefix=AC+DC/Album` from curl addressed `AC DC/Album`. The
+// player's deleteVariants escapes with encodeURIComponent to match; the
+// two halves moved together, since the old URLSearchParams client wrote
+// every space as the "+" this now reads as a plus.
 func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request) {
 	if s.deps.VariantDeleter == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
@@ -61,7 +81,8 @@ func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	req, errCode, errMsg := parseVariantDeleteRequest(r.URL.Query())
+	q := safeQuery(r)
+	req, errCode, errMsg := parseVariantDeleteRequest(q)
 	if errCode != "" {
 		writeError(w, http.StatusBadRequest, errCode, errMsg)
 		return
@@ -70,7 +91,7 @@ func (s *Server) apiUpscaleVariantsDelete(w http.ResponseWriter, r *http.Request
 	// deleter sees the same exact-path set the submit endpoint would.
 	// The parser has already rejected a present-but-blank identity
 	// parameter, so reaching here means there is something to expand.
-	if scopeReq, present := identityParams(r.URL.Query()); present {
+	if scopeReq, present := identityParams(q); present {
 		scope, scopeErr := s.resolveVariantScope(r, scopeReq)
 		if scopeErr != nil {
 			writeError(w, scopeErr.Status, scopeErr.Code, scopeErr.Message)
