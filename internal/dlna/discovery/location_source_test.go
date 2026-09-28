@@ -290,6 +290,17 @@ func TestHandlePacket_DefaultClientConnectsToThisHostWhenThePacketCameFromIt(t *
 	if len(served) != 1 || len(served[0].SinkProtocolInfos) != 3 {
 		t.Errorf("served %+v, want the renderer with its three sinks", served)
 	}
+
+	// The move path hands the source on too: the same renderer, announced
+	// at its address rather than its name, reads as a move (the detector
+	// compares host strings) and is re-fetched there.
+	moved := srv.URL + "/description.xml"
+	c.handlePacket(context.Background(), rendererAnnouncement("uuid:named-loopback", moved), udpFrom("127.0.0.1"))
+	c.wg.Wait()
+	wantControl := srv.URL + "/avtransport/control"
+	if served := c.cache.Snapshot(); len(served) != 1 || served[0].ControlURL != wantControl {
+		t.Errorf("after the move, served %+v, want the renderer driven at %s", served, wantControl)
+	}
 }
 
 // TestDefaultClientDialCheck pins the classification the dial check makes,

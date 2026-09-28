@@ -171,6 +171,16 @@ func TestServerDiscoveryDefaultClientConnectsToThisHostWhenThePacketCameFromIt(t
 	if !ok || info.DescriptionURL != location {
 		t.Errorf("cached %+v (present %v), want the server described at %s", info, ok, location)
 	}
+
+	// The move path hands the source on too: the same server, announced at
+	// its address rather than its name, reads as a move (the detector
+	// compares host strings) and is re-fetched there.
+	moved := srv.URL + "/desc.xml"
+	c.handlePacket(context.Background(), alivePacket("uuid:local-ms", moved), udpFrom("127.0.0.1"))
+	c.wg.Wait()
+	if info, _ := cache.Get("uuid:local-ms"); info.DescriptionURL != moved {
+		t.Errorf("after the move, DescriptionURL = %q, want %q", info.DescriptionURL, moved)
+	}
 }
 
 // manualDescriptionAt serves descXML for a description URL on any host, so a
