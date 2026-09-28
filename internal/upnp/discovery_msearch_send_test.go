@@ -65,6 +65,7 @@ func TestSendMSearchReportsFailedUpstreamSends(t *testing.T) {
 			c.sendMSearch()
 		}
 	}
+	const escalation = "failing persistently; upstream server discovery is degraded"
 	send(9)
 	if got := strings.Count(buf.String(), "M-SEARCH send failed"); got != 1 {
 		t.Errorf("nine failed sends logged %d Warns, want 1:\n%s", got, buf.String())
@@ -73,8 +74,11 @@ func TestSendMSearchReportsFailedUpstreamSends(t *testing.T) {
 		t.Fatalf("escalated before ten minutes of the 60 s cadence:\n%s", buf.String())
 	}
 	send(1)
+	if got := strings.Count(buf.String(), escalation); got != 1 {
+		t.Fatalf("the tenth failed send logged %d Errors naming upstream discovery, want 1:\n%s", got, buf.String())
+	}
 	send(20)
-	if got := strings.Count(buf.String(), "failing persistently; upstream server discovery is degraded"); got != 1 {
+	if got := strings.Count(buf.String(), escalation); got != 1 {
 		t.Errorf("thirty failed sends logged %d Errors naming upstream discovery, want 1:\n%s", got, buf.String())
 	}
 	failing = false
