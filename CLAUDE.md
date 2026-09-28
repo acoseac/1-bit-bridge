@@ -38,7 +38,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twelve carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Thirteen carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -50,9 +50,12 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   under **Lyrics**), `FuzzMatchRelease` (a claimed match is an entry the listing holds),
   `FuzzKeyFor` (the dupe key is deterministic and every field reaches `Key.ID`),
   `FuzzValidateRelPath` (an accepted upload path meets every invariant the commit relies
-  on) and `FuzzAcceptedExt` (an audio extension is always accepted). This said "Four"
-  until 2026-09-28, while eight more were added beside them: **count them by the
-  assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
+  on), `FuzzAcceptedExt` (an audio extension is always accepted) and
+  `FuzzParseDeviceDescription` (every service URL the parser keeps, re-parsed, is http(s)
+  with a host, stays on the description's host when discovered, and names this machine or a
+  link-local address only from a description URL that does too; it fuzzes the base URL as
+  well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
+  them: **count them by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
@@ -2025,7 +2028,8 @@ no failing test — which is the shape to expect in this area.
   the bridge's own console (measured). The
   manual upstream parses with `SourceUserChosen`: the operator's URL is the
   approval the host rule stands in for, so another host is kept, another
-  scheme never. A refused AVTransport control URL drops the renderer (it reads
+  scheme never, and never this machine or a link-local address unless the
+  manual URL itself is of that kind (the next bullet). A refused AVTransport control URL drops the renderer (it reads
   as "no AVTransport"); a refused optional URL (ConnectionManager,
   RenderingControl, any eventSubURL) is dropped alone, so GetProtocolInfo is
   POSTed only to a ConnectionManager URL that passed. An SSDP LOCATION that is
@@ -2052,6 +2056,53 @@ no failing test — which is the shape to expect in this area.
   names another host (a hostname where its LOCATION has an IP, say) drops out
   of discovery; a manual upstream URL is the escape hatch, and a renderer has
   none on the bridge.
+- **…and an SSDP LOCATION leads the bridge to THIS machine or a link-local
+  address only when the packet came from that address** (backlog B14,
+  2026-09-28). The same-host rule bounds a description's service URLs to the
+  host that served it and nothing bounded which host that is: a LAN peer
+  answering an M-SEARCH, or re-announcing a known UDN (the move detector
+  re-fetches), with LOCATION `http://127.0.0.1:7789/<path>` made the bridge GET
+  its own console. **A host string cannot carry this rule alone** (measured,
+  Go 1.27.1): a public DNS name pointed at 127.0.0.1 reached a loopback
+  listener on macOS and on Linux, and `127.1`, `2130706433`, `0x7f000001` and
+  `0` reached it on macOS, whose libc resolver takes inet_aton's spellings.
+  So it is enforced twice, in `internal/dlna/discovery/url_policy.go`.
+  `LocationFromSource`, in both handlers, refuses what the string shows (an IP
+  literal on loopback, unspecified or link-local that is not the packet's
+  source; a localhost name unless the source is loopback; a host ending in a
+  number without being an IP literal, which no device writes) before any
+  fetch, and a refused LOCATION reads as an absent one (a known UDN
+  refreshed, an unknown one skipped, the move detector never fires).
+  `NewDeviceFetchClient`, both clients' default client, checks the address
+  EVERY connect targets after resolution (`net.Dialer.ControlContext`), with
+  the packet's source carried in the request context
+  (`WithAnnouncementSource`, on the description GET and a renderer's
+  GetProtocolInfo POST alike). **Don't give that client a proxy** (the check
+  would judge the proxy's address, and a proxy on 127.0.0.1 would refuse
+  every fetch), **kept-alive connections** (a request could reuse one another
+  packet's source allowed) **or a TLS dialer of its own** (it would connect
+  around the check); a test pins all three. **The same host kinds bound a
+  service URL, for every source**: one on this machine or a link-local address
+  is kept only from a description URL of the same kind, so a manual upstream
+  elsewhere cannot make the console (or a cloud VM's metadata service at
+  169.254.169.254) its `LiveHost`, while one on this machine keeps its local
+  control URL. `hostPortFromURL` reads `Hostname()` too. **The exception is the
+  packet's own address, never "any address like it"**: a zero-configuration
+  device announces from its link-local address, and a loopback source was
+  sent on this machine. **Field data, 2026-09-28**: three root devices on one
+  home LAN (two hosts) sent every LOCATION on the packet's source address, as
+  an IP literal; two other LANs had none. The only LOCATIONs off their source
+  were this repo's own `internal/dlna` test advertisers, which multicast a
+  loopback LOCATION from the host's LAN address. Three devices do not
+  support the general rule (LOCATION host == source for every address, which
+  would also bound names and tailnet addresses): multi-homed hosts and some
+  NAS firmware are reported to break it, and a renderer has no escape hatch,
+  so **measure before tightening further**. **Not covered**: a HOSTNAME control
+  URL is resolved again at every later dial (the ingest's SOAP Browse, the
+  `upnpproxy` byte fetch), which a discovery-time check cannot pin, so DNS
+  rebinding can still steer a configured upstream's fetches; and a LOCATION
+  on a tailnet or public address is still fetched. The app's SSDP path has
+  no LOCATION-versus-source check either.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —

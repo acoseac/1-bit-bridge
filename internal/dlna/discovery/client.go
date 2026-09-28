@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -358,22 +357,14 @@ func NewSSDPDiscoveryClient(
 		cfg.DetailFetchTimeout = 5 * time.Second
 	}
 	if cfg.Dispatcher == nil {
-		cfg.Dispatcher = &HTTPClientDispatcher{
-			Client: &http.Client{
-				Timeout: cfg.DetailFetchTimeout,
-				// Relay 3xx verbatim instead of following it. The
-				// description / control URLs come from SSDP-advertised
-				// Location headers (a LAN device, possibly rogue or
-				// spoofed), so auto-following a redirect to loopback
-				// or a link-local metadata address would turn the
-				// bridge into an SSRF probe against its own no-auth
-				// admin API. Mirrors internal/upnpproxy's
-				// CheckRedirect guard.
-				CheckRedirect: func(*http.Request, []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			},
-		}
+		// The description / control URLs come from SSDP-advertised
+		// Location headers (a LAN device, possibly rogue or spoofed), so
+		// the client relays a 3xx verbatim rather than following it
+		// toward loopback or a link-local metadata address, and refuses
+		// to connect to either unless the packet came from that address
+		// (NewDeviceFetchClient). Mirrors internal/upnpproxy's
+		// CheckRedirect guard.
+		cfg.Dispatcher = &HTTPClientDispatcher{Client: NewDeviceFetchClient(cfg.DetailFetchTimeout)}
 	}
 	nowFunc := cfg.NowFunc
 	if nowFunc == nil {
@@ -752,10 +743,16 @@ func buildMSearchRequest(searchTarget string) []byte {
 // on PR #305 — the prior shape used `context.Background()` for
 // the detail fetches, leaving in-flight fetches alive past Stop
 // and re-populating the cache after it was cleared.
+//
+// `src` is the address the packet came from. A LOCATION may lead the
+// bridge to this machine or a link-local address only when it is that
+// address (LocationFromSource here, and the default client's dial check
+// on every fetch the packet causes); tests pass nil, which matches no
+// address.
 func (c *SSDPDiscoveryClient) handlePacket(
 	ctx context.Context,
 	packet []byte,
-	_ *net.UDPAddr,
+	src *net.UDPAddr,
 ) {
 	hdr, err := ParseSSDPHeaders(packet)
 	if err != nil {
@@ -789,6 +786,17 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		c.forgetLocation(udn)
 		packageLogger.Debug("renderer byebye", "udn", udn)
 		return
+	}
+
+	// A LOCATION this packet may not send the bridge to reads as absent,
+	// exactly as ParseSSDPHeaders' own refusals do: a known UDN is still
+	// refreshed, an unknown one skipped, and the move detector below
+	// never sees it (backlog B14).
+	location := LocationFromSource(hdr.Location, src)
+	if location == "" && hdr.Location != "" {
+		packageLogger.Debug("SSDP LOCATION refused: its host may lead to this machine or a link-local "+
+			"address, and the packet did not come from there", "udn", udn, "location", hdr.Location,
+			"source", src.String())
 	}
 
 	// Everything else (M-SEARCH response without NTS, OR NOTIFY
@@ -826,10 +834,10 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		// A same-UDN fetch already in flight blocks the dispatch below; the
 		// NEXT announcement re-detects the change with the slot free —
 		// self-healing within one M-SEARCH cycle.
-		if c.locationMoved(udn, hdr.Location, existing.ControlURL, now) {
+		if c.locationMoved(udn, location, existing.ControlURL, now) {
 			packageLogger.Debug("renderer moved; re-fetching description",
-				"udn", udn, "from", existing.ControlURL, "to", hdr.Location)
-			c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+				"udn", udn, "from", existing.ControlURL, "to", location)
+			c.spawnDetailFetch(ctx, udn, location, src, now)
 			return
 		}
 		// Incomplete stub (no AVTransport ControlURL) = residue of a
@@ -855,10 +863,10 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// First-time UDN: kick a detail fetch. Bounded via the
 	// semaphore so the run loop's NOTIFY storm during a LAN-wide
 	// event can't fanout unbounded TCP connections.
-	if hdr.Location == "" {
+	if location == "" {
 		return // no location → can't fetch description; skip
 	}
-	c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+	c.spawnDetailFetch(ctx, udn, location, src, now)
 }
 
 // sameURLHost reports whether two URLs share the same host:port.
@@ -1065,13 +1073,14 @@ func (c *SSDPDiscoveryClient) releaseFetch(udn string) {
 func (c *SSDPDiscoveryClient) spawnDetailFetch(
 	ctx context.Context,
 	udn, location string,
+	src *net.UDPAddr,
 	now time.Time,
 ) {
 	if !c.claimFetch(udn) {
 		return
 	}
 	c.wg.Add(1)
-	go c.fetchAndCacheDetails(ctx, udn, location, now)
+	go c.fetchAndCacheDetails(ctx, udn, location, src, now)
 }
 
 // fetchAndCacheDetails dispatches the description + GetProtocolInfo
@@ -1083,9 +1092,14 @@ func (c *SSDPDiscoveryClient) spawnDetailFetch(
 // `runCtx` is the discovery client's run-loop context — when Stop
 // cancels it, in-flight detail fetches return early without
 // touching the cache. Per Gemini HIGH round-1 on PR #305.
+//
+// `src` is the address of the packet that named location. Both fetches
+// carry it in their context (WithAnnouncementSource), so the default
+// client connects to this machine or a link-local address only when that
+// is where the packet came from.
 func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	runCtx context.Context,
-	udn, location string, lastSeenAt time.Time,
+	udn, location string, src *net.UDPAddr, lastSeenAt time.Time,
 ) {
 	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very
 	// top so it fires on EVERY return path (including the semaphore-acquire
@@ -1110,7 +1124,8 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
+	announced := WithAnnouncementSource(runCtx, src)
+	ctx, cancel := context.WithTimeout(announced, c.cfg.DetailFetchTimeout)
 	defer cancel()
 	desc, err := FetchDeviceDescription(ctx, c.dispatcher, location)
 	if err != nil {
@@ -1162,7 +1177,7 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	// iOS falls back to RendererProfile defaults).
 	var sinks []string
 	if cmSvc.ControlURL != "" {
-		piCtx, piCancel := context.WithTimeout(runCtx, c.cfg.DetailFetchTimeout)
+		piCtx, piCancel := context.WithTimeout(announced, c.cfg.DetailFetchTimeout)
 		piSinks, piErr := FetchGetProtocolInfo(piCtx, c.dispatcher, cmSvc.ControlURL)
 		piCancel()
 		if piErr != nil {

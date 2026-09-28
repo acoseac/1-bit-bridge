@@ -69,3 +69,31 @@ func TestLiveHostExactHitStillWins(t *testing.T) {
 		t.Errorf("unknown key resolved to %q — the fallback must not match an unrelated entry", host)
 	}
 }
+
+// TestLiveHostRefusesAControlURLThatNamesNoHost pins hostPortFromURL on
+// url.URL.Hostname rather than url.URL.Host. `http://:7789/ctl` has Host
+// ":7789" and no hostname, and Go's client dials a port with no host on the
+// local host, which on a bridge is its own no-auth console; the proxy would
+// then relay the console's answers to whoever asked for a routed track,
+// /dlna/file/{trackID} on the unauthenticated DLNA listener included. Nothing
+// can cache such a URL since #1050 (both writers go through the discovery
+// package's service-URL policy), so this is the second line.
+func TestLiveHostRefusesAControlURLThatNamesNoHost(t *testing.T) {
+	for _, ctrl := range []string{"http://:7789/ctl", "http://:7789", "http:///ctl", ":7789"} {
+		cache := upnp.NewServerCache()
+		cache.Upsert(upnp.ServerInfo{UDN: "uuid:hostless", ContentDirectoryControlURL: ctrl})
+		r := &serverCacheHostResolver{cache: cache}
+		if host, ok := r.LiveHost("uuid:hostless"); ok {
+			t.Errorf("control URL %q: LiveHost = %q; the proxy would dial it on this host", ctrl, host)
+		}
+	}
+	for ctrl, want := range map[string]string{
+		"http://192.168.1.44:8200/ctl/ContentDir": "192.168.1.44:8200",
+		"http://[fe80::1%25en0]:8200/ctl":         "[fe80::1%en0]:8200",
+		"http://nas.local/ctl":                    "nas.local",
+	} {
+		if got, ok := hostPortFromURL(ctrl); !ok || got != want {
+			t.Errorf("hostPortFromURL(%q) = (%q, %v), want (%q, true)", ctrl, got, ok, want)
+		}
+	}
+}
