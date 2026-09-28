@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -251,6 +252,30 @@ type Result struct {
 	AudioMD5Retryable bool
 }
 
+// writeWaveformTmp writes the curve to tmpPath as os.WriteFile would (0600,
+// truncating debris a crash left), giving it the owner of the curve it will
+// replace, or of its directory, while it is open: fsutil.KeepOwner, a no-op
+// unless this process is root. No fsync here: the pool fsyncs the sidecar
+// before it commits the row that names it.
+func writeWaveformTmp(tmpPath, finalPath string, data []byte) error {
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if err := fsutil.KeepOwner(f, finalPath); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	return nil
+}
+
 // RunAnalysis decodes the source via sox, computes the peak waveform +
 // EBU R128 loudness, and writes the sidecar atomically (tmp + rename),
 // returning its path, content tag, size, and loudness. The pool fsyncs
@@ -264,7 +289,10 @@ type Result struct {
 // exec.CommandContext (decodeFrames kills + reaps sox).
 func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	finalPath := spec.SidecarPath()
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
+	// fsutil.MkdirAll and the KeepOwner below: a `sudo bridge analyze`
+	// over a service install left the waveform tree root's 0700 and every
+	// curve root's 0600, which the service could neither serve nor replace.
+	if err := fsutil.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
 		return Result{}, fmt.Errorf("mkdir waveform dir: %w", err)
 	}
 	tmpPath := finalPath + AnalysisTmpSuffix
@@ -318,8 +346,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	pk.finish()
 	data := encodeWaveform(pk, AnalysisSampleRate, waveformBucketSamples, total)
 
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return Result{}, fmt.Errorf("write waveform tmp: %w", err)
+	if err := writeWaveformTmp(tmpPath, finalPath, data); err != nil {
+		return Result{}, err
 	}
 	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
 		return Result{}, fmt.Errorf("rename waveform: %w", err)

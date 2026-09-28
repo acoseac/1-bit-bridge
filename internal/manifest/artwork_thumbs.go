@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // ThumbsDirName is the subdirectory under the artwork cache that holds
@@ -167,7 +168,7 @@ func EnsureThumb(src, dst string, targetPx int) error {
 	if px, ok := longestSideOf(scaled); !ok || px > targetPx {
 		return errThumbNotNeeded
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
 	if err := atomicwrite.WriteBytes(dst, scaled, ".thumb-*.jpg.tmp"); err != nil {

@@ -3422,15 +3422,67 @@ no failing test — which is the shape to expect in this area.
   files the root service created), while the replaced file's own owner is
   the evidence of who reads it. **A chown that fails abandons the write**
   (root_squash NFS gives root's files to nobody), so the service keeps a
-  file it can read. **Not covered**: the job and database CLIs (`scan`,
-  `upscale` / `optimize` / `render` / `analyze`, `artwork`, `backup` /
-  `restore`, `manifest`, an offline `library` change), which create
-  directories and sidecars rather than replace one file; the runbook's
-  "always as the service user" still stands for them. Pinned per writer
+  file it can read. The job and database CLIs (`scan`, `upscale` /
+  `optimize` / `render` / `analyze`, `artwork`, `backup` / `restore`,
+  `manifest`, an offline `library` change), which CREATE directories and
+  sidecars rather than replace one file, were this bullet's "not covered"
+  list until 2026-09-28; the next bullet covers them. Pinned per writer
   through `fsutil.SimulateRootForTest` on every host, and as root by
   `TestKeepOwnerAsRoot` and `TestCLIRunAsRootKeepsTheInstallOwner`, which CI
   skips and dido's container runs. With the six writers reverted, the
   end-to-end test names exactly those six files.
+- **…and a job or database CLI run as root gives every entry it CREATES
+  the install's owner** (2026-09-28, backlog B17). Measured the same way
+  (`TestJobCLIsRunAsRootKeepTheInstallOwner`, as root with sox and ffmpeg
+  on dido), 51 entries came back root's on main: every directory and file
+  `scan` (the artwork cache, 0700), `upscale` / `optimize` / `render` (the
+  variants tree and each rendition, `--force` ones included), `analyze`
+  (the waveform tree, 0700, and each curve, 0600), `backup` (a snapshot the
+  service's own prune cannot remove) and `variants move` create; the five
+  files `restore` replaces (config, store, token file, TLS pair, root's
+  0600: the service does not start); a store a root CLI creates; and the
+  render scratch `1-bit-bridge-render`, root's 0700 in the shared temp dir,
+  where every later DSD render of the service failed. **SQLite's `-wal` and
+  `-shm` were never part of it**: its unix VFS gives both the database
+  file's owner whenever it opens them as root (`robustFchown`, carried in
+  modernc's transpile), measured with the store open; the one SQLite hole
+  is a database root CREATES. **A new entry takes the owner of the
+  directory it is created in**, #1048's rule for a file with nothing to
+  replace. `fsutil.MkdirAll` / `Mkdir` make each directory through an
+  `os.Root` on its parent and read the owner through that descriptor, so a
+  directory only ever goes to the owner of the directory actually holding
+  it, who could have made it anyway, never to the owner of a path looked
+  up beforehand; one it cannot give away (root_squash) is removed again.
+  Files the bridge stages take `fsutil.KeepOwner` (a cover, a curve, a
+  snapshot's copies and manifest, a restored file). **A file another writer
+  creates is precreated** (`fsutil.Precreate`: `O_EXCL`, the owner looked
+  up BEFORE the file exists): sox fills its output with `O_TRUNC`, SQLite
+  opens an existing empty database, `VACUUM INTO` writes into an empty
+  file, and each keeps the owner (all measured). **Two directories take a
+  reference's owner, because there the parent's says nothing about who uses
+  them**: the render scratch, when created in a directory anyone may create
+  entries in (other-writable and -searchable, as /tmp is), takes the
+  variants directory's (`fsutil.MkdirAllShared`; only there, since the temp
+  dir comes from the config the service user can write), and a `variants
+  move --to` directory takes the owner of the variants directory it
+  replaces, as `mv` keeps it (`fsutil.MkdirAllLike`; the command line names
+  that path). A cross-device copy in the move keeps its source's owner.
+  `TestJobWritersKeepTheInstallOwner` sweeps the writers
+  (`internal/{atomicwrite,manifest,transcode,analyze,backup}`,
+  `cmd/bridge/variants.go`) and fails on `os.MkdirAll` / `Mkdir` /
+  `MkdirTemp` / `WriteFile` / `Create`, or on `os.CreateTemp` /
+  `os.OpenFile(O_CREATE)` in a function with no `fsutil.KeepOwner`: **a
+  new writer there makes its directories through fsutil and gives its files
+  an owner**. What a child process creates the sweep cannot see; that is
+  `Precreate`'s, and the root test pins it. **Not covered**: `bridge tsnet
+  auth` (internal/tsnet makes `<dataDir>/tailscale` with `os.MkdirAll`,
+  `assertSecureDir` then requires it to be the RUNNING uid's, and the tsnet
+  library writes its state there: a root run over the service's state
+  refuses, and one on a fresh install leaves a state the service's node
+  refuses; read from the code, not measured). **Root's by the rule**: a
+  configured `variantsDir` or `tempDir` a root CLI creates under a parent
+  root owns that is not shared, where the service's own attempt would fail
+  too.
 - **`logging.Component` resolves `slog.Default()` at LOG time, not construction.**
   Package-level `var logger = logging.Component(...)` runs during package init,
   before `main()` calls `logging.Init()` — a captured-handler shape would lock

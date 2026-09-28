@@ -15,6 +15,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The DSD → PCM render chain — the branch of Run that a routeFFmpegDSDPipe
@@ -544,13 +545,24 @@ func MeasureDSDPeak(ctx context.Context, j JobSpec) (*float64, error) {
 		return nil, err
 	}
 	scratchDir := renderScratchDir(j.TempDir)
-	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
+	if err := j.mkdirScratch(scratchDir); err != nil {
 		return nil, fmt.Errorf("mkdir render scratch dir: %w", err)
 	}
 	scratchPath := filepath.Join(scratchDir, nextSidecarTmpToken()+renderScratchSuffix)
 	_ = os.Remove(scratchPath)
 	defer func() { _ = os.Remove(scratchPath) }()
 	return j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
+}
+
+// mkdirScratch creates the Stage A scratch directory. Its default home is
+// the OS temp dir, shared by every user, where a `sudo bridge render` (or
+// `optimize`) left it root's and 0700, so every DSD render of the service
+// then failed to create its scratch there. Run as root, a directory it
+// creates in such a shared directory takes the owner of the variants
+// directory the render publishes into (fsutil.MkdirAllShared); anywhere
+// else, its parent's, which a configured temp dir the service owns gives.
+func (j JobSpec) mkdirScratch(scratchDir string) error {
+	return fsutil.MkdirAllShared(scratchDir, 0o700, j.OutputDir)
 }
 
 // renderDSD is the DSD branch of Run — see the chain docblock at the top of
@@ -578,12 +590,12 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	finalPath := j.SidecarPath()
 	token := nextSidecarTmpToken()
 	tmpPath := finalPath + "." + token + sidecarTmpSuffix
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return RunResult{}, fmt.Errorf("mkdir sidecar dir: %w", err)
 	}
 	_ = os.Remove(tmpPath)
 	scratchDir := renderScratchDir(j.TempDir)
-	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
+	if err := j.mkdirScratch(scratchDir); err != nil {
 		return RunResult{}, fmt.Errorf("mkdir render scratch dir: %w", err)
 	}
 	scratchPath := filepath.Join(scratchDir, token+renderScratchSuffix)
@@ -595,6 +607,12 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	// Stage C's sox writes the rendition: precreated as the install's
+	// owner, as in Run, so a `sudo bridge render` leaves one the service
+	// can replace. A no-op when this process is not root.
+	if err := fsutil.Precreate(tmpPath, 0o666, finalPath); err != nil {
+		return RunResult{}, fmt.Errorf("create sidecar: %w", err)
+	}
 
 	// Stages A and B — decode into the scratch and measure it at unity.
 	truePeakUnity, err := j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
