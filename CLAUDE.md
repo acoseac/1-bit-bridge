@@ -969,12 +969,13 @@ lost my library."
   a `#…` alike) to any caller, and the pairing QR's `urls=` carried it
   (measured on main with the real binary: all four shapes, in both); in
   public mode a declared endpoint is also the QR's PRIMARY `url=`. The phone
-  uses none of those parts: it sets its own `Authorization` header (the
-  bearer token) on every request, and its request delegate cancels every
-  challenge but the server's certificate, so userinfo could never have
-  reached a proxy in front of the bridge; the app only stored the secret and
-  dialled with it (read in `BridgeSourceClient`, `BridgePairingURL` and
-  `SMBStore`, 2026-09-28). **Repair what is stored, refuse what is typed**
+  relies on none of those parts: it sets its own `Authorization` header (the
+  bearer token) on every request, its request delegates cancel every
+  challenge but the server's certificate, and `buildRequest` replaces the
+  path, and the query of every request that carries one (the file routes),
+  so no proxy in front of the bridge could have served the app on them (read
+  in `BridgeSourceClient`, `BridgePairingURL` and `SMBStore`, 2026-09-28).
+  **Repair what is stored, refuse what is typed**
   (the library name's rule, under Config): `ValidateCustomEndpoints`, which
   `Normalize` runs for `Load` and every writer, keeps such an entry WITHOUT
   those parts (`config.HasCredentialParts`), dedupes on the published form,
@@ -995,6 +996,15 @@ lost my library."
   health, a minted link and every log line;
   `TestHealthPublishesNoCustomEndpointCredential` and
   `TestPublicPairingCarriesNoCustomEndpointCredential` cover public mode.
+  **Nor does `/v1/health` publish a manual upstream's URL**:
+  `upnpUpstreamServers[].descriptionURL` read it back for a server
+  configured with a UDN AND a manual URL, whose poller caches its fetch
+  under the UDN, while the DTO and PROTOCOL.md keep a manual URL off the
+  wire. The public adapter leaves out a value equal to the configured
+  manual URL, and never strips one: the device's own LOCATION is published
+  as it gave it, query included (a Windows device host's is
+  `…/udhisapi.dll?content=uuid:…`), so a rule on its parts would cost those
+  devices the hint (`TestHealthDoesNotPublishTheOperatorsManualURL`).
 - **mDNS TXT records carry `host` + `port`.** Without them iOS must
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs

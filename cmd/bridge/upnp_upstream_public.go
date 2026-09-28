@@ -78,6 +78,17 @@ func (a *upnpPublicAdapter) PublicServers(ctx context.Context) []api.UPnPUpstrea
 			// whole point of the field is a phone on the SAME LAN.
 			descURL = ""
 		}
+		// Nor the operator's own manual URL, which the DTO keeps off the
+		// wire ("the operator already has the URL") and which can carry a
+		// credential: a user name and password, a token in its query
+		// (backlog B54). It reached this field for a server configured
+		// with a UDN AND a manual URL, whose poller caches its fetch under
+		// the UDN, the entry the lookup above reads. The device's own SSDP
+		// LOCATION, cached under the same key, is published as it gave
+		// it, query and all, as before.
+		if manual := strings.TrimSpace(srv.ManualDescriptionURL); manual != "" && descURL == manual {
+			descURL = ""
+		}
 		out = append(out, api.UPnPUpstreamPublicServer{
 			Name:           srv.Name,
 			ConfiguredUDN:  srv.UDN,

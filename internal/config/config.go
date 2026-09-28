@@ -3478,10 +3478,12 @@ const maxCustomEndpointHostLen = 255
 // them, for: the parts of a URL that carry a credential. /v1/health
 // publishes the list to any caller, a token or none, and every pairing QR
 // carries it (backlog B54). The bridge's own listener reads none of them,
-// and the phone uses none: it sets its own Authorization header (the bearer
-// token) on every request, and its request delegate cancels every challenge
-// but the server's certificate (BridgeSourceClient's PinningTaskDelegate,
-// read 2026-09-28).
+// and the phone relies on none: it sets its own Authorization header (the
+// bearer token) on every request, its request delegates cancel every
+// challenge but the server's certificate, and its request builder sets the
+// query of every request that has one, the file routes included
+// (BridgeSourceClient's PinningDelegate, PinningTaskDelegate and
+// buildRequest, read 2026-09-28).
 var errCustomEndpointCredentials = errors.New("carries a user name, password, query or fragment, " +
 	"which /v1/health (answering any caller) and every pairing QR would publish")
 
@@ -3556,10 +3558,11 @@ func CheckCustomEndpoints(in []string) error {
 // (HasCredentialParts) is KEPT WITHOUT THEM (backlog B54). Everything that
 // publishes an endpoint reads the list this returns: /v1/health, which
 // answers any caller, the pairing QR and the console's endpoints panel. The
-// phone and the bridge use none of those parts, and the endpoint itself
-// still reaches the host it names, so dropping it would cost the phone a
-// route for nothing, and refusing the config would stop a bridge that
-// started before. A typed entry is refused instead (CheckCustomEndpoints).
+// phone and the bridge rely on none of those parts
+// (errCustomEndpointCredentials says why), and the endpoint itself still
+// reaches the host it names, so dropping it would cost the phone a route
+// for nothing, and refusing the config would stop a bridge that started
+// before. A typed entry is refused instead (CheckCustomEndpoints).
 //
 // Why HTTPS-only: iOS clients won't speak plain-HTTP to the bridge
 // (ATS rejects it before our pinning runs even on a local-network
