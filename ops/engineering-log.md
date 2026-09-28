@@ -24375,3 +24375,224 @@ row note and no tray. Red on the merge commit, as above.
 | the summary's `soxAvailable` back to the precheck alone | the new test's "without FLAC" case, and the panel test's fourth state (the CarPlay row's "switched off", the hi-res Generate live), both red |
 | `soxUsable` counting an unread build as without FLAC (`_ = known`, or it does not build) | the new test's "could not be read" case and `TestAlbumDetailVariantSummarySeparatesOffFromNoSox` red; the panel test green, its probe always known |
 | the panel's sox note back to its old words | the panel test's fourth state red (no note naming FLAC) |
+
+## 2026-09-28 — bridge init honours its address flags on a loopback run, a --force rewrite is not refused over a port it moves off, and doctor's hints speak to the operator
+
+Backlog B34: the three leftovers #1066's entry recorded under Out of scope.
+
+### What was measured
+
+Every run below is the real binary on the dev Mac, stdin `/dev/null`: "main"
+is a build of 172d4704, "after" a build of this branch.
+
+**A loopback init read neither address flag.**
+
+| | run | main | after |
+|---|---|---|---|
+| 1a | loopback first install, `--listen-address 127.0.0.1:A --admin-address 127.0.0.1:B`, both free | exit 0, saved `:7788` / `127.0.0.1:7789`, no word | exit 0, saved A / B |
+| 1b | the same with `--admin-address 0.0.0.0:B` | exit 0, saved the defaults | exit 2: `--admin-address "0.0.0.0:B": host "0.0.0.0" is not a loopback address`, and a line saying why (next section) |
+| 1c | the same with `--listen-address 443` | exit 0, saved the defaults | exit 2: `--listen-address "443": address 443: missing port in address` |
+
+**A `--yes --force` rewrite was refused over a port it moves off.** An
+install whose config loads, on 127.0.0.1:X and :Y, no pid file (its bridge
+stopped), X held by a python listener:
+
+| | rewrite | main | after |
+|---|---|---|---|
+| 2a | public, onto A / B | exit 1, `[FAIL] port-api :X in use`, "another process owns this port; stop it or pick a different address in bridge.yaml", config unchanged | exit 0, saved A / B |
+| 2b | loopback, no flags (so the defaults, free on the Mac) | exit 1, the same FAIL | exit 0, saved `:7788` / `127.0.0.1:7789` |
+| 2c | control: public, keeping X for the API | exit 1, the same FAIL, no note | exit 1, the same FAIL, `[ok] port-admin not checked: this rewrite moves off :Y`, and "port-api and port-admin above grade the ports this init would write; --listen-address and --admin-address choose others." |
+
+**Three doctor hints named a `Deps` field.** The task named the first; a
+grep for the pattern (every string literal in `internal/doctor` holding
+`Deps.`) found the other two, and each reached an operator:
+
+| | run | hint on main |
+|---|---|---|
+| 3a | `bridge doctor --config` over `listenAddress: ":0"`, `adminAddress: "127.0.0.1:0"` | `[warn] port-api no port set` / `pass Deps.port-apiPort`, and `pass Deps.port-adminPort` |
+| 3b | a public first install with `--listen-address 127.0.0.1:0` | the same, under "preflight warnings" |
+| 3c | `bridge doctor` with no config anywhere (HOME a fresh directory, an empty working directory): every run before `bridge init` | `[warn] tls-cert no data dir set` / `pass Deps.DataDir so doctor can inspect cert state` |
+| 3d | the same with HOME unset | also `[warn] config-dir no config dir set` / `pass Deps.ConfigDir so doctor can verify write access` |
+
+After, the same runs print, in order: "the address names port 0, so the
+system picks a free port each time the bridge starts, and there is none to
+check; set a fixed port if clients must reach this listener on the same
+port after a restart"; "no config that loads says where the certificate is,
+so there is none to inspect (config-file above says why); `bridge init`
+mints one on a first install"; and "no config was named or found, and the
+default config directory could not be resolved: it lives under this user's
+home directory (HOME, or USERPROFILE on Windows), which is not set. Set it,
+or name a config with --config". Summaries and severities are unchanged.
+
+### Decisions
+
+- **Honour the address flags on a loopback run rather than refuse them.**
+  `initAddresses` already took them; a loopback run returned before reading
+  them. It now reads them in either posture, so the preflight grades and
+  the config saves the same ports by the one definition #1066 made. An
+  operator whose 7788 is taken (a second bridge beside the first) had no
+  init route but to edit bridge.yaml after init had graded and saved the
+  defaults. Refusing was the smaller change and left that operator where
+  they were.
+- **A loopback run's `--admin-address` must name a loopback host**, the
+  rule `Validate` holds that install's adminAddress to: its console has no
+  login. `config.ValidateLoopbackAddress(field, addr)` wraps the unexported
+  `validateLoopbackAddress` with the field in the error, as
+  `ValidateBindAddress` does, and `Validate`'s loopback branch now calls it
+  too, so the file and the flag share one function (the error text is
+  byte-identical to the old `adminAddress %q: %w`). `initAddressFlagsError`
+  runs the bind check on both flags first, then the loopback rule, and adds
+  one line only to a HOST refusal: "without --public the admin console has
+  no login, so it listens on this machine only: reach it from another over
+  an SSH tunnel, or run init with --public for a console with a login". A
+  port that does not parse is no question of login. The unexported function
+  stays, since four comments and the top of CLAUDE.md name it.
+- **One note for both postures.** `portsThisInitWrites(public)` said "…
+  would write, its defaults." for a loopback run, false once the flags are
+  read; it is one sentence now, naming the flags.
+- **A certain rewrite leaves the ports it abandons ungraded.** Only `--yes
+  --force` over a config that loads is certain before the preflight: `--yes`
+  alone keeps the config, and an interactive run asks "Overwrite?" after
+  the preflight, where a no keeps the install's ports. `portsARewriteAbandons`
+  lists the install's ports the rewrite binds in neither role, and
+  `doctor.Deps.AbandonedPorts` answers a listed port ok "not checked: this
+  rewrite moves off :X" without probing it (`abandonedPortCheck`, in
+  `checkListenPort` after the owned-port answer). The shape follows
+  `ungradedConfigPortCheck`'s: a line that says it was not graded, and why.
+  The second pass grades the ports written in their place, as before, and
+  carries the same Deps; the list never names a port the run writes, which
+  is what makes that safe. Port 0 is matched like any other port (unlike
+  `OwnedPorts`, where 0 means unset): here it comes from a config, where
+  `:0` is a legal address a rewrite may leave.
+- **Rejected: a list built per role** (a check's port is abandoned when its
+  own role moves). A rewrite that moves the console onto the install's old
+  API port binds that port again; a per-role list names it, and the second
+  pass, grading it as the new admin port with the same Deps, answers "not
+  checked" and saves a port a stranger holds. NC8 below.
+- **Rejected: the preflight grading the run's ports in place of the
+  install's on a certain rewrite.** A changed port needs the pid file
+  cleared (#970) and a kept one needs it (the running bridge holds it), and
+  `Deps` carries one pid file for both checks. Attribution-only mode
+  (`OwnPIDPortsUnknown`) for both would refuse a capability-bound bridge on
+  its own kept port wherever the probe cannot read it, #1027's documented
+  limit, on the NUC's ordinary shape. The second pass already has the right
+  semantics per port.
+- **Rejected: moving "Overwrite?" ahead of the preflight** so an interactive
+  run is certain too. It reorders the interactive flow for every re-init and
+  still leaves a no-answer grading the install. The residual is recorded in
+  CLAUDE.md: an interactive rewrite moving off a held port is refused before
+  its prompt, and `--yes --force` is the way through.
+- **On a certain rewrite the note prints under a refused kept port.** Every
+  port graded there is one the rewrite writes, and the check's own hint
+  names a bridge.yaml the run is about to replace.
+- **All three `Deps.` hints, not only the port's, and a sweep.** The task
+  named the port hint; the other two are the same defect and reached more
+  operators (3c is every pre-init doctor run). `TestNoStringInThisPackageNamesADepsField`
+  walks the package's string literals by AST (the docblocks that discuss the
+  fields are comments, and not read), with a floor of 10 files and 200
+  literals. Severities stay: whether tls-cert's pre-init warn should decline
+  as an ok "not checked", as #1022's rule would suggest, is a separate
+  change (Out of scope).
+- **Consult**: Gemini is at the project's monthly spending cap; decided
+  without it, on the measurements above.
+
+### Tests
+
+- `cmd/bridge/init_loopback_addresses_test.go`:
+  `TestInitLoopbackRunWritesTheAddressesItIsGiven` (two first-install
+  shapes, both on 127.0.0.1 and the API on every interface with the console
+  on localhost, and a `--force` rewrite of a loopback install); it holds
+  `writeLoopbackInstall`, which `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`
+  now uses in place of its own copy.
+- `cmd/bridge/init_run_ports_test.go`: `TestInitPreflightRefusesAPortTheRunWrites`
+  gained a loopback-flags row and lost its per-row note;
+  `TestInitRefusesAnAddressFlagTheConfigWouldRefuse` gained five loopback
+  rows (a listen address with no port, an admin port out of range, and an
+  admin host that is every interface, empty, or a name), requires the "no
+  login" line on exactly the three host rows, and passes `--library` so the
+  address is the run's only usage error.
+- `cmd/bridge/init_force_rewrite_ports_test.go`, each row in both postures:
+  `TestInitForceRewriteIsNotRefusedOverAPortItMovesOff`,
+  `TestInitForceRewriteStillRefusesAPortItKeeps` (kept as the listen port,
+  and as the admin port: the other-role shape),
+  `TestInitForceRewriteGradesThePortItMovesTo` (a stranger on the old port
+  and the new one: the second pass refuses the new one, and nothing names
+  the old), `TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt`
+  (the control that pins the residual), and `TestPortsARewriteAbandons`
+  (nine shapes, the swaps included; no row abandons a port the run writes).
+- `cmd/bridge/doctor_operator_hints_test.go`: `TestPrintedHintsSpeakToTheOperator`
+  drives `doctorCmd` and `initCmd` into 3a to 3d and a loopback init naming
+  `:0`, and requires the check's warn with no `Deps.` anywhere in the output.
+- `internal/doctor`: `TestHintsWithNothingToGradeSpeakToTheOperator`,
+  `TestNoStringInThisPackageNamesADepsField`, `TestAnAbandonedPortIsNotProbed`
+  (a held, listed port answers ok "not checked" on both checks with zero
+  calls to the bind probe; the same port unlisted FAILs).
+- **Red first, on the unchanged tree.** The new and changed test files were
+  copied into an archive of 172d4704 (a grep for `AbandonedPorts` and
+  `abandonedPortCheck` there found none), with `portsThisInitWrites()`
+  spelled as main's public variant, whose words the new note keeps, and a
+  stub `portsARewriteAbandons` returning nil so the package compiled. Red:
+  both new `internal/doctor` hint tests (the sweep naming `doctor.go:371`,
+  `:459` and `:965`), `TestPrintedHintsSpeakToTheOperator` 5 of 5, every
+  row of the three `TestInitForceRewrite…` tests, `TestInitLoopbackRunWritesTheAddressesItIsGiven`
+  3 of 3, the five loopback rows of the address-flag test, and the
+  loopback-flags row of the preflight-refusal table. Also red, by the
+  note's words only: that table's loopback-defaults row and
+  `TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`,
+  whose loopback note was "…, its defaults.". Green, as controls should be:
+  the interactive test, the keep test, and #1066's tests.
+
+### Negative controls
+
+Each on the committed tree (690fff79), restored with `git checkout --` and
+the tree confirmed clean after each; `-count=1` over `TestInit|TestDoctor|TestMenuDoctor|TestConfiguredPort|TestAutoStart|TestPrintedHints|TestPortsARewrite`
+in `cmd/bridge` and all of `internal/doctor`. Every mutation matched once
+and built.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | a loopback run reads neither address flag again | every loopback-flag test: the three `TestInitLoopbackRunWritesTheAddressesItIsGiven` rows, the loopback-flags row of the refusal table, the loopback init naming `:0`, and the loopback row of each `TestInitForceRewrite…` test (the run writes the free defaults and saves) |
+| NC2 | a loopback run's admin address skips the loopback rule | the three admin-host rows of the address-flag test, alone |
+| NC3 | the flags checked on a public run only, as before | the five loopback rows of the address-flag test |
+| NC4 | no abandoned list set | the not-refused test and the new-port test, both postures |
+| NC5 | the ladder never asks `abandonedPortCheck` | NC4's four rows and `TestAnAbandonedPortIsNotProbed` |
+| NC6 | `--yes` without `--force` abandons ports too | `TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`, alone |
+| NC7 | any run over a loaded config abandons ports | that test and the interactive test |
+| NC8 | the list built per role | the two other-role rows of the keep test, and three `TestPortsARewriteAbandons` rows (the swap, and a port moving onto the other role's, each way) |
+| NC9 | the note only where no config loaded, as before | the four keep-test rows |
+| NC10 | no second pass on a `--force` rewrite | the new-port test (both postures), `TestInitRefusesToSaveAPortItNeverGraded`, `TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID` |
+| NC11 | the port-0 hint back to `"pass Deps."+name+"Port"` | the two port rows of the hint test, the sweep, and the three `:0` rows of the printed-hints test |
+| NC12 | the tls-cert hint back | its hint row, the sweep, and the two printed rows with no config (the no-home run has no data dir either) |
+| NC13 | the config-dir hint back | its hint row, the sweep, and the no-home printed row |
+| NC14 | the sweep reads no file | the sweep, on its floor |
+| NC15 | the admin address skips the bind check | the two admin-out-of-range rows, public and loopback (the loopback one then carries the "no login" line) |
+| NC16 | `abandonedPortCheck` probes the port before answering | `TestAnAbandonedPortIsNotProbed`, alone |
+
+### Gate
+
+See the PR body: `go vet ./...`, the pinned gofmt on every file touched,
+`go test -race -count=1` over `cmd/bridge`, `internal/doctor` and
+`internal/config` on the dev Mac, and `make build-all P=2`. The full Linux
+race suite runs on dido for the PR head, and CI's macOS and Windows legs
+run the rest.
+
+### Out of scope
+
+- **`--domain`, `--email` and `--admin-tls-proxy` are still ignored,
+  silently, without `--public`**: a loopback init given all three exits 0,
+  and none reaches the saved config (measured with this branch's binary).
+  Their help says "required with --public" and "with --public:", so an
+  operator who forgets `--public` gets a loopback install and no word.
+- **tls-cert's "no data dir set" is a warn on every `bridge doctor` run
+  before `bridge init`**, where #1022's rule for a check that declines for
+  a reason another line reports (config-file's "none found") would make it
+  an ok "not checked". Its hint is an operator sentence now; the severity
+  is a separate change, which moves every first-run report's warn count.
+- **A loopback `--force` rewrite keeps a loopback install's
+  `customEndpoints` while writing the run's ports**, so a kept endpoint can
+  name the port the rewrite moves off. This predates the change (a loopback
+  rewrite always wrote the defaults, whatever port the install used), and
+  `printKept` lists the kept endpoints; the flags now at least let the
+  rewrite keep the port.
+- **An interactive rewrite moving off a held port is still refused before
+  its "Overwrite?" prompt** (recorded in CLAUDE.md as the residual).
