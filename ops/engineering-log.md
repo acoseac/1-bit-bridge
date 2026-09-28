@@ -22149,3 +22149,233 @@ Device identities and addresses stay out of this file.
 - The iOS app's SSDP path has no LOCATION-versus-source check.
 - `internal/dlna`'s SSDP tests multicast real NOTIFY announcements from the
   host's LAN address while the suite runs (above).
+
+## 2026-09-28 — the `--gc` sweeps refuse a partial walk, the background sweep walks past files it cannot remove, and the Jobs card shows its refusal
+
+Three leftovers of #1063 (backlog B30 and B26), in one PR.
+
+### B30: the CLI sweeps took a verdict over a walk that could not read part of the tree
+
+`bridge upscale --gc` (and optimize / render, which reach `runGC`) and
+`bridge analyze --gc` applied `MassOrphanRefusal` to the counts of the part
+of the tree their walk could read, printed "N entr(y/ies) … could not be
+read; they were neither counted nor removed", and went on. #1063 fixed the
+background sweep only.
+
+Measured on main (99b6d1e6) with #1063's shape, through the real `runGC`
+and `runAnalyzeGC`: 20 rows each with its file, 15 stranded files in view,
+1,000 stranded files behind a `chmod 000` directory. The visible counts,
+15 orphans of 35 files against 20 rows, pass the check; the whole tree,
+1,015 of 1,035, refuses. Both sweeps printed the unreadable count, removed
+the 15 (`GC forward sweep: removed 15 orphan file(s), kept 20 known
+sidecar(s)`; `analyze --gc: removed 15 orphan sidecar(s), kept 20`) and
+exited 0. 1,020 of 1,035 files were left.
+
+**Decided: split the unknowns, refuse the unbounded one, weigh the bounded
+one.**
+
+- `SidecarInventory.UnlistedDirs` counts the directories among `Unreadable`.
+  A directory the walk could not list may hold any number of files, so
+  `integrity.PartialWalkRefusal` refuses a verdict over such a walk. All
+  three deleting sweeps ask it after the mass-orphan check (whose advice,
+  a lost index, is the more urgent when the visible part already refuses),
+  and the doctor reports it (`GCRefusesPartialWalk`, sound on a truncated
+  prefix: a directory this walk could not list is one the whole walk cannot
+  list either).
+- The CLI's way past it is a new `--allow-partial-walk` on upscale /
+  optimize / render / analyze, which waives only that refusal; the
+  mass-orphan check still runs over what was read. **Rejected: reusing
+  `--allow-mass-orphans`**, which gives up the whole mass-orphan protection
+  to get past one directory. But `--allow-mass-orphans` waives the
+  partial-walk refusal too: that refusal exists only to protect the verdict
+  the flag has set aside, so asking for both flags would add nothing. A
+  threshold of 100 disables it the same way (`MassOrphanRefusal` never
+  refuses there, however much a directory hides). The background sweep has
+  no override, as before.
+- A link the walk could not stat (the rest of `Unreadable`) is never walked
+  into, so it is nothing, one known file or one orphan.
+  `integrity.MassOrphanRefusalFor` counts every such entry as an orphan
+  (o+k of f+k). That is exact, not merely conservative: a known file adds
+  to the files alone and can only lower the ratio; an orphan adds to both,
+  and the floor and `orphans > rows` grow with it while 100·(o+1) >
+  pct·(f+1) follows from 100·o > pct·f for pct ≤ 100; so the all-orphans
+  reading refuses whenever any reading does, and every reading proceeds
+  when it proceeds. `TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`
+  checks that against every reading by brute force (74,250 shapes: six
+  thresholds, rows and orphans 0–14, files up to orphans+10, 0–4 links).
+  Before this change the background sweep refused every tick over a single
+  such link. The refusal's reason says when its numbers are a worst case
+  ("counting the N entr(y/ies) the walk could not stat as unreferenced
+  files").
+
+**The ordinary false positive: `lost+found`.** mke2fs creates a root-owned,
+0700 `lost+found` at the top of every ext2/3/4 filesystem, so a variants
+directory that IS such a volume's mount point holds one the service user
+can never list. Since #1063 it made the background sweep refuse every tick,
+and `bridge doctor` warned about it on every run; with the CLI refusal above
+it would have made every `--gc` on such a host partial.
+
+- Decided (D1): a directory named exactly `lost+found`, directly under the
+  RESOLVED walk root, whose listing fails with a PERMISSION error, is the
+  filesystem's and not counted (`isFilesystemLostFound`, in
+  `TakeSidecarInventory`, so the three sweeps and the doctor agree). The
+  resolved root is where the volume is, so a symlinked variants directory
+  gets the rule too. A readable one is walked as before.
+- What else that name can be: the variants layout mirrors library-relative
+  paths, so `<variantsDir>/lost+found` is also what a single-root library
+  with a top-level folder of that name, or (multi-root) a library root with
+  that basename, would render into. The bridge creates that directory as its
+  own user and can list it, so D1 walks it. If the volume's own 0700
+  `lost+found` is already there, the bridge (non-root) cannot write into it
+  at all. The one way sidecars could sit in an unreadable one is a render
+  run as ROOT for such a library folder; left as a residual.
+- Rejected (D2): prune `lost+found` at the walk root always, like a
+  dot-directory. It would have kept `sudo bridge upscale --gc` from
+  unlinking fsck's recovered inodes (a nil Consider counts every file) and
+  made the verdict independent of the user running it; but it also hides a
+  readable, bridge-created directory from every forward sweep, and `--gc`'s
+  nil Consider already treats everything in the variants directory as its
+  own. Narrower is the smaller change.
+- Rejected: requiring the walk root to be a mount point (st_dev against its
+  parent) or the directory to be owned by uid 0. Both are POSIX-only, and
+  neither excludes the one residual (a root-run render makes a uid-0
+  directory under a mount point too).
+- Not covered: a volume mounted DEEPER in the tree keeps its `lost+found`
+  counted (nothing about the walk root vouches for it), and an I/O error on
+  the top one counts as any other. `TreeHoldsVariantSidecars`, the reverse
+  guard's probe, still fails closed on an unreadable `lost+found`, which can
+  only refuse a mass row deletion (the safe direction).
+- A Gemini consult on D1/D2 and on the link weighing was attempted; the API
+  answered HTTP 429 (the project's monthly spending cap). Decided here.
+
+**Doctor.** `variants-index`'s hint said `--gc` "measures the whole tree and
+unlinks nothing when it refuses", false past a directory it could not list;
+it now says `--gc` refuses such a walk and names `--allow-partial-walk`. Its
+summary called every unreadable entry a directory ("director(y/ies) could
+not be read"), the wording #969 fixed in both CLI sweeps and not here; it
+names directories and links apart now. `WouldRefuseGC` is withheld only for
+an unlisted directory, since a link is weighed as `--gc` weighs it.
+
+### B26 (1): a tick stalled behind files it could not remove
+
+Each tick retained the first `gcChunkSize` (5,000) orphan paths in walk
+order and every attempt spent a slot, so a chunk's worth of files the
+service user cannot unlink at the head of the walk (a root-owned directory
+from a `sudo bridge upscale` run) blocked every orphan behind them, every
+tick. The cursor this sweep had until #1063 moved past them. Measured on
+main with a chunk of 5: 30 rows with files, eight orphans in a read-only
+directory (`a-locked`, walked first) and ten deletable ones after it; four
+ticks, `unlinked=0 failed=5` each, 48 files left.
+
+- Decided: keep `gcRetainedPerUnlink` (4) chunks of paths and cap SUCCESSFUL
+  unlinks at the chunk; a tick tries the retained paths in walk order until
+  it has unlinked a chunk. After: 5, 5, 0 on the same shape.
+- The bound, measured (Apple silicon, go1.26.6, 21,000 files with 205-byte
+  paths): 10.8 MB of heap for 20,000 retained paths (two spellings each,
+  `OrphanPaths` and `OrphanWalkedPaths`), 3.0 MB at the old 5,000, freed
+  when the tick ends. A head of up to 15,000 undeletable files still leaves
+  a full chunk per tick; 20,000 or more stall again. The summary line gained
+  `retained`, so `failed == retained` with `unlinked == 0` shows it.
+- Nothing crosses a tick, #1063's rule. Rejected: remembering failed paths
+  between ticks (state carried across ticks, which #1063 refused);
+  reservoir-sampling the retained list (no stall in expectation, but a
+  tick's work stops being reproducible from its inputs, and tests would need
+  an RNG seam); predicting undeletable files from the parent directory's
+  writability (`access(W_OK)`: POSIX-only, blind to sticky bits and to
+  Windows' delete semantics).
+- The refusal still reads the full `Orphans` count. The full-count test
+  (`TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount`) had 150 rows and a
+  chunk of 100: at four chunks the retained 400 outnumber 150 rows, so a
+  refusal fed the retained count still refused, and the test caught that
+  mutation only through its wording check. Its fixture is now 500 rows, with
+  a guard that fails if the retained count ever reaches the rows again.
+
+### B26 (2): the Jobs chip said "on" while the sweep refused
+
+The "Orphan sidecar GC" line read the interval alone. A sweep refusing every
+tick, with no override and one WARN a day, looked healthy on the Jobs page.
+
+- `OrphanSidecarSweeper` keeps its latch as a kind
+  (`integrity.OrphanRefusalKind`: `massOrphans`, `partialWalk`) and the start
+  of the streak, and publishes both through an atomic snapshot (`Status`),
+  written by the run goroutine when the latch moves. The ticks' own latch
+  logic is unchanged (a tick that decided nothing leaves it).
+- `admin.Deps.OrphanSweepStatus` (wired by runServe to the sweep's `Status`,
+  nil when it does not run) fills `maintenance.orphanSidecarGCRefusal` (a
+  key) and `orphanSidecarGCRefusingSince` on `/api/jobs`, omitted while the
+  sweep is not refusing or its interval is off.
+- The card shows a "refusing" badge and when it started on the line, and
+  the reason in a `hint warn` paragraph under the list. The first draft put
+  the sentence in the list cell: in a browser at 375 px it wrapped into a
+  163 px column 170 px tall.
+- Verified in a real browser on a throwaway bridge (ports 27788 / 27789, the
+  orphan sweep at 5 s, two rows over 45 stranded files): the lost-index
+  refusal; then, with the 40-file directory locked, the partial-walk refusal
+  (a new streak, so a new start); then, with that directory removed and a
+  locked `lost+found` at the variants root, a tick that proceeded
+  (`unreadable=0 refused=false unlinked=5`, one "no longer refusing" line)
+  and the chip back to "on". At 375 and 1024 px, light and dark, no
+  horizontal scroll.
+- Not shown: the empty-catalog refusal, which is not a latch kind (it WARNs
+  every tick and decides nothing about the tree).
+
+### Tests
+
+New: `TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut`,
+`TestIsFilesystemLostFoundReadsAllThreeTerms`,
+`TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`,
+`TestPartialWalkRefusalNeedsADirectoryItCouldNotList`,
+`TestOrphanSidecarSweeperProceedsPastTheFilesystemsLostFound`,
+`TestOrphanSidecarSweeperWeighsALinkItCouldNotStat`,
+`TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove`,
+`TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch`,
+`TestOrphanSidecarSweeperStatusIsReadableBesideTheRunningLoop` (the atomic
+publication under `-race`), `TestRunGCRefusesAPartialWalkUntilAllowed`
+(with the control that the whole tree refuses as a lost index),
+`TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`,
+`TestRunGCProceedsPastTheFilesystemsLostFound`,
+`TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`,
+`TestEveryForwardSweepingGCCommandOffersThePartialWalkOverride` (the
+mass-orphan sweep test's body is now a helper both flags share),
+`TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk`,
+`TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`,
+`TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`,
+`TestMaintenanceChipSaysTheOrphanSweepIsRefusing`,
+`TestEveryOrphanRefusalKindIsWorded` (node) and
+`TestServeReportsTheOrphanSweepRefusalOnTheJobsCard` (boots serve).
+Adapted: the doctor fixtures that meant directories now say so
+(`UnlistedDirs`), `TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory`
+requires the new hint and forbids the old claim, the partial-walk WARN test
+reads "could not list", and the full-count test's fixture (above).
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| `upscale --gc`'s partial-walk refusal skipped | `TestRunGCRefusesAPartialWalkUntilAllowed`, alone |
+| `analyze --gc`'s skipped | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`, alone |
+| `isFilesystemLostFound` answers false | the inventory, unit, sweeper, `runGC` and doctor lost+found tests (five) |
+| its permission term dropped | the unit table's I/O-error row, alone |
+| its walk-root term dropped | the inventory test and the unit table's nested row |
+| `MassOrphanRefusalFor` weighs no links | the brute-force test and the sweeper's tenth-orphan row |
+| `PartialWalkRefusal` keyed on `Unreadable` | its own test and the sweeper's ordinary-crop row |
+| `PartialWalkRefusal` ignores pct 100 | its own test, alone |
+| `--allow-mass-orphans` no longer waives it | `TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`, alone |
+| render.go's flag misnamed | the partial-walk flag sweep, alone ("only 3 command(s)") |
+| the doctor's partial-walk hint case disabled | the doctor package test and the end-to-end doctor test |
+| the doctor's summary stops naming links apart | `TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`, alone |
+| the doctor probe withholds the verdict for links | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`, alone |
+| the unlink loop caps attempts (`i >= chunk`) | both rows of `TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove` |
+| one chunk of paths retained | the same two rows |
+| the refusal fed `len(inv.OrphanPaths)` | the full-count test ("unlinked 100, want 0") and the tenth-orphan row |
+| app.js stops reading `orphanSidecarGCRefusal` | `TestEveryJobsFieldIsRenderedSomewhere` (run again after the layout commit) |
+| app.js stops reading `orphanSidecarGCRefusingSince` | `TestEveryJobsFieldIsRenderedSomewhere` |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` ("falls through to the fallback") |
+| the handler never fills the refusal | the handler test and the serve boot test |
+| runServe wires nil | the serve boot test, alone |
+| the lifted streak is not published | `TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch` |
+| the handler ignores the interval gate | the handler test's interval-off block |
+
+One control was invalid on its first form: deleting the wiring line in
+`main.go` left `orphanSweepStatus` unused and the package did not build; it
+was rewritten to wire nil and keep a use.

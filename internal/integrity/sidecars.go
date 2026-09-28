@@ -141,8 +141,9 @@ const orphanRefusalExamples = 3
 // (2026-09-28). A tick lists the catalog, takes ONE read-only inventory
 // of the whole tree (TakeSidecarInventory — the walker `upscale --gc`,
 // `analyze --gc` and `bridge doctor`'s variants-index share), asks
-// MassOrphanRefusal of the whole tree's counts, and only then unlinks: at
-// most gcChunkSize files, each re-checked first (reclaimOrphan). Until
+// MassOrphanRefusalFor of the whole tree's counts and PartialWalkRefusal
+// of the walk, and only then unlinks: gcChunkSize files at most, each
+// re-checked first (reclaimOrphan), trying past any it cannot remove. Until
 // then this sweep unlinked INSIDE a walk chunked at 5,000 entries with a
 // cursor across ticks, and its only guard was "is the known set EMPTY?" —
 // so #940's shape, a catalog of 200 rows over a stranded tree of 10,048
@@ -153,18 +154,21 @@ const orphanRefusalExamples = 3
 // walk (an unmount, a cancel, a pruned root) or from a catalog that
 // changed mid-pass, and a budget carried between passes can be spent on
 // files it never counted. So no verdict crosses a tick; the one state
-// that does is the refusal's log latch.
+// that does is the refusal's latch, which Status reports to the console's
+// Jobs card.
 //
 // **No override.** A background sweeper has nobody in the loop to express
-// intent — the reason `--allow-empty` and `--allow-mass-orphans` exist on
-// the CLI and not here — so a refused tick unlinks nothing and says why:
-// one WARN when a streak of refused ticks starts, repeated at most once a
-// day while it lasts (the M-SEARCH rule: an identical line every tick
-// makes every other line unfindable), and one Info line when a tick
-// proceeds again. `bridge upscale --gc --allow-mass-orphans` is the way
-// past it. The threshold is `cfg.Integrity.VariantSweepMaxDeletePercent`,
-// the reverse sweep's knob with the same meaning at this end (100
-// disables both guards).
+// intent — the reason `--allow-empty`, `--allow-mass-orphans` and
+// `--allow-partial-walk` exist on the CLI and not here — so a refused tick
+// unlinks nothing and says why: one WARN when a streak of refused ticks
+// starts, repeated at most once a day while it lasts (the M-SEARCH rule:
+// an identical line every tick makes every other line unfindable), one
+// Info line when a tick proceeds again, and a "refusing" badge on the Jobs
+// card for as long as the streak lasts. `bridge upscale --gc` with those
+// flags is the way past it. The threshold is
+// `cfg.Integrity.VariantSweepMaxDeletePercent`, the reverse sweep's knob
+// with the same meaning at this end (100 disables both guards, and the
+// partial-walk refusal with them).
 //
 // **What the refusal does NOT cover.** MassOrphanRefusal refuses only when
 // its floor of ten, `orphans > rows` AND the ratio all hold, so a stranded

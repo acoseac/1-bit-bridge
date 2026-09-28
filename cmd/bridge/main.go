@@ -4109,9 +4109,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// `bridge upscale --gc` (cmd/bridge/upscale.go) and, since
 		// 2026-09-28, decides as it does: each tick takes the whole
 		// tree's inventory and refuses a mass orphaning
-		// (integrity.MassOrphanRefusal) — with no override, where `--gc`
-		// has --allow-mass-orphans — then unlinks at most a chunk of
-		// orphans. Opt-in via `cfg.Integrity.OrphanSidecarSweepIntervalSec`;
+		// (integrity.MassOrphanRefusalFor) or a walk that could not list
+		// part of the tree (integrity.PartialWalkRefusal) — with no
+		// override, where `--gc` has --allow-mass-orphans and
+		// --allow-partial-walk — then unlinks a chunk of orphans, trying
+		// past any it cannot remove. Its refusal reaches the Jobs card
+		// through orphanSweepStatus. Opt-in via `cfg.Integrity.OrphanSidecarSweepIntervalSec`;
 		// default zero (disabled), skipped silently when ≤ 0. The rules
 		// are in CLAUDE.md under "Job pools" (the forward sweep's
 		// denominator bullet). The tree to walk is liveVariantsDir,

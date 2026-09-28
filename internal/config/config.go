@@ -718,7 +718,9 @@ type IntegrityConfig struct {
 	// of the files in the variants directory when there are also more
 	// unreferenced files than rows (`--allow-mass-orphans` passes it),
 	// and since 2026-09-28 the background orphan sweep above does too,
-	// with no way past it. 100 disables that guard as well.
+	// with no way past it. 100 disables that guard as well, and with it
+	// the refusal of a walk that could not list part of the tree
+	// (integrity.PartialWalkRefusal), which exists only to protect it.
 	// Pointer-typed like its siblings; read via
 	// Config.VariantSweepMaxDeletePercent(). Config-file / env only, as
 	// the two intervals above are: none of the integrity knobs are on
