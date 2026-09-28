@@ -2249,7 +2249,10 @@ no failing test — which is the shape to expect in this area.
   breath the settings response calls the change pending. This is why there is no
   `partial` status — the rule removes the case instead of naming it. The
   field → apply-semantics matrix is **`ops/settings-apply-semantics.md`**, and a
-  test drives the real handler for every row in it.
+  test drives the real handler for every row in it. **That test checks the
+  REPORT, and no consumer**: under `upscaleEnabled`'s `live` row the console's
+  size projection was taken at boot until 2026-09-28 (the construction-time
+  bullet under The CLI and the serve wiring).
 - **…and a DEFAULT splits the halves too, when a writer can store what `Load`
   would replace** (#1042). `applyDefaults` runs in `Load` alone, and before
   the `BRIDGE_*` overrides, so its `if c.LibraryName == ""` reached neither
@@ -3301,6 +3304,35 @@ mentions across the four `ops/audit-*.md` files.
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
   operator who switched upscaling off can still reclaim the disk, where
   `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
+- **…and a value runServe DECIDES from the config while it builds Deps is a
+  boot snapshot, however live its reader is** (2026-09-28).
+  `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals
+  called in place that answered nil unless `upscale.enabled` was true at
+  that moment, and the projection handler read nil as "feature off".
+  Measured with the real `serve`, flipping `upscaleEnabled` through
+  `PATCH /api/settings`, which answered `live` both times: `GET
+  /api/library/browse-projection` answered 503 `upscale-disabled` after the
+  switch went on and 200 after it went off, while `/v1/health` followed it,
+  and with no sox on PATH it projected while health said off. The same nil
+  made `GET /api/upscale/variants-dir` report `freeBytes: 0`, "0 B free" on
+  the Library roots page, on every bridge booted with upscaling off. The two
+  sat directly above `OptimizeEligible`, whose own comment records this fix
+  for `optimizeEnabled`. Both helpers are now wired on every bridge, and the
+  handler refuses on `s.upscaleActive()`
+  (`Deps.UpscaleActive`, the batch's gate and /v1's, which
+  `TestConsoleBatchGateIsTheV1UpscaleGate` pins) before the target read, the
+  walk and the disk probe. **A function literal called where a Deps field or
+  a `With*` option is written decides on a WIRING fact (a nil handle), never
+  on the config**: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  sweeps runServe for one that reads `cfg`, `cfgHolder`, `liveCfg()` or a
+  live predicate outside the closure it returns. **A `live` row in
+  `ops/settings-apply-semantics.md` is a claim about every consumer, and
+  `TestMatrixDocMatchesWhatTheHandlerReports` checks only the REPORT**: it
+  passed throughout. The consumers are checked by a boot test that flips the
+  field through the PATCH and asks each one
+  (`TestServeProjectionFollowsTheLiveUpscaleGate`, which puts a stand-in sox
+  first on PATH, POSIX only, so the switch-on leg means something on a host
+  without sox, and checks health agrees before it compares).
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s

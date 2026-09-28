@@ -21750,3 +21750,126 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — the console's size projection follows the live upscale switch
+
+Backlog B25. runServe built `admin.Deps.ProjectedSize` and
+`AvailableDiskSpace` as function literals called in place, each answering
+nil unless `cfgHolder.Load().Upscale.Enabled` was true at that moment, and
+`apiLibraryBrowseProjection` read a nil helper as "feature off" (503
+`upscale-disabled`). So the projection took `upscale.enabled` at boot while
+`ops/settings-apply-semantics.md` calls the field `live` and the settings
+PATCH reports it `live`. The literals sat directly above `OptimizeEligible`,
+whose comment records the same fix for `optimizeEnabled` (the WIRED vs
+ACTIVE split); the upscale half was left. `AvailableDiskSpace` has a second
+reader, `probeVariantsDirUsage` behind `GET /api/upscale/variants-dir`, which
+feeds the Library roots page's "Free on that volume": nil there reads as 0.
+
+No page of the console calls the projection since the Library Inspector
+went; any loopback process or public-mode session can. The free-space figure
+is on a page every operator sees.
+
+### Measured
+
+`TestServeProjectionFollowsTheLiveUpscaleGate`, written first and run on the
+unchanged tree (99b6d1e6): the real `serve` over an empty library, booted
+with `upscale.enabled` false and then true, the flag flipped twice through
+`PATCH /api/settings` (both answered `live`), and after every step
+`/v1/health`'s `upscaleEnabled`, the projection and the variants-dir figure
+read. A stand-in `sox` (a `/bin/sh` script answering `--help` with a format
+list) is first on PATH, so health follows the flag on a host without sox.
+
+- Booted off: `freeBytes=0` at all three steps; after the switch went on,
+  health said on and the projection answered 503 `upscale-disabled`.
+- Booted on: after the switch went off, health said off and the projection
+  answered 200 with a projection.
+- The same on dido in the stock `golang:1.26.6` image (no sox, no lsof),
+  under `-race`, with the new tests copied onto `origin/main`.
+- With no sox on PATH at all (the Mac's PATH cut to `/usr/bin:/bin`, the shape
+  of CI's Windows leg, which gets no stand-in): booted on, the projection
+  answered 200 at all three steps while health said off at all three, since
+  the literal read the flag and not the sox half.
+
+### Decisions
+
+- Both helpers are wired on every bridge, and the handler refuses on
+  `s.upscaleActive()`: `Deps.UpscaleActive`, which runServe wires to
+  `upscaleActiveFn`, the closure `WithUpscale` gives /v1 and the batch submit
+  reads (#1060; `TestConsoleBatchGateIsTheV1UpscaleGate` pins that identity,
+  so no new wiring line needs its own pin). One predicate, so the projection
+  and `/v1/health` cannot disagree, a nil gate reads as off, and the refusal
+  is the same 503 `upscale-disabled` for every kind.
+- Rejected: gating inside `ProjectedSize`. It returns an int64, so "off"
+  would have to be a 0, and the endpoint would answer 200 with an empty
+  projection, a plausible wrong answer. Rejected: re-deriving the helpers on
+  each PATCH (a setter the settings handler calls), a second lifecycle for two
+  pure functions. Rejected: gating on the config flag. It is live, but it has
+  no sox half, and NC3 below shows the admin test is what catches it on a host
+  whose sox works.
+- Where the gate sits: after the path normalisation (no work, and a traversal
+  stays a 400 whatever the switch) and the manifest check, before the target
+  read, the projection walk and the disk probe. No WARN on the refusal: a read
+  refused is not worth a line, where the batch's refused mutation logs /v1's.
+- `AvailableDiskSpace` is a fact about the disk, so the variants-dir figure
+  answers whatever the switch; only the projection reads the gate.
+- A sweep for the shape: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  reads every admin.Deps value and every argument of a `With*` call in
+  runServe that is a function literal called in place, and reports one whose
+  own body reads `cfg`, `cfgHolder`, calls `liveCfg()`, or calls a live
+  predicate (a name ending in ActiveFn, CapsFn or EnabledFn). A read inside a
+  literal it returns runs per call and is left alone, as is a field name
+  (`x.cfg`, a `cfg:` key). The census it rests on: runServe has eleven such
+  literals, all in the admin.Deps literal; the two above read the config, and
+  the other nine (`TriggerCadenceRearm`, `BookletPath`, `BookletNudge`,
+  `OptimizeEligible`, `TargetRateForOptimize`, `DSDRenderEligible`,
+  `TargetRateForPCMRender`, `BatchCoordinator`, `VariantDeleter`) decide on a
+  slice or a nil handle, the harvest client's being the deliberately boot-bound
+  atlas posture. No `With*` argument is one. Reads of the boot `cfg` outside
+  such literals were read too: the api options take `cfg.Atlas.Enabled`,
+  `cfg.Demo.Enabled` and the DLNA verdict, none of them live, and the updater's
+  boot values sit beside the live providers it reads.
+- The boot test costs 1.1 s under `-race` on dido (two boots). The stand-in sox
+  is POSIX-only, as the Tailscale fake is; on Windows the boot-on leg still
+  fails the old code, as the no-sox run above shows.
+
+### Tests and controls
+
+`cmd/bridge/serve_projection_gate_test.go` (the boot test),
+`cmd/bridge/admin_upscale_gate_wiring_test.go` (the sweep and
+`TestConstructionTimeConfigReadsOnAFixture`, which runs it over synthetic
+source holding each shape it reports and each it leaves alone), and
+`internal/admin/handlers_projection_gate_test.go`
+(`TestProjectionAnswersTheUpscaleGateLive`: on, off, on for the upscale,
+optimize and pcm kinds, with the disk probes counted, so a refusal is shown to
+come before the probe; `TestProjectionReadsANilUpscaleGateAsOff`).
+`TestMatrixDocMatchesWhatTheHandlerReports/upscaleEnabled` passes before and
+after: it checks the PATCH report, and the report was never wrong.
+
+Negative controls on the committed tree (3bdb47cb), each restored with
+`git checkout --` and the tests re-run green:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| NC1: main.go's two literals put back (the handler keeps its gate) | the sweep, naming exactly `ProjectedSize` and `AvailableDiskSpace`; the boot test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg (the handler's gate answers the off step), the fixture test, the identity test |
+| NC2: the handler's `!s.upscaleActive()` removed | the boot test at every step health said off (booted off, steps 0 and 2; booted on, step 1); the admin live test for all three kinds; the nil-gate test | the sweep |
+| NC3: the handler gated on `cfg.Upscale.Enabled` instead | the admin live test (all three kinds) and the nil-gate test | the boot test with the stand-in sox; with no sox on PATH it goes red at the three steps where the flag is on |
+| NC4: the detector descends into nested literals | the sweep (`DSDRenderEligible` calls `dsdRenderCapsFn()`, `BatchCoordinator` reads `cfgHolder`, both inside the closures they return); the fixture (its read-inside-the-returned-closure case) | |
+| NC5: the detector counts field names as reads | the fixture (its `cfg:` key and `s.cfg` case) | the sweep (no such field on the tree) |
+| NC6: the stand-in sox prints nothing | the boot test's fixture check, at the first step with the flag on in each leg | |
+
+### Not fixed here
+
+Four consumers of `upscale.enabled` read it live but without the sox half,
+so they disagree with `/v1/health` on a bridge whose sox is missing: the
+console's upscale tile (`admin.Deps.UpscaleStats` and `UpscaleBusy`),
+`/v1/upscale/stats`' `enabled` (`upscaleStatsAdapter`, whose comment says it
+keeps "the wire semantics in lockstep with /v1/health.upscaleEnabled"), the
+auto-optimize sweeper's shared predicate (`autoOptimizeEnabledFn`, which the
+Jobs card reports), and `OptimizeActive` (safe where it is read, since both
+readers ask `UpscaleActive` first). Measured on this branch, with
+`upscale.enabled` and `autoOptimize.enabled` true and PATH cut to
+`/usr/bin:/bin`: `/v1/health` said `upscaleEnabled: false` and no
+`carPlayOptimize`, while `GET /api/upscale/stats` said `enabled: true` (with
+`soxAvailable: false`) and `/api/jobs`' auto-optimize card said enabled and
+active. A different defect (a live read of a narrower predicate, not a boot
+read), reported for its own change.
+
