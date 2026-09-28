@@ -273,11 +273,13 @@ type Deps struct {
 	// flight jobs, lifetime totals). Wired via a closure in
 	// cmd/bridge/main.go so the admin package stays decoupled
 	// from internal/transcode. The closure returns nil when
-	// the feature is off (Pool isn't instantiated); the admin
-	// endpoint then omits the `pool` field instead of
-	// surfacing zero-padded clutter ("0/0 queue, 0 inflight"
-	// would suggest the pool exists but is idle, which is
-	// semantically wrong).
+	// the feature is off by the live upscale gate (the flag
+	// AND a usable sox, what /v1/health reads), though the
+	// pool itself always exists; the admin endpoint then
+	// reports `enabled: false` and omits the `pool` field
+	// instead of surfacing zero-padded clutter ("0/0 queue,
+	// 0 inflight" would suggest the feature is on but idle,
+	// which is semantically wrong).
 	UpscaleStats func() *UpscalePoolStats
 
 	// UpscaleBusy is a CHEAP "is the pool actively processing" probe
@@ -1070,11 +1072,15 @@ type AnalysisSweepCounts struct {
 }
 
 // AutoOptimizeJobState is the auto-optimize sweeper's card on
-// /api/jobs. Enabled is the live config flag; Active the runtime
-// verdict (flag AND an upscale pool wired at startup AND the
-// optimize-kind gate). Lifecycle fields follow AnalysisSweepState's
-// shape and rules — pointer timestamps so omitempty genuinely drops
-// them, and no ticking countdowns.
+// /api/jobs. Enabled is the operator's three switches (upscale, the
+// CarPlay kind, pre-generation), read live; Active the sweeper's own
+// gate, the switches AND a usable sox, the predicate every sweep asks.
+// DegradedReason is the bounded key for Enabled-but-not-Active
+// ("sox_missing"), as on the analysis card. Active read the switches
+// alone until 2026-09-28, so the card said "on" through every sweep a
+// missing sox turned into failed jobs. Lifecycle fields follow
+// AnalysisSweepState's shape and rules — pointer timestamps so
+// omitempty genuinely drops them, and no ticking countdowns.
 type AutoOptimizeJobState struct {
 	Enabled        bool                     `json:"enabled"`
 	Active         bool                     `json:"active"`

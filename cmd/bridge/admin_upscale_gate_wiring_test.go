@@ -24,20 +24,52 @@ import (
 // AST rather than a text scan: this package's commentary names what it
 // discusses, the Deps literal's own comment included.
 func TestConsoleBatchGateIsTheV1UpscaleGate(t *testing.T) {
+	requireConsoleGateIsTheV1Gate(t, "WithUpscale", "UpscaleActive",
+		"a Deps without it reads the gate as off, and the console refuses every batch while "+
+			"/v1/health says upscaling is on",
+		"the console's batch gate and /v1/health's upscaleEnabled")
+}
+
+// TestConsoleCarPlayGateIsTheV1CarPlayGate pins `OptimizeActive:
+// carPlayOptimizeActiveFn` in runServe's admin.Deps: the console's
+// optimize kind (its batch submit and its projection) reads the closure
+// WithCarPlayOptimize hands /v1, the one /v1/health's carPlayOptimize and
+// the auto-optimize sweeper read.
+//
+// Until 2026-09-28 the field was a copy that read the upscale flag and the
+// CarPlay switch and nothing of sox. Both of its readers ask UpscaleActive
+// first, so no request answered differently, which is exactly why no
+// behavioural test can pin this. A reader that asked it alone would have
+// heard "on" from a bridge without sox, and the sweeper's gate was the
+// same kind of copy: it ran jobs there that could only fail
+// (TestServeWithoutSoxReportsUpscalingOffOnEverySurface).
+func TestConsoleCarPlayGateIsTheV1CarPlayGate(t *testing.T) {
+	requireConsoleGateIsTheV1Gate(t, "WithCarPlayOptimize", "OptimizeActive",
+		"a Deps without it reads the CarPlay kind as always on",
+		"the console's optimize kind and /v1/health's carPlayOptimize")
+}
+
+// requireConsoleGateIsTheV1Gate requires runServe's admin.Deps literal to
+// set field, once, to the very identifier main.go hands the /v1 server's
+// option method as its first argument. missing says what a Deps without
+// the field does; pair names the two surfaces that could otherwise
+// disagree.
+func requireConsoleGateIsTheV1Gate(t *testing.T, option, field, missing, pair string) {
+	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var (
-		v1Gates      []ast.Expr // WithUpscale's first argument, per call
+		v1Gates      []ast.Expr // the option's first argument, per call
 		depsLiterals int
-		consoleGates []ast.Expr // UpscaleActive's value, per admin.Deps literal
+		consoleGates []ast.Expr // the field's value, per admin.Deps literal
 	)
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CallExpr:
-			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WithUpscale" && len(x.Args) > 0 {
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == option && len(x.Args) > 0 {
 				v1Gates = append(v1Gates, x.Args[0])
 			}
 		case *ast.CompositeLit:
@@ -50,7 +82,7 @@ func TestConsoleBatchGateIsTheV1UpscaleGate(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "UpscaleActive" {
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == field {
 					consoleGates = append(consoleGates, kv.Value)
 				}
 			}
@@ -59,23 +91,20 @@ func TestConsoleBatchGateIsTheV1UpscaleGate(t *testing.T) {
 	})
 	// Floors: a sweep that finds neither half passes whatever main.go says.
 	if len(v1Gates) != 1 || depsLiterals != 1 {
-		t.Fatalf("main.go has %d WithUpscale calls and %d admin.Deps literals, want one of each; "+
-			"this test compares the two and cannot tell which pair is meant", len(v1Gates), depsLiterals)
+		t.Fatalf("main.go has %d %s calls and %d admin.Deps literals, want one of each; "+
+			"this test compares the two and cannot tell which pair is meant", len(v1Gates), option, depsLiterals)
 	}
 	v1, ok := v1Gates[0].(*ast.Ident)
 	if !ok {
-		t.Fatalf("WithUpscale is handed %T at %s, not a named closure the console could share",
-			v1Gates[0], fset.Position(v1Gates[0].Pos()))
+		t.Fatalf("%s is handed %T at %s, not a named closure the console could share",
+			option, v1Gates[0], fset.Position(v1Gates[0].Pos()))
 	}
 	if len(consoleGates) != 1 {
-		t.Fatalf("admin.Deps sets UpscaleActive %d times, want once: a Deps without it reads the "+
-			"gate as off, and the console refuses every batch while /v1/health says upscaling is on",
-			len(consoleGates))
+		t.Fatalf("admin.Deps sets %s %d times, want once: %s", field, len(consoleGates), missing)
 	}
 	if got, ok := consoleGates[0].(*ast.Ident); !ok || got.Name != v1.Name {
-		t.Errorf("admin.Deps.UpscaleActive at %s is not %s, the closure WithUpscale gets, so the "+
-			"console's batch gate and /v1/health's upscaleEnabled can disagree",
-			fset.Position(consoleGates[0].Pos()), v1.Name)
+		t.Errorf("admin.Deps.%s at %s is not %s, the closure %s gets, so %s can disagree",
+			field, fset.Position(consoleGates[0].Pos()), v1.Name, option, pair)
 	}
 }
 
