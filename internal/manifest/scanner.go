@@ -2811,11 +2811,11 @@ const (
 // own stat of a symlink is the LINK's, the length of the path it stores and
 // the link's mtime, and until 2026-09-28 a symlinked file was indexed under
 // it: the phone stored the length of the link's path as the file's size, the
-// skip gate never saw a change to the target, and every check that compares a
-// row with a stat of the file (the /v1/lyrics drift check answered 410 for its
-// embedded lyrics) disagreed with the row. That stat is also the identity of a
-// symlinked SACD container, its rows' and the in-motion guard's
-// (expandSACDContainer).
+// skip gate never saw a change to the target, and a check that compares a
+// stat taken from the row with a stat of the file disagreed with it (the
+// /v1/lyrics drift check answered 410 for its embedded lyrics). That stat is
+// also the identity of a symlinked SACD container, its rows' and the
+// in-motion guard's (expandSACDContainer).
 //
 // The test is "not a regular file", never "is a symlink", for the listing's
 // reason (resolveEntryInfo in internal/api): since Go 1.23 a Windows junction

@@ -6,10 +6,10 @@ package manifest
 // the scanner used to record the LINK's size (the length of the path it
 // stores) and the link's mtime, while it read the tags from the target and
 // every endpoint serves the target's bytes. The skip gate compared the same
-// link stat, so a change to the target was never re-extracted, and every
-// consumer that compares a row with a live stat of the file (the /v1/lyrics
-// drift check, the variant and waveform freshness gates) disagreed with the
-// row. /v1/list and /v1/stat already describe a link by its target
+// link stat, so a change to the target was never re-extracted, and a check
+// that compares a row with a live stat of the file disagreed with the row:
+// the /v1/lyrics drift check answered 410 for its embedded lyrics.
+// /v1/list and /v1/stat already describe a link by its target
 // (PROTOCOL.md), so the manifest was the one surface that did not.
 //
 // A link whose target cannot be stat'ed (dangling, or into a mount that went
@@ -108,6 +108,8 @@ type linkedFixture struct {
 	sc                  *Scanner
 }
 
+// newLinkedFixture builds the library, its store and scanner, and the
+// directory the links point into.
 func newLinkedFixture(t *testing.T) linkedFixture {
 	t.Helper()
 	root := t.TempDir()
