@@ -294,6 +294,7 @@ func TestTrashRejectsTraversalAndDotSegments(t *testing.T) {
 		"../outside.flac",
 		"A/../../outside.flac",
 		"/etc/passwd",
+		filepath.ToSlash(outside), // a drive letter on the Windows leg
 		".bridge-upload/sid/x.part",
 		".bridge-trash/1/A/x.flac",
 		"A/./x.flac",
@@ -409,6 +410,70 @@ func TestSplitIDRejectsMalformedInput(t *testing.T) {
 	stamp, rel, err := splitID("1700000000000000000/Artist/Album/01.flac")
 	if err != nil || stamp != "1700000000000000000" || rel != "Artist/Album/01.flac" {
 		t.Errorf("well-formed id: stamp=%q rel=%q err=%v", stamp, rel, err)
+	}
+}
+
+// TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash drives the two operations that
+// take an id from a request body, end to end, with ids aimed out of the trash
+// directory: at a live library file, and at a file beside the library root.
+// Purge is the one permanent delete, and `locate` joins the id onto each trash
+// directory with no containment check of its own, so splitID's shape rules (a
+// stamp that parses as a positive integer, a rel that passes validRel) are all
+// that keep it inside. Restore's destination also passes SplitRoot and
+// IsUnderAny, but its `locate` and `pruneEmptyStamp` read the same id. The
+// backslash and drive-letter forms mean something only on the Windows leg.
+func TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash(t *testing.T) {
+	m, root := newTestManager(t)
+	seed(t, root, "A/trashed.flac", "trashed")
+	if _, err := m.Trash("", []string{"A/trashed.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	live := seed(t, root, "A/live.flac", "live")
+	// An empty library directory: pruneEmptyStamp on a stamp of ".." would
+	// prune the library itself.
+	emptyDir := filepath.Join(root, "Empty")
+	if err := os.Mkdir(emptyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.flac")
+	if err := os.WriteFile(outside, []byte("do not touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := m.List()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("List = %v, %v; want the one trashed entry", entries, err)
+	}
+	stamp, _, _ := strings.Cut(entries[0].ID, "/")
+
+	for _, id := range []string{
+		"../A/live.flac",                 // the stamp climbs to the library root
+		stamp + "/../../A/live.flac",     // the rel does
+		stamp + "/../../../outside.flac", // and out of it
+		stamp + `/..\..\..\outside.flac`, // a separator only Windows collapses
+		stamp + `\..\..\..\outside.flac`, // the same, in the stamp
+		filepath.ToSlash(outside),        // absolute; a drive letter on Windows
+		stamp + "/" + filepath.ToSlash(outside),
+	} {
+		for op, run := range map[string]func([]string) (*Result, error){
+			"Restore": m.Restore, "Purge": m.Purge,
+		} {
+			res, err := run([]string{id})
+			if err != nil || res.OK != 0 || res.Failed != 1 {
+				t.Errorf("%s(%q) = %+v, %v; want one refusal", op, id, res, err)
+			}
+		}
+	}
+
+	for p, want := range map[string]string{live: "live", outside: "do not touch"} {
+		if got, err := os.ReadFile(p); err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want it untouched", p, got, err)
+		}
+	}
+	if _, err := os.Stat(emptyDir); err != nil {
+		t.Errorf("an empty library directory was pruned: %v", err)
+	}
+	if got, err := m.List(); err != nil || len(got) != 1 {
+		t.Errorf("List = %v, %v; want the trashed entry still there", got, err)
 	}
 }
 
