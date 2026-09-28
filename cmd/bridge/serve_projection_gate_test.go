@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 )
@@ -48,50 +46,18 @@ func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
 	stubbedSox := putUsableSoxOnPath(t)
 	for _, bootOn := range []bool{false, true} {
 		t.Run(fmt.Sprintf("booted with upscale.enabled=%t", bootOn), func(t *testing.T) {
-			dir := t.TempDir()
-			lib := filepath.Join(dir, "Music")
-			if err := os.MkdirAll(lib, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			apiPort, adminPort := freeLoopbackPort(t), freeLoopbackPort(t)
-			cfgPath := filepath.Join(dir, "bridge.yaml")
-			body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\nupscale:\n  enabled: %t\n",
-				lib, filepath.Join(dir, "data"), adminPort, bootOn)
-			if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			stdout, stderr := &safeBuffer{}, &safeBuffer{}
-			done := make(chan int, 1)
-			exited := make(chan struct{})
-			go func() {
-				defer close(exited)
-				done <- run(ctx, []string{"serve", "--config", cfgPath,
-					"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
-			}()
-			drainServeOnCleanup(t, cancel, exited, done, stderr)
-			addr, _ := waitForListening(t, stdout, 30*time.Second)
-			waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
-
-			console := &http.Client{Timeout: 30 * time.Second}
-			phone := &http.Client{
-				Timeout:   10 * time.Second,
-				Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-			}
-			adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
-
+			b := startServedBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil)
 			for step, on := range []bool{bootOn, !bootOn, bootOn} {
 				if step > 0 {
-					patchUpscaleEnabled(t, ctx, console, adminBase, on, stderr)
+					patchUpscaleEnabled(t, b.ctx, b.console, b.adminBase, on, b.stderr)
 				}
-				healthOn := healthUpscaleEnabled(t, phone, "https://"+addr)
+				healthOn := healthUpscaleEnabled(t, b.phone, b.apiBase)
 				if stubbedSox && healthOn != on {
 					t.Fatalf("step %d: /v1/health says upscaleEnabled=%t with the flag at %t and a usable "+
 						"sox on PATH, so the comparison below would not show what it is meant to; stderr=%s",
-						step, healthOn, on, stderr.String())
+						step, healthOn, on, b.stderr.String())
 				}
-				code, errCode := projectionVerdict(t, console, adminBase)
+				code, errCode := projectionVerdict(t, b.console, b.adminBase)
 				switch {
 				case healthOn && code != http.StatusOK:
 					t.Errorf("step %d (upscale.enabled=%t): /v1/health says upscaling is on, and the "+
@@ -100,7 +66,7 @@ func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
 					t.Errorf("step %d (upscale.enabled=%t): /v1/health says upscaling is off, and the "+
 						"console's projection answered %d %q, not 503 \"upscale-disabled\"", step, on, code, errCode)
 				}
-				if free := variantsDirFreeBytes(t, console, adminBase); free <= 0 {
+				if free := variantsDirFreeBytes(t, b.console, b.adminBase); free <= 0 {
 					t.Errorf("step %d (upscale.enabled=%t): GET /api/upscale/variants-dir reports "+
 						"freeBytes=%d for a volume this test is writing to", step, on, free)
 				}

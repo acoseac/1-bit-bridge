@@ -22761,3 +22761,59 @@ Negative controls on ae8a43fa, each restored from the commit:
 `UpscaleBusy` moved with `UpscaleStats`, and no test tells the two apart:
 with the gate closed the sweeper queues nothing, so the pool is idle
 whichever predicate asks.
+
+### Review round 1: the two boot tests share their setup
+
+SonarCloud's quality gate failed the PR on duplicated new code, 3.7% against
+a 3% ceiling. Its component tree put the duplicated new lines in the two boot
+tests (23 in `serve_projection_gate_test.go`, 24 in
+`serve_upscale_sox_gate_test.go`), and its duplications API named three
+blocks: the tests' boot blocks against each other (23 lines, from the config
+write to the phone client), and each against the inline boot of
+`TestServeRedeemsThePairingLinksCode` and
+`TestServeBakesHealthEndpointsIntoThePairingQR` (16 to 20 lines). A new line
+that repeats OLD code counts as duplicated new code.
+
+`startServedBridge` (`cmd/bridge/served_bridge_test.go`) now writes the
+config (a library under the test's own directory, `yamlTail` appended as
+written, and a `fill` callback for files the startup scan must find), boots
+serve, registers its drain, waits for both listeners and builds the console
+and phone clients. Both tests call it, and everything they assert is
+unchanged. It is spelled with names of its own: SonarCloud's duplication
+detector for Go keeps identifiers and folds only string literals, so a helper
+written with the old tests' names would repeat their token runs as new code.
+The older boot tests keep their inline blocks, which are old code.
+
+Moving the launch into a helper took both tests out of
+`TestEveryBackgroundGoroutineDrainsOnCleanup`'s population, which read Test
+functions only, and its docblock asked for the match to be widened in the
+same change that adds such a helper. It now reads every function in the
+package's test files and wants the drain in the function that launches. A
+census before the change, the guard's own shape run over every function: 45
+Test functions and 2 helpers (`runOneFingerprintPass` and
+`runOneSmartPlaylistPass` in `sweep_cancel_test.go`) launch the shape, and all
+47 drain in the same function, so the widening reports nothing it did not
+already cover. A helper that hands its channel back for the caller to drain
+would be reported, and none exists.
+
+Controls re-run on this commit's code, each restored from the commit. Every
+earlier row came out as recorded above:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| main.go's two literals put back | the projection test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg |
+| the handler's `!s.upscaleActive()` removed | the projection test at every step health said off (booted off, steps 0 and 2; booted on, step 1) | |
+| the handler gated on `cfg.Upscale.Enabled` | | the projection test with the stand-in sox (the admin live test catches it) |
+| the stand-in sox prints nothing | the fixture check, at the first step with the flag on in each leg | |
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`) | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the sox test |
+| the card's degraded key not set | `degradedReason` only | |
+| the helper's drain replaced by `t.Cleanup(stop)` | the drain guard, naming `startServedBridge` | |
+| the same, with the guard's Test-only filter put back | | the drain guard: the widening is what sees it |
+
+Gemini's two MEDIUM comments asked `putUsableSoxOnPath` and
+`withoutSoxOnPath` to call `t.Setenv` first, so that a parallel test is
+refused. Each helper's one PATH change already is a `t.Setenv`, which refuses
+a parallel test and restores PATH, so both were declined on the threads.

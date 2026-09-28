@@ -5187,7 +5187,14 @@ its twin.** The top list is older, shorter, and read first.
   that merely NAME a helper, and one for the old `defer cancel()` shape misses
   the sites that never had one. (#944; extended to the in-process loops, and
   `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
-  five files missed a sixth site that the shape match found.)
+  five files missed a sixth site that the shape match found.) **A new boot
+  test starts serve through `startServedBridge`** (2026-09-28), which writes
+  the config, registers the drain and builds the console and phone clients:
+  SonarCloud's gate fails a PR past 3% duplicated new lines and counts new
+  lines that repeat OLD code, and the inline boot block was 16 to 23 lines of
+  exactly that. The guard reads every function since, a helper as well as a
+  Test, and wants the drain in the function that launches; reading Test
+  functions alone, it lost sight of every test that used the helper.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the

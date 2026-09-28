@@ -2,11 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -42,58 +39,31 @@ import (
 // queued nothing.
 func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	withoutSoxOnPath(t)
-	// Registered before the drain below, so it runs after serve has
-	// returned: the loop reads the delay once, when it starts.
+	// Registered before startServedBridge registers its drain, so it runs
+	// after serve has returned: the loop reads the delay once, when it
+	// starts.
 	prev := autoOptimizeSettleDelay
 	autoOptimizeSettleDelay = time.Millisecond
 	t.Cleanup(func() { autoOptimizeSettleDelay = prev })
 
-	dir := t.TempDir()
-	lib := filepath.Join(dir, "Music")
-	// Two tracks the CarPlay kind takes (96 kHz / 24-bit FLAC), so a sweep
-	// that runs has something to queue.
-	for _, name := range []string{"01 One.flac", "02 Two.flac"} {
-		writeHiResFLACFixture(t, filepath.Join(lib, "Artist", "Album", name))
-	}
-	apiPort, adminPort := freeLoopbackPort(t), freeLoopbackPort(t)
-	cfgPath := filepath.Join(dir, "bridge.yaml")
 	// minFreeBytes 1: the sweep's free-space floor must not be what keeps
 	// it from queueing on a small CI volume.
-	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\n"+
-		"upscale:\n  enabled: true\n  autoOptimize:\n    enabled: true\n    minFreeBytes: 1\n",
-		lib, filepath.Join(dir, "data"), adminPort)
-	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	const upscaleYAML = "upscale:\n  enabled: true\n  autoOptimize:\n    enabled: true\n    minFreeBytes: 1\n"
+	b := startServedBridge(t, upscaleYAML, func(lib string) {
+		// Two tracks the CarPlay kind takes (96 kHz / 24-bit FLAC), so a
+		// sweep that runs has something to queue.
+		for _, name := range []string{"01 One.flac", "02 Two.flac"} {
+			writeHiResFLACFixture(t, filepath.Join(lib, "Artist", "Album", name))
+		}
+	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	stdout, stderr := &safeBuffer{}, &safeBuffer{}
-	done := make(chan int, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath,
-			"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
-	}()
-	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
-	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
-
-	console := &http.Client{Timeout: 30 * time.Second}
-	phone := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-	}
-	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
-	apiBase := "https://" + addr
-
-	if healthUpscaleEnabled(t, phone, apiBase) {
+	if healthUpscaleEnabled(t, b.phone, b.apiBase) {
 		t.Fatalf("fixture broken: /v1/health says upscaling is on, so a usable sox was found "+
-			"after all, and nothing below would show what it is meant to; stderr=%s", stderr.String())
+			"after all, and nothing below would show what it is meant to; stderr=%s", b.stderr.String())
 	}
 
 	// The console's tile, and the Settings chip that reads it.
-	stats := consoleUpscaleStats(t, console, adminBase)
+	stats := consoleUpscaleStats(t, b.console, b.adminBase)
 	if stats.SoxAvailable == nil || *stats.SoxAvailable {
 		t.Fatalf("fixture broken: the console's sox probe says soxAvailable=%v on a PATH with no sox",
 			stats.SoxAvailable)
@@ -105,23 +75,23 @@ func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	}
 
 	// What a paired device, or third-party tooling, reads.
-	mint := pairViaAdmin(t, ctx, console, adminBase+"/api/tokens",
-		`{"name":"sox gate test"}`, http.StatusCreated, stderr)
+	mint := pairViaAdmin(t, b.ctx, b.console, b.adminBase+"/api/tokens",
+		`{"name":"sox gate test"}`, http.StatusCreated, b.stderr)
 	token := linkQueryItems(t, mint.PairURL)["token"]
 	if token == "" {
 		t.Fatalf("the console's pairing link carries no token: %s", mint.PairURL)
 	}
-	if v1UpscaleStatsEnabled(t, phone, apiBase, token) {
+	if v1UpscaleStatsEnabled(t, b.phone, b.apiBase, token) {
 		t.Errorf("GET /v1/upscale/stats says enabled=true while /v1/health says upscaling is off; " +
 			"PROTOCOL.md documents the two as one live state")
 	}
 
 	// The pre-generation sweeper and its card. Wait for the startup scan,
 	// so the sweep has the two tracks to offer, then ask for one.
-	waitForTracksIndexed(t, console, adminBase, 2, stderr)
+	waitForTracksIndexed(t, b.console, b.adminBase, 2, b.stderr)
 	since := time.Now()
-	nudgeAutoOptimize(t, console, adminBase)
-	card := waitForAutoOptimizeSweep(t, console, adminBase, since, stderr)
+	nudgeAutoOptimize(t, b.console, b.adminBase)
+	card := waitForAutoOptimizeSweep(t, b.console, b.adminBase, since, b.stderr)
 	if !card.Enabled {
 		t.Fatalf("fixture broken: the card says the pre-generation switches are off: %+v", card)
 	}
