@@ -206,6 +206,65 @@ func TestClearVariantFailuresUnderPrefixIsByteRanged(t *testing.T) {
 	}
 }
 
+// TestMigration48ExpiresEverySuppressionOnceAndKeepsTheCount pins v48, run
+// through the ladder over a database that ran v47. Until the transcode pool
+// told a missing tool from a bad file, a job that could not run sox struck its
+// source, and the strike records say nothing of why, so every suppression is
+// expired as its TTL would expire it. The sweeper's own candidate query must
+// offer the file again, and the count must survive: a file that is still
+// broken is suppressed again by its next failure, not three more.
+func TestMigration48ExpiresEverySuppressionOnceAndKeepsTheCount(t *testing.T) {
+	s := openVariantFailStore(t)
+	ctx := context.Background()
+	const struck, partly, size, mtime = "A/struck.flac", "A/partly.flac", int64(1000), int64(1700000000)
+	seedFailTrack(t, s, struck, size, mtime)
+	seedFailTrack(t, s, partly, size, mtime)
+	strike := func(path string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := s.RecordVariantFailure(ctx, path, size, mtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	candidates := func() int {
+		t.Helper()
+		c, err := s.ListAutoOptimizeCandidates(ctx, 100, EligibilityOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(c)
+	}
+	strike(struck, variantFailureThreshold)
+	strike(partly, variantFailureThreshold-1)
+	if !suppressed(t, s, struck) || candidates() != 1 {
+		t.Fatalf("precondition: %s suppressed and one candidate left", struck)
+	}
+
+	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version = 47`); err != nil {
+		t.Fatalf("rewind user_version: %v", err)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if v := readUserVersion(t, s.db); v < 48 {
+		t.Fatalf("user_version = %d after the ladder, want v48 applied", v)
+	}
+	if suppressed(t, s, struck) || candidates() != 2 {
+		t.Fatalf("after v48: %s still suppressed or not offered (%d candidates, want 2)", struck, candidates())
+	}
+
+	// The counts were kept: one more failure each re-suppresses the file
+	// that was suppressed and completes the one that was two strikes in.
+	strike(struck, 1)
+	strike(partly, 1)
+	if !suppressed(t, s, struck) || !suppressed(t, s, partly) || candidates() != 0 {
+		t.Errorf("one failure after v48 left %s suppressed=%v, %s suppressed=%v, want both: v48 "+
+			"expires a suppression and must keep the count that earned it",
+			struck, suppressed(t, s, struck), partly, suppressed(t, s, partly))
+	}
+}
+
 // TestListAutoOptimizeCandidatesSkipsSuppressed is the end-to-end point of the
 // whole mechanism: the sweeper's candidate query must stop returning a source
 // that keeps failing. Without it the sweeper re-selects the same doomed file
