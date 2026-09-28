@@ -72,18 +72,25 @@ func TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding(t *te
 			t.Errorf("the refusal does not name %s:\n%s", name, out)
 		}
 	}
+	// The defaults are the ports this loopback run writes, and no config
+	// that loads says what the install's are.
+	if !strings.Contains(out, portsThisInitWrites(false)) {
+		t.Errorf("the refusal does not say these are the ports this init would write:\n%s", out)
+	}
 	assertConfigUnchanged(t, cfgDir)
 }
 
-// TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites is the
-// second port pass's half. A public re-init writes ports other than the
-// defaults, and the second pass grades them. It cleared the pid file for a
-// port that changed, because a live bridge binds what its config says and
-// a changed port is one that config does not name (#970). With no config
-// that loads, "changed" is measured against init's defaults, and the
-// bridge's own ports are refused.
+// TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites is a public
+// re-init, which writes ports other than the defaults. They were graded by
+// the second port pass, which cleared the pid file for a port that changed,
+// because a live bridge binds what its config says and a changed port is one
+// that config does not name (#970). With no config that loads, "changed" was
+// measured against init's defaults, and the bridge's own ports were refused.
+// Since 2026-09-28 the preflight grades the ports this run writes wherever no
+// config loads, in the same attribution-only mode, so no port of this run
+// reaches that pass here, and the defaults, which this run does not write,
+// are graded by neither.
 func TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites(t *testing.T) {
-	requireDefaultPortsFreeOrSkip(t)
 	cfgDir, lib := brokenInstall(t)
 	recordBridgePID(t, cfgDir, os.Getpid())
 	api, admin := holdLoopbackPortAsBridge(t), holdLoopbackPortAsBridge(t)
@@ -97,10 +104,16 @@ func TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites(t *testing.T
 }
 
 // TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding is
-// the control for the test above, on the second pass: the recorded bridge
-// is alive and something else holds the ports the public re-init writes.
+// the control for the test above: the recorded bridge is alive and something
+// else holds the ports the public re-init writes.
+//
+// It was refused by the second port pass, which says "these are the ports
+// this init would write" under a report of those two checks alone. The
+// preflight grades them now, and refuses before the run's prompts and
+// writes, so it is the preflight that must say whose ports they are: its
+// report grades the install in every other line, and the port checks' own
+// hint is written for an install whose bridge.yaml names them.
 func TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding(t *testing.T) {
-	requireDefaultPortsFreeOrSkip(t)
 	cfgDir, lib := brokenInstall(t)
 	recordBridgePID(t, cfgDir, os.Getppid())
 	api, admin := holdLoopbackPortAsBridge(t), holdLoopbackPortAsBridge(t)
@@ -110,12 +123,12 @@ func TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding(t *te
 		t.Fatalf("public init exited 0 over a config that does not load, saving ports another process "+
 			"holds, because the bridge recorded in the data dir is alive:\n%s", out)
 	}
-	if !strings.Contains(out, "these are the ports this init would write") {
-		t.Errorf("the refusal did not come from the second port pass:\n%s", out)
+	if !strings.Contains(out, portsThisInitWrites(true)) {
+		t.Errorf("the preflight did not refuse the ports this run writes and say they are the run's:\n%s", out)
 	}
-	for _, name := range []string{"port-api", "port-admin"} {
-		if !strings.Contains(out, name) {
-			t.Errorf("the refusal does not name %s:\n%s", name, out)
+	for _, port := range []struct{ name, port string }{{"port-api", api}, {"port-admin", admin}} {
+		if l := reportLine(out, port.name); !strings.Contains(l, "[FAIL]") || !strings.Contains(l, ":"+port.port+" in use") {
+			t.Errorf("%s says %q, want a FAIL on :%s, the port this run writes:\n%s", port.name, l, port.port, out)
 		}
 	}
 	assertConfigUnchanged(t, cfgDir)
@@ -171,7 +184,8 @@ func reinitBrokenInstall(t *testing.T, cfgDir, lib string, extra ...string) (int
 }
 
 // publicReinitArgs makes the re-init a public one on the two given loopback
-// ports, which are not init's defaults, so the second port pass grades them.
+// ports, which are not init's defaults: the ports this run writes, which the
+// preflight grades where no config loads.
 func publicReinitArgs(api, admin string) []string {
 	return []string{
 		"--public", "--domain", "example.test", "--admin-tls-proxy",
@@ -222,23 +236,6 @@ func holdDefaultPortsOrSkip(t *testing.T) {
 	}
 }
 
-// requireDefaultPortsFreeOrSkip skips unless init's default ports are free.
-// The preflight grades them whatever the re-init writes, as it does for a
-// first install, so another process on them would refuse the run before
-// the second pass these tests are about.
-func requireDefaultPortsFreeOrSkip(t *testing.T) {
-	t.Helper()
-	for _, port := range []int{7788, 7789} {
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		lis, err := net.Listen("tcp", addr)
-		if err != nil {
-			t.Skipf("%s is held by another process on this host (%v), and the preflight grades it "+
-				"before the second port pass this test is about", addr, err)
-		}
-		_ = lis.Close()
-	}
-}
-
 // holdLoopbackPortAsBridge binds an ephemeral loopback port for the rest of
 // the test and returns it.
 func holdLoopbackPortAsBridge(t *testing.T) string {
@@ -257,10 +254,11 @@ func holdLoopbackPortAsBridge(t *testing.T) string {
 
 // TestInitPreflightPointsAnUnloadableConfigAtItsDataDirsPidFile is the
 // wiring the end-to-end tests above rely on, one row per way a config that
-// is there can fail to load. The ports stay init's defaults, since nothing
-// in the config can be read; the pid file is the one `bridge serve` writes
-// under the data dir init writes; and OwnPIDPortsUnknown confines it to
-// the bridge seen listening, since its ports are unknown.
+// is there can fail to load. The ports stay the caller's, the ones the run
+// writes, since nothing in the config can be read, and the helper says so
+// (it reports the config as not loaded); the pid file is the one `bridge
+// serve` writes under the data dir init writes; and OwnPIDPortsUnknown
+// confines it to the bridge seen listening, since its ports are unknown.
 func TestInitPreflightPointsAnUnloadableConfigAtItsDataDirsPidFile(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -283,9 +281,12 @@ func TestInitPreflightPointsAnUnloadableConfigAtItsDataDirsPidFile(t *testing.T)
 			dataDir := filepath.Join(cfgDir, "data")
 
 			d := doctor.Deps{DataDir: dataDir, APIPort: 7788, AdminPort: 7789}
-			withExistingInstallDeps(&d, cfgPath)
+			if withExistingInstallDeps(&d, cfgPath) {
+				t.Error("the helper reports a config that does not load as loaded, so init would take the " +
+					"run's ports for the install's")
+			}
 			if d.APIPort != 7788 || d.AdminPort != 7789 {
-				t.Errorf("ports = %d/%d, want init's 7788/7789 — nothing in the config was read", d.APIPort, d.AdminPort)
+				t.Errorf("ports = %d/%d, want the caller's 7788/7789 — nothing in the config was read", d.APIPort, d.AdminPort)
 			}
 			if want := filepath.Join(dataDir, serverPIDFileName); d.OwnPIDFile != want {
 				t.Errorf("OwnPIDFile = %q, want %q — without it the bridge this re-init replaces reads "+

@@ -294,6 +294,19 @@ func (r *Report) count(s Status) int {
 // before touching the config file.
 func (r *Report) HasFail() bool { return r.FailCount() > 0 }
 
+// PortFailed reports whether a listen-port check (port-api or port-admin)
+// failed. `bridge init` grades the ports it would write where no install's
+// config names its own, and says so under a report whose port checks
+// refused them, so the refusal does not read as a verdict about an install.
+func (r *Report) PortFailed() bool {
+	for _, c := range r.Checks {
+		if c.Status == Fail && (c.Name == checkNamePortAPI || c.Name == checkNamePortAdmin) {
+			return true
+		}
+	}
+	return false
+}
+
 // Run executes every check against d and returns the report.
 //
 // EVERY check takes the context, including the ones that have nothing to do
