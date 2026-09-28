@@ -2091,7 +2091,7 @@ no failing test — which is the shape to expect in this area.
   device announces from its link-local address, and a loopback source was
   sent on this machine. **Field data, 2026-09-28**: three root devices on one
   home LAN (two hosts) sent every LOCATION on the packet's source address, as
-  an IP literal; a second LAN had none. The only LOCATIONs off their source
+  an IP literal; two other LANs had none. The only LOCATIONs off their source
   were this repo's own `internal/dlna` test advertisers, which multicast a
   loopback LOCATION from the host's LAN address. Three devices do not
   support the general rule (LOCATION host == source for every address, which
