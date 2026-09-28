@@ -22027,19 +22027,155 @@ shadowed the package's `run`). NC5 re-run there, as the `cfg:` key
 collection now goes through `forEachKeyedElement`: dropping that collection
 turns the fixture red on its `cfg:` key alone, and the sweep stays green.
 
-### Not fixed here
+### The four consumers without the sox half
 
-Four consumers of `upscale.enabled` read it live but without the sox half,
-so they disagree with `/v1/health` on a bridge whose sox is missing: the
-console's upscale tile (`admin.Deps.UpscaleStats` and `UpscaleBusy`),
-`/v1/upscale/stats`' `enabled` (`upscaleStatsAdapter`, whose comment says it
-keeps "the wire semantics in lockstep with /v1/health.upscaleEnabled"), the
-auto-optimize sweeper's shared predicate (`autoOptimizeEnabledFn`, which the
-Jobs card reports), and `OptimizeActive` (safe where it is read, since both
-readers ask `UpscaleActive` first). Measured on this branch, with
-`upscale.enabled` and `autoOptimize.enabled` true and PATH cut to
-`/usr/bin:/bin`: `/v1/health` said `upscaleEnabled: false` and no
-`carPlayOptimize`, while `GET /api/upscale/stats` said `enabled: true` (with
-`soxAvailable: false`) and `/api/jobs`' auto-optimize card said enabled and
-active. A different defect (a live read of a narrower predicate, not a boot
-read), reported for its own change.
+Found while measuring the projection, and fixed in the same PR on the
+orchestrator's request (a second commit, ae8a43fa). Four consumers read
+`upscale.enabled` live but without the sox half of `upscaleActiveFn`, so on
+a bridge whose sox is missing they disagreed with `/v1/health`: the
+console's upscale tile (`admin.Deps.UpscaleStats` and `UpscaleBusy`, and the
+Settings chip beside the switch, which takes its verdict from the tile's
+`enabled`), `/v1/upscale/stats`' `enabled` (`upscaleStatsAdapter`, whose own
+comment said it keeps "the wire semantics in lockstep with
+/v1/health.upscaleEnabled"), the auto-optimize sweeper's gate
+(`autoOptimizeEnabledFn`, which the Jobs card also reported as `active`),
+and `admin.Deps.OptimizeActive`.
+
+#### Measured, before
+
+The binary at 9776892c (these consumers as on main), `upscale.enabled` and
+`upscale.autoOptimize.enabled` true with `intervalSec: 20`, PATH cut to
+`/usr/bin:/bin`, over six 96 kHz / 24-bit FLACs and one 44.1 kHz / 16-bit,
+made with sox beforehand:
+
+- `/v1/health`: `upscaleEnabled: false`, no `carPlayOptimize`.
+  `/api/upscale/stats`: `enabled: true`, `soxAvailable: false`, a pool.
+  `/api/jobs` auto-optimize: `enabled: true, active: true`.
+- The first three sweeps (after the 3-minute settle, then every 20 s) each
+  enqueued 6, with `remaining` 6, 6 and 5: 18 jobs, 18 failed, 18
+  `pool: sox failed` WARNs (`exec: "sox": executable file not found in
+  $PATH`). The 16-bit track sits at the CarPlay floor and was never offered.
+- Every failure struck its file (`RecordVariantFailure`). After the third,
+  all six held `variant_fail_count` 3 and the suppression predicate took
+  them (`suppressedFailures: 6`), 40 s after the first sweep. Every later
+  sweep enqueued 0 with `remaining: 0`, which `formatAutoOptimizeRemaining`
+  renders "all caught up", over a library holding no CarPlay variant.
+- Restarted on the same data WITH sox on PATH: two sweeps enqueued 0,
+  `remaining: 0`, `suppressedFailures: 6`, `soxAvailable: true`. The
+  suppression is keyed on the file's (size, mtime) for `variantFailureTTL`,
+  30 days, and installing sox changes neither.
+- `POST /api/upscale/failures/retry` answered `{"cleared":6}`, and a nudged
+  sweep then enqueued 6: 6 done, 0 failed, 6 optimized variants.
+
+Why every job: `planCandidate` asks `soxInfo.CanDecode`, and
+`transcode.SnapshotOrOpen` answers a failed probe with the zero `SoxInfo`,
+whose `CanDecode` fails open (formats unknown), so without sox every eligible
+track reads as decodable. On the default cadence (the scan interval, 6 h,
+plus a nudge after every scan) with `maxPerSweep` 200, that is up to 200
+WARNs a sweep, and 200 files suppressed per three sweeps.
+
+#### Measured, after
+
+The binary at ae8a43fa, the same fixture, PATH `$W/bin:/usr/bin:/bin` with
+`$W/bin` empty:
+
+- `/v1/health` `upscaleEnabled: false`; `/api/upscale/stats` `enabled:
+  false`, `soxAvailable: false`, no pool; the card `enabled: true, active:
+  false, degradedReason: "sox_missing"`.
+- Three sweeps, each recorded `disabled` with 0 enqueued: 0 WARN lines and
+  `suppressedFailures: 0`.
+- A symlink to sox dropped into `$W/bin`, a directory the running bridge
+  already searches: the card read active 24 s later, with no restart (the
+  probe's TTL is 30 s), and a nudged sweep enqueued 6: 6 done, 0 failed,
+  `suppressedFailures` 0. For those seconds `/api/upscale/stats` said
+  `enabled: true` beside `soxAvailable: false`: the admin keeps its own 30 s
+  cache of the probe on top of runServe's. Left, since it only lags.
+- In a browser: the card's badge "degraded", its hint "Enabled but inactive:
+  sox is not installed on the bridge host, or has no FLAC support. No
+  restart is needed once it is fixed…", Sweep now hidden and Remaining "—".
+  The Settings chip beside "Enable PCM upscaling" read "not running — sox
+  not found" (the old binary said "active"), above the banner.
+
+#### Decisions
+
+- The CarPlay kind reads one closure, `carPlayOptimizeActiveFn` (the upscale
+  gate AND the optimize switch): `WithCarPlayOptimize`, `OptimizeActive`,
+  and, with the pre-generation flag, the sweeper. `OptimizeActive` changes
+  nothing a request can see, since both of its readers ask `UpscaleActive`
+  first; it was the copy that would let a reader hear "on" without sox, so
+  it is pinned by identity (`TestConsoleCarPlayGateIsTheV1CarPlayGate`,
+  which shares `requireConsoleGateIsTheV1Gate` with the batch pin).
+- The card: `enabled` is the three switches (`autoOptimizeSwitchedOnFn`),
+  `active` the sweeper's gate, `degradedReason: "sox_missing"` when they
+  differ. The key is the analysis card's, since the gate adds exactly
+  `soxUsable` (sox on PATH, and with FLAC); the console's label now names
+  both halves. The hint is an element of its own, so the description comes
+  back when the gate opens, which it now does live, and a refused sweep's
+  `disabled` reads "not run" there, not "turned off". It does not say
+  "Restart after fixing", as the analysis card's hint still does (stale
+  since #781; left).
+- `/v1/upscale/stats`: not a wire change. PROTOCOL.md's `enabled` row says
+  it is false when the sox precheck says no, "matching
+  `/v1/health.upscaleEnabled`"; the code drifted when #781 made the pool
+  unconditional and the adapter's `upscalePool != nil` stopped meaning
+  anything. No iOS code decodes the endpoint (the app names the
+  `upscale.stats` SSE topic in a doc comment and its parser tests; nothing
+  reads the payload), and the SSE frame comes from the same adapter. The row
+  still says the precheck "demoted the feature at startup", stale wording for
+  a live gate; left for a Mirror-PR, since the two PROTOCOL.md copies must
+  stay byte-identical and this change could not touch the app's.
+- The Settings chip reads the tile's `enabled`, now the gate, beside the
+  saved switch (the page renders the checkbox from the config, and the chip
+  runs once, at load): switch on and verdict off is `sox_missing`, painted as
+  "not running — <the doctor's audio-toolchain summary>". Its other arm said
+  "restart to apply" where the doctor finds sox and the gate does not; with
+  both gates live that is a probe about to catch up, and it says so. The sox
+  banners under the upscale and analysis switches said the bridge "will
+  degrade to feature-off at startup"; they now say the feature stays off
+  until sox is installed, with no restart needed.
+- The settings PATCH gives `optimizeEnabled` and `autoOptimizeEnabled`,
+  switched on, the sox reason `upscaleEnabled` and `analysisEnabled` carry;
+  `autoOptimizeEnabled` only where it reported `live`, since a restart-bound
+  report already says why.
+- Not changed: the transcode pool strikes a file for any runner error, a
+  missing sox included, where the analysis pool's rule is that a missing
+  tool is transient and records nothing. The gate now keeps the sweeper away
+  from the pool without sox; what remains is a job queued inside the probe's
+  30 s TTL after sox disappears. Reported for its own change.
+
+#### Tests and controls
+
+`cmd/bridge/serve_upscale_sox_gate_test.go`
+(`TestServeWithoutSoxReportsUpscalingOffOnEverySurface`): the real serve
+with upscale, the CarPlay kind and pre-generation on, `minFreeBytes: 1` and
+a 1 ms settle, over two hand-written 96 kHz / 24-bit FLACs (STREAMINFO and a
+Vorbis comment, no frames), on a PATH with every directory holding a sox
+removed (`exec.LookPath` must then fail). It asks `/v1/health` (must say
+off: a fixture check), `/api/upscale/stats`, `/v1/upscale/stats` with a
+bearer token minted through the console, and, once the scan has indexed both
+tracks, the Jobs card after a nudged sweep. 0.7 s. `TestUpscaleDegradedReason`
+gained the two CarPlay switches, both started off.
+
+Red on the old code first: the three tests copied into an archive of
+9776892c (where `carPlayOptimizeActiveFn`, `autoOptimizeSwitchedOnFn` and
+`optimizeOn` are all absent). The boot test failed on the console's stats,
+on `/v1/upscale/stats`, on the card's `active` and `degradedReason`, and on
+its sweep (`Disabled:false Enqueued:2`), with six `pool: sox failed` WARNs in
+its log; the pin failed on "WithCarPlayOptimize is handed *ast.FuncLit"; the
+report test on both switches' reasons, for both probe failures.
+
+Negative controls on ae8a43fa, each restored from the commit:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the boot test (both readers ask `UpscaleActive` first) |
+| the card's degraded key not set | `degradedReason` only | |
+| `optimizeEnabled`'s sox reason not set | the report test, that field, both probe failures | `autoOptimizeEnabled` |
+| `autoOptimizeOn` not set | the report test, that field, both probe failures | `optimizeEnabled` |
+
+`UpscaleBusy` moved with `UpscaleStats`, and no test tells the two apart:
+with the gate closed the sweeper queues nothing, so the pool is idle
+whichever predicate asks.

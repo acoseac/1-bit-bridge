@@ -5702,8 +5702,10 @@ function renderJobCards(j) {
     setText("job-ao-remaining", formatAutoOptimizeRemaining(last));
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
     setText("job-ao-next", formatInFuture(ao.nextDueAt));
+    // "not run" rather than the sweep's own "turned off": the hint above
+    // the description says why.
     setText("job-ao-counts", aoDegraded && last?.disabled
-      ? `not run: ${aoDegraded}`
+      ? "not run"
       : formatAutoOptimizeResult(last));
   }
 
