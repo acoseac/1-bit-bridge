@@ -2111,32 +2111,72 @@ no failing test — which is the shape to expect in this area.
   the stale `Clear()` wipes them. Every fetch spawn goes through the
   `spawnDetailFetch` helper that does the `Add(1)`; a missed site panics with a
   negative counter.
+- **…and both CLAIM a fetch per UDN from one bounded set, because a
+  semaphore acquired INSIDE the spawned goroutine bounds the fetches that
+  RUN, never the goroutines waiting to** (2026-09-28, backlog B37). The
+  upstream MediaServer client spawned a fetch per announcement, queued on its
+  two-slot semaphore: 10,000 packets cost 10,000 goroutines and 35 to 37 MiB
+  of stack, for one UDN as for many, and a burst for one new server fetched
+  its description once per packet (1,000 GETs for 1,000 packets). The
+  renderer client's per-UDN `claimFetch` collapsed one device's burst and
+  still spawned one goroutine per DISTINCT UDN, the shape a LAN peer that
+  sees the M-SEARCH's source port can send. **A dedup is not a bound**: the
+  backlog entry read that claim as guarding "exactly this", and it guarded
+  one shape of two. `discovery.DetailFetchClaims` is now the one set both
+  clients use, under each one's `locMu`: `Claim` refuses a UDN already
+  claimed and any claim past `MaxPendingDetailFetches` (64). A refused
+  dispatch records nothing, so the next announcement dispatches again (a new
+  device is fetched then, and a moved one still reads as moved). Measured
+  after: 1 goroutine and 1 fetch for one UDN's burst, 64 goroutines for
+  10,000 distinct UDNs, in either client. The claim is taken before the
+  spawn and released by the fetch's last deferred call (registered after
+  `wg.Done`, so it runs first): `Stop`'s join releases every claim, and a
+  restarted client skips no UDN. **The bound is on goroutines, not on the
+  renderer cache**: a flood of distinct renderer UDNs whose LOCATION answers
+  4xx still leaves one year-2999 structural stub per UDN (5,000 of 5,000
+  after an eviction pass, measured).
 - **Both SSDP read loops share `discovery.HandleReadErr`** — timeout resets the
   streak, `net.ErrClosed`/ctx exits, anything else logs with a ctx-aware backoff
   and one escalation. A bare `return` on a transient error kills discovery for
   the process lifetime; no backoff hot-spins a core. Keep the policy in the
   shared helper.
-- **The M-SEARCH SEND failure log is streak-suppressed** (first at Warn, one
-  Error at ~10 min, then silence until recovery). It runs on a ticker and its
-  failure mode is persistent by nature: unsuppressed it produced **199,078 of
-  the last 200,000 log lines**. The cost isn't disk — it's that every other line
-  becomes unfindable.
+- **The M-SEARCH SEND failure log is streak-suppressed, and BOTH discovery
+  clients report through the one `discovery.SendFailureLog`** (first at Warn,
+  one Error ten minutes into the streak, then silence until recovery, which
+  logs the streak's length). It runs on a ticker and its failure mode is
+  persistent by nature: unsuppressed it produced **199,078 of the last
+  200,000 log lines**. The cost isn't disk — it's that every other line
+  becomes unfindable. **The upstream MediaServer client discarded every send
+  error until 2026-09-28** (backlog B32): pinned to the dev Mac's routeless
+  `utun0`, its socket answered `sendto: can't assign requested address` on
+  every tick and the client logged nothing in 20 ticks; it now logs the Warn.
+  **Ten minutes is a DURATION, which each client turns into its own ticks**
+  (`sendErrEscalateAt`: 20 at the renderer's 30 s, 10 at the upstream's
+  60 s, never below 2). It was the renderer's constant 20, ten minutes at one
+  cadence only, and both cadences are configurable. **Every line names the
+  interface**: both wirings start one client per LAN-eligible interface, and
+  a route can be gone on one of them while the others send. `Start` calls
+  `Reset`. Don't give a client its own copy of the policy: this is the send
+  side's one definition, as `HandleReadErr` is the read side's.
 - **…and a send Stop's close cut short is a STOP, not a failure**
   (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
   can close it in between: the write fails with `net.ErrClosed`, which logged
   "M-SEARCH send failed … use of closed network connection" and took the
   streak to 1 on 4 of 6,000 plain Start→Stop cycles on macOS (43 under
-  `-race`) and 24 of 4,000 on Linux under `-race`. It is dropped before
-  `noteSendResult` sees it (0 of 12,000 after, on each host). **The ERROR
+  `-race`) and 24 of 4,000 on Linux under `-race`. `SendFailureLog.Note`
+  drops it before the streak sees it (0 of 12,000 after, on each host). **The ERROR
   decides, never the run's context**: the socket is the client's own and only
   Stop closes it, so `net.ErrClosed` names the stop exactly, while a write
   takes no context and a genuine failure that lands during Stop is still a
   failure (#998's second condition, under The CLI and the serve wiring).
   `TestSendMSearchReportsAFailureThatLandsDuringStop` goes red if the check is
   widened to `ctx.Err() != nil`. `HandleReadErr`'s ctx arm is no precedent: it
-  decides whether the READ loop exits, not what a result means. The upstream
-  MediaServer client (`internal/upnp`) discards every send error, so it has no
-  such line, and no line about a dead route either.
+  decides whether the READ loop exits, not what a result means. The drop is in
+  the shared log, so the upstream client has it too (its socket is likewise
+  its own, and only its Stop closes it). The server-side advertiser's NOTIFY
+  burst (`sendAliveAll`) ends on the same error rather than logging a Debug
+  line per target left, since only its Stop closes its sender; a write that
+  fails for its own reason still logs one per target.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -3571,10 +3611,11 @@ mentions across the four `ops/audit-*.md` files.
   carry the cancellation: a tsnet node the shutdown closed under
   `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
   context alone. Where the stop leaves its OWN mark on the error, ask the
-  error and not the context: the renderer discovery's M-SEARCH send drops
-  `net.ErrClosed`, which only its `Stop`'s close produces, and still reports
-  a genuine failure that lands during the stop (2026-09-28, under DLNA,
-  UPnP and discovery). **A stopped pass reports no failure the stop caused, and
+  error and not the context: both discovery clients' M-SEARCH sends drop
+  `net.ErrClosed`, which only each client's `Stop`'s close produces
+  (`discovery.SendFailureLog`, the advertiser's NOTIFY burst likewise), and
+  still report a genuine failure that lands during the stop (2026-09-28,
+  under DLNA, UPnP and discovery). **A stopped pass reports no failure the stop caused, and
   records no verdict, count or status for the work the stop
   interrupted.** A `ctxerr` site still reports any other failure, even
   one that lands during the shutdown (#998's second condition). The
@@ -5053,11 +5094,13 @@ its twin.** The top list is older, shorter, and read first.
   `"hidden"` in an automated tab, so `loading="lazy"` images never load and any
   perceived-performance claim measured that way is suspect.
 - **A field deliberately left unsynchronised binds TESTS too.**
-  `sendErrStreak` is only ever touched from its own run loop, so a test calling
-  `noteSendResult` directly must do so with no loop live — before `Start`, or
-  after `Stop` (which joins it). One that did neither raced under `-race` on CI
-  and was not reproducible locally in 26 runs. Adding a mutex would pay
-  production for a test's convenience.
+  A `discovery.SendFailureLog`'s streak (each discovery client's `sendErrs`,
+  the renderer's `sendErrStreak` until 2026-09-28) is only ever touched from
+  its own tick loop, so a test calling its `Note` or `Reset` directly must do
+  so with no loop live — before `Start`, or after `Stop` (which joins it).
+  One that did neither raced under `-race` on CI and was not reproducible
+  locally in 26 runs. Adding a mutex would pay production for a test's
+  convenience.
 - **…and a test that starts the loop decides what the loop's own sends do**
   (2026-09-28). `TestSendMSearchStreakResetsOnRestart` kept that ordering and
   still failed 10 of 200 runs on the dev Mac and 17 of 1,000 on Linux under
@@ -5069,7 +5112,9 @@ its twin.** The top list is older, shorter, and read first.
   per-client `writeMSearch` seam makes the restarted loop's own first send
   fail on every host, and the test asserts that send's Warn; with the reset
   deleted it fails 20 of 20 on both. A test whose subject a live loop also
-  moves cannot leave that loop's I/O to the host.
+  moves cannot leave that loop's I/O to the host. The upstream client got
+  the same seam and the same restart test
+  (`TestUpstreamSendStreakResetsOnRestart`) when it gained the report.
 - **Putting back slog's previous default does not put back the `log`
   package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28).
   `slog.SetDefault` points the log package's output at the new handler and
