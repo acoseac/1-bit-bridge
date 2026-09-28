@@ -1474,6 +1474,11 @@ no failing test — which is the shape to expect in this area.
   each bare directory (the render scratch, tempDir, the variants
   directory) into a placeholder, longest first, because the variants
   directory and tempDir can nest either way or share a string prefix.
+  **And a job's error logged outside the pool takes the same redaction**:
+  the album survey logs an album-mate it could not measure, and
+  `MeasureDSDPeak`'s error names the mate's absolute path and the scratch
+  under the tempDir, so `albumgain`'s `measure` returns it through
+  `JobSpec.RedactError`, by the mate's own spec (2026-09-28).
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to
