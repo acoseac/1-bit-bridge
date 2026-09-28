@@ -154,7 +154,7 @@ func TestDefaultClient_RefusesACloudMetadataAddressWhateverApprovedTheFetch(t *t
 			t.Fatalf("%s: the string check refused %s, which it cannot place; the case would test nothing", tc.name, location)
 		}
 		_, err := FetchDeviceDescription(WithDialApproval(context.Background(), tc.approval), c.dispatcher, location)
-		if !errors.Is(err, errCloudMetadataAddr) {
+		if !errors.Is(err, ErrCloudMetadataAddr) {
 			t.Errorf("%s: the fetch of %s (answering %s) = %v, want the dial check's refusal",
 				tc.name, location, tc.answer, err)
 		}

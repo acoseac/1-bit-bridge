@@ -26397,6 +26397,311 @@ under SonarCloud's cognitive-complexity limit (S3776, 18 against 15), and the
 linked-root watcher test defers its cancel (S8188); NC-G7 is the control on
 the split.
 
+## 2026-09-28 — a URL's credentials reach no startup refusal, no warning, `/v1/health` or a pairing link, and a manual upstream's description fetch refuses a cloud metadata address (backlog B54)
+
+#1074 (backlog B36) made the WARNINGS about a configured URL name its scheme
+and host alone (`urlOriginForLog`, its review round 1) and recorded three
+things it left, under "Out of scope (round 1)": two refusals that quote a
+configured URL whole, a `customEndpoints` entry carrying userinfo that
+`/v1/health` advertises as written, and a manual upstream's own description
+fetch with no metadata-address check. This entry closes the three, a fourth
+publication of an operator's URL in `/v1/health` found while measuring, and a
+shape #1074's own warnings still leaked.
+
+### What was measured on the old code
+
+The real binary, built from main at 84a3df20 (#1074's merge) out of a
+`git archive`, over a config whose four `customEndpoints` each hide
+`s3cret-Pw` in one part of a URL: a password
+(`https://user:s3cret-Pw@a.example.test:7788`), a token written as the user
+name (`https://s3cret-Pw@b.example.test:7788`), a query
+(`https://c.example.test:7788/?token=s3cret-Pw`) and a fragment
+(`https://d.example.test:7788/#s3cret-Pw`).
+
+- `GET /v1/health`, with no token, listed all four as written, after the
+  bridge's own addresses.
+- A link the console mints (`POST /api/tokens`) carried all four in `urls=`.
+- `bridge serve` over `enrich.musicbrainzBaseURL:
+  ftp://user:s3cret-Pw@mirror.example/ws/2` exited 2 with
+  `enrich.musicbrainzBaseURL: must be an absolute http(s) URL, got
+  "ftp://user:s3cret-Pw@mirror.example/ws/2"`, and over
+  `atlas.harvestBaseUrl: https://atlas.example/?token=s3cret-Pw` with
+  `atlas.harvestBaseUrl: must be a plain https base URL (https://host[:port]),
+  got "https://atlas.example/?token=s3cret-Pw"`. Serve prints that to the
+  terminal and the journal, `bridge doctor` puts it on its config-file line,
+  and the console's settings PATCH answers with it.
+- `bridge init --public --domain 'user:s3cret-Pw@bridge.example.test'`
+  exited 0, printed the secret once, and wrote it into `bridge.yaml` twice:
+  `customEndpoints: [https://user:s3cret-Pw@bridge.example.test]`, and
+  `autocert.domain`.
+- Serve's own lines carried no secret: #1074's round 1 had redacted the
+  warnings. One shape escaped that: an entry written WITHOUT a scheme,
+  `s3cret-Pw:x@bridge.example:7788`, parses with the user name as its scheme,
+  lowercased, so the warning named it `customEndpoints[4] (s3cret-pw:)` and
+  quoted `got "s3cret-pw"`. #1074's test searched for `s3cret-Pw` with case
+  and passed over both. (NC1 and NC4 below each put one of the two old
+  spellings back.)
+
+The same probe on the branch: `/v1/health` and the link list
+`https://a.example.test:7788`, `https://b.example.test:7788`,
+`https://c.example.test:7788/` and `https://d.example.test:7788/`; the load
+logs one Warn per entry, `custom endpoint published without its user name,
+password, query or fragment; a save stores it that way`, naming each by
+position and origin and none carrying the secret; the two refusals read
+`enrich.musicbrainzBaseURL (ftp://mirror.example): must be an absolute
+http(s) URL (http(s)://host[:port][/path])` and `atlas.harvestBaseUrl
+(https://atlas.example): must be a plain https base URL (https://host[:port]),
+with no user name, password, path, query or fragment`; and init exits 2 with
+nothing written and nothing of the secret printed.
+
+The manual poller, read at 84a3df20: its default client was a plain
+`http.Client` on `http.DefaultTransport`, the redirect guard and no dial
+check, which #1069 chose for a URL the operator typed. A manual URL on a
+metadata address (`http://169.254.169.254/latest/meta-data/`) was therefore
+sent a GET every poll (the tests' stub dispatcher records it, NC10), its
+answer parsed as a description and dropped, and the only trace was a Debug
+line, which the bridge never prints (`logging.Init` fixes the level at
+Info). The ingest's per-server error, the console's last walk error, said
+"manual description URL has not answered yet — check the URL is reachable".
+
+The fourth site: for a server configured with a UDN AND a manual URL, the
+manual poller caches its fetch under the server's key, which is its UDN
+(`upnpingest.StableServerKey` lowercases it), and `/v1/health`'s
+`upnpUpstreamServers[].descriptionURL` is read from the cache entry under
+the configured UDN. With the UDN written in lowercase, the ordinary form,
+the two are one entry, so a LAN bridge handed any caller the operator's
+URL, credentials included, while the DTO's docblock and PROTOCOL.md both
+say a manual URL stays on the admin surface ("the operator already has the
+URL"). `TestHealthDoesNotPublishTheOperatorsManualURL` was red on the branch
+before the fix, publishing
+`http://user:s3cret-Pw@127.0.0.1:<port>/rootDesc.xml?token=s3cret-Pw`.
+
+### The app, read and not changed
+
+Read-only, in the local checkout (another session was working there):
+
+- `BridgePairingURL` takes `url=` and each `urls=` entry that is https with
+  a host; a user name and password pass that check.
+- `SMBStore` keeps a bridge's `bridgeURL` and `allBridgeURLs` and hands
+  `/v1/health`'s endpoints to `BridgeSourceClient.updateAlternateURLs`;
+  `BridgeEndpointSelector.update` replaces the alternates with that list on
+  every fetch.
+- `BridgeSourceClient.buildRequest` builds every request from an endpoint
+  through `URLComponents`: it sets the path (replacing any the endpoint
+  had), sets the query only when the request carries one (so the endpoint's
+  query rode along on `/v1/health`, playlists and favorites, and never on
+  list, stat, read or download), keeps the userinfo, and sets
+  `Authorization: Bearer <token>` on every authenticated request.
+- `PinningDelegate` and `PinningTaskDelegate` answer every authentication
+  challenge but server trust with `.cancelAuthenticationChallenge`, so a user
+  name and password in the URL could only answer a challenge the app
+  cancels.
+
+So no working deployment could have relied on those parts: a proxy that
+authenticates by userinfo gets its challenge cancelled, and one that
+authenticates by query never sees it on the file routes. The endpoint
+without them reaches the same host and port, which is all the app's
+requests used. No wire change, no PROTOCOL.md change, no Mirror-PR.
+
+### Decisions
+
+- **`customEndpoints`: repair what is stored, refuse what is typed** (the
+  library name's rule, #1042 / #1046). `ValidateCustomEndpoints`, which
+  `Normalize` runs for `Load` and for every writer, keeps such an entry
+  WITHOUT its user name, password, query and fragment, dedupes on that form,
+  and warns once per entry under a message of its own. Every publication
+  reads the list it returns: `api.ReachableEndpoints` (health, the loopback
+  QR's `urls=`, the console's panel), `pairAlternates`' public branch, and
+  `defaultBridgeURL`'s declared-endpoint primary. Rejected:
+  - dropping the entry: its host and port still reach the bridge, and the
+    app replaces its alternates with health's list on every fetch, so every
+    phone would lose the route over parts nothing reads;
+  - refusing the config at load: a bridge that started before would not
+    start after the update (the constraint the backlog entry set);
+  - stripping at the publish sites: four sites, and the copy that drifts;
+  - logging it as "dropped": it was not, and the operator would go looking
+    for a route the phone still has.
+  The console's settings PATCH refuses a typed list holding such an entry
+  whole (`config.CheckCustomEndpoints`, 400 `validate`, nothing written):
+  storing the stripped form would store a URL nobody typed. A console that
+  sends back the list it showed is never refused, since that list is the
+  normalized one. `bridge init --public --domain` refuses a domain carrying
+  one (exit 2, before anything is written, and the value is not echoed):
+  init writes it into `customEndpoints` and `autocert.domain`, and public
+  mode synthesises an endpoint from the latter too. It also refuses a domain
+  that does not parse: `HasCredentialParts` answers false for a value it
+  cannot parse, and the check's first form, asking it alone, let
+  `--domain 'user:s3cret-Pw x@bridge.example.test'` (a space in the
+  password) through, exit 0, printing `Admin console:
+  https://user:s3cret-Pw x@bridge.example.test/` and writing the value into
+  `autocert.domain`, from which public mode builds its URL as a string. The
+  domain is trimmed first, as `Normalize` trims the autocert host, so a
+  padded plain domain is still taken, as it was: measured on the old binary
+  and on the branch, ` bridge.example.test` exits 0 with
+  `autocert.domain: bridge.example.test`.
+- **Which parts.** A user name or password, an empty one included
+  (`https://@host`); a query, a bare `?` included; a fragment. The one
+  predicate is `config.HasCredentialParts`, which the prune, the PATCH and
+  init all ask. The path is kept: it is not where a credential goes by
+  convention, and the app ignores it anyway (`buildRequest` replaces it), a
+  follow-up (B66).
+- **A URL is named by field, scheme and host (`urlFieldForLog`), and a URL
+  with no host part by field alone.** `urlOriginForLog` now renders "" for
+  a URL with no host part: the no-scheme shape's "scheme" is the user name.
+  The scheme warning no longer quotes the scheme at all; it says what the
+  value must be. The two refusals say what the value may not carry, since it
+  is not shown.
+- **Search for a leaked secret without regard to case.** `url.Parse`
+  lowercases a scheme, which is how #1074's test passed over its own leak.
+  Every test here does.
+- **The manual description fetch is refused on a metadata address, not
+  warned about and fetched.** It was the one request #1074's rule did not
+  reach, a GET to IMDS is the request that rule exists to prevent, no media
+  server serves on one, and such a server could never walk anyway (every
+  later dial is refused). A literal is refused before any request
+  (`discovery.NamesCloudMetadataAddr`, the string check's `classifyHost`); a
+  name that resolves to one is refused at the connect, the fetch now riding
+  `discovery.NewDeviceTransport` under `discovery.ManualDescriptionFetch()`,
+  which permits every address but a metadata one. Not `OperatorChose(url)`:
+  that approves no local address for a NAME (B36), which would refuse a
+  manual URL naming this host by a name, a fetch #1069 decided to keep
+  (NC12 shows the cost). Both refusals warn once per server, naming its
+  host, because the failed fetch is a Debug line. The ingest's error says so
+  for a literal. The console's add-server refuses a typed literal
+  (`admin.ErrUPnPValidation`, a 400); a config holding one still loads, and
+  the poller refuses it at runtime. `ErrCloudMetadataAddr` is exported so
+  the poller can tell that refusal from other fetch failures.
+- **The duplicate-configuration warning** (a manual URL naming a device
+  another entry configured by UDN) logged the URL whole as `url=`; it names
+  the host.
+- **`descriptionURL` leaves out the operator's manual URL**, by equality
+  with the configured one, in the public adapter, where the posture differs
+  from the console's. The device's own SSDP LOCATION, cached under the same
+  key, is still published as the device gave it, query and all: a Windows
+  device host's LOCATION is `…/udhisapi.dll?content=uuid:…`, so omitting
+  any URL with a query would have cost those devices the hint. When the two
+  writers take turns, the field now alternates between the device's URL and
+  absent, where it alternated between the device's URL and the operator's.
+- **Left**: the poller's two Debug lines still carry the URL whole, and
+  nothing prints Debug; B66 records them.
+- `loggingtest.Recorder.All` returns every record, at any level: the serve
+  test searches all of them for the secret.
+- No Gemini consult: every question here was settled by reading the app
+  and measuring the binary.
+
+### Tests
+
+- `internal/config/url_credentials_test.go`:
+  `TestNoStartupErrorCarriesAURLsCredentials` (sixteen shapes over both
+  refusals, through `Load`, `Validate`, `NormalizeAndValidate` and the
+  environment: each still refuses, names the field and, where the URL has a
+  host, its scheme and host, and carries no secret);
+  `TestACustomEndpointIsPublishedWithoutItsCredentials` (six shapes, each
+  kept without its parts and warned about once, and a duplicate that only
+  its credential set apart);
+  `TestALoadedConfigPublishesItsEndpointsWithoutCredentials` (the same
+  through `Load`); `TestCheckCustomEndpointsRefusesATypedCredential`;
+  `TestHasCredentialPartsReadsEveryPartThatCanCarryOne`.
+  `TestNoConfigWarningCarriesAURLsCredentials` (#1074's) gained the
+  no-scheme entry and searches without case.
+- `internal/api/endpoint_credentials_test.go`:
+  `TestHealthPublishesNoCustomEndpointCredential`, loopback and public mode,
+  `GET /v1/health` with no token.
+- `internal/admin`: `TestPublicPairingCarriesNoCustomEndpointCredential`
+  (the public QR's `url=` and `urls=`) and
+  `TestTheSettingsPatchRefusesACustomEndpointCarryingACredential` (the
+  array and textarea forms, 400, the file unchanged, and a clean list
+  still saved).
+- `cmd/bridge`: `TestServePublishesNoCustomEndpointCredential` boots serve
+  and checks health, a minted link and every log line;
+  `TestAStartupRefusalNamesAURLWithoutItsCredential` runs serve and doctor
+  over four refused values; `TestInitRefusesADomainCarryingACredential`
+  (six domains refused, a plain and a padded one taken);
+  `TestTheConsoleRefusesAManualUpstreamOnACloudMetadataAddress`;
+  `TestHealthDoesNotPublishTheOperatorsManualURL` (the real poller, the
+  cache and the public adapter).
+- `internal/upnp/manual_metadata_test.go`:
+  `TestManualPollerNeverFetchesACloudMetadataDescription` (three literals,
+  IPv4 and IPv6, over three polls, one warning each and no request; a name
+  resolving to 169.254.169.254 through `internal/dnstest`, refused at the
+  connect; the controls, a direct-cable device at 169.254.7.7 and the same
+  name answering 127.0.0.1, are fetched) and
+  `TestManualPollerWarningsNameTheHostAlone`.
+- `internal/dlna/discovery/manual_description_test.go`:
+  `TestManualDescriptionFetchApprovesEveryAddressButAMetadataOne` and
+  `TestNamesCloudMetadataAddrReadsTheHostStringAlone`.
+- `internal/upnpingest`:
+  `TestIngester_Run_AManualURLOnAMetadataAddressSaysWhy`.
+
+### Negative controls
+
+Each mutation applied once to the committed branch by a script that requires
+its target text exactly once, the named tests run with `-count=1`, the file
+restored with `git checkout --` and checked clean.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | `urlOriginForLog` renders a URL with no host part | `TestNoConfigWarningCarriesAURLsCredentials`, `TestNoStartupErrorCarriesAURLsCredentials`, `TestAStartupRefusalNamesAURLWithoutItsCredential` |
+| NC2 | `normalizeBaseURL` quotes the value again | `TestNoStartupErrorCarriesAURLsCredentials`, `TestAStartupRefusalNamesAURLWithoutItsCredential` |
+| NC3 | the harvest pin's refusal quotes the value again | the same two |
+| NC4 | the scheme warning quotes the scheme again | `TestNoConfigWarningCarriesAURLsCredentials` |
+| NC5 | an entry is kept as written | the two config publication tests, the health test, the public pairing test, the serve test |
+| NC6 | an entry is dropped instead | the same five |
+| NC7 | the strip is logged as "dropped" | `TestACustomEndpointIsPublishedWithoutItsCredentials`, the serve test |
+| NC8 | the PATCH takes a typed credential | the PATCH test |
+| NC9 | init takes a domain carrying one | the init test |
+| NC10 | the poller fetches a metadata literal | `TestManualPollerNeverFetchesACloudMetadataDescription` |
+| NC11 | the fetch carries no approval | eight manual poller tests (the dial check then refuses every local address) |
+| NC12 | the fetch runs under `OperatorChose(url)` | `TestManualPollerNeverFetchesACloudMetadataDescription` (its name-answering-127.0.0.1 control) |
+| NC13 | the poller back on `http.DefaultTransport` | `TestManualPollerNeverFetchesACloudMetadataDescription` (the name is never resolved through the test's DNS). Its first form did not build and was redone |
+| NC14 | `ManualDescriptionFetch` checked before the metadata rule | its discovery table, the poller test |
+| NC15 | `NamesCloudMetadataAddr` answers false | its table, the poller test, the console test, the ingest test |
+| NC16 | the console adds a metadata literal | the console test |
+| NC17 | the duplicate warning logs the URL | `TestManualPollerWarningsNameTheHostAlone` |
+| NC18 | a refused connect is not warned about | the poller test (the name case) |
+| NC19 | the metadata warning logs the URL | both poller tests |
+| NC20 | `hasCredentialParts` misses a query | nine tests across config, api, admin and cmd/bridge |
+| NC21 | `hasCredentialParts` misses a fragment | the same nine |
+| NC22 | the ingest says "not answered yet" | the ingest test |
+| NC23 | the public adapter publishes the manual URL again | `TestHealthDoesNotPublishTheOperatorsManualURL` |
+| NC24 | the adapter leaves out every URL of a server with a manual URL | the same test, its control half: the device's LOCATION is gone |
+| NC25 | init's check drops its parse arm | the init test's "a password that does not parse" row |
+| NC26 | init's check reads the domain untrimmed | the init test's padded control (refused, exit 2). Not the "a password behind a space" row: untrimmed it does not parse, and the parse arm refuses it |
+
+NC1 to NC22 first ran on the branch before its rebases onto #1080 to #1081.
+Every control whose file those rebases touched ran again on the final
+branch, with the reds above: NC14 and NC15 (#1080 renamed
+`DialApproval.permits` to `Permits` in their file; NC15 turned the ingest
+test red too, a package its first run did not include), and NC1 to NC7,
+NC9, NC20 and NC21 (#1081 changed `config.go` and `init.go`; NC9 now drops
+the credential arm and keeps the parse arm). The other files a control
+mutates did not change. NC23 and NC24 ran on the commit that added the
+fourth site's fix, NC25 and NC26 on the commits that added init's parse arm
+and its controls.
+
+### Out of scope
+
+- A hand-edited `autocert.domain` carrying a credential (init refuses one
+  now) is still turned into a URL in public mode: `publicModeEndpoints`,
+  `pairAlternates` and `defaultBridgeURL` write `https://<domain>`. Such a
+  bridge cannot get a certificate or pass the console's Origin check, so it
+  does not work either. B66.
+- A path in a `customEndpoints` entry is published, and the app never uses
+  it. B66.
+- The PATCH still answers 200 for a typed entry the prune drops for another
+  reason (http, no host, unparseable), the field reported `unchanged` and
+  the reason in the journal alone, as `TestCustomEndpointsReportedAfterPruning`
+  pins. B67.
+- A manual URL on a NAME that resolves to a metadata address is refused
+  and warned about, and the console's last walk error still says "has not
+  answered yet": only the literal is known to the ingest. B67.
+- An enrich base URL written with a token as its user name reaches the
+  journal in the enricher's own request errors, which this change did not
+  touch: net/http's `*url.Error` masks a password (`user:***@`) and keeps a
+  user name whole (measured over `http.Client.Get` with a refused connect),
+  and the enricher logs the error at Error and stores it as a skip reason.
+  B69.
+
 ## 2026-09-28 — the discovery caches hold at most 256 devices, a broken renderer's stub expires, and the dlna tests keep their SSDP on this host (backlog B47 and B38)
 
 B47 collected what #1072 left in discovery: its claims bound the goroutines a

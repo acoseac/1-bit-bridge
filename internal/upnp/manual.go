@@ -26,8 +26,11 @@ package upnp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -100,14 +103,22 @@ func NewManualPoller(cfg ManualPollerConfig) *ManualPoller {
 		// in one place rather than at each wiring site. The URL is
 		// operator-configured and therefore more trusted than an SSDP
 		// Location header — but "more trusted" is not "trusted", and an
-		// operator can paste a URL that redirects. NOT the SSDP client's
-		// dial check (discovery.NewDeviceFetchClient): a manual URL on
-		// this machine is the operator pointing at a local server, and
-		// the control URLs its description names are bounded by
-		// discovery's host-kind rule instead.
+		// operator can paste a URL that redirects.
+		//
+		// On discovery.NewDeviceTransport, the transport of every request
+		// to a device, and so under its dial check, with the approval
+		// pollServer gives the fetch (discovery.ManualDescriptionFetch):
+		// every address but a cloud metadata one (backlog B54). Not the
+		// SSDP client's approval: a manual URL on this machine, or a name
+		// resolving to it, is the operator pointing at a local server,
+		// and the control URLs its description names are bounded by
+		// discovery's host-kind rule instead. Like every other request to
+		// a device since #1074, it takes no proxy from the environment and
+		// keeps no connection alive.
 		cfg.Dispatcher = &discovery.HTTPClientDispatcher{
 			Client: &http.Client{
-				Timeout: cfg.Timeout,
+				Timeout:   cfg.Timeout,
+				Transport: discovery.NewDeviceTransport(net.Dialer{}),
 				// Relay 3xx verbatim rather than following it: an
 				// auto-followed redirect to loopback or a link-local
 				// metadata address would turn the bridge into an SSRF
@@ -167,20 +178,55 @@ func (p *ManualPoller) PollOnce(ctx context.Context) {
 	}
 }
 
+// manualCloudMetadataWarning is what the poller logs, once per server, for
+// a manual URL on a cloud metadata address, which it does not fetch.
+const manualCloudMetadataWarning = "UPnP manual server: not fetching its description, which is on a cloud metadata " +
+	"address no media server serves on; configure the server's own address"
+
+// descriptionHostForLog is a manual URL's host, and port, for a log line:
+// the rest of the URL is the operator's and can carry a credential (a user
+// name and password, a token in the query) the journal must not (backlog
+// B54). "" when the URL does not parse.
+func descriptionHostForLog(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
 func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUDNs map[string]struct{}) {
-	url := strings.TrimSpace(srv.DescriptionURL)
-	if url == "" || srv.Key == "" {
+	descURL := strings.TrimSpace(srv.DescriptionURL)
+	if descURL == "" || srv.Key == "" {
+		return
+	}
+	// A manual URL on a cloud metadata address is not fetched, whatever
+	// the operator's approval covers (backlog B54, #1074's rule): no media
+	// server serves on one, the fetch would send a cloud VM's metadata
+	// service a GET every poll, and every later dial of what it found is
+	// refused anyway. The literal is refused here, before any request; a
+	// name that resolves to one is refused by the dial check below. Both
+	// warn once per server, because a fetch that fails is a Debug line,
+	// which the bridge never prints, and the server would just never
+	// appear.
+	if discovery.NamesCloudMetadataAddr(descURL) {
+		p.warnCloudMetadata(srv)
 		return
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	fetchCtx = discovery.WithDialApproval(fetchCtx, discovery.ManualDescriptionFetch())
 
 	// SourceUserChosen, because the operator configured this URL: that
 	// choice is the approval the SSDP path's same-host rule stands in for,
 	// so a ContentDirectory on another host is kept (the escape hatch for a
 	// real server that spans hosts). A control URL that is not http(s)
 	// with a host is still refused (external audit 2026-09-23, M3).
-	desc, err := discovery.FetchDeviceDescriptionWithSource(fetchCtx, p.dispatcher, url, discovery.SourceUserChosen)
+	desc, err := discovery.FetchDeviceDescriptionWithSource(fetchCtx, p.dispatcher, descURL, discovery.SourceUserChosen)
+	if errors.Is(err, discovery.ErrCloudMetadataAddr) {
+		p.warnCloudMetadata(srv)
+		return
+	}
 	// FetchDeviceDescription returns a "no AVTransport service" error for
 	// any non-renderer device — which every MediaServer is — while still
 	// populating desc.Services. Tolerate that specific shape and let the
@@ -188,14 +234,14 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	// the SSDP path makes.
 	if err != nil && len(desc.Services) == 0 {
 		p.log.Debug("UPnP manual server: description fetch failed",
-			slog.String("server", srv.Name), slog.String("url", url),
+			slog.String("server", srv.Name), slog.String("url", descURL),
 			slog.String("err", err.Error()))
 		return
 	}
 	ctrlURL := lookupContentDirectoryControlURL(desc.Services)
 	if ctrlURL == "" {
 		p.log.Debug("UPnP manual server: description carries no ContentDirectory service",
-			slog.String("server", srv.Name), slog.String("url", url))
+			slog.String("server", srv.Name), slog.String("url", descURL))
 		return
 	}
 
@@ -217,10 +263,11 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	if realUDN := strings.ToLower(strings.TrimSpace(desc.UDN)); realUDN != "" && realUDN != strings.ToLower(srv.Key) {
 		if _, dup := knownUDNs[realUDN]; dup {
 			p.warnOnce(srv.Key, func() {
+				// The host alone, never the URL (descriptionHostForLog).
 				p.log.Warn("UPnP manual server: this device is already configured by UDN — "+
 					"ignoring the manual URL so it is not walked twice",
 					slog.String("server", srv.Name),
-					slog.String("url", url),
+					slog.String("host", descriptionHostForLog(descURL)),
 					slog.String("udn", realUDN))
 			})
 			return
@@ -241,13 +288,24 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 		ModelDescription:           desc.ModelDescription,
 		ModelName:                  desc.ModelName,
 		ContentDirectoryControlURL: ctrlURL,
-		DescriptionURL:             url,
+		DescriptionURL:             descURL,
 		DeviceUDN:                  strings.TrimSpace(desc.UDN),
 		// The operator's URL approves a local control URL only when it is
 		// of that kind itself, and a name approves none: the ingest and the
 		// proxy dial the control URL under this (backlog B36).
-		DialApproval: discovery.OperatorChose(url),
+		DialApproval: discovery.OperatorChose(descURL),
 		LastSeenAt:   p.nowFunc(),
+	})
+}
+
+// warnCloudMetadata logs manualCloudMetadataWarning for srv, once per
+// server for the life of the poller: the configuration it is about cannot
+// change without a restart.
+func (p *ManualPoller) warnCloudMetadata(srv ManualServer) {
+	p.warnOnce("cloud-metadata:"+srv.Key, func() {
+		p.log.Warn(manualCloudMetadataWarning,
+			slog.String("server", srv.Name),
+			slog.String("host", descriptionHostForLog(srv.DescriptionURL)))
 	})
 }
 
