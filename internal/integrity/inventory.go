@@ -52,14 +52,30 @@ type SidecarInventory struct {
 	Known   int
 	Orphans int
 	// OrphanPaths holds the orphans in walk order, capped by
-	// MaxOrphanPaths (all of them when that is 0). The `--gc` sweeps ask
-	// for all of them — they are about to unlink exactly this list, and a
-	// second walk could see a different tree. The doctor asks for a
-	// handful, to name examples in its hint.
+	// MaxOrphanPaths (all of them when that is 0), in the CONFIGURED
+	// spelling: the one the known set keys on and every report prints.
+	// The `--gc` sweeps ask for all of them, since they are about to
+	// unlink exactly these files and a second walk could see a different
+	// tree. The doctor asks for a handful, to name examples in its hint.
+	// A caller that unlinks uses OrphanWalkedPaths, never these.
 	OrphanPaths []string
+	// OrphanWalkedPaths holds the same orphans, in the same order, as the
+	// walk visited them: under the RESOLVED root. OrphanWalkedPaths[i] is
+	// the file OrphanPaths[i] names, and it is what a sweep unlinks. The
+	// two differ only where the configured root, or a directory above it,
+	// is a symlink, and there the difference is the point: the link can
+	// be repointed between the walk and the unlinks (an operator moving
+	// the variants alias to another volume while the bridge runs), and an
+	// unlink through it then removes files in a tree the walk never
+	// counted, past the mass-orphan refusal, whose verdict was taken over
+	// the first tree (CodeRabbit on #1063).
+	OrphanWalkedPaths []string
 	// ScratchPaths holds every scratch file, uncapped: the callers that
-	// ask for them remove them unconditionally.
-	ScratchPaths []string
+	// ask for them remove them unconditionally. They are in the
+	// configured spelling, and ScratchWalkedPaths is to them what
+	// OrphanWalkedPaths is to OrphanPaths.
+	ScratchPaths       []string
+	ScratchWalkedPaths []string
 	// Unreadable counts entries the walk could not resolve: a directory
 	// it could not descend into, and a NON-REGULAR entry it could not
 	// stat (a symlink, a Windows junction — so it cannot know whether
@@ -180,7 +196,9 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 	// spelling — so emitting resolved paths would miss every one of them
 	// and classify an entire healthy tree as orphans. Cheap because
 	// WalkDir builds each path by joining onto walkRoot, so the prefix is
-	// exact; a no-op when nothing was a symlink.
+	// exact; a no-op when nothing was a symlink. Each listed file keeps
+	// its walked path too, and that is the one a sweep unlinks (see
+	// SidecarInventory.OrphanWalkedPaths).
 	reportPath := func(p string) string {
 		return root + strings.TrimPrefix(p, walkRoot)
 	}
@@ -255,6 +273,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		name := d.Name()
 		if opts.Scratch != nil && opts.Scratch(name) {
 			inv.ScratchPaths = append(inv.ScratchPaths, reportPath(path))
+			inv.ScratchWalkedPaths = append(inv.ScratchWalkedPaths, path)
 			return nil
 		}
 		if opts.Consider != nil && !opts.Consider(name) {
@@ -269,6 +288,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		inv.Orphans++
 		if opts.MaxOrphanPaths == 0 || len(inv.OrphanPaths) < opts.MaxOrphanPaths {
 			inv.OrphanPaths = append(inv.OrphanPaths, reported)
+			inv.OrphanWalkedPaths = append(inv.OrphanWalkedPaths, path)
 		}
 		return nil
 	})

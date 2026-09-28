@@ -829,9 +829,15 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // guard is a pre-flight rather than a step inside the reverse sweep. A
 // sweep that deleted as it walked could only be guarded by a ratio
 // measured from the part of the tree it had already destroyed.
+//
+// It unlinks each orphan by the path the walk VISITED
+// (OrphanWalkedPaths) and names it by the configured one: through a
+// variants directory that is a symlink, repointed between the walk and
+// the unlinks, the configured spelling reaches a tree the guard never
+// counted.
 func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int) {
 	var removed, failed int
-	for _, path := range inv.OrphanPaths {
+	for i, path := range inv.OrphanPaths {
 		// Stop the forward sweep promptly on SIGINT. Without the check,
 		// a Ctrl-C mid-sweep would let the GC keep deleting files until
 		// it finished the list. CodeRabbit Major on PR #217.
@@ -844,7 +850,7 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integr
 		// which is the outcome asked for. Counting it as a failure would
 		// exit 1 and report a cron'd --gc as failed for doing its job.
 		// `analyze --gc` has always read it this way.
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := os.Remove(inv.OrphanWalkedPaths[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
 			failed++
 			continue

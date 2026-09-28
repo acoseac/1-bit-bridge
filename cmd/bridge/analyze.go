@@ -376,16 +376,41 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		}
 	}
 
-	var removed, kept, failed int
-	// The scratch half is unconditional and outside the ratio: a
-	// `.waveform.bin.tmp` is this sweep's own half-written litter, never
-	// the operator's data, so a crashed run must not be able to trip the
-	// guard on the next one.
-	for _, set := range [][]string{inv.ScratchPaths, inv.OrphanPaths} {
+	removed, failed, interrupted := removeAnalysisGCFiles(ctx, stderr, inv)
+	if interrupted {
+		fmt.Fprintln(stderr, "analyze --gc: interrupted")
+		return 130
+	}
+	kept := inv.Known
+	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
+	// Exit 0 even with per-file failures, as this command always has —
+	// unlike `upscale --gc`, which exits 1. Reported rather than silent
+	// (it was neither counted nor printed before), but promoting it to a
+	// non-zero exit would change what a cron'd analyze --gc reports, which
+	// is a decision for whoever wants it, not a side effect of this guard.
+	return 0
+}
+
+// removeAnalysisGCFiles unlinks the scratch files and orphans an analyze
+// --gc inventory listed and reports each failure by base name. interrupted
+// is true when ctx ended the loop, with the files before it already gone.
+//
+// The scratch half is unconditional and outside the ratio: a
+// `.waveform.bin.tmp` is this sweep's own half-written litter, never the
+// operator's data, so a crashed run must not be able to trip the guard on
+// the next one.
+//
+// Each file is unlinked by the path the walk VISITED
+// (integrity.SidecarInventory.OrphanWalkedPaths and ScratchWalkedPaths),
+// never by the configured spelling: through a waveform directory that is
+// a symlink, repointed between the walk and the unlinks, the configured
+// spelling reaches a tree the guard never counted. A base name is the
+// same under both.
+func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory) (removed, failed int, interrupted bool) {
+	for _, set := range [][]string{inv.ScratchWalkedPaths, inv.OrphanWalkedPaths} {
 		for _, path := range set {
 			if ctx.Err() != nil {
-				fmt.Fprintln(stderr, "analyze --gc: interrupted")
-				return 130
+				return removed, failed, true
 			}
 			if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 				fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
@@ -395,14 +420,7 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			removed++
 		}
 	}
-	kept = inv.Known
-	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
-	// Exit 0 even with per-file failures, as this command always has —
-	// unlike `upscale --gc`, which exits 1. Reported rather than silent
-	// (it was neither counted nor printed before), but promoting it to a
-	// non-zero exit would change what a cron'd analyze --gc reports, which
-	// is a decision for whoever wants it, not a side effect of this guard.
-	return 0
+	return removed, failed, false
 }
 
 // analysisGCMaxOrphanPercent is the mass-orphan threshold for waveforms.

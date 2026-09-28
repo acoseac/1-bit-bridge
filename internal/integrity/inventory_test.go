@@ -534,6 +534,58 @@ func TestSidecarInventoryResolvesASymlinkedRoot(t *testing.T) {
 	}
 }
 
+// TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked pins the
+// pairing every sweep unlinks by: OrphanWalkedPaths[i] and
+// ScratchWalkedPaths[i] are the files OrphanPaths[i] and ScratchPaths[i]
+// name, as the walk visited them under the RESOLVED root. Through a
+// symlinked root the two spellings differ, and that is the case the
+// pairing exists for: a sweep that unlinks the configured spelling after
+// the link was repointed reaches a tree the walk never counted
+// (CodeRabbit on #1063).
+func TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	seedTree(t, real, "Artist/Album/one.flac", "Artist/Album/two.flac", "Artist/Album/three.flac.tmp")
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inv, err := TakeSidecarInventory(context.Background(), link, knownOf(), SidecarInventoryOptions{
+		Consider: func(name string) bool { return strings.HasSuffix(name, ".flac") },
+		Scratch:  func(name string) bool { return strings.HasSuffix(name, ".tmp") },
+	})
+	if err != nil {
+		t.Fatalf("TakeSidecarInventory through a symlinked root: %v", err)
+	}
+	for _, c := range []struct {
+		name           string
+		listed, walked []string
+		want           int
+	}{
+		{"orphans", inv.OrphanPaths, inv.OrphanWalkedPaths, 2},
+		{"scratch", inv.ScratchPaths, inv.ScratchWalkedPaths, 1},
+	} {
+		if len(c.listed) != c.want || len(c.walked) != c.want {
+			t.Fatalf("%s: %d listed and %d walked, want %d of each", c.name, len(c.listed), len(c.walked), c.want)
+		}
+		for i, p := range c.listed {
+			rel, ok := strings.CutPrefix(p, link+string(filepath.Separator))
+			if !ok {
+				t.Fatalf("%s: listed %s is not under the configured root %s", c.name, p, link)
+			}
+			if want := filepath.Join(resolved, rel); c.walked[i] != want {
+				t.Errorf("%s: walked[%d] = %s, want %s, the file listed as %s under the resolved root",
+					c.name, i, c.walked[i], want, p)
+			}
+		}
+	}
+}
+
 // TestSidecarInventoryTreatsADanglingRootAsNothingToDo — the error path
 // of the fix above, pinned rather than assumed.
 //

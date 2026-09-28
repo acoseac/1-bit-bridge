@@ -763,6 +763,56 @@ func TestOrphanSidecarSweeperWalksASymlinkedVariantsDir(t *testing.T) {
 	}
 }
 
+// TestAnOrphanSweepUnlinksInTheTreeItWalked pins that a tick unlinks the
+// files its walk counted, by the paths the walk visited, never through
+// the configured spelling. The variants directory here is a symlink, and
+// the test repoints it at a second tree between the walk and the first
+// unlink (beforeUnlinksForTest), as an operator moving the alias to
+// another volume while the bridge runs would. Through the link, the
+// unlink found the same name in the second tree and removed it: a file
+// the walk never counted, past the mass-orphan refusal, whose verdict
+// was taken over the first tree (CodeRabbit on #1063).
+func TestAnOrphanSweepUnlinksInTheTreeItWalked(t *testing.T) {
+	base := t.TempDir()
+	rels := []string{"Artist/Album/01.flac.upscaled-v2-176400-24.flac", "Artist/Album/orphan.flac"}
+	first := filepath.Join(base, "first", "variants")
+	second := filepath.Join(base, "second", "variants")
+	firstPaths := seedTree(t, first, rels...)
+	secondPaths := seedTree(t, second, rels...)
+	ageFixtures(t, first)
+	ageFixtures(t, second)
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(first, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	known := map[string]struct{}{filepath.Join(link, filepath.FromSlash(rels[0])): {}}
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: known}, staticDir(link), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	s.beforeUnlinksForTest = func() {
+		if err := os.Remove(link); err != nil {
+			t.Fatalf("repoint the variants link: %v", err)
+		}
+		if err := os.Symlink(second, link); err != nil {
+			t.Fatalf("repoint the variants link: %v", err)
+		}
+	}
+
+	if n := s.tick(context.Background()); n != 1 {
+		t.Fatalf("unlinked %d, want 1 (the orphan the walk counted)", n)
+	}
+	if _, err := os.Stat(firstPaths[1]); !os.IsNotExist(err) {
+		t.Errorf("the orphan the walk counted survived: %v", err)
+	}
+	if _, err := os.Stat(secondPaths[1]); err != nil {
+		t.Errorf("the file of that name in the tree the link now points at was unlinked: %v", err)
+	}
+	for _, p := range []string{firstPaths[0], secondPaths[0]} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a known sidecar was unlinked: %s: %v", p, err)
+		}
+	}
+}
+
 // TestOrphanSidecarSweeperHonoursCancellation pins the ctx-cancel
 // contract: a context cancelled before the walk returns promptly and
 // unlinks nothing — the walk stops at its first entry, and the unlinks

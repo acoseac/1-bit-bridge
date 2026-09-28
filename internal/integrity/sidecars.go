@@ -211,6 +211,12 @@ type OrphanSidecarSweeper struct {
 	// zero.
 	chunkSizeForTest int
 
+	// beforeUnlinksForTest, when set, runs between a tick's walk and its
+	// first unlink: a test repoints a symlinked variants directory there,
+	// the window TestAnOrphanSweepUnlinksInTheTreeItWalked holds. Nil in
+	// production.
+	beforeUnlinksForTest func()
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 	done      chan struct{}
@@ -509,13 +515,16 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	}
 	s.noteProceeding(root, inv, len(rows))
 
-	paths := inv.OrphanPaths
+	paths, walked := inv.OrphanPaths, inv.OrphanWalkedPaths
 	if len(paths) > chunk {
 		// MaxOrphanPaths already capped the list; the cap is restated where
 		// the unlinks happen so it cannot quietly depend on an option.
-		paths = paths[:chunk]
+		paths, walked = paths[:chunk], walked[:chunk]
 	}
-	tally, stopErr := s.reclaimOrphans(ctx, paths, tickStart)
+	if s.beforeUnlinksForTest != nil {
+		s.beforeUnlinksForTest()
+	}
+	tally, stopErr := s.reclaimOrphans(ctx, paths, walked, tickStart)
 	t := orphanTick{root: root, walked: true, inv: inv, tally: tally}
 	if stopErr != nil {
 		// Only the context stops the unlinks. As for the walk: a shutdown is
@@ -534,22 +543,26 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	return tally.unlinked
 }
 
-// reclaimOrphans hands each of paths to reclaimOrphan, counting and logging
-// what it did, and stops at a cancelled context with the context's error.
+// reclaimOrphans hands each orphan's WALKED path to reclaimOrphan, counting
+// and logging what it did under the configured spelling in paths, and stops
+// at a cancelled context with the context's error. walked[i] is the file
+// paths[i] names, as the inventory's walk visited it (see
+// SidecarInventory.OrphanWalkedPaths): the unlink goes to the tree the
+// verdict was taken over, whatever the configured root points at by now.
 // Per-path lines are sampled at logSampleCap per message per tick, the rest
 // at Debug: a legitimate backlog is a chunk of 5,000 unlinks a tick, and
 // the summary line carries the totals.
-func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, paths []string, tickStart time.Time) (orphanTally, error) {
+func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, paths, walked []string, tickStart time.Time) (orphanTally, error) {
 	grace := s.effectiveGracePeriod()
 	var (
 		tally  orphanTally
 		sample logSampler
 	)
-	for _, p := range paths {
+	for i, p := range paths {
 		if err := ctx.Err(); err != nil {
 			return tally, err
 		}
-		outcome, err := reclaimOrphan(p, tickStart, grace, os.Lstat, os.Stat)
+		outcome, err := reclaimOrphan(walked[i], tickStart, grace, os.Lstat, os.Stat)
 		switch outcome {
 		case orphanUnlinked:
 			tally.unlinked++
