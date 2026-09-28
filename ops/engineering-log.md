@@ -23902,3 +23902,72 @@ replaced by `t.Cleanup(stop)`. The PR's three `go:S3776` cognitive-complexity
 smells (`requireConsoleGateIsTheV1Gate` at 28, `constructionTimeConfigReads`
 at 19, the projection test at 24, against 15) do not gate, since the
 maintainability rating on new code stays A, and are left.
+
+### Review round 2: a clock tick on Windows, and #1071's boot helper
+
+The helper round 1 describes is `startConsoleBridge` since this round, and
+its type `consoleBridge`: `servedBridge` is #1071's.
+
+**CI on `6c34070d` failed on test (windows-latest)** (run 36447240629, job
+109012588718): `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` ran
+out its 30 s wait with the card reading `Enabled:true Active:false
+DegradedReason:sox_missing`, a sweep recorded, and `lastFinishedAt` set.
+The test decided that a sweep had run after its nudge by comparing that
+`lastFinishedAt` with a `time.Now()` taken before the nudge. A sweep the
+gate refuses finishes within a millisecond, which on Windows is inside one
+tick of the wall clock, and a time decoded from JSON carries no monotonic
+reading, so `After` compared wall clocks, found them equal, and never held.
+The cadence is long, so no later sweep moved the time on. CLAUDE.md
+already said "assert on counted events" for this clock.
+
+serve takes `serveOpts.autoOptimizeSwept`, nil in production and called
+once a sweep's result is on the Jobs card. `startConsoleBridge` counts with
+it, and the test reads the count after the scan, nudges, waits until the
+count passes the one it read, and then reads the card once (`/api/jobs`
+reads the sweep status live, uncached). It asks what the timestamp asked,
+a sweep that finished after the nudge was sent, where a sweep already
+running can count, as before, and a refused sweep has nothing to show
+either way. The projection boot test compares no times. A grep of the
+tree's tests for `After` against a captured instant found one more of the
+kind, `internal/auth`'s `TestValidateUpdatesLastUsedAt` (`time.Now().UTC()`,
+which strips the monotonic reading, then a 5 ms sleep), outside this PR
+and not examined further.
+
+Controls, on the committed fix, each restored with `git checkout --`. The
+coarse clock is simulated by snapping both the finish time
+(`sweepFinished`) and the test's instant to a 15.625 ms tick with
+`Truncate`:
+
+| mutation | result |
+|---|---|
+| the timestamp wait put back, under the simulated tick | red 6 runs of 6, each after 30 s, with `lastFinishedAt` on a tick boundary: the CI failure |
+| the counted wait, under the same tick | green 6 runs of 6 |
+| the hook never called | red: no sweep finished within 30 s (0 before the nudge, 0 after) |
+| the sweeper's gate back to the three switches | red on the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`, so the sweep it read had the two tracks) |
+
+**#1071 merged first, with a boot helper and a drain-guard widening of its
+own.** Both widenings were the same change, the Test-prefix filter dropped,
+so the merge keeps one guard: this branch's name for the audit helper
+(`auditBackgroundLaunchesIn`, since it reads helpers too) and its error
+text (which says the drain goes in the function that launches), and both
+docblocks' reasons. #1071's `servedBridge` and this branch's type shared a
+name, so the branch renamed its own to `consoleBridge` before the merge,
+and the merge commit builds with both boot helpers launching serve. After
+it, both start serve through `launchServe` (main_test.go): the goroutine,
+the drain and the wait for the banner, around a function that runs serve.
+`bootServe` hands it `run` with a command line, as before, so #1071's two
+tests boot exactly as they did; `startConsoleBridge` hands it `runServe`
+with the `serveOpts` the hook needs, then waits for the console and builds
+the clients. The guard's shape now finds 42 tests and three helpers
+(`launchServe`, `runOneFingerprintPass`, `runOneSmartPlaylistPass`), each
+draining where it launches: 46 at the merge commit, when both boot helpers
+launched. #1071's record of its own controls is under its entry above.
+
+Controls on the unified launch, each restored with `git checkout --`:
+
+| mutation | result |
+|---|---|
+| `launchServe`'s drain replaced by `t.Cleanup(cancel)` | the drain guard red, naming `launchServe` |
+| the same, with the guard back to Test functions | the drain guard green: the gap each PR recorded for its own helper |
+| the projection handler's `!s.upscaleActive()` removed | the projection test red at every step health said off (booted off, steps 0 and 2; booted on, step 1) |
+| runServe wires a nil `OrphanSweepStatus` (with `_ = orphanSweepStatus`, or it does not build) | #1071's Jobs-card test red, booted through `bootServe` |
