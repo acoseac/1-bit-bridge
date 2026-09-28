@@ -479,9 +479,17 @@ func (l *upnpUpstreamLifecycle) HostResolver() *serverCacheHostResolver {
 // field of net/url.URL carries the port when one is present (the
 // upstream's libmicrohttpd typically advertises :8200), which is
 // exactly what the proxy needs.
+//
+// A URL with no hostname is refused, whatever its Host holds:
+// `http://:7789/ctl` has Host ":7789", and Go's client dials a port
+// with no host on the local host, which on a bridge is its own no-auth
+// console, so the proxy would relay the console's answers to whoever
+// asked for a routed track. Nothing can cache such a URL (both cache
+// writers go through the discovery package's service-URL policy, which
+// reads Hostname too); this is the second line.
 func hostPortFromURL(s string) (string, bool) {
 	u, err := url.Parse(s)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Hostname() == "" {
 		return "", false
 	}
 	return u.Host, true
