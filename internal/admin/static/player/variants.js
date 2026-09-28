@@ -137,7 +137,10 @@ function blockedReason(summary) {
     return "Variant generation is switched off for this bridge.";
   }
   if (!summary.soxAvailable) {
-    return "sox is not installed on the bridge host, so no variants can be generated.";
+    // soxAvailable is the gate's sox half (Server.soxUsable), so a sox
+    // without FLAC lands here too, and the note is the one the Jobs card
+    // gives for the same verdict.
+    return "sox is not installed on the bridge host, or has no FLAC support, so no variants can be generated.";
   }
   return "";
 }

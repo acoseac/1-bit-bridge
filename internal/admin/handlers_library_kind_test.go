@@ -281,7 +281,9 @@ func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 // TestApiLibraryBrowseProjection_KindOptimize_503WhenUnwired covers
 // the closure-missing path: optimize-projection MUST surface a clean
 // 503 rather than a typed-nil panic when the optimize-specific
-// closures aren't wired (upscale feature off OR pre-feature build).
+// closures aren't wired (a harness that wired none; cmd/bridge wires
+// them on every bridge, and the switches are UpscaleActive and
+// OptimizeActive).
 func TestApiLibraryBrowseProjection_KindOptimize_503WhenUnwired(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	browseTestSeed(t, srv)

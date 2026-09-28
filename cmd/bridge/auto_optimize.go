@@ -100,6 +100,11 @@ type autoOptimizeSweeper struct {
 	// the OS temp dir); forwarded onto every DSD JobSpec and graded by
 	// the sweep's second disk budget. Nil-safe.
 	tempDir func() string
+
+	// swept, when set, is called after each sweep's result is recorded on
+	// the Jobs card: serveOpts.autoOptimizeSwept, which only the boot
+	// tests set, to count sweeps. Nil-safe.
+	swept func()
 }
 
 func (sw *autoOptimizeSweeper) caps() transcode.DSDRenderCaps {
@@ -569,7 +574,12 @@ func runAutoOptimizeSweeper(ctx context.Context, sw *autoOptimizeSweeper, interv
 	sweep := func() {
 		status.sweepStarted()
 		var counts *admin.AutoOptimizeSweepCounts
-		defer func() { status.sweepFinished(counts) }()
+		defer func() {
+			status.sweepFinished(counts)
+			if sw.swept != nil {
+				sw.swept()
+			}
+		}()
 		counts = sw.sweepOnce(ctx)
 	}
 

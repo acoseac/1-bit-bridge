@@ -1619,23 +1619,14 @@ func (a *adminBatchCoordinatorAdapter) Throughput() admin.AdminBatchThroughput {
 // field so the operator's Settings tile and a paired iOS client see
 // the same numbers.
 //
-// Two pool-related closures (rather than a captured `*transcode.Pool`):
-// the pool reference itself can be nil (operator never enabled the
-// feature) AND the operator can flip `cfg.Upscale.Enabled = false`
-// mid-flight without restart, leaving a live but logically-disabled
-// Pool. The closures evaluate both conditions at snapshot time so
-// `enabled` and the `pool` payload move together — same gating the
-// admin `UpscaleStats` closure already uses.
-//
-// **Known limitation**: `cfg.Upscale.Enabled` is read here without
-// synchronization while the admin PATCH handler writes the same
-// field under `admin.Server.mu`. This data race already existed in
-// the admin tile's closure (cmd/bridge/main.go:909) and is out-of-
-// scope for this endpoint addition; the proper fix is an `atomic.Bool`
-// on `*config.Config` (touching admin's writer too). Worst case
-// today: a single 5 s poll snapshot reads a racing flag value and
-// reports `enabled` inconsistently with the freshly-PATCHed state;
-// the next poll converges.
+// Two closures rather than a captured `*transcode.Pool`: the pool
+// lives for the whole process (always constructed, never stopped),
+// while whether the feature is ON moves with the live gate. `enabled`
+// is that gate, the closure /v1/health's `upscaleEnabled` reads (the
+// flag AND a usable sox), evaluated per snapshot so `enabled` and the
+// `pool` payload move together and agree with health. It read the flag
+// alone until 2026-09-28, so a bridge with no sox answered `enabled:
+// true` beside `soxAvailable: false` while health said off.
 //
 // Sox precheck is TTL-cached (mirrors `admin.Server.cachedSoxAvailability`,
 // also 30 s) so the per-5-s poll doesn't shell out 12×/min — the
@@ -2357,6 +2348,14 @@ type serveOpts struct {
 	// request's context, to hold a drain open across a shutdown. Per
 	// invocation for tailscaleCLI's reason.
 	wrapAPIHandler func(http.Handler) http.Handler
+	// autoOptimizeSwept is called after each pre-generation sweep has
+	// recorded its result on the Jobs card. Nil everywhere but the boot
+	// tests, which count sweeps with it: a sweep the gate refuses ends
+	// inside the clock tick it started in on Windows (about 15.6 ms), so
+	// a finish time read off the card cannot say whether the sweep ran
+	// after a nudge the test sent. Per invocation for tailscaleCLI's
+	// reason.
+	autoOptimizeSwept func()
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -3350,6 +3349,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// until shutdown.
 	upscaleActiveFn := func() bool { return liveCfg().Upscale.Enabled && soxOK("upscale") }
 	analysisActiveFn := func() bool { return liveCfg().Analysis.Enabled && soxOK("analysis") }
+	// carPlayOptimizeActiveFn is the LIVE gate for the CarPlay-optimize
+	// kind: the upscale gate (the flag AND a usable sox) AND the optimize
+	// switch. ONE closure for /v1/health's carPlayOptimize and the /v1
+	// optimize paths (WithCarPlayOptimize), the console's optimize kind
+	// (admin.Deps.OptimizeActive) and, with the pre-generation flag, the
+	// auto-optimize sweeper, so none of them can answer the switches
+	// without the toolchain: until 2026-09-28 the console's and the
+	// sweeper's copies read the flags alone.
+	carPlayOptimizeActiveFn := func() bool {
+		return upscaleActiveFn() && liveCfg().Upscale.EffectiveOptimizeEnabled()
+	}
 	// dsdRenderCapsFn is the LIVE DSD-render capability every DSD gate
 	// reads — the coordinator's walks, the per-track enqueuer, the
 	// auto-optimize sweeper: the operator flag from the live config AND
@@ -3423,13 +3433,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider, store: manifestStore, variantsDir: liveVariantsDir}).
-		WithCarPlayOptimize(func() bool {
-			// The live upscale gate AND-ed with the live optimize toggle
-			// — the same pairing autoOptimizeEnabledFn uses, so the
-			// health flag and the sweeper cannot disagree about whether
-			// the feature is on.
-			return upscaleActiveFn() && liveCfg().Upscale.EffectiveOptimizeEnabled()
-		}).
+		// The CarPlay kind's live gate, the closure the console's optimize
+		// kind and the auto-optimize sweeper read too, so the health flag,
+		// the console and the sweeper cannot disagree about whether the
+		// feature is on.
+		WithCarPlayOptimize(carPlayOptimizeActiveFn).
 		// The `dsdRender` flag and the `pcm` kind gate read the SAME caps
 		// every DSD gate on the bridge reads (dsdRenderCapsFn: the live
 		// flag ∧ the cached ffmpeg probe, fail-closed), so the health
@@ -3904,17 +3912,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// scan lands — the moment album membership changes.
 	var albumGainResolver *albumgain.Resolver
 	// Auto-optimize sweeper handles, in runServe scope so the admin Deps
-	// closures wired further down can read them. Both stay nil when the
-	// feature can't run (no upscale pool, or the optimize kind opted out).
+	// closures wired further down can read them. Set on every bridge,
+	// since the sweeper is wired unconditionally below.
 	var autoOptimizeNudge chan struct{}
 	var autoOptimizeSweepState *sweepStatus[admin.AutoOptimizeSweepCounts]
 	// autoOptimizeEnabledFn is the SHARED live predicate: the sweeper asks
-	// it whether to do work, and the admin card asks it what to report.
-	// One closure, deliberately — duplicating the three gates would let the
-	// card claim "active" while every sweep short-circuits, which is the
-	// same live-runtime-vs-persisted-config divergence /v1/upscale/stats
-	// exists to avoid.
-	var autoOptimizeEnabledFn func() bool
+	// it whether to do work, and the admin card reports it as `active`.
+	// One closure, deliberately — duplicating the gates would let the card
+	// claim "active" while every sweep short-circuits, which is the same
+	// live-runtime-vs-persisted-config divergence /v1/upscale/stats exists
+	// to avoid. autoOptimizeSwitchedOnFn is the operator's three switches
+	// without the toolchain, the card's `enabled`: the two differ exactly
+	// when sox is unusable, which the card then says.
+	var autoOptimizeEnabledFn, autoOptimizeSwitchedOnFn func() bool
 	// orphanSweepStatus reads the background orphan-sidecar sweep's refusal
 	// latch for the Jobs card. Nil unless the sweep runs (its interval is
 	// zero by default), in runServe scope because the sweep is built inside
@@ -4023,35 +4033,43 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Auto-optimize sweeper: pre-generates CarPlay `optimized-*`
 		// variants so iOS never has to play the hi-res source while it
 		// waits for one (see cmd/bridge/auto_optimize.go for why the lazy
-		// path structurally misses on first play). Wired only when the
-		// pool exists AND the optimize kind is enabled; the `enabled`
-		// flag itself is read LIVE per sweep so an admin Settings flip
-		// hot-applies on the next nudge.
+		// path structurally misses on first play). Its gate is read LIVE
+		// per sweep, so an admin Settings flip hot-applies on the next
+		// nudge.
 		//
 		// bgWriters-joined: completions call UpsertVariant, so the
 		// sweeper's work must drain before Store.Close() like every other
 		// manifest writer.
-		// Wired UNCONDITIONALLY (within upscaleActive), not behind a boot
-		// read of EffectiveOptimizeEnabled. autoOptimizeEnabledFn below
-		// already checks all three gates live, so the boot `if` bought
-		// nothing except making optimizeEnabled restart-bound: off→on
-		// could not start a sweeper that was never created.
+		// Wired UNCONDITIONALLY, like the pool, not behind a boot read of
+		// the switches: autoOptimizeEnabledFn below checks them and the
+		// toolchain live, so a boot `if` would buy nothing except making
+		// them restart-bound: off→on could not start a sweeper that was
+		// never created.
 		{
 			autoOptimizeNudge = make(chan struct{}, 1)
 			autoOptimizeSweepState = &sweepStatus[admin.AutoOptimizeSweepCounts]{}
 			postScanNudges = append(postScanNudges, autoOptimizeNudge)
-			autoOptimizeEnabledFn = func() bool {
-				live := cfgHolder.Load()
-				if live == nil {
-					return false // defensive: never sweep on a nil snapshot
-				}
-				// All three gates: the master toggle, the optimize kind, and
-				// the pre-generation flag. `upscale.enabled` is included even
-				// though the pool is wired at boot — an operator can PATCH it
-				// off mid-flight, and the sweeper must stop with it.
+			// The three switches: the master toggle, the optimize kind, and
+			// the pre-generation flag. `upscale.enabled` is included even
+			// though the pool is wired at boot — an operator can PATCH it
+			// off mid-flight, and the sweeper must stop with it.
+			autoOptimizeSwitchedOnFn = func() bool {
+				live := liveCfg()
 				return live.Upscale.Enabled &&
 					live.Upscale.EffectiveOptimizeEnabled() &&
 					live.Upscale.AutoOptimize.Enabled
+			}
+			// The sweeper's gate adds the toolchain, through the CarPlay
+			// kind's gate. Until 2026-09-28 it was the switches alone, and
+			// on a bridge without sox each sweep offered up to maxPerSweep
+			// tracks to the pool (the sweeper's decodability check reads a
+			// failed probe as "can decode"). Every job failed with a WARN
+			// and struck its file, and a third strike suppresses a file
+			// from pre-generation for 30 days: a toolchain fault recorded
+			// as a fact about the files, which installing sox does not
+			// clear, while the card reads "all caught up".
+			autoOptimizeEnabledFn = func() bool {
+				return carPlayOptimizeActiveFn() && liveCfg().Upscale.AutoOptimize.Enabled
 			}
 			sweeper := &autoOptimizeSweeper{
 				store: manifestStore,
@@ -4091,6 +4109,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 					}
 					return 1
 				},
+				swept: opts.autoOptimizeSwept,
 			}
 			autoOptimizeRearm := make(chan struct{}, 1)
 			cadenceRearms = append(cadenceRearms, autoOptimizeRearm)
@@ -4221,11 +4240,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// page and the iOS management section show the same numbers.
 	//
 	// Three sources combined:
-	//   1. Live pool counters — only when upscalePool != nil AND
-	//      cfg.Upscale.Enabled (operator can disable mid-flight via a
-	//      PATCH; the long-lived Pool stays alive until restart, but
-	//      we honour the live flag and report no pool to keep the wire
-	//      semantics in lockstep with /v1/health.upscaleEnabled).
+	//   1. Live pool counters — only while the live upscale gate is
+	//      open (upscaleActiveFn: the flag AND a usable sox). The
+	//      long-lived Pool stays alive whatever the gate says, so the
+	//      gate, not the pool, decides; reading the same closure as
+	//      /v1/health.upscaleEnabled is what keeps the two in lockstep,
+	//      which reading the flag alone did not on a host without sox.
 	//   2. Cached-variants count + total bytes from `track_variants`
 	//      — survives across restarts and reflects historical work,
 	//      so it stays non-zero when the feature was disabled without
@@ -4238,12 +4258,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//      since iOS only polls when the management page is fore-
 	//      grounded — typically zero polls per minute on average).
 	upscaleStats := &upscaleStatsAdapter{
-		pool: func() *transcode.Pool { return upscalePool },
-		enabled: func() bool {
-			live := cfgHolder.Load()
-			return upscalePool != nil && live != nil && live.Upscale.Enabled
-		},
-		store: manifestStore,
+		pool:    func() *transcode.Pool { return upscalePool },
+		enabled: upscaleActiveFn,
+		store:   manifestStore,
 	}
 	apiSrv.WithUpscaleStats(upscaleStats)
 
@@ -4709,11 +4726,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fingerprintReady, fingerprintDegradedReason, fingerprintSweepState),
 		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
 		// Auto-optimize card + trigger. Both nil unless the sweeper is
-		// wired (upscale pool present AND the optimize kind enabled), so a
-		// bridge that can't pre-generate renders no card rather than a
-		// permanently-inactive one. The `enabled` reader is live because
-		// the flag hot-applies.
-		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeEnabledFn, "", autoOptimizeSweepState),
+		// wired, which since #781 is every bridge. `enabled` is the
+		// operator's switches and `active` the sweeper's own gate, both
+		// read live; the two differ only when sox is unusable, and the
+		// card then says so (degradedReason "sox_missing") rather than
+		// reading as switched off.
+		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeSwitchedOnFn, autoOptimizeEnabledFn, autoOptimizeSweepState),
 		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
 		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
 		// Free-space probe for the database compaction guard. Injected
@@ -4820,26 +4838,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			return harvestClient.NudgeBookletFetch
 		}(),
 		UpscaleStats: func() *admin.UpscalePoolStats {
-			// Snapshot the pool's live counters when the
-			// feature is active. Two off-paths return nil
-			// so the admin handler omits the `pool` field
-			// entirely instead of surfacing zero-padded
-			// clutter on the Settings page:
-			//
-			//   1. upscalePool == nil — sox-precheck demoted
-			//      the feature at startup OR the operator
-			//      never enabled it.
-			//   2. cfg.Upscale.Enabled == false — operator
-			//      just PATCHed the flag off; the long-
-			//      lived Pool is still alive until restart,
-			//      but the contract is "feature is off
-			//      live", so don't surface live counters
-			//      (CodeRabbit minor on PR #110 — the iOS-
-			//      facing /v1/health.upscaleEnabled and the
-			//      admin tile's `enabled` field both gate
-			//      on this).
-			live := cfgHolder.Load()
-			if upscalePool == nil || live == nil || !live.Upscale.Enabled {
+			// Snapshot the pool's live counters while the feature is
+			// active, and nil otherwise, so the admin handler omits the
+			// `pool` field (and reports `enabled: false`) rather than
+			// surfacing zero-padded clutter on the Settings page.
+			// "Active" is the live upscale gate, the closure
+			// /v1/health's `upscaleEnabled` reads (the flag AND a
+			// usable sox): the long-lived Pool is alive whatever the
+			// operator's switch says, so the gate decides. It read the
+			// flag alone until 2026-09-28, so the tile, and the Settings
+			// chip that takes its verdict from it, said "active" on a
+			// bridge with no sox while health said off.
+			if upscalePool == nil || !upscaleActiveFn() {
 				return nil
 			}
 			s := upscalePool.Stats()
@@ -4875,59 +4885,45 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		UpscaleBusy: func() bool {
 			// Cheap in-memory probe (Stats() = counters + a map-len read
 			// in one short p.mu section, no DB) gating the fast-tick
-			// worker grid. Mirror the UpscaleStats live-vs-persisted gate
-			// so a PATCHed-off feature reports not-busy even while the
-			// long-lived pool drains.
-			live := cfgHolder.Load()
-			if upscalePool == nil || live == nil || !live.Upscale.Enabled {
+			// worker grid. The same live gate as UpscaleStats above, so a
+			// feature that is off (PATCHed off, or without a usable sox)
+			// reports not-busy even while the long-lived pool drains.
+			if upscalePool == nil || !upscaleActiveFn() {
 				return false
 			}
 			st := upscalePool.Stats()
 			return st.Inflight > 0 || st.QueueLen > 0
 		},
-		// Library Inspector projection closures (v1.3). Wired
-		// to nil when upscale is disabled so the admin
-		// projection handler's existing `nil` check fires (503
-		// `upscale-disabled`). The prior shape wired non-nil
-		// closures that returned an error string — admin
-		// handler then surfaced 500 `disk-probe` instead of
-		// 503. Per CodeRabbit major on PR #203 round 2.
-		ProjectedSize: func() func(int64, int, int, int, int) int64 {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
-				return nil
-			}
-			return func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
-				return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
-					targetRate, targetBits,
-					transcode.DefaultCompressionFactor(targetBits))
-			}
-		}(),
-		AvailableDiskSpace: func() func(string) (int64, error) {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled {
-				return nil
-			}
-			// Nearest-existing-ancestor probe: the variants dir is
-			// created lazily, so a bare statfs on it would ENOENT
-			// before the first sidecar lands.
-			return transcode.AvailableDiskSpaceNearest
-		}(),
-		// CarPlay-optimize deps closures. Gated on BOTH
-		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()` so
-		// the projection endpoint surfaces 503 in lockstep with
-		// the api.Server's `WithCarPlayOptimize(upscaleActive
-		// && cfg.Upscale.EffectiveOptimizeEnabled())` advertisement
-		// (line ~1543 above). Pre-fix gated on Upscale.Enabled
-		// alone, so a bridge with optimize explicitly DISABLED in
-		// the config would still serve `?kind=optimize` projection
-		// data — divergent from what /v1/health advertises and
-		// from what POST /v1/upscale (kind=optimize) accepts. Per
-		// CodeRabbit major on PR #276.
-		// WIRED vs ACTIVE, split. These two closures now answer only "is
-		// the feature wired on this bridge" — the pool exists, which is a
-		// boot fact and cannot change — while OptimizeActive below carries
-		// the operator's toggle and is read live.
+		// The projection endpoint's two helpers, WIRED on every bridge.
+		// Whether the endpoint may answer is the live upscale gate's
+		// question (UpscaleActive below, which the handler reads per
+		// request), and free space is a fact about the disk, which the
+		// variants-dir panel reports whether upscaling is on or not.
+		// Until 2026-09-28 both were closures called ONCE, here, that
+		// answered nil when `upscale.enabled` was false at that moment,
+		// and the handler's nil check was its whole gate: 503 after the
+		// Settings PATCH that switched upscaling on and reported it
+		// `live`, until a restart; projections after the PATCH that
+		// switched it off; and "0 B free" on the panel of every bridge
+		// booted with upscaling off.
+		ProjectedSize: func(sourceSize int64, sourceRate, sourceBits, targetRate, targetBits int) int64 {
+			return transcode.ProjectedSize(sourceSize, sourceRate, sourceBits,
+				targetRate, targetBits,
+				transcode.DefaultCompressionFactor(targetBits))
+		},
+		// Nearest-existing-ancestor probe: the variants dir is created
+		// lazily, so a bare statfs on it would ENOENT before the first
+		// sidecar lands.
+		AvailableDiskSpace: transcode.AvailableDiskSpaceNearest,
+		// CarPlay-optimize deps closures, WIRED vs ACTIVE split. These two
+		// answer only "is the feature wired on this bridge" — the pool
+		// exists, which is a boot fact and cannot change — while
+		// OptimizeActive below carries the operator's toggle and is read
+		// live. (PR #276 had gated them, at construction, on
+		// `Upscale.Enabled` AND `EffectiveOptimizeEnabled()`, so that the
+		// projection endpoint's optimize kind answered 503 in lockstep
+		// with /v1/health's carPlayOptimize; before that a bridge with
+		// optimize DISABLED still served `?kind=optimize` projections.)
 		//
 		// Before the split both questions were folded into whether these
 		// were nil, evaluated ONCE at Deps construction. That is what made
@@ -4948,15 +4944,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return transcode.TargetRateForOptimize
 		}(),
-		// The LIVE upscale gate for POST /api/upscale/batch: the same
-		// closure WithUpscale hands the /v1 server, so the console refuses
-		// a batch exactly when /v1/health reports `upscaleEnabled: false`.
-		// BatchCoordinator below cannot say this; it is always wired.
+		// The LIVE upscale gate for POST /api/upscale/batch and GET
+		// /api/library/browse-projection: the same closure WithUpscale
+		// hands the /v1 server, so the console refuses a batch, and a
+		// projection, exactly when /v1/health reports
+		// `upscaleEnabled: false`. BatchCoordinator below cannot say this,
+		// nor can ProjectedSize above; both are always wired.
 		UpscaleActive: upscaleActiveFn,
-		OptimizeActive: func() bool {
-			live := liveCfg()
-			return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
-		},
+		// The CarPlay kind's live gate: the closure WithCarPlayOptimize
+		// hands /v1 and the auto-optimize sweeper reads, so the console's
+		// optimize kind answers exactly as /v1/health's carPlayOptimize.
+		// Until 2026-09-28 this was a copy that read the two switches
+		// alone. Both of its readers ask UpscaleActive first, so the copy
+		// refused nothing less; a reader that asked it alone would have
+		// heard "on" from a bridge without sox.
+		OptimizeActive: carPlayOptimizeActiveFn,
 		// The DSD-render caps, folded to the two bools the admin's SQL
 		// mirrors bind (admin never imports transcode): whether DSD
 		// sources are eligible at all, and whether DST-compressed ones
