@@ -26048,6 +26048,355 @@ controls of the first draft's `dirIsEmpty` arms went with it.
 - `bridge init` ignores `--listen-address` and `--admin-address` without
   `--public`, without a word.
 
+## 2026-09-28 — a library root that is a link to a directory is walked through
+
+Backlog B41, found by #1070's session with a throwaway program and left
+open in its CLAUDE.md bullet. `filepath.WalkDir` Lstats its root and follows
+no link, so a configured library root that is itself a symlink to a
+directory (`/music -> /mnt/nas/music`, an ordinary way to point at a mount)
+arrives at the callback as one entry that is not a directory, and the walk
+ends there. On Windows a directory junction, and a volume mounted in a
+folder, do the same: since Go 1.23 `os.Lstat` reports both `ModeIrregular`
+without `ModeDir` (Go 1.26.6's `fileStat.mode`: a name-surrogate reparse
+point gets no `ModeDir`, and only `IO_REPARSE_TAG_SYMLINK` gets
+`ModeSymlink`).
+
+Measured on main (4cd133e1) with a throwaway test over the real scanner,
+store and watcher, on macOS (APFS), a library of two FLACs under
+`Artist/Album`:
+
+- Single root, the root a symlink: `Scan` committed 0 rows. The same root
+  spelled with a trailing slash: 2 rows. `ScanSubtree(root)`: 0 rows.
+- Two roots, `music` (a link) and `other` (a directory): the rows were
+  `other/Artist/Album/01.flac` and `02.flac` only.
+- The watcher's `addTree(root, true)` over the link: no error and an empty
+  `WatchList()`; over the target directory itself, 3 watches.
+- The dangerous half, at the production threshold of three: the library
+  indexed while its root was a directory (2 rows), then moved to a sibling
+  and the configured root made a link to it. Each scan logged
+  `ERROR suspected clean-empty mount failure root=… rows_in_db=2 hint=place
+  .bridge-allow-empty at the root to confirm intent` and spared the rows. The
+  sentinel, written through the link, landed in the link's target beside the
+  files. The next scans: 2 rows, 2 rows, then 0 rows, with
+  `DeletedSince` returning both paths (a tombstone to every paired device),
+  while `Artist/` and the sentinel sat in the target.
+- `ScanSubtree(root)` on the same install, no sentinel: count 0 and no error
+  three times; the third deleted both rows, with no guard line. A DANGLING
+  root link (the target renamed away, as an unmount leaves it) did exactly
+  the same, while `Scan` of it logged `root unreachable` and spared the rows.
+- `ScanSubtree(root)` of a plain root whose contents were removed (a clean
+  unmount of a mount point): `Scan` logged the guard line and spared the rows;
+  three subtree scans deleted both, no line.
+
+A trailing slash in `bridge.yaml` was no workaround: `config.Load` Cleans
+every root (`resolvePaths` through `ResolvePath`), so the scanner is handed
+`/music` however it is written.
+
+The other walks of a root, found by sweeping for the call and measured with
+the new tests on main: the doctor's inotify pre-flight (`countDirs`, Linux)
+counted 0 directories under a linked root (want 4, on dido) while the
+watcher, once fixed, registers a watch per directory; and
+`POST /v1/upscale` for the root folder (`"."` single-root, the basename
+multi-root) walked the link as one entry and handed the enqueuer the folder
+itself, `["."]`. Serving was never affected: `fs.Resolver` joins lexically
+and the OS follows the root link on every open, and `bridge doctor`'s
+`library-roots` check (`os.Stat`, `os.ReadDir`) called the linked root
+reachable and non-empty, which is how the scanner's view went unnoticed.
+
+### Decisions
+
+- **Walk the root with a separator appended; report under the configured
+  spelling** (`fsutil.WalkableRoot`). A trailing separator makes `os.Lstat`
+  resolve the last component: POSIX resolves a pathname ending in a slash
+  through a symlink, chains included, and Go's Windows `lstatNolog` sets
+  `followSurrogates` when the path ends in a separator (its comment cites the
+  same POSIX rule), which follows a symlink and a junction alike. WalkDir
+  builds every path below as `filepath.Join(walkPath, name)`, which Cleans, so
+  each path is in the configured spelling: `relPath` stores what it stored
+  for a directory root, a multi-root prefix is the configured basename
+  (`music`, measured, where the target was `nas/library`), and the worker, the
+  folder-art lookup and the disc-folder boundary (`LibraryRootDirs`, the
+  configured roots Abs'd) all see the paths they see for a directory root.
+  An ordinary directory is returned unchanged, so those walks are
+  byte-for-byte what they were.
+- **Not `filepath.EvalSymlinks`**, though `integrity.resolveSidecarRoot` uses
+  it for the variants directory. Go 1.23 stopped it evaluating mount points
+  on Windows (`walkSymlinks` follows only `ModeSymlink`), so for a junction
+  root it returns the junction and the walk still ends at its first entry,
+  and through an intermediate junction it fails with ENOTDIR. It also
+  respells every path (`/var` becomes `/private/var` on macOS), which every
+  caller would have to map back, as `TakeSidecarInventory`'s `reportPath`
+  does. The separator needs no mapping and handles both Windows shapes.
+- **A root that cannot be stat'ed through is an error and "", never the
+  unresolved root.** Walking the link itself is the defect, and "" is what
+  `filepath.EvalSymlinks` answers on an error too. A root the separator does
+  not lead into (no platform Go supports) is `ErrRootNotEntered`, so such a
+  platform fails the walk rather than emptying it; the decision is
+  `walkableRoot(root, lstat, stat)` so the Windows shapes run on every host
+  (`TestWalkableRootTakesAWindowsJunction`), and
+  `TestWalkableRootDescendsARealJunction` makes a real junction on the
+  Windows leg (`mklink /J` needs no privilege).
+- **Scan**: `walkRoot` takes `WalkableRoot`'s error as the unreachable root
+  it already handled (`os.Stat` before), so a dangling link still reads as
+  "could not see", and compares the root entry against the walked string.
+- **ScanSubtree of the root**: walks `WalkableRoot(absDir)` and returns
+  before its deletion pass when the root cannot be seen, the answer the
+  owning-root audit gives for a missing subtree. Only a scan OF the root is
+  resolved: a subtree below it reaches the target through the kernel's
+  resolution of the intermediate component, and a link to a directory
+  below a root is still not walked, by either scan.
+- **ScanSubtree of the root runs the clean-empty guard.** Not strictly the
+  link defect, but the same deletion by the same route: a linked root whose
+  target is an emptied mount point reaches the bounded deletion pass the way
+  a plain one does, and without the guard the dangling-link fix alone would
+  have moved the reap from one mount-drop shape to the other. It is Scan's
+  guard, `emptyRootMustBeSpared`, run after a walk of the root that saw no
+  entry and did not fail. Measured after the change: three subtree scans of
+  the emptied plain root keep both rows and log three guard lines; with the
+  sentinel placed, the next three delete them.
+- **The lines name what a linked root links to.** For a linked root the
+  directory found empty, and the one the sentinel is looked for in, is the
+  target, and `root unreachable` for a dangling link otherwise said only
+  `stat /music: no such file or directory` about a path `ls -l` shows.
+  `rootLinkTarget` gives `EvalSymlinks` for a live symlink and `os.Readlink`
+  for a dangling one or a junction; the guard's hint for a linked root says
+  to check that volume is mounted. The absolute target sits beside the
+  absolute root these lines already log, so no new class of path reaches
+  the journal.
+- **The watcher** walks a configured root through the link and registers the
+  root's watch under the configured path. inotify follows every level of a
+  link, ReadDirectoryChangesW's `CreateFile` follows a junction, and
+  fsnotify's kqueue backend follows one level (it Readlinks and Lstats once),
+  so a link to a link on macOS or BSD gets the root's own watch as a
+  non-directory. Measured with a throwaway test on macOS: over a root that
+  is one link, a file dropped into the root and one dropped two levels down
+  were both indexed; over a link to a link, only the one two levels down
+  was, and the root's own event named the root, so the watcher dispatched a
+  subtree scan of its parent and logged `ERROR subtree scan … is not under
+  any configured library root`. Left as it is: the periodic scan picks the
+  file up, the watcher is off by default, and fsnotify names a kqueue event
+  by the path it was given, so no spelling of the root's watch both reaches
+  the directory and names a path under the configured root. Subdirectories
+  are watched in every case, since they are added by their configured paths
+  and resolve through the link. A runtime-created directory is walked as
+  before, and the scanner walks no link below a root.
+- **The doctor and the upscale walk** take the same helper. `countDirs`
+  answers an error for a root that cannot be seen (the check warns "could
+  not enumerate"), where it counted 0. The upscale walk follows the folder
+  only when `Resolver.SplitRoot` says it IS a root, so it enqueues nothing
+  from behind a directory link the scanner never indexed.
+- **A sweep over the call, not a list of sites.**
+  `TestEveryWalkOfALibraryRootStartsFromWalkableRoot` parses the production
+  tree (the go tool's directory and file rules, and
+  `sweeptest.IsOtherCheckout`) for every call of `filepath.WalkDir`,
+  `filepath.Walk` and `fs.WalkDir`, and requires each calling function to be
+  classified: five library-root walks, which must reach `WalkableRoot`
+  directly or through a named helper of their file, and nine others (the
+  cgroup mount, three trash-stamp walks below a root, the two variants-dir
+  walks, three artwork-cache walks), each with what it walks. The first
+  enumeration was by grep; the sweep is what finds a sixth.
+- **No `ExtractorVersion` bump, no PROTOCOL.md change.** Stored paths keep
+  the configured spelling. An install whose root became a link after it was
+  indexed rewrites nothing on the first scan after the change (the skip gate
+  sees the same files: `TestScanner_AnInstallWhoseRootBecameALinkKeepsItsRows`
+  checks every row's `indexed_at`); one whose root was always a link indexes
+  its library for the first time, a whole-library delta and enrichment,
+  once, which is the fix working.
+
+### Tests and negative controls
+
+New: `internal/fsutil/walkroot_test.go` (`TestWalkableRootDescendsALinkedRoot`,
+a link and a link to a link; `TestWalkableRootLeavesEverythingElseAlone`;
+`TestWalkableRootRefusesWhatItCannotSee`; `TestWalkableRootTakesAWindowsJunction`),
+`walkroot_windows_test.go` (`TestWalkableRootDescendsARealJunction`),
+`walkroot_sweep_test.go`, `internal/manifest/scanner_linked_root_test.go`
+(`TestScanner_ALinkedRootIsWalkedThrough`,
+`TestScanner_ALinkedRootInMultiRootModeKeepsItsConfiguredName`,
+`TestScanner_AnInstallWhoseRootBecameALinkKeepsItsRows`,
+`TestScanner_ADanglingRootLinkIsNotAnEmptyLibrary`,
+`TestScanner_ASubtreeScanOfAnEmptiedRootSparesItsRows`,
+`TestWatcherWatchesALinkedLibraryRoot`, which drops a file two levels below
+a linked root into a running watcher), `internal/doctor/inotify_linux_test.go`
+(`TestCountDirsCountsThroughALinkedRoot`) and
+`TestUpscaleFolderRequestForALinkedRootWalksThroughIt` in internal/api. The
+scanner tests check each row against `fs.Resolver`: it must serve the row
+from the very file the scanner read (`os.SameFile`), with the row's size and
+mtime. On Windows they link with a junction, the ordinary way there, which
+also runs them on a runner that cannot make a symlink.
+
+Every new test was red on main, with the tests copied into an export of
+4cd133e1: the store held no rows (single, chained, subtree, both multi-root
+legs); the install test failed on the guard lines, and with that assertion
+disabled on the sentinel half (`with the sentinel placed through the link:
+the row of Artist/Album/02.flac is gone`); the dangling test on "subtree
+scan 1 of a root it cannot see reported success"; both emptied-root legs on
+a deleted row; the watcher test at its 3 s deadline; the upscale test with
+`enqueued [.]`; the sweep on all five root walks; and on dido
+`countDirs(…/music) = 0, want 4`.
+
+Negative controls on the committed change (9ec9854e before a rebase onto
+main, f445bbcd after it), each restored and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `walkRoot` walks `root`, not the walked path | the two Scan legs of `…ALinkedRootIsWalkedThrough`, the multi-root Scan leg, `…AnInstallWhoseRootBecameALinkKeepsItsRows` |
+| NC2: `ScanSubtree` of the root does not resolve it | the subtree legs (single and multi-root), `…ADanglingRootLinkIsNotAnEmptyLibrary`, the sweep |
+| NC3: no clean-empty guard for a subtree scan of the root | both legs of `…ASubtreeScanOfAnEmptiedRootSparesItsRows` |
+| NC4: a root it cannot see is walked unresolved instead of refused | `…ADanglingRootLinkIsNotAnEmptyLibrary` |
+| NC5: the watcher walks `root` | `TestWatcherWatchesALinkedLibraryRoot` only |
+| NC7: `rootLinkTarget` answers "" | the dangling test and the linked emptied-root leg (no `links_to`) |
+| NC8: the guard's hint ignores a link | the linked emptied-root leg |
+| NC9: `WalkableRoot` answers the unresolved root when it cannot stat through | `…RefusesWhatItCannotSee`, the gone-volume row of the junction test, the scanner's dangling test |
+| NC10: no check that the separator leads in | the junction test's `ErrRootNotEntered` row |
+| NC11 (dido): `countDirs` walks `root` | `TestCountDirsCountsThroughALinkedRoot` |
+| NC12: the upscale walk never follows a root | `TestUpscaleFolderRequestForALinkedRootWalksThroughIt` |
+| NC13-15: a walk dropped from the tables, a stale entry, a wrong helper name | the sweep, one line each |
+
+The watcher's `watchPath` (the root's watch registered without the
+separator) has no control: fsnotify Cleans the path it is given on kqueue
+and Windows, and an inotify event name built on `root/` still has the root
+as its `filepath.Dir`, so it only keeps `WatchList()` and the watch lines in
+the configured spelling. NC12 leaves the sweep green, which is the sweep's
+stated limit: it sees that the helper is called, not what is walked.
+
+### Out of scope
+
+- **The clean-empty guard counts every entry, dot-files included.**
+  Measured with a throwaway test: an indexed root emptied (a clean unmount)
+  with a `.DS_Store` written into it, as Finder does, logs no guard line and
+  the third scan deletes both rows. The sentinel works the same way, by
+  making the root non-empty; `hasAllowEmptySentinel` decides only for one
+  placed after the walk listed the root. Fixed in the same PR: the next
+  entry.
+- By reading: `CountTracksUnderRoot` in single-root mode counts every row,
+  UPnP-routed ones included, so a single-root bridge whose root is empty and
+  which routes an upstream logs the guard line every scan.
+- By reading, Windows only: `fsutil.EvalSymlinksOrClean` resolves no
+  junction (EvalSymlinks leaves one as it is and fails with ENOTDIR through
+  one), so `IsUnderAny` compares a junction'd library root unresolved. A
+  variants directory named by its real path under the junction's target
+  (`D:\real\variants` against a root `C:\lib -> D:\real`) reads as not
+  nested, which is the containment `validateVariantsDir` and the admin
+  variants-dir handler exist to refuse. The integrity walks'
+  `resolveSidecarRoot` likewise leaves a junction'd variants directory
+  unresolved, so its walk would visit one entry.
+
+## 2026-09-28 — the clean-empty guard counts only library content
+
+CodeRabbit's finding on #1076 (the first out-of-scope item above, backlog
+B50), folded into the same PR. The clean-empty guard spares a root whose walk
+found nothing when the store holds rows for it, and both walks counted every
+entry they were handed: `observed++` ran at the top of the callback, for
+dot-files and for the directories the walk then skipped. The owning-root
+audit a subtree scan runs when its subtree is missing asked
+`len(os.ReadDir(root)) > 0` the same way.
+
+Measured with the new tests on an export of fa378d0e (this PR's head before
+the change), on macOS (APFS), a root indexed with two FLACs under
+`Artist/Album` and the threshold at three:
+
+- An emptied root holding only a `.DS_Store`, or only a Synology
+  `@eaDir/01.flac/SYNOINDEX_MEDIA_INFO`: in all eight cases (each noise, in
+  Scan and in a subtree scan of the root, single- and multi-root) the third
+  scan deleted every row under the root. The first round's throwaway test
+  had seen the `.DS_Store` case log no guard line.
+- A subtree scan of `root/Artist`, with `Artist/` gone and the root holding
+  only one of the two: all four cases (each noise, single- and multi-root)
+  returned no error, and the bounded pass deleted the subtree's rows.
+- An album beside audio files in `#recycle`, `#snapshot`, `@Recycle`,
+  `@Recently-Snapshot`, `~snapshot`, `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `lost+found` and `System Volume Information`, with an `@eaDir` beside the
+  album: both walks indexed six tracks from the recycle bins and snapshots
+  (`$RECYCLE.BIN` and `System Volume Information` were already skipped, and
+  on a case-insensitive volume `$Recycle.Bin` is the same directory), and
+  wrote folder rows for `Artist/Album/@eaDir` and
+  `Artist/Album/@eaDir/01.flac`.
+
+### Decisions
+
+- **One predicate, the walk's own** (`isLibraryEntry`). A directory counts
+  when the walk descends into it (`ShouldSkipDir` says no), a file when the
+  walk indexes it (not a dot-file, an audio file `enqueueableAudioFile`
+  takes). Both walks skip by it and count what passes it, and the audit asks
+  it of the root's listing (`holdsLibraryContent`). The root entry itself is
+  never counted, as before.
+- **Every file the walk does not index counts as nothing, not a list of named
+  ones.** The first proposal was to ignore dot-entries and a list of named
+  detritus (`Thumbs.db`, `desktop.ini`, `lost+found`, `$RECYCLE.BIN`,
+  `System Volume Information`, `@eaDir`, `#recycle`). A list of FILES that
+  are not content would be a second rule beside the walk's, and would miss
+  the next one (a `NOT_MOUNTED` marker an administrator leaves in a mount
+  point, a macOS `Icon\r`). The cost, accepted: a mounted root whose last
+  audio file went while only non-audio files stayed (a cover image, a
+  playlist) reads as emptied and keeps its rows, with an error line per
+  scan, until `.bridge-allow-empty` is placed, which is what an emptied root
+  has always cost. A root holding a directory is unaffected, since a
+  directory counts. A directory LINK below a root is a file entry to the
+  walk and counts as nothing, as the walk sees it (the scanner follows no
+  link below a root), so a root holding nothing but such links reads as
+  emptied too, and rows once indexed below them are spared with a line
+  rather than reaped at the threshold.
+- **The sentinel is asked for by name.** It is a dot-file, so it no longer
+  makes a root non-empty: `hasAllowEmptySentinel` is what decides, in Scan,
+  in a subtree scan of the root, and now in the audit, where a Gemini review
+  on #289 had called the explicit check redundant because the sentinel was
+  an entry like any other.
+- **The walk skips what operating systems and NAS firmware leave in a
+  volume.** `ShouldSkipDir` names `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `System Volume Information`, `lost+found`, `@eaDir`, `#recycle`,
+  `#snapshot`, `@Recycle`, `@Recently-Snapshot` and `~snapshot`, exactly and
+  case-sensitively, beside every dot-directory (the old list's dot-names
+  were redundant with the dot rule). Exact, so an album folder named
+  `Lost+Found` or `Recycler` is library content. A recycle bin's deleted
+  files and a snapshot's copies were tracks of their own; their rows now
+  take the usual missing-count grace and go, one delta to the paired
+  devices, which is the fix working.
+- **One rule for the scanner, the watcher and the doctor.** `ShouldSkipDir`
+  is exported, and `countDirs` (the doctor's inotify budget, Linux) skips by
+  it rather than by its own copy, `shouldSkipNoiseDir`, which would have
+  counted the `@eaDir` directories (one per file it describes) that the
+  watcher no longer watches.
+- **The audit's refusal says what it tested**: "no library content on disk
+  but N tracks in DB", where it said "empty on disk".
+- `TestScannerThreshold1PreservesImmediateDelete` kept its database file
+  inside the library root and deleted the root's one track; it passed only
+  because the database counted as an entry. The root keeps a second track
+  now, so the test pins threshold 1 on a root that still holds content.
+
+### Tests and negative controls
+
+New in `internal/manifest/scanner_root_noise_test.go`:
+`TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows` (both noises, in
+Scan and a subtree scan of the root, single- and multi-root; three scans
+keep the rows and log three guard lines, then with the sentinel placed three
+more delete them and leave the other root's row),
+`TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused` (both noises,
+single- and multi-root, with the sentinel as the positive control),
+`TestScanner_OSAndNASDetritusIsNotLibraryContent` (both walks, the exact
+track and folder rows) and `TestShouldSkipDirNamesExactlyTheDetritus` (every
+name, and near-misses that must stay content). `newIndexedRoot` became
+`newIndexedRootIn(t, multiRoot)`, whose multi-root form holds a second root
+with a row of its own. `TestCountDirsCountsThroughALinkedRoot` gained
+`@eaDir`, `#recycle` and `lost+found`.
+
+Negative controls on the committed round, each restored and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC-G1: the walks count every entry again | all eight `…AnEmptiedRootHoldingOnlyNoiseSparesItsRows` cases |
+| NC-G2: the audit counts every entry | all four `…ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused` cases |
+| NC-G3: `@eaDir` dropped from `ShouldSkipDir` | the four `@eaDir` guard cases, the two `@eaDir` audit cases, the detritus test (its folder rows), the exact test |
+| NC-G4: the guards ignore the sentinel | the sentinel half of all eight guard cases |
+| NC-G5: the audit ignores the sentinel | the sentinel half of all four audit cases |
+| NC-G6: `#recycle` dropped | the detritus test (a track and three folder rows), the exact test |
+| NC-G7: the watcher walks the root as it stands (`watchWalkStart` returns it) | `TestWatcherWatchesALinkedLibraryRoot`, the walk sweep |
+| NC-G8 (dido): `countDirs` back on its own list | `TestCountDirsCountsThroughALinkedRoot` |
+
+The watcher's `addTree` was split (`watchWalkStart`, `addWatch`) to bring it
+under SonarCloud's cognitive-complexity limit (S3776, 18 against 15), and the
+linked-root watcher test defers its cancel (S8188); NC-G7 is the control on
+the split.
+
 ## 2026-09-28 — the discovery caches hold at most 256 devices, a broken renderer's stub expires, and the dlna tests keep their SSDP on this host (backlog B47 and B38)
 
 B47 collected what #1072 left in discovery: its claims bound the goroutines a

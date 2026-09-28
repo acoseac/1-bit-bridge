@@ -6,7 +6,7 @@
 //
 //   - It is a same-filesystem rename, so it is instant even when the library
 //     is a network mount.
-//   - The dot-directory is invisible to the scanner (shouldSkipDir returns
+//   - The dot-directory is invisible to the scanner (ShouldSkipDir returns
 //     SkipDir for any "."-prefixed name), so trashed content leaves the
 //     manifest and never comes back on the next walk.
 //   - It is recoverable for a TTL window.
