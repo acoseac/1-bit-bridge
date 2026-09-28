@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -248,12 +247,7 @@ func TestTakeSidecarInventoryTreatsAMissingRootAsNothingToDo(t *testing.T) {
 // since a count taken over part of the tree can pass a mass-orphan check
 // the whole would fail. A report built from part of a tree has to say so.
 func TestTakeSidecarInventoryCountsADirectoryItCannotRead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0 does not deny directory reads on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 directory anyway")
-	}
+	skipWhereModesDenyNothing(t)
 	root := t.TempDir()
 	seedTree(t, root, "ok/a.flac", "locked/b.flac")
 	locked := filepath.Join(root, "locked")
@@ -547,10 +541,10 @@ func TestSidecarInventoryResolvesASymlinkedRoot(t *testing.T) {
 // (CodeRabbit on #1063).
 func TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked(t *testing.T) {
 	base := t.TempDir()
-	real := filepath.Join(base, "real")
-	seedTree(t, real, "Artist/Album/one.flac", "Artist/Album/two.flac", "Artist/Album/three.flac.tmp")
+	target := filepath.Join(base, "real")
+	seedTree(t, target, "Artist/Album/one.flac", "Artist/Album/two.flac", "Artist/Album/three.flac.tmp")
 	link := filepath.Join(base, "variants")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
 	resolved, err := filepath.EvalSymlinks(link)
@@ -658,12 +652,7 @@ func TestSidecarInventorySkipsASymlinkedDirectory(t *testing.T) {
 // "the target is not there" and "I could not find out", and only the
 // second is a reason to leave it alone. (CodeRabbit Major on #959.)
 func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory modes do not deny stat on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory modes")
-	}
+	skipWhereModesDenyNothing(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "variants")
 	seedTree(t, root, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
@@ -810,20 +799,20 @@ func TestCheckPairedRefusesListsThatDoNotPairUp(t *testing.T) {
 	root := t.TempDir()
 	seedTree(t, root, "a/x.flac", "a/y.flac", "b/z.flac", "b/half.flac.tmp")
 	isScratch := func(name string) bool { return strings.HasSuffix(name, ".tmp") }
-	for _, max := range []int{0, 1} {
+	for _, limit := range []int{0, 1} {
 		inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
 			Scratch:        isScratch,
-			MaxOrphanPaths: max,
+			MaxOrphanPaths: limit,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(inv.OrphanPaths) == 0 || len(inv.ScratchPaths) == 0 {
 			t.Fatalf("MaxOrphanPaths=%d: the fixture listed %d orphan(s) and %d scratch file(s), want some of each",
-				max, len(inv.OrphanPaths), len(inv.ScratchPaths))
+				limit, len(inv.OrphanPaths), len(inv.ScratchPaths))
 		}
 		if err := inv.CheckPaired(); err != nil {
-			t.Errorf("MaxOrphanPaths=%d: an inventory TakeSidecarInventory returned was refused: %v", max, err)
+			t.Errorf("MaxOrphanPaths=%d: an inventory TakeSidecarInventory returned was refused: %v", limit, err)
 		}
 	}
 }

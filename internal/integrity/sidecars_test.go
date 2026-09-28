@@ -593,12 +593,7 @@ func TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing(t *testing.T) {
 // refuses as a lost index, and that WARN comes at once, because a refusal
 // of the other kind starts a new streak. Nothing is unlinked on any tick.
 func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0 does not deny directory reads on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 directory anyway")
-	}
+	skipWhereModesDenyNothing(t)
 	dir := t.TempDir()
 	live := seedTestSidecarTree(t, dir, "live-", 20)
 	seedTestSidecarTree(t, dir, "stranded-", 15)
@@ -613,42 +608,67 @@ func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testin
 	s.gracePeriodForTest = time.Nanosecond
 	rec := loggingtest.Record(t)
 
-	for i := 1; i <= 2; i++ {
-		if n := s.tick(context.Background()); n != 0 {
-			t.Fatalf("tick %d unlinked %d of the files the walk could see, want 0", i, n)
-		}
-	}
-	partial := rec.Failures(msgOrphanPartialWalk)
-	if len(partial) != 1 {
-		t.Fatalf("want one partial-walk WARN over two ticks, got %d:\n%s", len(partial), strings.Join(rec.Failures(), "\n"))
-	}
-	if !strings.Contains(partial[0], "could not read 1 entr(y/ies)") ||
-		!strings.Contains(partial[0], "15 orphan(s) of 35 file(s) against 20 row(s)") {
-		t.Errorf("the refusal should name what the walk could not read and what it counted: %s", partial[0])
-	}
-	if got := rec.Lines(msgOrphanRefusal); len(got) != 0 {
-		t.Errorf("the part the walk saw passes the mass-orphan check, and was reported as failing it:\n%s", strings.Join(got, "\n"))
-	}
-	for _, line := range rec.Lines(msgOrphanTickComplete) {
-		if !strings.Contains(line, " refused=true") || !strings.Contains(line, " unreadable=1") {
-			t.Errorf("a refused partial walk's summary should say so, with the count: %s", line)
-		}
-	}
+	requireTicksUnlinkNothing(t, s, 2, "the walk could not read part of the tree")
+	requireLinesSay(t, rec.Failures(msgOrphanPartialWalk), 1,
+		"the partial-walk WARN, once for two ticks, naming what the walk could not read and what it counted",
+		"could not read 1 entr(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusal), 0,
+		"the part the walk saw passes the mass-orphan check, so no lost-index WARN")
+	requireLinesSay(t, rec.Lines(msgOrphanTickComplete), 2,
+		"each refused tick's summary, with the unreadable count", " refused=true", " unreadable=1")
 
 	if err := os.Chmod(locked, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if n := s.tick(context.Background()); n != 0 {
-		t.Fatalf("the whole tree's tick unlinked %d, want 0", n)
-	}
-	if got := rec.Failures(msgOrphanRefusal); len(got) != 1 || !strings.Contains(got[0], "1015 of 1035 file(s)") {
-		t.Errorf("the whole tree should refuse as a lost index at once, naming its count; got %q", got)
-	}
-	if got := rec.Lines(msgOrphanRefusalLifted); len(got) != 0 {
-		t.Errorf("a refusal of the other kind ended the streak as if the check had passed:\n%s", strings.Join(got, "\n"))
-	}
+	requireTicksUnlinkNothing(t, s, 1, "the whole tree is readable")
+	requireLinesSay(t, rec.Failures(msgOrphanRefusal), 1,
+		"the whole tree refuses as a lost index at once, naming its count", "1015 of 1035 file(s)")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 0,
+		"a refusal of the other kind is not the check passing")
 	if got := countFiles(t, dir); got != 1035 {
 		t.Errorf("%d of 1,035 files survive", got)
+	}
+}
+
+// skipWhereModesDenyNothing stops a test that locks a directory by its
+// mode where no mode can deny this user: chmod 0 denies nothing on
+// Windows, and root reads through any mode.
+func skipWhereModesDenyNothing(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes deny nothing on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+}
+
+// requireTicksUnlinkNothing runs n ticks of s and fails the test at the
+// first that unlinks anything; what says which state the ticks ran in.
+func requireTicksUnlinkNothing(t *testing.T, s *OrphanSidecarSweeper, n int, what string) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		if got := s.tick(context.Background()); got != 0 {
+			t.Fatalf("%s: tick %d unlinked %d file(s), want 0", what, i, got)
+		}
+	}
+}
+
+// requireLinesSay checks that lines holds exactly count lines, each
+// carrying every one of wants, and fails the test for each that does not;
+// what names the expectation in the failure.
+func requireLinesSay(t *testing.T, lines []string, count int, what string, wants ...string) {
+	t.Helper()
+	if len(lines) != count {
+		t.Errorf("%s: want %d line(s), got %d:\n%s", what, count, len(lines), strings.Join(lines, "\n"))
+		return
+	}
+	for _, line := range lines {
+		for _, w := range wants {
+			if !strings.Contains(line, w) {
+				t.Errorf("%s: %q is missing from: %s", what, w, line)
+			}
+		}
 	}
 }
 
@@ -849,13 +869,13 @@ func TestReclaimOrphanLeavesALinkToADirectory(t *testing.T) {
 // link itself — never a candidate — stay.
 func TestOrphanSidecarSweeperWalksASymlinkedVariantsDir(t *testing.T) {
 	base := t.TempDir()
-	real := filepath.Join(base, "volume", "variants")
-	paths := seedTree(t, real, "Artist/Album/01.flac.upscaled-v2-176400-24.flac", "Artist/Album/orphan.flac")
+	target := filepath.Join(base, "volume", "variants")
+	paths := seedTree(t, target, "Artist/Album/01.flac.upscaled-v2-176400-24.flac", "Artist/Album/orphan.flac")
 	link := filepath.Join(base, "variants")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	ageFixtures(t, real)
+	ageFixtures(t, target)
 	known := map[string]struct{}{filepath.Join(link, "Artist", "Album", filepath.Base(paths[0])): {}}
 	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: known}, staticDir(link), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond

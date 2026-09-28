@@ -21732,3 +21732,21 @@ committed tree (812d7d76), each restored before the next:
 | `upscale --gc` without it | its unpaired test, by `index out of range [1] with length 1` |
 | `analyze --gc` without it | its unpaired test (one file removed, exit 0) |
 | `CheckPaired` without its scratch arm | the two scratch rows of the table and the sweeper's scratch row |
+
+**SonarCloud (the PR's quality gate passed, with four code smells in the
+PR's own tests).** Three variables shadowed a builtin: two `real`s, in
+`TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked` and
+`TestOrphanSidecarSweeperWalksASymlinkedVariantsDir`, and a `max` in
+`TestCheckPairedRefusesListsThatDoNotPairUp`. The partial-walk test's
+cognitive complexity was 18 against 15. Fixed test-only: the renames, and
+three helpers in `sidecars_test.go`. `skipWhereModesDenyNothing` is now
+shared with the two inventory tests that carried the same Windows and root
+skips. `requireTicksUnlinkNothing` runs the ticks, and `requireLinesSay`
+checks a line count and the text of each line. The summary check gained a
+count: it looped over whatever lines there were, so no summary at all
+would have passed. The two controls that bite on that test (the
+partial-walk refusal skipped, the latch ignoring the kind) were re-run on
+the refactored test and still go red. A third goes red only now: with the
+partial-walk refusal's summary line removed, the old loop passed over zero
+lines, and the count reports "want 2 line(s), got 0".
+
