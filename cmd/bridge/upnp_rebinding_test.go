@@ -181,28 +181,46 @@ func newRebindingHosts(t *testing.T) *rebindingHosts {
 	return h
 }
 
-// fetchBoth sends what the bridge sends a routed server: one ingest walk
-// (its GetSystemUpdateID and Browse SOAP) and one byte fetch through the
-// proxy, both through the production wiring over cache. It returns the
-// ingest's per-server error and the proxy's pre-stream error.
-func fetchBoth(t *testing.T, cache *upnp.ServerCache, srv config.UPnPUpstreamServerConfig) (ingestErr error, proxyErr *upnpproxy.PreStreamError) {
+// routedServer is one configured upstream as the bridge serves it, over the
+// production wiring: its entry in a discovery cache, an Ingester that
+// resolves it through discoveryServerResolver and sends its SOAP with
+// upnpUpstreamSOAPHTTPClient, and a proxy over serverCacheHostResolver.
+type routedServer struct {
+	key   string
+	ing   *upnpingest.Ingester
+	proxy *upnpproxy.Proxy
+}
+
+// newRoutedServer caches srv with controlURL, as discovery leaves it under
+// approval.
+func newRoutedServer(t *testing.T, srv config.UPnPUpstreamServerConfig, controlURL string, approval discovery.DialApproval) *routedServer {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	key := upnpingest.StableServerKey(srv)
+	cache := upnp.NewServerCache()
+	cache.Upsert(upnp.ServerInfo{UDN: key, ContentDirectoryControlURL: controlURL, DialApproval: approval, LastSeenAt: time.Now()})
 	cds := upnp.NewContentDirectoryClient(&discovery.HTTPClientDispatcher{Client: upnpUpstreamSOAPHTTPClient(3 * time.Second)})
 	ing, err := upnpingest.NewIngester(config.UPnPUpstreamConfig{Enabled: true, Servers: []config.UPnPUpstreamServerConfig{srv}},
 		cds, &discoveryServerResolver{cache: cache}, openServeCancelStore(t), nil)
 	if err != nil {
 		t.Fatalf("NewIngester: %v", err)
 	}
-	res, err := ing.Run(ctx, upnpingest.Options{ForceWalk: true})
+	return &routedServer{key: key, ing: ing, proxy: upnpproxy.New(&serverCacheHostResolver{cache: cache}, nil)}
+}
+
+// fetchBoth sends what the bridge sends a routed server: one ingest walk
+// (its GetSystemUpdateID and Browse SOAP) and one byte fetch through the
+// proxy. It returns the ingest's per-server error and the proxy's
+// pre-stream error.
+func (r *routedServer) fetchBoth(t *testing.T) (ingestErr error, proxyErr *upnpproxy.PreStreamError) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := r.ing.Run(ctx, upnpingest.Options{ForceWalk: true})
 	if err != nil || len(res.PerServer) != 1 {
 		t.Fatalf("ingest Run = (%+v, %v), want one server's result", res, err)
 	}
-	proxy := upnpproxy.New(&serverCacheHostResolver{cache: cache}, nil)
-	w := httptest.NewRecorder()
-	rt := &manifest.UPnPRouting{ServerUDN: upnpingest.StableServerKey(srv), ResURL: "/MediaItems/1.flac"}
-	return res.PerServer[0].Err, proxy.Serve(ctx, w, http.MethodGet, http.Header{}, rt)
+	rt := &manifest.UPnPRouting{ServerUDN: r.key, ResURL: "/MediaItems/1.flac"}
+	return res.PerServer[0].Err, r.proxy.Serve(ctx, httptest.NewRecorder(), http.MethodGet, http.Header{}, rt)
 }
 
 // TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine caches a
@@ -237,25 +255,19 @@ func TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine(t *testing.T
 			discovery.OperatorChose(manualOnThisMachine), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cache := upnp.NewServerCache()
-			cache.Upsert(upnp.ServerInfo{
-				UDN:                        upnpingest.StableServerKey(tc.srv),
-				ContentDirectoryControlURL: controlURL,
-				DialApproval:               tc.approval,
-				LastSeenAt:                 time.Now(),
-			})
+			server := newRoutedServer(t, tc.srv, controlURL, tc.approval)
 			wantAll := []string{"POST /ctl", "POST /ctl", "GET /MediaItems/1.flac"}
 
 			if h.lanHost != nil {
 				h.dns.Answer(h.lan)
-				fetchBoth(t, cache, tc.srv)
+				server.fetchBoth(t)
 				if got := h.lanHost.take(); fmt.Sprint(got) != fmt.Sprint(wantAll) {
 					t.Errorf("with %s answering %s, the LAN stand-in saw %q, want %q", rebindingName, h.lan, got, wantAll)
 				}
 			}
 
 			h.dns.Answer(netip.MustParseAddr("127.0.0.1"))
-			ingestErr, proxyErr := fetchBoth(t, cache, tc.srv)
+			ingestErr, proxyErr := server.fetchBoth(t)
 			got := h.console.take()
 			if tc.reaches {
 				if fmt.Sprint(got) != fmt.Sprint(wantAll) || ingestErr != nil || proxyErr != nil {
