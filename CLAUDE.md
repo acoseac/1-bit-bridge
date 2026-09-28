@@ -427,10 +427,75 @@ lost my library."
   to every paired device, and a re-enrichment), and nothing else moves
   (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
   needed no change: it already said a listing row describes the target, and
-  a virtual row carries the container's size. **Still open: a library ROOT
-  that is itself a symlink to a directory is never walked** (`WalkDir` lstats
-  its root, so it visits one non-directory entry and stops: 0 rows, measured),
-  which is not this rule's shape.
+  a virtual row carries the container's size. A library ROOT that is itself
+  a link is not this rule's shape: that is the next bullet (this one said
+  "still open" until the same day).
+- **A library ROOT that is itself a link to a directory is walked THROUGH,
+  and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
+  backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
+  configured `/music -> /mnt/nas/music`, and on Windows a junction or a
+  volume mounted in a folder (`ModeIrregular` without `ModeDir` since Go
+  1.23), was one entry that is not a directory. Measured on main: Scan and a
+  subtree scan of the root indexed 0 rows (2 with the same root spelled with
+  a trailing slash), a multi-root install lost that root's rows, the watcher
+  registered 0 watches and returned nil, the doctor's inotify count saw 0
+  directories, and `POST /v1/upscale` of the root enqueued the folder itself.
+  **The half that deleted a library**: an install whose root BECAME a link
+  after it was indexed logged `suspected clean-empty mount failure` every
+  scan, with the hint to place `.bridge-allow-empty`; the sentinel, created
+  through the link, lands beside the files, and at the production threshold
+  the third scan deleted every row and sent the tombstones, every file on
+  disk. A subtree scan of the root (the watcher's, an upload's, the trash
+  tidy-scan) reaped every row with no line at all, and so it did when the
+  link DANGLED, where Scan spared them. `WalkableRoot` answers the root with
+  a separator appended when it is a link to a directory: POSIX resolves a
+  trailing slash through a symlink, chains included, and Go's `os.Lstat` on
+  Windows follows a name surrogate when the path ends in a separator. So
+  every path below keeps the CONFIGURED spelling: `relPath` stores what it
+  always stored, a multi-root prefix is the configured root's basename and
+  never the target's, and `fs.Resolver`, which joins lexically, serves each
+  row from the file the scanner read. **Compare the root entry against the
+  WALKED string, never the root**: WalkDir hands its callback the string it
+  was given, separator included, so `abs != root` counts the root as an
+  entry and can prune it. **Not `filepath.EvalSymlinks`**, which the sidecar
+  walks use (`resolveSidecarRoot`): since Go 1.23 it resolves no Windows
+  junction or mounted folder, which are not `ModeSymlink`, so the "resolved"
+  root is the junction again; and it respells every path, which each caller
+  would have to map back. A root that cannot be stat'ed through (missing, a
+  dangling link, a link into a mount that went away) is an error and "",
+  never the unresolved root: Scan logs `root unreachable` and spares it,
+  ScanSubtree of the root returns before its deletion pass, the watcher and
+  the doctor report it. **Only the root is followed**: a link to a directory
+  BELOW a root is still not walked by any of them, and the upscale folder
+  walk follows a folder only when it IS a root, so it enqueues nothing the
+  manifest does not hold. `TestEveryWalkOfALibraryRootStartsFromWalkableRoot`
+  requires every production function that calls `filepath.WalkDir`,
+  `filepath.Walk` or `fs.WalkDir` to be classified: the five root walks
+  (`walkRoot`, `ScanSubtree`, the watcher's `addTree`, the doctor's
+  `countDirs`, the upscale folder walk) must reach `WalkableRoot`, and every
+  other names what it walks. It sees the call, not that its answer is what
+  gets walked; the tests of each walk drive a linked root through it. No
+  `ExtractorVersion` bump and no PROTOCOL.md change: an install whose root
+  became a link rewrites nothing, and one whose root was always a link
+  indexes its library for the first time (a whole-library delta and
+  enrichment, once).
+- **A subtree scan OF the root runs the clean-empty guard Scan runs, and a
+  line about a linked root names what it links to** (2026-09-28). The
+  owning-root audit answers a SUBTREE that is not there; nothing covered the
+  root itself, so a subtree scan of an emptied mount point reaped every row
+  at the threshold while Scan spared them (measured on a plain root: three
+  subtree scans, every row deleted, no line). `emptyRootMustBeSpared` runs
+  there now, after a walk of the root that saw nothing and did not fail. For
+  a linked root the directory found empty, and the one the sentinel is
+  looked for in, is the link's target, so `suspected clean-empty mount
+  failure` and `root unreachable` carry `links_to` (`rootLinkTarget`:
+  `EvalSymlinks` for a live symlink, `os.Readlink` for a dangling one or a
+  junction) and the hint says to check that volume is mounted. **The guard
+  counts every entry the walk is handed, dot-files included**, so the
+  sentinel works by making the root non-empty (`hasAllowEmptySentinel`
+  decides only for a sentinel placed after the walk listed the root), and a
+  stray `.DS_Store` in an emptied mount point defeats the guard the same way
+  (measured: no line, every row deleted at the third scan). Still open.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
