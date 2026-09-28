@@ -41,13 +41,16 @@ func sendErrEscalateAt(interval time.Duration) int {
 	return n
 }
 
-// SendFailureLog is the streak-suppressed report of one discovery client's
-// failed M-SEARCH sends. Both discovery clients keep one, this package's
-// renderer client and internal/upnp's MediaServer client, so the policy has
-// one definition and the two cannot drift, as HandleReadErr is one
-// definition for their read loops. The MediaServer client discarded every
+// SendFailureLog is the streak-suppressed report of one sender's failed
+// multicast sends on a ticker. Both discovery clients keep one for their
+// M-SEARCH sends, this package's renderer client and internal/upnp's
+// MediaServer client, and internal/dlna's SSDP advertiser one for its
+// periodic NOTIFY ssdp:alive bursts (one result per burst), so the policy
+// has one definition and the three cannot drift, as HandleReadErr is one
+// definition for the read loops. The MediaServer client discarded every
 // send error until 2026-09-28, so a dead multicast route left upstream
-// discovery silent in the log.
+// discovery silent in the log, and the advertiser wrote its failures at
+// Debug, which the default level does not show.
 //
 // # Why the failure log is streak-suppressed
 //
@@ -97,7 +100,10 @@ func sendErrEscalateAt(interval time.Duration) int {
 //
 // Only the client's tick loop notes results, and Start spawns that loop
 // once and refuses to spawn it again while it runs, so the streak belongs to
-// that one goroutine. That makes it a real constraint on TESTS, not just a
+// that one goroutine. (The advertiser also notes its initial burst, in Start
+// before it spawns the loop, and builds a fresh log there, which is its
+// Reset; its Stop's byebye burst notes nothing, since the loop may be
+// mid-burst when it runs.) That makes it a real constraint on TESTS, not just a
 // note about production: a test that calls Note or Reset directly must do so
 // while no tick loop is live, before Start or after Stop (which joins the
 // loop). One that did neither raced under -race on CI and was not
@@ -106,6 +112,7 @@ func sendErrEscalateAt(interval time.Duration) int {
 // test's convenience; ordering the test correctly costs nothing.
 type SendFailureLog struct {
 	log      *slog.Logger
+	what     string
 	iface    string
 	degraded string
 
@@ -118,14 +125,16 @@ type SendFailureLog struct {
 	streak int
 }
 
-// NewSendFailureLog returns the failure log for one client's M-SEARCH
-// sends. log is the client's logger; iface names the interface the sends
-// are pinned to; degraded names what stops working while they fail, in the
-// Error line ("renderer discovery"); interval is the send cadence, which
-// places that Error sendErrEscalateAfter into the streak.
-func NewSendFailureLog(log *slog.Logger, iface, degraded string, interval time.Duration) SendFailureLog {
+// NewSendFailureLog returns the failure log for one sender's sends. log is
+// the sender's logger; what names the sends in every line ("M-SEARCH",
+// "NOTIFY"); iface names the interface the sends are pinned to; degraded
+// names what stops working while they fail, in the Error line ("renderer
+// discovery"); interval is the send cadence, which places that Error
+// sendErrEscalateAfter into the streak.
+func NewSendFailureLog(log *slog.Logger, what, iface, degraded string, interval time.Duration) SendFailureLog {
 	return SendFailureLog{
 		log:        log,
+		what:       what,
 		iface:      iface,
 		degraded:   degraded,
 		escalateAt: sendErrEscalateAt(interval),
@@ -147,7 +156,7 @@ func (l *SendFailureLog) Note(err error) {
 			// number, it is what an operator wants, and it matches the
 			// `consecutive` key on the escalation line rather than inventing
 			// a second vocabulary. (CodeRabbit, PR #708.)
-			l.log.Info("M-SEARCH send recovered",
+			l.log.Info(l.what+" send recovered",
 				"interface", l.iface, "consecutiveFailures", l.streak)
 			l.streak = 0
 		}
@@ -156,11 +165,11 @@ func (l *SendFailureLog) Note(err error) {
 	l.streak++
 	switch l.streak {
 	case 1:
-		l.log.Warn("M-SEARCH send failed", "interface", l.iface, "err", err.Error())
+		l.log.Warn(l.what+" send failed", "interface", l.iface, "err", err.Error())
 	case l.escalateAt:
 		// One Error, then silence until recovery. Repeating it would
 		// reintroduce exactly the flood this exists to stop.
-		l.log.Error("M-SEARCH send failing persistently; "+l.degraded+" is degraded",
+		l.log.Error(l.what+" send failing persistently; "+l.degraded+" is degraded",
 			"interface", l.iface, "consecutive", l.streak, "err", err.Error(),
 			"note", "further identical failures are suppressed until it recovers")
 	}

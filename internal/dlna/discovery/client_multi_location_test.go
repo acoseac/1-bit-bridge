@@ -204,12 +204,14 @@ func TestHandlePacket_StructuralStubStillRecoversAfterLongSilence(t *testing.T) 
 	// The time-domain twin of TestHandlePacket_StructuralStubRecoversAfterHostChange,
 	// and the reason the freshness sweep keeps a floor of one record.
 	//
-	// A structural stub carries NO ControlURL and NEVER ages out of the cache
-	// (year-2999 sentinel), so its recorded Location is the only reference a
-	// later announcement can be compared against. If the sweep were allowed to
-	// drop that last record after RendererTTL, a renderer that failed
-	// structurally at A, went quiet, then came back healthy at B would be
-	// stuck nameless and undrivable forever.
+	// A structural stub carries NO ControlURL and stays cached for
+	// structuralStubHold, far longer than RendererTTL, so its recorded
+	// Location is the only reference a later announcement can be compared
+	// against. If the sweep were allowed to drop that last record after
+	// RendererTTL, a renderer that failed structurally at A, went quiet, then
+	// came back healthy at B inside the hold would stay nameless and
+	// undrivable until the hold ended (for good, while the stub carried a
+	// year-2999 LastSeenAt).
 	var serveGood atomic.Bool
 	disp := &countingDispatcher{handler: func(w http.ResponseWriter, r *http.Request) {
 		if !serveGood.Load() {
@@ -223,14 +225,21 @@ func TestHandlePacket_StructuralStubStillRecoversAfterLongSilence(t *testing.T) 
 
 	c.handlePacket(ctx, alivePacket(movedUDN, locA), nil)
 	c.wg.Wait()
+	held := structuralStubLastSeen(base, c.cfg.RendererTTL)
 	stub, ok := c.cache.Get(movedUDN)
-	if !ok || !stub.LastSeenAt.Equal(structuralStubLastSeen) {
+	if !ok || !stub.LastSeenAt.Equal(held) {
 		t.Fatalf("precondition: want a structural stub, got %+v (cached=%v)", stub, ok)
 	}
 
-	// Silent for far longer than RendererTTL (60s), then back at a new
-	// address, healthy this time.
-	clock.Store(base.Add(10 * time.Minute).UnixNano())
+	// Silent for far longer than RendererTTL (60s), and an eviction pass
+	// then leaves the stub, still inside its hold. Back at a new address,
+	// healthy this time.
+	back := base.Add(structuralStubHold / 2)
+	clock.Store(back.UnixNano())
+	c.evictStaleEntries()
+	if _, ok := c.cache.Get(movedUDN); !ok {
+		t.Fatal("precondition: the stub went before its hold ended")
+	}
 	serveGood.Store(true)
 	c.handlePacket(ctx, alivePacket(movedUDN, locB), nil)
 	c.wg.Wait()
@@ -242,8 +251,8 @@ func TestHandlePacket_StructuralStubStillRecoversAfterLongSilence(t *testing.T) 
 	if info.ControlURL != ctrlB {
 		t.Errorf("ControlURL = %q, want %q — the move must still be detected after the freshness window lapsed", info.ControlURL, ctrlB)
 	}
-	if info.LastSeenAt.Equal(structuralStubLastSeen) {
-		t.Error("recovered entry still carries the structural sentinel")
+	if !info.LastSeenAt.Equal(back) {
+		t.Errorf("recovered entry's LastSeenAt = %v, want the announcement's %v, not the structural hold", info.LastSeenAt, back)
 	}
 }
 

@@ -81,6 +81,14 @@ type ServerInfo struct {
 // ServerCache is a small thread-safe UDN -> ServerInfo map. Parallel
 // shape to internal/dlna/discovery's RendererCache but kept separate to
 // avoid intertwining the renderer-output hot path with the source path.
+//
+// Servers found through SSDP are bounded at discovery.MaxCachedDevices
+// (Upsert refuses a new one past it); a server the operator configured is
+// not (UpsertConfigured). Until 2026-09-28 nothing bounded it, and a flood of
+// fake MediaServers serving a valid description stayed for ServerTTL, or for
+// as long as they kept announcing: measured, 100,000 held 45 MB, and made
+// every routed byte fetch that falls back to LiveHost's case-folded scan copy
+// the whole cache (7.7 ms and 18 MB a lookup; backlog B47).
 type ServerCache struct {
 	mu      sync.RWMutex
 	servers map[string]ServerInfo
@@ -90,52 +98,101 @@ func NewServerCache() *ServerCache {
 	return &ServerCache{servers: make(map[string]ServerInfo)}
 }
 
-// Upsert inserts or updates. When merging an alive-refresh that carries
-// only UDN + LastSeenAt, the cached descriptive fields (FriendlyName,
-// controlURL, ...) are preserved.
-func (c *ServerCache) Upsert(info ServerInfo) {
+// Upsert inserts or updates a server found through SSDP. When merging an
+// alive-refresh that carries only UDN + LastSeenAt, the cached descriptive
+// fields (FriendlyName, controlURL, ...) are preserved.
+//
+// A NEW UDN is stored only while the cache holds fewer than
+// discovery.MaxCachedDevices servers, and never by evicting one: any LAN peer
+// can announce a new UDN, while a cached server is one the ingest, the proxy
+// or the console may be using. The result reports whether info is stored.
+func (c *ServerCache) Upsert(info ServerInfo) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	existing, ok := c.servers[info.UDN]
+	if !ok && len(c.servers) >= discovery.MaxCachedDevices {
+		return false
+	}
+	if ok {
+		info = mergeServerInfo(existing, info)
+	}
+	c.servers[info.UDN] = info
+	return true
+}
+
+// UpsertConfigured is Upsert for a server the operator configured, by UDN
+// (the SSDP client's DiscoveryConfig.Configured) or by manual URL (the
+// ManualPoller): the bound never refuses it. The operator's list is short
+// and theirs, and a flood of fakes must not keep the server the ingest walks
+// out of the cache.
+func (c *ServerCache) UpsertConfigured(info ServerInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if existing, ok := c.servers[info.UDN]; ok {
-		if info.FriendlyName == "" {
-			info.FriendlyName = existing.FriendlyName
-		}
-		if info.Manufacturer == "" {
-			info.Manufacturer = existing.Manufacturer
-		}
-		if info.ModelDescription == "" {
-			info.ModelDescription = existing.ModelDescription
-		}
-		if info.ModelName == "" {
-			info.ModelName = existing.ModelName
-		}
-		if info.ContentDirectoryControlURL == "" {
-			info.ContentDirectoryControlURL = existing.ContentDirectoryControlURL
-			// The approval travels with the URL it approves, never alone:
-			// an update that carries a control URL carries that URL's
-			// approval (a zero one included), and one that keeps the
-			// cached URL keeps the cached approval. Merged on its own, a
-			// refresh would keep the old approval beside a new URL, or a
-			// new approval beside the old URL.
-			info.DialApproval = existing.DialApproval
-		}
-		if info.DescriptionURL == "" {
-			info.DescriptionURL = existing.DescriptionURL
-		}
-		// Every descriptive field, including this one: the alive-refresh
-		// the SSDP handler sends on each announcement is `{UDN,
-		// LastSeenAt}`, and a field missing from this list is blanked by
-		// it. TestServerCacheUpsertPreservesEveryDescriptiveField fills
-		// every string field by reflection so the next one cannot be
-		// missed the way this one was.
-		if info.DeviceUDN == "" {
-			info.DeviceUDN = existing.DeviceUDN
-		}
-		if info.LastSeenAt.IsZero() {
-			info.LastSeenAt = existing.LastSeenAt
-		}
+		info = mergeServerInfo(existing, info)
 	}
 	c.servers[info.UDN] = info
+}
+
+// Touch advances a cached server's LastSeenAt to seen and reports whether it
+// was cached. It stores nothing new, which is what the SSDP handler's refresh
+// needs: until 2026-09-28 it Upserted `{UDN, LastSeenAt}`, so an entry that
+// EvictStale removed between the handler's Get and its write came back as
+// one with no control URL, which the handler never re-fetched and every
+// later announcement kept fresh.
+func (c *ServerCache) Touch(udn string, seen time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, ok := c.servers[udn]
+	if !ok {
+		return false
+	}
+	info.LastSeenAt = seen
+	c.servers[udn] = info
+	return true
+}
+
+// mergeServerInfo is info with existing's value in every field info leaves
+// empty.
+func mergeServerInfo(existing, info ServerInfo) ServerInfo {
+	if info.FriendlyName == "" {
+		info.FriendlyName = existing.FriendlyName
+	}
+	if info.Manufacturer == "" {
+		info.Manufacturer = existing.Manufacturer
+	}
+	if info.ModelDescription == "" {
+		info.ModelDescription = existing.ModelDescription
+	}
+	if info.ModelName == "" {
+		info.ModelName = existing.ModelName
+	}
+	if info.ContentDirectoryControlURL == "" {
+		info.ContentDirectoryControlURL = existing.ContentDirectoryControlURL
+		// The approval travels with the URL it approves, never alone:
+		// an update that carries a control URL carries that URL's
+		// approval (a zero one included), and one that keeps the
+		// cached URL keeps the cached approval. Merged on its own, a
+		// refresh would keep the old approval beside a new URL, or a
+		// new approval beside the old URL.
+		info.DialApproval = existing.DialApproval
+	}
+	if info.DescriptionURL == "" {
+		info.DescriptionURL = existing.DescriptionURL
+	}
+	// Every descriptive field, including this one: a partial update
+	// (`{UDN, LastSeenAt}`, the alive-refresh the SSDP handler sent on each
+	// announcement until it moved to Touch) blanks a field missing from this
+	// list. TestServerCacheUpsertPreservesEveryDescriptiveField fills every
+	// string field by reflection so the next one cannot be missed the way
+	// this one was.
+	if info.DeviceUDN == "" {
+		info.DeviceUDN = existing.DeviceUDN
+	}
+	if info.LastSeenAt.IsZero() {
+		info.LastSeenAt = existing.LastSeenAt
+	}
+	return info
 }
 
 func (c *ServerCache) Remove(udn string) {
@@ -230,6 +287,13 @@ type DiscoveryConfig struct {
 	// NowFunc returns the current time. Defaults to time.Now (tests
 	// inject a fixed clock).
 	NowFunc func() time.Time
+
+	// Configured reports whether the operator configured a server by this
+	// UDN (upnpUpstream.servers[].udn). Such a server is cached through
+	// ServerCache.UpsertConfigured, which discovery.MaxCachedDevices never
+	// refuses, so a flood of fake MediaServers cannot keep a server the
+	// ingest walks out of the cache. Nil configures none.
+	Configured func(udn string) bool
 }
 
 const (
@@ -384,7 +448,7 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		detailFetchSem: make(chan struct{}, 2),
 		lastLocation:   make(map[string]string),
 		inFlight:       make(discovery.DetailFetchClaims),
-		sendErrs:       discovery.NewSendFailureLog(logger, cfg.Interface.Name, "upstream server discovery", cfg.MSearchInterval),
+		sendErrs:       discovery.NewSendFailureLog(logger, "M-SEARCH", cfg.Interface.Name, "upstream server discovery", cfg.MSearchInterval),
 		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
 }
@@ -624,9 +688,10 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 		// so LastSeenAt advanced only when a description fetch succeeded
 		// and a flaky description endpoint got a live server evicted
 		// (ResolveControlURL then returns "" → 503 on every play).
-		// Upsert merges: only UDN + LastSeenAt are set here, so the
-		// cached descriptive fields and controlURL survive untouched.
-		c.cache.Upsert(ServerInfo{UDN: udn, LastSeenAt: now})
+		// Touch advances LastSeenAt alone, and on an entry EvictStale took
+		// since the Get it does nothing: the next announcement is a first
+		// sighting, and fetched.
+		c.cache.Touch(udn, now)
 		// Known UDN announcing from a NEW host:port (DHCP renew, Wi-Fi ↔
 		// Ethernet move): the cached controlURL points at the old address,
 		// so without a re-fetch it would stay dead forever (TTL eviction
@@ -830,7 +895,7 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		// a new address cannot point LiveHost at a third host.
 		return
 	}
-	c.cache.Upsert(ServerInfo{
+	info := ServerInfo{
 		UDN:                        udn,
 		FriendlyName:               desc.FriendlyName,
 		Manufacturer:               desc.Manufacturer,
@@ -842,7 +907,18 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		// so the ingest and the proxy dial that URL under it too.
 		DialApproval: discovery.AnnouncedFrom(src),
 		LastSeenAt:   lastSeenAt,
-	})
+	}
+	if c.cfg.Configured != nil && c.cfg.Configured(udn) {
+		c.cache.UpsertConfigured(info)
+	} else if !c.cache.Upsert(info) {
+		// A new server meeting a cache that holds its bound (see
+		// discovery.MaxCachedDevices): a flood, since no real LAN comes near
+		// it. Nothing is recorded, and the server's next announcement is
+		// fetched again.
+		logger.Debug("upstream server not cached: the cache holds its bound of servers",
+			"udn", udn, "bound", discovery.MaxCachedDevices)
+		return
+	}
 	// Stamp AFTER the Upsert, so a recorded UDN is always a cached one and
 	// pruneLocations can use "not in cache" as its sole predicate.
 	c.recordLocation(udn, location)

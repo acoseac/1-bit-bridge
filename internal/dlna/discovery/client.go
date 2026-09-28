@@ -74,18 +74,37 @@ func HandleReadErr(ctx context.Context, err error, streak *int, log *slog.Logger
 	return false
 }
 
-// structuralStubLastSeen is the sentinel LastSeenAt stamped on a
-// STRUCTURALLY-failed renderer stub (4xx / unparseable description / no
-// AVTransport — see errStructuralDescription). Because EvictStale treats
-// a future timestamp as never-stale (IsStaleRenderer's interval<0 branch),
-// the stub persists indefinitely; combined with the exists-branch's
-// "incomplete stub → don't refresh, don't re-fetch" rule, that suppresses
-// the retry storm for a permanently-broken renderer until it sends
-// ssdp:byebye (Remove) or the bridge restarts. A TRANSIENT-failure stub
-// instead keeps its real fail-time LastSeenAt so it ages out + retries.
-// Both are hidden from /v1/renderers by Snapshot's ControlURL=="" gate.
-// (Gemini consult — bridge-12.)
-var structuralStubLastSeen = time.Date(2999, time.January, 1, 0, 0, 0, 0, time.UTC)
+// structuralStubHold is how long the stub of a STRUCTURALLY failed renderer
+// (4xx / unparseable description / no AVTransport, see
+// errStructuralDescription) stays cached, and so how long its announcements
+// fetch nothing: the exists-branch neither refreshes nor re-fetches a stub.
+// A TRANSIENT-failure stub keeps its real fail-time LastSeenAt and goes after
+// RendererTTL instead. Both are hidden from /v1/renderers by Snapshot's
+// ControlURL=="" gate. (Gemini consult — bridge-12.)
+//
+// Until 2026-09-28 the hold was forever: the stub carried a year-2999
+// LastSeenAt, which EvictStale treats as fresh, so it went only on
+// ssdp:byebye (which this M-SEARCH-only client rarely hears) or a restart.
+// That was the one stub a flood of distinct UDNs could pile up without
+// bound (backlog B47), and it hid a real renderer whose description
+// answered 404 once, say while it booted: measured, one fetch and then
+// nothing in two hours of healthy announcements from the same address.
+// Five minutes keeps what the sentinel was for, a permanently broken
+// renderer costs one description GET per hold rather than one per
+// M-SEARCH cycle, and brings a recovered one back within the hold.
+const structuralStubHold = 5 * time.Minute
+
+// structuralStubLastSeen is the LastSeenAt a structural stub is stamped
+// with. EvictStale drops an entry ttl after its LastSeenAt, so the stub is
+// stamped structuralStubHold - ttl past the failure (never before it), and
+// goes structuralStubHold after it. Only stubs carry such a future
+// LastSeenAt, and Snapshot never serves a stub.
+func structuralStubLastSeen(failedAt time.Time, ttl time.Duration) time.Time {
+	if structuralStubHold <= ttl {
+		return failedAt
+	}
+	return failedAt.Add(structuralStubHold - ttl)
+}
 
 // maxTrackedLocations caps how many distinct SSDP Locations a single UDN may
 // hold in lastLocations. A real renderer has one address per interface it is
@@ -94,6 +113,20 @@ var structuralStubLastSeen = time.Date(2999, time.January, 1, 0, 0, 0, 0, time.U
 // from growing the map without bound. On overflow the LEAST-recently-observed
 // record is dropped — the one least likely to still be live.
 const maxTrackedLocations = 4
+
+// maxLocationUDNs is how many UDNs lastLocations may hold before noteLocation
+// reaps the ones neither cached nor mid-fetch, which leaves at most
+// MaxCachedDevices + MaxPendingDetailFetches. Twice that, so a flood pays for
+// one reap per MaxCachedDevices + MaxPendingDetailFetches new UDNs rather than
+// one per UDN.
+//
+// The tick's pruneLocations alone let the map grow at the fetch rate for a
+// whole M-SEARCH interval: a fetch records its Location before it writes the
+// cache, and under a flood that write evicts another UDN's stub, or is
+// refused, while the cache stays at its bound. Nor can the evicting write
+// clean up after itself: the cache is shared by one client per interface,
+// and the evicted UDN's record may be another client's.
+const maxLocationUDNs = 2 * (MaxCachedDevices + MaxPendingDetailFetches)
 
 // locationRecord is one SSDP Location observed for a UDN, plus when it was
 // last seen. The timestamp is what separates "this renderer answers from two
@@ -232,12 +265,14 @@ type SSDPDiscoveryClient struct {
 	// It also covers entries whose cached ControlURL is empty — a
 	// failed-fetch stub carries no URL to compare a fresh announcement
 	// against, so without this map a renderer that failed at address A and
-	// moved to address B would never be re-fetched (a structural stub
-	// carries the year-2999 sentinel and never ages out).
+	// moved to address B would not be re-fetched until its stub expired
+	// (structuralStubHold, for a structural failure).
 	//
-	// Bounded three ways: at most maxTrackedLocations records per UDN,
-	// records unseen within RendererTTL are dropped on the next touch, and
-	// pruneLocations reaps whole UDNs that are neither cached nor mid-fetch.
+	// Bounded four ways: at most maxTrackedLocations records per UDN,
+	// records unseen within RendererTTL are dropped on the next touch,
+	// pruneLocations reaps whole UDNs that are neither cached nor mid-fetch,
+	// and noteLocation runs that reap before the map holds more than
+	// maxLocationUDNs UDNs.
 	//
 	// Deliberately NOT a field on RendererInfo: that struct IS the
 	// `/v1/renderers` wire shape (see renderer_dto.go) and this is
@@ -363,7 +398,7 @@ func NewSSDPDiscoveryClient(
 		nowFunc:        nowFunc,
 		lastLocations:  make(map[string][]locationRecord),
 		inFlight:       make(DetailFetchClaims),
-		sendErrs:       NewSendFailureLog(packageLogger, cfg.Interface.Name, "renderer discovery", cfg.MSearchInterval),
+		sendErrs:       NewSendFailureLog(packageLogger, "M-SEARCH", cfg.Interface.Name, "renderer discovery", cfg.MSearchInterval),
 		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
 }
@@ -600,6 +635,11 @@ func (c *SSDPDiscoveryClient) evictStaleEntries() {
 func (c *SSDPDiscoveryClient) pruneLocations() {
 	c.locMu.Lock()
 	defer c.locMu.Unlock()
+	c.pruneLocationsLocked()
+}
+
+// pruneLocationsLocked is pruneLocations for a caller that holds locMu.
+func (c *SSDPDiscoveryClient) pruneLocationsLocked() {
 	for udn := range c.lastLocations {
 		if c.inFlight.Held(udn) {
 			continue
@@ -732,8 +772,8 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		// mergeRendererInfo's non-empty-wins merge: a failed re-fetch
 		// upserting a ControlURL-less stub merged into the live entry,
 		// KEEPING the dead ControlURL while refreshing LastSeenAt — pinning
-		// the bad entry forever (immortally, with the year-2999 structural
-		// sentinel). fetchAndCacheDetails now REPLACES rather than merges,
+		// the bad entry forever (immortally, while the structural stub carried a
+		// year-2999 LastSeenAt). fetchAndCacheDetails now REPLACES rather than merges,
 		// which enforces that invariant at the write instead of by
 		// pre-deleting, so a failed re-fetch still leaves a genuine stub:
 		// hidden from Snapshot, aged out + retried by EvictStale, and with a
@@ -752,12 +792,12 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		// failed detail fetch. Do NOT refresh its LastSeenAt and do NOT
 		// re-fetch here: a transient-failure stub then ages out via
 		// EvictStale and is re-discovered as new on a later cycle (which
-		// retries the fetch); a structural-failure stub carries the
-		// far-future LastSeenAt sentinel so it never ages out (no retry
-		// storm). Both stay hidden from /v1/renderers via Snapshot's
-		// ControlURL gate. (Gemini consult — bridge-12: pre-fix this branch
-		// refreshed LastSeenAt forever, so a stub never aged out and never
-		// retried → the renderer was stuck nameless until restart.)
+		// retries the fetch); a structural-failure stub does the same after
+		// structuralStubHold (a fetch per hold, not per cycle). Both stay
+		// hidden from /v1/renderers via Snapshot's ControlURL gate. (Gemini
+		// consult — bridge-12: pre-fix this branch refreshed LastSeenAt
+		// forever, so a stub never aged out and never retried → the renderer
+		// was stuck nameless until restart.)
 		if existing.ControlURL == "" {
 			return
 		}
@@ -852,12 +892,19 @@ func (c *SSDPDiscoveryClient) recordLocation(udn, location string) {
 // noteLocation records (or refreshes) location among udn's live addresses.
 // A location whose HOST already appears is refreshed in place rather than
 // appended, so the set holds one record per distinct address.
+//
+// A record for a UDN the map does not hold yet first reaps the map when it
+// already holds maxLocationUDNs UDNs, so it never holds more than that plus
+// the one being recorded.
 func (c *SSDPDiscoveryClient) noteLocation(udn, location string, now time.Time) {
 	if udn == "" || location == "" {
 		return
 	}
 	c.locMu.Lock()
 	defer c.locMu.Unlock()
+	if _, known := c.lastLocations[udn]; !known && len(c.lastLocations) >= maxLocationUDNs {
+		c.pruneLocationsLocked()
+	}
 	recs, _ := c.dropStaleLocationsLocked(udn, now)
 	for i := range recs {
 		if sameURLHost(location, recs[i].url) {
@@ -885,9 +932,10 @@ func (c *SSDPDiscoveryClient) noteLocation(udn, location string, now time.Time) 
 // can tell a live set from that floor). The floor restores the old "remember
 // one Location, forever" behaviour and is load-bearing for a ControlURL-less
 // stub — the recorded Location is then the ONLY reference a later
-// announcement can be compared against, and a STRUCTURAL stub never ages out
-// of the cache on its own (year-2999 sentinel), so dropping the reference
-// would make it immortal. That is the case
+// announcement can be compared against, and a STRUCTURAL stub stays cached
+// for structuralStubHold, far longer than RendererTTL, so dropping the
+// reference would leave a renderer that moved inside that hold unfetched
+// until it ended. That is the case
 // TestHandlePacket_StructuralStubRecoversAfterHostChange guards, extended
 // into the time domain: a renderer that failed structurally, went quiet for
 // longer than RendererTTL, and came back at a new address must still be
@@ -935,7 +983,8 @@ func oldestLocationIndex(recs []locationRecord) int {
 }
 
 // forgetLocation drops udn's recorded Location — called when ssdp:byebye
-// removes the renderer, so the map tracks live devices only.
+// removes the renderer, and when the cache refuses a fetch's result (store),
+// so the map tracks live devices only.
 //
 // Deliberately does NOT drop an inFlight claim: that claim is owned by the
 // running fetch's defer (so it can't leak), and clearing it here would let
@@ -1042,17 +1091,16 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		}
 		// Classify the failure. A STRUCTURAL failure (4xx / unparseable
 		// description / no AVTransport — see errStructuralDescription)
-		// can't be fixed by re-fetching, so stamp the stub with the
-		// far-future sentinel → EvictStale never ages it out → the
-		// exists-branch never retries it (no storm). A TRANSIENT failure
-		// (timeout / dial / 5xx) keeps the real fail-time LastSeenAt → the
-		// stub ages out + is re-discovered + retried on a later cycle.
-		// Both stubs stay hidden from /v1/renderers (no ControlURL).
-		// (Gemini consult — bridge-12.)
+		// won't be fixed by re-fetching soon, so the stub is stamped to
+		// last structuralStubHold → the exists-branch leaves it alone that
+		// long (no storm). A TRANSIENT failure (timeout / dial / 5xx) keeps
+		// the real fail-time LastSeenAt → the stub ages out + is
+		// re-discovered + retried on a later cycle. Both stubs stay hidden
+		// from /v1/renderers (no ControlURL). (Gemini consult — bridge-12.)
 		structural := errors.Is(err, errStructuralDescription)
 		stubLastSeen := lastSeenAt
 		if structural {
-			stubLastSeen = structuralStubLastSeen
+			stubLastSeen = structuralStubLastSeen(lastSeenAt, c.cfg.RendererTTL)
 		}
 		packageLogger.Debug("device description fetch failed",
 			"udn", udn,
@@ -1071,7 +1119,7 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		// (now unreachable) URL and refresh LastSeenAt, pinning an
 		// undrivable renderer forever. See RendererCache.Replace.
 		c.recordLocation(udn, location)
-		c.cache.Replace(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
+		c.store(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
 		return
 	}
 
@@ -1105,7 +1153,7 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	// renderer, so nothing from the pre-move entry (a stale
 	// RenderingControlURL at the old address, say) may survive by merge.
 	c.recordLocation(udn, location)
-	c.cache.Replace(RendererInfo{
+	if !c.store(RendererInfo{
 		UDN:                 udn,
 		FriendlyName:        desc.FriendlyName,
 		Manufacturer:        desc.Manufacturer,
@@ -1116,11 +1164,29 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		RenderingControlURL: desc.Services[ServiceRenderingControl].ControlURL,
 		SinkProtocolInfos:   sinks,
 		LastSeenAt:          lastSeenAt,
-	})
+	}) {
+		return
+	}
 	packageLogger.Info("renderer discovered",
 		"udn", udn,
 		"friendlyName", desc.FriendlyName,
 		"sinkCount", len(sinks))
+}
+
+// store writes a fetch's result for its UDN (RendererCache.Replace) and
+// reports whether the cache took it. A refused result is a NEW UDN meeting a
+// cache full of renderers (see MaxCachedDevices), so it leaves nothing
+// behind: the fetch recorded udn's Location just before, and udn is neither
+// cached nor, once this fetch returns, in flight. Its next announcement
+// dispatches a fetch again.
+func (c *SSDPDiscoveryClient) store(info RendererInfo) bool {
+	if c.cache.Replace(info) {
+		return true
+	}
+	c.forgetLocation(info.UDN)
+	packageLogger.Debug("renderer not cached: the cache holds its bound of renderers",
+		"udn", info.UDN, "bound", MaxCachedDevices)
+	return false
 }
 
 // Cache returns the underlying renderer cache for read access by

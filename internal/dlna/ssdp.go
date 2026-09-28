@@ -138,6 +138,19 @@ type SSDPAdvertiser struct {
 	// constructor; immutable thereafter, so it's safe to read without
 	// the lock.
 	searchSem chan struct{}
+
+	// notifyErrs reports the NOTIFY ssdp:alive bursts that fail, one result
+	// per burst: discovery.SendFailureLog, the discovery clients' M-SEARCH
+	// policy (a Warn when a streak starts, one Error at its second failed
+	// burst at the default 14-minute cadence, a line on recovery). A burst
+	// is ticker-driven like an M-SEARCH, so its failure is persistent by
+	// nature: an interface that lost its address or route fails every
+	// burst until it comes back. Until 2026-09-28 each failed write logged
+	// at Debug alone, so an advertiser that could no longer announce was
+	// silent at the default level (backlog B47). Start builds it (so each
+	// run starts a fresh streak); Start's initial burst and the periodic
+	// goroutine note results, and nothing else touches it.
+	notifyErrs discovery.SendFailureLog
 }
 
 // NewSSDPAdvertiser constructs an advertiser with the given config.
@@ -182,6 +195,8 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 			s.log = ssdpLogger
 		}
 	}
+	s.notifyErrs = discovery.NewSendFailureLog(s.log, "NOTIFY", interfaceName(s.cfg.Interface),
+		"DLNA advertising", s.cfg.AdvertiseInterval)
 
 	addr, err := net.ResolveUDPAddr("udp4", SSDPMulticastAddr)
 	if err != nil {
@@ -245,7 +260,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	// every concurrent reader holds a local copy, and the only struct-
 	// field access (Start write, Stop close+nil) is serialized under
 	// `s.mu`.
-	s.sendAliveAll(sender)
+	s.announceAlive(sender)
 
 	// Periodic NOTIFY goroutine — captures `sender` locally.
 	s.wg.Add(1)
@@ -336,7 +351,7 @@ func (s *SSDPAdvertiser) runPeriodicNotify(ctx context.Context, sender *net.UDPC
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.sendAliveAll(sender)
+			s.announceAlive(sender)
 		}
 	}
 }
@@ -482,36 +497,48 @@ func (s *SSDPAdvertiser) handleMSearch(ctx context.Context, packet []byte, src *
 	}
 }
 
+// announceAlive sends one NOTIFY ssdp:alive burst and reports its result to
+// notifyErrs: the initial burst Start sends and every periodic one.
+func (s *SSDPAdvertiser) announceAlive(sender *net.UDPConn) {
+	s.notifyErrs.Note(s.sendAliveAll(sender))
+}
+
 // sendAliveAll sends one NOTIFY ssdp:alive packet per NotifyTarget,
-// in order. Takes the `sender` socket explicitly — callers pass their
-// thread-local copy so this never touches `s.sender` (race-free with
-// `Stop()`'s nil-set). Logs errors at Debug level (transient send
-// failures are not actionable; the next periodic tick retries). The
-// nil guard is on the PARAMETER (defensive — non-nil in practice on
-// every live caller).
+// in order, and returns the burst's result: nil when every packet went
+// out, else the first failure. Takes the `sender` socket explicitly —
+// callers pass their thread-local copy so this never touches `s.sender`
+// (race-free with `Stop()`'s nil-set). Each failed write is also logged
+// at Debug, naming its target; the burst's result is what reaches the
+// default level, through notifyErrs. The nil guard is on the PARAMETER
+// (defensive — non-nil in practice on every live caller).
 //
-// A write that meets net.ErrClosed ends the burst without a line: Stop
-// closed the sender under a burst the periodic goroutine had begun, and
-// every target left would meet the same closed socket. Only Stop closes
-// this socket, so that error names the stop exactly, the rule
-// discovery.SendFailureLog applies to the discovery clients' M-SEARCH
-// sends. Until 2026-09-28 such a burst logged one line per remaining
-// target.
-func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) {
+// A write that meets net.ErrClosed ends the burst without a line, and is
+// what the burst returns: Stop closed the sender under a burst the
+// periodic goroutine had begun, and every target left would meet the same
+// closed socket. Only Stop closes this socket, so that error names the
+// stop exactly, and discovery.SendFailureLog drops it, the rule it applies
+// to the discovery clients' M-SEARCH sends. Until 2026-09-28 such a burst
+// logged one line per remaining target.
+func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) error {
 	if sender == nil {
-		return
+		return nil
 	}
+	var first error
 	for _, target := range s.targets {
 		pkt := BuildNotifyAlive(s.cfg.Location, s.cfg.ServerToken, target)
 		if _, err := sender.Write(pkt); err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				return
+				return err
 			}
 			s.log.Debug("NOTIFY alive send failed",
 				slog.String("nt", target.NT),
 				slog.String("err", err.Error()))
+			if first == nil {
+				first = err
+			}
 		}
 	}
+	return first
 }
 
 // sendByebyeAll sends one NOTIFY ssdp:byebye packet per NotifyTarget.

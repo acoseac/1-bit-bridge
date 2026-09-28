@@ -231,7 +231,9 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	if strings.TrimSpace(name) == "" {
 		name = srv.Name
 	}
-	p.cache.Upsert(ServerInfo{
+	// UpsertConfigured, never the bounded Upsert: the operator named this
+	// server, and a flood of SSDP fakes must not keep it out of the cache.
+	p.cache.UpsertConfigured(ServerInfo{
 		// The StableServerKey, deliberately — see the file docblock.
 		UDN:                        srv.Key,
 		FriendlyName:               name,
