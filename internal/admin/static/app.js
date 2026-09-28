@@ -3381,14 +3381,32 @@ let traySeq = 0;
 // place so a tray opened afterwards shows the new value rather than the
 // one from page load.
 //
-// Dropped on every page init (see dispatchPageInit), NOT held for the
-// session: config changes from places this module never sees — the
-// Settings form, the CLI, another tab, a second browser — and a tray
-// showing a value from three navigations ago is the same
-// two-surfaces-disagree failure the cross-tray re-sync below exists to
-// prevent. One request per visit to a page that has trays.
+// Dropped on every page init (see dispatchPageInit) and on every player
+// route (window.BridgeFeatureTray.invalidate, from boot.js's route(); the
+// player never runs a page init, and until 2026-09-28 it held one snapshot
+// for the whole page load), NOT held for the session: config changes from
+// places this module never sees — the Settings form, the CLI, another tab,
+// a second browser — and a tray showing a value from three navigations ago
+// is the same two-surfaces-disagree failure the cross-tray re-sync below
+// exists to prevent. One request per visit to a page that has trays.
 let traySettings = null;
 let traySettingsPromise = null;
+
+// The settings fields the control plane owns on this bridge (a snapshot's
+// `managedSettings`, the effective set the PATCH refuses), or null before
+// any snapshot has landed in this document. Kept across
+// invalidateTraySettings on purpose: a console cannot change the deployment
+// block, so a tray built after the first snapshot leaves a managed row out
+// from its first paint, rather than showing it until its own fetch lands.
+// Every snapshot that lands replaces it.
+let trayManaged = null;
+
+// trayFieldManaged reports whether the control plane owns a field, as the
+// last snapshot said. Unknown is not managed: before the first snapshot a
+// tray's rows are all shown, and all disabled until it lands (syncTray).
+function trayFieldManaged(field) {
+  return !!trayManaged && trayManaged.has(field);
+}
 
 // Every tray mounted on the CURRENT page, so a save in one can re-sync
 // the others: analysisEnabled appears on both the Audio analysis card
@@ -3409,12 +3427,29 @@ function invalidateTraySettings() {
   traySettingsPromise = null;
 }
 
+// traySettingsSnapshot answers the shared settings snapshot, fetching it
+// once per drop. A request answers the cache only while it is still the
+// request the cache is waiting on: invalidateTraySettings says that
+// anything fetched before it is stale, and until 2026-09-28 it left the
+// request running, so its answer still became the snapshot when it landed,
+// over a newer answer or in place of the one the new page waited for, and
+// its failure dropped the newer request (CodeRabbit on #1088).
 function traySettingsSnapshot() {
   if (traySettings) return Promise.resolve(traySettings);
   if (!traySettingsPromise) {
-    traySettingsPromise = API.get("/api/settings")
-      .then((s) => { traySettings = s || {}; return traySettings; })
-      .catch((err) => { traySettingsPromise = null; throw err; });
+    const request = API.get("/api/settings")
+      .then((s) => {
+        const answer = s || {};
+        if (traySettingsPromise !== request) return answer;
+        traySettings = answer;
+        trayManaged = new Set(Array.isArray(answer.managedSettings) ? answer.managedSettings : []);
+        return answer;
+      })
+      .catch((err) => {
+        if (traySettingsPromise === request) traySettingsPromise = null;
+        throw err;
+      });
+    traySettingsPromise = request;
   }
   return traySettingsPromise;
 }
@@ -3509,7 +3544,11 @@ function buildFeatureTray(spec) {
   // a save, so a reader who never opens one accumulates them silently.
   // (Gemini on PR #763.)
   pruneDetachedTrays();
-  const entry = { tray, controls };
+  const hasNote = (spec.rows || []).some((row) => row.type === "note");
+  const entry = { button, tray, controls, hasNote };
+  // From the first paint when a snapshot has already told this document
+  // which fields are managed; syncTray applies it again when one lands.
+  applyTrayManaged(entry);
   mountedTrays.add(entry);
   pageSignal().addEventListener("abort", () => mountedTrays.delete(entry), { once: true });
 
@@ -3598,7 +3637,7 @@ function buildTrayRow(row, status, controls, onSaved) {
     wrap.appendChild(hint);
   }
 
-  const ctl = { row, input, onSaved };
+  const ctl = { row, input, onSaved, wrap };
   controls.push(ctl);
   // change, not input: a number field would otherwise PATCH on every
   // keystroke, and "6" on the way to "60" is a real, saved value.
@@ -3725,9 +3764,48 @@ function syncTray(entry) {
     trayApplyValue(ctl, traySettings[ctl.row.field]);
     ctl.input.disabled = false;
   }
+  applyTrayManaged(entry);
+}
+
+// applyTrayManaged leaves out of a tray every row whose field the control
+// plane owns on this bridge, and hides the gear once nothing is left to
+// show.
+//
+// The settings PATCH refuses a managed field, so a switch offered for one
+// could only answer "Save failed", which is what every tray did on a
+// managed bridge until 2026-09-28 (backlog B35): the variant panel's gear
+// offered PCM upscaling and CarPlay, the Jobs page's Backups and Update
+// checks gears offered nothing else. Hidden, not shown disabled, as the
+// Settings page hides the same fields (hideManagedSettings) and the library
+// page leaves out the roots form: a greyed switch on a hosted bridge reads
+// as something the reader could earn. The row's input is disabled too, so
+// nothing can send it. A tray keeps its gear while a field row or a note
+// row is left, since a note is written for the reader whatever the switches
+// are (History's).
+function applyTrayManaged(entry) {
+  let shown = entry.hasNote;
+  for (const ctl of entry.controls) {
+    const managed = trayFieldManaged(ctl.row.field);
+    ctl.wrap.hidden = managed;
+    if (managed) ctl.input.disabled = true;
+    else shown = true;
+  }
+  entry.button.hidden = !shown;
+  if (!shown && !entry.tray.hidden) {
+    entry.tray.hidden = true;
+    entry.button.setAttribute("aria-expanded", "false");
+  }
 }
 
 async function saveTrayField(ctl, status) {
+  // The console sends only what it showed. A managed row is hidden and its
+  // input disabled (applyTrayManaged), so only a change dispatched from
+  // script gets here, and the PATCH would refuse it whole: snap the control
+  // back and send nothing.
+  if (trayFieldManaged(ctl.row.field)) {
+    if (traySettings) trayApplyValue(ctl, traySettings[ctl.row.field]);
+    return;
+  }
   const value = trayValueOf(ctl);
   if (value == null) {
     status.dataset.tone = "err";
@@ -3736,6 +3814,12 @@ async function saveTrayField(ctl, status) {
   }
   status.dataset.tone = "";
   status.textContent = "Saving…";
+  // Disabling a focused control moves focus to the body (the focus fixup
+  // rule), and enabling it again does not give focus back, so every tray
+  // save left a keyboard user nowhere until 2026-09-28 (Chrome 152). The
+  // finally below gives focus back to the switch if it had it, unless
+  // something else took focus while the save was out.
+  const hadFocus = document.activeElement === ctl.input;
   ctl.input.disabled = true;
   let appliedLive = false;
   try {
@@ -3775,6 +3859,10 @@ async function saveTrayField(ctl, status) {
     status.textContent = `Save failed: ${err.message || err}`;
   } finally {
     ctl.input.disabled = false;
+    const at = document.activeElement;
+    if (hadFocus && ctl.input.isConnected && (!at || at === document.body)) {
+      ctl.input.focus({ preventScroll: true });
+    }
   }
   // A save the server applied live can change what the page around the
   // tray shows, and only the page can redraw that: the variant panel's
@@ -3817,9 +3905,11 @@ function attachFeatureTray(head, spec) {
 // The player module is an ES module and app.js is a deferred classic
 // script, so there is no import between them — the same one-way window
 // handshake boot.js already uses for window.__player, in the other
-// direction. Exposed as a function rather than the internals so the
-// player cannot reach the snapshot cache.
-window.BridgeFeatureTray = { build: buildFeatureTray };
+// direction. Exposed as functions rather than the internals so the
+// player cannot reach the snapshot cache. `invalidate` is what the
+// player's router calls on each route, the drop an operator page gets
+// from dispatchPageInit, which the player never runs.
+window.BridgeFeatureTray = { build: buildFeatureTray, invalidate: invalidateTraySettings };
 
 // showUpnpRestartBanner injects (or refreshes) a one-time "Restart
 // required" banner above the configured panel so the operator knows
@@ -4029,7 +4119,7 @@ async function renderSettingsPrereqs() {
     for (const c of doctor.report.checks) checks.set(c.name, c);
   }
 
-  const paint = (slot, { running, degradedReason, check, offLabel }) => {
+  const paint = (slot, { running, degradedReason, check, justFound, offLabel }) => {
     if (!slot) return;
     slot.hidden = false;
     if (running) {
@@ -4046,7 +4136,7 @@ async function renderSettingsPrereqs() {
       const live = check?.status === "ok";
       slot.dataset.state = "warn";
       slot.textContent = live
-        ? "not running yet — sox was just found; picked up within a minute"
+        ? `not running yet — ${justFound}; picked up within a minute`
         : `not running — ${check ? check.summary : degradedReason}`;
       return;
     }
@@ -4059,6 +4149,7 @@ async function renderSettingsPrereqs() {
     running: !!(jobs?.analysis?.enabled && !jobs.analysis.degradedReason),
     degradedReason: jobs?.analysis?.enabled ? jobs.analysis.degradedReason : "",
     check: audio,
+    justFound: "sox was just found",
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
   // `enabled` here is the RUNTIME verdict, not the persisted config flag:
@@ -4074,13 +4165,21 @@ async function renderSettingsPrereqs() {
     running: !!(upscale?.enabled),
     degradedReason: upscale && !upscale.enabled && upscaleSwitch?.checked ? "sox_missing" : "",
     check: audio,
+    justFound: "sox was just found",
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
+  // `active` is the fingerprint gate (the switch AND fpcalc AND a key),
+  // `enabled` the switch alone. The chip read `enabled` as running until
+  // 2026-09-28, so it said "active" beside a switch whose card said
+  // degraded, on a bridge without fpcalc: the upscale chip's defect, one
+  // switch over.
+  const fpJob = jobs?.fingerprint;
   const fp = checks.get("fingerprint-toolchain");
   paint(slots.fingerprint, {
-    running: !!(jobs?.fingerprint?.enabled),
-    degradedReason: "",
+    running: !!(fpJob?.active),
+    degradedReason: fpJob?.enabled && !fpJob.active ? (fpJob.degradedReason || "degraded") : "",
     check: fp,
+    justFound: "fpcalc was just found",
     offLabel: fp?.status === "ok" ? "off" : "off — needs fpcalc and an AcoustID key",
   });
 }
@@ -5254,30 +5353,30 @@ function initJobs() {
   }, "Cleared — will retry");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
-  // gets its own handler instead of wireJobButton — the post-click state
-  // must LATCH (the /api/jobs snapshot keeps reporting the startup flag
-  // until the restart, and a refresh must not reset the button).
+  // gets its own handler instead of wireJobButton. The switch applies live,
+  // so the card is redrawn as soon as the save lands: it reads "active", or
+  // "degraded" with what is missing (fpcalc, the AcoustID key) in its note,
+  // and the button goes. It latched "Enabled — restart to apply" until
+  // 2026-09-28, from when /api/jobs reported the switch as it was at
+  // startup; both halves are live since.
   const fpEnable = document.getElementById("jobs-fp-enable");
   fpEnable?.addEventListener("click", async () => {
     fpEnable.disabled = true;
     try {
       await API.patch("/api/settings", { fingerprintEnabled: true });
-      fpEnable.dataset.latched = "true";
-      fpEnable.textContent = "Enabled — restart to apply";
-      const hint = document.getElementById("job-fp-hint");
-      if (hint) {
-        hint.textContent =
-          "Enabled. Add your AcoustID key (if you haven't yet) and restart " +
-          "the bridge to start fingerprinting. ";
-        const a = document.createElement("a");
-        a.href = "/settings?tab=enrichment";
-        a.textContent = "Fingerprint settings";
-        hint.appendChild(a);
-      }
     } catch (err) {
       fpEnable.disabled = false;
       fpEnable.textContent = "Enable failed — retry";
+      return;
     }
+    fpEnable.disabled = false;
+    fpEnable.textContent = "Enable";
+    // The card's own gear offers the same switch: show it saved there too,
+    // as a tray's own save does for every tray on the page.
+    if (traySettings) traySettings.fingerprintEnabled = true;
+    for (const t of mountedTrays) syncTray(t);
+    // A failed refresh is the 10 s poll's to repeat: the save has landed.
+    await jobsSnapshotRefresh().catch(() => {});
   });
   wireJobButton("jobs-backup-now", () => API.post("/api/backups"), "Snapshot written");
   wireJobButton("jobs-mix-regen", async () => {
@@ -5385,7 +5484,8 @@ function mountJobTrays() {
       {
         field: "fingerprintEnabled", type: "switch", label: "Fingerprint unmatched tracks",
         hint: "Needs fpcalc on the bridge host and a free AcoustID application " +
-          "key — without either it degrades to off at startup.",
+          "key; without either the card says which is missing, and it starts once " +
+          "both are there, with no restart.",
       },
     ],
     link: { href: "/settings?tab=enrichment", text: "Fingerprint settings →" },
@@ -5605,6 +5705,33 @@ const JOB_DEGRADED_LABELS = {
   no_api_key: "no AcoustID API key configured (ACOUSTID_API_KEY)",
 };
 
+// jobDegradedLabel words a card's degraded key, the key itself when the
+// table has no words for it.
+function jobDegradedLabel(key) {
+  return JOB_DEGRADED_LABELS[key] || key || "a prerequisite is missing";
+}
+
+// showJobDegraded says why a card whose switch is on does no work, in the
+// card's degraded note, or hides the note when `why` is "". `trigger`
+// names the card's own sweep button.
+//
+// An element of its own, never the description's text. Every gate these
+// cards report is live (the flag AND the tool, or the key, probed on a 30 s
+// cache), so a card that goes degraded comes back by itself once the tool is
+// installed, and its description has to come back with it. The analysis and
+// fingerprint cards wrote the reason OVER the description until 2026-09-28,
+// with "Restart after fixing.", false since #781 made the gates live, and
+// the reason then stayed beside an "active" badge until a reload.
+function showJobDegraded(id, why, trigger) {
+  const note = document.getElementById(id);
+  if (!note) return;
+  note.hidden = !why;
+  note.textContent = why
+    ? `Enabled but inactive: ${why}. No restart is needed once it is fixed: ` +
+      `the card turns on within a minute, and the next sweep (or ${trigger}) takes up the work.`
+    : "";
+}
+
 function renderJobCards(j) {
   if (!j || !document.getElementById("jobs-page-root")) return;
 
@@ -5632,10 +5759,8 @@ function renderJobCards(j) {
     setBadge("job-analysis-state", "idle", "off");
   }
   if (analyzeBtn) analyzeBtn.hidden = !an.active;
-  const hint = document.getElementById("job-analysis-hint");
-  if (hint && an.enabled && !an.active && an.degradedReason) {
-    hint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[an.degradedReason] || an.degradedReason}. Restart after fixing.`;
-  }
+  showJobDegraded("job-analysis-degraded",
+    an.enabled && !an.active ? jobDegradedLabel(an.degradedReason) : "", "Analyze now");
   renderAnalysisCoverage(an.coverage);
   const sweep = an.sweep;
   if (sweep) {
@@ -5654,30 +5779,17 @@ function renderJobCards(j) {
     else if (fp.enabled) setBadge("job-fp-state", "warn", "degraded");
     else setBadge("job-fp-state", "idle", "off");
     if (fpBtn) fpBtn.hidden = !fp.active;
-    // The Enable button shows only while the STARTUP flag is off. After a
-    // click, the /api/jobs closure keeps reporting the startup value until
-    // the restart, so the click handler latches the button and this
-    // refresh must not un-latch it back to "Enable".
+    // The Enable button shows while the switch is off. The switch is live
+    // (fingerprintEnabled answers `live`, and /api/jobs reads it per
+    // request), so the refresh after a click hides it; it latched
+    // "Enabled — restart to apply" until 2026-09-28, written when this card
+    // reported the switch as it was at startup.
     const fpEnable = document.getElementById("jobs-fp-enable");
-    // NOT `fpEnable?.dataset.latched !== "true"`, which SonarCloud js:S6582
-    // would have you write: with no element that reads `undefined !== "true"`,
-    // i.e. TRUE, and the body then throws on fpEnable.hidden. The `&&` form
-    // guards the element; the optional-chain form guards only the lookup, and
-    // a `!==` downstream inverts the miss.
-    if (fpEnable && fpEnable.dataset.latched !== "true") {
-      fpEnable.hidden = fp.enabled;
-    }
-    const fpHint = document.getElementById("job-fp-hint");
-    if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
-      // textContent wipes the static settings link along with the old
-      // text; re-append it so the fix for a degraded state (missing key)
-      // stays one click away.
-      fpHint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[fp.degradedReason] || fp.degradedReason}. Restart after fixing. `;
-      const fpLink = document.createElement("a");
-      fpLink.href = "/settings?tab=enrichment";
-      fpLink.textContent = "Fingerprint settings";
-      fpHint.appendChild(fpLink);
-    }
+    if (fpEnable) fpEnable.hidden = fp.enabled;
+    // The description beneath keeps its "Fingerprint settings" link, which
+    // is where a missing key is fixed.
+    showJobDegraded("job-fp-degraded",
+      fp.enabled && !fp.active ? jobDegradedLabel(fp.degradedReason) : "", "Sweep now");
     setText("job-fp-last", fp.running ? "sweeping now" : agoOrDash(fp.lastFinishedAt));
     setText("job-fp-next", formatInFuture(fp.nextDueAt));
     setText("job-fp-counts", fp.last
@@ -5697,25 +5809,13 @@ function renderJobCards(j) {
     // missing tool, and it is said, not rendered as "off": every sweep
     // the gate refuses records `disabled`, which formatAutoOptimizeResult
     // alone would call "turned off" beside a switch that is on.
-    const aoDegraded = ao.enabled && !ao.active
-      ? (JOB_DEGRADED_LABELS[ao.degradedReason] || ao.degradedReason || "the toolchain is unusable")
-      : "";
+    const aoDegraded = ao.enabled && !ao.active ? jobDegradedLabel(ao.degradedReason) : "";
     if (ao.active) setBadge("job-ao-state", "running", "on");
     else if (aoDegraded) setBadge("job-ao-state", "warn", "degraded");
     else setBadge("job-ao-state", "idle", "off");
     const aoBtn = document.getElementById("jobs-ao-now");
     if (aoBtn) aoBtn.hidden = !ao.active;
-    // Its own element, not the hint's text: the gate is live, so a card
-    // that goes degraded comes back when sox is installed, and the
-    // description beneath has to come back with it.
-    const aoWhy = document.getElementById("job-ao-degraded");
-    if (aoWhy) {
-      aoWhy.hidden = !aoDegraded;
-      aoWhy.textContent = aoDegraded
-        ? `Enabled but inactive: ${aoDegraded}. No restart is needed once it is fixed: ` +
-          "the card turns on within a minute, and the next sweep (or Sweep now) takes up the work."
-        : "";
-    }
+    showJobDegraded("job-ao-degraded", aoDegraded, "Sweep now");
     const last = ao.last;
     setText("job-ao-remaining", formatAutoOptimizeRemaining(last));
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));

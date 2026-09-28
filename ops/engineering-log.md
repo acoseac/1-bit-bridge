@@ -27533,3 +27533,345 @@ now under the default TTL and twenty minutes, and
   and the pin to loopback both take (review round 1, above).
 - B71: `IP_MULTICAST_ALL` and a multi-homed Linux bridge's advertisers.
 - (3) and (5), as decided above.
+
+## 2026-09-28 — the console's tool state and its feature trays: one sox probe, notes that clear, trays that redraw and offer no managed switch (backlog B35, B45)
+
+Two backlog items taken together. B45: the analysis card's "Restart after
+fixing." (wrong since #781 made the gate live) and the console's own 30 s
+cache of the sox check on top of the shared one, which #1067's entry above
+names as leftovers. B35: the player's Smart mixes tray did not redraw the
+page after a save (#1068 did it for the variant panel's two trays), and
+every tray ignored `deployment.managedSettings`. Every claim was checked
+against the code first; each held, and each had siblings the entries did
+not name, recorded below with the reason they were taken.
+
+### Measured on the old code
+
+Two throwaway bridges built from 84a3df20, driven in a browser tab: a
+loopback one (upscale and analysis on, CarPlay and Smart mixes off, its PATH
+cut to an empty scratch directory plus `/usr/bin:/bin`, so sox came and went
+by a symlink dropped into that directory), and a public one per CLAUDE.md's
+public-mode recipe with `managedSettings: [optimizeEnabled, upscaleEnabled]`
+and `managedControls: [updates, backups]` (seven fields in the effective set).
+
+- **The analysis card.** Without sox the card read "degraded", and its
+  description was replaced by "Enabled but inactive: sox is not installed on
+  the bridge host, or has no FLAC support. Restart after fixing." With sox
+  linked back and 35 s passed (the probe's TTL), `jobsSnapshotRefresh()` on
+  the same open page (the tab sat in a hidden pane, where the 10 s poll
+  pauses, so the poll's own function was called): badge "active", "Analyze
+  now" shown, and the same sentence still in place of the description.
+- **The fingerprint card.** Enable, clicked with fpcalc off the PATH: the
+  button latched "Enabled — restart to apply" and stayed so after the
+  refresh (it never hides again until a reload), the hint said "Enabled. Add
+  your AcoustID key (if you haven't yet) and restart the bridge to start
+  fingerprinting.", then "Enabled but inactive: fpcalc is not installed on
+  the bridge host. Restart after fixing. Fingerprint settings". `/api/jobs`
+  already said `enabled: true, active: false, degradedReason:
+  fpcalc_missing`. The Settings chip beside the switch said "active".
+- **`soxAvailable` behind `enabled`.** A probe script left the bridge idle
+  35 s (both caches expired), read `/v1/health` (the shared probe, through
+  the gate), 20 s later `/api/upscale/stats` (the console's cache refreshes
+  on the shared one), then removed sox and polled both stats endpoints every
+  second: from t=53 to t=67 both answered `enabled: false` beside
+  `soxAvailable: true`. The lag is set by the two caches' phases, anywhere
+  from 0 to 30 s; an earlier free-running measurement happened to land 1 s
+  apart. The /v1 adapters had the same shape with a private probe each.
+- **Smart mixes.** On the loopback bridge with the switch off, the page's
+  gear saved "Generate smart mixes" on ("Saved.", `/api/settings` and
+  `/api/jobs` both on), and the page kept "Smart mixes are off / Turn them
+  on with the gear above"; the player's own links Albums → Smart mixes gave
+  the same, since the view read `seed.mixesEnabled`.
+- **Managed.** On the public bridge, the Hi-Res album's Variants gear
+  offered "PCM upscaling" and "CarPlay-optimized variants", both enabled, and
+  a click answered "Save failed: these settings are managed by the control
+  plane on this bridge and cannot be changed here: upscaleEnabled". On the
+  Jobs page three trays offered six managed fields, and the Backups and
+  Update checks trays offered nothing else, gears showing.
+
+### What changed
+
+- **One sox probe per surface.** The console's
+  `cachedSoxAvailability` and its three `Server` fields are gone:
+  `soxAvailability` reads `Deps.UpscalePrecheck` per snapshot, which runServe
+  wires to `soxCache.precheck`, the probe the upscale and analysis gates
+  read. `upscaleStatsAdapter` and `analysisStatsAdapter` lost their private
+  caches and take `soxPrecheck` (the same `soxCache.precheck`);
+  `precheckPassed` answers nil when none is wired, as the console does. The
+  stale comments that named the old cache as an alignment mechanism went
+  with it.
+- **The job cards' notes.** jobs.html gives the analysis and
+  fingerprint cards a `hint warn` note of their own, as #1067 gave the
+  CarPlay card; `showJobDegraded` fills or hides it for all three, and
+  `jobDegradedLabel` words the key. The Enable button PATCHes, updates the
+  page's tray snapshot as a tray's own save does, and refreshes the card; the
+  latch is gone, and the button hides because `fp.enabled` is live. The
+  fingerprint tray's hint no longer says "at startup". The Settings chip
+  reads `jobs.fingerprint.active` as running and its `degradedReason` as the
+  reason, and `paint` takes the "was just found" phrase per feature (sox,
+  fpcalc) instead of always naming sox.
+- **The boot line.** It says "…so it stays off until sox is installed (no
+  restart needed)" in place of "— disabling", for both of its shapes.
+- **Smart mixes.** `GET /api/player/mixes` answers
+  `playerMixesResponse`: the collections as before, `enabled` from
+  `SmartPlaylists.EffectiveEnabled()` per request (no mixes and no catalog
+  build while off), and `managed` when the control plane owns
+  `smartPlaylistsEnabled`. `playerPageData.MixesEnabled` and the route
+  context's `mixesEnabled` are gone. `renderMixes` builds the toolbar and
+  tray once per route and hands the tray an `onSaved` that, for
+  `smartPlaylistsEnabled` alone, calls `drawMixes`: fetch, then the grid (with
+  "Regenerate all" inserted ahead of the gear) or the off state, whose text
+  points at the gear only when `managed` is false. The redraw is refused once
+  the route generation has moved on. boot.js's `route()` calls
+  `BridgeFeatureTray.invalidate`, which app.js now publishes beside `build`.
+- **Managed trays.** `trayManaged`, set from each snapshot's
+  `managedSettings` and kept across `invalidateTraySettings`;
+  `applyTrayManaged`, run at build and in `syncTray`, hides a managed row's
+  wrapper, disables its input, and hides the gear (closing the tray) when no
+  field row and no note row is left; `saveTrayField` refuses a managed field
+  before anything is sent.
+- **A tray save gives focus back.** `saveTrayField` disables its switch while
+  the PATCH is out, and Chrome 152 moves focus off a focused control that
+  becomes disabled (the focus fixup rule) and leaves it on the body when the
+  control is enabled again: measured with a bare checkbox (focused, then
+  `disabled = true`, then `false`: `document.activeElement` is the body after
+  both). So every tray save, redraw or not, left a keyboard user on the body.
+  The save now notes whether the switch had focus before it disables it, and
+  in its `finally` gives focus back (`preventScroll`) when the switch is
+  still connected and nothing else has taken focus meanwhile.
+
+### Decisions
+
+- **Hidden, not read-only.** B35 allowed either. The console already
+  decided this twice: `hideManagedSettings` hides the field, and
+  library.html leaves out the roots form on a managed bridge ("Absent rather
+  than disabled: … a greyed form would read as something they could earn").
+  A tray is one more place the same field is offered, so it follows. The
+  gear goes when nothing is left, the collapse rule the Settings page applies
+  to a section, except that a note row counts: History's tray explains a
+  device-side switch whatever the bridge's switches are.
+- **The managed set is remembered, not seeded from the page.** Seeding it
+  into the layout (a body attribute) would make the first paint exact, at
+  the cost of a second source for one list; the Settings page already has
+  the same first-load window for the same list, and the tray's fetch
+  measured 2 ms on loopback. Remembering it across drops is what keeps a
+  tray built on a later route or page from flashing the row.
+- **In place, not a route re-render.** #1068's variant panel redraws by
+  `route()`, which rebuilds the toolbar, the tray, and moves focus to the
+  page title: the tray's "Saved." and the reader's place go. The Smart mixes
+  page keeps its tray and redraws the view and the controls ahead of the
+  gear. The generation guard is the one `route()` would have given for free,
+  written out.
+- **Focus comes back only to a switch that had it, and only to an empty
+  place.** Found on the final build: keyboard saves on the Smart mixes page
+  left focus on the body, for the Smart mixes switch (whose save redraws the
+  page) and for Audio analysis beside it (whose save redraws nothing), so the
+  in-place redraw was not what lost it; the tray's own disable was, since the
+  save began. Not "keep the switch enabled during the save": the disable is
+  what stops a second change while the first is out. Restoring only when
+  focus is on the body is what keeps a reader who
+  moved on during the save where they went; restoring only to a switch that
+  had focus keeps a pointer save from taking focus it never gave. The rest of
+  the console's controls that disable themselves during a request lose focus
+  the same way (`wireJobButton`'s buttons among them) and are left for their
+  own change.
+- **`managed` on the mixes answer.** With the switch managed and off, the
+  page's own sentence ("Turn them on with the gear above") would point at a
+  gear that no longer offers the switch. The server knows it; the tray's
+  snapshot may not have landed when the page paints.
+- **The per-route drop, because the view went live.** Before, the page seed
+  and the tray snapshot were both stale and agreed; with the view reading the
+  server and the snapshot still held for the page load, a switch turned on
+  elsewhere read on in the view and off in the gear. One `/api/settings`
+  fetch per route that mounts a tray.
+- **No cache of the console's own.** The cost it capped (a fork per 5 s
+  poll, CodeRabbit on PR #110) is the shared cache's to cap, and the SSE
+  tick already read that cache through the gate (`UpscaleStats` →
+  `upscaleActiveFn` → `soxOK`). The two tests that pinned the removed cache,
+  `…UpscaleSoxAvailabilityCached` and `…SoxAvailabilityProbeRunsUnlocked`,
+  went with it; what they protected is now the sweep's.
+- **Scope beyond the entries' text**, each the same claim on a sibling
+  surface: the fingerprint card carried the identical "Restart after
+  fixing." and never cleared either; its Enable button, its hint and its
+  tray hint made three more restart claims about a live gate; its Settings
+  chip read the switch as running (#1067's upscale-chip defect, one switch
+  over); the /v1 adapters kept the same second cache; the boot line said
+  "disabling" in the journal. Leaving any of them would have left a surface
+  telling the reader to restart, or saying "active", beside one that no
+  longer does.
+
+### Tests and controls
+
+- `internal/admin/stats_sox_availability_test.go`,
+  `TestTheStatsSoxAvailableIsThePrecheckTheGateReads`: the gate and the
+  precheck read one variable that moves between reads (on, off, on); red on
+  the old code at step 1 on both endpoints.
+- `cmd/bridge/sox_one_probe_test.go`, `TestServeReadsSoxThroughTheSharedProbe`:
+  an AST sweep of the package's non-test files; red on the old code naming
+  both adapters' `cachedSoxOK`. `cmd/bridge/stats_adapters_sox_test.go`:
+  `TestTheV1StatsAdaptersAnswerSoxFromTheirPrecheckEverySnapshot` and
+  `TestTheBootSoxLineSaysNoRestartIsNeeded` (red on the old wording).
+- `internal/admin/jobs_tool_state_test.go` runs the shipped `renderJobCards`
+  and `renderSettingsPrereqs` under node, extracting every top-level function
+  they reach except eight display helpers it stubs:
+  `TestAJobCardSaysWhyItIsInactiveBesideItsDescriptionAndClearsWhenActive`
+  and `TestTheFingerprintChipReadsTheGateNotTheSwitch`, both red on the old
+  app.js (the description overwritten and never restored; the chip
+  "active"). Its fake element keeps text as a child node, or a card whose
+  text is set and a link appended afterwards reads as the link alone.
+- `internal/admin/player_mixes_live_test.go`,
+  `TestThePlayerMixesAnswerTheSmartMixSwitchLive` (red: no `enabled`, no
+  `managed`); `player_mixes_view_test.go`,
+  `TestTheSmartMixesPageRedrawsInPlaceAfterItsGearSavesTheSwitch`, which
+  imports the shipped views.js under node (red on the old module: "off"
+  after the save, "gear above" on a managed bridge);
+  `feature_tray_managed_test.go`, `TestATrayOffersNoSwitchTheControlPlaneOwns`
+  (red on the old tray code, run with its extraction made tolerant of the
+  two helpers the old app.js lacks, in a scratch archive only);
+  `player_route_tray_snapshot_test.go`,
+  `TestThePlayerRouteDropsTheTraySnapshot`, structural, since `route()`
+  cannot run without booting the player. #1068's tray harness gained the
+  managed set and a settings answer copied per fetch (one shared object let
+  one case's save leak into the next).
+- `feature_tray_onsaved_test.go`, `TestATraySaveGivesFocusBackToItsSwitch`:
+  the harness models the fixup rule (a focused element that becomes disabled
+  hands focus to the body, and `focus()` takes it only while enabled), and
+  checks the switch took focus before each change so the model cannot pass
+  vacuously. Red on the code before the fix: focus on the body after a live,
+  restart, unchanged and refused save.
+
+Negative controls on the committed code, each restored with `git checkout
+--` and the test re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC1: the console caches the first precheck answer | the stats test, step 1, both endpoints |
+| NC2: the upscale adapter calls `transcode.PrecheckSox` itself | the sweep (naming `UpscaleStatsSnapshot`) and the adapter test, step 1 |
+| NC3: the analysis adapter wired to `func() error { return transcode.PrecheckSox() }` | the sweep, both halves (`runServe` probes; the wiring is `*ast.FuncLit`) |
+| NC4: the analysis card writes over its description again, with the corrected wording | the card test's analysis rows (note absent; description replaced and not restored) |
+| NC5: the note is never hidden again | the card test's "active again" rows, all three cards |
+| NC6: the fingerprint chip reads `enabled` as running | the chip test, cases 0 and 1 |
+| NC7: `applyTrayManaged` does nothing | the managed tray test, ten findings (rows and gears); the send guard still held |
+| NC8: the send guard removed | the managed tray test's send assertions alone |
+| NC9: a note row does not count | the "all managed beside a note" case alone |
+| NC10: no managed pass at build | the "managed set known at build" case alone |
+| NC11: the mixes page redraws for every field | the view test's audio-analysis step (one fetch) |
+| NC12: the redraw ignores the route generation | the view test's "after the reader left" step |
+| NC13: the save re-runs `renderMixes` (a whole-page rebuild) | the view test: a tray built per save, and the stale-route step |
+| NC14: the mixes answer ignores the switch | the endpoint test's off steps |
+| NC15: `route()` no longer drops the snapshot | the route test |
+| NC16: the save gives focus back to nothing | the focus test's four "switch" cases |
+| NC17: focus goes back even when something else took it | the focus test's "focus taken during the save" case alone |
+| NC18: focus goes back to a switch that never had it | the focus test's "never focused" case alone |
+
+### In a browser, after
+
+The same two bridges, with the same configs and the same loopback PATH, on
+a build of this branch taken before its rebases onto main's #1078–#1083
+(those commits share no file with this branch but CLAUDE.md and this log):
+
+- Analysis without sox: badge "degraded", the note "Enabled but inactive:
+  sox is not installed on the bridge host, or has no FLAC support. No
+  restart is needed once it is fixed: the card turns on within a minute, and
+  the next sweep (or Analyze now) takes up the work." as a warn-coloured
+  block under the list (computed `display: block`, 93 px), and the
+  description intact below it. Sox linked back, 32 s, refresh of the same
+  page: badge "active", "Analyze now" shown, the note `display: none` and
+  empty, the description unchanged.
+- Fingerprint: Enable → badge "degraded", the button hidden, the note naming
+  fpcalc beside the intact description (its "Fingerprint settings" link
+  kept), and the card's own tray showing the switch on. Settings chip: "not
+  running — fpcalc not found".
+- The lag probe, same phases as before: both endpoints answered `enabled:
+  false, soxAvailable: false` on the first poll after the change, and never
+  disagreed through t=72.
+- Smart mixes, loopback: the gear saved the switch on and the page showed
+  "No mixes generated yet" with "Regenerate all" beside the gear, the tray
+  still open on "Saved.", the same gear element and the same document. Saved
+  off again: the off state and no "Regenerate all". Switched on by a PATCH
+  from outside the page, then Albums → Smart mixes by the player's own
+  links: the page and the reopened tray both on. (This run also recorded
+  "focus still on the switch", in a hidden pane whose document did not
+  necessarily have focus; the next section's keyboard run, on a focused
+  document, found focus lost with the tray code this build had.)
+- Managed bridge: the Variants note "Variant generation is switched off for
+  this bridge." stood alone, no gear, both Generate buttons disabled; the
+  Jobs page's managed rows hidden and disabled, the Backups and Update checks
+  gears gone, a change dispatched to the hidden `upscaleEnabled` input sent
+  nothing and snapped back, and `autoOptimizeEnabled` in the same tray saved
+  on and off ("Saved." both times). With `smartPlaylistsEnabled` managed and
+  off, the Smart mixes page read "They are generated from your listening
+  history, and are switched off for this bridge.", its gear offering only
+  Audio analysis.
+- At 375 px: the document 375 wide with no overflow, the Jobs notes wrapping
+  inside their 343 px cards, and the Smart mixes toolbar holding "Regenerate
+  all" and the gear on one line.
+
+### On the final build
+
+#1084 changed `describeOrphanGCRefusal` in app.js, so once the branch was
+rebased onto it the three checks the backlog named were repeated on a build
+of the branch, on the same two bridges:
+
+- Analysis: without sox the note shown under the list with the description
+  intact; sox linked back and the same page's snapshot refreshed: "active",
+  "Analyze now", the note hidden and empty.
+- Smart mixes, by keyboard (the switch focused, Space): switched on, the
+  page redrew in place with the same gear element, the tray on "Saved." and
+  focus on the switch. That last one failed on the build before the focus
+  fix: focus on the body, for this switch and for Audio analysis beside it,
+  a `focusout` logged as the save began. With the fix, off again and Audio
+  analysis off and on: focus stayed on each switch.
+- Managed bridge: on the Jobs page the rows for `upscaleEnabled`,
+  `optimizeEnabled`, `smartPlaylistsEnabled`, `backupIntervalHours`,
+  `backupKeep`, `updateCheckIntervalHours` and `updateAutoInstall` hidden and
+  disabled, every other row shown and enabled, the Backups and Update checks
+  gears hidden; the Hi-Res album's Variants gear hidden beside "Variant
+  generation is switched off for this bridge.", both Generate buttons
+  disabled. No console errors on either bridge.
+
+### Left open (backlog B68)
+
+- Two controls outside the trays still offer a managed field: the Jobs
+  page's fingerprint Enable button and the Duplicates page's policy select.
+- The variant panel still redraws by `route()`, so its tray's "Saved." and
+  the reader's focus go with a save that changes the panel.
+- The CarPlay pre-generation tray's blurb ("All three switches have to be
+  on") stays beside one or two switches on a bridge that manages the
+  others.
+- `fingerprintFeatureReady` in cmd/bridge/upscale.go has no caller; its
+  messages still say "disabling".
+- Every other control the console disables while a request is out loses
+  focus the same way the tray switch did (`wireJobButton`'s buttons on the
+  Jobs page among them).
+
+### Review round 1: a dropped snapshot's request
+
+CodeRabbit (Major, on boot.js's new drop): `invalidateTraySettings`
+nulls the promise and leaves the request running, so its answer still
+writes `traySettings` and `trayManaged`. Verified against the code, and
+wider than stated: the old request's `.catch` also nulled the NEWER
+request's promise, so a caller meanwhile started a third fetch.
+
+- **Measured in a browser**, on the Jobs page (nine trays mounted), with
+  `API.get` wrapped to hold back one `/api/settings` answer for 2 s: a
+  request made with Smart mixes off, the switch then turned on by a PATCH,
+  a drop and a fresh snapshot (on), then the held answer landing. On the
+  build before the fix the snapshot went back to off and the next tray
+  sync (what every tray save runs) rendered the Smart mixes switch OFF
+  beside a server that held ON; on the fixed build the snapshot and the
+  switch stayed on. The player's route drop makes the window common: every
+  route that mounts a tray drops the snapshot, so a request from the page
+  being left is often in flight.
+- **Fix.** `traySettingsSnapshot` caches an answer, and clears the promise
+  on a failure, only while its request is still `traySettingsPromise`. No
+  new state: the drop already clears that promise, so promise identity is
+  the generation CodeRabbit proposed.
+- **Test.** `TestADroppedTraySnapshotIsNotCachedWhenItsAnswerArrives`
+  (`feature_tray_snapshot_test.go`) runs the shipped pair under node with
+  the answers released by hand: the old answer landing last, landing
+  first, and failing, beside a control with no drop. Red on the old code
+  in three steps (the old answer cached in both orders, three fetches).
+- **Controls**, on the committed fix: NC19, caching every answer, turns
+  the two "old answer" steps red; NC20, clearing the promise on any
+  failure, turns the failure steps red (three fetches, no snapshot).

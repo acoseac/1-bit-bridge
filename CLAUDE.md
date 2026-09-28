@@ -3177,7 +3177,9 @@ no failing test — which is the shape to expect in this area.
   never touched. `dropUnofferedFields` drops any key whose control is absent or
   inside something hidden; `dlnaEnabled` had done this for its own disabled-
   checkbox case since PR #342 and it was never generalised. No Go test can see
-  this — the payload is built in JS — so it took driving the real form.
+  this — the payload is built in JS — so it took driving the real form. The
+  feature trays sent managed fields too, until 2026-09-28 (the tray bullet
+  under **Admin console and the web player**).
 - **Hiding a settings field leaves its heading and its prose behind.**
   Sections are flat siblings, so `collapseEmptySettingsSections()` hides a
   heading only when its section had a `.field` and every one is now hidden,
@@ -4474,6 +4476,27 @@ mentions across the four `ops/audit-*.md` files.
   until the next change the same day made a tool the host lacks strike
   nothing and v48 expire the suppressions it had written (the TRANSCODE
   bullet under **Job pools**).
+- **…and a surface that reports the gate beside its tool reads both from
+  ONE probe: a cache over the shared one is a second clock** (2026-09-28,
+  backlog B45). The console's two stats endpoints kept a 30 s cache of the
+  sox precheck on top of `soxToolchainCache`, and the /v1 pair's two
+  adapters each kept one over a `transcode.PrecheckSox` of their own, so
+  `enabled` (the gate, on the shared probe) and `soxAvailable` (another
+  cache) answered probes up to 30 s apart. Measured with the real binary,
+  the two caches put 20 s out of phase and sox then taken off the PATH:
+  `enabled: false` beside `soxAvailable: true` for 14 s on both console
+  endpoints; after the fix they moved on the same poll. All three read
+  `soxCache.precheck` per snapshot now (the console's `soxAvailability`, the
+  adapters' `soxPrecheck`). The per-poll fork CodeRabbit flagged on #110 is
+  the shared cache's to cap: a warm read is a mutex and a clock read, and
+  the SSE tick already read that cache through the gate.
+  `TestServeReadsSoxThroughTheSharedProbe` refuses a sox probe anywhere in
+  cmd/bridge outside the shared probe and the CLI's once-per-run preflights
+  (`soxProbeCallers`), and requires every precheck wiring to be
+  `soxCache.precheck`. **Don't give a surface a cache of its own to save a
+  probe: give the shared one to it.** Serve's boot line about a feature
+  without sox said "— disabling", which reads as a demotion a restart
+  undoes; it says "stays off until sox is installed (no restart needed)".
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
@@ -5593,14 +5616,100 @@ its twin.** The top list is older, shorter, and read first.
   generation is off depends on the CarPlay switch, so a redraw for it
   would repaint the same panel and take the tray and its "Saved." away
   for nothing, the reason Generate does not redraw either. **Don't make
-  a tray redraw by itself, or a page redraw for every field.** The Smart
-  mixes tray takes no hook: its off state is `seed.mixesEnabled`, read
-  once per page load, which a re-render repaints unchanged, so it still
-  needs a reload (a follow-up).
+  a tray redraw by itself, or a page redraw for every field.**
   `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` runs the
   shipped `buildFeatureTray` and save under node, and
   `TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt` the shipped
   panel on the summaries the album detail serves.
+- **…and a page that redraws after a save reads what it draws from the
+  server, never the page seed** (2026-09-28, backlog B35). The Smart mixes
+  page drew its off state from `seed.mixesEnabled`, read once per page load,
+  and handed its tray no `onSaved`, so after its own gear saved the switch
+  on the page said "Smart mixes are off" beside "Saved.", and the player's
+  own navigation back to it said it again, until a reload (seen in a
+  browser). The seed is read once per page load and neither a save nor the
+  player's navigation reloads it, so **nothing a gear on a player page can
+  save belongs in it**. `GET /api/player/mixes` answers `enabled` per
+  request, and `managed` when the control plane owns the switch, so the off
+  state points at the gear only where the gear can turn it on. The page
+  redraws for `smartPlaylistsEnabled` alone, and IN PLACE: toolbar and tray
+  are built once per route, the redraw repaints the view and the bar ahead
+  of the gear, and is refused once the route has moved on, so the tray and
+  its "Saved." survive, which the variant panel's whole-route redraw does
+  not (a follow-up; the focus is the next bullet's). **The player also drops the
+  trays' shared settings snapshot on every route**
+  (`BridgeFeatureTray.invalidate`, from boot.js's `route()`), the drop an
+  operator page gets from its page init, which the player never runs: a
+  player tray showed a switch as it was at page load, beside a view that
+  now reads the server fresh.
+  `TestTheSmartMixesPageRedrawsInPlaceAfterItsGearSavesTheSwitch` runs the
+  shipped view under node; `TestThePlayerRouteDropsTheTraySnapshot` pins
+  the drop structurally, since `route()` cannot run without booting the
+  player. **A drop also discards the answer to a request made before it**
+  (CodeRabbit on #1088): `invalidateTraySettings` nulled the promise and
+  left the request running, so its answer still became the snapshot, over
+  a newer answer or in place of the one the new page waited for, and its
+  failure dropped the newer request. In a browser, with the older answer
+  held back: the Jobs page's Smart mixes switch rendered off at the next
+  tray sync while the server held on. `traySettingsSnapshot` caches an
+  answer, and drops a failed request, only while its request is still
+  `traySettingsPromise`
+  (`TestADroppedTraySnapshotIsNotCachedWhenItsAnswerArrives`).
+- **…and a tray save gives focus back to its switch** (2026-09-28). A save
+  disables its switch while the PATCH is out, and a browser moves focus off
+  a focused control that becomes disabled (the focus fixup rule) and does
+  not give it back when the control is enabled again (measured on Chrome
+  152). So every tray save left a keyboard user's focus on the body,
+  whatever the answer and whether or not the page redrew: on the Smart
+  mixes page the focus was gone before the in-place redraw ran, and
+  equally for the Audio analysis switch beside it, whose save redraws
+  nothing. `saveTrayField` notes whether the switch had focus before it
+  disables it and gives focus back once the save is over, unless something
+  else took focus meanwhile, and never takes focus the switch did not have.
+  `TestATraySaveGivesFocusBackToItsSwitch` runs the shipped save under node
+  with the fixup rule modelled in the harness. **Every other control the
+  console disables while a request is out loses focus the same way** (the
+  Jobs page's `wireJobButton` buttons among them): open (a follow-up).
+- **A tray offers no switch the control plane owns** (2026-09-28, backlog
+  B35). Trays ignored `deployment.managedSettings`, so on a managed bridge
+  they offered switches the settings PATCH refuses whole: the album page's
+  Variants gear offered PCM upscaling and CarPlay, and a click answered
+  "Save failed: these settings are managed by the control plane…", and
+  the Jobs page's Backups and Update checks gears offered nothing else
+  (seen in a browser). `applyTrayManaged` HIDES a managed row and disables
+  its input, as `hideManagedSettings` hides the field and the library page
+  leaves out the roots form, and hides the gear once no field row and no
+  note row is left (a note is written for the reader whatever the
+  switches). **Hidden, not greyed**: a greyed switch on a hosted bridge
+  reads as something to earn. A change dispatched to a managed row anyway
+  sends nothing (`saveTrayField`'s guard). The managed set is the
+  snapshot's EFFECTIVE `managedSettings` and outlives a snapshot drop, so a
+  tray built after the first snapshot leaves the row out from its first
+  paint; on a fresh page load it is unknown until the tray's settings
+  fetch lands (2 ms on loopback), and every row shows disabled meanwhile,
+  the Settings page's own window. `TestATrayOffersNoSwitchTheControlPlaneOwns`
+  runs the shipped tray under node. **Two controls outside the trays still
+  offer a managed field** (the Jobs page's fingerprint Enable button, the
+  Duplicates page's policy select; a follow-up).
+- **A job card says why a switched-on job is inactive in a note of its
+  own, never over its description, and never asks for a restart a live
+  gate does not need** (2026-09-28, backlog B45). The analysis and
+  fingerprint cards wrote "Enabled but inactive: … Restart after fixing."
+  over their description, false since #781 made both gates live, and
+  nothing wrote the description back: in a browser, with sox taken off the
+  running bridge's PATH and put back, the analysis card read "active" with
+  "Analyze now" beside that sentence until a reload. `showJobDegraded` is
+  the one note for the three cards whose gate probes a tool (analysis,
+  fingerprinting, CarPlay pre-generation), hidden again once the card reads
+  active. The fingerprint surfaces said "restart" three more times (the
+  Enable button latched "Enabled — restart to apply" for good, its hint,
+  the tray's "degrades to off at startup"), and the Settings chip beside
+  the switch read `enabled` as running, so it said "active" beside a card
+  that said degraded: #1067's upscale-chip defect, one switch over. **A
+  chip or badge reporting a gate reads the gate (`active`), never the
+  switch.** `TestAJobCardSaysWhyItIsInactiveBesideItsDescriptionAndClearsWhenActive`
+  and `TestTheFingerprintChipReadsTheGateNotTheSwitch` run the shipped
+  `renderJobCards` and `renderSettingsPrereqs` under node.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the

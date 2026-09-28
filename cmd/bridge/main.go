@@ -1628,21 +1628,20 @@ func (a *adminBatchCoordinatorAdapter) Throughput() admin.AdminBatchThroughput {
 // alone until 2026-09-28, so a bridge with no sox answered `enabled:
 // true` beside `soxAvailable: false` while health said off.
 //
-// Sox precheck is TTL-cached (mirrors `admin.Server.cachedSoxAvailability`,
-// also 30 s) so the per-5-s poll doesn't shell out 12×/min — the
-// precheck forks `sox --version`, which is cheap but not free, and
-// gemini-code-assist reasonably flagged the per-call cost on PR #111.
+// `soxAvailable` comes from soxPrecheck, runServe's soxCache.precheck: the
+// one TTL-cached probe the gate behind `enabled` reads, so the two answer
+// from the same probe. Each adapter kept a 30 s cache of its own over
+// `transcode.PrecheckSox` until 2026-09-28, so `enabled` and
+// `soxAvailable` could disagree for up to 30 s after sox was installed or
+// removed, and each cache cost a fork of its own every 30 s it was polled.
+// The per-poll cost gemini-code-assist flagged on PR #111 is the shared
+// cache's to cap (TestServeReadsSoxThroughTheSharedProbe).
 type upscaleStatsAdapter struct {
-	pool    func() *transcode.Pool
-	enabled func() bool
-	store   *manifest.Store
-
-	soxMu sync.Mutex
-	soxAt time.Time
-	soxOK bool
+	pool        func() *transcode.Pool
+	enabled     func() bool
+	soxPrecheck func() error
+	store       *manifest.Store
 }
-
-const upscaleStatsSoxTTL = 30 * time.Second
 
 func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) (api.UpscaleStats, error) {
 	var snap api.UpscaleStats
@@ -1661,8 +1660,7 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) (api.Ups
 		}
 	}
 	snap.Enabled = (snap.Pool != nil)
-	soxOK := a.cachedSoxOK()
-	snap.SoxAvailable = &soxOK
+	snap.SoxAvailable = precheckPassed(a.soxPrecheck)
 	if a.store != nil {
 		count, bytes, err := a.store.CountVariants(ctx)
 		if err != nil {
@@ -1694,42 +1692,31 @@ func (a *upscaleStatsAdapter) UpscaleStatsSnapshot(ctx context.Context) (api.Ups
 	return snap, nil
 }
 
-// cachedSoxOK returns the most recent `transcode.PrecheckSox` result
-// or runs a fresh probe when the cache is older than
-// `upscaleStatsSoxTTL`. Mirrors `admin.Server.cachedSoxAvailability`'s
-// 30 s TTL so the operator's Settings tile and the iOS-facing
-// endpoint stay aligned on what the host reports.
-func (a *upscaleStatsAdapter) cachedSoxOK() bool {
-	a.soxMu.Lock()
-	defer a.soxMu.Unlock()
-	if !a.soxAt.IsZero() && time.Since(a.soxAt) < upscaleStatsSoxTTL {
-		return a.soxOK
+// precheckPassed is a stats DTO's optional `soxAvailable`: whether the
+// precheck passes, read now, or nil when none is wired.
+func precheckPassed(precheck func() error) *bool {
+	if precheck == nil {
+		return nil
 	}
-	a.soxOK = (transcode.PrecheckSox() == nil)
-	a.soxAt = time.Now()
-	return a.soxOK
+	ok := precheck() == nil
+	return &ok
 }
 
 // analysisStatsAdapter implements api.AnalysisStatsProvider. Mirrors
-// upscaleStatsAdapter, minus the live pool: serve-side analysis
-// generation is CLI-driven (`bridge analyze`), so there's no long-lived
-// serve pool to snapshot — `Enabled` reflects the config+sox gate
-// directly (not pool presence), and Pool stays nil. Counts come from
-// CountAnalysis; sox precheck shares the same 30 s TTL cache shape.
+// upscaleStatsAdapter, minus the pool: `Enabled` is the live analysis
+// gate itself (the flag AND a usable sox), Pool stays nil, counts come
+// from CountAnalysis, and `soxAvailable` from soxPrecheck, the shared
+// probe that gate reads, as the upscale adapter's does.
 type analysisStatsAdapter struct {
-	enabled func() bool
-	store   *manifest.Store
-
-	soxMu sync.Mutex
-	soxAt time.Time
-	soxOK bool
+	enabled     func() bool
+	soxPrecheck func() error
+	store       *manifest.Store
 }
 
 func (a *analysisStatsAdapter) AnalysisStatsSnapshot(ctx context.Context) (api.AnalysisStats, error) {
 	var snap api.AnalysisStats
 	snap.Enabled = a.enabled()
-	soxOK := a.cachedSoxOK()
-	snap.SoxAvailable = &soxOK
+	snap.SoxAvailable = precheckPassed(a.soxPrecheck)
 	if a.store != nil {
 		count, bytes, err := a.store.CountAnalysis(ctx)
 		if err != nil {
@@ -1746,17 +1733,6 @@ func (a *analysisStatsAdapter) AnalysisStatsSnapshot(ctx context.Context) (api.A
 		}
 	}
 	return snap, nil
-}
-
-func (a *analysisStatsAdapter) cachedSoxOK() bool {
-	a.soxMu.Lock()
-	defer a.soxMu.Unlock()
-	if !a.soxAt.IsZero() && time.Since(a.soxAt) < upscaleStatsSoxTTL {
-		return a.soxOK
-	}
-	a.soxOK = (transcode.PrecheckSox() == nil)
-	a.soxAt = time.Now()
-	return a.soxOK
 }
 
 // soxToolchainCache memoizes one transcode.ProbeSox result for adminSoxTTL
@@ -3446,8 +3422,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider, store: manifestStore, waveformDir: liveWaveformDir}).
 		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
-			enabled: analysisActiveFn,
-			store:   manifestStore,
+			enabled:     analysisActiveFn,
+			soxPrecheck: soxCache.precheck,
+			store:       manifestStore,
 		}).
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore).
@@ -4251,16 +4228,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//      so it stays non-zero when the feature was disabled without
 	//      `--gc`. SQL failure degrades to "0 cached" with a logged
 	//      warning rather than turning the whole response into a 5xx.
-	//   3. Sox-availability probe — same `transcode.PrecheckSox` the
-	//      admin tile consumes, gated by the same 30 s TTL cache the
-	//      admin handler uses (the admin cache holds it; we re-probe
-	//      directly here, accepting one extra fork-exec per 5 s poll
-	//      since iOS only polls when the management page is fore-
-	//      grounded — typically zero polls per minute on average).
+	//   3. Sox availability — soxCache.precheck, the one TTL-cached
+	//      probe the gate in (1) reads and the admin tile reads too, so
+	//      `soxAvailable` and `enabled` answer from the same probe, here
+	//      and on the console.
 	upscaleStats := &upscaleStatsAdapter{
-		pool:    func() *transcode.Pool { return upscalePool },
-		enabled: upscaleActiveFn,
-		store:   manifestStore,
+		pool:        func() *transcode.Pool { return upscalePool },
+		enabled:     upscaleActiveFn,
+		soxPrecheck: soxCache.precheck,
+		store:       manifestStore,
 	}
 	apiSrv.WithUpscaleStats(upscaleStats)
 
@@ -4704,9 +4680,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		SoxCanDecode: func() func(string) bool {
 			return transcode.SnapshotOrOpen(soxCache.snapshot).CanDecode
 		},
-		// Live runtime state of audio analysis (startup-computed gate),
-		// so the admin tile's `enabled` matches /v1/health's `waveform`
-		// flag rather than the persisted config flag.
+		// The live analysis gate (the flag AND a usable sox, read per
+		// call), so the admin tile's `enabled` matches /v1/health's
+		// `waveform` flag rather than the persisted config flag.
 		AnalysisActive: analysisActiveFn,
 		// Analysis pool + sweeper surfaces (nil when the feature is off —
 		// the admin then omits the fields, mirroring the upscale tile).

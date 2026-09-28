@@ -3054,13 +3054,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 //     page consumes so the two surfaces agree about whether
 //     the host can run conversions.
 type upscaleStatsResponse struct {
-	// Enabled mirrors `cfg.Upscale.Enabled` AND the live
-	// presence of the pool — false when the feature was on
-	// at startup but the sox-precheck demoted it to off.
+	// Enabled is the live upscale gate (the flag AND a usable sox),
+	// read through the pool closure: false while the flag is off or
+	// sox is unusable, and true again once sox is installed, with no
+	// restart.
 	Enabled bool `json:"enabled"`
-	// SoxAvailable reports the live `transcode.PrecheckSox`
-	// result. Nil when the precheck closure isn't wired
-	// (test harnesses).
+	// SoxAvailable is the sox precheck (on PATH and runnable), read
+	// for this snapshot from the one cached probe the gate reads
+	// (soxAvailability), so it moves when Enabled does. Nil when the
+	// precheck closure isn't wired (test harnesses).
 	SoxAvailable *bool `json:"soxAvailable,omitempty"`
 	// Pool reports the live worker-pool snapshot. Nil when
 	// the feature is off (no pool to query).
@@ -3144,9 +3146,7 @@ func (s *Server) getUpscaleStatsSnapshot(ctx context.Context) upscaleStatsRespon
 	cfg := s.deps.CfgHolder.Load()
 	var resp upscaleStatsResponse
 	resp.StoragePath = cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
-	if avail := s.cachedSoxAvailability(); avail != nil {
-		resp.SoxAvailable = avail
-	}
+	resp.SoxAvailable = s.soxAvailability()
 	if s.deps.UpscaleStats != nil {
 		resp.Pool = s.deps.UpscaleStats()
 	}
@@ -3193,50 +3193,27 @@ func (s *Server) getUpscaleStatsSnapshot(ctx context.Context) upscaleStatsRespon
 	return resp
 }
 
-// soxAvailabilityCacheTTL bounds how long the cached precheck
-// result is reused before re-probing. 30 s feels right: an
-// operator installing sox sees the Settings UI reflect it
-// within at most 30 s without us spending up to 2 s on the
-// probe per 5 s stats poll (CodeRabbit major on PR #110 — the
-// previous per-call precheck shelled out 12×/min on every open
-// Settings tab).
-const soxAvailabilityCacheTTL = 30 * time.Second
-
-// cachedSoxAvailability returns the most recent precheck result
-// or runs a fresh probe when the cache is older than
-// soxAvailabilityCacheTTL. Returns nil when no precheck closure
-// is wired (test harnesses).
-func (s *Server) cachedSoxAvailability() *bool {
+// soxAvailability is the sox precheck for one stats snapshot: true
+// when sox is on PATH and runnable, nil when no precheck closure is
+// wired (test harnesses).
+//
+// It reads UpscalePrecheck every time and keeps no cache of its own.
+// cmd/bridge wires the one TTL-cached probe that the upscale and
+// analysis gates read too, so the snapshot's `enabled` and
+// `soxAvailable` come from the same probe, and a second cache here
+// could only lag it. One did, until 2026-09-28: a 30 s cache on top of
+// the shared one answered a probe older than the gate's, so for up to
+// 30 s after sox was installed or removed both stats endpoints said
+// `enabled: false` beside `soxAvailable: true`, or the reverse
+// (measured on a live bridge: 14 s after sox left the PATH). The cost
+// the old cache existed to cap, a `sox --help` per 5 s poll (CodeRabbit
+// on PR #110), is the shared cache's to cap: it probes at most once per
+// TTL, and a warm read is a mutex and a clock read.
+func (s *Server) soxAvailability() *bool {
 	if s.deps.UpscalePrecheck == nil {
 		return nil
 	}
-	now := time.Now()
-
-	// Fast path: serve a fresh cached value, then release the lock. The
-	// unlocks are EXPLICIT (no defer) because the whole point is to run
-	// UpscalePrecheck() UNLOCKED — it can shell out to `sox --help` for
-	// up to 2 s, and cachedSoxAvailability is called on the SSE snapshot
-	// path (getUpscaleStatsSnapshot / getAnalysisStatsSnapshot). A
-	// deferred unlock would hold soxAvailabilityMu across that probe and
-	// block every concurrent SSE connection / Settings tab.
-	s.soxAvailabilityMu.Lock()
-	if !s.soxAvailabilityAt.IsZero() && now.Sub(s.soxAvailabilityAt) < soxAvailabilityCacheTTL {
-		v := s.soxAvailability
-		s.soxAvailabilityMu.Unlock()
-		return &v
-	}
-	s.soxAvailabilityMu.Unlock()
-
-	// Probe unlocked. Concurrent cache-miss callers may each invoke
-	// UpscalePrecheck, but the wired soxToolchainCache (cmd/bridge, its
-	// own mutex + TTL) dedupes the actual exec — at most one real
-	// `sox --help` runs; the rest are warm-cache hits.
 	v := s.deps.UpscalePrecheck() == nil
-
-	s.soxAvailabilityMu.Lock()
-	s.soxAvailability = v
-	s.soxAvailabilityAt = time.Now() // fresh timestamp captured post-probe
-	s.soxAvailabilityMu.Unlock()
 	return &v
 }
 
@@ -3278,15 +3255,13 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 	// Tracks analyze.WaveformDirSubdir ("waveforms"); inlined to avoid
 	// an admin → analyze import (config does the same for transcode).
 	resp.StoragePath = filepath.Join(cfg.DataDir, "waveforms")
-	avail := s.cachedSoxAvailability()
-	if avail != nil {
-		resp.SoxAvailable = avail
-	}
-	// Enabled mirrors the LIVE runtime state (startup-computed
-	// `analysisActive`) so the tile agrees with /v1/health's `waveform`
-	// flag even between a restart-required PATCH and the actual restart.
-	// Falls back to the persisted-config + sox derivation when the
-	// closure isn't wired (test harnesses). (CodeRabbit on #395.)
+	avail := s.soxAvailability()
+	resp.SoxAvailable = avail
+	// Enabled is the live analysis gate (`analysisActive`: the flag AND
+	// a usable sox, read per call), so the tile agrees with /v1/health's
+	// `waveform` flag. Falls back to the persisted-config + sox
+	// derivation when the closure isn't wired (test harnesses).
+	// (CodeRabbit on #395.)
 	if a := s.deps.AnalysisActive; a != nil {
 		resp.Enabled = a()
 	} else {

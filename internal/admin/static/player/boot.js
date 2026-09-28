@@ -553,8 +553,14 @@ function route() {
   // per-key abort cannot do this — two views with different keys race,
   // and the loser wins. See abortReads in api.js.
   abortReads();
-  const ctx = { params, gen, setToolbar, setCrumb, id: rest,
-    mixesEnabled: !!seed.mixesEnabled, trail: readTrail() };
+  // And the settings snapshot the feature trays share. An operator page
+  // drops it in its page init, which the player never runs for its own
+  // navigation, so a player tray showed a switch as it was when the page
+  // loaded, whatever Settings, the CLI or another tab had done since, beside
+  // a view that reads the server fresh. One fetch per route that mounts a
+  // tray. Guarded like every other reach into app.js.
+  window.BridgeFeatureTray?.invalidate?.();
+  const ctx = { params, gen, setToolbar, setCrumb, id: rest, trail: readTrail() };
 
   const routes = {
     albums: ["Albums", () => renderAlbums(view, ctx)],

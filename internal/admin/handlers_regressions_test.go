@@ -63,24 +63,3 @@ func TestRootsRemoveEmptyPathRejected(t *testing.T) {
 		t.Errorf("remove whitespace-only path: got %d, want 400", code)
 	}
 }
-
-// TestSoxAvailabilityProbeRunsUnlocked is the F8 regression: the probe
-// (a ≤2 s `sox --help` shell-out in prod) must run WITHOUT
-// soxAvailabilityMu held, or concurrent SSE snapshot callers block on
-// it. TryLock succeeds iff the lock is free while the probe runs — with
-// the pre-fix deferred unlock it would be held and this fails.
-func TestSoxAvailabilityProbeRunsUnlocked(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	probedUnlocked := false
-	srv.deps.UpscalePrecheck = func() error {
-		if srv.soxAvailabilityMu.TryLock() {
-			probedUnlocked = true
-			srv.soxAvailabilityMu.Unlock()
-		}
-		return nil
-	}
-	_ = srv.cachedSoxAvailability()
-	if !probedUnlocked {
-		t.Error("UpscalePrecheck ran while soxAvailabilityMu was held; the probe must run unlocked")
-	}
-}
