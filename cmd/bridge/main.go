@@ -3885,6 +3885,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// same live-runtime-vs-persisted-config divergence /v1/upscale/stats
 	// exists to avoid.
 	var autoOptimizeEnabledFn func() bool
+	// orphanSweepStatus reads the background orphan-sidecar sweep's refusal
+	// latch for the Jobs card. Nil unless the sweep runs (its interval is
+	// zero by default), in runServe scope because the sweep is built inside
+	// the upscale block and admin.New comes after it.
+	var orphanSweepStatus func() integrity.OrphanSweepStatus
 	// Constructed UNCONDITIONALLY — see the analysis pool above for why,
 	// and for why always-construct-never-stop avoids the Stop-ordering
 	// invariants that make a real pool lifecycle dangerous.
@@ -4104,9 +4109,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// `bridge upscale --gc` (cmd/bridge/upscale.go) and, since
 		// 2026-09-28, decides as it does: each tick takes the whole
 		// tree's inventory and refuses a mass orphaning
-		// (integrity.MassOrphanRefusal) — with no override, where `--gc`
-		// has --allow-mass-orphans — then unlinks at most a chunk of
-		// orphans. Opt-in via `cfg.Integrity.OrphanSidecarSweepIntervalSec`;
+		// (integrity.MassOrphanRefusalFor) or a walk that could not list
+		// part of the tree (integrity.PartialWalkRefusal) — with no
+		// override, where `--gc` has --allow-mass-orphans and
+		// --allow-partial-walk — then unlinks a chunk of orphans, trying
+		// past any it cannot remove. Its refusal reaches the Jobs card
+		// through orphanSweepStatus. Opt-in via `cfg.Integrity.OrphanSidecarSweepIntervalSec`;
 		// default zero (disabled), skipped silently when ≤ 0. The rules
 		// are in CLAUDE.md under "Job pools" (the forward sweep's
 		// denominator bullet). The tree to walk is liveVariantsDir,
@@ -4125,6 +4133,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			)
 			stopOrphanSweeper := orphanSweeper.Start(scanCtx)
 			defer stopOrphanSweeper()
+			orphanSweepStatus = orphanSweeper.Status
 		}
 	}
 
@@ -4688,6 +4697,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}(cadenceRearms),
 		DuplicatesSweepRun: jobRunClosure(duplicatesSweepState),
+		// The orphan sweep's refusal latch, so the Jobs card says it is
+		// refusing rather than "on" (nil when the sweep does not run).
+		OrphanSweepStatus: orphanSweepStatus,
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

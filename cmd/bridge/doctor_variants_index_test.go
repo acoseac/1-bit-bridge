@@ -29,8 +29,19 @@ func variantsIndexInstall(t *testing.T, dir string, rows, orphans int) (cfgPath,
 	cfgPath = writeInstallAt(t, dir, "Artist/Album/01.flac")
 	variantsDir = filepath.Join(dir, "variants")
 	appendYAML(t, cfgPath, "upscale:\n    enabled: true\n    variantsDir: "+variantsDir+"\n")
+	seedVariantCatalog(t, filepath.Join(dir, "data"), variantsDir, rows, orphans)
+	return cfgPath, variantsDir
+}
 
-	store, err := manifest.OpenStore(manifest.DefaultDBPath(filepath.Join(dir, "data")))
+// seedVariantCatalog writes, into dataDir's manifest, `rows` variant rows
+// each with its file at the canonical path under variantsDir, and
+// `stranded` sidecar files no row references, all older than the orphan
+// sweep's grace: with few rows and many stranded files, the shape a lost
+// index leaves. variantsDir exists afterwards even with nothing in it,
+// because an absent one is a different (legitimate) state.
+func seedVariantCatalog(t *testing.T, dataDir, variantsDir string, rows, stranded int) {
+	t.Helper()
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,16 +62,22 @@ func variantsIndexInstall(t *testing.T, dir string, rows, orphans int) (cfgPath,
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < orphans; i++ {
+	for i := 0; i < stranded; i++ {
 		writeFixtureFile(t, transcode.VariantSidecarPath(variantsDir,
 			fmt.Sprintf("Artist/Stranded %d/%02d.flac", i%3, i), variant), 1000)
 	}
-	// The directory must exist even with nothing in it — an absent one is
-	// a different (legitimate) state.
 	if err := os.MkdirAll(variantsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return cfgPath, variantsDir
+	old := time.Now().Add(-time.Hour)
+	if err := filepath.WalkDir(variantsDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		return os.Chtimes(p, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func appendYAML(t *testing.T, cfgPath, body string) {
@@ -322,5 +339,94 @@ func TestDoctorVariantsIndexClaimsNoVerdictFromATruncatedWalk(t *testing.T) {
 	}
 	if idx.Truncated || !idx.WouldRefuseGC {
 		t.Errorf("an unbounded walk withheld the verdict (truncated=%v wouldRefuse=%v)", idx.Truncated, idx.WouldRefuseGC)
+	}
+}
+
+// TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk drives the real
+// probe and check over a tree the walk cannot fully list: a directory of
+// stranded files locked from this user, beside the root-owned lost+found an
+// ext4 volume mounted as the variants directory carries. The locked
+// directory is the one counted (the lost+found is the filesystem's), the
+// ratio verdict is withheld for it, and the hint says what `--gc` will do,
+// which is refuse: it said `--gc` "measures the whole tree" until
+// 2026-09-28, false past a directory it could not list.
+func TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root lists any directory, so the walk would not be partial")
+	dir := t.TempDir()
+	cfgPath, variantsDir := variantsIndexInstall(t, dir, 20, 15)
+	for _, sub := range []string{"Locked", "lost+found"} {
+		writeFixtureFile(t, filepath.Join(variantsDir, sub, "a.flac.upscaled-v2-176400-24.flac"), 10)
+		locked := filepath.Join(variantsDir, sub)
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	}
+
+	idx, err := variantsIndexCounts(context.Background(), manifest.DefaultDBPath(filepath.Join(dir, "data")), variantsDir, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Unreadable != 1 || idx.UnlistedDirs != 1 || idx.WouldRefuseGC || !idx.GCRefusesPartialWalk {
+		t.Errorf("probe: unreadable=%d unlistedDirs=%d wouldRefuse=%v refusesPartialWalk=%v, want 1, 1, false, true",
+			idx.Unreadable, idx.UnlistedDirs, idx.WouldRefuseGC, idx.GCRefusesPartialWalk)
+	}
+
+	c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps(cfgPath)), "variants-index")
+	if c.Status != doctor.Warn {
+		t.Fatalf("status=%v, want warn\nsummary: %s", c.Status, c.Summary)
+	}
+	for _, want := range []string{"15 of 35 sidecar file(s)", "1 director(y/ies) could not be read"} {
+		if !strings.Contains(c.Summary, want) {
+			t.Errorf("summary does not say %q: %q", want, c.Summary)
+		}
+	}
+	if !strings.Contains(c.Hint, "refuses to act on a walk that could not list part of the tree") {
+		t.Errorf("hint does not say what `--gc` does with this walk: %q", c.Hint)
+	}
+	if strings.Contains(c.Hint, "whole tree and unlinks") {
+		t.Errorf("hint claims `--gc` measures the whole tree past a directory it cannot list: %q", c.Hint)
+	}
+}
+
+// TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC — a link the walk
+// could not stat is at most one file, and `--gc` weighs it as one more
+// orphan rather than refusing the walk (integrity.MassOrphanRefusalFor).
+// The probe must say what `--gc` will do with it, not withhold the verdict
+// as it does past a directory it could not list: here that is REFUSES,
+// over a lost index the link does not change.
+func TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root stats through any directory, so the link would resolve")
+	dir := t.TempDir()
+	_, variantsDir := variantsIndexInstall(t, dir, 2, 40)
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(variantsDir, "Parked", "album.flac")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(blocked, "sub"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+	if _, err := os.Stat(link); err == nil {
+		t.Skip("this user can stat through a 0000 directory — the fixture cannot reproduce the state")
+	}
+
+	idx, err := variantsIndexCounts(context.Background(), manifest.DefaultDBPath(filepath.Join(dir, "data")), variantsDir, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Unreadable != 1 || idx.UnlistedDirs != 0 {
+		t.Fatalf("the fixture is not one unstattable link: unreadable=%d unlistedDirs=%d", idx.Unreadable, idx.UnlistedDirs)
+	}
+	if !idx.WouldRefuseGC || idx.GCRefusesPartialWalk {
+		t.Errorf("wouldRefuse=%v refusesPartialWalk=%v, want true and false: `--gc` weighs the link and refuses the lost index",
+			idx.WouldRefuseGC, idx.GCRefusesPartialWalk)
 	}
 }

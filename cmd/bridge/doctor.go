@@ -534,7 +534,7 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 		return doctor.VariantsIndex{}, err
 	}
 	out.Files, out.Known, out.Orphans = inv.Files, inv.Known, inv.Orphans
-	out.Truncated, out.Unreadable = inv.Truncated, inv.Unreadable
+	out.Truncated, out.Unreadable, out.UnlistedDirs = inv.Truncated, inv.Unreadable, inv.UnlistedDirs
 	// The lower bound is monotone in the walk, so it is sound either way;
 	// the full verdict is not, so it is claimed only on a complete walk.
 	// The doctor telling an operator that `--gc` REFUSES when it would
@@ -542,13 +542,19 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 	// catch — and it is reachable at the default threshold, not an exotic
 	// one (integrity.MassOrphanLowerBound has why).
 	out.OrphansExceedRows = integrity.MassOrphanLowerBound(inv.Orphans, len(rows))
-	// A truncated walk and an unreadable directory are the same fact: the
-	// ratio was taken over part of the tree. The lower bound survives both
-	// (hiding entries can only lower `orphans`, and `rows` is the whole
-	// catalog either way); the ratio survives neither.
-	if !inv.Truncated && inv.Unreadable == 0 {
-		out.WouldRefuseGC = integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), maxOrphanPercent) != ""
+	// A truncated walk and a directory the walk could not list are the same
+	// fact: the ratio was taken over part of the tree. The lower bound
+	// survives both (hiding entries can only lower `orphans`, and `rows` is
+	// the whole catalog either way); the ratio survives neither. An entry
+	// the walk could not stat is bounded, and MassOrphanRefusalFor weighs
+	// it exactly as `--gc` does, so it does not withhold the verdict.
+	if !inv.Truncated && inv.UnlistedDirs == 0 {
+		out.WouldRefuseGC = integrity.MassOrphanRefusalFor(inv, len(rows), maxOrphanPercent) != ""
 	}
+	// Whether `--gc` refuses the WALK is sound on a truncated prefix too: a
+	// directory this walk could not list is one the whole walk cannot list
+	// either.
+	out.GCRefusesPartialWalk = integrity.PartialWalkRefusal(inv, len(rows), maxOrphanPercent) != ""
 	for _, p := range inv.OrphanPaths {
 		// Relative to the directory the summary already names: shorter to
 		// read, and a doctor report gets pasted into issues.

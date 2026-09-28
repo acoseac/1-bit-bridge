@@ -154,17 +154,26 @@ func renderAnalysisSweepLine(t *testing.T, node string, counts AnalysisSweepCoun
 	if err != nil {
 		t.Fatal(err)
 	}
-	fn := extractJSFunction(t, readFile(t, "static/app.js"), "describeAnalysisSweep")
-	script := fn + "\nconsole.log(describeAnalysisSweep(" + string(payload) + "));\n"
-	path := filepath.Join(t.TempDir(), "sweep.mjs")
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+	out := runConsoleFunction(t, node, "describeAnalysisSweep",
+		"console.log(describeAnalysisSweep("+string(payload)+"));")
+	return strings.TrimSpace(string(out))
+}
+
+// runConsoleFunction runs the shipped app.js function fnName under node,
+// followed by call, a statement that calls it and prints what it returns,
+// and gives back what node printed. A node that fails stops the test.
+func runConsoleFunction(t *testing.T, node, fnName, call string) []byte {
+	t.Helper()
+	fn := extractJSFunction(t, readFile(t, "static/app.js"), fnName)
+	path := filepath.Join(t.TempDir(), fnName+".mjs")
+	if err := os.WriteFile(path, []byte(fn+"\n"+call+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := exec.Command(node, path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	return strings.TrimSpace(string(out))
+	return out
 }
 
 // sweepPart is one part of the rendered line: a count and its label.

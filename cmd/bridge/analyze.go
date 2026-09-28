@@ -40,6 +40,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	gc := fs.Bool("gc", false, "remove orphan waveform sidecars (files with no DB row); skips analysis")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no analysis row references any waveform (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink waveform files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index")
+	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
 	if !parseTranscodeArgs(fs, "analyze", args, stderr) {
 		return 2
 	}
@@ -68,7 +69,11 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 	outputDir := analyze.WaveformDirFor(cfg.DataDir)
 	if *gc {
-		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir, *allowEmpty, *allowMassOrphans)
+		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir, analyzeGCOptions{
+			allowEmpty:       *allowEmpty,
+			allowMassOrphans: *allowMassOrphans,
+			allowPartialWalk: *allowPartialWalk,
+		})
 	}
 
 	resolver := bridgefs.New(cfg.LibraryRoots)
@@ -276,11 +281,19 @@ func dispatchAnalysisCandidates(ctx context.Context, enqueue func(analyze.Analyz
 	return false
 }
 
+// analyzeGCOptions carries `analyze --gc`'s operator overrides, the
+// waveform twins of gcOptions' forward-sweep half: --allow-empty,
+// --allow-mass-orphans and --allow-partial-walk. The threshold is not
+// here: it is analysisGCMaxOrphanPercent.
+type analyzeGCOptions struct {
+	allowEmpty, allowMassOrphans, allowPartialWalk bool
+}
+
 // runAnalyzeGC removes orphan waveform sidecars — files under the
 // waveform output dir that no `track_analysis` row points at (plus
 // stale `.tmp` debris from interrupted runs). Mirrors the forward sweep
-// of `bridge upscale --gc`.
-func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, allowEmpty, allowMassOrphans bool) int {
+// of `bridge upscale --gc`, refusals included.
+func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, opts analyzeGCOptions) int {
 	rows, err := store.AllAnalysisRows(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
@@ -326,7 +339,7 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// as orphaned. Cheaper to rebuild than a PCM rendition, which is why this
 	// is the milder of the two — not a different rule.
 	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir,
-		"analysis row", "waveform directory", len(known), allowEmpty); code != 0 {
+		"analysis row", "waveform directory", len(known), opts.allowEmpty); code != 0 {
 		return code
 	}
 
@@ -364,8 +377,13 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		fmt.Fprintf(stderr, "analyze --gc: %d entr(y/ies) under %s could not be read; they were neither counted nor removed.\n",
 			inv.Unreadable, outputDir)
 	}
-	if !allowMassOrphans {
-		if reason := integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), analysisGCMaxOrphanPercent); reason != "" {
+	if !opts.allowMassOrphans {
+		// The same two refusals as `upscale --gc`, in the same order: the
+		// mass-orphan check with the entries the walk could not stat
+		// weighed as what they could be, then a walk that could not list a
+		// directory, whose counts are about part of the tree
+		// (gcRefusePartialWalk). --allow-mass-orphans sets both aside.
+		if reason := integrity.MassOrphanRefusalFor(inv, len(rows), analysisGCMaxOrphanPercent); reason != "" {
 			fmt.Fprintf(stderr, "analyze --gc: refusing to run — %s.\n", reason)
 			fmt.Fprintln(stderr, "  A catalog this much smaller than the tree it describes usually means the INDEX was lost —")
 			fmt.Fprintln(stderr, "  a bridge.db restored from an older snapshot, or a --config naming another install.")
@@ -373,6 +391,11 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans; `bridge analyze --force` rebuilds")
 			fmt.Fprintln(stderr, "  waveforms from source, so this side is recoverable in a way the variant tree is not.")
 			return 1
+		}
+		if !opts.allowPartialWalk {
+			if code := gcRefusePartialWalk(stderr, "analyze --gc", outputDir, inv, len(rows), analysisGCMaxOrphanPercent); code != 0 {
+				return code
+			}
 		}
 	}
 

@@ -69,6 +69,38 @@ func strandedTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Stor
 	return store, paths
 }
 
+// waveformTree seeds `fresh` analysis rows each with its waveform at the
+// canonical path, and `stranded` waveform files no row references, under
+// dir — the analyze twin of strandedTree.
+func waveformTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Store, []string) {
+	t.Helper()
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	for i := 0; i < fresh; i++ {
+		source := fmt.Sprintf("Artist/Re-analyzed/%02d.flac", i)
+		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
+		writeFixtureFile(t, p, 20)
+		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 10, ModTime: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
+			SourcePath: source, WaveformPath: p, SourceMTimeNS: 1, SourceSize: 10, SchemaVersion: "wf4",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := make([]string, stranded)
+	for i := range paths {
+		paths[i] = analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
+		writeFixtureFile(t, paths[i], 20)
+	}
+	return store, paths
+}
+
 func writeFixtureFile(t *testing.T, path string, size int) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -185,41 +217,17 @@ func TestRunGCMassOrphanGuardLeavesSmallSweepsAlone(t *testing.T) {
 // milder of the two; not a different rule. (The enumeration lesson: a fix
 // that lists the sites it covers misses one.)
 func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
-	dataDir := t.TempDir()
-	dir := analyze.WaveformDirFor(dataDir)
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
+	dir := analyze.WaveformDirFor(t.TempDir())
 	ctx := context.Background()
 
 	// Two rows whose waveforms are where they say, forty files nothing
 	// references, and one half-written scratch file.
-	for i := 0; i < 2; i++ {
-		source := fmt.Sprintf("Artist/Re-analyzed/%02d.flac", i)
-		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: source}.SidecarPath()
-		writeFixtureFile(t, p, 20)
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 10, ModTime: time.Now()}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
-			SourcePath: source, WaveformPath: p, SourceMTimeNS: 1, SourceSize: 10, SchemaVersion: "wf4",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var stranded []string
-	for i := 0; i < 40; i++ {
-		p := analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
-		writeFixtureFile(t, p, 20)
-		stranded = append(stranded, p)
-	}
+	store, stranded := waveformTree(t, dir, 2, 40)
 	scratch := filepath.Join(dir, "half-written.waveform.bin.tmp")
 	writeFixtureFile(t, scratch, 3)
 
 	var stdout, stderr bytes.Buffer
-	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, false, false); rc == 0 {
+	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, analyzeGCOptions{}); rc == 0 {
 		t.Fatalf("analyze --gc swept a tree the catalog no longer describes\nstderr: %s", stderr.String())
 	}
 	for _, p := range stranded {
@@ -238,7 +246,7 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, false, true); rc != 0 {
+	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, analyzeGCOptions{allowMassOrphans: true}); rc != 0 {
 		t.Fatalf("analyze --gc --allow-mass-orphans rc=%d\nstderr: %s", rc, stderr.String())
 	}
 	for _, p := range stranded {
@@ -260,11 +268,22 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 //
 // `artwork --gc` is deliberately out of scope and asserted so below.
 func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) {
+	requireForwardSweepGCOverride(t, "allow-mass-orphans")
+}
+
+// requireForwardSweepGCOverride fails the test for every command in this
+// package that declares `--gc` without declaring flag, except `artwork
+// --gc`, which must NOT declare it: artwork is cached from the network and
+// keyed by content / MBID, takes no sidecar inventory, and makes none of
+// the forward sweeps' verdicts. One body for each forward-sweep override,
+// so a new one gets the same scan, exemption and floors.
+func requireForwardSweepGCOverride(t *testing.T, flag string) {
+	t.Helper()
 	// Anchored on the declaration, not on prose: stripGoComments would
 	// blank these string literals, so the scan is raw and a `--gc`
 	// mentioned in a docblock cannot satisfy `fs.Bool("gc"`.
 	gcRe := regexp.MustCompile(`fs\.Bool\("gc"`)
-	allowRe := regexp.MustCompile(`fs\.Bool\("allow-mass-orphans"`)
+	allowRe := regexp.MustCompile(`fs\.Bool\("` + regexp.QuoteMeta(flag) + `"`)
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -294,13 +313,13 @@ func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) 
 			// Named explicitly so a later reader sees a decision rather
 			// than an omission.
 			if allowRe.MatchString(src) {
-				t.Errorf("artwork.go grew --allow-mass-orphans; if that is deliberate, move it out of this exemption")
+				t.Errorf("artwork.go grew --%s; if that is deliberate, move it out of this exemption", flag)
 			}
 			continue
 		}
 		if !allowRe.MatchString(src) {
-			t.Errorf("%s declares a sidecar --gc but not --allow-mass-orphans: an operator whose files "+
-				"really are junk gets a refusal with no way past it", name)
+			t.Errorf("%s declares a sidecar --gc but not --%s: a refusal of its forward sweep "+
+				"there has no way past it", name, flag)
 			continue
 		}
 		covered++
@@ -311,7 +330,7 @@ func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) 
 		t.Fatalf("scanned only %d --gc command(s); the anchor has drifted", checked)
 	}
 	if covered < 4 {
-		t.Fatalf("only %d command(s) carry the override; upscale / optimize / render / analyze all should", covered)
+		t.Fatalf("only %d command(s) carry --%s; upscale / optimize / render / analyze all should", covered, flag)
 	}
 }
 
