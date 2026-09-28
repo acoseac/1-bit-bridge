@@ -258,10 +258,13 @@ func TestInitPreflightGradesTheInstallsOwnPortsAndPidFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Seeded with the defaults the call site passes, so the assertions
-	// below fail if the helper simply leaves them alone.
+	// Seeded with the ports a loopback run passes, so the assertions below
+	// fail if the helper simply leaves them alone.
 	d := doctor.Deps{APIPort: 7788, AdminPort: 7789}
-	withExistingInstallDeps(&d, cfgPath)
+	if !withExistingInstallDeps(&d, cfgPath) {
+		t.Error("the helper reports a config that loaded as not loaded, so init would say the " +
+			"install's ports are the run's")
+	}
 
 	if d.APIPort != 443 {
 		t.Errorf("APIPort = %d, want 443 — the preflight graded the DEFAULT port, "+
@@ -293,7 +296,9 @@ func TestInitPreflightLeavesAFirstInstallsPortsAlone(t *testing.T) {
 	// config at the data dir's pid file, as it does a broken one, fails
 	// here rather than being stopped by an empty DataDir.
 	d := doctor.Deps{DataDir: filepath.Join(dir, "data"), APIPort: 7788, AdminPort: 7789}
-	withExistingInstallDeps(&d, filepath.Join(dir, "bridge.yaml"))
+	if withExistingInstallDeps(&d, filepath.Join(dir, "bridge.yaml")) {
+		t.Error("the helper reports a config that is not there as loaded")
+	}
 	if d.APIPort != 7788 || d.AdminPort != 7789 {
 		t.Errorf("ports = %d/%d, want the caller's 7788/7789 untouched", d.APIPort, d.AdminPort)
 	}

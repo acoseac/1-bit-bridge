@@ -660,12 +660,13 @@ func badgeForStatus(s doctor.Status) string {
 }
 
 // ensureDoctorClean is a helper consumed by `bridge init` before it
-// starts touching the filesystem. Returns 0 when doctor has no fails, 1
-// otherwise; printing to the passed writer. Separate from doctorCmd so
-// the init path can pre-seed Deps with the values its prompts produced,
+// starts touching the filesystem. Returns the report, and 0 when it has no
+// fails, 1 otherwise; printing to the passed writer. Separate from doctorCmd
+// so the init path can pre-seed Deps with the values its prompts produced,
 // rather than re-reading a config that might not exist yet.
 //
-// Caller decides the exit action — we just return the code.
+// Caller decides the exit action — we just return the code, and the report
+// for what the caller prints under it (init's portsThisInitWrites).
 //
 // Warn does not block — that split is doctor's, not this function's,
 // and refusing to initialise a bridge over a lapsed cert would block
@@ -680,17 +681,17 @@ func badgeForStatus(s doctor.Status) string {
 // Only the warn lines, not the whole table: on a clean host this prints
 // nothing at all, so `bridge init`'s first-run output is unchanged
 // except on the hosts that have something to say.
-func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
+func ensureDoctorClean(w io.Writer, d doctor.Deps) (doctor.Report, int) {
 	// Background for the same reason as doctorCmd: `bridge init` is a
 	// short-lived foreground process, and the per-subprocess deadline
 	// inside doctor is what keeps a wedged mount from hanging preflight.
 	report := doctor.Run(context.Background(), d)
 	if report.HasFail() {
 		printReport(w, report)
-		return 1
+		return report, 1
 	}
 	printWarnings(w, report)
-	return 0
+	return report, 0
 }
 
 // printWarnings emits the warn-level checks in printReport's layout,
