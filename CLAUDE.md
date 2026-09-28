@@ -2601,7 +2601,8 @@ no failing test — which is the shape to expect in this area.
   home LAN (two hosts) sent every LOCATION on the packet's source address, as
   an IP literal; two other LANs had none. The only LOCATIONs off their source
   were this repo's own `internal/dlna` test advertisers, which multicast a
-  loopback LOCATION from the host's LAN address. Three devices do not
+  loopback LOCATION from the host's LAN address (until B38 bound them to the
+  loopback interface, the test bullet further down). Three devices do not
   support the general rule (LOCATION host == source for every address, which
   would also bound names and tailnet addresses): multi-homed hosts and some
   NAS firmware are reported to break it, and a renderer has no escape hatch,
@@ -2797,9 +2798,59 @@ no failing test — which is the shape to expect in this area.
   spawn and released by the fetch's last deferred call (registered after
   `wg.Done`, so it runs first): `Stop`'s join releases every claim, and a
   restarted client skips no UDN. **The bound is on goroutines, not on the
-  renderer cache**: a flood of distinct renderer UDNs whose LOCATION answers
-  4xx still leaves one year-2999 structural stub per UDN (5,000 of 5,000
-  after an eviction pass, measured).
+  caches**: those have their own (the next bullet). A refusal at this bound
+  is silent, and stays so (B47 measured it and decided, the next bullet).
+- **…and both CACHES hold at most `discovery.MaxCachedDevices` (256), and a
+  full cache never makes room by dropping a device it serves** (2026-09-28,
+  backlog B47). A renderer whose LOCATION answered 4xx left a stub with a
+  year-2999 `LastSeenAt` that no eviction pass reached, and a location
+  record beside it, so a flood of distinct UDNs grew both for the life of
+  the process (5,000 of 5,000 left an hour later, about 490 bytes a UDN),
+  and a REAL renderer whose description failed once, while it booted say,
+  was never fetched again from that address (one GET, then nothing in two
+  hours of healthy announcements). The upstream cache kept every MediaServer
+  serving a valid description (100,000 held 45 MB, and LiveHost's folded
+  fallback copied all of them per routed byte fetch: 7.7 ms, 18 MB).
+  **A structural stub lasts `structuralStubHold` (5 minutes) whatever the
+  TTL**, stamped `hold - ttl` from the failure so `EvictStale` drops it at
+  the hold: BEFORE the failure under a TTL longer than the hold, which
+  `dlna.discovery.rendererTTLSeconds` admits up to a year. The first form
+  clamped the stamp to the failure there and held the stub for the whole
+  TTL (CodeRabbit on #1086). Nothing but eviction reads the stamp, and the
+  earliest stamp is still the earliest expiry. A stub still costs a broken
+  device one GET per hold, not per cycle. **The renderer
+  cache makes room by evicting the stub that expires first**, and refuses a
+  new UDN once only renderers it serves are left (`makeRoomLocked`): a
+  served renderer is what a phone may be driving, and a new UDN is what any
+  LAN peer can announce. **The server cache refuses a new SSDP server past
+  the bound and never one the operator configured**: `UpsertConfigured` for
+  the manual poller and for a UDN `DiscoveryConfig.Configured` names (the
+  wiring's `upstreamDiscoveryConfig`, case-folded like `StableServerKey`), so
+  a flood of fakes cannot keep the server the ingest walks out. **Don't
+  switch either to LRU**: under a flood of valid fakes the least recently
+  seen entry is the real device, refreshed every 30 to 60 s while the fakes
+  are refreshed every second. A refused fetch leaves nothing behind (the
+  renderer client drops the record it wrote, `store`; the upstream client
+  records only after a stored Upsert), and the renderer client reaps its
+  location records whenever they pass `maxLocationUDNs`, because the cache
+  is shared by one client per interface and an evicting write cannot clean
+  another client's map. **The upstream handler looks a server up and
+  refreshes it in one step, `ServerCache.Touch`**: its Get then Upsert of
+  `{UDN, LastSeenAt}` resurrected an entry `EvictStale` took in between,
+  with no control URL, which was never fetched again (2 of 200,000 races on
+  main). **Measured and left**: a dual-homed upstream server alternating its
+  two addresses re-fetches twice per M-SEARCH cycle (120 GETs an hour, the
+  control URL alternating between two valid addresses); porting the
+  renderer's location set into that security-relevant move detector was not
+  worth two GETs a minute. And a dispatch refused at the claims bound logs
+  nothing, a result refused at a full cache only at Debug: neither bound is
+  reached by a real LAN, a flood's refusals are the protection working, and
+  a once-per-episode Warn needs a latch with its own flap rules, the second
+  streak policy #1072 declined. `TestAFloodOfBrokenRenderersStaysBounded`,
+  `TestARendererWhoseDescriptionFailedOnceComesBackAfterTheHold`,
+  `TestAFloodNeverDisplacesACachedRenderer`,
+  `TestAFloodOfFakeServersStaysBounded` and
+  `TestAConfiguredServerIsCachedPastTheBound` pin it.
 - **Both SSDP read loops share `discovery.HandleReadErr`** — timeout resets the
   streak, `net.ErrClosed`/ctx exits, anything else logs with a ctx-aware backoff
   and one escalation. A bare `return` on a transient error kills discovery for
@@ -2822,7 +2873,16 @@ no failing test — which is the shape to expect in this area.
   interface**: both wirings start one client per LAN-eligible interface, and
   a route can be gone on one of them while the others send. `Start` calls
   `Reset`. Don't give a client its own copy of the policy: this is the send
-  side's one definition, as `HandleReadErr` is the read side's.
+  side's one definition, as `HandleReadErr` is the read side's. **The SSDP
+  advertiser's NOTIFY bursts report through it too** (2026-09-28, backlog
+  B47): a failed write logged at Debug alone, so an advertiser whose
+  interface lost its route announced nothing and said nothing at the default
+  level. It notes ONE result per burst (`announceAlive`, the first failure of
+  its five writes): noted per write, the Error lands inside the first burst
+  (escalation is at the second failure, ten minutes of a 14-minute cadence).
+  Start builds the log, so each run starts a fresh streak; the byebye burst
+  at Stop notes nothing, since the periodic goroutine may be mid-burst then.
+  `NewSendFailureLog` takes what it reports on ("M-SEARCH", "NOTIFY").
 - **…and a send Stop's close cut short is a STOP, not a failure**
   (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
   can close it in between: the write fails with `net.ErrClosed`, which logged
@@ -2840,8 +2900,43 @@ no failing test — which is the shape to expect in this area.
   the shared log, so the upstream client has it too (its socket is likewise
   its own, and only its Stop closes it). The server-side advertiser's NOTIFY
   burst (`sendAliveAll`) ends on the same error rather than logging a Debug
-  line per target left, since only its Stop closes its sender; a write that
-  fails for its own reason still logs one per target.
+  line per target left, since only its Stop closes its sender, and returns
+  it, which the shared log drops; a write that fails for its own reason still
+  logs one Debug line per target, and the burst's result reaches the
+  default level through the log.
+- **A test that starts an SSDP advertiser binds it to the loopback
+  interface, and a discovery test client sends no M-SEARCH** (2026-09-28,
+  backlog B38). Two `internal/dlna` tests bound the OS default, so one run of
+  the package multicast about 310 NOTIFYs of a fake MediaServer with a
+  loopback LOCATION to every device and bridge on the LAN (measured with a
+  listener joined on en0, three runs; about 300 of them from
+  `Test_SSDPAdvertiser_StartStopRaceFree`'s 1 ms advertise interval), and
+  each package's `TestStopWaitsForInFlightFetch` sent a real M-SEARCH.
+  `loopbackInterface(t)` pins the join, the sends and the listener to
+  loopback and keeps the race and lifecycle coverage (both tests PASS, not
+  skip, on macOS and in a Linux container); `newTestClient` and
+  `newServerDiscoveryTestClient` install a `writeMSearch` that sends nothing.
+  Measured after: 0 datagrams on en0 in three runs of each package, while a
+  lo0 listener heard the advertisers' NOTIFYs; on Linux 0 on the Docker
+  bridge, where main put 299. **A new test that starts an advertiser or a
+  client does the same.** **The skip is decided by the PIN, not only by
+  Start's error**: Start only warns when `SetMulticastInterface` fails, and
+  sends on the OS default interface, so a test whose Start succeeded would
+  multicast onto the LAN on such a host. `loopbackInterface` first pins a
+  socket of its own with Start's own call (`pinMulticastInterface`) and
+  skips where that fails (CodeRabbit on #1086). The fallback itself stays:
+  a production advertiser whose pin fails still advertises. **Measure what
+  leaves a Linux host from ANOTHER network namespace, or with tcpdump on
+  the bridge, never with a listener
+  in the same one**: Go binds a multicast listener to the group address, and
+  with Linux's default `IP_MULTICAST_ALL` a socket joined on one interface
+  also receives the group's datagrams arriving on any interface another
+  socket joined (a listener on eth0 heard the loopback advertisers' NOTIFYs,
+  and one on lo heard eth0's). The same default reaches a multi-homed Linux
+  bridge's advertisers (backlog B71). On the Windows runner the join and
+  the pin both take on "Loopback Pseudo-Interface 1": the tests run there,
+  and its log shows them starting with no pin warning. What leaves a
+  Windows host was not measured.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -2851,12 +2946,14 @@ no failing test — which is the shape to expect in this area.
   both. `librarycat.SourceID` prefixes `"source:"` before hashing so a routing
   key can never collide with an album or artist id.
 - **`ServerCache.Upsert`'s merge must carry EVERY descriptive field, and the
-  test that pins it is reflective.** The SSDP handler refreshes a known UDN
-  with `{UDN, LastSeenAt}` on every announcement and the merge preserved the
+  test that pins it is reflective.** The SSDP handler refreshed a known UDN
+  with `{UDN, LastSeenAt}` on every announcement (it uses `Touch` since
+  2026-09-28) and the merge preserved the
   cached fields one by one — `DeviceUDN` was added to `ServerInfo` and not to
   the list, so any partial refresh blanked it. Latent today (only the
   manual-URL poller sets it, under a key no SSDP refresh lands on), and the
-  next field would have met the same list.
+  next field would have met the same list. The merge is `mergeServerInfo`,
+  which `Upsert` and `UpsertConfigured` share.
   `TestServerCacheUpsertPreservesEveryDescriptiveField` fills every string
   field by reflection, so a field is covered the day it is declared.
 - **A path component that sanitizes to NOTHING is a folder that collapses onto

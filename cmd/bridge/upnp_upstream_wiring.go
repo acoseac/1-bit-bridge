@@ -521,11 +521,7 @@ func startUPnPDiscoveryAcrossInterfaces(
 ) []*upnp.MediaServerDiscoveryClient {
 	clients := make([]*upnp.MediaServerDiscoveryClient, 0, len(ifaces))
 	for _, iface := range ifaces {
-		discCfg := upnp.DefaultDiscoveryConfig()
-		discCfg.Interface = iface
-		discCfg.MSearchInterval = upCfg.EffectiveMSearchInterval()
-		discCfg.ServerTTL = upCfg.EffectiveServerTTL()
-		client, cerr := upnp.NewMediaServerDiscoveryClient(discCfg, cache)
+		client, cerr := upnp.NewMediaServerDiscoveryClient(upstreamDiscoveryConfig(upCfg, iface), cache)
 		if cerr == nil {
 			cerr = client.Start(ctx)
 		}
@@ -537,6 +533,36 @@ func startUPnPDiscoveryAcrossInterfaces(
 		clients = append(clients, client)
 	}
 	return clients
+}
+
+// upstreamDiscoveryConfig is the config the SSDP client on iface is built
+// with. Configured names the servers the operator configured by UDN, which
+// the cache's bound never refuses (discovery.MaxCachedDevices), so a flood
+// of fake MediaServers on the LAN cannot keep one the ingest walks out.
+func upstreamDiscoveryConfig(upCfg config.UPnPUpstreamConfig, iface *net.Interface) upnp.DiscoveryConfig {
+	discCfg := upnp.DefaultDiscoveryConfig()
+	discCfg.Interface = iface
+	discCfg.MSearchInterval = upCfg.EffectiveMSearchInterval()
+	discCfg.ServerTTL = upCfg.EffectiveServerTTL()
+	configured := configuredUDNSet(upCfg)
+	discCfg.Configured = func(udn string) bool {
+		_, ok := configured[strings.ToLower(strings.TrimSpace(udn))]
+		return ok
+	}
+	return discCfg
+}
+
+// configuredUDNSet is the set of UDNs the operator configured servers by,
+// trimmed and lowercased: the spelling of the ingest's StableServerKey, so a
+// device announcing its UDN in another case still matches.
+func configuredUDNSet(upCfg config.UPnPUpstreamConfig) map[string]struct{} {
+	out := make(map[string]struct{}, len(upCfg.Servers))
+	for _, srv := range upCfg.Servers {
+		if udn := strings.ToLower(strings.TrimSpace(srv.UDN)); udn != "" {
+			out[udn] = struct{}{}
+		}
+	}
+	return out
 }
 
 // manualServersFrom projects the configured manual-URL servers into the
@@ -577,11 +603,5 @@ func foreignConfiguredUDNs(cfg *config.Config) map[string]struct{} {
 	if cfg == nil {
 		return nil
 	}
-	out := make(map[string]struct{}, len(cfg.UPnPUpstream.Servers))
-	for _, srv := range cfg.UPnPUpstream.Servers {
-		if udn := strings.ToLower(strings.TrimSpace(srv.UDN)); udn != "" {
-			out[udn] = struct{}{}
-		}
-	}
-	return out
+	return configuredUDNSet(cfg.UPnPUpstream)
 }

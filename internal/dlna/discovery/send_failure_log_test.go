@@ -43,7 +43,7 @@ func TestSendFailureLogEscalatesTenMinutesIntoAStreak(t *testing.T) {
 // which route is gone unless the line names it.
 func TestSendFailureLogNamesTheInterfaceOnEveryLine(t *testing.T) {
 	buf := captureLogs(t)
-	l := NewSendFailureLog(packageLogger, "utun3", "renderer discovery", time.Minute)
+	l := NewSendFailureLog(packageLogger, "M-SEARCH", "utun3", "renderer discovery", time.Minute)
 	for i := 0; i < l.escalateAt; i++ {
 		l.Note(errors.New("sendto: can't assign requested address"))
 	}
@@ -70,7 +70,7 @@ func TestSendFailureLogNamesTheInterfaceOnEveryLine(t *testing.T) {
 // count, while any other failure starts a streak as before.
 func TestSendFailureLogDropsOnlyTheErrorOfItsOwnStop(t *testing.T) {
 	buf := captureLogs(t)
-	l := NewSendFailureLog(packageLogger, "en0", "renderer discovery", time.Minute)
+	l := NewSendFailureLog(packageLogger, "M-SEARCH", "en0", "renderer discovery", time.Minute)
 	closed := &net.OpError{Op: "write", Net: "udp4", Err: net.ErrClosed}
 	l.Note(closed)
 	if buf.Len() != 0 || l.Streak() != 0 {

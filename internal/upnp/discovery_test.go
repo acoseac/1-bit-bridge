@@ -173,6 +173,10 @@ func (d *recordingDispatcher) fetchCount() int {
 	return d.fetches
 }
 
+// newServerDiscoveryTestClient builds a client whose M-SEARCH sends go
+// nowhere. The zero interface pins a real send to the OS default, the LAN, so
+// a test that started this client multicast a search every server there
+// answered until 2026-09-28 (backlog B38).
 func newServerDiscoveryTestClient(t *testing.T, disp discovery.SOAPDispatcher, cache *ServerCache) *MediaServerDiscoveryClient {
 	t.Helper()
 	cfg := DiscoveryConfig{
@@ -183,6 +187,7 @@ func newServerDiscoveryTestClient(t *testing.T, disp discovery.SOAPDispatcher, c
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
+	c.writeMSearch = func(_ *net.UDPConn, b []byte, _ *net.UDPAddr) (int, error) { return len(b), nil }
 	return c
 }
 
