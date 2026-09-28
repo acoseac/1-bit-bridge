@@ -26,9 +26,10 @@ func (s *Server) variantSummaryFor(r *http.Request, paths []string, sourceBytes 
 	}
 	cfg := s.deps.CfgHolder.Load()
 	out := &playerVariantSummaryDTO{
-		SourceBytes:  sourceBytes,
-		Enabled:      upscaleFeatureEnabled(cfg),
-		SoxAvailable: s.deps.UpscalePrecheck != nil && s.deps.UpscalePrecheck() == nil,
+		SourceBytes:    sourceBytes,
+		Enabled:        upscaleFeatureEnabled(cfg),
+		SoxAvailable:   s.deps.UpscalePrecheck != nil && s.deps.UpscalePrecheck() == nil,
+		OptimizeActive: s.optimizeActive(),
 	}
 
 	// Coverage comes from SQL rather than from hydrated rows, and that

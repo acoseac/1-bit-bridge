@@ -21750,3 +21750,121 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — the variant panel disables Generate CarPlay while the CarPlay switch is off
+
+Backlog B29, first half (a follow-up from #1060; the second half, the
+standard logger `loggingtest` left redirected, is #1064's). #1060 made
+`POST /api/upscale/batch` refuse the optimize kind with 503
+`optimize-disabled` while `upscale.optimizeEnabled` is off. The variant
+panel on the album and artist pages (`static/player/variants.js`) disables
+its Generate buttons only for the panel-wide blocks the summary reports
+(`enabled`, `soxAvailable`), and the summary carried no CarPlay switch, so
+with upscaling on and the switch off "Generate CarPlay" stayed live and a
+click answered with the 503. The #1060 entry above records that as the
+state it left, the player keeping "Generate CarPlay" live whenever
+upscaling was on; this change supersedes that sentence.
+
+### Measured on the old code
+
+The two tests below, copied into a `git archive` of the tree before this
+change (the new identifiers checked absent there first):
+
+- `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads`: the album and
+  artist summaries carried no `optimizeActive` in any state of the switch.
+- `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt`, the
+  shipped panel under node on the summary the album detail served: with
+  the switch off, `"CarPlay-optimized" Generate disabled=false, while the
+  submit of that kind answered "optimize-disabled"`, with no note in the
+  row and no way to the switch, with and without the tray. Both switches
+  on, and upscaling off, were already right.
+
+### Decided
+
+- One predicate. `Server.optimizeActive` (`Deps.OptimizeActive`, nil read
+  as on, the reading `apiLibraryBrowseProjection` and the #1060 submit
+  already shared) is what the submit, the projection endpoint and the
+  summary read. The summary field is `optimizeActive`, not
+  `optimizeEnabled`: it is the gate, which in production folds in
+  `upscale.enabled`, not the configured switch. Serving the configured
+  switch was rejected: it agrees with the submit only while the gate is
+  wired from the same config, and the negative control that served it
+  stayed green on the panel test (whose gates are wired as cmd/bridge wires
+  them) and went red on the summary test alone.
+- The reason in the kind's own row, under its bar, beside the button it
+  disables, with a gear for that one switch (`OPTIMIZE_SWITCH_ROW`, one
+  row object that the panel-wide tray now shares) and the panel-wide note's
+  fallback link when app.js published no tray. A block that stops both
+  kinds (upscaling off, no sox) stays one note above them, and the per-kind
+  note is not repeated under it. Delete stays live, as the owner decided
+  for #1060: the switch being off must not stop an operator reclaiming the
+  disk.
+- `summary.optimizeActive === false`, not a falsy test. The folder view
+  builds its summary from `/api/library/browse`, which carries no feature
+  state, and its rule is to leave the buttons live and let the endpoint
+  answer; its synthetic summary now says `optimizeActive: true` for the
+  same reason, which is documentation rather than load: `=== false` reads
+  an absent field as unknown.
+- The #1060 sweep (`TestEveryBatchSubmitReadsTheUpscaleGateFirst`) now
+  counts a call of `optimizeActive` as reading the CarPlay switch, and its
+  fixture test has a submitter gated that way.
+- No static Go↔JS guard for the summary payload, which had none. The node
+  test reads the new field by the name the Go tag serves and the panel
+  reads, so a rename on either side turns it red (the misspelled-read and
+  unset-field controls below). The older fields (`enabled`,
+  `soxAvailable`, the byte totals) are still unguarded by name.
+
+### In a browser
+
+A throwaway bridge on 127.0.0.1:17788/17789 over three sox-synthesised
+FLACs (two at 96/24 in one album), upscale on, the switches moved through
+the Settings page and through the panel's own gear:
+
+- Both on: both Generate buttons live, no note.
+- CarPlay off (Settings, Save): "Generate CarPlay" `disabled: true`, the
+  note "CarPlay-optimized variants are switched off for this bridge." and
+  a gear in the CarPlay row, "Generate hi-res" live. The gear's tray
+  showed the switch off and saved it on ("Saved.").
+- After a reload, both live; "Generate CarPlay" queued and wrote
+  `optimized-v2-48000-16.flac` for both tracks, and the row read 2 / 2.
+- At 375 px the note wraps beside its gear with no overflow (document and
+  rows `scrollWidth == clientWidth`, 375 and 343); dark mode legible.
+
+### Tests and controls
+
+`internal/admin/player_variants_optimize_test.go`:
+`TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` (album and artist
+summaries against a real submit, switch on, off, on again and unwired, on
+one server) and `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt`
+(the shipped panel under node with a small DOM that keeps children, class,
+text and disabled state; three states moved by `PATCH /api/settings`,
+each rendered with and without a tray; each kind's Generate compared with
+that kind's submit). It skips where node is not installed, as the other
+node tests here do.
+
+Negative controls on the committed code, each restored with
+`git checkout --`:
+
+| mutation | goes red |
+|---|---|
+| the summary never sets `optimizeActive` | the summary test (on, on again, unwired) and the panel test's "both on" cases |
+| the summary serves the configured switch | the summary test's "off" step alone |
+| the panel reads a misspelled field | the panel test's "CarPlay off" cases: Generate live, no note, no tray or link |
+| the per-kind note never appended | the same cases' note, tray and link; Generate still disabled |
+| Generate ignores the per-kind reason | the same cases' Generate state alone |
+| the per-kind reason shown under a panel-wide block | the "upscaling off" cases: a second note and a second tray |
+| the sweep does not count `optimizeActive` | the tree sweep (the real handler) and the fixture's shared-predicate submitter |
+| the `.variant-kind-off` rule removed | `TestPlayerEmittedClassesAreStyled` |
+
+### Left open
+
+- A player tray's save does not re-render the view. After the gear's
+  switch saves, the row still says "switched off" and the button stays
+  disabled until the next render (a reload, a navigation, a variant job
+  landing). The panel-wide tray and the Smart mixes tray behave the same;
+  closing it needs a hook in app.js's shared `buildFeatureTray`.
+- The folder view still offers both Generate buttons whatever the
+  switches say, by its own design, because `/api/library/browse` carries
+  no feature state.
+- On a managed bridge whose `managedSettings` lists `optimizeEnabled`,
+  the gear offers a switch the PATCH refuses, as the panel-wide tray
+  already did for both of its switches.

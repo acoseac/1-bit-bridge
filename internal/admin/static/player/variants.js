@@ -25,6 +25,15 @@ const KINDS = [
   },
 ];
 
+// The CarPlay switch as a tray row. Two trays offer it: the panel-wide one
+// when variant generation is off, and the CarPlay kind's own when only this
+// switch is. One row, so the two cannot describe it differently.
+const OPTIMIZE_SWITCH_ROW = {
+  field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants",
+  hint: "16-bit downsamples for head units and cellular streaming. " +
+    "Only active while PCM upscaling is on — they share a worker pool.",
+};
+
 /**
  * Build the panel.
  *
@@ -71,11 +80,7 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
         "sox. Nothing is transcoded on the fly and the originals are untouched.",
       rows: [
         { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
-        {
-          field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants",
-          hint: "16-bit downsamples for head units and cellular streaming. " +
-            "Only active while PCM upscaling is on — they share a worker pool.",
-        },
+        OPTIMIZE_SWITCH_ROW,
       ],
       link: { href: "/settings?tab=audio", text: "All audio settings →" },
     });
@@ -98,7 +103,11 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
   }
 
   for (const kind of KINDS) {
-    root.appendChild(kindRow(kind, summary[kind.key], scope, !blocked, onChanged));
+    // A block that stops both kinds is said once, above them. One that
+    // stops a single kind is said in that kind's row, beside the button it
+    // disables.
+    const off = blocked ? "" : kindOffReason(kind.key, summary);
+    root.appendChild(kindRow(kind, summary[kind.key], scope, !blocked && !off, off, onChanged));
   }
   return root;
 }
@@ -124,7 +133,52 @@ function blockedReason(summary) {
   return "";
 }
 
-function kindRow(kind, cov, scope, actionable, onChanged) {
+/**
+ * Why one kind's Generate is off while the panel is otherwise live, or "".
+ *
+ * Only the CarPlay kind has a switch of its own (upscale.optimizeEnabled),
+ * and POST /api/upscale/batch refuses the kind while it is off.
+ * `summary.optimizeActive` is that handler's own predicate, so the button is
+ * off exactly where a click would be refused. Until 2026-09-28 the summary
+ * did not carry it, and the button stayed live and answered with the 503.
+ *
+ * `=== false`, not a falsy test: an unknown must leave the button live and
+ * let the endpoint answer, the folder view's rule for the feature state its
+ * endpoint does not carry. A disabled button saying "switched off" about a
+ * switch that is on would be the one outcome that lies.
+ */
+function kindOffReason(key, summary) {
+  if (key === "optimize" && summary.optimizeActive === false) {
+    return "CarPlay-optimized variants are switched off for this bridge.";
+  }
+  return "";
+}
+
+/**
+ * The note a kind carries when its own switch is off, with a gear beside it
+ * that opens that one switch: the panel-wide note's shape, one kind down.
+ * The fallback, when app.js did not publish the tray, is the same link the
+ * panel-wide note falls back to.
+ */
+function kindOffNote(reason) {
+  const note = el("p", { class: "variants-blocked small", text: reason });
+  const tray = window.BridgeFeatureTray?.build({
+    title: "CarPlay-optimized variants",
+    blurb: "16-bit copies for head units and cellular streaming, generated offline " +
+      "by sox. The originals are untouched.",
+    rows: [OPTIMIZE_SWITCH_ROW],
+    link: { href: "/settings?tab=audio", text: "All audio settings →" },
+  });
+  if (tray) {
+    return el("div", { class: "variant-kind-off" },
+      el("div", { class: "variants-blocked-row" }, note, tray.button), tray.tray);
+  }
+  return el("div", { class: "variant-kind-off" }, note,
+    el("p", { class: "small" },
+      el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" })));
+}
+
+function kindRow(kind, cov, scope, actionable, off, onChanged) {
   const c = cov || { covered: 0, eligible: 0, exempt: 0, stale: 0 };
   const row = el("div", { class: "variant-kind" });
 
@@ -140,6 +194,7 @@ function kindRow(kind, cov, scope, actionable, onChanged) {
     kindActions(kind, c, scope, actionable, onChanged, status));
   row.appendChild(head);
   row.appendChild(bar(c, kind.title));
+  if (off) row.appendChild(kindOffNote(off));
 
   // One note, not a list. An empty denominator and a non-zero exempt
   // count are the SAME fact told twice — "2 need nothing · nothing here

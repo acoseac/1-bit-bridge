@@ -3295,7 +3295,10 @@ mentions across the four `ops/audit-*.md` files.
   the closure `WithUpscale` hands /v1 (`TestConsoleBatchGateIsTheV1UpscaleGate`
   requires the same identifier; a nil gate reads as off), and the optimize kind
   reads `OptimizeActive` too, as the projection endpoint does: /v1 refused that
-  kind with the CarPlay switch off and the console accepted it. Both come before
+  kind with the CarPlay switch off and the console accepted it. Both read it
+  through `Server.optimizeActive` since 2026-09-28, the predicate the player's
+  variant summary serves, so "Generate CarPlay" is disabled where this refuses
+  (the Admin console section). Both come before
   the scope, and `TestEveryBatchSubmitReadsTheUpscaleGateFirst` sweeps every
   `BatchCoordinator.Submit*` caller by AST. **The console's delete stays open on
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
@@ -4347,6 +4350,33 @@ its twin.** The top list is older, shorter, and read first.
   at 375 px with a deliberately long fixture string**, and check
   `scrollWidth == clientWidth` rather than eyeballing it. (2026-09-20)
 
+- **A control the server will refuse must not look live, and the panel
+  reads the refusal's own predicate** (2026-09-28). With upscaling on and
+  `upscale.optimizeEnabled` off, "Generate CarPlay" stayed enabled on the
+  album and artist Variants panels and a click answered 503
+  `optimize-disabled`: #1060 made the console's submit refuse the kind, and
+  the summary the panel reads carried no switch. The summary now carries
+  `optimizeActive`, which is `Server.optimizeActive`, the ONE predicate the
+  batch submit, the projection endpoint and the summary read (nil reads as
+  on, as `Deps.OptimizeActive` always has), so the button is disabled
+  exactly where the submit refuses.
+  `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` compares the served
+  value with a real submit for every state of the switch, and
+  `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt` runs
+  the SHIPPED panel under node on the summary the album detail serves,
+  kind by kind against the submit, with the switches moved through the
+  settings PATCH. **Don't serve the configured `optimizeEnabled` instead**:
+  it agrees with the submit only while the gate is wired from the same
+  config, and a control that served it went red on the summary test alone.
+  The reason sits in the kind's own row with a gear for that one switch (a
+  block that stops both kinds stays one note above them), and the panel
+  tests `=== false`: an unknown leaves the button live and lets the
+  endpoint answer, the folder view's rule, since `/api/library/browse`
+  carries no feature state. The #1060 AST sweep counts a call of
+  `optimizeActive` as reading the CarPlay switch. **A player tray's save
+  does not re-render the view** (this one, the panel-wide one, the Smart
+  mixes one): after "Saved." the row still says "switched off" until the
+  next render, a follow-up.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the

@@ -1168,6 +1168,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .variant-kind-title { font-weight: 650; font-size: 0.88rem; flex: 1 1 auto; min-width: 0; }
 .variant-kind-ratio { color: var(--fg-muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 .variant-kind-note { margin: 4px 0 0; }
+/* A kind whose own switch is off (the CarPlay kind) says so in its row,
+ * under the bar, with the gear for that one switch; the note above the
+ * kinds is for a block that stops both. Spaced like the kind's other
+ * notes. */
+.variant-kind-off { margin: 4px 0 0; }
 
 .variant-bar {
   height: 6px; margin-top: 8px; border-radius: 999px; overflow: hidden;
