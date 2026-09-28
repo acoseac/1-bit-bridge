@@ -24195,3 +24195,38 @@ Controls on the unified launch, each restored with `git checkout --`:
 | the same, with the guard back to Test functions | the drain guard green: the gap each PR recorded for its own helper |
 | the projection handler's `!s.upscaleActive()` removed | the projection test red at every step health said off (booted off, steps 0 and 2; booted on, step 1) |
 | runServe wires a nil `OrphanSweepStatus` (with `_ = orphanSweepStatus`, or it does not build) | #1071's Jobs-card test red, booted through `bootServe` |
+
+**Then #1068 merged**, while this round's push was going out (c1bdedf4
+merges it; the one conflict was the log's end). It serves
+`Server.optimizeActive` in the album and artist variant summaries, and the
+panel names the CarPlay switch ("CarPlay-optimized variants are switched
+off for this bridge", with a gear for that switch) when `optimizeActive` is
+false and no panel-wide note has closed both kinds. The panel-wide notes
+come from the summary's `enabled` (the configured flag) and `soxAvailable`,
+which was the precheck alone. This branch makes `Deps.OptimizeActive` the
+upscale gate (the flag and a usable sox) and the CarPlay switch, and a
+usable sox is found AND able to write FLAC where the build's formats are
+known (cmd/bridge's `soxUsable`). So with both switches on and a sox
+without FLAC, the merge showed no panel-wide note, the CarPlay row called
+a switch that was on "switched off" and offered its gear, and the hi-res
+Generate stayed live over a submit that answered 503 `upscale-disabled`.
+The last was already so on main, whose batch submit has read the full gate
+since #1060; the false "switched off" came with this branch.
+
+The summary's `soxAvailable` is `Server.soxUsable` now (1f28f692): the
+precheck finds sox, and `UpscaleSoxFLAC` does not report a build known to
+lack FLAC, which is `soxUsable`'s verdict over the same cached probe. The
+panel's sox note reads "sox is not installed on the bridge host, or has no
+FLAC support, so no variants can be generated.", the Jobs card's words for
+the same verdict. #1068's panel test wires its gates as cmd/bridge does
+now (the CarPlay predicate through the upscale gate, the upscale gate with
+a FLAC probe) and gains a fourth state: both switches on, a sox without
+FLAC, both submits refused, and the panel showing one note naming FLAC, no
+row note and no tray. Red on the merge commit, as above.
+`TestTheVariantSummaryReadsSoxAsTheGateDoes` pins the three FLAC answers.
+
+| mutation | result |
+|---|---|
+| the summary's `soxAvailable` back to the precheck alone | the new test's "without FLAC" case, and the panel test's fourth state (the CarPlay row's "switched off", the hi-res Generate live), both red |
+| `soxUsable` counting an unread build as without FLAC (`_ = known`, or it does not build) | the new test's "could not be read" case and `TestAlbumDetailVariantSummarySeparatesOffFromNoSox` red; the panel test green, its probe always known |
+| the panel's sox note back to its old words | the panel test's fourth state red (no note naming FLAC) |
