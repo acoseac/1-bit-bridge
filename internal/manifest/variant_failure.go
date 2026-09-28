@@ -45,12 +45,16 @@ import (
 // # What must NOT be recorded
 //
 // Only failures that are a property of the FILE. The pool records a strike
-// exclusively on a genuine sox failure: shutdown cancellation and the per-job
-// timeout are both excluded at the call site, because the first says nothing
-// about the source and the second is as likely to mean a hung mount as a
-// pathological file. This mirrors the acoustid rule that a lookup ERROR (a
-// fact about the upstream) never persists while a no-match (a fact about the
-// audio) does.
+// exclusively on a genuine sox failure: shutdown cancellation, the per-job
+// timeout and a tool the host lacks are all excluded at the call site, because
+// the first says nothing about the source, the second is as likely to mean a
+// hung mount as a pathological file, and the third reached no verdict on the
+// file at all (internal/transcode/tool_unavailable.go). A missing sox struck
+// every file queued behind it until 2026-09-28, and three sweeps then
+// suppressed the whole eligible library for the TTL, past the install that
+// fixed it; migration v48 expired those suppressions once. This mirrors the
+// acoustid rule that a lookup ERROR (a fact about the upstream) never persists
+// while a no-match (a fact about the audio) does.
 //
 // The columns are COLUMN-ONLY: no `json:` tags, never spliced onto wire
 // output — the same rule the v25 format facts and the v28/v37/v38 acoustid

@@ -24709,6 +24709,182 @@ operator's configured URL named`), and the console saw nothing.
   operator's URL; upstream ingest is refused in public mode), though no
   later dial of one reaches a metadata address.
 
+## 2026-09-28 — a job that cannot run its tool fails without striking its source
+
+The transcode pool recorded a strike against the source for every runner error
+that was not a timeout or a shutdown (`processJob`, `RecordVariantFailure`).
+Three strikes on one (size, mtime) take the file out of every candidate query
+for 30 days (`variantFailureSuppressedSQL`), and installing a missing tool
+changes neither the size nor the mtime. A missing sox is the one failure that
+does not go away between strikes, so every job that reached the runner without
+it sidelined its file for a month, and each logged its own WARN. #1067 gated
+the auto-optimize sweeper on the live upscale gate (the flag AND a usable sox)
+and left this for its own change (the entry above); the gate re-probes every
+30 s and refuses only new work, so a job already queued when the tool goes (the
+queue holds up to 5,000 a lane) or one queued inside the probe window still
+reached the runner. The analysis pool had always treated a
+missing sox as transient (`internal/analyze/failure.go`).
+
+### Measured
+
+Through the real pool and the real runner (`Run`), PATH set to an empty
+directory, three jobs per case, on the unchanged tree (c6036d4a):
+
+```
+--- FAIL: TestAJobThatCannotRunItsToolStrikesNoSource/sox_missing,_FLAC
+    1 source(s) suppressed from every candidate query for Music/Album/01.flac
+    1 strike record(s) against Music/Album/01.flac after its jobs failed for want of a tool, want none
+    WARN pool: sox failed path=Music/Album/01.flac err=exec: "sox": executable file not found in $PATH (stderr: )   (x3)
+--- FAIL: …/sox_missing,_ALAC     (the same, for an .m4a: the decoder probe failed open, so sox was tried)
+--- FAIL: …/ffmpeg_missing,_DSD   (the same, err=dsd render: source is DSD but the DSD decode route is unavailable (route none, source "01.dsf"))
+```
+
+With the real `bridge serve`, built from c6036d4a and from the branch, over a
+3-track 44.1 kHz/16 album made with sox, `upscale.enabled: true`, and a PATH
+whose only sox was a symlink: `GET /v1/health` (the gate probes sox,
+`upscaleEnabled: true`), the symlink removed, three `POST /v1/upscale
+{"path":"Artist/Album"}` a second apart (each `{"enqueued":3}`, inside the
+probe's TTL), the symlink restored, then `POST /v1/upscale/batch` over the
+album:
+
+| | main | branch |
+|---|---|---|
+| jobs failed | 9 | 9 |
+| WARN lines | 9 × `pool: sox failed` | 1 × `pool: tool unavailable` (`tool=sox`, `reason=executable file not found in $PATH`) |
+| strike records | 3 on each file | 0 |
+| `suppressedFailures` | 3 | 0 |
+| the batch with sox back | `totalFiles: 0, enqueuedCount: 0`, no variant | `totalFiles: 3, enqueuedCount: 3`, 3 variants |
+| recovery line | none | `pool: tool available again tool=sox failedJobs=9` |
+
+Then the branch binary over main's struck database (user_version 47, three rows
+at `variant_fail_count` 3): v48 ran, `suppressedFailures` read 0 at start, and
+the batch converted all three (the success cleared their records).
+
+A bad-interpreter `sox` on PATH (`#!/b43/no/such/interpreter`), probed with
+go1.26.6: `exec.Command("sox")` passes the lookup and Start fails with
+`fork/exec <path>: no such file or directory`, an `*fs.PathError` with `Op
+"fork/exec"`, no `*exec.Error`.
+
+### Decisions
+
+- **Classify by type where the fact is known, never by message.** Three
+  shapes, each a failure no tool reached a verdict in: an `*exec.Error` (only
+  exec's PATH lookup produces one: not found, not executable, or found relative
+  to the working directory); a fork/exec `*fs.PathError` (os.StartProcess could
+  not start the program at the absolute path `resolveBin` found; the source
+  path is only an argument to that call); and `Run`'s own mark
+  (`markToolUnavailable`) where the decoder probe gave the source no route. The
+  mark keeps the error's text (the `markUnreadable` shape), since the message
+  reaches the batch row and the `jobFailed` event. A tool that could not start
+  is asked about before the mark, so a route mark over sox's own lookup failure
+  (sox gone between the probe and the run) names sox.
+- **The two route verdicts.** A `.dsf` / `.dff` that did not route to the DSD
+  chain is one this host's ffmpeg cannot decode (missing, without the `dsd_*`
+  decoders, or with a decoder listing the probe could not read: a timed-out
+  probe is cached for 30 s, and every DSD job in that window used to strike).
+  An MP4 source reaches sox on `routeNone` only when sox has no MP4 reader and
+  ffmpeg or ffprobe is missing, so sox's refusal is about the toolchain.
+  **A DSD-flagged row under another extension keeps its strike**: the same
+  `ErrDSDDecodeUnavailable`, but a fact about the row, which no install fixes.
+- **The job still counts as failed and is announced.** Its batch row and
+  `jobFailed` event say what happened; #988's ordered tail is unchanged, and
+  the new exit is a row in both terminal-order tables.
+- **The rest still strikes.** The transcode debounce predates classification,
+  so its default is the opposite of the analysis pool's: everything not
+  classified as the host's strikes, a tool that ran and refused the file
+  included (`TestAToolThatRanAndRefusedTheFileStillStrikesIt`).
+- **One report per tool per outage** (`toolOutages`), the M-SEARCH rule: a
+  Warn when it starts, Debug for each job after it under the same message
+  (so `loggingtest.ParkOn` parks the first job only), an Info when a job whose
+  chain ran the tool succeeds, and a re-Warn after 24 h of silence, because a
+  tool that comes back and goes again before any job proves it would otherwise
+  be reported by the first outage's line alone. Which tools a success proves
+  is read from the settings' `decoder`, the route the run took (every chain
+  ends in sox; the pipe routes ran ffprobe and ffmpeg; the DSD route ran the
+  DSD decoders). **Per tool**: with ffmpeg missing and sox present, a FLAC
+  success between two DSD failures proves nothing about ffmpeg, and ending
+  every outage on any success logged a Warn and an Info per DSD job (NC9).
+  The analysis pool's rule against deduplicating a transient failure is about
+  a per-FILE marker swallowing a tool failure; this key is the tool, and the
+  alarm stays up until the tool is proven back.
+- **v48 expires every suppression once.** What the strike rows store (v39):
+  `variant_fail_count`, `variant_fail_at`, `variant_fail_size`,
+  `variant_fail_mtime_ns`, no reason, so a reason-keyed migration is not
+  possible, and the strikes a missing tool wrote cannot be told from the rest.
+  Leaving them to `POST /api/upscale/failures/retry` leaves an affected host's
+  files out for up to 30 days with no cue: `/api/upscale/stats` carries
+  `suppressedFailures` and no console code reads it (grep: no reader in
+  `app.js`, `player/` or the templates), and the Jobs card reads "all caught
+  up" because the candidate count excludes suppressed sources (#1067's
+  measurement). Clearing the strikes outright (the Retry button's statement)
+  was rejected: a file that is still broken would take three more failed jobs
+  to suppress. Expiring them as the TTL does (`variant_fail_at = 0`, the count
+  kept) costs such a file one attempt, which the TTL already spends every 30
+  days, and `RecordVariantFailure` then counts on from the same version and
+  re-suppresses it. No `indexed_at` change, so nothing reaches a client.
+- **It leans on #1067 for the sweeper.** With no strike, only the live gate
+  keeps the sweeper from re-offering the backlog to a host without sox; each
+  such job fails in microseconds at exec, and one Warn covers the outage.
+
+### Tests and controls
+
+- `internal/transcode/pool_missing_tool_test.go`:
+  `TestAJobThatCannotRunItsToolStrikesNoSource` (the three cases above, on
+  every platform), `TestAToolOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`
+  (a scripted runner: sox's outage, then ffmpeg's with FLAC successes between
+  its failures), `TestAToolOutageThatOutlastsADayIsReportedAgain` (the
+  per-instance clock `toolOutages.now`).
+- `internal/transcode/pool_missing_tool_unix_test.go` (shell stand-ins):
+  `TestAToolThatRanAndRefusedTheFileStillStrikesIt`,
+  `TestAJobWhoseToolIsBrokenOrMissingOnTheWayStrikesNoSource` (ALAC with no
+  decoder, the DSD pipe starting ffmpeg and then failing to find sox, a sox that
+  cannot start), `TestInstallingTheToolBringsTheSourceBackAtTheNextJob`.
+- `internal/transcode/tool_unavailable_test.go`: the classifier against real
+  exec failures (not on PATH; an absolute path that is not there, a fork/exec
+  error on POSIX and a lookup error on Windows; the test binary exiting 2 on an
+  unknown flag; a context ended before the start; an `*exec.Error` built with
+  no cause, which must not panic), the mark, `toolName`,
+  `missingDecodeTool`, `toolsProvenBy` over the settings each route writes.
+- `TestRun_DSDJobRefusesANonDSDRoute` gained the split: the no-ffmpeg `.dsf` is
+  classified, the DSD-flagged `.flac` is not.
+- `TestACountedTranscodeFailureHasAlreadyReleasedItsPath` and
+  `TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath` gained a "tool
+  unavailable" exit.
+- `internal/manifest`: `TestMigration48ExpiresEverySuppressionOnceAndKeepsTheCount`
+  (through the ladder from v47, against the sweeper's own candidate query).
+
+Negative controls on the committed tree, each restored with `git checkout --`
+and re-run green:
+
+| mutation | red | green |
+|---|---|---|
+| NC1: the pool ignores the classification | all three reproduction cases, the three stand-in no-strike cases, the recovery test, both outage tests, the parked "tool unavailable" exit | the held exit, the positive control, the classifier's unit tests |
+| NC2: no `*exec.Error` arm | sox missing (FLAC, ALAC), the DSD pipe without sox, unit "not on PATH", the mark over sox's lookup failure, both outage tests, the recovery test, the parked exit | the fork/exec and route-mark cases |
+| NC3: no fork/exec arm | "a sox that cannot start", unit "absolute path that is not there" | everything else |
+| NC4: no route-mark arm | DSD with no ffmpeg, ALAC with no decoder, the route guard's no-ffmpeg `.dsf`, the mark unit test, the per-tool outage test | the exec cases |
+| NC5: `Run` does not mark the no-ffmpeg `.dsf` | DSD with no ffmpeg, the route guard's no-ffmpeg case | everything else |
+| NC6: `Run` does not mark the no-decoder MP4 route | ALAC with no decoder | everything else |
+| NC7: `Run` marks every DSD refusal | the route guard's DSD-flagged `.flac` | everything else |
+| NC8: a Warn per job | every warning-count assertion | |
+| NC9: any success ends every outage | the per-tool outage test (its Warn, Debug and recovery counts) | the recovery test |
+| NC10: no 24 h re-warn | the re-warn test | |
+| NC11: the pool never reports a success | the per-tool outage test, the recovery test | |
+| NC12: v48 a no-op | the v48 test (still suppressed) | |
+| NC13: v48 also zeroes the count | the v48 test (the kept count) | |
+| NC14: the pool strikes nothing at all | the positive control, the parked "sox failed" exit (`requireStrikes(1)`) | every no-strike test |
+| NC15: `causeText` calls `Error()` on a nil cause | the classifier's "an exec error with no cause" row (a nil-pointer panic) | |
+
+### Left as they are
+
+- Other failures that are about the host still strike: a variants directory
+  the service cannot create a directory in (`mkdir sidecar dir`), a full disk
+  (sox exits non-zero), a rename that fails, the album survey's failed store
+  read, and a sox that runs but whose build has no FLAC writer (every job
+  exits non-zero; the gate's `soxUsable` refuses new work on it). Each needs
+  a verdict of its own, where it is known.
+- A strike records no reason, so the console cannot say why a file was
+  suppressed, and `suppressedFailures` has no reader in the console at all.
+
 ## 2026-09-28 — a GENA callback on this machine or the link gets the initial NOTIFY only from that address, and the NOTIFY follows no redirect (backlog B39, half of #818's step two)
 
 #818 (2026-09-01) was step one of a two-step narrowing of the GENA initial
