@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,7 +48,7 @@ func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
 			b := startServedBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil)
 			for step, on := range []bool{bootOn, !bootOn, bootOn} {
 				if step > 0 {
-					patchUpscaleEnabled(t, b.ctx, b.console, b.adminBase, on, b.stderr)
+					patchUpscaleEnabled(t, b.console, b.adminBase, on, b.stderr)
 				}
 				healthOn := healthUpscaleEnabled(t, b.phone, b.apiBase)
 				if stubbedSox && healthOn != on {
@@ -97,9 +96,9 @@ func putUsableSoxOnPath(t *testing.T) bool {
 
 // patchUpscaleEnabled switches upscaling through the console's settings
 // PATCH and requires the report to call the change live.
-func patchUpscaleEnabled(t *testing.T, ctx context.Context, client *http.Client, adminBase string, on bool, stderr *safeBuffer) {
+func patchUpscaleEnabled(t *testing.T, client *http.Client, adminBase string, on bool, stderr *safeBuffer) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, adminBase+"/api/settings",
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPatch, adminBase+"/api/settings",
 		strings.NewReader(fmt.Sprintf(`{"upscaleEnabled":%t}`, on)))
 	if err != nil {
 		t.Fatal(err)

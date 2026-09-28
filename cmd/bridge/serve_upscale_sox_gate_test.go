@@ -75,7 +75,7 @@ func TestServeWithoutSoxReportsUpscalingOffOnEverySurface(t *testing.T) {
 	}
 
 	// What a paired device, or third-party tooling, reads.
-	mint := pairViaAdmin(t, b.ctx, b.console, b.adminBase+"/api/tokens",
+	mint := pairViaAdmin(t, t.Context(), b.console, b.adminBase+"/api/tokens",
 		`{"name":"sox gate test"}`, http.StatusCreated, b.stderr)
 	token := linkQueryItems(t, mint.PairURL)["token"]
 	if token == "" {

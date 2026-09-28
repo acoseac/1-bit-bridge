@@ -22817,3 +22817,19 @@ Gemini's two MEDIUM comments asked `putUsableSoxOnPath` and
 `withoutSoxOnPath` to call `t.Setenv` first, so that a parallel test is
 refused. Each helper's one PATH change already is a `t.Setenv`, which refuses
 a parallel test and restores PATH, so both were declined on the threads.
+
+SonarCloud re-analysed the pushed refactor within two minutes: the gate
+passed, with 0.0% duplicated new lines and no file holding one. It raised one
+new smell, on the helper itself: `godre:S8242`, a `context.Context` stored in
+a struct field (`servedBridge.ctx`, serve's own context, which the tests
+handed to their console requests). The follow-up keeps serve's context a
+local of `startServedBridge`, where only the serve goroutine and the drain
+use it, and the requests take `t.Context()`, which is live for the whole test
+body: `patchUpscaleEnabled` reads it itself, and `pairViaAdmin` is handed it.
+Re-run on the follow-up, each as recorded above: the handler's
+`!s.upscaleActive()` removed, the sweeper's gate back to the three switches,
+the `/v1/upscale/stats` adapter back to the flag, and the helper's drain
+replaced by `t.Cleanup(stop)`. The PR's three `go:S3776` cognitive-complexity
+smells (`requireConsoleGateIsTheV1Gate` at 28, `constructionTimeConfigReads`
+at 19, the projection test at 24, against 15) do not gate, since the
+maintainability rating on new code stays A, and are left.

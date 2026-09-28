@@ -12,11 +12,10 @@ import (
 )
 
 // servedBridge is a `bridge serve` a test stood up on two loopback ports,
-// and what the test reaches it with.
+// and what the test reaches it with. Serve's own context stays inside
+// startServedBridge, whose drain cancels it; a request the test makes
+// takes the test's, t.Context().
 type servedBridge struct {
-	// ctx is serve's own context, which the drain cancels. A request made
-	// on it ends with serve.
-	ctx    context.Context
 	stderr *safeBuffer
 	// adminBase is the console, over plain HTTP; apiBase is the v1 API,
 	// over TLS, as a paired device reaches it.
@@ -66,13 +65,12 @@ func startServedBridge(t *testing.T, yamlTail string, fill func(lib string)) *se
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		},
 	}
-	var stop context.CancelFunc
-	b.ctx, stop = context.WithCancel(context.Background())
+	serveCtx, stop := context.WithCancel(context.Background())
 	stdout := &safeBuffer{}
 	exitCode, returned := make(chan int, 1), make(chan struct{})
 	go func() {
 		defer close(returned)
-		exitCode <- run(b.ctx, []string{"serve", "--config", configPath, "--addr", listenAddr}, stdout, b.stderr)
+		exitCode <- run(serveCtx, []string{"serve", "--config", configPath, "--addr", listenAddr}, stdout, b.stderr)
 	}()
 	drainServeOnCleanup(t, stop, returned, exitCode, b.stderr)
 	apiAddr, _ := waitForListening(t, stdout, 30*time.Second)
