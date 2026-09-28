@@ -26319,13 +26319,16 @@ restored with `git checkout --` and checked clean.
 | NC25 | init's check drops its parse arm | the init test's "a password that does not parse" row |
 | NC26 | init's check reads the domain untrimmed | the init test's padded control (refused, exit 2). Not the "a password behind a space" row: untrimmed it does not parse, and the parse arm refuses it |
 
-NC1 to NC22 ran on the branch before its rebase onto #1080, which renamed
-`DialApproval.permits` to `Permits` in the file NC14 and NC15 mutate; both
-ran again on the rebased branch, with the results above (NC15 turned the
-ingest test red too, a package its first run did not include). No other
-file a control mutates changed in the rebase. NC23 and NC24 ran on the
-commit that added the fourth site's fix, NC25 and NC26 on the commits that
-added init's parse arm and its controls, after the rebase onto #1081.
+NC1 to NC22 first ran on the branch before its rebases onto #1080 to #1081.
+Every control whose file those rebases touched ran again on the final
+branch, with the reds above: NC14 and NC15 (#1080 renamed
+`DialApproval.permits` to `Permits` in their file; NC15 turned the ingest
+test red too, a package its first run did not include), and NC1 to NC7,
+NC9, NC20 and NC21 (#1081 changed `config.go` and `init.go`; NC9 now drops
+the credential arm and keeps the parse arm). The other files a control
+mutates did not change. NC23 and NC24 ran on the commit that added the
+fourth site's fix, NC25 and NC26 on the commits that added init's parse arm
+and its controls.
 
 ### Out of scope
 
@@ -26343,3 +26346,9 @@ added init's parse arm and its controls, after the rebase onto #1081.
 - A manual URL on a NAME that resolves to a metadata address is refused
   and warned about, and the console's last walk error still says "has not
   answered yet": only the literal is known to the ingest. B67.
+- An enrich base URL written with a token as its user name reaches the
+  journal in the enricher's own request errors, which this change did not
+  touch: net/http's `*url.Error` masks a password (`user:***@`) and keeps a
+  user name whole (measured over `http.Client.Get` with a refused connect),
+  and the enricher logs the error at Error and stores it as a skip reason.
+  B69.

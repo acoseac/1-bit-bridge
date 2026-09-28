@@ -973,8 +973,9 @@ lost my library."
   bearer token) on every request, its request delegates cancel every
   challenge but the server's certificate, and `buildRequest` replaces the
   path, and the query of every request that carries one (the file routes),
-  so no proxy in front of the bridge could have served the app on them (read
-  in `BridgeSourceClient`, `BridgePairingURL` and `SMBStore`, 2026-09-28).
+  so no proxy that needed one of those parts could have served the app's
+  file routes (read in `BridgeSourceClient`, `BridgePairingURL` and
+  `SMBStore`, 2026-09-28).
   **Repair what is stored, refuse what is typed**
   (the library name's rule, under Config): `ValidateCustomEndpoints`, which
   `Normalize` runs for `Load` and every writer, keeps such an entry WITHOUT
@@ -3014,6 +3015,10 @@ no failing test — which is the shape to expect in this area.
   `TestNoStartupErrorCarriesAURLsCredentials` (every shape, through Load,
   Validate and the environment) and
   `TestAStartupRefusalNamesAURLWithoutItsCredential` (serve and doctor).
+  **Not yet the enricher's own request errors** (backlog B69): net/http's
+  `*url.Error` names a request URL with its password masked
+  (`user:***@`) and a token written as the user name whole, and the
+  enricher logs those errors and stores them as skip reasons.
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true
