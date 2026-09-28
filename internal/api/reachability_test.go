@@ -128,27 +128,33 @@ func TestProbeAllRoots_MixedReachability(t *testing.T) {
 	}
 }
 
-func TestReachabilityProbe_TimeoutRespected(t *testing.T) {
-	// Pre-cancelled context — probe returns the timeout/offline result and
-	// the cache MUST NOT trap the cancellation as an authoritative status.
+// TestReachabilityProbe_ACancelledCallerCachesTheRealVerdict pins that a
+// caller's cancellation never reaches the verdict every caller shares.
+// probeLocked runs its stat under context.WithoutCancel(ctx), so a caller
+// whose context is already cancelled still waits for the real stat, and the
+// cache stores what that stat found. The second probe answers from that
+// entry inside the TTL, so a cancellation that got through (the Done
+// branch's "offline", cached) fails the assertion.
+//
+// Its premise changed with #373. It was written for #198, when the probe ran
+// on the caller's context: the cancellation took the Done branch, and the
+// test pinned that the "offline" it produced was returned but not cached.
+// #373 detached the probe and dropped that exception, and the comments here
+// went on describing it until 2026-09-28, under the name TimeoutRespected,
+// though no timeout fires in this test.
+func TestReachabilityProbe_ACancelledCallerCachesTheRealVerdict(t *testing.T) {
 	c := newReachabilityCache()
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before probe
+	cancel() // the caller hung up before the probe started
 
-	// Use a real path so the underlying os.Stat would succeed if it ran;
-	// the cancelled context forces the select to take the timeout branch.
-	// (Race: a sufficiently fast stat could beat the cancelled-ctx
-	// detection, in which case we'd see Reachable=true. The test is
-	// best-effort verifying the no-cache-on-upstream-cancel contract.)
+	// A real directory, so the stat the probe runs regardless finds it.
 	dir := t.TempDir()
 	_ = c.probe(ctx, dir)
 
-	// The second probe with a healthy context MUST hit os.Stat fresh
-	// (no cached offline-from-cancellation entry) and observe the
-	// real, reachable state.
 	got := c.probe(context.Background(), dir)
 	if !got.Reachable {
-		t.Errorf("after upstream cancel, fresh probe should NOT have cached offline; got Reachable=false")
+		t.Errorf("a probe whose caller had already cancelled cached Reachable=false "+
+			"for a reachable root; the caller's cancellation reached the shared verdict (%+v)", got)
 	}
 }
 
