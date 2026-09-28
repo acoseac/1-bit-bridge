@@ -19985,3 +19985,135 @@ operator-configured manual upstream (`internal/upnp/manual.go`).
 - The Build section says four fuzz targets carry PROPERTY assertions; the
   lyrics targets carry properties too, so the count was already stale.
   `FuzzParseDeviceDescription` could carry this change's policy as one.
+
+## 2026-09-27 — the album-level gain's parts: a peak per render profile, a measure-only pass, a claim-coordinated survey (dark)
+
+The plan is `ops/plan-2026-09-27-dsd-album-gain.md`; this PR builds its parts
+and switches nothing on. A DSD rendition's boost is `ClipGuardedGainDB` of the
+track's OWN true peak (Stage B), so the tracks of one album get different
+boosts. The B1 entry above deferred this ("album-level gain consistency
+(per-track clip guard, recorded for a later pass)"). A listener's report of a
+hot SACD rip brought it back.
+
+**Phase 0 decided that it is worth building.** It was measured on a
+backup-API snapshot of the operator's bridge (`v0.2.0-58`), grouped with the
+admin catalog's own album identity:
+- 57 % of the 143 multi-track DSD albums shift their tracks' relative levels by
+  more than 1 dB. The median spread is 1.2 dB and the maximum 4.7 dB.
+- A segued concept album steps 3.5 dB at boundaries that were mastered
+  seamless.
+- The fix costs the average track 0.8 dB of boost; 31 tracks lose more than
+  3 dB.
+- `ClipGuardedGainDB(true_peak_dbtp)` reproduced the stored `applied_gain_db`
+  on 1,707 of 1,707 rows. That is what makes seeding peaks from existing
+  renditions sound.
+
+**Decisions and what was rejected**
+- **Where peaks come from.** Not the scan-time analysis: it skips
+  `.dsf`/`.dff` entirely (sox cannot decode DSD), so no DSD track has a
+  pre-render peak. Peaks come from three places, all into `dsd_peaks`:
+  - renders, which measure in Stage B anyway;
+  - a measure-only pass that IS the render's Stages A and B
+    (`decodeAndMeasure`, shared);
+  - a one-time seed from `true_peak_dbtp`.
+- **Where the survey runs.** It runs inside the render, between Stage B and
+  Stage C. The alternative was separate measure jobs the render waits on, but
+  with 2 workers, two renders waiting on measure jobs that are queued behind
+  them deadlock the pool. In-job measurement plus claims cannot:
+  - a claim is only ever held by work that is decoding;
+  - a render resolves its own claim before it surveys;
+  - a survey claim is released before any wait.
+- **Deadline.** The pool widens the job's deadline by `SurveyBudget` (twice
+  each unmeasured album-mate's duration). Without it, a render surveying a
+  20-track album would outlive its own 10-minute budget and collect a failure
+  strike.
+- **Membership.** The admin catalog's key (`dupes.AlbumIDOf(dupes.Resolve(row))`),
+  never a folder: CLAUDE.md's "an album is a SET of tracks", and 69 of 880
+  albums on the reference library share a folder.
+- **The boost is derived from stored peaks at render time, never stored per
+  album.** This follows the catalog's computed-not-stored rule. A membership
+  change moves only renders made after it; re-gaining existing renditions is an
+  explicit act (the switch-on PR).
+- **The album figure is bounded by the track's own guard.** A stale peak can
+  make a file quieter than intended, never clip.
+
+**Tests**
+- `internal/albumgain` (15), with fakes. It pins:
+  - the grouping, partition-equal to `librarycat` over case, discs, a
+    compilation, an untagged folder and a year split;
+  - profile filtering (DSD64/128/256 share a profile, the 48k family does not);
+  - stored peaks used without decoding;
+  - missing peaks measured once and recorded with the mate's source facts;
+  - an unmeasurable mate left out;
+  - three concurrent renders of a six-track album measuring the three
+    unrendered tracks exactly once between them, and landing on one boost;
+  - a waiter measuring a track whose render failed;
+  - cancellation, the deadline budget, and index invalidation and TTL.
+
+  The three concurrency tests pass 100 runs under `-race`.
+- `transcode`: the profile literal and the pure gain and bound functions.
+- `transcode`, on the real toolchain:
+  - the published file's RMS moves with the album figure (−21.01 dB at +2
+    against −17.01 dB at +6 on a −20 dBFS tone);
+  - the bound holds;
+  - the claim resolves once, with the render's own peak;
+  - an early failure resolves it with an error;
+  - `MeasureDSDPeak` equals the render's peak exactly on both tiers.
+- `transcode`, the pool: it injects the gainer into DSD specs only, and widens
+  their deadline.
+- `manifest` (6): the seed's profile spelling, silent rows and idempotency;
+  `UpsertVariant` recording the peak; freshness and chunking; the FK and the
+  CASCADE; `StreamDSDCatalogRefs` equal to the full stream's DSD rows.
+
+**Negative controls.** Run on the committed tree with `-count=1`; each red
+set was predicted by name and matched.
+- Stage C ignoring the album figure and the pool not injecting the gainer:
+  9 tests, exactly 2 red. The render test's "below the guard" case failed
+  (applied +6 where +2 was decided) and the pool test failed (no gainer, and a
+  10-minute deadline instead of 40).
+- The seed spelling the tier `optimize` and `UpsertVariant` skipping the peak:
+  6 tests, exactly the 2 that pin them red.
+- A survey ignoring other renders' claims: 15 tests, exactly 2 red. The
+  concurrent case decoded rendered tracks and measured each unrendered track 3
+  times, and the cancellation case returned without waiting.
+
+### Review (round 1)
+
+Gemini was over its daily quota and CodeRabbit paused at its plan limit, so
+SonarCloud was the only reviewer. Its quality gate failed on one `go:S2077`,
+and it raised four smells. All five are fixed, plus a race its fix run found.
+- **`go:S2077`: `FreshDSDPeaks` built its IN list at the call site.** It is
+  now ONE literal statement binding the paths as one `json_each` argument, the
+  `VariantsForPaths` shape, plus one raw path. A path that is not valid UTF-8
+  goes in the raw slot, one at a time, because `encoding/json` rewrites it and
+  it would never match (`splitIllFormedUTF8Paths`;
+  `TestFreshDSDPeaksFindsAnIllFormedPath`). The rewrite also checks
+  `rows.Err()`, which the old loop dropped. The first fix, two statements
+  assembled from a shared constant, was flagged again: **SonarCloud reads
+  through a named const to its concatenation**, so a query argument is quiet
+  only when it is a literal or a function parameter. Several comments in this
+  package say a named const is enough; `main` carries 30 open S2077s that
+  show it is not.
+- `AlbumGainDB` (cognitive complexity 30) is a `survey` now: a pass, a claimed
+  measurement and the list of peaks. The no-op claim resolver says why it is
+  empty, `Catalog` is `CatalogStreamer`, and the real-toolchain test's
+  assertions moved into two helpers.
+- **A race: a mate could be measured twice.** Running the suite beside a full
+  `-race` run failed `TestConcurrentRendersShareOneSurvey` once ("unrendered
+  track 5 measured 2 times"), in code the refactor had not changed. A survey
+  reads the store, then claims each missing mate in turn. Another survey can
+  measure a mate, record it and release its claim in between, and the first
+  survey then finds the mate unclaimed with a stale read. In production the
+  gap is the survey's own earlier measurements, which take minutes, so this
+  would not have been rare. A survey now reads the store again under its
+  claim before it measures; a measurement records before it releases, so that
+  read sees it. `TestASurveyRereadsThePeakUnderItsClaim` holds survey B
+  between its read and its claims while survey A measures the mate, and B
+  must take A's peak.
+- The package's 16 tests pass 100 runs under `-race`.
+
+**Negative controls**, on the committed tree, both in one run of the two
+packages (944 tests, all accounted for): dropping the re-read under the claim
+turned exactly `TestASurveyRereadsThePeakUnderItsClaim` red ("measured 2
+times, want exactly 1"), and dropping the raw bind for ill-formed paths turned
+exactly `TestFreshDSDPeaksFindsAnIllFormedPath` red.

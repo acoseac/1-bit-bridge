@@ -307,6 +307,13 @@ type JobSpec struct {
 	// the coordinator can attribute completion / failure to the
 	// right `upscale_batches` row without a path-to-batch lookup.
 	BatchID uuid.UUID
+
+	// AlbumGain, when set, decides the album-level boost of a DSD render
+	// (album_gain.go). Nil keeps the per-track clip guard, which is also
+	// what every PCM job gets. The pool and the CLI set it when the job
+	// RUNS, never at an enqueue site, so no path that builds a DSD spec can
+	// leave it out.
+	AlbumGain AlbumGainer
 }
 
 // RenderScratchBytes is the Stage A scratch this job holds on the temp

@@ -275,7 +275,7 @@ func TestDSDSettingsShape(t *testing.T) {
 	geo := sourceGeometry{SampleRate: 352800, Channels: 2}
 	pcm := JobSpec{Kind: JobKindPCMRender, Quality: QualityVeryHigh, TargetSampleRate: 176400, TargetBits: 24}
 	tp := -3.4
-	blob, err := pcm.dsdSettings(geo, 2.4, &tp)
+	blob, err := pcm.dsdSettings(geo, 2.4, &tp, GainScopeAlbum, 3.1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,6 +288,7 @@ func TestDSDSettingsShape(t *testing.T) {
 		"targetRate": float64(176400), "targetBits": float64(24), "guard": false, "schemaVersion": "v1", "kind": "pcm",
 		"dsdRate": float64(2822400), "pipeRate": float64(352800), "channels": float64(2),
 		"preAttenuationLinear": 0.5, "nominalGainDB": 6.0, "appliedGainDB": 2.4, "truePeakDBTP": -3.4,
+		"gainScope": "album", "trackGainDB": 3.1,
 		"lowpass": "sinc -a 110 -t 10000 -35000",
 	}
 	for k, v := range want {
@@ -298,11 +299,12 @@ func TestDSDSettingsShape(t *testing.T) {
 	// A measured 0.0 gain ships as 0, and an unmeasured peak as null — the
 	// compact tier carries no lowpass key at all.
 	opt := JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, Quality: QualityVeryHigh, TargetSampleRate: 44100, TargetBits: 16}
-	blob, err = opt.dsdSettings(geo, 0, nil)
+	blob, err = opt.dsdSettings(geo, 0, nil, GainScopeTrack, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(blob, `"appliedGainDB":0`) || !strings.Contains(blob, `"truePeakDBTP":null`) || strings.Contains(blob, "lowpass") {
+	if !strings.Contains(blob, `"appliedGainDB":0`) || !strings.Contains(blob, `"truePeakDBTP":null`) || strings.Contains(blob, "lowpass") ||
+		!strings.Contains(blob, `"gainScope":"track"`) || !strings.Contains(blob, `"trackGainDB":0`) {
 		t.Errorf("compact/silent blob shape wrong: %s", blob)
 	}
 }
@@ -314,9 +316,10 @@ func TestParseSoxSettings_LegacyAndDSDBlobs(t *testing.T) {
 		t.Errorf("legacy blob parsed wrong: ok=%v %+v", ok, v)
 	}
 	geo := sourceGeometry{SampleRate: 352800, Channels: 2}
-	blob, _ := JobSpec{Kind: JobKindPCMRender, TargetSampleRate: 176400, TargetBits: 24}.dsdSettings(geo, 5.0, nil)
+	blob, _ := JobSpec{Kind: JobKindPCMRender, TargetSampleRate: 176400, TargetBits: 24}.dsdSettings(geo, 5.0, nil, GainScopeTrack, 5.0)
 	v, ok = ParseSoxSettings(blob)
-	if !ok || v.Decoder != "ffmpeg-dsd+sox" || v.AppliedGainDB == nil || *v.AppliedGainDB != 5.0 || v.TruePeakDBTP != nil || v.Kind != "pcm" {
+	if !ok || v.Decoder != "ffmpeg-dsd+sox" || v.AppliedGainDB == nil || *v.AppliedGainDB != 5.0 || v.TruePeakDBTP != nil || v.Kind != "pcm" ||
+		v.GainScope != GainScopeTrack || v.TrackGainDB == nil || *v.TrackGainDB != 5.0 {
 		t.Errorf("DSD blob parsed wrong: ok=%v %+v", ok, v)
 	}
 	if _, ok := ParseSoxSettings("sox -G a.flac -b 24 -t flac out rate -v -L 176400 dither -s"); ok {
