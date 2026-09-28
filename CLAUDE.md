@@ -2726,15 +2726,44 @@ what it claimed**, and none of it had a failing test.
   control. (#963)
 - **…and grades the ports it is about to SAVE, which is a different
   question** (#970). The preflight runs BEFORE the keep-or-overwrite
-  decision, so it grades the install's current ports. For the certificate
+  decision, so where the install's config loads it grades the install's
+  current ports (where none loads, the next bullet's). For the certificate
   that is right and deliberate — init does not rewrite the pair on disk.
-  For the ports it is backwards: `baseConfig` always seeds the loopback
-  defaults and `--public` replaces them, so an install on `:9090`/`:9091`
-  was graded on those, passed, and was then handed `:7788` /
-  `127.0.0.1:7789`. A second narrow pass (`doctor.RunPortChecks`) grades
-  what the config will contain, BEFORE `Save`, so a refusal leaves the
-  existing config intact — and only over the ports that CHANGED, since an
-  unchanged one was already graded correctly.
+  For the ports it is backwards: a rewrite writes the run's own addresses,
+  so an install on `:9090`/`:9091` was graded on those, passed, and was
+  then handed `:7788` / `127.0.0.1:7789`. A second narrow pass
+  (`doctor.RunPortChecks`) grades what the config will contain, BEFORE
+  `Save`, so a refusal leaves the existing config intact — and only over
+  the ports that CHANGED, since an unchanged one was already graded
+  correctly.
+- **…and where no install's config loads, the preflight grades the ports
+  this run WRITES, from the one definition the config is built from**
+  (2026-09-28). It kept init's 7788 / 7789 there, on a first install and
+  over a config that does not load, whatever the run wrote. A `--public`
+  run writes `:443` or `--listen-address` and 7789 or `--admin-address`, so
+  another process on 7788 (a second bridge beside the operator's, say)
+  refused a public first install, and a public re-init over a broken
+  config, over a port neither would bind: measured with the real binary,
+  exit 1 on `[FAIL] port-api :7788 in use`, and exit 0 now.
+  `initAddresses` is the ONE definition of the addresses a run writes: the
+  config is built from it, and the preflight is seeded with its ports,
+  which `withExistingInstallDeps` still replaces with the install's own
+  where the config loads (and reports whether it did). **Don't seed the
+  preflight from anything else, or build the config's addresses anywhere
+  else**: a divergence reaches only the second pass, which runs after init
+  has made its data dir. Where no config loads that pass now grades
+  nothing, and its `OwnPIDPortsUnknown` exception (the "…over a config
+  that is there and does not load" bullet) stays for a port that could
+  differ. **A refusal on the run's ports says so under the report**
+  (`portsThisInitWrites`, printed only when a port check FAILed and no
+  config loaded): those lines are the run's choice, not a verdict about an
+  install, and the checks' own hint names a bridge.yaml, where a public
+  run chooses its ports with `--listen-address` and `--admin-address`.
+  **A public run's address flag that `config.ValidateBindAddress` refuses
+  is refused before the preflight** (exit 2), which has no port to grade
+  for it; it was refused only at the validation before Save, after a
+  preflight that graded 7788 in its place. Both flags are still ignored,
+  silently, without `--public`.
 - **The "is it us?" fallback must NOT reach a port the run is choosing.**
   `checkPort` answers ok or warn — never fail — whenever the pid in
   `OwnPIDFile` is alive and the owner probe could not rule it out (one it
@@ -2844,7 +2873,9 @@ what it claimed**, and none of it had a failing test.
   init --yes --force`, the run that replaces that config, refused (#1022
   measured it). A public re-init refused in the second pass instead,
   because "changed" was measured against init's defaults and #970 clears
-  the pid for a changed port. init always writes `<dir>/data` and serve
+  the pid for a changed port (since 2026-09-28 the preflight grades a
+  public re-init's own ports there, the bullet after #970's, in this
+  mode). init always writes `<dir>/data` and serve
   records `<dataDir>/server.pid`, so the bridge the re-init replaces is
   known without its config wherever the data dir did not move. That pid
   file is wired with `doctor.Deps.OwnPIDPortsUnknown`, which confines the
@@ -2857,7 +2888,8 @@ what it claimed**, and none of it had a failing test.
   init writes. With the full ladder behind that pid file the re-init
   saved `:7788` without a word, and the restarted bridge died on `bind:
   address already in use` (row B on dido, with and without lsof): #970's
-  defect. The second pass keeps that pid file rather than clearing it. **A
+  defect. The second pass keeps that pid file rather than clearing it
+  (though since 2026-09-28 no port of the run reaches it there). **A
   MISSING config stays a first install**, with no pid file: nothing there
   shows an install, and a leftover pid can be stale or recycled (a Gemini
   consult agreed). **Attribution does not depend on lsof on Linux**:
