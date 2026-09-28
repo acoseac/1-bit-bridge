@@ -210,41 +210,27 @@ func runServe() {
 // A read inside a function literal nested in it runs later, per call, and
 // is not one. It also returns how many admin.Deps literals runServe builds.
 func constructionTimeConfigReads(fset *token.FileSet, f *ast.File) (depsLiterals int, findings []string) {
-	var run *ast.FuncDecl
-	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "runServe" {
-			run = fd
-		}
-	}
-	if run == nil || run.Body == nil {
+	serve := topLevelFuncNamed(f, "runServe")
+	if serve == nil || serve.Body == nil {
 		return 0, nil
 	}
 	report := func(where string, value ast.Expr) {
-		call, ok := value.(*ast.CallExpr)
-		if !ok {
-			return
-		}
-		lit, ok := call.Fun.(*ast.FuncLit)
-		if !ok {
+		call, lit := calledInPlace(value)
+		if lit == nil {
 			return
 		}
 		if read := configReadIn(lit.Body); read != "" {
 			findings = append(findings, fmt.Sprintf("%s: %s %s", fset.Position(call.Pos()), where, read))
 		}
 	}
-	ast.Inspect(run.Body, func(n ast.Node) bool {
+	ast.Inspect(serve.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CompositeLit:
-			if !isAdminDepsType(x.Type) {
-				return true
-			}
-			depsLiterals++
-			for _, el := range x.Elts {
-				if kv, ok := el.(*ast.KeyValueExpr); ok {
-					if key, ok := kv.Key.(*ast.Ident); ok {
-						report("admin.Deps."+key.Name, kv.Value)
-					}
-				}
+			if isAdminDepsType(x.Type) {
+				depsLiterals++
+				forEachKeyedElement(x, func(key *ast.Ident, value ast.Expr) {
+					report("admin.Deps."+key.Name, value)
+				})
 			}
 		case *ast.CallExpr:
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "With") {
@@ -258,6 +244,42 @@ func constructionTimeConfigReads(fset *token.FileSet, f *ast.File) (depsLiterals
 	return depsLiterals, findings
 }
 
+// topLevelFuncNamed returns f's function (not method) named name, or nil.
+func topLevelFuncNamed(f *ast.File, name string) *ast.FuncDecl {
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == name {
+			return fd
+		}
+	}
+	return nil
+}
+
+// calledInPlace returns value's call and function literal when value calls
+// a function literal where it is written, `func() T { … }()`, or two nils.
+func calledInPlace(value ast.Expr) (*ast.CallExpr, *ast.FuncLit) {
+	call, ok := value.(*ast.CallExpr)
+	if !ok {
+		return nil, nil
+	}
+	lit, ok := call.Fun.(*ast.FuncLit)
+	if !ok {
+		return nil, nil
+	}
+	return call, lit
+}
+
+// forEachKeyedElement calls fn with the key and value of every `Name: value`
+// element of lit.
+func forEachKeyedElement(lit *ast.CompositeLit, fn func(key *ast.Ident, value ast.Expr)) {
+	for _, el := range lit.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				fn(key, kv.Value)
+			}
+		}
+	}
+}
+
 // configReadIn describes the first config read in body that runs when body
 // does, or returns "". It does not descend into a nested function literal,
 // and a field name (`x.cfg`, a `cfg:` key) is not a read.
@@ -268,13 +290,7 @@ func configReadIn(body *ast.BlockStmt) string {
 		case *ast.SelectorExpr:
 			fieldNames[x.Sel] = true
 		case *ast.CompositeLit:
-			for _, el := range x.Elts {
-				if kv, ok := el.(*ast.KeyValueExpr); ok {
-					if key, ok := kv.Key.(*ast.Ident); ok {
-						fieldNames[key] = true
-					}
-				}
-			}
+			forEachKeyedElement(x, func(key *ast.Ident, _ ast.Expr) { fieldNames[key] = true })
 		}
 		return true
 	})
