@@ -489,6 +489,14 @@ func (s *SSDPAdvertiser) handleMSearch(ctx context.Context, packet []byte, src *
 // failures are not actionable; the next periodic tick retries). The
 // nil guard is on the PARAMETER (defensive — non-nil in practice on
 // every live caller).
+//
+// A write that meets net.ErrClosed ends the burst without a line: Stop
+// closed the sender under a burst the periodic goroutine had begun, and
+// every target left would meet the same closed socket. Only Stop closes
+// this socket, so that error names the stop exactly, the rule
+// discovery.SendFailureLog applies to the discovery clients' M-SEARCH
+// sends. Until 2026-09-28 such a burst logged one line per remaining
+// target.
 func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) {
 	if sender == nil {
 		return
@@ -496,6 +504,9 @@ func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) {
 	for _, target := range s.targets {
 		pkt := BuildNotifyAlive(s.cfg.Location, s.cfg.ServerToken, target)
 		if _, err := sender.Write(pkt); err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			s.log.Debug("NOTIFY alive send failed",
 				slog.String("nt", target.NT),
 				slog.String("err", err.Error()))
