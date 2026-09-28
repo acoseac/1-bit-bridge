@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 )
 
@@ -71,10 +72,11 @@ func TestUpscaleGCForwardSweepUnlinksTheWalkedPath(t *testing.T) {
 // spellings name.
 func TestAnalyzeGCUnlinksTheWalkedPaths(t *testing.T) {
 	base := t.TempDir()
-	walkedOrphan := writeWalkedPathFixture(t, filepath.Join(base, "walked", "Artist", "orphan.1bwf"))
-	walkedScratch := writeWalkedPathFixture(t, filepath.Join(base, "walked", "Artist", "half.1bwf.tmp"))
-	listedOrphan := writeWalkedPathFixture(t, filepath.Join(base, "listed", "Artist", "orphan.1bwf"))
-	listedScratch := writeWalkedPathFixture(t, filepath.Join(base, "listed", "Artist", "half.1bwf.tmp"))
+	orphan, scratch := "orphan"+analyze.WaveformExt, "half"+analyze.WaveformExt+analyze.AnalysisTmpSuffix
+	walkedOrphan := writeWalkedPathFixture(t, filepath.Join(base, "walked", "Artist", orphan))
+	walkedScratch := writeWalkedPathFixture(t, filepath.Join(base, "walked", "Artist", scratch))
+	listedOrphan := writeWalkedPathFixture(t, filepath.Join(base, "listed", "Artist", orphan))
+	listedScratch := writeWalkedPathFixture(t, filepath.Join(base, "listed", "Artist", scratch))
 	inv := integrity.SidecarInventory{
 		Files: 1, Orphans: 1,
 		OrphanPaths:        []string{listedOrphan},
