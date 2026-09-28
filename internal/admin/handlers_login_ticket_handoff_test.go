@@ -242,13 +242,14 @@ func TestTheLoginFormExplainsAStaleLinkOnlyWhenItApplies(t *testing.T) {
 //
 // `link=stale` is an instruction as much as an explanation: it tells the user
 // the link was the problem and that a fresh one will work. When the redeem
-// failed because the ticket file could not be written, both halves are false —
-// the record is still on disk, nothing was determined about the ticket, and a
-// fresh link fails identically. It is also the only place an operator would
-// learn the store has gone read-only, which is why the branch logs.
+// failed because the ticket's file could not be removed, both halves are
+// false — the record is still on disk, nothing was determined about the
+// ticket, and a fresh link needs a mint into the same read-only directory. It
+// is also the only place an operator would learn the store has gone
+// read-only, which is why the branch logs.
 func TestAnUnwritableTicketStoreIsNotAStaleLink(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("a directory mode does not gate file creation on Windows")
+		t.Skip("a directory mode does not gate file removal on Windows")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory mode this fixture depends on")
@@ -270,12 +271,10 @@ func TestAnUnwritableTicketStoreIsNotAStaleLink(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// Two, so the redeem's write takes the stage-and-rename path.
+	// The directory stays readable, so the redeem FINDS the ticket; it is
+	// the removal that spends it that the read-only directory refuses.
 	ticket, err := store.MintLoginTicket("admin")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.MintLoginTicket("admin"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o555); err != nil {

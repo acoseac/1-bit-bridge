@@ -582,7 +582,7 @@ func TestAnInitialCredentialIsNotWrittenOverAnother(t *testing.T) {
 
 // TestARotationLeavesLoginTicketsAlone: rotating the password writes the
 // credential file and nothing beside it. A login link minted before the
-// rotation still redeems, and its sidecar is byte for byte what it was.
+// rotation still redeems, and its file is byte for byte what it was.
 func TestARotationLeavesLoginTicketsAlone(t *testing.T) {
 	a, path, _, _ := runningBridge(t)
 	cli, err := OpenStore(path)
@@ -593,15 +593,16 @@ func TestARotationLeavesLoginTicketsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(a.ticketPath())
+	ticketPath := a.ticketFilePath(hashTicket(ticket))
+	before, err := os.ReadFile(ticketPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	rotateElsewhere(t, path)
 
-	if after, err := os.ReadFile(a.ticketPath()); err != nil || !bytes.Equal(before, after) {
-		t.Errorf("the rotation changed the login-ticket file (err=%v)", err)
+	if after, err := os.ReadFile(ticketPath); err != nil || !bytes.Equal(before, after) {
+		t.Errorf("the rotation changed the login ticket's file (err=%v)", err)
 	}
 	if user, err := a.RedeemLoginTicket(ticket); err != nil || user != "admin" {
 		t.Errorf("a ticket minted before the rotation = (%q, %v), want (admin, nil)", user, err)
@@ -669,7 +670,7 @@ func TestMintRefusesAnAccountReplacedElsewhere(t *testing.T) {
 
 // TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket: a redemption that
 // cannot read the credential has established nothing about the ticket, so it
-// leaves the ticket on disk, as a ticket file that cannot be written does. The
+// leaves the ticket on disk, as a ticket file that cannot be removed does. The
 // admin handler answers that error with a 500 that says the record is still
 // there, and the link works once the file reads again.
 func TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket(t *testing.T) {
