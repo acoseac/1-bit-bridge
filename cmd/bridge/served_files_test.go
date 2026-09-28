@@ -44,9 +44,9 @@ func TestEveryServedFileIsOpenedAsAFile(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			// The blank-keeper sweep's rule for a directory: nothing
-			// under one that no build of this module compiles.
-			return keeperWalkDir(root, path, d.Name())
+			// Nothing under a directory no build of this module
+			// compiles, nor another checkout's.
+			return moduleDirRule(root, path, d.Name())
 		}
 		name := d.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {

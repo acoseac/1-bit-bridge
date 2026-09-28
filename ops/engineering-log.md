@@ -24508,7 +24508,9 @@ reads every production file (438 of them, holding 12 `http.ServeContent`
 calls, when its floors were set); `TestServedFileSweepOnFixtures` runs its
 scan over six sources whose findings are known.
 
-On the committed fix (6e0247b2, a8886f47), each restored and re-run green:
+On the committed fix (6e0247b2 and a8886f47, which are 86ac29fc and
+e2cc1d21 after the rebase onto 73ef5b58), each restored and re-run
+green:
 
 | mutation | goes red |
 |---|---|
