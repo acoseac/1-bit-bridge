@@ -185,36 +185,47 @@ func TestScanner_OSAndNASDetritusIsNotLibraryContent(t *testing.T) {
 	for _, subtree := range []bool{false, true} {
 		t.Run(fmt.Sprintf("subtree=%v", subtree), func(t *testing.T) {
 			root := t.TempDir()
-			for _, rel := range append([]string{"Artist/Album/01.flac"}, detritusTracks...) {
-				p := filepath.Join(root, filepath.FromSlash(rel))
-				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": rel})
-			}
-			writeNoiseFile(t, filepath.Join(root, "Artist", "Album", "@eaDir", "01.flac", "SYNOINDEX_MEDIA_INFO"))
-
+			writeLibraryBesideDetritus(t, root)
 			store, sc := newScanFixture(t, root)
 			scanTheRoot(t, sc, root, subtree)
-
-			paths, err := store.TrackPaths(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Join(paths, " ") != "Artist/Album/01.flac" {
-				t.Errorf("indexed %v, want only Artist/Album/01.flac", paths)
-			}
-			// The folder rows are the library's own, exactly: an @eaDir
-			// holds no audio, so only its folder rows can show it walked.
-			folders, err := store.FolderPaths(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			sort.Strings(folders)
-			if strings.Join(folders, " ") != ". Artist Artist/Album" {
-				t.Errorf("folder rows %v, want only [. Artist Artist/Album]", folders)
-			}
+			requireOnlyTheLibraryIndexed(t, store)
 		})
+	}
+}
+
+// writeLibraryBesideDetritus writes one album track, every file of
+// detritusTracks, and the Synology @eaDir entry that describes the track.
+func writeLibraryBesideDetritus(t *testing.T, root string) {
+	t.Helper()
+	for _, rel := range append([]string{"Artist/Album/01.flac"}, detritusTracks...) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": rel})
+	}
+	writeNoiseFile(t, filepath.Join(root, "Artist", "Album", "@eaDir", "01.flac", "SYNOINDEX_MEDIA_INFO"))
+}
+
+// requireOnlyTheLibraryIndexed checks that the store holds the album track
+// alone, and the library's own folder rows exactly: an @eaDir holds no
+// audio, so only its folder rows can show it was walked.
+func requireOnlyTheLibraryIndexed(t *testing.T, store *Store) {
+	t.Helper()
+	paths, err := store.TrackPaths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, " ") != "Artist/Album/01.flac" {
+		t.Errorf("indexed %v, want only Artist/Album/01.flac", paths)
+	}
+	folders, err := store.FolderPaths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(folders)
+	if strings.Join(folders, " ") != ". Artist Artist/Album" {
+		t.Errorf("folder rows %v, want only [. Artist Artist/Album]", folders)
 	}
 }
 
