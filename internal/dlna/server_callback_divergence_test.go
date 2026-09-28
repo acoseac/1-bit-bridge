@@ -27,6 +27,9 @@ func Test_callbackHostMatchesSource(t *testing.T) {
 		{"same_ip_no_port", "192.168.1.4", "192.168.1.4", true, true},
 		{"same_public_ip", "8.8.8.8", "8.8.8.8:1234", true, true},
 		{"ipv6_same", "fe80::1", "[fe80::1]:49152", true, true},
+		// A link-local peer's RemoteAddr carries its zone and its callback
+		// cannot: it is still its own address, so no divergence is logged.
+		{"ipv6_same_zoned_source", "fe80::1", "[fe80::1%en0]:49152", true, true},
 
 		// The divergence left — accepted today, refused after step two.
 		{"other_private_host", "192.168.1.250", "192.168.1.4:49152", false, true},
