@@ -860,7 +860,7 @@ func (a *integritySidecarListerAdapter) AllVariants(ctx context.Context) ([]inte
 //     package's ErrUpscaleQueueFull sentinel so the handler can
 //     `errors.Is` cleanly without importing transcode.
 type upscaleEnqueuerAdapter struct {
-	pool     *transcode.Pool
+	pool     renditionQueue
 	store    *manifest.Store
 	resolver *bridgefs.Resolver
 	cfg      *config.Config
@@ -886,6 +886,13 @@ type upscaleEnqueuerAdapter struct {
 	// tempDir resolves the render scratch directory per call (empty =
 	// the OS temp dir). Nil-safe.
 	tempDir func() string
+}
+
+// renditionQueue is the one transcode.Pool method the adapter calls. It is
+// an interface so a test can stand in for the pool and commit each job the
+// way the pool does, without sox (rendition_stamp_test.go).
+type renditionQueue interface {
+	Enqueue(spec transcode.JobSpec) error
 }
 
 func (a *upscaleEnqueuerAdapter) caps() transcode.DSDRenderCaps {
