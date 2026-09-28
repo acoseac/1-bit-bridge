@@ -580,20 +580,38 @@ func BaseURLNamesHost(raw string) bool {
 const baseURLNamesNoHostWarning = "base URL names a port and no host, which reaches this machine; " +
 	"write the host (localhost for this machine)"
 
-// urlOriginForLog renders a configured URL for a log line as its scheme and
-// host alone (`http://:5000`), or "" when it does not parse. The rest of a
-// URL can carry a credential the journal must not: its userinfo
-// (`user:password@`, or a token written as the user name, which
-// url.URL.Redacted keeps whole) and its query (`?apikey=`). The scheme and
-// host are what a warning about a URL here is about. normalizeBaseURL
-// accepts userinfo, so `http://user:password@:5000` reached the log whole
-// until review round 1 on #1074.
+// urlOriginForLog renders a configured URL for a log line or an error as its
+// scheme and host alone (`http://:5000`), or "" when it does not parse or has
+// no host part. The rest of a URL can carry a credential the journal must
+// not: its userinfo (`user:password@`, or a token written as the user name,
+// which url.URL.Redacted keeps whole), its query (`?apikey=`) and its
+// fragment. The scheme and host are what a warning or a refusal about a URL
+// here is about. normalizeBaseURL accepts userinfo, so
+// `http://user:password@:5000` reached the log whole until review round 1 on
+// #1074.
+//
+// A URL with no host part renders as "", scheme and all (backlog B54): a
+// value written without a scheme, `user:password@host`, parses with the USER
+// NAME as its scheme (a token written as one, too, lowercased), and a scheme
+// followed by nothing that names a host is not worth naming anyway.
 func urlOriginForLog(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return ""
 	}
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+}
+
+// urlFieldForLog names a configured URL in a warning or an error: its field,
+// then its scheme and host in parentheses when it has a host part
+// (`enrich.musicbrainzBaseURL (ftp://mirror.example)`), never the value
+// (urlOriginForLog says why). The one way this package names a URL it
+// refuses, prunes or repairs.
+func urlFieldForLog(field, raw string) string {
+	if o := urlOriginForLog(raw); o != "" {
+		return field + " (" + o + ")"
+	}
+	return field
 }
 
 // LyricsTierActive is the ONE definition of whether the network lyrics tier
@@ -2720,6 +2738,13 @@ func ResolvePath(baseDir, p string) string {
 // is an absolute http(s) URL. Empty stays empty (the enrich client falls back
 // to its public default). Trimming the trailing slash prevents double-slash
 // request paths (e.g. "https://host/ws/2/" + "/release/..." → "...//release").
+//
+// The refusal names the value by its field, scheme and host alone
+// (urlFieldForLog), never the value (backlog B54). It stops the bridge from
+// starting and is printed to its log, by `bridge doctor` and in the
+// console's settings response, and a base URL may carry a mirror's password
+// or token (net/http sends a URL's userinfo as Basic auth). It quoted the
+// value whole until B54.
 func normalizeBaseURL(field, raw string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -2728,7 +2753,8 @@ func normalizeBaseURL(field, raw string) (string, error) {
 	v = strings.TrimRight(v, "/")
 	u, err := url.Parse(v)
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", fmt.Errorf("%s: must be an absolute http(s) URL, got %q", field, raw)
+		return "", fmt.Errorf("%s: must be an absolute http(s) URL (http(s)://host[:port][/path])",
+			urlFieldForLog(field, v))
 	}
 	return v, nil
 }
@@ -2824,7 +2850,8 @@ func RepairLibraryName(name string) string {
 // what an operator might reasonably type: the two enrich base URLs (trim
 // whitespace + trailing slash), the public-mode autocert domain (trim),
 // customEndpoints (prune-and-warn to the entries that survive
-// ValidateCustomEndpoints), and the library name (RepairLibraryName, and
+// ValidateCustomEndpoints, each without a user name, password, query or
+// fragment it carried), and the library name (RepairLibraryName, and
 // DefaultLibraryName for a blank one). Idempotent — running it twice
 // produces the same Config as running it once.
 //
@@ -2944,9 +2971,18 @@ func (c *Config) Normalize() error {
 	// PR #92 — without observability, a bad entry just disappeared). We
 	// log each at `.warn` so the operator sees the breadcrumb in the
 	// bridge logs even though the patch / load doesn't fail.
+	//
+	// An entry kept without its user name, password, query or fragment
+	// (backlog B54) is logged under a message of its own: it was not
+	// dropped, and "dropped" would send the operator looking for an
+	// endpoint the phone still has.
 	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
 	c.CustomEndpoints = kept
 	for _, w := range warns {
+		if errors.Is(w, errCustomEndpointCredentials) {
+			validateLogger.Warn(customEndpointPublishedWithoutCredentials, "err", w)
+			continue
+		}
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
 	}
 	return nil
@@ -3108,8 +3144,13 @@ func (c *Config) Validate() error {
 	// accept, so a malformed value must fail at load rather than silently
 	// reduce to "" and leave the endpoint unpinned — the failure mode this
 	// field exists to prevent. Same shape the handler enforces on the wire.
+	// Named by its scheme and host alone (urlFieldForLog), since what it is
+	// refused for can be a password, a token or a query (backlog B54), so
+	// the message says every part a plain base URL leaves out.
 	if strings.TrimSpace(c.Atlas.HarvestBaseURL) != "" && c.Atlas.CanonicalHarvestBaseURL() == "" {
-		return fmt.Errorf("atlas.harvestBaseUrl: must be a plain https base URL (https://host[:port]), got %q", c.Atlas.HarvestBaseURL)
+		return fmt.Errorf("%s: must be a plain https base URL (https://host[:port]), "+
+			"with no user name, password, path, query or fragment",
+			urlFieldForLog("atlas.harvestBaseUrl", c.Atlas.HarvestBaseURL))
 	}
 	// dlna.listenAddress: the DLNA HTTP server binds this value
 	// directly, so a bogus host:port (unparseable, or an
@@ -3432,14 +3473,93 @@ func validateRenderTempDir(tempDir string, libraryRoots []string) error {
 // should reference it.
 const maxCustomEndpointHostLen = 255
 
+// errCustomEndpointCredentials is what a custom endpoint carrying a user
+// name, a password, a query or a fragment is refused, or published without
+// them, for: the parts of a URL that carry a credential. /v1/health
+// publishes the list to any caller, a token or none, and every pairing QR
+// carries it (backlog B54). The bridge's own listener reads none of them,
+// and the phone uses none: it sets its own Authorization header (the bearer
+// token) on every request, and its request delegate cancels every challenge
+// but the server's certificate (BridgeSourceClient's PinningTaskDelegate,
+// read 2026-09-28).
+var errCustomEndpointCredentials = errors.New("carries a user name, password, query or fragment, " +
+	"which /v1/health (answering any caller) and every pairing QR would publish")
+
+// customEndpointPublishedWithoutCredentials is what Normalize logs, once per
+// entry, for a custom endpoint ValidateCustomEndpoints kept without its
+// credential parts. Its own message, because "dropped" is not what happened
+// to it.
+const customEndpointPublishedWithoutCredentials = "custom endpoint published without its user name, " +
+	"password, query or fragment; a save stores it that way"
+
+// HasCredentialParts reports whether raw parses as a URL with a part that
+// can carry a credential: a user name or a password (an empty one included,
+// `https://@host`), a query (`?`, empty or not) or a fragment. A value that
+// does not parse answers false; the prune drops it for that. The one test of
+// "carries a credential" for a custom endpoint: the prune
+// (ValidateCustomEndpoints), the console's settings PATCH
+// (CheckCustomEndpoints) and `bridge init --domain` all ask it.
+func HasCredentialParts(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && hasCredentialParts(u)
+}
+
+// hasCredentialParts is HasCredentialParts over a URL already parsed.
+func hasCredentialParts(u *url.URL) bool {
+	return u.User != nil || u.RawQuery != "" || u.ForceQuery ||
+		u.Fragment != "" || u.RawFragment != ""
+}
+
+// withoutCredentialParts returns u without the parts hasCredentialParts
+// reads: the endpoint an entry is published as.
+func withoutCredentialParts(u *url.URL) *url.URL {
+	out := *u
+	out.User = nil
+	out.RawQuery, out.ForceQuery = "", false
+	out.Fragment, out.RawFragment = "", ""
+	return &out
+}
+
+// CheckCustomEndpoints says why a customEndpoints list the operator TYPED
+// (the console's settings PATCH) must be refused, or returns nil: an entry
+// that carries a user name, password, query or fragment (HasCredentialParts),
+// named by its position and its scheme and host, never its value. A list a
+// config or the environment already holds is repaired instead, published
+// without those parts (ValidateCustomEndpoints, in Normalize): refusing it
+// would stop a bridge that started before. Storing the repaired entry for a
+// typed one would store a URL nobody typed, which is why the typed list is
+// refused (the library name's rule, #1042 / #1046). Entries that are invalid
+// for another reason are left to the prune, as they always were.
+func CheckCustomEndpoints(in []string) error {
+	for i, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw != "" && HasCredentialParts(raw) {
+			return fmt.Errorf("%s: %w; write it without them",
+				urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw), errCustomEndpointCredentials)
+		}
+	}
+	return nil
+}
+
 // ValidateCustomEndpoints filters the input to entries that parse as
 // absolute HTTPS URLs with a non-empty host. Returns (kept, warnings)
-// where `warnings` is one error per dropped entry. Normalize, which scrubs
-// the persisted list for every writer (the admin settings PATCH included),
-// logs each warning. So a warning names its entry by position and by its
-// scheme and host (urlOriginForLog), never by the whole value: an entry can
-// carry a password (`https://user:password@host`), and one that does not
-// parse is not echoed at all, since the parse error quotes it.
+// where `warnings` is one error per dropped entry, and one per entry kept
+// without its credential parts (errCustomEndpointCredentials, below).
+// Normalize, which scrubs the persisted list for every writer (the admin
+// settings PATCH included), logs each warning. So a warning names its entry
+// by position and by its scheme and host (urlFieldForLog), never by the
+// whole value: an entry can carry a password (`https://user:password@host`),
+// and one that does not parse is not echoed at all, since the parse error
+// quotes it.
+//
+// An entry that carries a user name, password, query or fragment
+// (HasCredentialParts) is KEPT WITHOUT THEM (backlog B54). Everything that
+// publishes an endpoint reads the list this returns: /v1/health, which
+// answers any caller, the pairing QR and the console's endpoints panel. The
+// phone and the bridge use none of those parts, and the endpoint itself
+// still reaches the host it names, so dropping it would cost the phone a
+// route for nothing, and refusing the config would stop a bridge that
+// started before. A typed entry is refused instead (CheckCustomEndpoints).
 //
 // Why HTTPS-only: iOS clients won't speak plain-HTTP to the bridge
 // (ATS rejects it before our pinning runs even on a local-network
@@ -3450,12 +3570,9 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 	kept = make([]string, 0, len(in))
 	seen := make(map[string]bool, len(in))
 	// entry names the i-th entry for a warning: its position, and its
-	// scheme and host when it has either.
+	// scheme and host when it has a host part.
 	entry := func(i int, raw string) string {
-		if o := urlOriginForLog(raw); o != "" {
-			return fmt.Sprintf("customEndpoints[%d] (%s)", i, o)
-		}
-		return fmt.Sprintf("customEndpoints[%d]", i)
+		return urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw)
 	}
 	for i, raw := range in {
 		raw = strings.TrimSpace(raw)
@@ -3467,8 +3584,12 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: does not parse as a URL", i))
 			continue
 		}
+		// The scheme is named only through entry(), and only for a URL
+		// with a host part: `s3cret:x@host`, written without a scheme,
+		// parses with the user name as its scheme, and this warning quoted
+		// it as `got "s3cret"` until backlog B54.
 		if u.Scheme != "https" {
-			warnings = append(warnings, fmt.Errorf("%s: scheme must be https, got %q", entry(i, raw), u.Scheme))
+			warnings = append(warnings, fmt.Errorf("%s: scheme must be https (https://host[:port])", entry(i, raw)))
 			continue
 		}
 		// Hostname, never Host: `https://:8443` has Host ":8443" and no
@@ -3484,13 +3605,24 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: hostname is %d characters, exceeds %d-character limit", i, hostLen, maxCustomEndpointHostLen))
 			continue
 		}
+		// An entry that carries a user name, password, query or fragment
+		// is published without them (the docblock says why), so the
+		// published form is what is deduped and kept, and one that
+		// duplicates another once they are gone is dropped silently,
+		// like any duplicate: nothing of it is published.
+		strip := hasCredentialParts(u)
+		if strip {
+			u = withoutCredentialParts(u)
+			raw = u.String()
+		}
 		// Dedupe on a canonical form so two paste-friendly equivalents
 		// collapse. url.String() does NOT treat an empty path
 		// ("https://host") and a root path ("https://host/") as equal,
 		// so normalise a bare "/" path to "" before building the key —
 		// that's the common trailing-slash paste case. Deeper paths are
 		// compared verbatim (no further path/port normalisation); the
-		// operator's exact input form is what we keep in `kept`.
+		// operator's exact input form is what we keep in `kept`, less
+		// any credential part.
 		cu := *u
 		if cu.Path == "/" {
 			cu.Path = ""
@@ -3500,6 +3632,9 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			continue
 		}
 		seen[canonical] = true
+		if strip {
+			warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointCredentials))
+		}
 		kept = append(kept, raw)
 	}
 	return kept, warnings

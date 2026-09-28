@@ -2820,6 +2820,16 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			} else {
 				next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
 			}
+			// A typed entry carrying a user name, password, query or
+			// fragment is refused, whole, before anything is written
+			// (backlog B54): /v1/health publishes the list to any caller,
+			// and Normalize would store it without them, a URL nobody
+			// typed. The stored list is already without them (Normalize
+			// ran when it was loaded), so a console that sends back what
+			// it showed is never refused here.
+			if err := config.CheckCustomEndpoints(next.CustomEndpoints); err != nil {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: err.Error()}
+			}
 		}
 
 		// PR 4 — Tailscale mode dropdown. Hot-reload matrix:

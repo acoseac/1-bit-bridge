@@ -224,6 +224,19 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "--public requires --domain <fqdn>\n")
 			return 2
 		}
+		// The domain becomes the endpoint every phone dials,
+		// `https://<domain>`, in customEndpoints and in the autocert host,
+		// and /v1/health (answering any caller) and every pairing QR publish
+		// both. So a user name, password, query or fragment in it is
+		// refused here, before anything is written, and not echoed (backlog
+		// B54): the operator typed it, and a stored config that already
+		// holds such an endpoint is published without them instead
+		// (config.ValidateCustomEndpoints).
+		if config.HasCredentialParts("https://" + *publicDomain) {
+			fmt.Fprintf(stderr, "--domain: must be the host name alone, with no user name, password, query or fragment "+
+				"(/v1/health, which answers any caller, and every pairing QR publish the endpoint init writes from it)\n")
+			return 2
+		}
 		if *publicEmail == "" && !*publicProxy {
 			// Email is required ONLY when the bridge will run
 			// autocert itself; reverse-proxy installs let the
