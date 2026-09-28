@@ -206,11 +206,14 @@ func TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads(t *testing.T) 
 // refused at the validation before Save, exit 1, after a preflight that graded
 // 7788 in its place and after init had made its directories.
 func TestInitRefusesAnAddressFlagTheConfigWouldRefuse(t *testing.T) {
-	for _, tc := range []struct{ flag, addr, want string }{
-		{"--listen-address", "443", "missing port in address"},
-		{"--admin-address", "127.0.0.1:99999", "must be a number between 0 and 65535"},
+	// The subtests are not named for the flags: t.TempDir's path carries the
+	// test's name, and init prints the path, so an output that named the
+	// flag would prove nothing.
+	for _, tc := range []struct{ name, flag, addr, want string }{
+		{"listen address with no port", "--listen-address", "443", "missing port in address"},
+		{"admin address out of range", "--admin-address", "127.0.0.1:99999", "must be a number between 0 and 65535"},
 	} {
-		t.Run(tc.flag, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
 			code, out := runInit(t,
 				"--yes", "--no-service", "--dir", cfgDir,
@@ -220,8 +223,9 @@ func TestInitRefusesAnAddressFlagTheConfigWouldRefuse(t *testing.T) {
 			if code != 2 {
 				t.Errorf("init exited %d on %s %q, want 2, a usage error", code, tc.flag, tc.addr)
 			}
-			if !strings.Contains(out, tc.flag) || !strings.Contains(out, tc.want) {
-				t.Errorf("the refusal does not name %s and why (%q)", tc.flag, tc.want)
+			if named := tc.flag + " " + strconv.Quote(tc.addr); !strings.Contains(out, named) ||
+				!strings.Contains(out, tc.want) {
+				t.Errorf("the refusal does not name %s and why (%q)", named, tc.want)
 			}
 			if _, err := os.Stat(cfgDir); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("the config dir is there after the refusal (stat: %v): the run was refused after "+
