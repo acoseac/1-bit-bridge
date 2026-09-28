@@ -112,16 +112,18 @@ func TestAConfiguredServerIsCachedPastTheBound(t *testing.T) {
 	}
 }
 
-// TestTouchStoresNothingNew pins the refresh the SSDP handler sends on every
-// announcement of a known server. It Upserted `{UDN, LastSeenAt}` until
-// 2026-09-28, so an entry EvictStale removed between the handler's Get and
-// that write came back with no control URL, which the handler never fetched
-// again while the server kept announcing (measured on main: 2 of 200,000
-// such races, each still without a control URL ten announcements later).
+// TestTouchStoresNothingNew pins the lookup-and-refresh the SSDP handler
+// makes on every announcement. It was a Get and then an Upsert of `{UDN,
+// LastSeenAt}` until 2026-09-28, so an entry EvictStale removed between the
+// two came back with no control URL, which the handler never fetched again
+// while the server kept announcing (measured on main: 2 of 200,000 such
+// races, each still without a control URL ten announcements later). Touch
+// is one step under the lock, and stores nothing for a server the cache
+// does not hold.
 func TestTouchStoresNothingNew(t *testing.T) {
 	cache := NewServerCache()
 	at := time.Unix(100, 0)
-	if cache.Touch("uuid:gone", at) {
+	if _, ok := cache.Touch("uuid:gone", at); ok {
 		t.Error("Touch reported a server the cache does not hold")
 	}
 	if _, ok := cache.Get("uuid:gone"); ok {
@@ -130,11 +132,14 @@ func TestTouchStoresNothingNew(t *testing.T) {
 
 	cache.Upsert(ServerInfo{UDN: "uuid:x", FriendlyName: "Cellar", ContentDirectoryControlURL: "http://192.0.2.10:8200/ctl", LastSeenAt: at})
 	later := at.Add(time.Minute)
-	if !cache.Touch("uuid:x", later) {
-		t.Error("Touch did not report a server the cache holds")
+	got, ok := cache.Touch("uuid:x", later)
+	if !ok {
+		t.Fatal("Touch did not report a server the cache holds")
 	}
-	info, _ := cache.Get("uuid:x")
-	if !info.LastSeenAt.Equal(later) || info.FriendlyName != "Cellar" || info.ContentDirectoryControlURL == "" {
-		t.Errorf("after Touch: %+v, want LastSeenAt %v and every other field kept", info, later)
+	stored, _ := cache.Get("uuid:x")
+	for _, info := range []ServerInfo{got, stored} {
+		if !info.LastSeenAt.Equal(later) || info.FriendlyName != "Cellar" || info.ContentDirectoryControlURL == "" {
+			t.Errorf("after Touch: %+v, want LastSeenAt %v and every other field kept", info, later)
+		}
 	}
 }
