@@ -3728,6 +3728,16 @@ func boolPtr(b bool) *bool { return &b }
 // into a JSON null, which decodes to a nil *float64 and is dropped from
 // the wire by `omitempty` — so a PCM variant carries NO key, while a DSD
 // rendition clamped to 0 dB carries `0` (see Variant.AppliedGainDB).
+//
+// **NEWEST FIRST, and that is a wire guarantee (PROTOCOL.md).** iOS resolves
+// a family by id prefix and takes the FIRST match, and a track can hold two
+// rows of one family: a superseded schema version (the DSD v1 → v2 move keeps
+// v1 for the phones that downloaded it) or a pre-re-rip target rate. Before
+// this ORDER BY the array came out in primary-key order, which listed
+// `…-v1-…` ahead of `…-v2-…`, so every shipped app version would have
+// streamed and downloaded the superseded file. Newest first is version-
+// agnostic: the current schema is always the one written last. The id is
+// the tie-break so the order is deterministic.
 const variantsAggSQL = `
 	(SELECT json_group_array(json_object(
 	            'id',            v.variant_id,
@@ -3736,7 +3746,8 @@ const variantsAggSQL = `
 	            'bitsPerSample', v.bits_per_sample,
 	            'sizeBytes',     v.size_bytes,
 	            'appliedGainDB', v.applied_gain_db,
-	            'label',         v.variant_id))
+	            'label',         v.variant_id)
+	        ORDER BY v.created_at DESC, v.variant_id DESC)
 	 FROM track_variants v
 	 WHERE v.source_path = tracks.path) AS variants_json`
 
@@ -6562,7 +6573,7 @@ const (
 	VariantKindPrefixUpscaled  = "upscaled"
 	VariantKindPrefixOptimized = "optimized"
 	// VariantKindPrefixOptimizedDSD is the DSD compact tier
-	// (`optimized-dsd-v1-<44100|48000>-16`). It STARTS WITH
+	// (`optimized-dsd-v2-<44100|48000>-16`). It STARTS WITH
 	// VariantKindPrefixOptimized on purpose: `LIKE 'optimized-%'` and
 	// every `optimized-` prefix check — the coverage counters, the
 	// sweeper's already-covered test, iOS routing — admit it unchanged.
@@ -6570,9 +6581,16 @@ const (
 	// matches the whole `<prefix>-v<n>-<rate>-<bits>` segment.
 	VariantKindPrefixOptimizedDSD = VariantKindPrefixOptimized + "-dsd"
 	// VariantKindPrefixPCM is the DSD faithful tier
-	// (`pcm-v1-<176400|192000>-24`): a NEW family, never "upscaled".
+	// (`pcm-v2-<176400|192000>-24`): a NEW family, never "upscaled".
 	VariantKindPrefixPCM = "pcm"
 )
+
+// DSDRenditionSchemaVersion mirrors transcode.DSDRenditionSchemaVersion for
+// the SQL that must tell the CURRENT DSD renditions from superseded ones:
+// the sweeper's coverage and the faithful tier's migration pass. This
+// package cannot import transcode; transcode's
+// TestManifestMirrorsTheDSDRenditionSchema keeps the two equal.
+const DSDRenditionSchemaVersion = "v2"
 
 // childFolderRollupSelect is the shared SELECT-projection block used
 // by ListChildFolders + ListChildFoldersPage's `parent == ""` AND

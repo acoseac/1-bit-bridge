@@ -63,8 +63,8 @@ func TestDSDStageAArgs_PerTier(t *testing.T) {
 
 func TestDSDStageCArgs(t *testing.T) {
 	pcm := JobSpec{Kind: JobKindPCMRender, TargetSampleRate: 176400, TargetBits: 24}
-	got := strings.Join(pcm.dsdStageCArgs("/scratch", "/scratch/tok.stageA.sox", "/v/a.dsf.pcm-v1-176400-24.flac.tok.tmp", dsdPreAttenuationDB+5.0), " ")
-	want := "--temp /scratch /scratch/tok.stageA.sox -b 24 -t flac /v/a.dsf.pcm-v1-176400-24.flac.tok.tmp gain 11.0206 dither -s"
+	got := strings.Join(pcm.dsdStageCArgs("/scratch", "/scratch/tok.stageA.sox", "/v/a.dsf.pcm-v2-176400-24.flac.tok.tmp", dsdPreAttenuationDB+5.0), " ")
+	want := "--temp /scratch /scratch/tok.stageA.sox -b 24 -t flac /v/a.dsf.pcm-v2-176400-24.flac.tok.tmp gain 11.0206 dither -s"
 	if got != want {
 		t.Errorf("stage C =\n  %s\nwant\n  %s", got, want)
 	}
@@ -285,7 +285,7 @@ func TestDSDSettingsShape(t *testing.T) {
 	}
 	want := map[string]any{
 		"resampler": "sox", "decoder": "ffmpeg-dsd+sox", "quality": "very-high", "rateFlag": "-v", "phase": "linear",
-		"targetRate": float64(176400), "targetBits": float64(24), "guard": false, "schemaVersion": "v1", "kind": "pcm",
+		"targetRate": float64(176400), "targetBits": float64(24), "guard": false, "schemaVersion": "v2", "kind": "pcm",
 		"dsdRate": float64(2822400), "pipeRate": float64(352800), "channels": float64(2),
 		"preAttenuationLinear": 0.5, "nominalGainDB": 6.0, "appliedGainDB": 2.4, "truePeakDBTP": -3.4,
 		"gainScope": "album", "trackGainDB": 3.1,
@@ -523,11 +523,11 @@ func TestRunDSD_RealToolchain(t *testing.T) {
 		wantRMS          float64 // NaN = don't check
 		peakMax          float64 // NaN = don't check
 	}{
-		{"DSF −20 faithful", spec(m20, JobKindPCMRender, 176400, 24), "pcm-v1-176400-24", 6.0, 6.0, -17.01, math.NaN()},
-		{"DSF −20 compact", spec(m20, JobKindOptimize, 44100, 16), "optimized-dsd-v1-44100-16", 6.0, 6.0, -17.01, math.NaN()},
-		{"DSF −6 faithful", spec(m6, JobKindPCMRender, 176400, 24), "pcm-v1-176400-24", 4.6, 5.1, math.NaN(), -0.8},
-		{"DSF −6 compact", spec(m6, JobKindOptimize, 44100, 16), "optimized-dsd-v1-44100-16", 4.9, 5.1, math.NaN(), -0.8},
-		{"DFF −20 faithful", spec(dff20, JobKindPCMRender, 176400, 24), "pcm-v1-176400-24", 6.0, 6.0, -17.01, math.NaN()},
+		{"DSF −20 faithful", spec(m20, JobKindPCMRender, 176400, 24), "pcm-v2-176400-24", 6.0, 6.0, -17.01, math.NaN()},
+		{"DSF −20 compact", spec(m20, JobKindOptimize, 44100, 16), "optimized-dsd-v2-44100-16", 6.0, 6.0, -17.01, math.NaN()},
+		{"DSF −6 faithful", spec(m6, JobKindPCMRender, 176400, 24), "pcm-v2-176400-24", 4.6, 5.1, math.NaN(), -0.8},
+		{"DSF −6 compact", spec(m6, JobKindOptimize, 44100, 16), "optimized-dsd-v2-44100-16", 4.9, 5.1, math.NaN(), -0.8},
+		{"DFF −20 faithful", spec(dff20, JobKindPCMRender, 176400, 24), "pcm-v2-176400-24", 6.0, 6.0, -17.01, math.NaN()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

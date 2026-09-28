@@ -541,7 +541,7 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		wantPrefix = "upscaled-"
 	case "optimize":
 		// Version-agnostic AND family-inclusive: `optimized-%` also
-		// matches the DSD compact tier (`optimized-dsd-v1-…`), which is
+		// matches the DSD compact tier (`optimized-dsd-v2-…`), which is
 		// the optimize KIND's own output.
 		wantPrefix = "optimized-"
 	case "pcm":

@@ -59,12 +59,12 @@ func TestBatchDSDJobsRideTheBackgroundLane(t *testing.T) {
 	got := specsFromBatch(t, s, 7)
 
 	for _, key := range []string{
-		"DSD/01.dsf|pcm-v1-176400-24",
-		"DSD/02.dff|pcm-v1-176400-24",
-		"DSD/03.dff|pcm-v1-192000-24",
-		"DSD/01.dsf|optimized-dsd-v1-44100-16",
-		"DSD/02.dff|optimized-dsd-v1-44100-16",
-		"DSD/03.dff|optimized-dsd-v1-48000-16",
+		"DSD/01.dsf|pcm-v2-176400-24",
+		"DSD/02.dff|pcm-v2-176400-24",
+		"DSD/03.dff|pcm-v2-192000-24",
+		"DSD/01.dsf|optimized-dsd-v2-44100-16",
+		"DSD/02.dff|optimized-dsd-v2-44100-16",
+		"DSD/03.dff|optimized-dsd-v2-48000-16",
 	} {
 		sp, ok := got[key]
 		if !ok {
@@ -99,7 +99,7 @@ func TestBatchDSDJobsCarryChannelsAndDuration(t *testing.T) {
 	seedDSDBatchFixture(t, s)
 	got := specsFromBatch(t, s, 7)
 
-	sp, ok := got["DSD/01.dsf|pcm-v1-176400-24"]
+	sp, ok := got["DSD/01.dsf|pcm-v2-176400-24"]
 	if !ok {
 		t.Fatal("no spec for DSD/01.dsf")
 	}
@@ -114,7 +114,7 @@ func TestBatchDSDJobsCarryChannelsAndDuration(t *testing.T) {
 	// A row with no duration/channels in the manifest reports zero —
 	// "unknown", which the consumers fall back from. Pinned so the
 	// json_extract is not silently returning a wrong non-zero value.
-	if sp := got["DSD/03.dff|pcm-v1-192000-24"]; sp.SourceChannels != 0 || sp.SourceDurationSec != 0 {
+	if sp := got["DSD/03.dff|pcm-v2-192000-24"]; sp.SourceChannels != 0 || sp.SourceDurationSec != 0 {
 		t.Errorf("unseeded geometry = %d ch / %.1f s, want 0 / 0", sp.SourceChannels, sp.SourceDurationSec)
 	}
 	// A PCM row never carries them either — the projection reads both for
