@@ -25165,6 +25165,159 @@ inside the container asked for over `127.0.0.1`.
   0 lines, want 1"), green on 8ebf29f3, and red again with the refusal
   pointed back at the shared set (NC, run on the committed fix).
 
+## 2026-09-28 — CodeQL triage: the 27 alerts open on main are false positives (backlog B55)
+
+Open on `refs/heads/main` at `84a3df20`: 27 alerts of two rules, 14
+`go/log-injection` (#87, #88, #94, #95, #96, #97, #100, #103, #111–#115,
+#118) and 13 `go/path-injection` (#89, #90, #91, #119–#126, #131, #132).
+(The backlog entry's 16 and 11 were an estimate.) All 27 are false
+positives and were dismissed as such, each comment naming its barrier and
+the line it sits on. No production code changed. One test was added,
+because the one permanent delete in the trash rested on a barrier nothing
+drove end to end.
+
+### Method
+
+The alert API says only "depends on a user-provided value". The flows are
+in the analysis's SARIF: `gh api -H 'Accept: application/sarif+json'
+repos/acoseac/1-bit-bridge/code-scanning/analyses/<id>` (the latest
+`refs/heads/main` analysis, `1854518657`), whose `codeFlows` name each
+source and every step to the sink. Each alert was matched to its result by
+path and line, and the tainted argument read off the result's column.
+
+### go/log-injection: 14 alerts
+
+The probe (a `_`-prefixed directory, run and deleted, not committed) goes
+through the bridge's own setup: `logging.Init(os.Stdout)`, then
+`logging.Component("probe").Warn("constant message", "path", evil, "err",
+errors.New(evil))` and `.Warn(evil)`, with `evil =
+"a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`. Under
+`BRIDGE_LOG_FORMAT=text`, `=json`, and unset (stdout a file, so JSON): two
+records, two lines, zero CR bytes. Text wrote
+`path="a\nb\rc\r\ntime=2026-09-28T00:00:00Z level=ERROR msg=forged"`, JSON
+`"path":"a\nb\rc\r\ntime=…"`; the error attribute read the same, and so
+did the message. Every flagged logger resolves through `logging.Component`
+to the default handler (the DLNA server's is
+`logging.Component("bridge").With(component=dlna)`, the API's request
+logger `httpLogger.With(…)`), `main` calls `logging.Init(os.Stderr)` before
+`run`, and `internal/` has no `log.Printf` (handshakelog's `log.Print`
+reaches the same handler through `slog.SetDefault`).
+
+At each site the tainted value is an attribute and the message a constant:
+
+| alert | site | attribute |
+|---|---|---|
+| #87 | admin/handlers_upscale_batch.go:361 | `path` (through `scrubForLog`) |
+| #88 | admin/handlers_upload.go:167 | `err` |
+| #94, #95 | atomicwrite/atomicwrite.go:142 | `path`, `err` |
+| #96 | manifest/store.go:5751 | `path` |
+| #97 | upload/upload.go:722 | `err` (it wraps `dest`) |
+| #100 | dlna/server.go:593 | `callbackHost` (a Debug line) |
+| #103 | transcode/batch.go:1228 | `batchPath` |
+| #111 | api/artwork.go:371 | `mbid` |
+| #112 | api/artwork.go:396 | `mbid` |
+| #113 | api/files.go:445 | `source_path` |
+| #114 | api/files.go:446 | `variant_id` |
+| #115 | transcode/batch.go:515 | `batchPath` |
+| #118 | admin/handlers_api.go:1465 | `path`, through `attrs()`; the message is `scope+": …"`, and `scope` is a constant at both callers |
+
+### go/path-injection: 13 alerts
+
+- **#131, #132** (api/files.go:117 and :313, `os.Open(abs)`) are
+  re-fingerprints of #7 and #8, not new flows. The analysis of `cb9c8718`
+  (#1055, 05:35:13Z) marked #7 and #8 fixed and opened #131 and #132 at the
+  same lines: #1055 replaced `writeErrorLog` with `writeFileErrorLog` on the
+  lines just after both sinks, which moves CodeQL's line-context
+  fingerprint. The sinks still take `abs` from `ResolveChecked`
+  (files.go:108, :283), that is `resolveParts`: NUL and a raw `..` segment
+  refused, joined onto the root, prefix-checked (fs.go:329).
+- **#90** (trash.go:269, `os.Stat(src)`): `src` is `SplitRoot`'s root and
+  suffix, refused unless `fsutil.IsUnderAny(src, root)` (trash.go:263,
+  which resolves links on both sides); the path passed `validRel` first.
+- **#91** (trash.go:282, `MkdirAll`): `dst` is
+  `<root>/.bridge-trash/<stamp>/<rel>`, the stamp made by the server
+  (`UnixNano`), the rel through `validRel`.
+- **#119–#121** (restore.go:72, :85, :97): `dst` is `SplitRoot`'s root and
+  suffix, refused unless `IsUnderAny(dst, root)` (restore.go:66).
+- **#122–#124** (restore.go:152, :155, :175): `locate`'s
+  `<root>/.bridge-trash/<stamp>/<rel>`, which has no containment check of
+  its own (the next section).
+- **#125, #126** (restore.go:202, :203): `pruneEmptyStamp`'s
+  `<root>/.bridge-trash/<stamp>`.
+- **#89** (fsutil/fsync_unix.go:30): three flows, all through
+  `atomicwrite.RenameWithRetry` → `commitDirEntry` → `SyncParentDir`,
+  carrying `Trash`'s `dst` (#91's) and `Restore`'s (#119's). Callers traced
+  past CodeQL's flows: `upload.commitOne` (its `dest` after
+  `ValidateRelPath` and `AssertRootContains`, upload.go:676–682),
+  `fsutil.FsyncFileAndParent` (no production caller), and every other
+  `RenameWithRetry` caller writes a path of the bridge's own (the config,
+  data and cache directories).
+
+### The trash ids, on their own merits
+
+`Restore` and `Purge` take `<stamp>/<rel>` ids from a JSON body. `splitID`
+cuts at the first `/`. The stamp must `ParseInt` (base 10) to a positive
+integer, so it is `[+]?[0-9]+`: no separator, dot or drive letter. The rel
+must pass `validRel`: one leading `/` trimmed, then no NUL, no backslash, no
+empty, `.` or `..` segment, no dot-prefixed segment (which refuses `..` a
+second time), and clean form. The forms asked about:
+
+- `..`: refused in the stamp by `ParseInt`, and twice in the rel.
+- A separator: `/` splits. A backslash is refused in the rel and fails
+  `ParseInt` in the stamp. On Windows this is the barrier, since
+  `filepath.Join` collapses `..\..` there.
+- An absolute path: an id starting with `/` has an empty stamp; `1//etc/x`
+  loses one `/` and is relative, inside the stamp directory.
+- A Windows drive (`1/C:/x`): a legal segment to `validRel`, joined AFTER
+  the trash directory and the stamp, so `…\.bridge-trash\1\C:\x`, which
+  does not name `C:\x`: Go's `Join` and `Clean` read a volume only at the
+  start of a path. That is read from the source; what Win32 then does with
+  a mid-path `C:` was not measured here, and the Windows leg of the new
+  test is the measurement (a Purge that reached the file beside the root
+  would delete it). Win32's trimming of trailing dots and spaces cannot
+  turn a segment into `..` unless it starts with a dot.
+- The stamp's shape, measured: `ParseInt` base 10 with a positive result
+  accepts `+5` and `00012`, and refuses `-5`, `0`, `1_000`, ` 5`, `5 `,
+  `..`, `1\x`, `C:`, `0x1F`, `+` and the empty string.
+- No request can plant a link inside `.bridge-trash`: `Trash` refuses a
+  directory (its `os.Stat` follows links) and a link that resolves outside
+  the root (`IsUnderAny`), and uploads refuse dot-prefixed segments.
+
+`Restore` is guarded twice, since its destination also passes `SplitRoot`
+and `IsUnderAny`. **`Purge`, the one permanent delete, rests on `splitID`
+alone**, because `locate` checks nothing. Nothing drove either with a
+hostile id: `TestSplitIDRejectsMalformedInput` unit-tests the split alone.
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash` sends both operations ids
+aimed at a live library file and at a file beside the root, in each form
+above, and requires one refusal each, both files untouched, an empty
+library directory kept, and the real entry still listed.
+`TestTrashRejectsTraversalAndDotSegments` gained the drive-letter form. The
+backslash and drive rows mean something only on the Windows leg.
+
+Negative controls, the test committed first, each restored with `git
+checkout --`, `-count=1`:
+
+| | mutation | result |
+|---|---|---|
+| NC1 | `splitID` skips the stamp check | red: `Purge("../A/live.flac")` purges the live library file, and `pruneEmptyStamp(root, "..")` then prunes the library's empty directory |
+| NC2 | `validRel` drops `seg == ".."` | green: the dot-prefix rule refuses `..` as well |
+| NC2b | NC2, and the dot-prefix rule lets `..` through | red: `Purge` removes the live file (`<stamp>/../../A/live.flac`) and the file beside the root (`<stamp>/../../../outside.flac`), while `Restore` still refuses both (`SplitRoot` refuses a raw `..`); `TestSplitIDRejectsMalformedInput` red too |
+
+The backslash rule has no control off Windows, where a backslash is an
+ordinary filename byte.
+
+### Dismissals
+
+All 27 dismissed as "false positive" on 2026-09-28 (20:19Z), each with a
+comment under 280 characters naming the barrier and its line: the attribute
+and this probe for the 14 log-injection alerts; `resolveParts` (fs.go:329)
+for #131 and #132, with the #1055 re-fingerprint named; `SplitRoot`,
+`IsUnderAny` and `splitID` for the trash ones, #119–#126 naming
+`TestRestoreAndPurgeRefuseIDsThatLeaveTheTrash`. Nothing is open on
+`refs/heads/main` since. A later change to a line near one of these sinks
+re-fingerprints it, as #1055 did to #7 and #8: read the new alert's flow
+from the SARIF, and dismiss it again only while its barrier still stands.
+
 ## 2026-09-28 — every rendition records its track row's version, and a changed file is not rendered until its row is read again
 
 Backlog B24; PR #1077. A rendition records the version of its source it was made
