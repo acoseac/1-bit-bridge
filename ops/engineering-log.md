@@ -25733,3 +25733,88 @@ The full Linux race suite runs in CI, and on dido for the PR head.
   hint, and `hintUnder` requires it on the line printReport puts under the
   check. With both hint printers in cmd/bridge/doctor.go removed (NC, on the
   committed test), all five cases are red; restored, green.
+
+## 2026-09-28 — the auth and tls tests count writes and compare file identity, never a clock tick apart (backlog B52)
+
+`TestValidateUpdatesLastUsedAt` took `time.Now().UTC()`, slept 5 ms and asserted
+the stamp `Validate` wrote was strictly `After` it. `.UTC()` strips the
+monotonic reading, so that compares wall clocks, and Windows advances the wall
+clock in ticks of about 15.6 ms. #1067 met the same shape in its own serve test
+on the Windows leg (the bullet this entry extends). A survey of every
+`_test.go` for a reading taken before an action and then a strict
+`After` / `Before` on what the action wrote found only this one; widening it to
+mtimes found five more tests deciding "was the file rewritten?" from mtimes a
+few milliseconds apart.
+
+- internal/auth: `TestValidateDebouncesLastUsedPersist`,
+  `TestRecordClientVersionUpdatesInMemoryAndFlushPersists`,
+  `TestRecordClientVersionDebouncesUnderRapidChanges`,
+  `TestRecordClientVersionSkipsDiskOnRepeat`.
+- internal/tls: `TestReloadsWithoutRegenerating` (its comment: "Small sleep
+  so any mtime change would be visible on coarse-grained FSes", with a 10 ms
+  sleep).
+
+**An mtime compare is wrong both ways.** "Was it written?" (`!mt.After(before)`)
+fails correct code when both writes land in one tick; "was it NOT rewritten?"
+(`mt.After(before)`) passes with the guard removed. The existing rule named the
+second half only.
+
+### Reproduction, on a coarse filesystem
+
+A FAT32 disk image keeps 2 s mtimes, so a Mac can reproduce the coarse-tick
+case with one (`hdiutil create -size 200m -fs MS-DOS`, attached with
+`-nobrowse`, `TMPDIR` pointed into it so `t.TempDir()` lands there). APFS
+keeps nanosecond mtimes, which is why these tests pass on a Mac's own disk. On main (84a3df20), unchanged
+code:
+
+```
+--- FAIL: TestValidateDebouncesLastUsedPersist
+    auth_test.go:213: FlushLastUsed did not persist: 2026-09-28 22:06:42 +0200 CEST (want > 2026-09-28 22:06:42 +0200 CEST)
+--- FAIL: TestRecordClientVersionUpdatesInMemoryAndFlushPersists
+    auth_test.go:662: FlushLastUsed did not persist deferred client-version update (mtime 2026-09-28 22:06:42 +0200 CEST == 2026-09-28 22:06:42 +0200 CEST)
+```
+
+`TestValidateUpdatesLastUsedAt` cannot be driven red here without a clock seam
+the store does not have, and none was added for it: its fix is a bound that
+holds at any clock resolution, so there is nothing a seam would buy.
+
+### The change (tests only)
+
+- `TestValidateUpdatesLastUsedAt`: the stamp is zero before `Validate` and lies
+  in `[before, after]`, two readings taken around the call.
+- The four auth debounce tests count writes through `inCommitWindow` (its hook
+  fires once per staging) and read the result back through a store opened fresh
+  from the file (`onlyTokenOnDisk`), never an mtime. The sleeps that existed
+  to space stamps apart are gone.
+- `TestRecordClientVersionSkipsDiskOnRepeat` repeated the same version INSIDE
+  the debounce window after `Mint`, where no call writes anyway, so it passed
+  with the same-value skip removed on every filesystem (NC3). It now opens the
+  window first (`setLastUsedFlushForTest`), and a new version at the end is the
+  positive control that the window was open.
+- `TestReloadsWithoutRegenerating` compares the cert and key by `os.SameFile`.
+  A regenerated pair already fails its fingerprint check; a rewrite of the
+  SAME bytes is caught by identity, since every write in the package stages a
+  new file and renames it into place. Bytes cannot see that rewrite.
+
+### Negative controls
+
+Each on the committed tests (834eafe7), run on APFS and on the FAT image, beside
+main's versions of the same tests:
+
+| mutation | new tests, APFS and FAT alike | main's tests |
+|---|---|---|
+| NC1: the debounce removed (`flushDueLocked` always true) | the three debounce tests red | on FAT, `…DebouncesUnderRapidChanges` green |
+| NC2: `FlushLastUsed` writes nothing | the two flush tests red | red |
+| NC3: the same-value skip removed | `…SkipsDiskOnRepeat` red | green on APFS and FAT |
+| NC4: `Validate` stamps nothing | `TestValidateUpdatesLastUsedAt` and the flush test's read-back red | red |
+| NC5: the reload rewrites the cert with the same bytes | `TestReloadsWithoutRegenerating` red | green on FAT |
+
+Restored, all five auth tests and the tls test are green on APFS and on FAT
+(`-count=3` on FAT).
+
+### Left alone
+
+`internal/adminauth`'s sign-out fixture compares size and mtime on purpose: it
+builds a replacement with the old file's size and mtime to prove the store
+notices a rename by identity. `api/files_entryinfo_test.go` and the SACD
+scanner tests compare a stat they took with one they set, not two writes.
