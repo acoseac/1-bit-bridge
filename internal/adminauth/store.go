@@ -87,10 +87,11 @@ const adminBcryptCost = 12
 // in TestMain and never again", which needs no synchronisation — but two tests
 // have to prove the NO-OVERRIDE path, so they set it during the run, and a
 // store's own background writers can hash while they do. The repo has been here
-// before with sendErrStreak: a field left unsynchronised binds tests too, and
-// the failure is an intermittent `-race` report on CI that does not reproduce
-// locally. An atomic load beside a ~250 ms key derivation is not a cost worth
-// weighing.
+// before with the M-SEARCH send streak (discovery.SendFailureLog's now, the
+// renderer client's sendErrStreak field then): a field left unsynchronised
+// binds tests too, and the failure is an intermittent `-race` report on CI
+// that does not reproduce locally. An atomic load beside a ~250 ms key
+// derivation is not a cost worth weighing.
 var testHashCost atomic.Int64
 
 // SetTestHashCost lowers the bcrypt work factor for the rest of the process.

@@ -399,6 +399,73 @@ func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	}
 }
 
+// TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove — a tick keeps
+// the tree's first orphans in walk order, and until 2026-09-28 it kept
+// exactly one chunk of them and every attempt spent a slot, so a chunk's
+// worth of files this user cannot remove at the head of the walk (a
+// root-owned directory a `sudo bridge upscale` left) blocked every orphan
+// behind them, every tick. Measured on the old code with the first row's
+// fixture: four ticks, nothing unlinked. The chunk caps UNLINKS now, and a
+// tick tries past the failures. The retained list is bounded
+// (gcRetainedPerUnlink chunks), so a head of undeletable files as long as
+// the whole list stalls the tick again: the second row pins that residual,
+// and the summary line that shows it.
+func TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove(t *testing.T) {
+	skipWhereModesDenyNothing(t)
+	for _, c := range []struct {
+		name         string
+		chunk        int
+		perTick      []int
+		wantSummary1 []string
+	}{
+		{"a chunk of 5 walks past the 8 it cannot remove", 5, []int{5, 5, 0},
+			[]string{" orphans=18", " retained=18", " unlinked=5", " failed=8"}},
+		{"a head as long as the retained list stalls the tick", 2, []int{0, 0},
+			[]string{" orphans=18", " retained=8", " unlinked=0", " failed=8"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			live := seedTestSidecarTree(t, dir, "live-", 30)
+			stuck := filepath.Join(dir, "a-stuck")
+			seedTestSidecarTree(t, stuck, "stuck-", 8)
+			seedTestSidecarTree(t, filepath.Join(dir, "z"), "free-", 10)
+			ageFixtures(t, dir)
+			// Read-only, so this user can list the directory and cannot
+			// unlink what is in it: the walk sees the eight, the unlinks
+			// fail with a permission error.
+			if err := os.Chmod(stuck, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+			s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+			s.gracePeriodForTest = time.Nanosecond
+			s.chunkSizeForTest = c.chunk
+			rec := loggingtest.Record(t)
+
+			total := 0
+			for i, want := range c.perTick {
+				n := s.tick(context.Background())
+				if n != want {
+					t.Errorf("tick %d unlinked %d, want %d", i+1, n, want)
+				}
+				total += n
+			}
+			if got := countFiles(t, dir); got != 48-total {
+				t.Errorf("%d files left after %d unlinks, want %d", got, total, 48-total)
+			}
+			summaries := rec.Lines(msgOrphanTickComplete)
+			if len(summaries) != len(c.perTick) {
+				t.Fatalf("want one summary per tick, got %d:\n%s", len(summaries), strings.Join(summaries, "\n"))
+			}
+			for _, want := range c.wantSummary1 {
+				if !strings.Contains(summaries[0], want) {
+					t.Errorf("the first tick's summary lacks %q: %s", want, summaries[0])
+				}
+			}
+		})
+	}
+}
+
 // TestOrphanSidecarSweeperRefusesAStrandedTree is #940's shape, the one
 // that change left the background sweep open to: after a lost index the
 // catalog holds a handful of rows (the auto-optimize sweeper's fresh
@@ -446,28 +513,35 @@ func TestOrphanSidecarSweeperRefusesAStrandedTree(t *testing.T) {
 }
 
 // TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount — the inventory keeps
-// only a chunk's worth of orphan PATHS (MaxOrphanPaths) and counts all of
-// them. The refusal must read the COUNT: 1,000 orphans against a catalog of
-// 150 rows is a lost index, while the 100 paths a chunk of 100 retains are
-// fewer than the rows, and a refusal fed that number would proceed and
-// unlink them.
+// only gcRetainedPerUnlink chunks of orphan PATHS (MaxOrphanPaths) and
+// counts all of them. The refusal must read the COUNT: 1,000 orphans
+// against a catalog of 500 rows is a lost index, while the 400 paths a
+// chunk of 100 retains are fewer than the rows, and a refusal fed that
+// number would proceed and unlink them. The catalog was 150 rows when a
+// tick kept one chunk of paths; at four chunks the retained 400 outnumber
+// 150 and the refusal fed them still refused, so only this test's wording
+// check caught that mutation (2026-09-28), and the fixture moved.
 func TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount(t *testing.T) {
 	dir := t.TempDir()
-	live := seedTestSidecarTree(t, dir, "live-", 150)
+	live := seedTestSidecarTree(t, dir, "live-", 500)
 	seedTestSidecarTree(t, dir, "orphan-", 1000)
 	ageFixtures(t, dir)
 	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond
 	s.chunkSizeForTest = 100
+	if retained := s.chunkSizeForTest * gcRetainedPerUnlink; retained >= len(live) {
+		t.Fatalf("the tick retains %d paths, not fewer than the %d rows, so a refusal fed the retained count "+
+			"would refuse too and this test would pin nothing", retained, len(live))
+	}
 
 	rec := loggingtest.Record(t)
 	if n := s.tick(context.Background()); n != 0 {
 		t.Errorf("unlinked %d, want 0 — the refusal read the retained paths, not the count", n)
 	}
-	if got := countFiles(t, dir); got != 1150 {
-		t.Errorf("%d of 1,150 files survive", got)
+	if got := countFiles(t, dir); got != 1500 {
+		t.Errorf("%d of 1,500 files survive", got)
 	}
-	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 || !strings.Contains(lines[0], "1000 of 1150 file(s)") {
+	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 || !strings.Contains(lines[0], "1000 of 1500 file(s)") {
 		t.Errorf("want one refusal naming the full count, got %q", lines)
 	}
 }
@@ -611,7 +685,7 @@ func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testin
 	requireTicksUnlinkNothing(t, s, 2, "the walk could not read part of the tree")
 	requireLinesSay(t, rec.Failures(msgOrphanPartialWalk), 1,
 		"the partial-walk WARN, once for two ticks, naming what the walk could not read and what it counted",
-		"could not read 1 entr(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
+		"could not list 1 director(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
 	requireLinesSay(t, rec.Lines(msgOrphanRefusal), 0,
 		"the part the walk saw passes the mass-orphan check, so no lost-index WARN")
 	requireLinesSay(t, rec.Lines(msgOrphanTickComplete), 2,

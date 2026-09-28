@@ -65,6 +65,29 @@ func TestIsLANEligibleInterface(t *testing.T) {
 		// (CGNAT address on a non-matching iface stays refused)
 		{"tsnet_name_mismatch_refuses_cgnat", mkIface("utun7", net.FlagUp), []net.Addr{mkIPNet("100.64.0.5")}, EligibilityOpts{TsnetIfaceName: "tailscale0"}, false},
 
+		// Tailscale gives every node an address in 100.64/10 AND one in
+		// fd7a:115c:a1e0::/48. The ULA is inside fc00::/7, which Go's
+		// IsPrivate counts, so it admitted every Tailscale interface
+		// without the opt-in until 2026-09-28: macOS's utun, Linux's
+		// tailscale0 (both point-to-point), Windows' Wintun adapter (not).
+		{"tailscale_macos_utun_no_optin", mkIface("utun12", net.FlagUp|net.FlagPointToPoint), []net.Addr{mkIPNet("fe80::d12"), mkIPNet("100.64.0.7"), mkIPNet("fd7a:115c:a1e0::7")}, EligibilityOpts{}, false},
+		{"tailscale_linux_tailscale0_no_optin", mkIface("tailscale0", net.FlagUp|net.FlagPointToPoint), []net.Addr{mkIPNet("100.101.102.103"), mkIPNet("fd7a:115c:a1e0:ab12::1"), mkIPNet("fe80::1")}, EligibilityOpts{}, false},
+		{"tailscale_windows_wintun_no_optin", mkIface("Tailscale", net.FlagUp|net.FlagRunning), []net.Addr{mkIPNet("fe80::d12"), mkIPNet("100.64.0.7"), mkIPNet("fd7a:115c:a1e0::7")}, EligibilityOpts{}, false},
+		// A tailnet with IPv4 switched off leaves the ULA beside an fe80,
+		// which the zero-config arm must not admit either.
+		{"tailscale_ipv6_only_no_optin", mkIface("tailscale0", net.FlagUp|net.FlagPointToPoint), []net.Addr{mkIPNet("fd7a:115c:a1e0::7"), mkIPNet("fe80::1")}, EligibilityOpts{}, false},
+		{"tailscale_ula_alone_no_optin", mkIface("utun12", net.FlagUp), []net.Addr{mkIPNet("fd7a:115c:a1e0::7")}, EligibilityOpts{}, false},
+		{"tailscale_ula_last_address", mkIface("utun12", net.FlagUp), []net.Addr{mkIPNet("fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff")}, EligibilityOpts{}, false},
+		// Just outside the /48 on either side is an ordinary ULA.
+		{"ula_below_tailscale_range", mkIface("en1", net.FlagUp), []net.Addr{mkIPNet("fd7a:115c:a1df:ffff::1")}, EligibilityOpts{}, true},
+		{"ula_above_tailscale_range", mkIface("en1", net.FlagUp), []net.Addr{mkIPNet("fd7a:115c:a1e1::1")}, EligibilityOpts{}, true},
+		// A LAN address beside a Tailscale one still admits, as a
+		// private IPv4 beside a public IPv6 does.
+		{"private_v4_beside_tailscale_ula", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("192.168.1.5"), mkIPNet("fd7a:115c:a1e0::7")}, EligibilityOpts{}, true},
+		{"ula_beside_tailscale_ula", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("fd7a:115c:a1e0::7"), mkIPNet("fd12:3456::1")}, EligibilityOpts{}, true},
+		// The opt-in admits the whole shape.
+		{"tailscale_optin", mkIface("utun12", net.FlagUp|net.FlagPointToPoint), []net.Addr{mkIPNet("fe80::d12"), mkIPNet("100.64.0.7"), mkIPNet("fd7a:115c:a1e0::7")}, EligibilityOpts{TsnetIfaceName: "utun12"}, true},
+
 		// Multi-address interface: first eligible address wins
 		{"multi_addr_first_private", mkIface("eth0", net.FlagUp), []net.Addr{mkIPNet("192.168.1.5"), mkIPNet("8.8.8.8")}, EligibilityOpts{}, true},
 

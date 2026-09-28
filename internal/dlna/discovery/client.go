@@ -33,16 +33,6 @@ const ssdpReadErrBackoff = 250 * time.Millisecond
 // blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
 const ssdpReadErrEscalateAt = 20
 
-// ssdpSendErrEscalateAt is the consecutive M-SEARCH send failure count at
-// which sendMSearch logs once at Error and then goes quiet until recovery.
-//
-// Counted in TICKS, not in milliseconds like its read-side sibling: at the
-// default 30s MSearchInterval, 20 is ~10 minutes of unbroken failure — long
-// enough that a Wi-Fi transition or a sleep/wake cycle has resolved itself,
-// short enough that a genuinely dead multicast route is on record within one
-// coffee break.
-const ssdpSendErrEscalateAt = 20
-
 // HandleReadErr drives the shared read-loop resilience policy so BOTH SSDP
 // discovery read loops — this package's renderer client AND
 // internal/upnp's MediaServer client — stay byte-identical (they mirror each
@@ -194,32 +184,22 @@ type SSDPDiscoveryClient struct {
 	// for tests. Default: time.Now.
 	nowFunc func() time.Time
 
-	// sendErrStreak counts consecutive M-SEARCH send failures, so a
+	// sendErrs reports failed M-SEARCH sends, streak-suppressed, so a
 	// persistently unsendable socket costs O(1) log lines per outage
-	// instead of one per tick forever. See sendMSearch.
-	//
-	// No mutex: sendMSearch is called only from runTickLoop, which Start
-	// spawns exactly once and refuses to spawn again while running, so this
-	// field is owned by that single goroutine.
-	//
-	// That makes it a real constraint on TESTS, not just a note about
-	// production: a test calling noteSendResult directly must do so while
-	// no run loop is live — before Start, or after Stop, which joins the
-	// loop. One that did neither raced under -race on CI and was not
-	// reproducible locally in 26 runs, which is the shape this kind of bug
-	// takes. Adding a mutex to make that test safe would be paying
-	// production for a test's convenience; ordering the test correctly
-	// costs nothing.
-	sendErrStreak int
+	// instead of one per tick forever. SendFailureLog is the policy, shared
+	// with internal/upnp's MediaServer client. Its streak has no mutex: only
+	// runTickLoop notes results, so a test that calls its Note or Reset must
+	// do so with no loop live (see the type docblock).
+	sendErrs SendFailureLog
 
 	// writeMSearch writes one M-SEARCH datagram. NewSSDPDiscoveryClient sets
 	// it to (*net.UDPConn).WriteToUDP. It is a field so a test can decide
 	// what the tick loop's send returns, and when, rather than this host's
-	// multicast route deciding it: a send that goes through RESETS
-	// sendErrStreak, one that fails moves it, and one that loses a race with
-	// Stop's close meets a closed socket. A test of the streak that lets a
-	// real send reach the wire therefore measures the host. Like
-	// sendErrStreak, it is set before Start, never while a loop runs.
+	// multicast route deciding it: a send that goes through RESETS the
+	// streak, one that fails moves it, and one that loses a race with Stop's
+	// close meets a closed socket. A test of the streak that lets a real
+	// send reach the wire therefore measures the host. Like the streak, it
+	// is set before Start, never while a loop runs.
 	writeMSearch func(conn *net.UDPConn, b []byte, dst *net.UDPAddr) (int, error)
 
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
@@ -264,21 +244,26 @@ type SSDPDiscoveryClient struct {
 	// client-side bookkeeping the protocol has no business carrying.
 	lastLocations map[string][]locationRecord
 
-	// inFlight holds the UDNs with a detail fetch currently running, so
-	// a burst of announcements for the same renderer dispatches exactly
-	// one fetch. Two paths depend on it, both because a fetch publishes
-	// nothing until it finishes: a NEW renderer sending a burst of packets
-	// has no cache entry yet, so every one of them lands in the
-	// first-time-UDN branch; and a MOVED renderer's new Location isn't
-	// recorded until its fetch completes, so every further packet from that
-	// address still reads as a move.
+	// inFlight holds the UDNs with a detail fetch dispatched and not yet
+	// returned, running or queued for detailFetchSem, so a burst of
+	// announcements for the same renderer dispatches exactly one fetch. Two
+	// paths depend on it, both because a fetch publishes nothing until it
+	// finishes: a NEW renderer sending a burst of packets has no cache entry
+	// yet, so every one of them lands in the first-time-UDN branch; and a
+	// MOVED renderer's new Location isn't recorded until its fetch
+	// completes, so every further packet from that address still reads as a
+	// move.
 	//
-	// Self-cleaning: every claim is released by the spawned fetch's
-	// defer, so the map can't grow past the number of concurrent
-	// fetches. NOT a substitute for a time-based cooldown — after a
-	// FAILED fetch the stub's empty ControlURL makes the exists-branch
-	// early-return, which suppresses re-fetching until EvictStale.
-	inFlight map[string]struct{}
+	// Self-cleaning, and bounded: every claim is released by the spawned
+	// fetch's defer, and DetailFetchClaims refuses one past
+	// MaxPendingDetailFetches, so a flood of distinct UDNs holds at most
+	// that many goroutines. Until 2026-09-28 the set had no bound and only
+	// the semaphore limited the fetches that RUN, so 10,000 distinct UDNs
+	// queued 10,000 goroutines. NOT a substitute for a time-based cooldown:
+	// after a FAILED fetch the stub's empty ControlURL makes the
+	// exists-branch early-return, which suppresses re-fetching until
+	// EvictStale.
+	inFlight DetailFetchClaims
 }
 
 // DiscoveryConfig captures the SSDPDiscoveryClient's tunables.
@@ -377,7 +362,8 @@ func NewSSDPDiscoveryClient(
 		detailFetchSem: make(chan struct{}, 4), // see field docblock
 		nowFunc:        nowFunc,
 		lastLocations:  make(map[string][]locationRecord),
-		inFlight:       make(map[string]struct{}),
+		inFlight:       make(DetailFetchClaims),
+		sendErrs:       NewSendFailureLog(packageLogger, cfg.Interface.Name, "renderer discovery", cfg.MSearchInterval),
 		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
 }
@@ -414,14 +400,10 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 	}
 	c.conn = conn
 
-	// Fresh run, fresh streak. A client stopped mid-outage keeps a non-zero
-	// sendErrStreak, and carrying it across a restart makes the new run's
-	// FIRST failure land past both switch arms in noteSendResult — so a
-	// restarted-and-still-broken client would log nothing at all, which is the
-	// opposite of what the suppression is for. Safe under runMu: runTickLoop,
-	// the field's only other toucher, has not been spawned yet.
-	// (Gemini, PR #708.)
-	c.sendErrStreak = 0
+	// Fresh run, fresh streak (SendFailureLog.Reset says why). Safe under
+	// runMu: runTickLoop, the streak's only other toucher, has not been
+	// spawned yet.
+	c.sendErrs.Reset()
 
 	// Pin outgoing M-SEARCH multicast to the operator-chosen
 	// interface. Without this, the kernel picks an outbound
@@ -619,7 +601,7 @@ func (c *SSDPDiscoveryClient) pruneLocations() {
 	c.locMu.Lock()
 	defer c.locMu.Unlock()
 	for udn := range c.lastLocations {
-		if _, busy := c.inFlight[udn]; busy {
+		if c.inFlight.Held(udn) {
 			continue
 		}
 		if _, cached := c.cache.Get(udn); cached {
@@ -633,46 +615,11 @@ func (c *SSDPDiscoveryClient) pruneLocations() {
 // devices. Renderer responses come back on the same socket as
 // unicast HTTP responses + are handled in runLoop.
 //
-// # Why the failure log is streak-suppressed
-//
-// This runs on a ticker, so a send failure is not a one-off: when it fails it
-// fails on EVERY tick, forever, and it logged on every one of them. The
-// failure mode is persistent by nature — "can't assign requested address"
-// means the multicast route is gone, not that the packet was unlucky — so the
-// second line adds nothing the first did not say.
-//
-// Measured on the author's Mac before this change: 12 lines/minute, unbroken,
-// producing **199,078 of the last 200,000 log lines** and ~99.5% of a 301 MB
-// log spanning 72 days. That is not merely wasted disk: it buries every other
-// line, so the log stops being usable for the diagnosis it exists for.
-//
-// The policy mirrors HandleReadErr's escalation shape — first occurrence at
-// Warn, one Error once failures are sustained — but SUPPRESSES the repeats in
-// between, which the read side does not need: its errors are bounded by a
-// 250ms backoff and, empirically, it logged zero lines across those same 72
-// days. A ticker has no backoff to bound it, so suppression has to do that
-// job. Recovery logs once, carrying the suppressed count so the gap in the
-// log is explained rather than mysterious.
-//
-// # A send Stop cut short is a stop, not a failure
-//
-// The socket is snapshotted and then written to, and Stop can close it in
-// between: the write then fails with net.ErrClosed. That error is the
-// stop's own doing and says nothing about the multicast route, so it is
-// dropped before the streak sees it: no Warn, and no count a restart would
-// have to reset. Measured on main (2026-09-28), a plain Start then Stop
-// logged "M-SEARCH send failed … use of closed network connection" in 4 of
-// 6,000 cycles on macOS, 43 of 6,000 under -race, and 24 of 4,000 on Linux
-// under -race.
-//
-// Only that error is dropped, never a failure that merely lands while a
-// shutdown is under way: the run's context is not consulted. The socket is
-// this client's own and only Stop closes it, so net.ErrClosed identifies
-// the stop exactly, while a write takes no context and fails for the same
-// reasons whether or not the run is ending. A route that is gone at
-// shutdown is still gone, and still reported (the #998 rule the serve
-// loops follow). HandleReadErr's read side also exits on the context, but
-// that decides whether its LOOP returns; this decides what a result means.
+// Its result goes to sendErrs, whose SendFailureLog is the one definition of
+// what a send's result logs, shared with internal/upnp's MediaServer client:
+// a failure streak costs a Warn, one Error and a recovery line whatever its
+// length, and a send Stop's close cut short (net.ErrClosed, which only
+// Stop's close produces here) is a stop, not a failure.
 func (c *SSDPDiscoveryClient) sendMSearch() {
 	conn := c.snapshotConn()
 	if conn == nil {
@@ -682,46 +629,7 @@ func (c *SSDPDiscoveryClient) sendMSearch() {
 	packet := buildMSearchRequest(target)
 	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
 	_, err := c.writeMSearch(conn, packet, dst)
-	if errors.Is(err, net.ErrClosed) {
-		return
-	}
-	c.noteSendResult(err)
-}
-
-// noteSendResult applies the send-failure logging policy.
-//
-// Split from the I/O so the policy is testable without a socket — the same
-// separation HandleReadErr has from the read loop, and for the same reason:
-// what makes this correct is WHICH occurrences produce a line, and a test that
-// has to arrange a real multicast failure to check that is a test that will be
-// flaky in CI rather than one that pins the rule.
-func (c *SSDPDiscoveryClient) noteSendResult(err error) {
-	if err == nil {
-		if c.sendErrStreak > 0 {
-			// `consecutiveFailures`, not `suppressedFailures`: this is the
-			// whole streak, and up to two of those DID produce a line (the
-			// first, and the escalation), so calling it "suppressed" was off
-			// by two. Reporting the outage LENGTH is also the more useful
-			// number — it is what an operator wants — and it matches the
-			// `consecutive` key on the escalation line rather than inventing
-			// a second vocabulary. (CodeRabbit, PR #708.)
-			packageLogger.Info("M-SEARCH send recovered",
-				"consecutiveFailures", c.sendErrStreak)
-			c.sendErrStreak = 0
-		}
-		return
-	}
-	c.sendErrStreak++
-	switch c.sendErrStreak {
-	case 1:
-		packageLogger.Warn("M-SEARCH send failed", "err", err.Error())
-	case ssdpSendErrEscalateAt:
-		// One Error, then silence until recovery. Repeating it would
-		// reintroduce exactly the flood this exists to stop.
-		packageLogger.Error("M-SEARCH send failing persistently; renderer discovery is degraded",
-			"consecutive", c.sendErrStreak, "err", err.Error(),
-			"note", "further identical failures are suppressed until it recovers")
-	}
+	c.sendErrs.Note(err)
 }
 
 // buildMSearchRequest assembles the SSDP M-SEARCH packet. MX=3
@@ -1039,28 +947,26 @@ func (c *SSDPDiscoveryClient) forgetLocation(udn string) {
 }
 
 // claimFetch reserves the single in-flight fetch slot for udn. Returns
-// false when a fetch is already running, in which case the caller MUST NOT
-// spawn (and MUST NOT release).
+// false when a fetch is already in flight for udn, or when
+// MaxPendingDetailFetches are, in which case the caller MUST NOT spawn (and
+// MUST NOT release).
 func (c *SSDPDiscoveryClient) claimFetch(udn string) bool {
 	c.locMu.Lock()
 	defer c.locMu.Unlock()
-	if _, busy := c.inFlight[udn]; busy {
-		return false
-	}
-	c.inFlight[udn] = struct{}{}
-	return true
+	return c.inFlight.Claim(udn)
 }
 
 // releaseFetch frees udn's in-flight slot. Called from the spawned fetch's
 // defer — see fetchAndCacheDetails for the ordering contract.
 func (c *SSDPDiscoveryClient) releaseFetch(udn string) {
 	c.locMu.Lock()
-	delete(c.inFlight, udn)
+	c.inFlight.Release(udn)
 	c.locMu.Unlock()
 }
 
 // spawnDetailFetch launches a tracked detail fetch for udn, unless one is
-// already in flight for that UDN (see the inFlight field docblock).
+// already in flight for that UDN or the client holds
+// MaxPendingDetailFetches already (see the inFlight field docblock).
 //
 // wg.Add(1) here (not inside fetchAndCacheDetails) is safe to run
 // concurrently with Stop()'s wg.Wait(): in production handlePacket runs ON

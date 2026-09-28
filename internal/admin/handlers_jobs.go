@@ -130,12 +130,25 @@ type jobsUpdates struct {
 	AutoInstall        bool `json:"autoInstall"`
 }
 
-// jobsMaintenance — display-only flags for the low-key maintenance
-// sweepers (config/wiring-derived; no runtime plumbing by design).
+// jobsMaintenance — the low-key maintenance sweepers: whether each runs
+// (config/wiring-derived), and, for the background orphan-sidecar sweep,
+// whether it is refusing.
+//
+// The refusal is the one piece of runtime state here. The sweep refuses a
+// tick that would reap a stranded tree, or that took its counts from a walk
+// that could not list part of the variants directory, with no override and
+// one journal line a day; the chip said "on" throughout, so a bridge whose
+// orphan GC had reclaimed nothing for weeks looked healthy. The kind is a
+// KEY (integrity.OrphanRefusalKind), worded by the console.
 type jobsMaintenance struct {
 	VariantIntegrityActive bool `json:"variantIntegrityActive"`
 	OrphanSidecarGC        bool `json:"orphanSidecarGC"`
-	ArtworkCacheLRU        bool `json:"artworkCacheLRU"`
+	// OrphanSidecarGCRefusal is the kind of refusal the sweep's current
+	// streak is; omitted while it is not refusing, or not running.
+	OrphanSidecarGCRefusal string `json:"orphanSidecarGCRefusal,omitempty"`
+	// OrphanSidecarGCRefusingSince is when that streak started.
+	OrphanSidecarGCRefusingSince *time.Time `json:"orphanSidecarGCRefusingSince,omitempty"`
+	ArtworkCacheLRU              bool       `json:"artworkCacheLRU"`
 }
 
 type jobsUPnP struct {
@@ -307,6 +320,17 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		VariantIntegrityActive: cfg.VariantSweepInterval() > 0,
 		OrphanSidecarGC:        cfg.OrphanSidecarSweepInterval() > 0,
 		ArtworkCacheLRU:        cfg.Artwork.CacheMaxBytes > 0,
+	}
+	// The orphan sweep's refusal, read from its latch (an atomic snapshot:
+	// no lock, no I/O, cheap on the 10 s poll). Only for a sweep that runs:
+	// the closure is nil otherwise, and a refusal left in a latch the
+	// interval now says is off would describe a sweep that is not there.
+	if st := s.deps.OrphanSweepStatus; st != nil && resp.Maintenance.OrphanSidecarGC {
+		if status := st(); status.Refusing != "" {
+			since := status.Since
+			resp.Maintenance.OrphanSidecarGCRefusal = string(status.Refusing)
+			resp.Maintenance.OrphanSidecarGCRefusingSince = &since
+		}
 	}
 
 	// UPnP ingest (trigger + detail live on the UPnP page).

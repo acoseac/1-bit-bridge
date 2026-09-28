@@ -45,6 +45,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
@@ -580,6 +581,14 @@ type Deps struct {
 	// recorder for the Jobs card. Nil-safe: absent omits the run field
 	// (the card still renders policy + summary numbers).
 	DuplicatesSweepRun func() *JobRunState
+
+	// OrphanSweepStatus reports the background orphan-sidecar sweep's
+	// refusal latch (integrity.OrphanSidecarSweeper.Status), so the Jobs
+	// card's "Orphan sidecar GC" line can say the sweep is refusing rather
+	// than "on" while every tick unlinks nothing. Nil when the sweep is not
+	// running (its interval is zero, the default); the line then reads the
+	// interval alone, as it always has.
+	OrphanSweepStatus func() integrity.OrphanSweepStatus
 
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)

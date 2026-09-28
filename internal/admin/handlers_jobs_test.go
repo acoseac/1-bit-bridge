@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -46,6 +47,67 @@ func TestMaintenanceChipsFollowTheIntervalsNotTheUpscaleFlag(t *testing.T) {
 	srv.deps.CfgHolder.Store(next)
 	if mt := get(); mt.VariantIntegrityActive || !mt.OrphanSidecarGC {
 		t.Errorf("intervals flipped: %+v, want integrity off / GC on", mt)
+	}
+}
+
+// TestMaintenanceChipSaysTheOrphanSweepIsRefusing — the background orphan
+// sweep refuses, with no override, a tick that would reap a tree its
+// catalog no longer describes or that counted over a walk which could not
+// list part of the variants directory, and the Jobs chip said "on"
+// throughout. /api/jobs now carries the latch: the kind (a key the console
+// words) and when the streak started, and nothing at all while the sweep is
+// not refusing or not running (key absence, not a zero value).
+func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+	since := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
+	status := integrity.OrphanSweepStatus{Refusing: integrity.OrphanRefusalMassOrphans, Since: since}
+	srv.deps.OrphanSweepStatus = func() integrity.OrphanSweepStatus { return status }
+	on, off := 3600, 0
+	setInterval := func(sec *int) {
+		next := config.Clone(srv.deps.CfgHolder.Load())
+		next.Integrity.OrphanSidecarSweepIntervalSec = sec
+		srv.deps.CfgHolder.Store(next)
+	}
+	raw := func() map[string]any {
+		t.Helper()
+		var got struct {
+			Maintenance map[string]any `json:"maintenance"`
+		}
+		if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
+			t.Fatalf("jobs: %d", code)
+		}
+		return got.Maintenance
+	}
+
+	setInterval(&on)
+	mt := raw()
+	if mt["orphanSidecarGC"] != true || mt["orphanSidecarGCRefusal"] != "massOrphans" {
+		t.Errorf("a refusing sweep: %v, want orphanSidecarGC true and the massOrphans key", mt)
+	}
+	if got, _ := mt["orphanSidecarGCRefusingSince"].(string); got != since.Format(time.RFC3339) {
+		t.Errorf("orphanSidecarGCRefusingSince = %q, want %q", got, since.Format(time.RFC3339))
+	}
+
+	status.Refusing = integrity.OrphanRefusalPartialWalk
+	if got := raw()["orphanSidecarGCRefusal"]; got != "partialWalk" {
+		t.Errorf("a partial-walk refusal reads %v, want the partialWalk key", got)
+	}
+
+	status = integrity.OrphanSweepStatus{}
+	for _, key := range []string{"orphanSidecarGCRefusal", "orphanSidecarGCRefusingSince"} {
+		if v, present := raw()[key]; present {
+			t.Errorf("a sweep that is not refusing still sends %s = %v", key, v)
+		}
+	}
+
+	// A latch the interval now says is off describes a sweep that is not
+	// there: the chip reads the interval, and nothing about a refusal.
+	status = integrity.OrphanSweepStatus{Refusing: integrity.OrphanRefusalMassOrphans, Since: since}
+	setInterval(&off)
+	mt = raw()
+	if _, present := mt["orphanSidecarGCRefusal"]; present || mt["orphanSidecarGC"] != false {
+		t.Errorf("an orphan GC turned off: %v, want it off with no refusal", mt)
 	}
 }
 

@@ -14,21 +14,22 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **39** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **40** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
   2026-09-10: the sixth stale claim of the kind, and in the paragraph that
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
-  `FuzzTextCandidateClassification`.) They cover
+  `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
+  `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 39 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 38, because
+  **Count them by file:name pair** to get 40 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 39, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -38,14 +39,17 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Thirteen carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Fourteen carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
   `FuzzParseRetryAfter` (the `maxRetryAfter` cap), `FuzzSACDVirtualPathRoundTrip` (a
   rendered virtual path must parse back to the same index and container — the renderer and the
   parser disagreeing is a row-reaping bug, since the deletion pass keys on
-  `IsSACDVirtualPath`), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
+  `IsSACDVirtualPath`), `FuzzSACDExpandUnderAReadFault` (an SACD image expanded through
+  one failing read answers what it answers fault-free, or an error: never "not an SACD"
+  where the fault-free read found an album, the answer that retires its rows; the rule
+  is under **Scanner**), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
   `FuzzPickIsShuffleInvariant`, `FuzzTextCandidateClassification`; their properties are
   under **Lyrics**), `FuzzMatchRelease` (a claimed match is an entry the listing holds),
   `FuzzKeyFor` (the dupe key is deterministic and every field reaches `Key.ID`),
@@ -55,7 +59,8 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   with a host, stays on the description's host when discovered, and names this machine or a
   link-local address only from a description URL that does too; it fuzzes the base URL as
   well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
-  them: **count them by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
+  them, and then "Twelve" and "Thirteen" that same day, as two more joined: **count them
+  by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
@@ -157,7 +162,7 @@ Force re-enrichment if the DB is already populated from a prior run:
 sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
 ```
 
-**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags — the scanner's skip gate at `internal/manifest/scanner.go:511` compares the file's on-disk mtime against `Track.ModTime`, which is stored INSIDE the `tags_json` BLOB column (read back via `GetTrack` from `tags_json` alone, NOT the standalone `mtime_ns` column). A `UPDATE tracks SET mtime_ns = 0` looks like it should work but doesn't, because `GetTrack` never reads that column. To force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes you must wipe the affected `tracks` rows so the next scan re-inserts them from scratch.
+**`enriched_at = 0` is NOT a tag-re-extraction reset.** It only triggers the MusicBrainz / CoverArt / Deezer enricher (the `WHERE enriched_at = 0` worker query at `internal/manifest/store.go:477`). It does NOT cause the scanner to re-read file tags: the scanner's skip gate (`runScanWorker`) compares the walk's size and mtime with the row's `size` and `mtime_ns` COLUMNS, read through `GetTrackStat`. **This paragraph said until 2026-09-28 that the gate compared the mtime inside `tags_json` (through `GetTrack`), so that `UPDATE tracks SET mtime_ns = 0` does not work. It does**: the gate has read the columns since it moved to `GetTrackStat` (#574), and measured through the Go store, a row whose `mtime_ns` was zeroed is re-extracted on the next scan, on the full upsert leg (its `enriched_at` resets, as for a changed file). So to force tag re-extraction after an `internal/manifest/extractors.go` change (e.g. the PR #208 multi-value Vorbis fix) without touching real file mtimes, zero `mtime_ns` on the affected rows or wipe them, either way through the Go helper below. In code, a change to what extraction produces bumps `ExtractorVersion` instead, whose diff-guard bounds the delta to rows that changed.
 
 **The old `sqlite3 … "DELETE FROM tracks;"` form here is BROKEN since migration v4** (corrected 2026-06-23). v4 added the expression index `tracks(unicode_lower(path))` (+ a `track_variants` twin), and `unicode_lower` is a Go-registered scalar (`internal/manifest/sqlfunc.go` `init()`), so an external `sqlite3` CLI `DELETE`/`UPDATE`/`INSERT` on those tables fails at prepare with `unknown function: unicode_lower()`. Dropping the index doesn't help — it's created only by the version-gated migration, so a restart won't recreate it. Two working paths:
 
@@ -246,7 +251,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Ten claims in this list have been wrong and been corrected** — the
+**Eleven claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -256,8 +261,9 @@ the re-init that replaces it", which held for config-file and not for the port
 checks, (2026-09-26) "`os.ReadDir("")` reads the process working
 directory", (2026-09-27) "init never prompts for `customEndpoints`, so
 the old value survives the rewrite", (2026-09-27) "`Load` serves a config
-giving a blank name `DefaultLibraryName`", and (2026-09-28) "`analyze --gc`'s
-`Consider` requires `.1bwf`". The first five cost a later session real
+giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
+`Consider` requires `.1bwf`", and (2026-09-28) "`mtime_ns = 0` does not
+force a re-extraction". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -273,7 +279,10 @@ asserted the opposite (`served: "  "`, as written), and `Load` gave the
 default only to an exactly-empty name until #1042. The tenth named an
 extension the bridge has never written (waveforms have been `.waveform.bin`
 since #395), and survived because its conclusion, that a directory symlink
-is no candidate there, holds for either spelling.
+is no candidate there, holds for either spelling. The eleventh outlived the
+code it described: #574 moved the skip gate to `GetTrackStat`, which reads
+the `mtime_ns` column, and the bullet went on describing `GetTrack`, which
+reads the mtime inside `tags_json`.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -322,14 +331,21 @@ lost my library."
   completed read**, so the scanner also skips, retiring and writing nothing,
   a container that changed during the scan (`expandSACDContainer`): the
   handle's stat before the first read against a stat of the path after it
-  (`os.SameFile`, size, mtime), and the walk's stat against an LSTAT after it
-  (size, mtime). **Never `os.SameFile` against the walk's stat**: on Windows
-  a directory entry carries no file index on FAT or exFAT, so every container
-  there would skip, forever. **Never compare the walk's stat with a stat**:
-  the walk's is an lstat, so every symlinked container would read as moved
-  (`TestScanner_SACDSymlinkedContainer_Expands`). Residual: an in-place
-  overwrite that keeps size and inode inside one coarse mtime tick (FAT's
-  2 s). **No `ExtractorVersion` bump for this**: readable files expand
+  (`os.SameFile`, size, mtime), and the walk's stat against that same STAT
+  (size, mtime), since the walk's stat of a linked container is its TARGET's
+  (the next bullet). **Never `os.SameFile` against the walk's stat**: on
+  Windows a directory entry carries no file index on FAT or exFAT, so every
+  container there would skip, forever. **Never compare the walk's stat with an
+  LSTAT**: for a link the walk's stat is the target's, so every symlinked
+  container would read as moved (`TestScanner_SACDSymlinkedContainer_Expands`).
+  This bullet said the opposite, lstat, until 2026-09-28, when the walk's stat
+  of a link was the link's own; that pairing could not see a write to a
+  symlinked container's target before the open, and the album was retired
+  (`TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows`).
+  Residual: an in-place overwrite that keeps size and inode inside one coarse
+  mtime tick (FAT's 2 s), and a link repointed after the walk at a file with
+  the first one's size and mtime. **No `ExtractorVersion` bump for this**:
+  readable files expand
   byte-identically, a wrongly retired container has no representative row so
   the gate re-expands it anyway, and a bump re-upserts every virtual row (that
   leg has no diff-guard). `TestScanner_SACDReadFailure_RetiresNothing` (a
@@ -338,6 +354,83 @@ lost my library."
   (`Scanner.openSACD`), and
   `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` is the positive
   control: a container read whole as junk still retires, with tombstones.
+  **`FuzzSACDExpandUnderAReadFault` puts the rule under the fuzzer** (the other
+  SACD targets' reader never fails): an image expanded through one failing
+  read must answer what it answers fault-free, or an error. It holds only for
+  an image carrying ONE answer, so the harness builds it with identical TOC
+  copies, one stereo area and one geometry, and truncates it only BETWEEN
+  structures (`sacdFaultCuts`): an image whose copies differ can legitimately
+  expand from the second, and a later copy cut short is one that differs
+  (measured: cut inside the second area copy's TTxt sector, it expands to
+  "Track 1" where the first says "T1"). A reader that reports the end of the
+  file early is a truncation nobody can tell apart, so only failures that say
+  so are injected; `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` shows
+  the property reporting both. Its seeds fault each of the three reads above,
+  and they are what gives the fuzzer its reach: Go's mutator walks an integer
+  by at most 100, one argument per step, so with the DST probe's failure
+  dropped again it found the violation within half a second from the other
+  seeds (on the first harness and on the final one), and not in 90 s
+  (468,005 inputs) from one seed whose fault touched no read.
+- **A file the walk reaches through a link is indexed under its TARGET's
+  stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
+  symlinked audio file was indexed under the LINK's size (the length of the
+  path it stores: in one test run 123 bytes against a 116-byte FLAC, and 134
+  against a 1,228,800-byte `.iso`) and the link's mtime, while its tags came
+  from the target and every endpoint serves the target's bytes. The skip
+  gate compared the same
+  link stat, so a retagged target was never re-extracted (and a re-authored
+  linked `.iso` never re-expanded); `/v1/lyrics` answered 410 `lyrics_stale`
+  forever for its embedded lyrics (the row's stat against the resolver's
+  `os.Stat`); and the phone, which stores the size as `Track.fileSize`, fails
+  every offline download of the file (`validateDownloadedSize` wants an exact
+  match), re-downloads it forever through the auto-cache, and cannot read a
+  linked SACD container at all (its reads clamp to the container size).
+  `walkedFileInfo` is the one decision, in `walkRoot` and `ScanSubtree` alike:
+  a REGULAR file keeps its own stat and pays no second syscall; anything else
+  is stat'ed through (the listing's "not a regular file" test,
+  `resolveEntryInfo`, because a Windows junction is `ModeIrregular` with no
+  `ModeDir`; a cloud placeholder stats to itself). **A link whose target
+  cannot be stat'ed spares its own row, keyed on the entry itself, and mints
+  none**: "could not see" dominates, so a mount that went away keeps its rows
+  as they were, and the old walk's row minted from the path alone (which the
+  skip gate then kept once the target came back) is gone. Keyed on the entry,
+  not its directory, so a permanently dangling link spares nothing beside it.
+  One Warn per scan names them (`links whose target could not be read`),
+  never one per link: a mount takes every link into it at once. **A link to a
+  DIRECTORY is not a track**, whatever its name, and the walk still follows no
+  directory link (loops). **Nor is a named pipe, a socket or a device, or a
+  link to one** (`notAFile`): whatever stat the row would carry must describe
+  something that opens as a file, and a regular file whose own stat says
+  otherwise is judged through. A worker opens what the walk hands it, and
+  opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
+  named `01.flac` held a worker, and the scan with it, forever (measured still
+  running at 10 s, and at 15 s with its context expired at 5 s; an `.iso`
+  FIFO blocked the next scan too, since no row ever let the skip gate pass
+  it). By reading: `Scan` holds the scanner's mutex for its whole run, so
+  every later scan waits on it, and the stuck `IsScanning` stands down the
+  Atlas lyrics sweep, the booklet GC and the duplicate restamp and makes a
+  compaction answer 409. When a writer did come, the row was replaced by one
+  minted from the path (title "01", 0 bytes), and a link to a device or a
+  socket was indexed that way outright. **The refusal is a list of kinds,
+  never "is a regular file"**: a Windows cloud placeholder is
+  `ModeIrregular` after `os.Stat` and opens, and hydrates, as a file, so a
+  OneDrive library with files on demand would vanish. **A row at such a path
+  is reaped like a deleted file's**, after the usual missing-count grace, a
+  directory link's included: the walk stat'ed the entry and knows what is
+  there. That is the dangling link's answer reversed on purpose: a stat that
+  FAILED is "could not see", a stat that answered is a fact. One Warn per
+  scan names them with the example's kind (`audio-named entries that are not
+  files`), and a row the old walk minted for one is reaped the same way.
+  **No `ExtractorVersion` bump**: the stored stat of
+  each linked row no longer matches, so the first scan after the change
+  re-extracts exactly those rows, once, on the full upsert leg (one delta row
+  to every paired device, and a re-enrichment), and nothing else moves
+  (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
+  needed no change: it already said a listing row describes the target, and
+  a virtual row carries the container's size. **Still open: a library ROOT
+  that is itself a symlink to a directory is never walked** (`WalkDir` lstats
+  its root, so it visits one non-directory entry and stops: 0 rows, measured),
+  which is not this rule's shape.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
@@ -528,9 +621,12 @@ lost my library."
   The upsert reset to 0 is load-bearing. Never touch it anywhere else — the
   `WHERE enriched_at = 0` query drives the worker, and a broad reset pushes a
   whole-library delta to every paired device.
-- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and `mtime_ns = 0`
-  looks like it should work but doesn't (`GetTrack` reads mtime from inside
-  `tags_json`). See `## Local test fixture` for the two working paths.
+- **`enriched_at = 0` is NOT a tag-re-extraction reset**, and a zeroed
+  `mtime_ns` IS: the skip gate reads the `size` and `mtime_ns` columns through
+  `GetTrackStat` (measured 2026-09-28). This bullet said until then that
+  `mtime_ns = 0` does not work because `GetTrack` reads the mtime from inside
+  `tags_json`, which described the gate before #574 moved it to `GetTrackStat`. See
+  `## Local test fixture` for the working paths.
 - **The scanner excludes its own variant sidecars** via an ANCHORED filename
   match (`^(upscaled|optimized)-v\d+-\d+-\d+$` on the final dot-segment, with
   the part before it a supported audio ext). Don't loosen to a substring — it
@@ -543,6 +639,12 @@ lost my library."
   `runScanWorker`, not around the loop — a panicking file must skip and let the
   worker continue. A crash found by the extractor fuzz targets is a REAL defect:
   the recover means a panicking file silently never reaches the manifest.
+  **Nothing recovers the WALK's callback** (`walkRoot`, `ScanSubtree`), so a
+  panic there ends the scan and the process with it: what the walk logs about
+  an error goes through `walkErrReason`, which cannot panic. An `*fs.PathError`
+  without a cause panics in its own `Error()`, so a guard on the cause does not
+  help once the text is taken first, which is where the suggested fix put it
+  (Gemini on #1070; measured, the suggestion still panicked).
 - **Shutdown joins every background writer**, and the wait must be written
   INLINE in the defer, never routed through a variable assigned later in
   `runServe` — the first tracked goroutine starts ~1200 lines before the end, so
@@ -1687,7 +1789,8 @@ no failing test — which is the shape to expect in this area.
   errors), and `TakeSidecarInventory`, the walker the sweep uses now,
   refuses it again. The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
-  the watchers tick regardless. (#917)
+  the watchers tick regardless. (#917) The orphan GC's chip also says when
+  that sweep is refusing (2026-09-28, the Jobs-card bullet below).
 
 - **A recorded sidecar path is a CLAIM about where the file was, never
   proof that it is gone.** `track_variants.sidecar_path` and
@@ -1844,12 +1947,17 @@ no failing test — which is the shape to expect in this area.
   proposed in review, and it turns two tests red. The decision is taken as
   `(mode, stat)` so the Windows shape is driveable on any platform; a plain
   file answers without a stat, and the closure does not escape (measured).
-- **`SidecarInventory.Unreadable` is a count of ENTRIES, and BOTH sweeps say
-  so.** It covers a directory the walk could not descend into AND a
-  non-regular entry it could not stat. `upscale --gc` and `analyze --gc`
-  print that one count from two places and both called it directories; a
-  wording fix reaching one of them is the enumeration failure this file
-  keeps recording.
+- **`SidecarInventory.Unreadable` is a count of ENTRIES, and every place
+  that prints it says so.** It covers a directory the walk could not
+  descend into AND a non-regular entry it could not stat. `upscale --gc`
+  and `analyze --gc` print that one count from two places and both called
+  it directories; a wording fix reaching one of them is the enumeration
+  failure this file keeps recording, and it happened: `bridge doctor`'s
+  variants-index summary said "director(y/ies)" until 2026-09-28. The two
+  kinds are counted apart now (`UnlistedDirs` is the directories), because
+  they bound different things: a directory the walk could not list may
+  hold any number of files, a link it could not stat at most one (the
+  partial-walk bullet below).
 - **A forward sweep's denominator is the TREE, never the catalog, and the
   term that knows a lost index is `orphans > rows`.** Adoption and the
   canonical known set both need the ROWS; the 2026-09-20 aftermath had
@@ -1874,8 +1982,10 @@ no failing test — which is the shape to expect in this area.
   up — a guard inside the walk measures a ratio from the tree it has
   already destroyed, so the test asserts on the FILES.
   `--allow-mass-orphans` is the CLI's way past it on upscale / optimize /
-  render / analyze; `artwork --gc` is exempt BY NAME in the sweep test
-  (content/MBID-keyed, no absolute path a relocation can strand). #940 left
+  render / analyze (and `--allow-partial-walk` past the refusal of a walk
+  that could not list part of the tree, below); `artwork --gc` is exempt
+  BY NAME in the sweep test (content/MBID-keyed, no absolute path a
+  relocation can strand). #940 left
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
@@ -1888,14 +1998,27 @@ no failing test — which is the shape to expect in this area.
   stranded files) went in three ticks on the old code: 4,800, 5,000, 248.
   Each tick now lists the catalog, takes the whole tree's inventory
   (`TakeSidecarInventory`, read-only, a `.flac` Consider, NO `MaxEntries`),
-  refuses on `MassOrphanRefusal` of the FULL `Orphans` count, and only then
-  unlinks at most `gcChunkSize`, each path re-checked first
-  (`reclaimOrphan`: a fresh Lstat, the inventory's own `classifyWalkEntry`,
-  the grace against the tick start). **The chunk caps UNLINKS, never the
-  walk**, and the retained `OrphanPaths` are capped with it, so a refusal
-  fed their length reads 100 where there are 1,000 and proceeds (the
-  full-count test pins it). The walk costs 128 ms per 100,001 files warm on
-  the dev Mac, every tick. **No verdict crosses a tick**: a tally across
+  refuses on `MassOrphanRefusalFor` of the FULL `Orphans` count, then on
+  `PartialWalkRefusal`, and only then unlinks up to `gcChunkSize` files,
+  each path re-checked first (`reclaimOrphan`: a fresh Lstat, the
+  inventory's own `classifyWalkEntry`, the grace against the tick start).
+  **The chunk caps SUCCESSFUL unlinks, never the walk and never the
+  attempts** (2026-09-28): a tick keeps `gcRetainedPerUnlink` (4) chunks of
+  paths and tries them in walk order until it has unlinked a chunk. It
+  kept one chunk until then and every attempt spent a slot, so a chunk's
+  worth of files the service user cannot remove at the head of the walk (a
+  root-owned directory a `sudo bridge upscale` left) stalled every orphan
+  behind them, every tick, where the old cursor had moved past them
+  (measured with a chunk of 5: eight in a read-only directory ahead of ten
+  deletable ones, four ticks, nothing unlinked). 20,000 retained paths
+  measured 10.8 MB of heap at 205-byte paths, freed with the tick; a head
+  of 20,000 or more stalls again, and the summary's `retained` beside
+  `failed` shows it. **Nothing about a failure crosses a tick either.** The
+  refusal reads the full count, never the retained list: fed its length,
+  400 retained against 500 rows proceeds where 1,000 orphans refuse (the
+  full-count test, whose fixture had to grow from 150 rows when the list
+  did, or it bit only through its wording). The walk costs 128 ms per
+  100,001 files warm on the dev Mac, every tick. **No verdict crosses a tick**: a tally across
   ticks was rejected, because its verdict can come from a partial walk (an
   unmount, a cancel, a pruned root) or a catalog that changed mid-pass, and
   a budget carried between passes can be spent on files it never counted.
@@ -1911,22 +2034,81 @@ no failing test — which is the shape to expect in this area.
   old WalkDir Lstat'd the link and swept nothing). The `.flac` Consider
   stays, so the ratio is over the files this sweep would remove, where
   `upscale --gc`'s nil Consider counts and removes every file. **A walk
-  that could not read an entry (`inv.Unreadable`) refuses too**, after the
-  mass-orphan check and under a WARN of its own (CodeRabbit on #1063). What
-  it could not read is missing from every count, and a directory the
-  service user cannot list may hold any number of orphans, so a verdict
-  that proceeds over the part it saw can be a refusal over the whole: 1,000
-  stranded files behind a locked directory and 15 in view, against 20
-  rows, pass the check, and the review head unlinked the 15. The
-  inventory's docblock said an unreadable entry "can only make the
-  deletion set SMALLER", which is true of the list and false of the
-  verdict. The latch keys on the KIND of refusal, so a streak that turns
-  into the other kind logs at once. **The cost is deliberate**: a variants
-  directory holding a directory the bridge may never list, a root-owned
-  `lost+found` at the top of an ext4 volume mounted there being the
-  ordinary one, reclaims nothing until it is readable, and its hint says
-  so once a day. The two CLI sweeps still report such entries and go on;
-  whether they should refuse too (and past which flag) is open.
+  that could not LIST a directory refuses too** (`PartialWalkRefusal`),
+  after the mass-orphan check and under a WARN of its own (CodeRabbit on
+  #1063). What it could not list is missing from every count and may hold
+  any number of orphans, so a verdict that proceeds over the part it saw
+  can be a refusal over the whole: 1,000 stranded files behind a locked
+  directory and 15 in view, against 20 rows, pass the check, and the
+  review head unlinked the 15. The inventory's docblock said an unreadable
+  entry "can only make the deletion set SMALLER", which is true of the
+  list and false of the verdict. The latch keys on the KIND of refusal, so
+  a streak that turns into the other kind logs at once. **The cost is
+  deliberate**: a variants directory holding a directory the bridge may
+  never list reclaims nothing until it is readable, and its hint says so
+  once a day. The ordinary such directory, the root-owned `lost+found` of
+  an ext4 volume mounted AS the variants directory, is the filesystem's
+  and not counted (next bullet), and a link the walk could not stat is
+  weighed, not refused. The CLI sweeps make the same refusal since
+  2026-09-28 (next bullet).
+- **…and a partial walk is refused by every forward sweep, weighed by what
+  it can hide** (2026-09-28). `upscale --gc` (optimize, render) and
+  `analyze --gc` took `MassOrphanRefusal` over the part of the tree they
+  could read and went on: over #1063's shape both unlinked the 15 and
+  exited 0. The inventory splits its unknowns, and the three sweeps and
+  the doctor read them through two shared decisions. **A directory the
+  walk could not list** (`UnlistedDirs`) is unbounded, so
+  `PartialWalkRefusal` refuses the verdict, after `MassOrphanRefusalFor`,
+  whose lost-index advice is the more urgent. The CLI's way past it is
+  **`--allow-partial-walk`, which waives that refusal and nothing else**:
+  the mass-orphan check still runs over what was read. Never
+  `--allow-mass-orphans` as the way past it, which gives up the whole
+  protection to get past one directory; but `--allow-mass-orphans` waives
+  the partial-walk refusal too, since that refusal exists only to protect
+  the verdict the flag has set aside. So does a threshold of 100, where no
+  count can refuse. **A link the walk could not stat** is never walked
+  into, so it is nothing, one known file or one orphan, and
+  `MassOrphanRefusalFor` counts it as an orphan (o+k of f+k): a known file
+  only lowers the ratio and an orphan only raises the refusal (100·(o+1) >
+  pct·(f+1) follows from 100·o > pct·f for pct ≤ 100), so that refuses
+  exactly when some reading would, pinned against every reading by brute
+  force (`TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`). **The
+  root-owned `lost+found` of an ext4 volume mounted AS the variants
+  directory is not an unknown**: a directory named exactly that, directly
+  under the RESOLVED walk root, that a PERMISSION error keeps this user
+  out of, is not counted (`isFilesystemLostFound`). Since #1063 it made
+  the background sweep refuse every tick and `bridge doctor` warn on every
+  run. Nothing the bridge writes can be in it: a `<variantsDir>/lost+found`
+  the bridge made (a single-root library's top-level folder of that name,
+  or a multi-root root whose basename it is) is its own and listable, so
+  it is walked as before, and so is any readable one (a CLI run as root).
+  **Residuals**: a render run as ROOT for a library folder named
+  `lost+found` could put sidecars in one the service user cannot list
+  (unexamined, as the filesystem's); a volume mounted deeper in the tree
+  has its `lost+found` counted, since nothing about the walk root vouches
+  for it; an I/O error on it counts. `TreeHoldsVariantSidecars`, the
+  reverse guard's probe, still fails closed on an unreadable `lost+found`
+  (a refused mass ROW deletion, the safe direction). A Gemini consult was
+  attempted for the `lost+found` trade-off and refused by the API's
+  spending cap; the rule is the narrow one, decided here.
+- **The Jobs card shows the background orphan sweep's refusal**
+  (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
+  interval was positive, while every tick refused and only the journal
+  said so, once a day. The sweep publishes its latch through an atomic
+  snapshot (`OrphanSidecarSweeper.Status`: the kind,
+  `integrity.OrphanRefusalKind`, and when the streak started), runServe
+  wires it into `admin.Deps.OrphanSweepStatus`, and `/api/jobs` carries
+  `maintenance.orphanSidecarGCRefusal` (a KEY the console words) and
+  `orphanSidecarGCRefusingSince`, omitted while the sweep is not refusing
+  or not running. The card shows a "refusing" badge on the line and the
+  reason in a `hint warn` under the list: a sentence in a list cell wrapped
+  into a 163 px column 170 px tall at 375 px (measured in a browser).
+  `TestEveryOrphanRefusalKindIsWorded` runs `describeOrphanGCRefusal`
+  under node for every kind, because the leaf guard proves the key is READ,
+  not that it is WORDED; `TestServeReportsTheOrphanSweepRefusalOnTheJobsCard`
+  boots serve and is the only test that sees the wiring line. The
+  empty-catalog refusal is not a latch kind (it WARNs every tick and
+  decides nothing about the tree), so the chip does not show it.
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
@@ -1947,7 +2129,13 @@ no failing test — which is the shape to expect in this area.
   orphans throughout. **The probe reports the budget it ran under**: a
   closure wired with 0 walks the whole tree on a page render and every
   count still looks right, which is the one mistake no number reveals.
-  (#940)
+  (#940) **Its hint said `--gc` "measures the whole tree"**, false past a
+  directory it could not list; since 2026-09-28 it says `--gc` refuses
+  such a walk (`GCRefusesPartialWalk`, sound on a truncated prefix, since
+  a directory this walk could not list is one the whole walk cannot list
+  either), names directories and links apart, and withholds the ratio
+  verdict only for an unlisted directory: a link is weighed as `--gc`
+  weighs it.
 - **A guard that reads the world AFTER a sweep has to be told what the sweep
   did.** `gcCheckOutputDirBeforeReverseSweep` reads a missing-or-empty variants
   directory as a lost mount — right, except that on the legacy hash-flat layout
@@ -2111,32 +2299,72 @@ no failing test — which is the shape to expect in this area.
   the stale `Clear()` wipes them. Every fetch spawn goes through the
   `spawnDetailFetch` helper that does the `Add(1)`; a missed site panics with a
   negative counter.
+- **…and both CLAIM a fetch per UDN from one bounded set, because a
+  semaphore acquired INSIDE the spawned goroutine bounds the fetches that
+  RUN, never the goroutines waiting to** (2026-09-28, backlog B37). The
+  upstream MediaServer client spawned a fetch per announcement, queued on its
+  two-slot semaphore: 10,000 packets cost 10,000 goroutines and 35 to 37 MiB
+  of stack, for one UDN as for many, and a burst for one new server fetched
+  its description once per packet (1,000 GETs for 1,000 packets). The
+  renderer client's per-UDN `claimFetch` collapsed one device's burst and
+  still spawned one goroutine per DISTINCT UDN, the shape a LAN peer that
+  sees the M-SEARCH's source port can send. **A dedup is not a bound**: the
+  backlog entry read that claim as guarding "exactly this", and it guarded
+  one shape of two. `discovery.DetailFetchClaims` is now the one set both
+  clients use, under each one's `locMu`: `Claim` refuses a UDN already
+  claimed and any claim past `MaxPendingDetailFetches` (64). A refused
+  dispatch records nothing, so the next announcement dispatches again (a new
+  device is fetched then, and a moved one still reads as moved). Measured
+  after: 1 goroutine and 1 fetch for one UDN's burst, 64 goroutines for
+  10,000 distinct UDNs, in either client. The claim is taken before the
+  spawn and released by the fetch's last deferred call (registered after
+  `wg.Done`, so it runs first): `Stop`'s join releases every claim, and a
+  restarted client skips no UDN. **The bound is on goroutines, not on the
+  renderer cache**: a flood of distinct renderer UDNs whose LOCATION answers
+  4xx still leaves one year-2999 structural stub per UDN (5,000 of 5,000
+  after an eviction pass, measured).
 - **Both SSDP read loops share `discovery.HandleReadErr`** — timeout resets the
   streak, `net.ErrClosed`/ctx exits, anything else logs with a ctx-aware backoff
   and one escalation. A bare `return` on a transient error kills discovery for
   the process lifetime; no backoff hot-spins a core. Keep the policy in the
   shared helper.
-- **The M-SEARCH SEND failure log is streak-suppressed** (first at Warn, one
-  Error at ~10 min, then silence until recovery). It runs on a ticker and its
-  failure mode is persistent by nature: unsuppressed it produced **199,078 of
-  the last 200,000 log lines**. The cost isn't disk — it's that every other line
-  becomes unfindable.
+- **The M-SEARCH SEND failure log is streak-suppressed, and BOTH discovery
+  clients report through the one `discovery.SendFailureLog`** (first at Warn,
+  one Error ten minutes into the streak, then silence until recovery, which
+  logs the streak's length). It runs on a ticker and its failure mode is
+  persistent by nature: unsuppressed it produced **199,078 of the last
+  200,000 log lines**. The cost isn't disk — it's that every other line
+  becomes unfindable. **The upstream MediaServer client discarded every send
+  error until 2026-09-28** (backlog B32): pinned to the dev Mac's routeless
+  `utun0`, its socket answered `sendto: can't assign requested address` on
+  every tick and the client logged nothing in 20 ticks; it now logs the Warn.
+  **Ten minutes is a DURATION, which each client turns into its own ticks**
+  (`sendErrEscalateAt`: 20 at the renderer's 30 s, 10 at the upstream's
+  60 s, never below 2). It was the renderer's constant 20, ten minutes at one
+  cadence only, and both cadences are configurable. **Every line names the
+  interface**: both wirings start one client per LAN-eligible interface, and
+  a route can be gone on one of them while the others send. `Start` calls
+  `Reset`. Don't give a client its own copy of the policy: this is the send
+  side's one definition, as `HandleReadErr` is the read side's.
 - **…and a send Stop's close cut short is a STOP, not a failure**
   (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
   can close it in between: the write fails with `net.ErrClosed`, which logged
   "M-SEARCH send failed … use of closed network connection" and took the
   streak to 1 on 4 of 6,000 plain Start→Stop cycles on macOS (43 under
-  `-race`) and 24 of 4,000 on Linux under `-race`. It is dropped before
-  `noteSendResult` sees it (0 of 12,000 after, on each host). **The ERROR
+  `-race`) and 24 of 4,000 on Linux under `-race`. `SendFailureLog.Note`
+  drops it before the streak sees it (0 of 12,000 after, on each host). **The ERROR
   decides, never the run's context**: the socket is the client's own and only
   Stop closes it, so `net.ErrClosed` names the stop exactly, while a write
   takes no context and a genuine failure that lands during Stop is still a
   failure (#998's second condition, under The CLI and the serve wiring).
   `TestSendMSearchReportsAFailureThatLandsDuringStop` goes red if the check is
   widened to `ctx.Err() != nil`. `HandleReadErr`'s ctx arm is no precedent: it
-  decides whether the READ loop exits, not what a result means. The upstream
-  MediaServer client (`internal/upnp`) discards every send error, so it has no
-  such line, and no line about a dead route either.
+  decides whether the READ loop exits, not what a result means. The drop is in
+  the shared log, so the upstream client has it too (its socket is likewise
+  its own, and only its Stop closes it). The server-side advertiser's NOTIFY
+  burst (`sendAliveAll`) ends on the same error rather than logging a Debug
+  line per target left, since only its Stop closes its sender; a write that
+  fails for its own reason still logs one per target.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -2212,6 +2440,32 @@ no failing test — which is the shape to expect in this area.
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+- **A Tailscale interface is eligible ONLY through the opt-in
+  (`EligibilityOpts.TsnetIfaceName`), and its ULA is what had defeated it**
+  (2026-09-28). A Tailscale interface carries an address in
+  `fd7a:115c:a1e0::/48`, and one in 100.64/10 where the tailnet has IPv4. The
+  100.64/10 address always counted as public; the ULA is
+  inside fc00::/7, so `net.IP.IsPrivate` counted it as a LAN address and
+  admitted the interface with no opt-in (and no production caller sets one).
+  Measured: the dev Mac's `utun12` and dido's `tailscale0` were eligible with
+  their addresses and not without the ULA. The real bridge on the Mac then
+  ran an SSDP advertiser on utun12 (LOCATION on its 100.x address) and a
+  renderer- and a UPnP-discovery client sending into it, and on dido each
+  of those consumers' first step (the group join, an M-SEARCH send)
+  succeeded on tailscale0. On Windows (reasoned from the ranking and pinned
+  by a row, not measured) the Wintun adapter, which has no point-to-point
+  flag, outranked a zero-config LAN as the mDNS responder's single pick.
+  `isTailscaleULA` sorts the ULA out BEFORE `IsPrivate` and counts it as
+  public, so it admits nothing AND keeps the zero-config arm from admitting
+  a tailnet with IPv4 switched off (fe80 plus the ULA). **Address-based, not
+  name-based**: macOS numbers its utuns, and Windows' adapter carries no
+  flag that says tunnel. 100.64/10 needed no change: a LAN genuinely
+  numbered in CGNAT space was refused before and still is. `tailscaleULA`
+  is pinned to `tsaddr.TailscaleULARange()` by
+  `TestTailscaleULAIsTailscalesRange`. Multicast written to the tailnet
+  interface reached no peer in the one tailnet measured (no exit node, no
+  subnet router): 0 of 32 datagrams each way between the Mac and dido,
+  beside 32 of 32 unicast controls.
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns
@@ -2225,7 +2479,8 @@ no failing test — which is the shape to expect in this area.
   private IPv4, then any other usable address (a ULA, the opted-in tsnet
   interface), then link-local only, and enumeration order among equals, so
   a host whose first eligible interface already ranks best keeps it (dido
-  measured: `enp1s0f0` and the same five-member set as before).
+  measured: `enp1s0f0` and the same five-member set as before; three
+  members since the next paragraph's rule and the Tailscale bullet above).
   `PickAllLANEligibleInterfaces` keeps its members and order but leaves out
   a point-to-point interface whose only addresses are link-local whenever
   anything else is eligible: six such utuns sat in the dev Mac's set, and
@@ -2237,20 +2492,66 @@ no failing test — which is the shape to expect in this area.
   ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
   and the bullet above says why each arm is there. **Don't reduce the key
   to either half**: the flag alone misses Windows' Wintun adapter
-  (Tailscale, WireGuard; `IF_TYPE_PROP_VIRTUAL`, which Go gives no
-  point-to-point flag) and a Mac's `bridge0` holding a self-assigned
-  address, and the class alone ties a WireGuard tunnel's private 10.x with
-  `en0` and lets enumeration order pick the tunnel (each half turns rows
-  red that the other leaves green). One case moves the other way: a host
-  whose LAN is zero-config (169.254 / fe80 only) beside a private-IPv4
-  bridge (`docker0`, a VM's) now binds the bridge, where the first eligible
-  used to win if it came first. The tables drive `pickLANInterface` and
-  `pickAllLANInterfaces`, the seam both exported pickers call
-  (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
+  (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`,
+  which Go gives no point-to-point flag) and a Mac's `bridge0` holding a
+  self-assigned address, and the class alone ties a WireGuard tunnel's
+  private 10.x with `en0` and lets enumeration order pick the tunnel (each
+  half turns rows red that the other leaves green). One case moves the
+  other way: a host whose LAN is zero-config (169.254 / fe80 only) beside a
+  private-IPv4 bridge (`docker0`, a VM's) now binds the bridge, where the
+  first eligible used to win if it came first. The tables drive
+  `pickLANInterface` and `pickAllLANInterfaces`, the seam both exported
+  pickers call (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
   `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel`), and
   `TestTheExportedPickersRunTheSelection` compares the exported pair with it
   on the host, which can fail only where the first eligible interface does
   not rank best (the dev Mac, not a typical Linux runner).
+- **…and then leaves out a member with no IPv4 address, whenever one with
+  an IPv4 address remains** (2026-09-28). Every consumer of the set runs
+  SSDP over IPv4 (udp4, 239.255.255.250): the advertisers, which already
+  skipped such a member (`gatherAdvertiseEndpoints`), and the renderer and
+  UPnP-upstream discovery clients, which did not. On the dev Mac awdl0 and
+  llw0 (fe80 only, not point-to-point) each got a renderer client whose every
+  M-SEARCH failed with `can't assign requested address` (a WARN per client
+  and an ERROR ten minutes on; since #1072 the UPnP-upstream clients on the
+  same members report theirs as well); on dido each
+  docker veth (fe80 only, a port of `docker0` or a user bridge, both members
+  with an IPv4 address) got two clients, whose sends Linux lets out. **The
+  rule is the SET's, not the SSDP call sites'**: all three consumers are IPv4
+  SSDP, and it sits beside the tunnel rule #1051 justified by the same
+  failed send. A 169.254 address counts (the direct-cable renderer).
+  **It runs AFTER the tunnel rule, and neither rule empties the set**, so a
+  host whose tunnel-ruled set holds no IPv4 member (an IPv6-only LAN) keeps
+  that set exactly, and UPnP upstream, whose manual-URL poller starts only
+  where an SSDP client does, still starts there. The single pick can then
+  be a member the set leaves out (an IPv6-only LAN beside a tunnel holding a
+  private IPv4, or awdl0 beside an opted-in tunnel, since a non-tunnel
+  ranks first): `assertPickIsInTheSet` allows exactly that, a pick carrying
+  no IPv4 while a member does, because the responder answers over IPv6 too.
+  `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` and
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` drive both rules.
+- **The mDNS rebind loop compares the ADVERTISEMENT, never the host's
+  addresses** (2026-09-28). `maybeRebind` rebuilt the responder whenever
+  `ipsForAdvertise()`, every up interface's addresses, differed from the set
+  cached at the last rebuild, while the records carry only the pinned
+  interface's. So an address coming or going on another interface rebuilt
+  it with the same records on the same interface. Sampled at the loop's
+  cadence for 80 minutes: 21 such changes on dido, every one a docker veth
+  (a container starting or stopping), and 1 on the dev Mac, a new utun
+  coming up; the pick and its addresses changed 0 times on either.
+  Each tick now builds the advertisement a rebuild would make
+  (`advertisementNow`: the InterfaceSource's pick, and the addresses
+  narrowed to it, or all of them when nothing is pinned) and rebuilds only
+  when it is not `same` as the running one. **By name AND index**: an
+  adapter re-created under a new index has none of the old sockets' group
+  memberships. That asks the InterfaceSource every tick, where it was asked
+  only on a rebuild, so the responder follows a better interface as soon as
+  the picker names it, **and the source must not print per call**:
+  cmd/bridge's `lanInterfaceSource` prints a failed pick once per streak (a
+  host with no LAN-eligible interface would print a line a minute), and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne` requires the Config literal
+  to take it. The rebind tests pin the responder to the loopback interface,
+  which hashicorp/mdns binds on macOS and on Linux (measured).
 
 - **A folder's children sort by `RelativePath`, with `AbsolutePath` only
   as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`
@@ -3639,10 +3940,11 @@ mentions across the four `ops/audit-*.md` files.
   carry the cancellation: a tsnet node the shutdown closed under
   `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
   context alone. Where the stop leaves its OWN mark on the error, ask the
-  error and not the context: the renderer discovery's M-SEARCH send drops
-  `net.ErrClosed`, which only its `Stop`'s close produces, and still reports
-  a genuine failure that lands during the stop (2026-09-28, under DLNA,
-  UPnP and discovery). **A stopped pass reports no failure the stop caused, and
+  error and not the context: both discovery clients' M-SEARCH sends drop
+  `net.ErrClosed`, which only each client's `Stop`'s close produces
+  (`discovery.SendFailureLog`, the advertiser's NOTIFY burst likewise), and
+  still report a genuine failure that lands during the stop (2026-09-28,
+  under DLNA, UPnP and discovery). **A stopped pass reports no failure the stop caused, and
   records no verdict, count or status for the work the stop
   interrupted.** A `ctxerr` site still reports any other failure, even
   one that lands during the shutdown (#998's second condition). The
@@ -4430,7 +4732,15 @@ its twin.** The top list is older, shorter, and read first.
   `*AnalysisSweepState`, and a field added to its `last` breakdown and never
   rendered leaves this guard green (measured on #992), so that breakdown is
   pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
-  executes the line that renders it.
+  executes the line that renders it. **A leaf the server sends as a KEY
+  for the console to word needs its wording pinned too**: the guard proves
+  `maintenance.orphanSidecarGCRefusal` is read, not that every value it
+  can take has words, so `TestEveryOrphanRefusalKindIsWorded` runs
+  `describeOrphanGCRefusal` under node for each
+  `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
+  comes back blank, `undefined` or `null` (what `console.log` prints for a
+  case that returns nothing), as its key, as the fallback, or in another
+  kind's words.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
@@ -5121,11 +5431,13 @@ its twin.** The top list is older, shorter, and read first.
   `"hidden"` in an automated tab, so `loading="lazy"` images never load and any
   perceived-performance claim measured that way is suspect.
 - **A field deliberately left unsynchronised binds TESTS too.**
-  `sendErrStreak` is only ever touched from its own run loop, so a test calling
-  `noteSendResult` directly must do so with no loop live — before `Start`, or
-  after `Stop` (which joins it). One that did neither raced under `-race` on CI
-  and was not reproducible locally in 26 runs. Adding a mutex would pay
-  production for a test's convenience.
+  A `discovery.SendFailureLog`'s streak (each discovery client's `sendErrs`,
+  the renderer's `sendErrStreak` until 2026-09-28) is only ever touched from
+  its own tick loop, so a test calling its `Note` or `Reset` directly must do
+  so with no loop live — before `Start`, or after `Stop` (which joins it).
+  One that did neither raced under `-race` on CI and was not reproducible
+  locally in 26 runs. Adding a mutex would pay production for a test's
+  convenience.
 - **…and a test that starts the loop decides what the loop's own sends do**
   (2026-09-28). `TestSendMSearchStreakResetsOnRestart` kept that ordering and
   still failed 10 of 200 runs on the dev Mac and 17 of 1,000 on Linux under
@@ -5137,7 +5449,9 @@ its twin.** The top list is older, shorter, and read first.
   per-client `writeMSearch` seam makes the restarted loop's own first send
   fail on every host, and the test asserts that send's Warn; with the reset
   deleted it fails 20 of 20 on both. A test whose subject a live loop also
-  moves cannot leave that loop's I/O to the host.
+  moves cannot leave that loop's I/O to the host. The upstream client got
+  the same seam and the same restart test
+  (`TestUpstreamSendStreakResetsOnRestart`) when it gained the report.
 - **Putting back slog's previous default does not put back the `log`
   package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28).
   `slog.SetDefault` points the log package's output at the new handler and
@@ -5187,14 +5501,17 @@ its twin.** The top list is older, shorter, and read first.
   that merely NAME a helper, and one for the old `defer cancel()` shape misses
   the sites that never had one. (#944; extended to the in-process loops, and
   `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
-  five files missed a sixth site that the shape match found.) **A new boot
-  test starts serve through `startServedBridge`** (2026-09-28), which writes
-  the config, registers the drain and builds the console and phone clients:
-  SonarCloud's gate fails a PR past 3% duplicated new lines and counts new
-  lines that repeat OLD code, and the inline boot block was 16 to 23 lines of
-  exactly that. The guard reads every function since, a helper as well as a
-  Test, and wants the drain in the function that launches; reading Test
-  functions alone, it lost sight of every test that used the helper.
+  five files missed a sixth site that the shape match found.) **It reads
+  every function in the test files, helpers included** (2026-09-28): it read
+  Test functions alone, so a launch factored into a helper went unaudited,
+  and two such helpers already existed. It wants the drain in the function
+  that launches. **A serve test boots through a helper**: `bootServe`
+  (main_test.go), or `startServedBridge` when it needs the console and a
+  paired client (it writes the config and builds both clients). Each
+  registers its own drain, and with either drain deleted the Test-only guard
+  stayed green. SonarCloud's gate fails a PR past 3% duplicated new lines
+  and counts new lines that repeat OLD code, and an inline boot block was 16
+  to 23 lines of exactly that.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the

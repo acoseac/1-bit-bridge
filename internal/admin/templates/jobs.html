@@ -284,6 +284,10 @@
         <dt>UPnP ingest</dt>
         <dd id="job-upnp">—</dd>
       </dl>
+      {{/* Why the orphan sidecar GC is refusing, painted by app.js
+           renderOrphanSidecarGC. Hidden unless it is: the sweep refuses with
+           no override, and its line above says so beside a badge. */}}
+      <p class="hint warn" id="job-maint-gc-refusal" hidden></p>
       <p class="hint">
         Housekeeping sweepers (config-driven, <code>bridge.yaml</code>).
         UPnP upstream rescans are triggered from the

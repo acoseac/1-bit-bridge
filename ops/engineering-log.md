@@ -22498,6 +22498,1075 @@ goroutine the test waits for.
   where `## Build` names five; it now names `FuzzValidateRelPath`, the target
   that covers it, and gives no count.
 
+## 2026-09-28 — upstream discovery deduplicates and bounds its detail fetches, and both discovery clients report failed sends through one log
+
+Backlog B37 and B32, both in the upstream MediaServer client
+(`internal/upnp/discovery.go`), fixed together because the fix for each is
+a piece the renderer client (`internal/dlna/discovery`) already had, and in
+both cases the fix was to move that piece into one shared definition rather
+than copy it. #1064's entry (above) left B32 open under "Left as they are".
+
+### What was measured on main
+
+Probes were throwaway tests in each package, on the unchanged code
+(darwin/arm64, go1.27.1). A dispatcher held every description fetch, so a
+fetch lasted as long as the flood did (in production it lasts up to
+`DetailFetchTimeout`, 5 s, against a LOCATION that never answers), and
+`handlePacket` was called as the read loop calls it.
+
+| Client, flood | goroutines | stack | description fetches |
+|---|---|---|---|
+| upstream, 1,000 packets for one UDN | +1,000 | +4,192 KiB | 1,000 once released |
+| upstream, 10,000 packets for one UDN | +10,000 | +37,664 KiB | |
+| upstream, 10,000 distinct UDNs | +10,000 | +35,840 KiB | |
+| renderer, 10,000 packets for one UDN | +1 | | 1 |
+| renderer, 10,000 distinct UDNs | +10,000 | +37,056 KiB | |
+
+- **Each dispatch was a goroutine from the start.** Both clients acquire
+  their fetch semaphore (two slots upstream, four for the renderer) INSIDE
+  the spawned goroutine, so it bounds the fetches that run and nothing
+  else. The upstream client had no dedup at all: every packet of one new
+  server's burst landed in the first-time branch and queued a fetch, and
+  every queued fetch got the description again once it ran.
+- **The renderer's per-UDN claim covered one shape of two.** The backlog
+  entry described its `claimFetch` / `inFlight` as guarding exactly this.
+  It collapsed one renderer's burst to one fetch and still queued a
+  goroutine per distinct UDN. A LAN peer sees the M-SEARCH's source port,
+  since the M-SEARCH is multicast, and can send that flood to it.
+- **The upstream client's sends failed in silence.** A probe pinned a real
+  client to the dev Mac's `utun0` (up, point-to-point, no IPv4 address):
+  the socket's own `WriteToUDP` answered `sendto: can't assign requested
+  address`, and the client, ticking every 10 ms, logged 0 lines in 20
+  ticks, because `sendMSearch` discarded the error (`_, _ =
+  conn.WriteToUDP`). `en0` was the control: sends go through there.
+
+### What changed
+
+- **`discovery.DetailFetchClaims`** (`internal/dlna/discovery/fetch_claims.go`)
+  is the one set of claimed fetches, a map type with no lock of its own:
+  each client keeps it under its `locMu`, so the renderer's
+  `pruneLocations` still decides from its location records and its claims
+  under one lock. `Claim` refuses a UDN that holds a claim and any claim
+  past `MaxPendingDetailFetches` (64), changing nothing when it refuses.
+  The renderer's `inFlight` became one, and the upstream client gained one
+  with the renderer's `claimFetch` / `releaseFetch` shape: the claim before
+  the spawn, the release as the fetch's last deferred call (registered after
+  `wg.Done`, so it runs first, and after the Upsert and `recordLocation`, so
+  a packet that finds the claim free finds both written).
+- **At the bound a dispatch is dropped, not queued.** A dropped dispatch
+  records nothing, so the next announcement dispatches again: a new device
+  is fetched then, and a moved one still reads as moved. 64 is far above a
+  real LAN's burst (a power cut that brings thirty renderers back claims
+  thirty).
+- **`discovery.SendFailureLog`** (`send_failure_log.go`) is the renderer's
+  policy moved out of the client: `Note(err)`, `Reset()`, `Streak()`. Both
+  clients keep one (`sendErrs`). It drops `net.ErrClosed` (#1064's rule,
+  now in one place), writes the first failure of a streak at Warn, one
+  Error ten minutes in, and the recovery at Info with the streak's length.
+- **The ten minutes became a duration.** The renderer escalated at its
+  20th consecutive failure, a constant whose own docblock reasoned in
+  minutes: ten at the default 30 s cadence. The upstream client sends every
+  60 s by default, and both cadences are configurable
+  (`dlna.discovery.msearchIntervalSeconds`,
+  `upnpUpstream.msearchIntervalSeconds`), so a count of ticks is ten
+  minutes for one client at one setting. `sendErrEscalateAt(interval)` is
+  ten minutes of the client's own ticks, rounded up, never below 2 (so the
+  Warn and the Error stay two lines): 20 at 30 s, the renderer unchanged at
+  its default, and 10 at 60 s.
+- **Every line names the interface.** Both wirings start one client per
+  LAN-eligible interface, and a failure line without it could not say
+  which route was gone. It rides as a record attribute, so a capturing
+  handler that drops `With` attributes (`loggingtest.Recorder`'s) still
+  sees it.
+- **The upstream client** gained the `writeMSearch` seam (the renderer
+  client's since #1064), reports every send through its `SendFailureLog`,
+  and resets the streak in `Start`.
+- **The server-side advertiser's `sendAliveAll`** returns on
+  `net.ErrClosed`: `Stop` closes the sender under a burst the periodic
+  goroutine had begun, and each target left logged "NOTIFY alive send
+  failed … use of closed network connection" at Debug (5 lines for a burst
+  that met the close before its first write). Only `Stop` closes that
+  sender. A write that fails for its own reason still logs a line per
+  target.
+
+Measured after, with the same probes: one UDN's burst, +1 goroutine and 1
+description fetch (was 1,000 fetches for 1,000 packets); 10,000 distinct
+UDNs, +64 goroutines in either client. The `utun0` client logs
+`level=WARN msg="M-SEARCH send failed" component=upnp interface=utun0
+err="write udp4 0.0.0.0:60651->239.255.255.250:1900: sendto: can't assign
+requested address"` on its first send and nothing on the next 19.
+
+### Rejected
+
+- **No queue at all** (a non-blocking semaphore acquire in `handlePacket`,
+  dropping a dispatch when every slot runs). It bounds goroutines at the
+  slot count with no new constant, and it drops most of a genuine burst:
+  thirty renderers answering one M-SEARCH within its 3 s MX spread would be
+  fetched four at a time, the rest a cycle (30 s) later.
+- **A claims type with a mutex of its own.** It works, since every release
+  follows the fetch's cache write, but it gives up the renderer's one-lock
+  argument for `pruneLocations` ("a concurrent fetch can neither record nor
+  release mid-prune") for no gain. The map type keeps each client's lock
+  discipline as it was and shares the policy.
+- **A second copy of the send policy in `internal/upnp`**, or a function
+  on `*int` like `HandleReadErr`: the per-client state (logger, interface,
+  what is degraded, the escalation point) would have been four fields or
+  five parameters at each call site.
+- **A log line when a claim is refused at the bound.** A flood keeps the
+  set full, so a line per refusal is the flood the M-SEARCH streak exists
+  to stop, and a latched line is another streak policy. Refusals are
+  silent; a flood that fills the set delays a genuine new device until the
+  flood stops, where the unbounded queue put it behind every packet the
+  flood had sent.
+
+### Tests
+
+- `TestDetailFetchClaimsDeduplicateAndBound` (the set's two refusals).
+- `TestHandlePacket_FloodOfNewRenderersHoldsAtMostTheBound` and
+  `TestHandlePacket_FloodOfNewServersHoldsAtMostTheBound`: 1,000 distinct
+  UDNs against a held dispatcher; the claims equal the bound, the goroutine
+  count grows by at most the bound plus an allowance of 8 for goroutines of
+  the runtime and of earlier tests (the unbounded code grew by 1,000), and
+  after the drain a dropped UDN's next announcement is fetched.
+- `TestHandlePacket_BurstForOneServerDispatchesOneFetch` (50 packets, 1
+  fetch), `TestHandlePacket_MovedServerRefetchesOnceForABurst` (20 packets
+  from the new address, 1 re-fetch, none once the address is recorded),
+  `TestHandlePacket_FailedRefetchFreesItsClaim` (a failed move re-fetch is
+  retried by the next announcement), and `TestStopWaitsForInFlightFetch`
+  extended: no claim outlives `Stop`, and a restarted client fetches the
+  same server.
+- `TestSendFailureLogEscalatesTenMinutesIntoAStreak` (the tick count at
+  nine cadences), `TestSendFailureLogNamesTheInterfaceOnEveryLine`,
+  `TestSendFailureLogDropsOnlyTheErrorOfItsOwnStop`.
+- `TestSendMSearchReportsFailedUpstreamSends` drives the upstream client's
+  `sendMSearch` 31 times through a failing seam: one Warn by the ninth, the
+  one Error AT the tenth (naming upstream server discovery), nothing more,
+  then the recovery line with `consecutiveFailures=30`, every line with
+  `component=upnp` and the interface. Its first draft checked "no Error by
+  the ninth" and "one Error by the thirtieth", which a client escalating at
+  the renderer's 20th also passes (NC6 below found it).
+  `TestUpstreamSendStreakResetsOnRestart` is the renderer's restart test on
+  this client.
+- `Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause`: a
+  burst through a closed sender logs nothing (red first, 5 lines), and a
+  burst whose every write fails for its own reason (a 70 KB datagram, past
+  the maximum on every platform) logs one line per target.
+- The renderer's existing M-SEARCH tests drive `c.sendErrs` now;
+  `TestSendMSearchEscalatesOnceSustained` pins the literal 20 at its default
+  30 s, which is also the pin that the renderer hands its interval to the
+  log.
+- 100 runs of every new test under `-race` on the dev Mac and on Linux
+  (`golang:1.26.6` on dido): all green.
+
+| Control | Red |
+|---|---|
+| NC1: upstream dispatches whatever `claimFetch` answers | `…BurstForOneServerDispatchesOneFetch` (50 fetches), `…FloodOfNewServersHoldsAtMostTheBound` (+1,000 goroutines, 1,000 cached), `…MovedServerRefetchesOnceForABurst` (20 re-fetches), as predicted |
+| NC2: `Claim` without the bound | the two flood tests and `TestDetailFetchClaimsDeduplicateAndBound`, as predicted |
+| NC3: an upstream fetch never releases its claim | the four predicted (`…BurstForOneServer…`, `…FloodOfNewServers…`, `…FailedRefetchFreesItsClaim`, `TestStopWaitsForInFlightFetch`: a claim outlives Stop and the restart fetches nothing) plus three existing move tests, `TestHandlePacket_GenuineMoveStillRefetches`, `TestServerDiscoveryDefaultClientConnectsToThisHostWhenThePacketCameFromIt` and `TestAMovedServerCannotSteerTheCachedControlURLToAnotherHost`: the first fetch's claim blocks the move's re-fetch |
+| NC4: upstream `sendMSearch` discards the error again | `TestSendMSearchReportsFailedUpstreamSends`, `TestUpstreamSendStreakResetsOnRestart` |
+| NC5: upstream `Start` without `Reset` | `TestUpstreamSendStreakResetsOnRestart` only (streak 16) |
+| NC6: the upstream log built with 30 s, not its interval | `TestSendMSearchReportsFailedUpstreamSends` only ("the tenth failed send logged 0 Errors"); green against the test's first draft |
+| NC7: `Note` without the `net.ErrClosed` drop | `TestSendFailureLogDropsOnlyTheErrorOfItsOwnStop`, `TestSendMSearchCutShortByStopIsNotAFailure` |
+| NC8: `sendErrEscalateAt` returns 20 whatever the cadence | the table test and `TestSendMSearchReportsFailedUpstreamSends`; the renderer's escalation test stays green, 20 being its default's answer |
+| NC9: the floor of 2 removed | the table test's 10 min and 1 h rows only |
+| NC10: the Warn without `interface` | `TestSendFailureLogNamesTheInterfaceOnEveryLine`, `TestSendMSearchReportsFailedUpstreamSends` |
+| NC11: the renderer's `Start` without `Reset` | `TestSendMSearchStreakResetsOnRestart` only (streak 26) |
+| NC12: `sendAliveAll` logs its Stop's close again | the advertiser test, closed half (5 lines) |
+| NC12b: `sendAliveAll` drops every failure | the advertiser test, oversized half (0 lines, want 5) |
+
+### Left as they are
+
+- **The renderer cache still grows under a flood of distinct UDNs whose
+  LOCATION answers 4xx.** A structural failure writes a stub with the
+  year-2999 `LastSeenAt`, which `EvictStale` never ages out, so the claim
+  bounds the goroutines and not the cache: 5,000 such UDNs left 5,000 stubs
+  and 5,000 location records after an eviction pass (a throwaway probe,
+  with the claims drained every 32). The upstream client caches only a
+  server whose description names a ContentDirectory, until `ServerTTL`; a
+  flood of fake servers that serve one grows its cache for that long (not
+  measured). The ingest walks only configured servers.
+- **The upstream client's move detector keeps one Location per UDN**, so a
+  server answering from two addresses alternately reads as moved on every
+  alternation. The renderer keeps a set (`lastLocations`, bounded per UDN).
+  With the claim, one re-fetch runs at a time; they still repeat.
+- **The advertiser's failed NOTIFY sends log only at Debug**, so a dead
+  multicast route on the advertising side is silent at the default level.
+  Its cadence is 14 minutes, so the ten-minute escalation would land on the
+  second failure.
+
+## 2026-09-28 — the scanner indexes a linked file under its target's stat
+
+Backlog B28. `filepath.WalkDir` hands each entry a stat of the entry itself,
+an lstat, and `walkRoot` and `ScanSubtree` both took the stat they index a
+file under from `DirEntry.Info()`. `enqueueableAudioFile` checks only the
+extension, so a symlinked audio file was scanned: `ExtractWithContext`
+opened the path, which follows the link, and read the TARGET's tags, while
+the row recorded the LINK's size (the length of the target path it stores)
+and the link's mtime. `/v1/list` and `/v1/stat` already describe a link by
+its target (PROTOCOL.md, and `resolveEntryInfo` in internal/api), so the
+manifest was the one surface that did not, and everything that compares a
+row with the file disagreed with it.
+
+Measured on main (99b6d1e6) with the new tests, before the fix:
+
+- A symlinked FLAC recorded 123 bytes and the link's mtime against a
+  116-byte target stamped 2021; a DSF, 122 against 140; the two virtual rows
+  of a symlinked `.iso`, 134 against 1,228,800. The manifest's JSON carried
+  the same numbers. (A link's size is its path's length, so the numbers
+  vary with the temp directory.)
+- Retagging the target, with the link's lstat checked unchanged before and
+  after, was never re-extracted: the title stayed "Before" for FLAC and
+  DSF. A re-authored `.iso` target kept its old album title.
+- A link first scanned while its target was missing minted a row from the
+  path alone (title "01", artist "Music", size 134), and the skip gate then
+  kept it once the target appeared. An audio-named link to a directory was
+  indexed the same way (title "Bonus", size 103).
+- #1061's stated residual: a symlinked container whose target was written
+  after the walk (its mtime moved and its bytes ended at 1 KiB) and was idle
+  while it was read. The guard compared the walk's stat with an lstat, both
+  the link's, saw nothing, and the completed read of the short file retired
+  both virtual rows.
+- On the wire, through a throwaway program over the real `Store`, `Provider`
+  and `api.Server` (a symlinked FLAC with a Vorbis LYRICS tag, a 108-byte
+  target): the manifest row said 83, `GET /v1/stat` said 108, and
+  `GET /v1/lyrics` answered `410 lyrics_stale`, the row's source size (the
+  link's) against the resolver's `os.Stat`. After the fix: 108, 108 and 200.
+
+What the phone does with the link's size, read in the iOS repo (not run).
+`BridgeSyncActor` stores `bt.size` as `Track.fileSize`:
+
+- a manual offline download of the track always fails:
+  `DownloadCoordinator.validateDownloadedSize` wants `actual == expected`,
+  and a job with no variant expects `fileSize`, so the file is discarded as
+  `sizeMismatch` ("The download was incomplete — tap to retry"), and every
+  retry downloads it whole again;
+- the auto-cache (`PredictivePrefetchService`) runs the same check after a
+  full download, discards the file and records nothing, so the track stays a
+  candidate and is downloaded and thrown away on every evaluation, and the
+  overnight smart-mix sync repeats it;
+- a virtual row's demux bounds every container read by the row's
+  `fileSize` (`PlayerService`, `DownloadCoordinator`: reads past it return
+  empty), so the geometry probes at byte 1,044,480 and beyond read nothing
+  and every track of a linked `.iso` fails "Not a plain SACD disc image.";
+- streaming a linked non-SACD track plays in full (the size only seeds the
+  progress total, which the Content-Length replaces), but the hybrid DSD
+  early start and the progressive PCM start read the tiny total and stay
+  off, and the gapless preload lead falls back to its fixed minimum;
+- the phone's waveform and lyrics caches key on (size, mtime), so a retag of
+  the target never invalidated them. After the fix each linked track's key
+  changes once. The phone's enrichers never see a bridge row.
+
+By reading, not measured: an analysis strike is stamped from the manifest
+row and re-checked against the resolver's `os.Stat`, so a linked file that
+never decodes was never suppressed; the auto-optimize sweeper stamps a
+rendition's source from the row, and `serveVariant` compares it with
+`os.Stat`, so a linked track's swept renditions answered 410
+`variant_stale`. The fix makes each of those agree.
+
+### Decisions
+
+- **Stat through anything that is not a regular file**
+  (`walkedFileInfo(typ, own, through)`). A regular file keeps its own stat
+  and pays no second syscall, and nothing else: `-gcflags=-m` reports that
+  neither `d.Info` nor the `os.Stat` closure escapes, in either walk. The
+  test is "not a regular file", the listing's
+  (`resolveEntryInfo`), never "is a symlink": since Go 1.23 a Windows
+  junction is `ModeIrregular` with no `ModeDir`, and a stat through it says
+  it names a directory. A reparse point that names nothing (a cloud
+  placeholder) stats to itself and is indexed under that stat; a FIFO, a
+  socket or a device stats to itself and is refused (the next section).
+  Taken as a function of (type, own, through) so the Windows shapes run on
+  every platform (`TestWalkedFileInfoStatsThroughEverythingButARegularFile`).
+- **A link whose target cannot be stat'ed spares its own row, keyed on the
+  entry itself, and mints none.** Measured on main: a link whose target
+  vanished kept its row only because the skip gate compared the link's
+  unchanged lstat, and one first seen dangling minted a junk row. Three
+  alternatives rejected. (a) Fall back to the lstat, as `/v1/list` does for
+  a dangling link: once the stored stat is the target's, that reads as a
+  change on every flap of the mount, and the worker's failed extract
+  rewrites the row from the path alone. NC7 below produces exactly that
+  rewrite. (b) Spare the parent directory, as a failed stat of a regular
+  file does: a permanently dangling link would then spare its siblings
+  forever, and a deleted neighbour would never be reaped. (c) Mark the
+  entry seen: the deletion pass would skip it too, but the spare is the
+  guard the deletion loop checks first ("we could not see this path"), and
+  it is counted in the spared line.
+- **A link to a directory is not a track**, whatever its name, and the walk
+  still follows no directory link. On main such a link was indexed from its
+  path. A row at its path is reaped, for the reason the next section gives.
+- **One Warn per scan**, never one per link: a mount that goes away takes
+  every link into it at once, on every scan until it returns. The line gives
+  the count, one library-relative example, and the error without the
+  absolute path its `*fs.PathError` names (#1055).
+- **The in-motion guard compares the walk's stat with a stat of the path**
+  (`sacdContainerChange(walk, opened, post)`, the lstat gone). For a file
+  that is no link, a stat and an lstat of the path are the same on every
+  platform: POSIX answers the same inode, and Go's Windows `stat` and
+  `lstat` take the same `GetFileAttributesEx` fast path for a file with no
+  reparse point, and neither follows one that names nothing. So nothing
+  changes for a regular container, a FAT or exFAT one included. For a link
+  both sides are now the target's, which closes #1061's residual. Identity
+  is still never compared against the walk's stat, for #1061's reason.
+  What it still cannot see: an overwrite inside one coarse mtime tick, and
+  a link repointed after the walk at a file of the first one's size and
+  mtime.
+- **No `ExtractorVersion` bump.** The stored stat of each linked row no
+  longer matches the walk's, so the first scan after the change re-extracts
+  exactly those rows, once, through the full upsert: one delta row to every
+  paired device and a re-enrichment, and (by reading) a sweeper-made
+  rendition of a linked track is rendered once more. No other row moves
+  (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows` writes a
+  row as main wrote it and counts `indexed_at`).
+- **No PROTOCOL.md change.** It already says a listing row describes the
+  target and a virtual row carries its container's size; the code now does
+  what it says.
+
+Out of scope, measured with throwaway programs and left for the backlog:
+
+- A library ROOT that is itself a symlink to a directory is never walked.
+  `WalkDir` lstats its root, so it visits one non-directory entry and stops:
+  0 rows, and 1 row with a trailing slash on the root. By reading, not
+  measured: on an install with rows under that root, the empty-root guard
+  then logs "suspected clean-empty mount failure" every scan and suggests
+  `.bridge-allow-empty`, which `hasAllowEmptySentinel` finds through the
+  link, and which would then let the deletion pass reap the root's rows.
+- A FIFO named `01.flac` in the library hung `Scan`: the worker's open
+  blocked, the scan's context expiring at 5 s changed nothing, and
+  `IsScanning` still read true at 15 s. Folded into this change before its
+  review (the next section).
+
+Stale claim corrected on the way. CLAUDE.md said twice (under Scanner, and
+in `## Local test fixture`) that `UPDATE tracks SET mtime_ns = 0` does not
+force a re-extraction, because the skip gate compares the mtime inside
+`tags_json`, read through `GetTrack`. #574 moved the gate to
+`GetTrackStat`, which reads the `size` and `mtime_ns` columns. Measured with
+a throwaway test through the Go store: a scan of an unchanged file left its
+`indexed_at` alone, and after `mtime_ns` was zeroed the next scan
+re-extracted it and advanced `indexed_at`.
+
+### Entries that are not files
+
+Folded in before review, from the FIFO finding above. `walkedFileInfo`
+refuses, after the stat it takes, anything that does not open as a file
+(`notAFile`): a directory, a named pipe, a socket or a device, or a link to
+one. A worker opens what the walk hands it, and opening a named pipe waits
+for a writer, with nothing to cancel the wait.
+
+Measured on this branch before the change (0d8ff285), with the new tests,
+each scan bounded at 10 s and the test then playing the writer so the run
+could finish:
+
+- A FIFO named `01.flac`, and a link to one: the full scan was still running
+  at 10 s. Once a writer came, the row minted was the path's (title "01",
+  0 bytes), and the subtree scan kept it.
+- A FIFO named `01.iso`: the full scan and the subtree scan after it both
+  blocked, since an expansion that finds no album writes no row and the skip
+  gate never passes it.
+- A link to `/dev/null`, and a Unix socket, named `01.flac`: indexed from the
+  path (title "01", 0 bytes) in both walks.
+- A FLAC with a row, replaced by a FIFO (full walk) or by a link to one
+  (subtree walk): each scan blocked, and once a writer came the file's tags
+  were replaced by the path's.
+
+By reading, what a scan that never returns costs: `Scan` holds the scanner's
+mutex for its whole run, so every later `Scan` and `ScanSubtree` waits on it
+and the library stops updating; `IsScanning` stays true, so the Atlas lyrics
+sweep and the booklet GC stand down (`ScanInProgress`), the duplicate
+restamp defers, `/v1/health` reports a scan in progress, and
+`POST /api/database/compact` answers 409 (`ScanInFlight`).
+
+Decisions:
+
+- **A list of kinds refused, never "is a regular file".** On Windows a
+  reparse point that names nothing, a cloud placeholder (OneDrive's files on
+  demand) among them, is `ModeIrregular` after `os.Stat` (the default arm of
+  Go 1.26.6's `fileStat.mode`), and it opens, and hydrates, as a file.
+  Refusing it would empty a library kept in OneDrive and reap its rows. On
+  Windows an AF_UNIX socket reports `ModeSocket` and a pipe or character
+  device handle `ModeNamedPipe` or `ModeDevice|ModeCharDevice`, so the list
+  covers Windows' kinds as well.
+- **Judged on the stat, not the listing.** A regular listing's own stat
+  answers only while it still says regular; an entry replaced since its
+  directory was read is stat'ed through and judged as what it is then: a
+  named pipe is refused, and a symlink is indexed under its target's stat,
+  the rule above. Only POSIX can see this, since on Windows the listing's
+  stat is the one `DirEntry.Info` returns.
+- **A row at such a path is reaped like a deleted file's**, after the usual
+  missing-count grace (`deleteAfterMissingScans`, three by default), and so
+  is a directory link's. Sparing it as a dangling link's row is spared was
+  rejected: the walk stat'ed the entry and knows what is there, while "we
+  could not see this path" answers a stat that failed. A spared row would go
+  on offering the phone a track the bridge cannot serve, whose download
+  blocks in `os.Open` (below). The missing-count debounce still absorbs a
+  type that flickers.
+- **One Warn per scan**, beside the unreadable-links line, with the count, a
+  library-relative example and its kind. The two tallies are one `walkTally`
+  type now. Only an audio-named entry reaches the decision, so the line is
+  about something named like a track.
+- **No `ExtractorVersion` bump for this either.** What the walk admits is not
+  extraction. A row the old walk minted for such an entry (a link to a
+  device, a socket, a FIFO some writer once opened) is no longer seen, so the
+  deletion pass reaps it after the grace, with a tombstone to every paired
+  device, and nothing else moves.
+
+`TestScanner_AnEntryThatIsNotAFileIsNotATrack` (a FIFO, a link to one, an
+`.iso` FIFO, a link to `/dev/null` and a socket, each beside a real file, in
+both walks, with the line) and `TestScanner_AFileReplacedByANamedPipeLosesItsRow`
+make the real entries, so they are `//go:build unix`; a scan still running
+at 10 s fails them, and the helper then writes to each pipe so a failure
+cannot hang the suite. The table test gained a row per kind, a cloud
+placeholder that answers `ModeIrregular`, and two entries replaced after
+the listing; `TestNotAFileNamesEachKindTheWalkRefuses` pins the names.
+Before the change every new case was red, the FIFO ones on the 10 s bound;
+after it each scan takes about 20 ms.
+
+Out of scope, measured with a throwaway program over the real `api.Server`
+and resolver: `/v1/download` and `/v1/read` of a path that is a FIFO block in
+`os.Open`. The client gave up at 2 s, and the handlers were still running
+3 s later, until the program wrote to the pipe (then 500). `/v1/stat` answered
+at once. By reading, the same holds for the web player's audio route, and
+`serveFile` counts the request as a download in flight, so while one is
+pinned the updater's auto-install defers every poll ("active downloads").
+This change keeps such a path out of the manifest, but `/v1/list` still
+lists it and nothing stops a client asking for it.
+
+### The read-fault fuzz target
+
+`FuzzSACDExpandUnderAReadFault`, in `fuzz_sacd_test.go`: the SACD targets'
+reader never fails, so #1061's rule was pinned by unit tests alone. The
+property: an image expanded through a reader that fails where a fuzzed fault
+says answers exactly what it answers fault-free, or an error; never a
+different successful answer, and never "not an SACD" where the fault-free
+read found an album. It holds only for an image carrying one answer, so the
+harness builds it with the fixture builder (identical master and area TOC
+copies, one stereo area, one geometry) and applies each structural damage
+to every copy alike: an image whose copies differ can legitimately expand
+from the second when the first cannot be read, and so can one with two
+different stereo areas or a signature under both geometries. Only failures
+that say so are injected (an EIO, another error, and a short read with none);
+a reader that reports the end of the file early is a truncation no reader
+can tell apart.
+
+The first harness truncated the image at a fuzzed byte, and reviewing it
+before the PR found that this breaks the precondition: a cut inside a later
+copy leaves it short of what the first holds, so with the earlier copies
+unreadable it expands to less. Measured: an image cut 100 bytes into the
+second area copy's TTxt sector, with the first copy unreadable, expands to
+tracks titled "Track 1" where the fault-free read says "T1". That is a copy
+that differs, not a defect, so a cut now lands only between structures
+(`sacdFaultCuts`), where a later copy is either whole or absent. The fuzzer
+could not have reached it in practice (the cut is a uint32 walked by at most
+100 from its seeds' zero), but a nightly crasher from it would have been a
+false alarm. `TestSACDFaultPropertySeesWhatTheHarnessKeepsOut` is the
+property's positive control on both things the harness keeps out: the
+lying reader, through which the parser answers "not an SACD", and that cut
+image. Each must be reported as a violation.
+
+Its seeds fault each of the three reads #1061 made fail closed, and a copy
+that survives, and `TestSACDFaultSeedsReachTheFailure` requires each seed's
+fault to be reached and the three sites to answer an error. The seeds are
+what gives the fuzzer its reach. Go's mutator changes one argument per step
+and walks an integer by at most 100, so a fault wanders only from where a
+seed put one. With the DST probe's failure dropped again and that probe's
+own seed left out, the fuzzer found the violation from the other seeds
+within half a second of an empty cache: the whole `go test` took 0.46 s on
+the first harness, and on the final one the fuzz run failed at 0.09 s. From
+one seed whose fault touched no read it ran 468,005 inputs in 90 s without
+finding it. A mapping that started every fault at a sector's first byte or
+its payload found it in 3.2 s from the seeds and not in 90 s from the one
+seed, so the plain byte offset stayed.
+
+Runs, 4 workers, `-fuzzminimizetime 1s`: the first harness 3 min, 724,412
+inputs, no violation; the final one (cuts between structures) 3 min,
+685,566 inputs, no violation; and a minute each of `FuzzParseSACDTOC`
+(935,328 inputs), `FuzzParseSACDArea` (1,052,395) and
+`FuzzSACDVirtualPathRoundTrip` (1,452,394), all passing.
+
+### Tests and negative controls
+
+`scanner_linked_file_test.go` (skipped where a symlink cannot be made):
+`TestScanner_ALinkedTrackIsIndexedUnderItsTargetsStat` (FLAC and DSF, plus
+a subtree scan that must rewrite nothing),
+`TestScanner_ALinkedTrackIsReExtractedWhenOnlyItsTargetChanged`,
+`TestScanner_ALinkedSACDContainerIsExpandedUnderItsTargetsStat`,
+`TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows`,
+`TestScanner_ALinkWhoseTargetWentAwayKeepsItsRow` (two full scans and a
+subtree scan with the mount gone, the test scanner reaping at threshold 1,
+and one log line per scan), `TestScanner_ALinkFirstSeenDanglingIsIndexedOnceItsTargetAppears`,
+`TestScanner_ALinkToADirectoryIsNotATrack`,
+`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`, and
+`TestWalkedFileInfoStatsThroughEverythingButARegularFile`, which runs
+everywhere. `TestSACDContainerChange` gained a symlinked leg that writes the
+target after the walk. All but the dangling-link test (whose rows main kept,
+by the skip gate) were red on main.
+
+Negative controls on the committed fix (87a4ab1f) and fuzz target, each
+restored and re-run green before the next:
+
+| mutation | goes red |
+|---|---|
+| NC1: `walkedFileInfo` takes the entry's own stat for a link | every linked-file test, five `walkedFileInfo` rows, `TestScanner_SACDSymlinkedContainer_Expands` |
+| NC2: the guard compares the walk's stat with an lstat again | the three linked-container tests and `TestScanner_SACDSymlinkedContainer_Expands` |
+| NC3: no spare for an unreadable link, in both walks | `…ALinkWhoseTargetWentAwayKeepsItsRow`: reaped |
+| NC3b: no spare in the subtree walk alone | the same test, at its subtree scan |
+| NC4: a link to a directory indexed under its target's stat | `…ALinkToADirectoryIsNotATrack` and the two directory rows of the table |
+| NC5: the guard's since-the-walk arm removed | the written-after-the-walk test, the matching `…ChangingDuringTheScan…` case, `TestSACDContainerChange` |
+| NC6: the unreadable-links line never reported | the dangling test: 0 lines, want 3 |
+| NC7: the subtree walk takes the entry's own stat | the identity test's subtree leg and the dangling test: rows rewritten |
+| NC-F1: the master-signature probe's failure dropped | fuzz seeds 0-2, the seed test's three probe rows, and the #1061 unit tests of that site |
+| NC-F2: a failed area-TOC read folded into a refusal | fuzz seed 3, its seed-test row, and the #1061 tests of that site |
+| NC-F3: the DST probe's failure dropped | fuzz seed 4, its seed-test row, and the #1061 tests of that site |
+| NC-F4: NC-F3 with its own seed left out, fuzzing | found within half a second of an empty cache, on both harnesses |
+
+Negative controls on the committed not-a-file change (147325c9), each
+restored and the set re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC-S1: the refusal back to a directory alone | six table rows; every case of `…AnEntryThatIsNotAFileIsNotATrack` (the FIFO ones on the 10 s bound); `…AFileReplacedByANamedPipeLosesItsRow` |
+| NC-S2: a regular listing's own stat indexed whatever it says | the two replaced-after-the-listing rows |
+| NC-S3: `ModeIrregular` refused too | the cloud placeholder row, `TestNotAFileNamesEachKindTheWalkRefuses` |
+| NC-S4: the row at such a path spared, in both walks | `…AFileReplacedByANamedPipeLosesItsRow`, both legs: rows kept with their tags |
+| NC-S4b: spared in the subtree walk alone | the same test, its subtree leg only |
+| NC-S5: the full walk does not tally what it refused | the directory-link test (0 lines, want 1), every case of the kinds test (1 line, want 2) |
+| NC-S5b: the subtree walk does not tally | every case of the kinds test |
+
+### Review round 1: describing an error must not panic
+
+Gemini (MEDIUM, twice: on 0d8ff285 and on 4cd01033) noted that
+`noteUnreadable` called `pe.Err.Error()` on an `*fs.PathError` whose cause
+may be nil. Nothing in os builds one, but the call runs in the walk's
+callback, which no recover covers (the workers' per-file recover does not),
+so a panic there ends the scan and the process. Both suggested fixes guard
+`pe.Err` and fall back to `err.Error()`, and that is no fix: a PathError's
+own `Error()` dereferences its cause, so the fallback panics on exactly the
+shape the finding describes. Measured with
+`TestNoteUnreadableDescribesAnyErrorWithoutPanicking`, whose rows recover
+the panic and report it: on 4cd01033, three rows panicked (a PathError
+without a cause, a nil `*fs.PathError`, a nil error), and with the second
+suggestion applied as written the same three still panicked.
+`walkErrReason` now describes the error, through `fmt`, which answers
+`<nil>` for a nil error and recovers a panicking `Error` method; the
+PathError branch also requires a non-nil `pe`, which `errors.As` sets for a
+typed nil. The six rows pass, and none names the absolute path. No other
+dereference of a cause is in the change.
+
+## 2026-09-28 — the `--gc` sweeps refuse a partial walk, the background sweep walks past files it cannot remove, and the Jobs card shows its refusal
+
+Three leftovers of #1063 (backlog B30 and B26), in one PR.
+
+### B30: the CLI sweeps took a verdict over a walk that could not read part of the tree
+
+`bridge upscale --gc` (and optimize / render, which reach `runGC`) and
+`bridge analyze --gc` applied `MassOrphanRefusal` to the counts of the part
+of the tree their walk could read, printed "N entr(y/ies) … could not be
+read; they were neither counted nor removed", and went on. #1063 fixed the
+background sweep only.
+
+Measured on main (99b6d1e6) with #1063's shape, through the real `runGC`
+and `runAnalyzeGC`: 20 rows each with its file, 15 stranded files in view,
+1,000 stranded files behind a `chmod 000` directory. The visible counts,
+15 orphans of 35 files against 20 rows, pass the check; the whole tree,
+1,015 of 1,035, refuses. Both sweeps printed the unreadable count, removed
+the 15 (`GC forward sweep: removed 15 orphan file(s), kept 20 known
+sidecar(s)`; `analyze --gc: removed 15 orphan sidecar(s), kept 20`) and
+exited 0. 1,020 of 1,035 files were left.
+
+**Decided: split the unknowns, refuse the unbounded one, weigh the bounded
+one.**
+
+- `SidecarInventory.UnlistedDirs` counts the directories among `Unreadable`.
+  A directory the walk could not list may hold any number of files, so
+  `integrity.PartialWalkRefusal` refuses a verdict over such a walk. All
+  three deleting sweeps ask it after the mass-orphan check (whose advice,
+  a lost index, is the more urgent when the visible part already refuses),
+  and the doctor reports it (`GCRefusesPartialWalk`, sound on a truncated
+  prefix: a directory this walk could not list is one the whole walk cannot
+  list either).
+- The CLI's way past it is a new `--allow-partial-walk` on upscale /
+  optimize / render / analyze, which waives only that refusal; the
+  mass-orphan check still runs over what was read. **Rejected: reusing
+  `--allow-mass-orphans`**, which gives up the whole mass-orphan protection
+  to get past one directory. But `--allow-mass-orphans` waives the
+  partial-walk refusal too: that refusal exists only to protect the verdict
+  the flag has set aside, so asking for both flags would add nothing. A
+  threshold of 100 disables it the same way (`MassOrphanRefusal` never
+  refuses there, however much a directory hides). The background sweep has
+  no override, as before.
+- A link the walk could not stat (the rest of `Unreadable`) is never walked
+  into, so it is nothing, one known file or one orphan.
+  `integrity.MassOrphanRefusalFor` counts every such entry as an orphan
+  (o+k of f+k). That is exact, not merely conservative: a known file adds
+  to the files alone and can only lower the ratio; an orphan adds to both,
+  and the floor and `orphans > rows` grow with it while 100·(o+1) >
+  pct·(f+1) follows from 100·o > pct·f for pct ≤ 100; so the all-orphans
+  reading refuses whenever any reading does, and every reading proceeds
+  when it proceeds. `TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`
+  checks that against every reading by brute force (74,250 shapes: six
+  thresholds, rows and orphans 0–14, files up to orphans+10, 0–4 links).
+  Before this change the background sweep refused every tick over a single
+  such link. The refusal's reason says when its numbers are a worst case
+  ("counting the N entr(y/ies) the walk could not stat as unreferenced
+  files").
+
+**The ordinary false positive: `lost+found`.** mke2fs creates a root-owned,
+0700 `lost+found` at the top of every ext2/3/4 filesystem, so a variants
+directory that IS such a volume's mount point holds one the service user
+can never list. Since #1063 it made the background sweep refuse every tick,
+and `bridge doctor` warned about it on every run; with the CLI refusal above
+it would have made every `--gc` on such a host partial.
+
+- Decided (D1): a directory named exactly `lost+found`, directly under the
+  RESOLVED walk root, whose listing fails with a PERMISSION error, is the
+  filesystem's and not counted (`isFilesystemLostFound`, in
+  `TakeSidecarInventory`, so the three sweeps and the doctor agree). The
+  resolved root is where the volume is, so a symlinked variants directory
+  gets the rule too. A readable one is walked as before.
+- What else that name can be: the variants layout mirrors library-relative
+  paths, so `<variantsDir>/lost+found` is also what a single-root library
+  with a top-level folder of that name, or (multi-root) a library root with
+  that basename, would render into. The bridge creates that directory as its
+  own user and can list it, so D1 walks it. If the volume's own 0700
+  `lost+found` is already there, the bridge (non-root) cannot write into it
+  at all. The one way sidecars could sit in an unreadable one is a render
+  run as ROOT for such a library folder; left as a residual.
+- Rejected (D2): prune `lost+found` at the walk root always, like a
+  dot-directory. It would have kept `sudo bridge upscale --gc` from
+  unlinking fsck's recovered inodes (a nil Consider counts every file) and
+  made the verdict independent of the user running it; but it also hides a
+  readable, bridge-created directory from every forward sweep, and `--gc`'s
+  nil Consider already treats everything in the variants directory as its
+  own. Narrower is the smaller change.
+- Rejected: requiring the walk root to be a mount point (st_dev against its
+  parent) or the directory to be owned by uid 0. Both are POSIX-only, and
+  neither excludes the one residual (a root-run render makes a uid-0
+  directory under a mount point too).
+- Not covered: a volume mounted DEEPER in the tree keeps its `lost+found`
+  counted (nothing about the walk root vouches for it), and an I/O error on
+  the top one counts as any other. `TreeHoldsVariantSidecars`, the reverse
+  guard's probe, still fails closed on an unreadable `lost+found`, which can
+  only refuse a mass row deletion (the safe direction).
+- A Gemini consult on D1/D2 and on the link weighing was attempted; the API
+  answered HTTP 429 (the project's monthly spending cap). Decided here.
+
+**Doctor.** `variants-index`'s hint said `--gc` "measures the whole tree and
+unlinks nothing when it refuses", false past a directory it could not list;
+it now says `--gc` refuses such a walk and names `--allow-partial-walk`. Its
+summary called every unreadable entry a directory ("director(y/ies) could
+not be read"), the wording #969 fixed in both CLI sweeps and not here; it
+names directories and links apart now. `WouldRefuseGC` is withheld only for
+an unlisted directory, since a link is weighed as `--gc` weighs it.
+
+### B26 (1): a tick stalled behind files it could not remove
+
+Each tick retained the first `gcChunkSize` (5,000) orphan paths in walk
+order and every attempt spent a slot, so a chunk's worth of files the
+service user cannot unlink at the head of the walk (a root-owned directory
+from a `sudo bridge upscale` run) blocked every orphan behind them, every
+tick. The cursor this sweep had until #1063 moved past them. Measured on
+main with a chunk of 5: 30 rows with files, eight orphans in a read-only
+directory (`a-locked`, walked first) and ten deletable ones after it; four
+ticks, `unlinked=0 failed=5` each, 48 files left.
+
+- Decided: keep `gcRetainedPerUnlink` (4) chunks of paths and cap SUCCESSFUL
+  unlinks at the chunk; a tick tries the retained paths in walk order until
+  it has unlinked a chunk. After: 5, 5, 0 on the same shape.
+- The bound, measured (Apple silicon, go1.26.6, 21,000 files with 205-byte
+  paths): 10.8 MB of heap for 20,000 retained paths (two spellings each,
+  `OrphanPaths` and `OrphanWalkedPaths`), 3.0 MB at the old 5,000, freed
+  when the tick ends. A head of up to 15,000 undeletable files still leaves
+  a full chunk per tick; 20,000 or more stall again. The summary line gained
+  `retained`, so `failed == retained` with `unlinked == 0` shows it.
+- Nothing crosses a tick, #1063's rule. Rejected: remembering failed paths
+  between ticks (state carried across ticks, which #1063 refused);
+  reservoir-sampling the retained list (no stall in expectation, but a
+  tick's work stops being reproducible from its inputs, and tests would need
+  an RNG seam); predicting undeletable files from the parent directory's
+  writability (`access(W_OK)`: POSIX-only, blind to sticky bits and to
+  Windows' delete semantics).
+- The refusal still reads the full `Orphans` count. The full-count test
+  (`TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount`) had 150 rows and a
+  chunk of 100: at four chunks the retained 400 outnumber 150 rows, so a
+  refusal fed the retained count still refused, and the test caught that
+  mutation only through its wording check. Its fixture is now 500 rows, with
+  a guard that fails if the retained count ever reaches the rows again.
+
+### B26 (2): the Jobs chip said "on" while the sweep refused
+
+The "Orphan sidecar GC" line read the interval alone. A sweep refusing every
+tick, with no override and one WARN a day, looked healthy on the Jobs page.
+
+- `OrphanSidecarSweeper` keeps its latch as a kind
+  (`integrity.OrphanRefusalKind`: `massOrphans`, `partialWalk`) and the start
+  of the streak, and publishes both through an atomic snapshot (`Status`),
+  written by the run goroutine when the latch moves. The ticks' own latch
+  logic is unchanged (a tick that decided nothing leaves it).
+- `admin.Deps.OrphanSweepStatus` (wired by runServe to the sweep's `Status`,
+  nil when it does not run) fills `maintenance.orphanSidecarGCRefusal` (a
+  key) and `orphanSidecarGCRefusingSince` on `/api/jobs`, omitted while the
+  sweep is not refusing or its interval is off.
+- The card shows a "refusing" badge and when it started on the line, and
+  the reason in a `hint warn` paragraph under the list. The first draft put
+  the sentence in the list cell: in a browser at 375 px it wrapped into a
+  163 px column 170 px tall.
+- Verified in a real browser on a throwaway bridge (ports 27788 / 27789, the
+  orphan sweep at 5 s, two rows over 45 stranded files): the lost-index
+  refusal; then, with the 40-file directory locked, the partial-walk refusal
+  (a new streak, so a new start); then, with that directory removed and a
+  locked `lost+found` at the variants root, a tick that proceeded
+  (`unreadable=0 refused=false unlinked=5`, one "no longer refusing" line)
+  and the chip back to "on". At 375 and 1024 px, light and dark, no
+  horizontal scroll.
+- Not shown: the empty-catalog refusal, which is not a latch kind (it WARNs
+  every tick and decides nothing about the tree).
+
+### Tests
+
+New: `TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut`,
+`TestIsFilesystemLostFoundReadsAllThreeTerms`,
+`TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`,
+`TestPartialWalkRefusalNeedsADirectoryItCouldNotList`,
+`TestOrphanSidecarSweeperProceedsPastTheFilesystemsLostFound`,
+`TestOrphanSidecarSweeperWeighsALinkItCouldNotStat`,
+`TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove`,
+`TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch`,
+`TestOrphanSidecarSweeperStatusIsReadableBesideTheRunningLoop` (the atomic
+publication under `-race`), `TestRunGCRefusesAPartialWalkUntilAllowed`
+(with the control that the whole tree refuses as a lost index),
+`TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`,
+`TestRunGCProceedsPastTheFilesystemsLostFound`,
+`TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`,
+`TestEveryForwardSweepingGCCommandOffersThePartialWalkOverride` (the
+mass-orphan sweep test's body is now a helper both flags share),
+`TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk`,
+`TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`,
+`TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`,
+`TestMaintenanceChipSaysTheOrphanSweepIsRefusing`,
+`TestEveryOrphanRefusalKindIsWorded` (node) and
+`TestServeReportsTheOrphanSweepRefusalOnTheJobsCard` (boots serve).
+Adapted: the doctor fixtures that meant directories now say so
+(`UnlistedDirs`), `TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory`
+requires the new hint and forbids the old claim, the partial-walk WARN test
+reads "could not list", and the full-count test's fixture (above).
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| `upscale --gc`'s partial-walk refusal skipped | `TestRunGCRefusesAPartialWalkUntilAllowed`, alone |
+| `analyze --gc`'s skipped | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`, alone |
+| `isFilesystemLostFound` answers false | the inventory, unit, sweeper, `runGC` and doctor lost+found tests (five) |
+| its permission term dropped | the unit table's I/O-error row, alone |
+| its walk-root term dropped | the inventory test and the unit table's nested row |
+| `MassOrphanRefusalFor` weighs no links | the brute-force test and the sweeper's tenth-orphan row |
+| `PartialWalkRefusal` keyed on `Unreadable` | its own test and the sweeper's ordinary-crop row |
+| `PartialWalkRefusal` ignores pct 100 | its own test, alone |
+| `--allow-mass-orphans` no longer waives it | `TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`, alone |
+| render.go's flag misnamed | the partial-walk flag sweep, alone ("only 3 command(s)") |
+| the doctor's partial-walk hint case disabled | the doctor package test and the end-to-end doctor test |
+| the doctor's summary stops naming links apart | `TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`, alone |
+| the doctor probe withholds the verdict for links | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`, alone |
+| the unlink loop caps attempts (`i >= chunk`) | both rows of `TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove` |
+| one chunk of paths retained | the same two rows |
+| the refusal fed `len(inv.OrphanPaths)` | the full-count test ("unlinked 100, want 0") and the tenth-orphan row |
+| app.js stops reading `orphanSidecarGCRefusal` | `TestEveryJobsFieldIsRenderedSomewhere` (run again after the layout commit) |
+| app.js stops reading `orphanSidecarGCRefusingSince` | `TestEveryJobsFieldIsRenderedSomewhere` |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` ("falls through to the fallback") |
+| the handler never fills the refusal | the handler test and the serve boot test |
+| runServe wires nil | the serve boot test, alone |
+| the lifted streak is not published | `TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch` |
+| the handler ignores the interval gate | the handler test's interval-off block |
+
+One control was invalid on its first form: deleting the wiring line in
+`main.go` left `orphanSweepStatus` unused and the package did not build; it
+was rewritten to wire nil and keep a use.
+
+### Review round 1: SonarCloud's duplication gate
+
+CodeRabbit (on `4948fd32`) and Gemini left no findings. SonarCloud's
+quality gate failed on duplication: 3.3% of the new code (60 lines in 9
+blocks, over 1,797 new lines; the gate is 3%). Read through its
+`duplications/show` API, every block but three was test setup this change
+repeated from a test that already had it: the serve boot (the Jobs-card
+test against the harvest-revoke test, 12 lines), the lost-index seed (the
+same test against the doctor fixture, 20), the waveform seed (the
+partial-walk test against the mass-orphan one, 12), and the node runner
+(the orphan-refusal wording test against the sweep-line one, 13). Each is
+one helper now: `bootServe` (main_test.go), `seedVariantCatalog`
+(doctor_variants_index_test.go), `waveformTree` (moved beside
+`strandedTree`), and `runConsoleFunction` (internal/admin). The older side
+of each pair uses its helper too, since a helper only the new test called
+would still repeat the old test's lines.
+
+**The drain guard had to widen to take `bootServe`.**
+`TestEveryBackgroundGoroutineDrainsOnCleanup` read Test functions alone, so
+a boot moved into a helper left its audit. It reads every function in the
+test files now: 45 match (42 tests and three helpers, two of which,
+`runOneFingerprintPass` and `runOneSmartPlaylistPass`, already launched
+unaudited, and both drain). With `bootServe`'s drain deleted it goes red
+naming `bootServe`; with the same deletion and the Test-only filter put
+back, it stays green, which is the gap it had.
+
+**The three `--allow-partial-walk` lines stay.** Each extends the flag
+block `upscale`, `optimize` and `render` already repeat, and its help text
+is one const, so the wording cannot drift. A helper registering that one
+flag would still sit inside the repeated block; removing the block means
+one helper for every `--gc` override, which the per-file flag sweeps
+(anchored on each command declaring `fs.Bool("<flag>"` itself) would have
+to follow. Three lines of 1,797 is 0.17%.
+
+Controls re-run on the refactored tests, each restored with
+`git checkout --` (the code under them is the refactor commit's):
+
+| mutation | result |
+|---|---|
+| runServe wires a nil `OrphanSweepStatus` | the serve Jobs-card test red |
+| the jobs handler never fills the refusal | the serve Jobs-card test red |
+| serve's harvest-off clearer clears nothing | the harvest-revoke test red ("re-enabling the harvest would find the revoked credential") |
+| `bootServe` registers no drain | the drain guard red, naming `bootServe` |
+| the same, with the guard back to Test functions | the drain guard GREEN (the gap) |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` red |
+| `describeAnalysisSweep` drops `alreadyQueued` | `TestDescribeAnalysisSweepAccountsForEveryTrack` red |
+| `analyze --gc` skips the mass-orphan refusal | `TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed` red |
+| `analyze --gc` skips the partial-walk refusal | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed` red |
+| the doctor's partial-walk hint case disabled | `TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk` red |
+| the doctor probe never says the sweep would refuse | `TestDoctorReportsAVariantCatalogThatLostItsIndex` red |
+| the doctor verdict withheld for a link too | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC` red |
+
+### Review round 2: an empty refusal reason
+
+CodeRabbit (on `615ec468`, one Trivial comment) found that
+`TestEveryOrphanRefusalKindIsWorded` did not reject an EMPTY reason: its
+cases were the fallback, the bare key and another kind's words, and an
+empty line is none of them. Measured with `partialWalk`'s case in
+`describeOrphanGCRefusal` returning `""`, returning nothing, returning
+`null` and returning `" "`: the test on `615ec468` passed all four, while
+the Jobs card would have read "Orphan sidecar GC is refusing." with no
+reason, or with "undefined" or "null" as one. It now rejects a line that is
+blank, `undefined` or `null` before its other cases, taking CodeRabbit's
+suggestion and adding the two spellings it did not name (`null` prints as
+"null"; a blank passes `== ""`). The same four mutations turn the new
+test red with "has no refusal reason", and each is green against the old
+one, so nothing else in the test caught them. Gemini was at its daily
+quota this round.
+
+## 2026-09-28 — a tailnet interface needs the opt-in, the SSDP set leaves out a member with no IPv4, and the mDNS responder rebuilds only when its advertisement changes (backlog B15, #1051's follow-ups)
+
+#1051's entry left three things: Tailscale's interface was eligible through
+its ULA, members with no IPv4 address still got SSDP clients, and the mDNS
+rebind loop rebuilt on addresses its records do not carry. Each was measured
+before anything was changed.
+
+### What was measured on the old code
+
+- **Tailscale's interface is LAN-eligible without the opt-in, through its
+  ULA.** A throwaway program called `IsLANEligibleInterface` on every
+  interface twice, with all its addresses and with the
+  `fd7a:115c:a1e0::/48` one removed, and printed both pickers:
+
+  | host | Tailscale interface | eligible | without the ULA | multicast set |
+  |---|---|---|---|---|
+  | the dev Mac (darwin/arm64) | `utun12`: up, pointtopoint, multicast, running; fe80, a 100.64/10 address, a ULA in the /48 | true | false | en0 awdl0 llw0 utun12 |
+  | dido (Linux 7.0, `--network host`) | `tailscale0`: the same flags, 100.64/10 /32, the ULA /128, fe80 | true | false | enp1s0f0 docker0 br-… tailscale0 and four veths |
+
+  The ULA is inside fc00::/7, so `net.IP.IsPrivate` counts it and
+  `hasPrivate` admitted the interface; the 100.64/10 address has always
+  counted as public. No production caller sets `TsnetIfaceName`, and
+  `dlna.allowTsnet` is read by nothing, so the opt-in the docs describe was
+  never what admitted it.
+- **What the bridge did with it.** The real binary on the Mac (DLNA with
+  renderer discovery and UPnP upstream on, a throwaway config, the HTTP
+  listener on `:17790`) logged `SSDP advertiser started` twice,
+  `interface=en0` and `interface=utun12`, the second with its LOCATION on
+  the tunnel's 100.x address; `UPnP upstream started … interfaces=4`; and
+  four renderer-discovery clients (en0, awdl0, llw0, utun12). Per member,
+  the probe did what each consumer does first: on utun12 and on dido's
+  tailscale0 `ListenMulticastUDP` joined the SSDP group and an M-SEARCH send
+  succeeded, written into the tunnel. Windows was not measured: Wintun is
+  `IF_TYPE_PROP_VIRTUAL`, which Go gives no point-to-point flag, so by
+  #1051's ranking its adapter (class "other usable", from the ULA) outranks
+  a zero-config LAN (link-local only) and is the single pick the mDNS
+  responder binds; beside a private-IPv4 LAN it ranks below it and is still
+  in the set.
+- **Whether that multicast reaches a peer.** Between the Mac and dido (one
+  tailnet, no exit node, no subnet router): a sender pinned to the tunnel
+  (`IP_MULTICAST_IF`) wrote 32 SSDP-shaped datagrams to 239.255.255.250:1900,
+  all without error, and a listener joined to the group on the other side's
+  tunnel received 0, in both directions, while 32 of 32 unicast datagrams
+  sent beside them to the peer's 100.x address arrived. A multicast M-SEARCH
+  from dido's tailscale0 drew 0 answers from the Mac's bridge (the one with
+  an advertiser on utun12). So in this tailnet the advertiser and the
+  clients on the tunnel reached no peer; what the fix removes is that work,
+  and, on Windows, the responder's pick.
+- **Members with no IPv4 address.** On the Mac, awdl0 and llw0 (fe80 only,
+  not point-to-point) each got a renderer client; each client's first
+  M-SEARCH failed with `sendto: can't assign requested address`, logged as
+  a WARN `M-SEARCH send failed` (two in the probe bridge's first seconds,
+  naming no interface before #1072; since #1072 the UPnP-upstream clients
+  on the same two members report theirs too), and
+  `ListenMulticastUDP("udp4", awdl0, …)` failed
+  `no such network interface` (the advertiser already skipped both, through
+  `firstIPv4OnInterface`). On dido the four veths (fe80 only, not
+  point-to-point) each got a client too, and there the join and the sends
+  succeed, since Linux joins by interface index. `ip -o link` shows each
+  veth as a port (`master`) of `docker0` or `br-46c2e99686b3`, both of them
+  members with a private IPv4. Every consumer of the set is IPv4 SSDP
+  (udp4, 239.255.255.250): the advertisers, the renderer clients and the
+  UPnP-upstream clients (a grep of `PickAllLANEligibleInterfaces`'s three
+  callers).
+- **The mDNS rebind loop.** `maybeRebind` compared `ipsForAdvertise()`
+  (every up interface's addresses) with the set cached at the last rebuild,
+  while `rebuildLocked` narrowed the records to the pinned interface's. A
+  copy of `ipsForAdvertise` and the picker sampled once a minute for 80
+  minutes, as the loop ticks, and counted where each comparison differed:
+  on dido the full set changed 21 times, every one a docker veth coming or
+  going (16 distinct veths, one per container), and the advertised set
+  (the pick and its addresses) 0 times; on the dev Mac the full set changed
+  once, a new tunnel (`utun13`) coming up, #1051's case, and the advertised
+  set 0 times. So all 22 rebuilds the old loop would have made in those two
+  windows changed nothing it advertised.
+- hashicorp/mdns pins a responder to the loopback interface on macOS and on
+  Linux, whose `lo` carries no multicast flag (both `ListenMulticastUDP`
+  calls and `NewServer` succeed, in a container's namespace and the host's),
+  which is what lets the rebind tests run on a CI runner.
+
+### Decisions
+
+- **The Tailscale ULA is classified before `IsPrivate` and counts as
+  public.** Public, not merely "not private", because a tailnet with IPv4
+  switched off leaves the ULA beside an fe80, which the zero-config arm
+  (`hasLinkLocal && !hasPublic`) would otherwise admit. By ADDRESS, not by
+  name: macOS numbers its utuns, and nothing in Windows' adapter says
+  tunnel. 100.64/10 needed nothing: it was already refused, and a LAN
+  genuinely numbered in CGNAT space is refused as before. A LAN that uses
+  Tailscale's own ULA prefix would lose eligibility through it; RFC 4193's
+  40-bit global ID makes a collision a one-in-2^40 case, and a private IPv4
+  beside it still admits. The prefix is a local `netip.Prefix`, pinned to
+  `tsaddr.TailscaleULARange()` by a test, rather than an import of tsaddr
+  into `internal/dlna`, which imports nothing of tailscale.com; this is
+  `internal/advertise`'s precedent too. `lanPreferenceOf` is unchanged: an
+  eligible interface carrying the ULA has a real private address, whose
+  class the ULA cannot better.
+- **The IPv4 rule is the SET's, not the SSDP call sites'.** Every consumer
+  of the set runs IPv4 SSDP, the advertisers already skipped such a member,
+  and #1051 justified its tunnel rule on the set by the same failed send.
+  Filtering at the two discovery wirings instead was rejected: it leaves the
+  set holding members no consumer can use, and puts the rule in two places.
+  **Conditional**, like the tunnel rule: when no member carries IPv4 the set
+  is kept, so an IPv6-only host behaves as before; unconditional would empty
+  the set there and, through `startUPnPUpstreamIfEnabled`'s early return,
+  switch off UPnP upstream's manual URLs, which need no multicast.
+  **After the tunnel rule**, so where the tunnel rule leaves no IPv4 member
+  the set is exactly #1051's: the other order readmits a self-assigned
+  tunnel beside an fe80-only interface. A 169.254 address counts: that is
+  the direct-cable renderer #1051 kept the zero-config arm for.
+- **The single pick may now sit outside the set**, and only one way:
+  carrying no IPv4 while a member does. The responder answers over IPv6
+  too, and #1051's ranking puts a non-tunnel first, so an IPv6-only LAN
+  beside a tunnel holding a private IPv4 is its pick and is rightly outside
+  an IPv4 set. No single-pick key keeps strict membership there without
+  ranking the tunnel first. `assertPickIsInTheSet` and the host coherence
+  test allow exactly that case.
+- **The rebind compares the advertisement.** `advertisementOf` is the one
+  computation of what a rebuild stands up (the pinned interface, and the
+  addresses narrowed to it, or all of them when nothing is pinned or none
+  is on it); `rebuildLocked` builds from it and records it as `running`,
+  and `maybeRebind` rebuilds only when a fresh one is not `same`: the
+  interface by name and index, the addresses as a set. Rejected: skipping
+  point-to-point interfaces in `ipsForAdvertise`, which misses Wintun and
+  the docker veths (every change measured on dido) and would change what a
+  responder with nothing pinned advertises.
+- **The InterfaceSource is asked every tick**, where it was asked only
+  inside a rebuild; the responder now follows a better pick when the picker
+  names it, rather than on the next address change anywhere. The
+  cmd/bridge closure printed every failed pick, which per tick is a line a
+  minute on a host with no LAN-eligible interface, so `lanInterfaceSource`
+  prints once per streak (and again when the error's text changes), and an
+  AST test requires the Config literal to take it.
+- **Stale comments corrected.** `internal/dlna`'s package doc said the DLNA
+  listener "is bound ONLY to LAN-eligible interfaces"; eligibility governs
+  SSDP and the single pick, and the HTTP listener binds
+  `dlna.listenAddress`. `cmd/bridge/dlna_wiring.go` said `AllowTsnet` is
+  "honoured at the admin-config layer" and that the empty
+  `TsnetIfaceName` "keeps the picker on LAN-only interfaces": nothing reads
+  `AllowTsnet`, and the second was true only from this change on; the
+  config field's doc now says it changes nothing yet.
+- A Gemini consult on the classification and the placement was refused by
+  the API (the project's spending cap), so these were decided on the
+  measurements above.
+
+### Tests and controls
+
+- `internal/dlna`: 11 rows in `TestIsLANEligibleInterface` (the three
+  platforms' Tailscale shapes without the opt-in, IPv4 switched off, the ULA
+  alone, the /48's last address, a ULA just outside it on either side, a
+  private IPv4 and a ULA beside Tailscale's, and the opt-in);
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` (7 hosts, both
+  pickers); `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` (10 hosts);
+  `TestTailscaleULAIsTailscalesRange`. `macos_host`'s set lost utun12 and
+  awdl0, the Windows single-pick row became a WireGuard adapter numbered
+  with a ULA (Tailscale's is no longer a candidate, and the row exists for
+  Wintun's missing flag), and the Tailscale key row became the opted-in
+  one.
+- `internal/mdns`: `TestAdvertisementSameIsWhatARebuildWouldChange` (10
+  rows), `TestTheRunningAdvertisementIsTheOneBuilt`, and, in their own file
+  so they build on the old code, `TestRebindIgnoresAddressesOffThePinnedInterface`
+  and `TestRebindFollowsTheInterfaceSource`, which drive `maybeRebind` with
+  the responder pinned to the loopback interface. The two filter tests
+  became `advertisementOf` tests.
+- `cmd/bridge`: `TestLANInterfaceSourcePrintsAFailureOncePerStreak` and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne`.
+- **Red first**, on the pre-fix commit in a throwaway worktree with the
+  new test files copied in (those that build there): 19 subtests red in
+  `internal/dlna` (6 eligibility rows, 6 of the 7 tailnet hosts, 6 of the
+  10 IPv4 hosts, `macos_host`), the guards green; both rebind tests red on
+  macOS and on Linux (golang:1.26.6 on dido). The new functions' own tables
+  (`advertisementOf`, `same`, `lanInterfaceSource`) have no old form.
+- **Negative controls**, each applied once to the committed fix by a script
+  that requires its target text exactly once, `-count=1`, restored with
+  `git checkout --` and checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no Tailscale case (the ULA private again) | the 6 eligibility rows, 6 tailnet hosts, `macos_host` |
+  | NC2a | the prefix widened to /32 | the two just-outside rows, the tsaddr pin |
+  | NC2b | the prefix narrowed to /64 | the /48's last address, the Linux shape (`…:ab12::1`), the tsaddr pin |
+  | NC3 | the ULA admits nothing but blocks nothing | `tailscale_ipv6_only_no_optin`, `ipv6_only_tailnet_beside_a_zero_config_lan` |
+  | NC4 | no IPv4 rule | 6 IPv4 hosts, `macos_host` |
+  | NC5 | the IPv4 rule unconditional | 3 IPv4 hosts, `tunnels_alone_are_kept`, one tailnet host, 2 single-pick rows through membership |
+  | NC6 | 169.254 does not count as IPv4 | `link_local_ipv4_counts`, `direct_cable_kept_beside_en0`, `macos_host`, one single-pick row through membership |
+  | NC7 | the IPv4 rule before the tunnel rule | `tunnel_rule_first` |
+  | NC8 | the membership check strict again | `opted_in_tsnet_counts_as_ipv4`, `ipv6_only_lan_beside_an_ipv4_tunnel` |
+  | NC9 | no narrowing | the two "off the pinned interface" rows, the narrowing test, the running test, `TestRebindIgnoresAddressesOffThePinnedInterface` |
+  | NC10 | `same` ignores the interface | the new-index row, `TestRebindFollowsTheInterfaceSource` |
+  | NC11 | `same` compares the name only | the new-index row |
+  | NC13 | every failed pick printed | the streak test |
+  | NC14 | an inline closure in the Config literal | the AST test |
+  | NC15 | a success does not end the streak | the streak test, once fixed (below) |
+
+  The first draft's `tunnel_rule_first` row (two fe80-only interfaces) could
+  not tell the two orders apart, which planning NC7 showed before it ran;
+  that row became `neither_rule_empties_the_set`, and `tunnel_rule_first`
+  a self-assigned tunnel beside an fe80-only interface. NC15 went green on
+  its first run: the streak test's last failure had a different text from
+  the one printed before the success, so it printed with or without the
+  reset. It now repeats that text, and NC15 turns it red.
+- **After**, on the Mac: the set is en0 alone, one advertiser, one renderer
+  client, `UPnP upstream started … interfaces=1`, no send failure, and the
+  bridge holds 4 UDP sockets where it held 12; with mDNS on, `dns-sd -B`
+  finds it on en0 beside the NUC's bridge. On dido: the set is enp1s0f0,
+  docker0 and br-46c2e99686b3, with two veths up at the time.
+
+### Out of scope
+
+- The single picker ranks a non-tunnel fe80-only interface (awdl0) and a
+  169.254 one equally, so on a Mac with no private-IPv4 LAN, enumeration
+  order would give the responder awdl0 over a direct cable. An IPv4
+  tie-break after the class would take the cable; not measured on a host
+  that has both.
+- `dlna.allowTsnet` does nothing until serve passes the pickers the
+  tsnet interface's name.
+
 ## 2026-09-28 — the console's size projection follows the live upscale switch
 
 Backlog B25. runServe built `admin.Deps.ProjectedSize` and

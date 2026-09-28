@@ -224,6 +224,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files (the sidecars really are gone); refused by default, because that shape is a relocation in progress")
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
+	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
 	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
 		return 2
 	}
@@ -243,6 +244,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			allowEmpty:       *allowEmpty,
 			allowMassDelete:  *allowMassDelete,
 			allowMassOrphans: *allowMassOrphans,
+			allowPartialWalk: *allowPartialWalk,
 			maxDeletePercent: r.cfg.VariantSweepMaxDeletePercent(),
 		})
 	}
@@ -888,10 +890,12 @@ func gcTakeInventory(ctx context.Context, stderr io.Writer, outputDir string, kn
 		return integrity.SidecarInventory{}, 1
 	}
 	if inv.Unreadable > 0 {
-		// Not a refusal: an entry the walk could not resolve is simply
-		// absent from the counts, and anything under it is absent from
-		// the deletion list. Say so, because the summary that follows is
-		// then about part of the tree.
+		// Not itself a refusal: an entry the walk could not resolve is
+		// absent from the counts, and anything under it is absent from the
+		// deletion list. Say so, because the summary or the refusal that
+		// follows is then about part of the tree. What the sweep may DECIDE
+		// from such a walk is gcRefuseMassOrphans' and
+		// gcRefusePartialWalk's, which weigh the two kinds apart.
 		//
 		// ENTRIES, not directories: Unreadable also counts a link the
 		// walk could not stat, which since #969 includes a Windows
@@ -901,6 +905,37 @@ func gcTakeInventory(ctx context.Context, stderr io.Writer, outputDir string, kn
 			inv.Unreadable, outputDir)
 	}
 	return inv, 0
+}
+
+// gcRefusePartialWalk refuses a forward sweep's verdict when its walk
+// could not list part of the tree (integrity.PartialWalkRefusal), prints
+// why under label, and returns 1; 0 when there is nothing to refuse.
+// Shared by `upscale --gc` (and `optimize` / `render`, which reach runGC)
+// and `analyze --gc`, the two CLI twins of the background sweep's
+// partial-walk refusal: until 2026-09-28 both took their mass-orphan
+// verdict over the part they could read, so a stranded tree whose larger
+// part sat behind a directory this user could not list lost the part it
+// could, at exit 0.
+//
+// The caller decides whether it applies: `--allow-partial-walk` waives it,
+// and so does `--allow-mass-orphans`, since this refusal exists only to
+// protect the mass-orphan verdict and that flag has set the verdict aside.
+// Never `--allow-mass-orphans` as the way PAST it: that would give up the
+// whole mass-orphan protection to get past one unreadable directory.
+func gcRefusePartialWalk(stderr io.Writer, label, outputDir string, inv integrity.SidecarInventory, rowCount, maxOrphanPercent int) int {
+	reason := integrity.PartialWalkRefusal(inv, rowCount, maxOrphanPercent)
+	if reason == "" {
+		return 0
+	}
+	fmt.Fprintf(stderr, "%s: refusing to run — %s.\n", label, reason)
+	fmt.Fprintln(stderr, "  The mass-orphan check weighs the whole tree, and a directory this walk could not list may hold")
+	fmt.Fprintln(stderr, "  any number of files it did not count, so a verdict on the part it saw could let through a tree")
+	fmt.Fprintln(stderr, "  the whole would refuse. Nothing was unlinked and no row was removed.")
+	fmt.Fprintf(stderr, "  Make every directory under %s listable by the user running this command, which should\n", outputDir)
+	fmt.Fprintln(stderr, "  be the one the bridge runs as; root-owned directories left by a run under sudo are the usual cause.")
+	fmt.Fprintln(stderr, "  If a verdict over the part it could read is what you want, re-run with --allow-partial-walk;")
+	fmt.Fprintln(stderr, "  the mass-orphan check still runs over that part.")
+	return 1
 }
 
 // gcRefuseMassOrphans is the FORWARD sweep's mass-deletion guard, the
@@ -922,7 +957,10 @@ func gcRefuseMassOrphans(stderr io.Writer, outputDir string, inv integrity.Sidec
 	if opts.allowMassOrphans {
 		return 0
 	}
-	reason := integrity.MassOrphanRefusal(inv.Orphans, inv.Files, rowCount, opts.maxDeletePercent)
+	// MassOrphanRefusalFor, not MassOrphanRefusal over the raw counts: an
+	// entry the walk could not stat may be one more orphan, and is weighed
+	// as one.
+	reason := integrity.MassOrphanRefusalFor(inv, rowCount, opts.maxDeletePercent)
 	if reason == "" {
 		return 0
 	}
@@ -942,6 +980,13 @@ func gcRefuseMassOrphans(stderr io.Writer, outputDir string, inv integrity.Sidec
 	fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans.")
 	return 1
 }
+
+// gcAllowPartialWalkUsage is `--allow-partial-walk`'s help, one text for
+// the four commands whose `--gc` unlinks sidecar files (upscale, optimize,
+// render, analyze), so the flag cannot mean one thing in one of them.
+const gcAllowPartialWalkUsage = "with --gc: take the mass-orphan check over the part of the tree the walk could list " +
+	"when it could not list all of it (a directory this user cannot read); refused by default, because a directory " +
+	"the walk could not list may hide any number of orphans, enough to make the whole tree read as a lost index"
 
 // gcOrphanExamples bounds how many orphan paths a refusal prints. Enough
 // for an operator to recognise whether these are their renditions; not so
@@ -1278,6 +1323,11 @@ type gcOptions struct {
 	// catalog never knew about — and the file half is the one that cannot
 	// be undone.
 	allowMassOrphans bool
+	// allowPartialWalk lets the FORWARD sweep take its mass-orphan
+	// verdict over the part of the tree its walk could list
+	// (--allow-partial-walk). The check itself still runs over that part;
+	// only the refusal of a partial walk is waived (gcRefusePartialWalk).
+	allowPartialWalk bool
 	// maxDeletePercent is cfg.VariantSweepMaxDeletePercent(), the
 	// threshold the serve-time watcher applies and the one BOTH guards
 	// read: an operator who raised it to allow a big row reap is saying
@@ -1355,6 +1405,14 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 	}
 	if code := gcRefuseMassOrphans(stderr, outputDir, inv, len(allRows), opts); code != 0 {
 		return code
+	}
+	// Then the walk's own completeness: a verdict over part of the tree is
+	// no verdict about the tree. After the mass-orphan check, whose advice
+	// is the more urgent when the part the walk saw already refuses.
+	if !opts.allowPartialWalk && !opts.allowMassOrphans {
+		if code := gcRefusePartialWalk(stderr, "GC", outputDir, inv, len(allRows), opts.maxDeletePercent); code != 0 {
+			return code
+		}
 	}
 
 	forwardRemoved, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)

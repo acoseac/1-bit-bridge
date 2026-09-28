@@ -5774,12 +5774,62 @@ function renderJobCards(j) {
   // Neither chip depends on the upscale flag: the sweepers reconcile
   // EXISTING sidecars and run whenever their interval is positive.
   setText("job-maint-integrity", mt.variantIntegrityActive ? "on" : "off (integrity.variantSweepIntervalSec: 0)");
-  setText("job-maint-gc", mt.orphanSidecarGC ? "on" : "off (default)");
+  renderOrphanSidecarGC(mt);
   setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — LRU eviction every 15 min" : "unlimited");
   const up = j.upnp || {};
   setText("job-upnp", up.enabled
     ? `on — ${up.configuredServers} upstream server${up.configuredServers === 1 ? "" : "s"}`
     : "off");
+}
+
+// renderOrphanSidecarGC — the Jobs card's "Orphan sidecar GC" line: off,
+// on, or refusing. The background orphan sweep refuses a tick that would
+// reap a tree its catalog no longer describes, or that counted over a walk
+// which could not list part of the variants directory, and it has no
+// override; it says so in the journal once a day. This line read "on"
+// throughout until 2026-09-28, so a sweep that had unlinked nothing for
+// weeks looked healthy here. The line carries the badge and when the
+// refusal started; the why goes in the warning under the card's list,
+// since a sentence in a list cell wraps into a tall column on a phone.
+// Built with textContent; the refusal kind is a key the server sends and
+// describeOrphanGCRefusal words.
+function renderOrphanSidecarGC(mt) {
+  const el = document.getElementById("job-maint-gc");
+  const why = document.getElementById("job-maint-gc-refusal");
+  if (!el) return;
+  const kind = mt.orphanSidecarGC ? mt.orphanSidecarGCRefusal : "";
+  if (why) {
+    why.hidden = !kind;
+    why.textContent = kind ? `Orphan sidecar GC is refusing. ${describeOrphanGCRefusal(kind)}` : "";
+  }
+  if (!kind) {
+    el.textContent = mt.orphanSidecarGC ? "on" : "off (default)";
+    return;
+  }
+  const badge = document.createElement("span");
+  badge.className = "badge warn";
+  badge.textContent = "refusing";
+  el.textContent = "";
+  el.append(badge, ` since ${agoOrDash(mt.orphanSidecarGCRefusingSince)}`);
+}
+
+// describeOrphanGCRefusal words a refusal kind of the background orphan
+// sweep (integrity.OrphanRefusalKind): why nothing is being unlinked, and
+// what to do. TestEveryOrphanRefusalKindIsWorded runs it under node for
+// every kind the server can send, so a new kind cannot reach this line as
+// its bare key.
+function describeOrphanGCRefusal(kind) {
+  switch (kind) {
+    case "massOrphans":
+      return "The variant catalog is far smaller than the tree it describes, which is what a lost index " +
+        "looks like, so nothing is unlinked. Check bridge doctor (variants-index) first.";
+    case "partialWalk":
+      return "It could not list part of the variants directory, and a count over part of the tree could " +
+        "let a lost index through, so nothing is unlinked. Make every directory there listable by the " +
+        "user the bridge runs as.";
+    default:
+      return `Nothing is unlinked (${kind}).`;
+  }
 }
 
 // renderAnalysisCoverage — analysed-vs-eligible bar + the exclusion

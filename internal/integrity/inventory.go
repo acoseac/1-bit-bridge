@@ -86,16 +86,28 @@ type SidecarInventory struct {
 	// this docblock claimed until 2026-09-28: MassOrphanRefusal weighs
 	// the whole tree, and a directory the walk could not list may hold
 	// any number of orphans, so a verdict that proceeds over the part
-	// the walk saw can be a refusal over the whole. The background sweep
-	// refuses on it for that reason (OrphanSidecarSweeper.tick); the two
-	// CLI sweeps still report it and go on, which is left open. A report
+	// the walk saw can be a refusal over the whole. So every deleting
+	// sweep asks MassOrphanRefusalFor and PartialWalkRefusal, which weigh
+	// the two kinds of entry differently (UnlistedDirs has why). A report
 	// built from a partial tree should say so.
 	//
 	// It is therefore a count of ENTRIES, not of directories, and the
 	// two CLI sweeps that print it say so: the message named directories
 	// and their contents, which was already imprecise for an unstattable
 	// link and is plainly wrong for a junction (CodeRabbit on #969).
+	//
+	// One unreadable directory is not counted: the `lost+found` directly
+	// under the walk root that a permission error keeps this user out of
+	// (isFilesystemLostFound).
 	Unreadable int
+	// UnlistedDirs is how many of the Unreadable entries are DIRECTORIES
+	// the walk could not list. Each may hold any number of files, so no
+	// count taken over the rest of the tree bounds what it hides: a
+	// verdict needs the walk to see it (PartialWalkRefusal). The other
+	// Unreadable entries, a link or a junction the walk could not stat,
+	// are never walked into, so each can be at most ONE candidate file,
+	// itself, and MassOrphanRefusalFor weighs them exactly.
+	UnlistedDirs int
 	// Truncated is true when the walk stopped at MaxEntries with more of
 	// the tree unseen. A caller that deletes must not truncate; a caller
 	// that reports must scope its claim to what it looked at.
@@ -190,7 +202,9 @@ type SidecarInventoryOptions struct {
 // error aborts and is returned: a tree that cannot be read is not
 // evidence its files are junk, and it is the same fail-closed reading
 // TreeHoldsVariantSidecars takes. A directory that cannot be DESCENDED
-// into is the softer case — see SidecarInventory.Unreadable.
+// into is the softer case — see SidecarInventory.Unreadable and
+// UnlistedDirs — except the filesystem's own `lost+found` at the top of
+// the walk root, which is not counted at all (isFilesystemLostFound).
 func TakeSidecarInventory(ctx context.Context, root string, known map[string]struct{}, opts SidecarInventoryOptions) (SidecarInventory, error) {
 	var (
 		inv SidecarInventory
@@ -243,9 +257,11 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		}
 		if walkErr != nil {
 			// The root itself missing is "nothing to do"; a directory
-			// below it that cannot be read is counted and stepped over,
-			// because its absence from the counts can only shrink what a
-			// caller goes on to delete.
+			// below it that cannot be read is counted and stepped over.
+			// Its absence from the counts can only shrink the LIST a
+			// caller goes on to delete from, not make the caller's
+			// verdict sound, so it is counted in UnlistedDirs, which
+			// PartialWalkRefusal reads.
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				if path == walkRoot {
 					return filepath.SkipDir
@@ -253,7 +269,11 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 				return nil
 			}
 			if d != nil && d.IsDir() {
+				if isFilesystemLostFound(walkRoot, path, d, walkErr) {
+					return nil
+				}
 				inv.Unreadable++
+				inv.UnlistedDirs++
 				return nil
 			}
 			return walkErr
@@ -401,6 +421,97 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 		return walkEntryUnreadable
 	}
 	return walkEntryClassify
+}
+
+// isFilesystemLostFound reports whether a directory the walk could not
+// list is the `lost+found` of the filesystem mounted AT the walk root:
+// named exactly that, directly under the (resolved) walk root, and kept
+// from this user by a PERMISSION error.
+//
+// mke2fs creates that directory at the root of every ext2/3/4 filesystem,
+// owned by root with mode 0700, and fsck puts the inodes it recovers
+// there under names like `#12345`. So a variants directory that IS an
+// ext4 volume's mount point, the ordinary way to give renditions a disk of
+// their own, holds one the bridge's service user can never list. Counted
+// as an unlisted directory it made every tick of the background sweep
+// refuse, forever, and every CLI `--gc` on such a host a partial walk; and
+// `bridge doctor` warned about it on every run. Nothing the bridge writes
+// can be in it: the sweeps' layout mirrors library-relative paths, so a
+// `<variantsDir>/lost+found` the bridge wrote is one a single-root library
+// with a top-level folder of that name, or (multi-root) a library root
+// whose basename it is, made the bridge create, as its own user, which
+// can list it; such a directory is walked as before. The one way sidecars
+// could sit in a directory meeting all three terms is a render run as
+// ROOT for a library folder named `lost+found` (root can write into the
+// volume's 0700 one, or create its own under a restrictive umask), and
+// that is left as the residual it is.
+//
+// Only a permission error: an I/O error on it is a fault like any other,
+// and a lost+found deeper in the tree (a volume mounted INSIDE the variants
+// directory) still counts, because nothing about the walk root vouches for
+// it. Directories only, which the caller has checked.
+func isFilesystemLostFound(walkRoot, path string, d fs.DirEntry, err error) bool {
+	return d.Name() == "lost+found" &&
+		filepath.Dir(path) == walkRoot &&
+		errors.Is(err, fs.ErrPermission)
+}
+
+// MassOrphanRefusalFor is MassOrphanRefusal over an inventory, with the
+// entries its walk could not stat weighed as what they could be.
+//
+// Such an entry (Unreadable − UnlistedDirs: a link or a junction whose
+// target the walk could not stat) is never walked into, so it is either
+// nothing to this sweep, one file a row references, or one orphan. A file
+// a row references adds to the files alone, which can only lower the
+// ratio. An orphan adds to both counts, which can only raise the refusal:
+// the floor and `orphans > rows` grow, and 100·(o+1) > pct·(f+1) follows
+// from 100·o > pct·f whenever pct ≤ 100. So counting all k of them as
+// orphans (o+k of f+k) refuses exactly when SOME reading of them would,
+// and proceeds only when none would. That is the whole of what these
+// entries can hide; a directory the walk could not list can hide any
+// number of files, which is PartialWalkRefusal's case.
+//
+// The reason says when the count includes them, because its numbers are
+// then a worst case rather than what the walk saw.
+func MassOrphanRefusalFor(inv SidecarInventory, rows, maxOrphanPercent int) string {
+	unstatted := inv.Unreadable - inv.UnlistedDirs
+	if unstatted < 0 {
+		// Only an inventory built by hand can say this; it has no bounded
+		// unknowns to weigh.
+		unstatted = 0
+	}
+	reason := MassOrphanRefusal(inv.Orphans+unstatted, inv.Files+unstatted, rows, maxOrphanPercent)
+	if reason != "" && unstatted > 0 {
+		reason += fmt.Sprintf(", counting the %d entr(y/ies) the walk could not stat as unreferenced files", unstatted)
+	}
+	return reason
+}
+
+// PartialWalkRefusal decides whether a forward sweep must refuse to take
+// its mass-orphan verdict from an inventory whose walk could not list part
+// of the tree, and says why. Empty means proceed.
+//
+// A directory the walk could not list may hold any number of orphans, so
+// a verdict that proceeds over the rest can be a refusal over the whole:
+// 20 live files and 15 stranded in view against 20 rows pass
+// MassOrphanRefusal, while the 1,000 stranded behind the directory make the
+// whole tree refuse, and both `--gc` sweeps unlinked the 15 until
+// 2026-09-28. Every deleting sweep asks this after MassOrphanRefusalFor,
+// whose advice is the more urgent when the part the walk saw already
+// refuses (its floor and `orphans > rows` only grow as more is seen).
+//
+// Nothing to refuse when the verdict cannot refuse at all: at a threshold
+// of 100 (the knob that disables the mass-orphan guard) no count, however
+// much the directory hides, makes MassOrphanRefusal refuse. Whether a
+// caller may WAIVE the refusal is the caller's: the background sweep never
+// does, and the CLI sweeps take `--allow-partial-walk`, or pass on it when
+// `--allow-mass-orphans` has already set the verdict aside.
+func PartialWalkRefusal(inv SidecarInventory, rows, maxOrphanPercent int) string {
+	if inv.UnlistedDirs == 0 || maxOrphanPercent >= 100 {
+		return ""
+	}
+	return fmt.Sprintf("the walk could not list %d director(y/ies), so its %d orphan(s) of %d file(s) against %d row(s) describe part of the tree",
+		inv.UnlistedDirs, inv.Orphans, inv.Files, rows)
 }
 
 // MassOrphanLowerBound reports whether the two terms of MassOrphanRefusal

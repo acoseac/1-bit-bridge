@@ -145,16 +145,20 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 // fixture's teardown is ORDERED behind it, which is the `defer`
 // -beats-t.Cleanup trap drainLoopOnCleanup's docblock describes and no
 // AST shape can catch. It matches the `go func(){ defer close(ch) … }()`
-// form in EVERY function of the package's test files, a fixture helper
-// as well as a Test, and requires the drain in the function that
-// launches: startServedBridge, the boot tests' helper, and the two sweep
-// helpers in sweep_cancel_test.go each register their own. Until
-// 2026-09-28 it read Test functions only, so a launch factored out into
-// a helper went unseen, which the floor could not reveal either, since
-// the tests that launch inline still satisfied it (the two sweep helpers
-// happened to drain). A helper that hands its channel back for the
-// CALLER to drain would be reported, and none does: a drain beside its
-// launch is what one function's AST can check.
+// form in EVERY function of the package's test files, a helper as well as
+// a test, and requires the drain in the function that launches. Until
+// 2026-09-28 it read Test functions only, so a launch factored out into a
+// fixture helper went unseen, and the floor could not reveal it, since the
+// tests that launched inline still satisfied it. Two changes that day
+// moved a boot into a helper and widened the scan for it, each unaware of
+// the other: bootServe (#1071, the boot every `serve` test repeated) and
+// startServedBridge (#1067, a boot with the console and a paired client).
+// Two helpers already launched goroutines unaudited then
+// (runOneFingerprintPass, runOneSmartPlaylistPass; both drain). A helper
+// that launches must register the drain itself, which is also where the
+// drain's ordering against the caller's cleanups is decided; one that
+// handed its channel back for the CALLER to drain would be reported, since
+// a drain beside its launch is what one function's AST can check.
 func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -178,20 +182,23 @@ func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 		}
 		checked += auditBackgroundLaunchesIn(t, fset, path)
 	}
-	// Thirteen at the time of writing. Adding a drained launch only raises
-	// this, so the floor never needs bumping — it trips when the count
-	// DROPS, which is the scan silently ceasing to match.
+	// Thirteen when written, all tests; 45 on 2026-09-28, when helpers
+	// joined (42 tests and three helpers), and 46 once startServedBridge
+	// joined them. Adding a drained launch only raises this, so the floor
+	// never needs bumping — it trips when the count DROPS, which is the
+	// scan silently ceasing to match.
 	if checked < 13 {
 		t.Fatalf("matched %d function(s) that start a drainable goroutine, want at least 13 — "+
 			"the scan has stopped matching what it is meant to match", checked)
 	}
 }
 
-// auditBackgroundLaunchesIn reports how many functions in one file, Test
-// or helper, start a drainable goroutine, and errors for each that does so
-// without registering a drain itself. Split out from the test body to
-// keep the nesting shallow (SonarCloud go:S3776 on PR #944); the count it
-// returns is what feeds the floor.
+// auditBackgroundLaunchesIn reports how many functions in one file, tests
+// and the helpers they call alike, start a drainable goroutine, and errors
+// for each that does so without registering a drain itself. Split out
+// from the test body to keep the nesting shallow (SonarCloud go:S3776 on
+// PR #944); the count it returns is what feeds the floor. It was
+// auditBackgroundTestsIn while it read tests alone.
 func auditBackgroundLaunchesIn(t *testing.T, fset *token.FileSet, path string) int {
 	t.Helper()
 	f, err := parser.ParseFile(fset, path, nil, 0)
