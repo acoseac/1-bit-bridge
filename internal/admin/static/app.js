@@ -3801,6 +3801,12 @@ async function saveTrayField(ctl, status) {
   }
   status.dataset.tone = "";
   status.textContent = "Saving…";
+  // Disabling a focused control moves focus to the body (the focus fixup
+  // rule), and enabling it again does not give focus back, so every tray
+  // save left a keyboard user nowhere until 2026-09-28 (Chrome 152). The
+  // finally below gives focus back to the switch if it had it, unless
+  // something else took focus while the save was out.
+  const hadFocus = document.activeElement === ctl.input;
   ctl.input.disabled = true;
   let appliedLive = false;
   try {
@@ -3840,6 +3846,10 @@ async function saveTrayField(ctl, status) {
     status.textContent = `Save failed: ${err.message || err}`;
   } finally {
     ctl.input.disabled = false;
+    const at = document.activeElement;
+    if (hadFocus && ctl.input.isConnected && (!at || at === document.body)) {
+      ctl.input.focus({ preventScroll: true });
+    }
   }
   // A save the server applied live can change what the page around the
   // tray shows, and only the page can redraw that: the variant panel's
