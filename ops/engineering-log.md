@@ -21750,7 +21750,6 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
-
 ## 2026-09-28 — bridge init's preflight grades the ports the run writes where no config loads
 
 #1027's entry recorded this under Out of scope: "The preflight grades init's
@@ -21916,3 +21915,237 @@ ok, 182.9 s, 3.9 s and 1.2 s.
 - **`bindVerdict`'s hint for port 0 is `pass Deps.port-apiPort`**, a
   developer's note that reaches an operator whose config (or public init)
   names `:0`, the ephemeral-port mode `validatePort` accepts.
+
+## 2026-09-28 — an SSDP LOCATION leads the bridge to this machine or the link only from that address (backlog B14, #1050's follow-ups)
+
+#1050 kept a discovered description's service URLs on the host that served
+it and recorded three follow-ups it measured and left: nothing bounded which
+host the LOCATION names; `hostPortFromURL` read `url.URL.Host`; a manual
+upstream (`SourceUserChosen`) could name a loopback control URL. This entry
+closes the three, and adds #1050's rule to `FuzzParseDeviceDescription` as a
+property (the second half of B16).
+
+### What was measured on the old code
+
+The new tests, compiled against the unchanged handlers with only the new API
+surface stubbed to the old behaviour, all failed on their assertions:
+
+- **Renderer client, through `handlePacket`** with a recording dispatcher,
+  every packet from 192.0.2.7: each of sixteen LOCATIONs naming this machine
+  or a link-local address was fetched, and each fetch was followed by the
+  GetProtocolInfo POST to the same host, `http://127.0.0.1:7789/cm/control`
+  among them. A renderer known at 192.0.2.7, re-announced from 192.0.2.99
+  with `LOCATION: http://127.0.0.1:7789/api/stats`, was read as a move: the
+  console was fetched and the cached ControlURL became
+  `http://127.0.0.1:7789/avtransport/control`.
+- **Upstream client**, the same way: seven such LOCATIONs fetched, and the
+  move replaced the cached ContentDirectory control URL with
+  `http://127.0.0.1:7789/api/stats` (the description on "the console" named
+  a relative control URL, which the same-host rule accepts). `LiveHost`
+  derives every routed byte fetch from that URL.
+- **Both default clients** connected to a listener on 127.0.0.1 for a
+  request that named it by `localhost` or by its address, with the packet
+  from 192.0.2.7 and with no packet at all.
+- **Manual upstream**: a description at `http://192.0.2.50:8200/rootDesc.xml`
+  naming its ContentDirectory on `127.0.0.1:7789`, `localhost:7789`,
+  `[::1]:7789`, `0.0.0.0:7789`, `127.1:7789` or `169.254.169.254` was cached
+  in all six cases.
+- **`LiveHost`** returned `":7789"` for `http://:7789/ctl`.
+
+**What reaches a loopback listener** (a probe program, Go 1.27.1, an
+`http.Client` GET to each spelling of a listener on 127.0.0.1). On macOS and
+on Linux (`CGO_ENABLED=0`): `127.0.0.1`, `localhost` in any case,
+`foo.localhost`, `127.0.0.1.localhost`, `localhost.`, `0.0.0.0`, `[::]`, `[::ffff:127.0.0.1]`,
+`[0:0:0:0:0:ffff:7f00:1]`, and two PUBLIC DNS names that resolve to
+127.0.0.1. On macOS only, whose libc resolver takes inet_aton's spellings:
+`127.1`, `127.0.1`, `2130706433`, `0x7f000001`, `0X7F000001`, `0x7f.1`,
+`0x7f.0.0.1`, `017700000001`, `0177.1`, `127.000.000.001`, `127.0.0.01`,
+`127.0x0.1`, `0`, `0.0` and `0x0`. Linux's pure-Go resolver fails every
+one of those. Neither reached it with `127.0.0.1.`, `127.0.0.1..`,
+`localhost..` or `[::127.0.0.1]`. So a check of the host STRING against
+`netip` misses a dozen spellings, and a public DNS name defeats it on every
+platform.
+
+**What devices send.** A probe program sent M-SEARCH (`ssdp:all`,
+`upnp:rootdevice`, MediaServer:1, MediaRenderer:1) every 20 to 60 s on
+every multicast IPv4 interface, pinned with `IP_MULTICAST_IF` as the
+bridge's clients are, listened for NOTIFY on 239.255.255.250:1900, and
+recorded each packet's source address against its LOCATION host. Runs of 4,
+1.5 and 30 minutes on dido's LAN, and of 4 and 30 minutes on the dev Mac's
+(a phone hotspot, then a home LAN when the Mac changed networks during the
+second run). Reception was checked by counting the M-SEARCH packets heard,
+our own included.
+
+- On the home LAN, three root devices answered, on two hosts (one exposed
+  two UDNs). All 1,891 of their packets (1,827 M-SEARCH answers and 64
+  NOTIFYs) carried a LOCATION on the packet's source address, as an IP
+  literal. No device used a hostname.
+- dido's LAN and the hotspot had no device at all.
+- The only LOCATIONs off their source address were this repo's own
+  `internal/dlna` test advertisers (`Test_SSDPAdvertiser_StartStopRaceFree`,
+  UDN `uuid:f1b3a5c2-…`, server token `test`, LOCATION
+  `http://127.0.0.1:7790/dlna/description.xml`; and
+  `Test_Server_StartStop_LifecycleBindsLoopbackPort`, `uuid:test-lifecycle`),
+  which other sessions' test runs multicast from the Mac's LAN address and
+  from the golang containers on dido's docker0. They are the shape the new
+  rule refuses.
+
+Device identities and addresses stay out of this file.
+
+### Decisions
+
+- **The rule**: a LOCATION may lead the bridge to this machine (loopback,
+  the unspecified address, a localhost name) or to a link-local address only
+  when the SSDP packet came from that same address. A loopback source was
+  sent on this machine, whose processes reach the console directly, and a
+  device on a zero-configuration LAN announces from its link-local address.
+  The unspecified address is never a packet's source, so it is always
+  refused.
+- **Enforced twice, because the string shows only part of it.**
+  `LocationFromSource` runs in both handlers before any fetch and refuses
+  what the host string shows: an IP literal (unmapped, one trailing dot
+  ignored), a localhost name (unless the source is loopback), and a host
+  that ends in a number without being an IP literal. A refused LOCATION
+  reads as an absent one, exactly as `ParseSSDPHeaders`' refusals do: a
+  known UDN is refreshed, an unknown one skipped, and the move detector
+  never sees it, so no fetch goroutine, stub or Location record is spent.
+  `NewDeviceFetchClient`, the default client of both SSDP clients, refuses a
+  connect to a loopback, unspecified or link-local address unless the
+  request's context says the packet came from it. `net.Dialer.ControlContext`
+  sees the address of each connect attempt after resolution, and net/http
+  dials under `context.WithoutCancel` of the request context, so the value
+  arrives. DNS lookups do not go through that dialer (net's `Resolver.dial`
+  uses a Dialer of its own), so a stub resolver on 127.0.0.53 keeps working.
+- **Numeric spellings are refused, not parsed.** Parsing inet_aton's forms
+  would say which address `10.1` means, but no device writes one, and the
+  two resolvers the bridge runs on disagree about them (macOS resolves,
+  Linux fails), so refusing them wherever the bridge judges a device URL is
+  simpler and loses nothing measured. The test is the WHATWG URL standard's
+  "ends in a number" (decimal digits, or 0x and hex digits, in the last
+  label).
+- **No proxy, no kept-alive connections, no TLS dialer.** Through a proxy
+  the connect goes to the proxy, so the check would judge the proxy's
+  address, and a proxy on 127.0.0.1 in `HTTP_PROXY` would refuse every fetch
+  (the old client used `http.DefaultTransport`, which honours the
+  environment; a LOCATION names a device on the link the packet arrived on,
+  which a proxy cannot stand in for). A kept-alive connection could carry a
+  later request that another packet's source had not allowed. A
+  `DialTLSContext` would connect around the check.
+  `TestDefaultClient_ChecksTheDevicesAddressNotAProxys` pins the three.
+- **The same host kinds bound a service URL, whatever the source.**
+  `resolveServiceURL` keeps a URL on this machine or a link-local address
+  only from a description URL of the same kind, and refuses a numeric
+  spelling outright. For a discovered description the same-host rule
+  already implies it. For a manual upstream it is the bound on the
+  operator's approval: a manual URL elsewhere cannot make the console, or a
+  cloud VM's metadata service at 169.254.169.254, its `LiveHost` (whose
+  answers the unauthenticated DLNA listener relays), while a manual URL on
+  this machine keeps its local control URL, by any spelling. The manual
+  poller keeps its own client, without the dial check: its URL is the
+  operator's choice.
+- **`hostPortFromURL` reads `Hostname()`**, as #1050 recorded.
+- **Not the general rule** (the LOCATION host equals the packet's source
+  for every address). It would bound names and tailnet or public addresses
+  too, and all three devices measured pass it. Three devices on one LAN are
+  not the evidence it needs: multi-homed hosts and some NAS firmware are
+  reported to announce another of their addresses, a renderer has no escape
+  hatch on the bridge, and none of the devices measured was multi-homed.
+- **Gemini consult**: the API refused (the project's monthly spending cap).
+  The design questions (whether `ControlContext` sees every attempt, whether
+  a dial can bypass `DialContext`, the proxy and keep-alive interplay, the
+  same-address exception) were settled against the Go source instead
+  (`net/sock_posix.go`'s `fd.dial` calls the control function with the
+  resolved remote address, on unix and windows; `net/http/transport.go`
+  dials under `context.WithoutCancel(ctx)`; `net/lookup.go`'s
+  `Resolver.dial` uses a zero `Dialer`) and by the tests.
+- **The `.Host` sweep** (item 2's "grep the tree"). The other reads are
+  `internal/dlna/server.go`'s GENA callback, already safe (it hands
+  `Hostname()` to `callbackHostAllowed`, which refuses an empty host); the
+  `upnpproxy` rewrite, whose dial target is `LiveHost`'s; and three
+  validators whose values come from the operator's file or an authenticated
+  device. `CanonicalHTTPSBase` (the harvest base URL) passes `https://:8443`,
+  which would dial this machine, but an explicit `https://127.0.0.1:8443`
+  passes as well off-demo by design, and changing the reduction turns a
+  nonsense pin into "unpinned". `normalizeBaseURL` (the enrich override
+  bases) would need a `Validate` refusal, which stops a bridge from starting
+  after an update. `customEndpoints` are advertised to phones, not dialled.
+  All three left.
+
+### Tests and controls
+
+- `internal/dlna/discovery/location_source_test.go`: sixteen host-local
+  LOCATIONs from a LAN source never fetched; link-local and loopback
+  LOCATIONs fetched from their own address; a known renderer not moved onto
+  the console; the default client refusing a loopback name and address
+  announced from elsewhere or not announced at all; the transport settings;
+  the positive twin through `handlePacket` from 127.0.0.1, including the
+  move path; the dial-check and `LocationFromSource` tables.
+- `internal/upnp/location_source_test.go`: the same for the upstream
+  client, and the manual poller refusing six host-local control URLs from a
+  description elsewhere and keeping a local one from a description on this
+  machine, in three spellings.
+- `service_url_policy_test.go` (discovery): the host-kind table for service
+  URLs. `service_url_policy_test.go` (upnp):
+  `TestDiscoveredServerWithAnOffHostControlURLIsNotCached` gained a LAN-host
+  case. Its console case is now also refused by the host-kind rule, so it no
+  longer showed that the upstream SSDP path parses with the strict source
+  (#1050's NC5b passed it until the case was added).
+- `cmd/bridge/upnp_livehost_test.go`:
+  `TestLiveHostRefusesAControlURLThatNamesNoHost`.
+- `FuzzParseDeviceDescription` fuzzes the base URL beside the XML and
+  checks every kept URL, re-parsed from the string the parser returned,
+  against the policy stated apart from the parser's own helpers. Its seeds
+  cover each rule from both sides. Sixty seconds each afterwards,
+  `-fuzzminimizetime 1s`, `-parallel 4`: `FuzzParseDeviceDescription`
+  1,233,873 executions, `FuzzParseSSDPHeaders` 1,981,900,
+  `FuzzParseGetProtocolInfoResponse` 2,673,667, no failure. The target's
+  signature gained an argument, and the nightly job restores a Go build
+  cache that can hold corpus entries of the old one; an entry of the old
+  signature planted in the local fuzz cache was skipped and the run passed,
+  so a restored cache cannot fail the job.
+- The existing redirect tests of both default clients now send their
+  request with a loopback source in its context: their two servers listen
+  on 127.0.0.1, which the dial check otherwise refuses.
+- Negative controls on the committed tree, each restored with
+  `git checkout --` and checked green, `-count=1` over both packages
+  (`cmd/bridge` for NC8):
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | `LocationFromSource` keeps host-local LOCATIONs | the handler, move and table tests, both packages (5) |
+  | NC2 | the dial check allows every address | the default-client refusals (2 + 1) and the dial table |
+  | NC3a | the renderer fetch drops the source | the renderer's positive twin |
+  | NC3b | only the GetProtocolInfo POST drops it | the same test, on the missing POST and sinks |
+  | NC3c | the upstream fetch drops it | the upstream positive twin |
+  | NC3d | the move branch drops it (both clients) | both positive twins, on the move step only |
+  | NC4 | the dial check never honours the source | both positive twins, the dial table, both redirect tests |
+  | NC5 | `LocationFromSource` drops the same-address exception | the same-address test, the table, both positive twins |
+  | NC6 | no host-kind rule for service URLs | the host-kind table, fuzz seeds #2 and #3, the manual refusal |
+  | NC7 | no same-kind exception | 11 tests, six of them existing ones served from 127.0.0.1 or a link-local base (four manual-poller tests, the IPv6 parser test, the fetcher round trip) |
+  | NC8 | `hostPortFromURL` reads `Host` | the LiveHost test |
+  | NC9 | numeric spellings read as names | the handler and table tests, the host-kind table, fuzz seeds #4 and #5, both packages' refusals |
+  | NC10 | a proxy and kept-alive connections | the transport test only |
+  | NC11 | no same-host rule for discovered descriptions | #1050's five discovery tests, fuzz seeds #2 and #3, the upstream LAN-host case |
+  | NC12 | `FetchDeviceDescription` parses as user-chosen | the two renderer handler tests and the upstream LAN-host case |
+  | NC13 | any scheme passes | fuzz seed #2 (`ftp://…` kept) |
+  | NC14 | a port-only host passes | fuzz seed #2 (`http://:8080/x` kept) |
+
+  NC11 first ran before the LAN-host case existed, and the upstream tests
+  stayed green: the host-kind rule held them. That is what added the case.
+
+### Out of scope
+
+- **A hostname control URL is resolved again at every later dial.** The
+  ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`) and the `upnpproxy`
+  byte fetch dial the cached control URL's host with clients of their own,
+  which have no dial check. A peer that re-announces a configured server's
+  UDN with a LOCATION on a name it controls passes both checks while the
+  name resolves to its own LAN address; a rebinding answer later sends the
+  Browse and the byte fetches to 127.0.0.1, whose answers the DLNA listener
+  relays. Closing it needs the cached server's announced source (or the
+  manual URL's kind) carried to those two clients, or IP-literal LOCATIONs
+  for SSDP upstreams.
+- A LOCATION on a tailnet or public address is still fetched.
+- The iOS app's SSDP path has no LOCATION-versus-source check.
+- `internal/dlna`'s SSDP tests multicast real NOTIFY announcements from the
+  host's LAN address while the suite runs (above).

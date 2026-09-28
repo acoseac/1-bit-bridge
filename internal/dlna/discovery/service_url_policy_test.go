@@ -109,6 +109,62 @@ func TestParseDeviceDescription_UserChosenKeepsAControlURLOnAnotherHost(t *testi
 	}
 }
 
+// TestParseDeviceDescription_AHostLocalServiceURLNeedsAHostLocalDescription
+// pins the bound on the operator's approval (backlog B14, #1050's follow-up).
+// A description the operator chose may name a service on another host, but
+// not on THIS host (loopback, the unspecified address, a localhost name) or
+// on a link-local address, unless the description URL itself names an
+// address of that same kind: the operator pointing at a server on this host,
+// or at a zero-configuration device, on purpose. Otherwise the server a
+// manual URL names chooses where LiveHost sends every byte fetch of its
+// tracks, the bridge's own console included, and the unauthenticated DLNA
+// listener relays the answers. A discovered description gets the same rule,
+// where #1050's same-host rule already implies it.
+func TestParseDeviceDescription_AHostLocalServiceURLNeedsAHostLocalDescription(t *testing.T) {
+	for _, tc := range []struct {
+		base, control string
+		kept          bool
+	}{
+		{"http://192.168.1.42:8200/d.xml", "http://127.0.0.1:7789/api/stats", false},
+		{"http://192.168.1.42:8200/d.xml", "http://127.53.0.1:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://localhost:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://LocalHost.:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://console.localhost:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://[::1]:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://0.0.0.0:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://[::]:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://[::ffff:127.0.0.1]:7789/ctl", false},
+		{"http://192.168.1.42:8200/d.xml", "http://169.254.169.254/latest/meta-data/", false},
+		{"http://192.168.1.42:8200/d.xml", "http://[fe80::1%25en0]:8200/ctl", false},
+		{"http://nas.local:8200/d.xml", "http://127.0.0.1:8200/ctl", false},
+		{"http://127.0.0.1:8200/d.xml", "http://169.254.169.254/latest/meta-data/", false},
+		{"http://169.254.10.20:8200/d.xml", "http://127.0.0.1:7789/ctl", false},
+		// A numeric spelling no device writes is refused from any
+		// description, its own spelling included: macOS reads 127.1 as
+		// 127.0.0.1 and Linux reads it as nothing.
+		{"http://192.168.1.42:8200/d.xml", "http://127.1:7789/ctl", false},
+		{"http://127.0.0.1:8200/d.xml", "http://2130706433:8200/ctl", false},
+		{"http://127.1:8200/d.xml", "/ctl", false},
+		// The kept rows: a description on this host naming a service on this
+		// host by any spelling, a zero-configuration device naming another
+		// link-local address, and #1050's escape hatch, another LAN host.
+		{"http://127.0.0.1:8200/d.xml", "http://127.0.0.1:8200/ctl", true},
+		{"http://127.0.0.1:8200/d.xml", "http://localhost:8200/ctl", true},
+		{"http://localhost:8200/d.xml", "http://[::1]:8200/ctl", true},
+		{"http://[::1]:8200/d.xml", "http://127.0.0.1:8200/ctl", true},
+		{"http://169.254.10.20:8200/d.xml", "http://169.254.10.21:8200/ctl", true},
+		{"http://192.168.1.42:8200/d.xml", "http://192.0.2.50:8200/ctl", true},
+		{"http://192.168.1.42:8200/d.xml", "/ctl", true},
+	} {
+		desc, err := ParseDeviceDescriptionWithSource(avtOnlyDescription(tc.control), tc.base, SourceUserChosen)
+		svc, kept := desc.Services[ServiceAVTransport]
+		if kept != tc.kept || (err == nil) != tc.kept {
+			t.Errorf("description %s, control %q: kept = %v as %q (err %v), want kept = %v",
+				tc.base, tc.control, kept, svc.ControlURL, err, tc.kept)
+		}
+	}
+}
+
 // TestParseDeviceDescription_KeepsServiceURLsOnTheSameHostAtAnotherPort pins
 // that the rule is the HOST, not the origin: serving the description and the
 // control endpoints on different ports of one address is ordinary UPnP, and
