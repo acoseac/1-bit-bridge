@@ -434,7 +434,10 @@ func Test_PickLANEligibleInterface_DoesNotPanic(t *testing.T) {
 // independently passes IsLANEligibleInterface, and (c) agrees with the
 // single picker — the single picker errors iff the multi set is empty,
 // and (d) what it picks is in the multi set, so the mDNS responder never
-// binds an interface the multicast set leaves out as a link-local tunnel.
+// binds an interface the multicast set leaves out as a link-local tunnel,
+// unless the set left it out for carrying no IPv4 address while a member
+// carries one (assertPickIsInTheSet's rule: the responder answers over
+// IPv6 too).
 func Test_PickAllLANEligibleInterfaces_Coherent(t *testing.T) {
 	all := PickAllLANEligibleInterfaces(EligibilityOpts{})
 	for _, iface := range all {
@@ -456,8 +459,16 @@ func Test_PickAllLANEligibleInterfaces_Coherent(t *testing.T) {
 	if err != nil && len(all) != 0 {
 		t.Errorf("single picker errored (%v) but PickAll returned %d", err, len(all))
 	}
+	// An interface whose addresses cannot be read now counts as carrying
+	// IPv4, so a membership miss is reported rather than excused.
+	carries := func(ifi *net.Interface) bool {
+		addrs, err := ifi.Addrs()
+		return err != nil || carriesIPv4(addrs)
+	}
 	if err == nil && len(all) != 0 && !slices.Contains(ifaceNames(all), one.Name) {
-		t.Errorf("single picker chose %s, which PickAll leaves out of %v", one.Name, ifaceNames(all))
+		if carries(one) || !slices.ContainsFunc(all, carries) {
+			t.Errorf("single picker chose %s, which PickAll leaves out of %v", one.Name, ifaceNames(all))
+		}
 	}
 }
 

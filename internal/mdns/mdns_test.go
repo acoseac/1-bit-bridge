@@ -520,8 +520,8 @@ func TestRebindFiresOnIPChange(t *testing.T) {
 	if a.server == firstSrv {
 		t.Errorf("expected server pointer to change after IP set flip; still %p", firstSrv)
 	}
-	if !ipSetEqual(a.cachedIPs, setB) {
-		t.Errorf("cachedIPs not updated after rebind: got %v, want %v", a.cachedIPs, setB)
+	if !ipSetEqual(a.running.ips, setB) {
+		t.Errorf("running advertisement not updated after rebind: got %v, want %v", a.running.ips, setB)
 	}
 }
 
@@ -598,47 +598,168 @@ func TestRebindAfterCloseIsNoop(t *testing.T) {
 	}
 }
 
-func TestFilterIPsToInterface_NilInterfacePassthrough(t *testing.T) {
+func TestAdvertisementOfANilInterfaceCarriesEveryAddress(t *testing.T) {
 	ips := []net.IP{net.ParseIP("192.168.0.208"), net.ParseIP("10.0.0.1")}
-	out := filterIPsToInterface(ips, nil)
-	if len(out) != 2 {
-		t.Fatalf("nil iface should be passthrough; got %d ips", len(out))
+	adv := advertisementOf(ips, nil, nil)
+	if adv.iface != nil || !ipSetEqual(adv.ips, ips) {
+		t.Fatalf("nil iface should pass every address through; got iface %v, ips %v", adv.iface, adv.ips)
 	}
 }
 
-func TestFilterIPsToInterface_KeepsOnlyMatchingIPs(t *testing.T) {
-	// Resolve loopback (always present, predictable IP: 127.0.0.1).
-	// Use it as the "pinned" interface and pass a mixed-IP list.
-	// Result should keep 127.0.0.1 only.
-	ifaces, err := net.Interfaces()
+func TestAdvertisementOfKeepsOnlyThePinnedInterfacesAddresses(t *testing.T) {
+	// The host's loopback as the "pinned" interface and a mixed list:
+	// only 127.0.0.1 is on it.
+	loopback := loopbackInterface(t)
+	addrs, err := loopback.Addrs()
 	if err != nil {
-		t.Skipf("net.Interfaces unavailable: %v", err)
-	}
-	var loopback *net.Interface
-	for i := range ifaces {
-		if ifaces[i].Flags&net.FlagLoopback != 0 {
-			loopback = &ifaces[i]
-			break
-		}
-	}
-	if loopback == nil {
-		t.Skip("no loopback interface available in this environment")
+		t.Skipf("loopback addresses unreadable: %v", err)
 	}
 	ips := []net.IP{
 		net.ParseIP("127.0.0.1"),
 		net.ParseIP("192.168.0.208"),
 		net.ParseIP("10.0.0.1"),
 	}
-	out := filterIPsToInterface(ips, loopback)
-	// loopback should contain 127.0.0.1; the other two LAN IPs
-	// should NOT be on the loopback interface.
-	if len(out) == 0 {
-		t.Fatalf("expected at least 127.0.0.1 to survive the filter, got empty")
+	adv := advertisementOf(ips, loopback, addrs)
+	if !ipSetEqual(adv.ips, []net.IP{net.ParseIP("127.0.0.1")}) {
+		t.Errorf("advertised %v for the loopback interface, want [127.0.0.1]", ipsForLog(adv.ips))
 	}
-	for _, ip := range out {
-		s := ip.String()
-		if s == "192.168.0.208" || s == "10.0.0.1" {
-			t.Errorf("non-loopback IP %s passed filter for loopback interface", s)
+}
+
+// TestAdvertisementSameIsWhatARebuildWouldChange pins the rebind loop's
+// change detection: two snapshots of the host are the same advertisement
+// when a rebuild would make the same responder, pinned to the same
+// interface and carrying the same addresses. The first rows are the ones
+// that rebuilt the responder for nothing until 2026-09-28, when the loop
+// compared every interface's addresses: a tunnel's appearing, a docker
+// veth's going (measured on a Linux docker host: three rebuilds in its
+// first ten minutes, each a veth, none changing what was advertised).
+func TestAdvertisementSameIsWhatARebuildWouldChange(t *testing.T) {
+	en0 := &net.Interface{Index: 14, Name: "en0"}
+	en0Readded := &net.Interface{Index: 52, Name: "en0"}
+	en5 := &net.Interface{Index: 8, Name: "en5"}
+	addrs := func(ips ...string) []net.Addr {
+		out := make([]net.Addr, 0, len(ips))
+		for _, s := range ips {
+			out = append(out, &net.IPNet{IP: net.ParseIP(s), Mask: net.CIDRMask(64, 128)})
 		}
+		return out
+	}
+	ips := func(s ...string) []net.IP {
+		out := make([]net.IP, 0, len(s))
+		for _, v := range s {
+			out = append(out, net.ParseIP(v))
+		}
+		return out
+	}
+	en0Addrs := addrs("192.168.1.20", "fe80::e0")
+	host := ips("192.168.1.20", "fe80::e0", "fe80::a0d1")
+	cases := []struct {
+		name        string
+		before      advertisement
+		after       advertisement
+		wantRebuild bool
+	}{
+		{"a tunnel appears",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(append(ips("100.64.0.7", "fd7a:115c:a1e0::7", "fe80::d12"), host...), en0, en0Addrs),
+			false},
+		{"a docker veth goes",
+			advertisementOf(append(ips("fe80::17"), host...), en0, en0Addrs),
+			advertisementOf(host, en0, en0Addrs),
+			false},
+		{"the same addresses in another order",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(ips("fe80::a0d1", "fe80::e0", "192.168.1.20"), en0, en0Addrs),
+			false},
+		{"the pinned interface gains an address",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(append(ips("fd12:3456::20"), host...), en0, addrs("192.168.1.20", "fe80::e0", "fd12:3456::20")),
+			true},
+		{"the pinned interface's address changes",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(ips("192.168.1.21", "fe80::e0", "fe80::a0d1"), en0, addrs("192.168.1.21", "fe80::e0")),
+			true},
+		{"the pick moves to another interface",
+			advertisementOf(append(ips("10.0.0.5"), host...), en0, en0Addrs),
+			advertisementOf(append(ips("10.0.0.5"), host...), en5, addrs("10.0.0.5")),
+			true},
+		{"the pinned interface comes back under a new index",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(host, en0Readded, en0Addrs),
+			true},
+		{"the pick is lost",
+			advertisementOf(host, en0, en0Addrs),
+			advertisementOf(host, nil, nil),
+			true},
+		// With nothing pinned the responder advertises every address, so
+		// every address counts.
+		{"nothing pinned: a tunnel appears",
+			advertisementOf(host, nil, nil),
+			advertisementOf(append(ips("100.64.0.7"), host...), nil, nil),
+			true},
+		// A pinned interface carrying none of the host's addresses falls
+		// back to all of them, and so does the comparison.
+		{"pinned to an interface with none of the addresses: a tunnel appears",
+			advertisementOf(host, en5, nil),
+			advertisementOf(append(ips("100.64.0.7"), host...), en5, nil),
+			true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := !tc.after.same(tc.before); got != tc.wantRebuild {
+				t.Errorf("rebuild = %v, want %v (before %s %v, after %s %v)", got, tc.wantRebuild,
+					ifaceForLog(tc.before.iface), ipsForLog(tc.before.ips), ifaceForLog(tc.after.iface), ipsForLog(tc.after.ips))
+			}
+			if tc.before.same(tc.after) != tc.after.same(tc.before) {
+				t.Error("same is not symmetric")
+			}
+		})
+	}
+}
+
+// TestTheRunningAdvertisementIsTheOneBuilt pins what maybeRebind compares
+// against: the running record is the advertisement rebuildLocked stood up,
+// the pinned interface and the addresses narrowed to it, and a rebuild on
+// a lost pick records the OS's choice (no interface) and every address.
+func TestTheRunningAdvertisementIsTheOneBuilt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mdns live test skipped on windows")
+	}
+	loopback := loopbackInterface(t)
+	var picked atomic.Pointer[net.Interface]
+	picked.Store(loopback)
+	host := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.0.2.7")}
+	a, err := advertiseInternal(Config{
+		InstanceName:    "running-test",
+		Port:            62993,
+		ProtocolVersion: 1,
+		LibraryName:     "Running Test",
+		InterfaceSource: func() *net.Interface { return picked.Load() },
+	}, func() []net.IP { return host }, time.Hour, false)
+	if err != nil {
+		t.Skipf("mdns unavailable in this env: %v", err)
+	}
+	defer a.Close()
+
+	a.rebindMu.Lock()
+	running := a.running
+	a.rebindMu.Unlock()
+	if running.iface == nil || running.iface.Index != loopback.Index {
+		t.Fatalf("running pinned to %q, want %s", ifaceForLog(running.iface), loopback.Name)
+	}
+	if !ipSetEqual(running.ips, []net.IP{net.ParseIP("127.0.0.1")}) {
+		t.Fatalf("running advertises %v, want only the pinned interface's [127.0.0.1]", ipsForLog(running.ips))
+	}
+
+	picked.Store(nil)
+	a.maybeRebind()
+
+	a.rebindMu.Lock()
+	defer a.rebindMu.Unlock()
+	if a.running.iface != nil {
+		t.Errorf("running pinned to %s after the pick was lost, want none", a.running.iface.Name)
+	}
+	if !ipSetEqual(a.running.ips, host) {
+		t.Errorf("running advertises %v with nothing pinned, want every address %v", ipsForLog(a.running.ips), ipsForLog(host))
 	}
 }

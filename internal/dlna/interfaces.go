@@ -3,14 +3,15 @@ package dlna
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"slices"
 )
 
 // EligibilityOpts customizes the per-interface LAN-eligibility check.
 // TsnetIfaceName, when non-empty, opts the Tailscale tsnet interface
-// in to DLNA binding — by default a CGNAT 100.64/10 address (Tailscale's
-// range) is refused so an operator who hasn't opted in can't accidentally
-// expose DLNA over their tailnet.
+// in to DLNA binding — by default Tailscale's addresses (CGNAT 100.64/10
+// and the ULA fd7a:115c:a1e0::/48) are refused so an operator who hasn't
+// opted in can't accidentally expose DLNA over their tailnet.
 type EligibilityOpts struct {
 	// TsnetIfaceName is the OS-level interface name of the Tailscale
 	// tsnet socket (e.g. "utun7" on macOS, "tailscale0" on Linux).
@@ -26,6 +27,7 @@ type EligibilityOpts struct {
 //
 // Allowed:
 //   - RFC1918 private ranges: 10/8, 172.16/12, 192.168/16
+//   - IPv6 unique local addresses (fc00::/7), except Tailscale's
 //   - Link-local IPv4 (169.254/16) and IPv6 (fe80::/10)
 //   - The opted-in Tailscale tsnet interface (opts.TsnetIfaceName)
 //
@@ -33,9 +35,10 @@ type EligibilityOpts struct {
 //   - Loopback (127.0.0.1, ::1) — DLNA on loopback is useless and is a
 //     symptom of misconfiguration
 //   - Public IPs (anything that's not in the allowed ranges)
-//   - CGNAT (100.64/10) when NOT opted in via TsnetIfaceName — even
-//     though Tailscale CGNAT addresses appear here, they're refused
-//     unless explicitly opted in
+//   - Tailscale's addresses, CGNAT 100.64/10 and the ULA
+//     fd7a:115c:a1e0::/48, when NOT opted in via TsnetIfaceName. Every
+//     Tailscale interface carries both; they count as public, so a
+//     link-local address beside them admits nothing either.
 //
 // The helper signature accepts (iface, addrs) separately so tests can
 // construct interface descriptors without making real OS-level calls
@@ -77,6 +80,14 @@ func IsLANEligibleInterface(iface net.Interface, addrs []net.Addr, opts Eligibil
 			continue
 		}
 		switch {
+		case isTailscaleULA(ip):
+			// Tailscale's IPv6 range is inside fc00::/7, so IsPrivate
+			// below would count it as a LAN address, and it admitted
+			// every Tailscale interface without the opt-in above until
+			// 2026-09-28. It counts as public, as the tailnet's IPv4
+			// range does below, which also keeps the link-local arm from
+			// admitting a tailnet interface that has no IPv4 address.
+			hasPublic = true
 		case ip.IsPrivate():
 			// RFC1918 IPv4 + RFC4193 IPv6 unique-local.
 			hasPrivate = true
@@ -84,12 +95,24 @@ func IsLANEligibleInterface(iface net.Interface, addrs []net.Addr, opts Eligibil
 			// fe80::/10 + 169.254/16 — neither Private nor GlobalUnicast.
 			hasLinkLocal = true
 		case ip.IsGlobalUnicast():
-			// Public v4/v6, incl. CGNAT 100.64/10 (only LAN-eligible via the
-			// TsnetIfaceName opt-in above).
+			// Public v4/v6, incl. CGNAT 100.64/10, Tailscale's IPv4 range
+			// (only LAN-eligible via the TsnetIfaceName opt-in above).
 			hasPublic = true
 		}
 	}
 	return hasPrivate || (hasLinkLocal && !hasPublic)
+}
+
+// tailscaleULA is fd7a:115c:a1e0::/48, the IPv6 range Tailscale numbers
+// every node from (tailscale.com/net/tsaddr's TailscaleULARange, which a
+// test pins it to). Its IPv4 half, 100.64/10, needs no prefix of its own:
+// net.IP.IsPrivate does not count it, so it is already a public address.
+var tailscaleULA = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+
+// isTailscaleULA reports whether ip is in tailscaleULA.
+func isTailscaleULA(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	return ok && tailscaleULA.Contains(addr.Unmap())
 }
 
 // lanAddressClass is the best kind of address that makes an interface
@@ -170,10 +193,11 @@ type interfaceAddrs func(*net.Interface) ([]net.Addr, error)
 func hostInterfaceAddrs(ifi *net.Interface) ([]net.Addr, error) { return ifi.Addrs() }
 
 // lanCandidate is one interface IsLANEligibleInterface accepted, with its
-// lanPreference.
+// lanPreference and whether it carries an IPv4 address (carriesIPv4).
 type lanCandidate struct {
 	iface *net.Interface
 	pref  lanPreference
+	ipv4  bool
 }
 
 // lanCandidates returns every interface in ifaces that IsLANEligibleInterface
@@ -191,10 +215,26 @@ func lanCandidates(ifaces []net.Interface, addrsOf interfaceAddrs, opts Eligibil
 			// escape per candidate, and ifaces outlives the call through
 			// the pointers the multicast set returns (gemini-code-assist on
 			// PR #328).
-			out = append(out, lanCandidate{iface: &ifaces[i], pref: lanPreferenceOf(ifaces[i], addrs, opts)})
+			out = append(out, lanCandidate{
+				iface: &ifaces[i],
+				pref:  lanPreferenceOf(ifaces[i], addrs, opts),
+				ipv4:  carriesIPv4(addrs),
+			})
 		}
 	}
 	return out
+}
+
+// carriesIPv4 reports whether addrs hold an IPv4 address other than loopback
+// and unspecified, a link-local 169.254/16 one included: the rule by which
+// cmd/bridge's firstIPv4OnInterface picks an SSDP advertiser's address.
+func carriesIPv4(addrs []net.Addr) bool {
+	for _, addr := range addrs {
+		if v4 := ipFromAddr(addr).To4(); v4 != nil && !v4.IsLoopback() && !v4.IsUnspecified() {
+			return true
+		}
+	}
+	return false
 }
 
 // pickLANInterface is PickLANEligibleInterface over a given enumeration: the
@@ -217,20 +257,48 @@ func pickLANInterface(ifaces []net.Interface, addrsOf interfaceAddrs, opts Eligi
 }
 
 // pickAllLANInterfaces is PickAllLANEligibleInterfaces over a given
-// enumeration: every candidate in enumeration order, except that a
-// linkLocalTunnel is left out whenever anything else is eligible. When only
-// such tunnels are, they are all kept, as they always were.
+// enumeration: every candidate in enumeration order, less two kinds, each
+// left out only where that leaves something, so a host with nothing else
+// keeps them as it always did.
+//
+//   - A linkLocalTunnel, whenever anything else is eligible.
+//   - Then a candidate with no IPv4 address (carriesIPv4), whenever one with
+//     an IPv4 address remains. Every consumer of the set runs SSDP over IPv4
+//     (udp4, 239.255.255.250:1900): the advertisers, which skip such a
+//     member themselves, and the renderer and UPnP-upstream discovery
+//     clients, which did not. On a Mac awdl0 and llw0 (fe80 only) each got
+//     a client whose every M-SEARCH failed with `sendto: can't assign
+//     requested address`; on Linux each docker veth (fe80 only) got one
+//     whose sends went out into a port of a bridge (docker0) that is a
+//     member with an IPv4 address of its own.
+//
+// The single picker ranks for the mDNS responder, which answers over IPv6
+// as well, so its pick can be a member this rule leaves out: an IPv6-only
+// LAN beside a tunnel holding a private IPv4, say.
 func pickAllLANInterfaces(ifaces []net.Interface, addrsOf interfaceAddrs, opts EligibilityOpts) []*net.Interface {
 	cands := lanCandidates(ifaces, addrsOf, opts)
-	dropTunnels := slices.ContainsFunc(cands, func(c lanCandidate) bool { return !c.pref.linkLocalTunnel() })
+	cands = withoutUnlessAll(cands, func(c lanCandidate) bool { return c.pref.linkLocalTunnel() })
+	cands = withoutUnlessAll(cands, func(c lanCandidate) bool { return !c.ipv4 })
 	var out []*net.Interface
 	for _, c := range cands {
-		if dropTunnels && c.pref.linkLocalTunnel() {
-			continue
-		}
 		out = append(out, c.iface)
 	}
 	return out
+}
+
+// withoutUnlessAll returns cands less those drop reports, in order, or cands
+// unchanged when drop reports every one of them.
+func withoutUnlessAll(cands []lanCandidate, drop func(lanCandidate) bool) []lanCandidate {
+	if !slices.ContainsFunc(cands, func(c lanCandidate) bool { return !drop(c) }) {
+		return cands
+	}
+	var kept []lanCandidate
+	for _, c := range cands {
+		if !drop(c) {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 func ipFromAddr(addr net.Addr) net.IP {

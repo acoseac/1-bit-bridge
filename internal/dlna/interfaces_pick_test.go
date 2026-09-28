@@ -68,20 +68,41 @@ func ifaceNames(ifaces []*net.Interface) []string {
 }
 
 // assertPickIsInTheSet requires what the two pickers return over one host to
-// agree: the single pick is a member of the multicast set, and the single
-// picker errors exactly when that set is empty. The mDNS responder binds the
-// single pick, and an interface it binds must not be one the multicast set
-// calls unusable.
+// agree: the single picker errors exactly when the multicast set is empty,
+// and the single pick is a member of the set unless the set left it out for
+// carrying no IPv4 address. The mDNS responder binds the single pick, and an
+// interface it binds must not be one the multicast set calls unusable, but
+// the set is where SSDP runs over IPv4, while the responder answers over
+// IPv6 as well, so an IPv6-only LAN can be its pick and outside the set.
 func assertPickIsInTheSet(t *testing.T, ifaces []net.Interface, addrsOf interfaceAddrs, opts EligibilityOpts) {
 	t.Helper()
 	one, err := pickLANInterface(ifaces, addrsOf, opts)
-	all := ifaceNames(pickAllLANInterfaces(ifaces, addrsOf, opts))
+	set := pickAllLANInterfaces(ifaces, addrsOf, opts)
+	all := ifaceNames(set)
 	switch {
 	case err != nil && len(all) != 0:
 		t.Errorf("single picker errored (%v) but the multicast set is %v", err, all)
 	case err == nil && !slices.Contains(all, one.Name):
-		t.Errorf("single pick %s is not in the multicast set %v", one.Name, all)
+		if hostIPv4(t, addrsOf, one) || !slices.ContainsFunc(set, func(ifi *net.Interface) bool { return hostIPv4(t, addrsOf, ifi) }) {
+			t.Errorf("single pick %s is not in the multicast set %v", one.Name, all)
+		}
 	}
+}
+
+// hostIPv4 reports whether ifi's addresses, as addrsOf gives them, include
+// an IPv4 address other than loopback and unspecified.
+func hostIPv4(t *testing.T, addrsOf interfaceAddrs, ifi *net.Interface) bool {
+	t.Helper()
+	addrs, err := addrsOf(ifi)
+	if err != nil {
+		t.Fatalf("addresses of %s: %v", ifi.Name, err)
+	}
+	for _, a := range addrs {
+		if v4 := ipFromAddr(a).To4(); v4 != nil && !v4.IsLoopback() && !v4.IsUnspecified() {
+			return true
+		}
+	}
+	return false
 }
 
 // TestLANPreferenceOfRanksWhatTheInterfaceCarries pins the key the pickers
@@ -110,9 +131,10 @@ func TestLANPreferenceOfRanksWhatTheInterfaceCarries(t *testing.T) {
 			lanPreference{pointToPoint: false, class: lanPrivateIPv4}},
 		{"self_assigned_v4", lan("en12", "fe80::e12", "169.254.20.30"), EligibilityOpts{},
 			lanPreference{pointToPoint: false, class: lanLinkLocalOnly}},
-		// Tailscale's utun on the Mac: eligible through its fd7a:115c:a1e0::
-		// ULA, whatever the CGNAT address beside it.
-		{"macos_tailscale_utun", tunnel("utun12", "fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"), EligibilityOpts{},
+		// Tailscale's utun on the Mac, eligible only through the opt-in
+		// (its fd7a:115c:a1e0:: ULA admitted it without one until
+		// 2026-09-28).
+		{"opted_in_macos_tailscale_utun", tunnel("utun12", "fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"), EligibilityOpts{TsnetIfaceName: "utun12"},
 			lanPreference{pointToPoint: true, class: lanOtherUsable}},
 		{"wireguard_private_v4", tunnel("wg0", "10.8.0.2"), EligibilityOpts{},
 			lanPreference{pointToPoint: true, class: lanPrivateIPv4}},
@@ -186,9 +208,12 @@ func TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4(t *testing.T) {
 			lan("en0", "192.168.1.20"),
 		}, EligibilityOpts{}, "en0"},
 		// Go gives Wintun (IF_TYPE_PROP_VIRTUAL) no point-to-point flag,
-		// so on Windows it is the address class that puts the LAN first.
-		{"windows_tailscale_adapter_before_ethernet", []fakeIface{
-			{name: "Tailscale", flags: net.FlagUp | net.FlagRunning, addrs: []string{"fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"}},
+		// so on Windows it is the address class that puts the LAN first:
+		// here a WireGuard adapter numbered with a ULA. (This row was
+		// Tailscale's adapter until 2026-09-28, which is no longer
+		// eligible without the opt-in.)
+		{"windows_wireguard_adapter_before_ethernet", []fakeIface{
+			{name: "WireGuard", flags: net.FlagUp | net.FlagRunning, addrs: []string{"fe80::d12", "fd12:3456::7"}},
 			lan("Ethernet", "192.168.1.20"),
 		}, EligibilityOpts{}, "Ethernet"},
 		{"non_tunnel_link_local_beats_private_tunnel", []fakeIface{
@@ -242,6 +267,9 @@ func TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4(t *testing.T) {
 // whose only addresses are link-local, which is left out whenever anything
 // else is eligible. The first row is the Mac this was measured on: six such
 // utuns were in the set, and an SSDP client bound to one cannot send IPv4.
+// Its want lost two more members on 2026-09-28: utun12, Tailscale's, which
+// is not eligible without the opt-in, and awdl0, which carries no IPv4
+// address (TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4).
 func TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -256,7 +284,7 @@ func TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel(t *testing.T) {
 			tunnel("utun1", "fe80::a2"),
 			tunnel("utun12", "fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"),
 			lan("en12", "fe80::e12", "169.254.20.30"),
-		}, EligibilityOpts{}, []string{"en0", "awdl0", "utun12", "en12"}},
+		}, EligibilityOpts{}, []string{"en0", "en12"}},
 		{"tunnels_alone_are_kept", []fakeIface{
 			tunnel("utun0", "fe80::2"),
 			tunnel("utun1", "fe80::3"),
@@ -289,6 +317,145 @@ func TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel(t *testing.T) {
 			got := ifaceNames(pickAllLANInterfaces(ifaces, addrsOf, tc.opts))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("multicast set %v, want %v", got, tc.want)
+			}
+			assertPickIsInTheSet(t, ifaces, addrsOf, tc.opts)
+		})
+	}
+}
+
+// TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4 pins the set's second
+// rule: after the tunnel rule, a member with no IPv4 address is left out
+// whenever one with an IPv4 address remains, a link-local 169.254/16 one
+// counting. Every consumer of the set runs SSDP over IPv4; on the Mac this
+// was measured on, awdl0 and llw0 (fe80 only) each got a renderer-discovery
+// client whose every M-SEARCH failed, and on the Linux host each docker veth
+// (fe80 only, a port of a bridge in the set) got one per container.
+func TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4(t *testing.T) {
+	cases := []struct {
+		name string
+		host []fakeIface
+		opts EligibilityOpts
+		want []string
+	}{
+		{"macos_awdl0_llw0_beside_en0", []fakeIface{
+			lan("en0", "fe80::e0", "192.168.1.20"),
+			lan("awdl0", "fe80::a0d1"),
+			lan("llw0", "fe80::11"),
+		}, EligibilityOpts{}, []string{"en0"}},
+		{"linux_docker_veths", []fakeIface{
+			lan("enp1s0f0", "192.168.1.9", "fe80::9"),
+			lan("docker0", "172.17.0.1", "fe80::17"),
+			lan("br-1", "172.18.0.1", "fe80::18"),
+			lan("veth1", "fe80::a"),
+			lan("veth2", "fe80::b"),
+		}, EligibilityOpts{}, []string{"enp1s0f0", "docker0", "br-1"}},
+		{"ula_only_lan_beside_en0", []fakeIface{
+			lan("en0", "192.168.1.20"),
+			lan("en1", "fd12:3456::1"),
+		}, EligibilityOpts{}, []string{"en0"}},
+		{"link_local_ipv4_counts", []fakeIface{
+			lan("en0", "192.168.1.20"),
+			lan("en5", "169.254.1.2", "fe80::5"),
+			lan("awdl0", "fe80::a0d1"),
+		}, EligibilityOpts{}, []string{"en0", "en5"}},
+		{"opted_in_tsnet_counts_as_ipv4", []fakeIface{
+			tunnel("utun7", "100.64.0.5"),
+			lan("awdl0", "fe80::a0d1"),
+		}, EligibilityOpts{TsnetIfaceName: "utun7"}, []string{"utun7"}},
+		// The single pick is en1 (not point-to-point) and outside the set:
+		// the one case the relaxed membership check allows.
+		{"ipv6_only_lan_beside_an_ipv4_tunnel", []fakeIface{
+			lan("en1", "fd12:3456::1"),
+			tunnel("wg0", "10.8.0.2"),
+		}, EligibilityOpts{}, []string{"wg0"}},
+		// Nothing carries IPv4: every member stays, as it always did.
+		{"ipv6_only_host_keeps_every_member", []fakeIface{
+			lan("en1", "fd12:3456::1", "fe80::1"),
+			lan("awdl0", "fe80::a0d1"),
+		}, EligibilityOpts{}, []string{"en1", "awdl0"}},
+		// The tunnel rule runs first, and neither rule empties the set.
+		{"tunnel_rule_first", []fakeIface{
+			tunnel("utun0", "fe80::2"),
+			lan("awdl0", "fe80::a0d1"),
+		}, EligibilityOpts{}, []string{"awdl0"}},
+		{"nothing_eligible", []fakeIface{
+			lan("eth0", "8.8.8.8", "fe80::1"),
+		}, EligibilityOpts{}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ifaces, addrsOf := fakeHost(tc.host)
+			got := ifaceNames(pickAllLANInterfaces(ifaces, addrsOf, tc.opts))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("multicast set %v, want %v", got, tc.want)
+			}
+			assertPickIsInTheSet(t, ifaces, addrsOf, tc.opts)
+		})
+	}
+}
+
+// TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn drives both pickers
+// over the shapes Tailscale's interface takes: macOS's utun and Linux's
+// tailscale0 (point-to-point) and Windows' Wintun adapter (not), each with a
+// 100.64/10 address, an fd7a:115c:a1e0::/48 one and an fe80. The ULA made
+// each one eligible until 2026-09-28, so it was in every multicast set,
+// with an SSDP advertiser and two discovery clients on it, and on Windows
+// beside a zero-config LAN it was the single pick the mDNS responder bound.
+func TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn(t *testing.T) {
+	windowsTailscale := fakeIface{name: "Tailscale", flags: net.FlagUp | net.FlagRunning, addrs: []string{"fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"}}
+	cases := []struct {
+		name    string
+		host    []fakeIface
+		opts    EligibilityOpts
+		wantOne string // "" means the single picker must error
+		wantAll []string
+	}{
+		{"macos", []fakeIface{
+			tunnel("utun0", "fe80::a1"),
+			lan("en0", "fe80::e0", "192.168.1.20"),
+			tunnel("utun12", "fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"),
+		}, EligibilityOpts{}, "en0", []string{"en0"}},
+		{"linux", []fakeIface{
+			lan("enp1s0f0", "192.168.1.9", "fe80::9"),
+			lan("docker0", "172.17.0.1", "fe80::17"),
+			tunnel("tailscale0", "100.64.0.7", "fd7a:115c:a1e0::7", "fe80::7"),
+		}, EligibilityOpts{}, "enp1s0f0", []string{"enp1s0f0", "docker0"}},
+		{"windows_beside_ethernet", []fakeIface{
+			windowsTailscale,
+			lan("Ethernet", "192.168.1.20"),
+		}, EligibilityOpts{}, "Ethernet", []string{"Ethernet"}},
+		{"windows_beside_a_zero_config_lan", []fakeIface{
+			windowsTailscale,
+			lan("Ethernet", "169.254.7.8", "fe80::1"),
+		}, EligibilityOpts{}, "Ethernet", []string{"Ethernet"}},
+		{"ipv6_only_tailnet_beside_a_zero_config_lan", []fakeIface{
+			tunnel("tailscale0", "fd7a:115c:a1e0::7", "fe80::7"),
+			lan("en0", "fe80::1"),
+		}, EligibilityOpts{}, "en0", []string{"en0"}},
+		// A host with a public NIC and Tailscale (a cloud VM) has no LAN.
+		{"tailnet_only_host", []fakeIface{
+			lan("eth0", "203.0.113.9", "fe80::1"),
+			tunnel("tailscale0", "100.64.0.7", "fd7a:115c:a1e0::7", "fe80::7"),
+		}, EligibilityOpts{}, "", nil},
+		{"opted_in", []fakeIface{
+			lan("en0", "192.168.1.20"),
+			tunnel("utun12", "fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"),
+		}, EligibilityOpts{TsnetIfaceName: "utun12"}, "en0", []string{"en0", "utun12"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ifaces, addrsOf := fakeHost(tc.host)
+			one, err := pickLANInterface(ifaces, addrsOf, tc.opts)
+			switch {
+			case tc.wantOne == "" && err == nil:
+				t.Errorf("single picker chose %s, want an error", one.Name)
+			case tc.wantOne != "" && err != nil:
+				t.Errorf("single picker: %v, want %s", err, tc.wantOne)
+			case tc.wantOne != "" && one.Name != tc.wantOne:
+				t.Errorf("single picker chose %s, want %s", one.Name, tc.wantOne)
+			}
+			if got := ifaceNames(pickAllLANInterfaces(ifaces, addrsOf, tc.opts)); !slices.Equal(got, tc.wantAll) {
+				t.Errorf("multicast set %v, want %v", got, tc.wantAll)
 			}
 			assertPickIsInTheSet(t, ifaces, addrsOf, tc.opts)
 		})
