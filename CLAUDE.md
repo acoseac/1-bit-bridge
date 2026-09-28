@@ -437,9 +437,10 @@ lost my library."
   volume mounted in a folder (`ModeIrregular` without `ModeDir` since Go
   1.23), was one entry that is not a directory. Measured on main: Scan and a
   subtree scan of the root indexed 0 rows (2 with the same root spelled with
-  a trailing slash), a multi-root install lost that root's rows, the watcher
-  registered 0 watches and returned nil, the doctor's inotify count saw 0
-  directories, and `POST /v1/upscale` of the root enqueued the folder itself.
+  a trailing slash), a multi-root scan indexed nothing under the linked root,
+  the watcher registered 0 watches and returned nil, the doctor's inotify
+  count saw 0 directories, and `POST /v1/upscale` of the root enqueued the
+  folder itself.
   **The half that deleted a library**: an install whose root BECAME a link
   after it was indexed logged `suspected clean-empty mount failure` every
   scan, with the hint to place `.bridge-allow-empty`; the sentinel, created
