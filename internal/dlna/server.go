@@ -194,16 +194,20 @@ type Server struct {
 
 	// Observation state for the callback-vs-source divergence warning
 	// (see callbackHostMatchesSource) and the host-local refusal warning
-	// (noteCallbackRefusal), one set for both. One Warn per distinct
-	// (callbackHost, sourceIP) pair, bounded, so a control point that
-	// re-subscribes on a timer produces one line rather than one per
+	// (noteCallbackRefusal), a set for each under one mutex. One Warn per
+	// distinct (callbackHost, sourceIP) pair, bounded, so a control point
+	// that re-subscribes on a timer produces one line rather than one per
 	// renewal — this project has been bitten by a per-tick log before
-	// (199,078 of 200,000 lines from one ticker).
+	// (199,078 of 200,000 lines from one ticker). Two sets, because a peer
+	// reaches the refusal at will: sharing one bound let refused pairs use
+	// it up and silence the divergence lines, which are the evidence the
+	// private half of step two waits for.
 	callbackDivergeMu   sync.Mutex
 	callbackDivergeSeen map[string]struct{}
+	callbackRefusedSeen map[string]struct{}
 }
 
-// callbackDivergeSeenCap bounds the observation set. A LAN has a handful
+// callbackDivergeSeenCap bounds each observation set. A LAN has a handful
 // of control points; anything past this is either a fuzzer or a bug, and
 // silently not warning further is the right failure mode for a
 // diagnostic.
@@ -799,7 +803,7 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 	// does nothing in production — the exact flood this function exists to
 	// avoid. (Caught in review; the first version's test used one fixed
 	// port and therefore passed against the bug.)
-	if !s.firstSighting(callbackHost + "|" + sourceIPOf(remoteAddr)) {
+	if !s.firstSighting(&s.callbackDivergeSeen, callbackHost+"|"+sourceIPOf(remoteAddr)) {
 		return
 	}
 	s.log.Warn("GENA callback host differs from the SUBSCRIBE source — accepted for now, will be refused in a future release",
@@ -811,7 +815,7 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 }
 
 // noteCallbackRefusal logs, once per (callbackHost, sourceIP) pair and
-// within the same bound, a callback refused because it names this machine
+// within a bound of its own, a callback refused because it names this machine
 // or a link-local address that is not the subscriber's own, or a cloud
 // metadata address among them: B39's rule.
 // Most such lines are a peer aiming the bridge's NOTIFY at this host or the
@@ -820,7 +824,7 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 // Warn: a strict control point (Linn, Naim) waits for its initial NOTIFY,
 // and nothing else tells anyone why it never came.
 func (s *Server) noteCallbackRefusal(service, callbackHost, remoteAddr string) {
-	if !s.firstSighting("refused|" + callbackHost + "|" + sourceIPOf(remoteAddr)) {
+	if !s.firstSighting(&s.callbackRefusedSeen, callbackHost+"|"+sourceIPOf(remoteAddr)) {
 		return
 	}
 	s.log.Warn("GENA callback on this machine or a link-local address refused — the NOTIFY goes only to the subscriber's own, never to a cloud metadata address",
@@ -829,24 +833,25 @@ func (s *Server) noteCallbackRefusal(service, callbackHost, remoteAddr string) {
 		slog.String("subscribeSource", sourceIPOf(remoteAddr)))
 }
 
-// firstSighting records key in the observation set both warnings share and
-// reports whether it is new. It answers false for a key already seen AND for
-// every new key once the set holds callbackDivergeSeenCap entries: suppress
-// rather than log every unseen key forever, so a host manufacturing unique
-// addresses cannot turn a diagnostic into a flood by exhausting the cap.
-func (s *Server) firstSighting(key string) bool {
+// firstSighting records key in one warning's observation set (a pointer to
+// the Server field, allocated here on first use) and reports whether it is
+// new. It answers false for a key already seen AND for every new key once
+// the set holds callbackDivergeSeenCap entries: suppress rather than log
+// every unseen key forever, so a host manufacturing unique addresses cannot
+// turn a diagnostic into a flood by exhausting the cap.
+func (s *Server) firstSighting(set *map[string]struct{}, key string) bool {
 	s.callbackDivergeMu.Lock()
 	defer s.callbackDivergeMu.Unlock()
-	if s.callbackDivergeSeen == nil {
-		s.callbackDivergeSeen = make(map[string]struct{}, 8)
+	if *set == nil {
+		*set = make(map[string]struct{}, 8)
 	}
-	if _, seen := s.callbackDivergeSeen[key]; seen {
+	if _, seen := (*set)[key]; seen {
 		return false
 	}
-	if len(s.callbackDivergeSeen) >= callbackDivergeSeenCap {
+	if len(*set) >= callbackDivergeSeenCap {
 		return false
 	}
-	s.callbackDivergeSeen[key] = struct{}{}
+	(*set)[key] = struct{}{}
 	return true
 }
 

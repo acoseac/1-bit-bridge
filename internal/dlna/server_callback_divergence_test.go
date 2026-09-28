@@ -84,13 +84,16 @@ func Test_noteCallbackDivergence_SilentWhenCallbackIsTheSource(t *testing.T) {
 type callbackNote struct {
 	name, host, message string
 	note                func(s *Server, callbackHost, remoteAddr string)
+	seen                func(s *Server) map[string]struct{} // the note's own observation set
 }
 
 var callbackNotes = []callbackNote{
 	{"divergence", "192.168.1.250", "GENA callback host differs",
-		func(s *Server, host, remoteAddr string) { s.noteCallbackDivergence("cds", host, remoteAddr) }},
+		func(s *Server, host, remoteAddr string) { s.noteCallbackDivergence("cds", host, remoteAddr) },
+		func(s *Server) map[string]struct{} { return s.callbackDivergeSeen }},
 	{"refusal", "127.0.0.1", "GENA callback on this machine or a link-local address refused",
-		func(s *Server, host, remoteAddr string) { s.noteCallbackRefusal("cds", host, remoteAddr) }},
+		func(s *Server, host, remoteAddr string) { s.noteCallbackRefusal("cds", host, remoteAddr) },
+		func(s *Server) map[string]struct{} { return s.callbackRefusedSeen }},
 }
 
 func Test_callbackNotes_WarnOncePerPair(t *testing.T) {
@@ -146,7 +149,7 @@ func Test_callbackNotes_CapSuppressesRatherThanFloods(t *testing.T) {
 				n.note(s, n.host, "10.0."+itoa(i/256)+"."+itoa(i%256)+":49152")
 			}
 			s.callbackDivergeMu.Lock()
-			seen := len(s.callbackDivergeSeen)
+			seen := len(n.seen(s))
 			s.callbackDivergeMu.Unlock()
 			if seen > callbackDivergeSeenCap {
 				t.Errorf("observation set grew past its cap: %d > %d", seen, callbackDivergeSeenCap)
@@ -156,6 +159,24 @@ func Test_callbackNotes_CapSuppressesRatherThanFloods(t *testing.T) {
 				t.Errorf("logged %d lines for %d distinct sources; the cap must suppress, not just stop recording", lines, over)
 			}
 		})
+	}
+}
+
+// Test_callbackNotes_ARefusalFloodDoesNotSilenceTheDivergenceObserver pins
+// that the two warnings are bounded apart. A refusal is the one a peer
+// reaches at will: with one set for both, a peer sending cap distinct
+// refused pairs filled it, and the next divergence, the evidence backlog
+// B56 waits for before the private half of step two, was suppressed
+// (CodeRabbit on #1080).
+func Test_callbackNotes_ARefusalFloodDoesNotSilenceTheDivergenceObserver(t *testing.T) {
+	var buf bytes.Buffer
+	s := newLogCaptureServer(&buf)
+	for i := 0; i < callbackDivergeSeenCap*3; i++ {
+		s.noteCallbackRefusal("cds", "127.0.0.1", "10.1."+itoa(i/256)+"."+itoa(i%256)+":49152")
+	}
+	s.noteCallbackDivergence("cds", "192.168.1.250", "192.168.1.9:49152")
+	if c := strings.Count(buf.String(), "GENA callback host differs"); c != 1 {
+		t.Fatalf("a divergence after %d refused pairs logged %d lines, want 1: the refusals used up the observer's bound", callbackDivergeSeenCap*3, c)
 	}
 }
 
