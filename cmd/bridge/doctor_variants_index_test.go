@@ -371,3 +371,45 @@ func TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk(t *testing.T) {
 		t.Errorf("hint claims `--gc` measures the whole tree past a directory it cannot list: %q", c.Hint)
 	}
 }
+
+// TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC — a link the walk
+// could not stat is at most one file, and `--gc` weighs it as one more
+// orphan rather than refusing the walk (integrity.MassOrphanRefusalFor).
+// The probe must say what `--gc` will do with it, not withhold the verdict
+// as it does past a directory it could not list: here that is REFUSES,
+// over a lost index the link does not change.
+func TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root stats through any directory, so the link would resolve")
+	dir := t.TempDir()
+	_, variantsDir := variantsIndexInstall(t, dir, 2, 40)
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(variantsDir, "Parked", "album.flac")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(blocked, "sub"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+	if _, err := os.Stat(link); err == nil {
+		t.Skip("this user can stat through a 0000 directory — the fixture cannot reproduce the state")
+	}
+
+	idx, err := variantsIndexCounts(context.Background(), manifest.DefaultDBPath(filepath.Join(dir, "data")), variantsDir, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Unreadable != 1 || idx.UnlistedDirs != 0 {
+		t.Fatalf("the fixture is not one unstattable link: unreadable=%d unlistedDirs=%d", idx.Unreadable, idx.UnlistedDirs)
+	}
+	if !idx.WouldRefuseGC || idx.GCRefusesPartialWalk {
+		t.Errorf("wouldRefuse=%v refusesPartialWalk=%v, want true and false: `--gc` weighs the link and refuses the lost index",
+			idx.WouldRefuseGC, idx.GCRefusesPartialWalk)
+	}
+}
