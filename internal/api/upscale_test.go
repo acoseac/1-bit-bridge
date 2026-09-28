@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -72,15 +74,32 @@ func upscaleFixtureOpts(t *testing.T, withEnqueuer, dsdRender bool) (*httptest.S
 	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
+	seedUpscaleTree(t, root)
+	hs, raw, stub := upscaleServer(t, tmp, root, withEnqueuer, dsdRender)
+	return hs, raw, root, stub
+}
+
+// upscaleTreeFiles are the library-relative files seedUpscaleTree writes.
+var upscaleTreeFiles = []string{"Artist/Album/01.flac", "Artist/Album/02.flac", "Artist/Single.flac"}
+
+// seedUpscaleTree writes upscaleTreeFiles under root.
+func seedUpscaleTree(t *testing.T, root string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{"Artist/Album/01.flac", "Artist/Album/02.flac", "Artist/Single.flac"} {
+	for _, rel := range upscaleTreeFiles {
 		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), bytes.Repeat([]byte{0xAA}, 64), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
 
+// upscaleServer serves the api over the one library root, with its token
+// store under tmp, and returns the server, a valid bearer token and the stub
+// enqueuer.
+func upscaleServer(t *testing.T, tmp, root string, withEnqueuer, dsdRender bool) (*httptest.Server, string, *stubEnqueuer) {
+	t.Helper()
 	cfg := &config.Config{
 		LibraryRoots:  []string{root},
 		ListenAddress: ":7788",
@@ -105,7 +124,7 @@ func upscaleFixtureOpts(t *testing.T, withEnqueuer, dsdRender bool) (*httptest.S
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	return hs, raw, root, stub
+	return hs, raw, stub
 }
 
 func postJSON(t *testing.T, hs *httptest.Server, path, token string, body any) *http.Response {
@@ -208,6 +227,32 @@ func TestUpscaleFolderRecursivelyWalks(t *testing.T) {
 		if !seen {
 			t.Errorf("missing enqueue for %q", path)
 		}
+	}
+}
+
+// TestUpscaleFolderRequestForALinkedRootWalksThroughIt: a folder request for
+// the library root walks the root the way the scanner does. For a root that
+// is itself a link to a directory, the walk of the link was one entry that is
+// not a directory, so the request's only candidate was the folder itself
+// ("."), and no track under the root was enqueued.
+func TestUpscaleFolderRequestForALinkedRootWalksThroughIt(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "nas", "Music")
+	seedUpscaleTree(t, target)
+	root := filepath.Join(tmp, "Music")
+	if err := os.Symlink(target, root); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+	hs, tok, stub := upscaleServer(t, tmp, root, true, true)
+
+	resp := postJSON(t, hs, "/v1/upscale", tok, UpscaleRequest{Path: "."})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", resp.StatusCode)
+	}
+	sort.Strings(stub.calls)
+	if strings.Join(stub.calls, " ") != strings.Join(upscaleTreeFiles, " ") {
+		t.Errorf("enqueued %v, want every file under the root: %v", stub.calls, upscaleTreeFiles)
 	}
 }
 

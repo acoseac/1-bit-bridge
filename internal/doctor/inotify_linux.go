@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // errCountCapReached is the internal sentinel countDirs uses to stop the
@@ -94,12 +96,20 @@ func readInotifyLimit() (int, error) {
 // stops early once the running total reaches stopAt (the caller only
 // needs a "> threshold?" verdict), bounding the walk's cost on huge
 // libraries.
+//
+// A root that is itself a link to a directory is walked through, as the
+// watcher walks it (fsutil.WalkableRoot): walked as the link it counted
+// nothing, while the watcher registers a watch per directory behind it.
 func countDirs(roots []string, stopAt int) (int, error) {
 	total := 0
 	for _, root := range roots {
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		walkFrom, err := fsutil.WalkableRoot(root)
+		if err != nil {
+			return total, err
+		}
+		err = filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				if path == root {
+				if path == walkFrom {
 					// Root unreadable — bubble up so checkInotifyLimit's
 					// caller produces a Warn instead of a misleading OK.
 					return err
@@ -111,7 +121,7 @@ func countDirs(roots []string, stopAt int) (int, error) {
 				return nil
 			}
 			name := d.Name()
-			if path != root && shouldSkipNoiseDir(name) {
+			if path != walkFrom && shouldSkipNoiseDir(name) {
 				return filepath.SkipDir
 			}
 			total++

@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -191,11 +192,33 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // Now we surface it as an error, and the caller in `Run()` logs
 // "initial watch add failed (partial coverage)" so the operator
 // at least knows.
+//
+// A configured root that is itself a link to a directory (or on Windows a
+// junction) is walked THROUGH, as the scanner walks it
+// (fsutil.WalkableRoot): walked as the link, the root was one entry that
+// is not a directory, so not a single watch was registered and addTree
+// still returned nil — the library had no instant updates and nothing said
+// so. Every watch is registered under the configured spelling, so an event
+// names a directory ScanSubtree finds under its configured root; the root's
+// own watch is added as the configured path, which inotify, kqueue (one
+// level of link) and ReadDirectoryChangesW each resolve. Only a configured
+// root is followed: a directory that appears at runtime is walked as the
+// scanner walks it, and the scanner walks no link below a root.
 func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
+	walkFrom := root
+	if isConfiguredRoot {
+		var err error
+		if walkFrom, err = fsutil.WalkableRoot(root); err != nil {
+			// The root cannot be seen through: the caller logs it as a
+			// failed initial watch, which is the "root-level walk failure
+			// surfaces" rule above.
+			return err
+		}
+	}
 	limitHit := false
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if path == root {
+			if path == walkFrom {
 				// Failure to even open the root — surface so the
 				// caller can log a clear warning. Returning the
 				// error stops the walk, which is what we want
@@ -210,17 +233,23 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 		if !d.IsDir() {
 			return nil
 		}
-		// `isConfiguredRoot && path == root` is the ONLY exemption.
+		// `isConfiguredRoot && path == walkFrom` is the ONLY exemption.
 		// Without it a configured root whose basename starts with a dot
 		// (`/mnt/storage/.music`) registers ZERO watches and addTree
 		// returns nil, so the caller's "initial watch add failed
 		// (partial coverage)" warning never fires either: the library
 		// silently loses instant-update coverage with no operator
-		// signal at all. WalkDir hands the callback the `root` string
-		// verbatim, so string identity is exact. A runtime-discovered
+		// signal at all. WalkDir hands the callback the string it was
+		// handed verbatim, so string identity is exact against
+		// walkFrom (never root: a linked root's walkFrom carries the
+		// separator WalkableRoot appended). A runtime-discovered
 		// directory gets no exemption — see the docblock.
-		if (!isConfiguredRoot || path != root) && shouldSkipDir(d.Name()) {
+		if (!isConfiguredRoot || path != walkFrom) && shouldSkipDir(d.Name()) {
 			return filepath.SkipDir
+		}
+		watchPath := path
+		if path == walkFrom {
+			watchPath = root
 		}
 		if limitHit {
 			// Every subsequent Add would fail the same way, so there
@@ -231,11 +260,11 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 			// periodic full scan covers the gap.
 			return filepath.SkipAll
 		}
-		if addErr := wt.w.Add(path); addErr != nil {
+		if addErr := wt.w.Add(watchPath); addErr != nil {
 			switch {
 			case isWatchLimitError(addErr):
 				watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
-					"path", path, "err", addErr,
+					"path", watchPath, "err", addErr,
 					"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
 				limitHit = true
 				return nil
@@ -245,12 +274,12 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 				// max_user_watches here would send them down the wrong
 				// path. Same degrade-to-periodic fallback, different hint.
 				watcherLogger.Error("open-file limit reached — periodic scan covers the gap; raise the open-files limit to fix",
-					"path", path, "err", addErr,
+					"path", watchPath, "err", addErr,
 					"hint", "raise the process open-files limit (ulimit -n, or LimitNOFILE= in the systemd unit) or the system-wide fs.file-max")
 				limitHit = true
 				return nil
 			default:
-				watcherLogger.Warn("watch add", "path", path, "err", addErr)
+				watcherLogger.Warn("watch add", "path", watchPath, "err", addErr)
 			}
 		}
 		return nil
