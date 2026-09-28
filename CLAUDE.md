@@ -524,8 +524,10 @@ lost my library."
   NetApp's `~snapshot`. The walk descended them, so a recycle bin's deleted
   files and a snapshot's copies were indexed as tracks of their own (the
   old walk indexed six of the test's fixtures on macOS), and their rows now
-  go after the usual missing-count grace. It is exported so the doctor's inotify count skips
-  by it, not by a copy of its own that had drifted. `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
+  go after the usual missing-count grace. It is exported so the doctor's
+  inotify count skips by it: that count kept a copy of the old list, which
+  would have gone on counting what the watcher now skips.
+  `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
   `TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused`,
   `TestScanner_OSAndNASDetritusIsNotLibraryContent`.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from

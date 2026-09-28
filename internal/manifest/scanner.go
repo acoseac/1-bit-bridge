@@ -2870,11 +2870,11 @@ func ShouldSkipDir(name string) bool {
 // (ShouldSkipDir says no), or a file it indexes (not a dot-file, and an
 // audio file it can enqueue). Both walks skip by it, and it is all the
 // clean-empty guard counts, in the walks and in the owning-root audit
-// (holdsLibraryContent): a root holding only what it refuses, a .DS_Store
-// Finder wrote into an unmounted mount point, a Synology @eaDir, a
-// desktop.ini or a cover image, is as empty as the guard's question. The
-// guard counted every entry until 2026-09-28, so one stray .DS_Store let
-// the deletion pass reap every row under an emptied mount point.
+// (holdsLibraryContent), so to the guard a root holding only what it
+// refuses (a .DS_Store Finder wrote into an unmounted mount point, a
+// Synology @eaDir, a desktop.ini, a cover image) is empty. The guard
+// counted every entry until 2026-09-28, so one stray .DS_Store let the
+// deletion pass reap every row under an emptied mount point.
 func isLibraryEntry(abs, name string, isDir bool) bool {
 	if isDir {
 		return !ShouldSkipDir(name)
