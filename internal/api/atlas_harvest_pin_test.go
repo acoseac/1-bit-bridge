@@ -165,6 +165,29 @@ func TestAtlasHarvestCredentialPinIgnoresDefaultHTTPSPort(t *testing.T) {
 	}
 }
 
+// TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost: a base naming a
+// port and no host survives config.CanonicalHTTPSBase, and the harvest
+// client would dial it, carrying the token, on THIS machine (backlog B36).
+// It is refused on an unpinned, non-demo bridge, the widest acceptance
+// there is, and a pin written that way matches nothing, its own spelling
+// included.
+func TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost(t *testing.T) {
+	for _, tc := range []struct{ pin, sent string }{
+		{"", "https://:8443"},
+		{"", "https://:443"},
+		{"https://:8443", "https://:8443"},
+	} {
+		sink := &fakeHarvestCred{}
+		token, srv := newHarvestCredTestServerPinned(t, sink, tc.pin, false)
+		resp := postCredential(t, srv, token, tc.sent)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || sink.called != 0 {
+			t.Errorf("pin %q, sent %q: status %d, sink called %d times; want 400 and none",
+				tc.pin, tc.sent, resp.StatusCode, sink.called)
+		}
+	}
+}
+
 // A non-default port is part of the identity and must NOT be collapsed.
 func TestAtlasHarvestCredentialPinKeepsNonDefaultPort(t *testing.T) {
 	sink := &fakeHarvestCred{}

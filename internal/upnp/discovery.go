@@ -59,6 +59,22 @@ type ServerInfo struct {
 	// check. Empty when the description carried none.
 	DeviceUDN string
 
+	// DialApproval is what lets a request to ContentDirectoryControlURL,
+	// or to the host:port LiveHost derives from it for every byte fetch of
+	// this server's routed tracks, connect to this machine or a link-local
+	// address: the address of the SSDP packet that led to the URL
+	// (discovery.AnnouncedFrom), or the operator's manual URL
+	// (discovery.OperatorChose). The ingest and the proxy carry it in each
+	// request's context, and the dial check judges every connect against
+	// it, so a control URL naming a host by a NAME cannot be steered to the
+	// console later by answering 127.0.0.1 for the name (backlog B36).
+	//
+	// It belongs to the control URL it came with: Upsert replaces the two
+	// together and keeps the two together, so a partial refresh cannot pair
+	// one writer's URL with another's approval. The zero value approves no
+	// local address.
+	DialApproval discovery.DialApproval
+
 	LastSeenAt time.Time
 }
 
@@ -95,6 +111,13 @@ func (c *ServerCache) Upsert(info ServerInfo) {
 		}
 		if info.ContentDirectoryControlURL == "" {
 			info.ContentDirectoryControlURL = existing.ContentDirectoryControlURL
+			// The approval travels with the URL it approves, never alone:
+			// an update that carries a control URL carries that URL's
+			// approval (a zero one included), and one that keeps the
+			// cached URL keeps the cached approval. Merged on its own, a
+			// refresh would keep the old approval beside a new URL, or a
+			// new approval beside the old URL.
+			info.DialApproval = existing.DialApproval
 		}
 		if info.DescriptionURL == "" {
 			info.DescriptionURL = existing.DescriptionURL
@@ -815,7 +838,10 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		ModelName:                  desc.ModelName,
 		ContentDirectoryControlURL: ctrlURL,
 		DescriptionURL:             location,
-		LastSeenAt:                 lastSeenAt,
+		// The approval this fetch ran under, kept with the URL it found,
+		// so the ingest and the proxy dial that URL under it too.
+		DialApproval: discovery.AnnouncedFrom(src),
+		LastSeenAt:   lastSeenAt,
 	})
 	// Stamp AFTER the Upsert, so a recorded UDN is always a cached one and
 	// pruneLocations can use "not in cache" as its sole predicate.

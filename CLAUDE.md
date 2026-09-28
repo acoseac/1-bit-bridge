@@ -56,9 +56,9 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `FuzzValidateRelPath` (an accepted upload path meets every invariant the commit relies
   on), `FuzzAcceptedExt` (an audio extension is always accepted) and
   `FuzzParseDeviceDescription` (every service URL the parser keeps, re-parsed, is http(s)
-  with a host, stays on the description's host when discovered, and names this machine or a
-  link-local address only from a description URL that does too; it fuzzes the base URL as
-  well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
+  with a host, stays on the description's host when discovered, names this machine or a
+  link-local address only from a description URL that does too, and never names a cloud
+  metadata address; it fuzzes the base URL as well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
   them, and then "Twelve" and "Thirteen" that same day, as two more joined: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
@@ -2202,7 +2202,9 @@ no failing test — which is the shape to expect in this area.
   `CheckRedirect: ErrUseLastResponse` — without it a rogue LAN upstream can aim
   a `<res>` fetch at the bridge's own no-auth loopback admin API, reachable
   unauthenticated. A caller needing a different Content-Type wraps the writer;
-  don't change the package.
+  don't change the package. Its client dials through
+  `discovery.NewDeviceTransport` under the server's approval (the B36 bullet
+  below), with no kept-alive connections.
 - **A DISCOVERED description's service URLs stay on its own host** (external
   audit 2026-09-23, M3). `resolveServiceURL`
   (`internal/dlna/discovery/url_policy.go`) is the one home: every
@@ -2285,12 +2287,93 @@ no failing test — which is the shape to expect in this area.
   support the general rule (LOCATION host == source for every address, which
   would also bound names and tailnet addresses): multi-homed hosts and some
   NAS firmware are reported to break it, and a renderer has no escape hatch,
-  so **measure before tightening further**. **Not covered**: a HOSTNAME control
-  URL is resolved again at every later dial (the ingest's SOAP Browse, the
-  `upnpproxy` byte fetch), which a discovery-time check cannot pin, so DNS
-  rebinding can still steer a configured upstream's fetches; and a LOCATION
-  on a tailnet or public address is still fetched. The app's SSDP path has
-  no LOCATION-versus-source check either.
+  so **measure before tightening further**. **Not covered**: a LOCATION on a
+  tailnet or public address is still fetched, and the app's SSDP path has no
+  LOCATION-versus-source check either. (This bullet also said the later dials
+  of a HOSTNAME control URL were not covered; the next bullet covers them.)
+- **…and every LATER request to a device dials under the approval its URL
+  came with, because a NAME in it resolves again at each dial** (backlog B36,
+  2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, then on
+  `http.DefaultTransport`) and every `upnpproxy` byte fetch dialled the cached
+  control URL's host with no dial check, so a peer that passed discovery with
+  a name answering its own LAN address and then answered 127.0.0.1 took both
+  to the console, and the proxy relayed its 200 (measured, macOS and Linux:
+  `CONSOLE POST /ctl`, `CONSOLE GET /api/stats`). What approved a local
+  connect is `discovery.DialApproval`: `AnnouncedFrom(src)` (the packet's own
+  address, #1069's rule) or `OperatorChose(manualURL)` (every address of the
+  kind the URL's host names; **a NAME approves no local address**, so a manual
+  URL naming this host by its host name, which Debian maps to 127.0.1.1, is
+  refused; write `localhost`). It is recorded as `upnp.ServerInfo.DialApproval`
+  beside the control URL, and **`Upsert` keeps and replaces the two together,
+  never the approval alone**: a merged-alone approval outlives the URL it
+  came with, or pairs one writer's URL with another's approval.
+  `ResolveControlURL` and `LiveHost` return both from ONE lookup, and the
+  ingest and the proxy carry the approval in each request's context. **Every
+  client that sends a device a request is built on
+  `discovery.NewDeviceTransport`**: the dial check (it replaces any
+  `ControlContext` the dialer template carries), no proxy, **no kept-alive
+  connections**, no TLS dialer. The keep-alive rule is measured, not
+  argued: with the proxy's old pool a second fetch, approved only for a LAN
+  address, rode the first fetch's idle connection to 127.0.0.1 past the check
+  (`TestProxy_Serve_NeverCarriesARequestOnAConnectionAnotherApprovalOpened`),
+  and net/http also hands a connection dialed for one request to another
+  waiting one. Cost: about 65 µs a request on loopback, one round trip on a
+  LAN. **Declined, on evidence**: requiring SSDP control URLs to be IP
+  literals. Three devices on one LAN (#1069) are thin evidence against names,
+  UDA 1.1 says LOCATION hosts are "normally" literals, not always, the dial
+  check already covers the dangerous targets, and a literal can name a
+  tailnet host anyway (the previous bullet), so the rule would bound no third
+  host either. Tests resolve through `discovery.UseResolverForTest` (atomic)
+  and `internal/dnstest`, **never by replacing `net.DefaultResolver`**, which
+  every goroutine in the process reads unsynchronised. **Residual**: an SSDP
+  source is not authenticated, and a peer on the same L2 segment can send a
+  packet FROM a link-local address; the same-address exception then
+  approves exactly that address, for the description fetch and the later
+  dials, and never a cloud metadata one (the next bullet). A loopback source
+  is what RFC 1122 has a host discard from any other interface.
+- **…and no device's say-so and no approval reaches a cloud metadata
+  address** (CodeRabbit on #1074, 2026-09-28). The residual above said
+  169.254.169.254 was included: a packet spoofed from it approved it for the
+  description fetch and every later dial, whose answers the proxy relays to
+  the unauthenticated DLNA listener (a cloud VM's credentials, on IMDSv1).
+  `cloudMetadataAddrs` (`url_policy.go`) is the ONE list, from each
+  provider's documentation (AWS's IMDS, DNS, NTP, ECS and EKS Pod Identity
+  addresses in both families; the IPv6 metadata addresses of Google Cloud,
+  Oracle, Linode, OpenStack and Scaleway; Scaleway's and Tencent's IPv4
+  ones; Alibaba's 100.100.100.200; Azure's 168.63.129.16). `addrKind` names
+  them first (`hostMetadata`), so the string check (`LocationFromSource`),
+  the service-URL rule (`resolveServiceURL`, for every source) and the dial
+  check (`DialApproval.permits`) refuse them whatever approved the request.
+  **Exact addresses, never a range**: a direct-cable device self-assigns
+  anywhere in 169.254/16 and fe80::/10, and a /24 around 169.254.169.254
+  would refuse one such device in 254 (the tests keep one at 169.254.7.7).
+  Ten of them are not link-local (the fd00::/8 ones, 100.100.100.200,
+  168.63.129.16) and were fetched on ANY device's say-so, exception or not.
+  A tailnet node may hold 100.100.100.200 (it is in 100.64/10, one address
+  in four million) and would lose its routed dials. The resolver's own DNS
+  connects do not pass the dial check, so Azure's DNS on 168.63.129.16 keeps
+  working. A manual upstream's own description fetch is not checked (the
+  operator's URL; upstream ingest is refused in public mode), and no later
+  dial of one reaches a metadata address. `TestCloudMetadataAddrsAreTheDocumentedOnes`
+  holds the list to its sources, and
+  `TestAPacketFromAMetadataAddressApprovesNoLaterDialThere` drives the chain
+  through the real ingest and proxy.
+- **A URL that names a port and no host (`https://:8443`) is not a URL of any
+  host, and Go dials it on THIS machine**, so every validator reads
+  `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
+  to every phone); the harvest credential endpoint answers 400
+  (`config.BaseURLNamesHost`); a configured enrich or harvest base URL of that
+  shape is WARNED about in `Normalize`, never refused, because it loaded
+  before and a refusal stops a bridge from starting after an update. **Don't
+  move the host test into `CanonicalHTTPSBase`'s reduction**: a hostless pin
+  would reduce to "" (unpinned) or, through `Validate`, refuse to load; as it
+  stands it pins to a value no accepted credential can carry. **A warning
+  about a configured URL logs its scheme and host alone**
+  (`urlOriginForLog`), never the value (review round 1 on #1074): an enrich
+  base accepts userinfo, so `http://user:password@:5000` reached the journal
+  whole, and a dropped custom endpoint was quoted whole, a parse failure
+  twice (the parse error quotes it). `url.URL.Redacted` is not enough: it
+  keeps a token written as the user name, and the query.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
@@ -2617,7 +2700,11 @@ no failing test — which is the shape to expect in this area.
   breath the settings response calls the change pending. This is why there is no
   `partial` status — the rule removes the case instead of naming it. The
   field → apply-semantics matrix is **`ops/settings-apply-semantics.md`**, and a
-  test drives the real handler for every row in it.
+  test drives the real handler for every row in it. **That test checks the
+  REPORT, and no consumer**: under `upscaleEnabled`'s `live` row the console's
+  size projection was taken at boot until 2026-09-28, and four consumers read
+  the flag without its sox half (the construction-time bullet under The CLI
+  and the serve wiring, and the one after it).
 - **…and a DEFAULT splits the halves too, when a writer can store what `Load`
   would replace** (#1042). `applyDefaults` runs in `Load` alone, and before
   the `BRIDGE_*` overrides, so its `if c.LibraryName == ""` reached neither
@@ -3704,6 +3791,70 @@ mentions across the four `ops/audit-*.md` files.
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
   operator who switched upscaling off can still reclaim the disk, where
   `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
+- **…and a value runServe DECIDES from the config while it builds Deps is a
+  boot snapshot, however live its reader is** (2026-09-28).
+  `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals
+  called in place that answered nil unless `upscale.enabled` was true at
+  that moment, and the projection handler read nil as "feature off".
+  Measured with the real `serve`, flipping `upscaleEnabled` through
+  `PATCH /api/settings`, which answered `live` both times: `GET
+  /api/library/browse-projection` answered 503 `upscale-disabled` after the
+  switch went on and 200 after it went off, while `/v1/health` followed it,
+  and with no sox on PATH it projected while health said off. The same nil
+  made `GET /api/upscale/variants-dir` report `freeBytes: 0`, "0 B free" on
+  the Library roots page, on every bridge booted with upscaling off. The two
+  sat directly above `OptimizeEligible`, whose own comment records this fix
+  for `optimizeEnabled`. Both helpers are now wired on every bridge, and the
+  handler refuses on `s.upscaleActive()`
+  (`Deps.UpscaleActive`, the batch's gate and /v1's, which
+  `TestConsoleBatchGateIsTheV1UpscaleGate` pins) before the target read, the
+  walk and the disk probe. **A function literal called where a Deps field or
+  a `With*` option is written decides on a WIRING fact (a nil handle), never
+  on the config**: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  sweeps runServe for one that reads `cfg`, `cfgHolder`, `liveCfg()` or a
+  live predicate outside the closure it returns. **A `live` row in
+  `ops/settings-apply-semantics.md` is a claim about every consumer, and
+  `TestMatrixDocMatchesWhatTheHandlerReports` checks only the REPORT**: it
+  passed throughout. The consumers are checked by a boot test that flips the
+  field through the PATCH and asks each one
+  (`TestServeProjectionFollowsTheLiveUpscaleGate`, which puts a stand-in sox
+  first on PATH, POSIX only, so the switch-on leg means something on a host
+  without sox, and checks health agrees before it compares).
+- **…and a LIVE reader of the flag alone splits the gate too: every consumer
+  that answers "is upscaling on" reads `upscaleActiveFn`, the flag AND a
+  usable sox** (2026-09-28). Four read `upscale.enabled` live and without the
+  sox half: the console's tile (`Deps.UpscaleStats` / `UpscaleBusy`, and the
+  Settings chip that takes its verdict from it), `/v1/upscale/stats`'
+  `enabled` (whose PROTOCOL.md row says "matching `/v1/health.upscaleEnabled`"),
+  the auto-optimize sweeper and its Jobs card, and `Deps.OptimizeActive`. On
+  a bridge without sox, health said off and they said on, and the sweeper
+  WORKED on it: its decodability check reads a failed probe as "can decode",
+  so it queued every eligible track, each job failed with a WARN and struck
+  its file, and the third strike suppresses a file from pre-generation for 30
+  days. Measured with the real binary, six hi-res tracks, a 20 s cadence: 18
+  jobs, 18 WARNs, all six suppressed within 40 s; restarted WITH sox, every
+  sweep still queued nothing (`remaining: 0`, rendered "all caught up") until
+  `POST /api/upscale/failures/retry`. A toolchain fault recorded as a fact
+  about the files. **The CarPlay kind reads one closure**,
+  `carPlayOptimizeActiveFn` (the upscale gate AND the optimize switch):
+  `WithCarPlayOptimize`, `Deps.OptimizeActive`
+  (`TestConsoleCarPlayGateIsTheV1CarPlayGate`, the only pin possible, since
+  both of its readers ask `UpscaleActive` first) and, with the pre-generation
+  flag, the sweeper. **A card that reports a switch beside a gate says why
+  they differ**: the auto-optimize card's `enabled` is the switches, `active`
+  the gate, and `degradedReason: "sox_missing"` the difference, rendered as a
+  "degraded" badge, a hint of its own that clears when the probe (30 s TTL)
+  finds sox, and "not run" where a refused sweep's `disabled` would read
+  "turned off". No restart is needed and none is advised. The settings PATCH
+  gives `optimizeEnabled` and `autoOptimizeEnabled` the sox reason
+  `upscaleEnabled` had. `TestServeWithoutSoxReportsUpscalingOffOnEverySurface`
+  boots the real serve on a PATH with no sox and asks every surface; it and
+  the report test were red on the old code, and seven controls each turn red
+  only the assertions of the surface they revert. **Still open**: the
+  transcode pool strikes a file for ANY runner error, a missing sox
+  included, where the analysis pool records a missing tool as transient. The
+  gate now keeps the sweeper away without sox, and what remains is a job
+  queued inside the probe's TTL after sox disappears.
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
@@ -4791,7 +4942,17 @@ its twin.** The top list is older, shorter, and read first.
   endpoint answer, the folder view's rule, since `/api/library/browse`
   carries no feature state. The #1060 AST sweep counts a call of
   `optimizeActive` as reading the CarPlay switch. A save from either tray
-  redraws the panel: the next bullet.
+  redraws the panel: the next bullet. **The panel-wide note must close
+  wherever the upscale gate does**, because `Deps.OptimizeActive` includes
+  that gate (the flag and a usable sox: `carPlayOptimizeActiveFn`, under The
+  CLI and the serve wiring), and a block the panel-wide note does not
+  show falls through to the CarPlay row's "switched off". The summary's
+  `soxAvailable` is therefore `Server.soxUsable`, the gate's sox half
+  (found, and FLAC when the build's formats are known): with the precheck
+  alone a sox without FLAC read as available, and the panel named a switch
+  that was on while the hi-res Generate stayed live over a refusal
+  (`TestTheVariantSummaryReadsSoxAsTheGateDoes`, and the panel test's
+  fourth state).
 - **A tray redraws the page only through its spec's `onSaved`, and a page
   redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
   #1068). A feature tray saves one switch and repaints nothing else, so
@@ -5512,9 +5673,16 @@ its twin.** The top list is older, shorter, and read first.
   five files missed a sixth site that the shape match found.) **It reads
   every function in the test files, helpers included** (2026-09-28): it read
   Test functions alone, so a launch factored into a helper went unaudited,
-  and two such helpers already existed. A serve test boots through
-  `bootServe` (main_test.go), which registers the drain itself; with that
-  drain deleted, the Test-only guard stayed green.
+  and two such helpers already existed. It wants the drain in the function
+  that launches. **A serve test boots through a helper**: `bootServe`
+  (main_test.go), which runs a command line, or `startConsoleBridge`
+  (served_bridge_test.go), which writes the config, calls `runServe` with
+  a `serveOpts` hook no flag carries, and builds the console and phone
+  clients. Both start serve through `launchServe`, the one launch and the
+  one drain, and with that drain deleted the Test-only guard stayed green.
+  SonarCloud's gate fails a PR past 3% duplicated new lines and counts new
+  lines that repeat OLD code, and an inline boot block was 16 to 23 lines
+  of exactly that.
 - **Two things the drain cannot fix by itself, both found converting the loop
   tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
   down with `defer store.Close()` can have no drain ordered behind it — the
@@ -5564,7 +5732,14 @@ its twin.** The top list is older, shorter, and read first.
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
   (two writes in one tick leave them equal, so the check silently passes on the
   platform most likely to break). Normalize CRLF before any `\n`-literal scan of
-  a static file — there is no `.gitattributes` pinning `eol`.
+  a static file — there is no `.gitattributes` pinning `eol`. **A time decoded
+  from JSON has no monotonic reading**, so `After` against a local
+  `time.Now()` compares wall clocks, which is where the tick bites:
+  `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` waited for the Jobs
+  card's `lastFinishedAt` to pass the instant of its nudge, a sweep the gate
+  refuses finished inside the tick, and the wait ran out on the Windows leg
+  (2026-09-28; 6 runs of 6 under a simulated 15.625 ms clock). A serve test
+  counts through a `serveOpts` hook instead (`autoOptimizeSwept`).
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP

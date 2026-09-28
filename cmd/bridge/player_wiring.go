@@ -59,7 +59,7 @@ func playerHostOnlineAdapter(lc *upnpUpstreamLifecycle) func(string) bool {
 		return nil
 	}
 	return func(udn string) bool {
-		_, ok := hr.LiveHost(udn)
+		_, _, ok := hr.LiveHost(udn)
 		return ok
 	}
 }

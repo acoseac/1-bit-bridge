@@ -3999,10 +3999,12 @@ function initSettingsTabs() {
 // said audio-toolchain ok. Four endpoints, four true statements, and
 // audio analysis had done nothing for nine days of uptime.
 //
-// None of those facts was next to the switch. Putting the boot-time
-// VERDICT and the live PREREQUISITE side by side — and saying
-// "restart to apply" when they disagree — is worth more than any
-// default change.
+// None of those facts was next to the switch. Putting the gate's
+// VERDICT and the PREREQUISITE side by side is worth more than any
+// default change. The verdict was a boot snapshot then, so the chip
+// said "restart to apply" when the two disagreed; both sox gates are
+// live now (a 30 s probe), and a disagreement is a probe about to
+// catch up.
 async function renderSettingsPrereqs() {
   const slots = {
     analysis: document.getElementById("prereq-analysis"),
@@ -4038,12 +4040,13 @@ async function renderSettingsPrereqs() {
     if (degradedReason) {
       // The toggle is on and the feature is not running. Say which
       // way the disagreement points, because the fix differs: a
-      // missing tool needs installing, a tool that is present now
-      // needs a restart to be picked up.
+      // missing tool needs installing, while one the doctor finds
+      // usable now is one the gate's probe has not caught up with.
+      // A restart changes neither.
       const live = check?.status === "ok";
       slot.dataset.state = "warn";
       slot.textContent = live
-        ? "not running — restart to apply"
+        ? "not running yet — sox was just found; picked up within a minute"
         : `not running — ${check ? check.summary : degradedReason}`;
       return;
     }
@@ -4059,12 +4062,17 @@ async function renderSettingsPrereqs() {
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
   // `enabled` here is the RUNTIME verdict, not the persisted config flag:
-  // the handler reports it as "the pool exists", so a config that says on
-  // with a boot-time precheck that failed reads as off — which is the
-  // disagreement this chip exists to surface.
+  // the live upscale gate, the flag AND a usable sox, the one /v1/health
+  // reads. The switch beside the chip is the flag as saved (the page
+  // renders it checked from the config, and this runs once, at load), so
+  // a switch that is on beside a verdict that is off is the missing tool,
+  // which is the disagreement this chip exists to surface. Until
+  // 2026-09-28 the verdict read the flag alone and this chip said
+  // "active" on a bridge with no sox.
+  const upscaleSwitch = document.querySelector('input[name="upscaleEnabled"]');
   paint(slots.upscale, {
     running: !!(upscale?.enabled),
-    degradedReason: "",
+    degradedReason: upscale && !upscale.enabled && upscaleSwitch?.checked ? "sox_missing" : "",
     check: audio,
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
@@ -5586,7 +5594,9 @@ function setBadge(id, cls, text) {
 // Bounded degraded-reason keys → operator copy (server sends keys, not
 // prose — same discipline as the enricher's skip reasons).
 const JOB_DEGRADED_LABELS = {
-  sox_missing: "sox is not installed on the bridge host",
+  // The server sends this key whenever its sox gate says no, and that
+  // gate (soxUsable) also refuses a sox built without FLAC.
+  sox_missing: "sox is not installed on the bridge host, or has no FLAC support",
   fpcalc_missing: "fpcalc is not installed on the bridge host",
   no_api_key: "no AcoustID API key configured (ACOUSTID_API_KEY)",
 };
@@ -5678,14 +5688,39 @@ function renderJobCards(j) {
   const aoCard = document.getElementById("job-ao-card");
   if (aoCard) aoCard.hidden = !ao;
   if (ao) {
-    setBadge("job-ao-state", ao.active ? "running" : "idle", ao.active ? "on" : "off");
+    // `enabled` is the operator's switches, `active` the sweeper's gate
+    // (the switches AND a usable sox). Switched on and not active is the
+    // missing tool, and it is said, not rendered as "off": every sweep
+    // the gate refuses records `disabled`, which formatAutoOptimizeResult
+    // alone would call "turned off" beside a switch that is on.
+    const aoDegraded = ao.enabled && !ao.active
+      ? (JOB_DEGRADED_LABELS[ao.degradedReason] || ao.degradedReason || "the toolchain is unusable")
+      : "";
+    if (ao.active) setBadge("job-ao-state", "running", "on");
+    else if (aoDegraded) setBadge("job-ao-state", "warn", "degraded");
+    else setBadge("job-ao-state", "idle", "off");
     const aoBtn = document.getElementById("jobs-ao-now");
     if (aoBtn) aoBtn.hidden = !ao.active;
+    // Its own element, not the hint's text: the gate is live, so a card
+    // that goes degraded comes back when sox is installed, and the
+    // description beneath has to come back with it.
+    const aoWhy = document.getElementById("job-ao-degraded");
+    if (aoWhy) {
+      aoWhy.hidden = !aoDegraded;
+      aoWhy.textContent = aoDegraded
+        ? `Enabled but inactive: ${aoDegraded}. No restart is needed once it is fixed: ` +
+          "the card turns on within a minute, and the next sweep (or Sweep now) takes up the work."
+        : "";
+    }
     const last = ao.last;
     setText("job-ao-remaining", formatAutoOptimizeRemaining(last));
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
     setText("job-ao-next", formatInFuture(ao.nextDueAt));
-    setText("job-ao-counts", formatAutoOptimizeResult(last));
+    // "not run" rather than the sweep's own "turned off": the hint above
+    // the description says why.
+    setText("job-ao-counts", aoDegraded && last?.disabled
+      ? "not run"
+      : formatAutoOptimizeResult(last));
   }
 
   // Network lyrics (Atlas). Hidden entirely when the tier is off: the card

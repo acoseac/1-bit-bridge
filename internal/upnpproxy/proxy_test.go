@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -73,11 +75,27 @@ func TestIsHopByHopHeader(t *testing.T) {
 // --- Serve() end-to-end tests using a stub upstream ---
 
 type stubHostResolver struct {
-	host string
-	ok   bool
+	host     string
+	ok       bool
+	approval discovery.DialApproval
 }
 
-func (s *stubHostResolver) LiveHost(_ string) (string, bool) { return s.host, s.ok }
+func (s *stubHostResolver) LiveHost(_ string) (string, discovery.DialApproval, bool) {
+	return s.host, s.approval, s.ok
+}
+
+// announcedFrom is the approval of a server whose SSDP packet came from ip.
+func announcedFrom(ip string) discovery.DialApproval {
+	return discovery.AnnouncedFrom(&net.UDPAddr{IP: net.ParseIP(ip), Port: 1900})
+}
+
+// onThisMachine resolves every server to host, a stub upstream on
+// 127.0.0.1, approved the way a server on this machine announcing from
+// 127.0.0.1 is: the device dial check lets the proxy reach 127.0.0.1 for it
+// and for nothing else on this machine.
+func onThisMachine(host string) *stubHostResolver {
+	return &stubHostResolver{host: host, ok: true, approval: announcedFrom("127.0.0.1")}
+}
 
 // newStubUpstream returns an httptest server that records each request
 // and replies with the given (status, body, headers).
@@ -114,7 +132,7 @@ func TestProxy_Serve_HappyPath(t *testing.T) {
 		"Content-Type":  "audio/x-flac",
 		"Accept-Ranges": "bytes",
 	})
-	p := New(&stubHostResolver{host: hostPortOf(t, upstream), ok: true}, nil)
+	p := New(onThisMachine(hostPortOf(t, upstream)), nil)
 
 	rt := &manifest.UPnPRouting{ServerUDN: "uuid:x", ResURL: "/MediaItems/5.flac"}
 	rec := httptest.NewRecorder()
@@ -147,7 +165,7 @@ func TestProxy_Serve_PassesRangeHeader(t *testing.T) {
 	upstream, recs := newStubUpstream(t, 206, []byte("partial"), map[string]string{
 		"Content-Range": "bytes 0-6/100",
 	})
-	p := New(&stubHostResolver{host: hostPortOf(t, upstream), ok: true}, nil)
+	p := New(onThisMachine(hostPortOf(t, upstream)), nil)
 
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/dlna/file/abc", nil)
@@ -178,7 +196,7 @@ func TestProxy_Serve_StripsHopByHop(t *testing.T) {
 		"Transfer-Encoding": "chunked",
 		"Content-Type":      "audio/x-flac",
 	})
-	p := New(&stubHostResolver{host: hostPortOf(t, upstream), ok: true}, nil)
+	p := New(onThisMachine(hostPortOf(t, upstream)), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/dlna/file/abc", nil)
 
@@ -200,7 +218,7 @@ func TestProxy_Serve_HEADSkipsBody(t *testing.T) {
 	upstream, _ := newStubUpstream(t, 200, []byte("fLaC body"), map[string]string{
 		"Content-Type": "audio/x-flac",
 	})
-	p := New(&stubHostResolver{host: hostPortOf(t, upstream), ok: true}, nil)
+	p := New(onThisMachine(hostPortOf(t, upstream)), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("HEAD", "/dlna/file/abc", nil)
 
@@ -255,7 +273,7 @@ func TestProxy_Serve_BadResURL_ReturnsBadGateway(t *testing.T) {
 
 func TestProxy_Serve_UpstreamUnreachable_ReturnsBadGateway(t *testing.T) {
 	// Point at a port nothing's listening on.
-	p := New(&stubHostResolver{host: "127.0.0.1:1", ok: true}, nil)
+	p := New(onThisMachine("127.0.0.1:1"), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/dlna/file/abc", nil)
 
@@ -288,7 +306,7 @@ func TestProxy_Serve_NilRoutingRow_ReturnsInternalError(t *testing.T) {
 
 func TestProxy_Serve_ForwardsUserAgentTag(t *testing.T) {
 	upstream, recs := newStubUpstream(t, 200, []byte("x"), nil)
-	p := New(&stubHostResolver{host: hostPortOf(t, upstream), ok: true}, nil)
+	p := New(onThisMachine(hostPortOf(t, upstream)), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/dlna/file/abc", nil)
 	r.Header.Set("User-Agent", "iOS/1.0") // caller's UA — proxy overrides

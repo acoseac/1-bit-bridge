@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 )
 
@@ -43,9 +44,9 @@ func TestARunStoppedByShutdownStartsNoFurtherServer(t *testing.T) {
 // countingResolver resolves every server and counts the calls.
 type countingResolver struct{ calls atomic.Int32 }
 
-func (r *countingResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, error) {
+func (r *countingResolver) ResolveControlURL(context.Context, config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error) {
 	r.calls.Add(1)
-	return "http://192.0.2.1:8200/ctl/ContentDir", nil
+	return "http://192.0.2.1:8200/ctl/ContentDir", discovery.DialApproval{}, nil
 }
 
 // cancellingDoer is where the shutdown lands: its first call cancels, and
