@@ -4,6 +4,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // The DSD families' identity + eligibility, pinned separately from the
@@ -18,23 +20,23 @@ func TestJobSpecVariantID_DSDFamilies(t *testing.T) {
 	}{
 		{"optimize on a DSD source is the compact DSD family",
 			JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16},
-			"optimized-dsd-v1-44100-16"},
+			"optimized-dsd-v2-44100-16"},
 		{"compact 48k family",
 			JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 48000, TargetBits: 16},
-			"optimized-dsd-v1-48000-16"},
+			"optimized-dsd-v2-48000-16"},
 		{"pcm 44.1k family",
 			JobSpec{Kind: JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 176400, TargetBits: 24},
-			"pcm-v1-176400-24"},
+			"pcm-v2-176400-24"},
 		{"pcm 48k family",
 			JobSpec{Kind: JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 192000, TargetBits: 24},
-			"pcm-v1-192000-24"},
+			"pcm-v2-192000-24"},
 		// Off-memo inputs fall through to the live format, same family.
 		{"pcm off-memo rate still names the family",
 			JobSpec{Kind: JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 88200, TargetBits: 24},
-			"pcm-v1-88200-24"},
+			"pcm-v2-88200-24"},
 		{"compact off-memo bits still names the family",
 			JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 24},
-			"optimized-dsd-v1-44100-24"},
+			"optimized-dsd-v2-44100-24"},
 		// The PCM optimize family is untouched — this is the pin that keeps
 		// 8,356 existing optimize rows resolving to the same ids.
 		{"optimize on a PCM source stays the PCM family",
@@ -61,14 +63,51 @@ func TestDSDFamilyPrefixes(t *testing.T) {
 	if VariantPrefixPCM != "pcm" || VariantPrefixOptimizedDSD != "optimized-dsd" {
 		t.Errorf("prefixes are wire-stable: pcm=%q optimizedDSD=%q", VariantPrefixPCM, VariantPrefixOptimizedDSD)
 	}
-	if DSDRenditionSchemaVersion != "v1" {
+	// A tripwire, so a bump is always deliberate: bumping re-renders every
+	// DSD rendition on every bridge (the sweeper's coverage and the faithful
+	// pass follow the current schema) and leaves the old rows in place.
+	// v2 (2026-09-27) is the album-level gain.
+	if DSDRenditionSchemaVersion != "v2" {
 		t.Errorf("DSDRenditionSchemaVersion = %q; bumping it re-renders every DSD sidecar", DSDRenditionSchemaVersion)
 	}
-	// A DSD id is never mistaken for the PCM optimize schema: the compact
-	// family's version segment is the DSD schema, not VariantSchemaVersion.
+	// The compact family's version segment is the DSD schema, never
+	// VariantSchemaVersion — the two version independently. (They are both
+	// "v2" today by coincidence, so the check is the constant the id is
+	// built from, not an inequality between the two numbers.)
 	id := JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16}.VariantID()
-	if strings.Contains(id, "-"+VariantSchemaVersion+"-") {
-		t.Errorf("%q carries the PCM schema version; the DSD recipe must version independently", id)
+	if want := VariantPrefixOptimizedDSD + "-" + DSDRenditionSchemaVersion + "-44100-16"; id != want {
+		t.Errorf("compact DSD id %q, want %q built from DSDRenditionSchemaVersion", id, want)
+	}
+}
+
+// TestManifestMirrorsTheDSDRenditionSchema: manifest cannot import this
+// package, so the sweeper's coverage and the faithful migration pass spell
+// the current DSD schema from manifest.DSDRenditionSchemaVersion, in the
+// LIKE patterns 'optimized-dsd-<v>-%' and 'pcm-<v>-%'. Drift between the two
+// and the pattern never matches the id a render writes: every DSD track
+// stays a candidate and the sweeper re-renders it on every pass. So the ids
+// are checked against the patterns' own spelling, not just the constants.
+func TestManifestMirrorsTheDSDRenditionSchema(t *testing.T) {
+	if manifest.DSDRenditionSchemaVersion != DSDRenditionSchemaVersion {
+		t.Fatalf("manifest.DSDRenditionSchemaVersion = %q, transcode.DSDRenditionSchemaVersion = %q",
+			manifest.DSDRenditionSchemaVersion, DSDRenditionSchemaVersion)
+	}
+	if manifest.VariantKindPrefixOptimizedDSD != VariantPrefixOptimizedDSD || manifest.VariantKindPrefixPCM != VariantPrefixPCM {
+		t.Errorf("family prefixes drifted: manifest %q/%q, transcode %q/%q",
+			manifest.VariantKindPrefixOptimizedDSD, manifest.VariantKindPrefixPCM, VariantPrefixOptimizedDSD, VariantPrefixPCM)
+	}
+	for _, c := range []struct {
+		spec    JobSpec
+		pattern string
+	}{
+		{JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 44100, TargetBits: 16}, "optimized-dsd-" + manifest.DSDRenditionSchemaVersion + "-"},
+		{JobSpec{Kind: JobKindOptimize, SourceIsDSD: true, TargetSampleRate: 48000, TargetBits: 16}, "optimized-dsd-" + manifest.DSDRenditionSchemaVersion + "-"},
+		{JobSpec{Kind: JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 176400, TargetBits: 24}, "pcm-" + manifest.DSDRenditionSchemaVersion + "-"},
+		{JobSpec{Kind: JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 192000, TargetBits: 24}, "pcm-" + manifest.DSDRenditionSchemaVersion + "-"},
+	} {
+		if id := c.spec.VariantID(); !strings.HasPrefix(id, c.pattern) {
+			t.Errorf("a render writes %q, which the manifest's coverage pattern %q%% never matches", id, c.pattern)
+		}
 	}
 }
 

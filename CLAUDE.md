@@ -1148,8 +1148,8 @@ no failing test — which is the shape to expect in this area.
 - **THREE CLI commands feed the same classifier and worker pool, split by
   tier, and their DSD arms are gated per RUN.** `bridge upscale` (PCM →
   higher-rate PCM), `bridge optimize` (PCM → 16/44.1|48, and DSD →
-  `optimized-dsd-v1-*` under the flag) and `bridge render` (DSD →
-  `pcm-v1-*-24`). `runUpscaleParams.dsdCaps` is probed once per run and its
+  `optimized-dsd-v2-*` under the flag) and `bridge render` (DSD →
+  `pcm-v2-*-24`). `runUpscaleParams.dsdCaps` is probed once per run and its
   ZERO VALUE refuses every DSD source, which is what keeps `upscale` and a
   flag-less `optimize` byte-for-byte unchanged. **The admission itself
   delegates to `transcode.OptimizeEligibleFor` / `PCMRenderEligible`** — the
@@ -1230,6 +1230,82 @@ no failing test — which is the shape to expect in this area.
   "gain 2.0" across three different coefficient sets — **a constant factor across
   every variant of a parameter is evidence about the MEASUREMENT, not the
   subject**; it was a print bug (`want {dc*0.5}` while passing `u = dc`).
+- **The album-level gain's parts (2026-09-27, #1053; switched on as the DSD
+  `v2` schema by the PR after it; `ops/plan-2026-09-27-dsd-album-gain.md`).**
+  Stage B's guard decides each track's boost alone, so an album's tracks shift
+  against each other (Phase 0, on the operator's library: 57 % of DSD albums
+  by more than 1 dB). The album gain gives every track the boost its album's
+  hottest track allows.
+  - **`dsd_peaks` (v47)** holds one true peak at unity per (track,
+    `DSDPeakProfile` = recipe|tier|rate|rateFlag). NULL means silent and a
+    missing row means never measured. A peak is fresh only while its mtime and
+    size match the track row, so **never read one without that join**
+    (`FreshDSDPeaks`).
+  - Three writers fill it: every render, through `UpsertVariant`
+    (`VariantRow.PeakProfile`, in the same transaction); the survey's
+    `UpsertDSDPeak`; and v47's one-time seed from `track_variants.true_peak_dbtp`.
+    The seed spells the profile in SQL, so **don't change `DSDPeakProfileFor`
+    without the seed**. Both pin `"a1|compact|44100|-v"`.
+  - **`DSDPeakRecipe` is not `DSDRenditionSchemaVersion`.** Bump the recipe
+    only when Stage A changes what it produces, which makes every stored peak
+    stale. A gain-policy change keeps them all.
+  - **`MeasureDSDPeak` is the render's own Stages A and B** (the shared
+    `decodeAndMeasure`), so a measured peak equals the render's exactly
+    (`TestMeasureDSDPeakMatchesTheRender`). **Don't fork a second decode path
+    for measuring.**
+  - `JobSpec.AlbumGain` is injected by the POOL when the job runs, never at an
+    enqueue site. The pool also widens the job's deadline by `SurveyBudget`.
+  - Stage C applies the album figure **never above the track's own guard**
+    (`albumBoundedGain`), so a stale figure cannot make a file clip.
+  - **Claims cannot deadlock, by construction.** A render claims its own track
+    before Stage A and resolves the claim on EVERY exit (a deferred error
+    covers early failures). A survey claims an album-mate while it measures
+    it. So a claim is only ever held by work that is decoding, and nothing
+    waits while holding one. **Don't make a render wait before resolving its
+    own claim, and don't hold a survey claim across a wait.**
+  - A waiter whose claim resolved without a peak measures that mate itself,
+    because the holder's failure may have been transient. Only the waiter's OWN
+    failed measurement leaves the mate out of the album.
+  - **A survey reads the store again after it takes a claim, and before it
+    measures.** Its pass's read can be minutes old by then, because it
+    measures mates one after another, and another survey may have measured,
+    recorded and released that mate in between. A measurement records before
+    it releases, so the second read sees it. **Don't drop the re-read:**
+    without it the mate is decoded twice (`TestASurveyRereadsThePeakUnderItsClaim`).
+  - **Membership is the admin catalog's album identity** over served, local
+    DSD rows. `StreamDSDCatalogRefs` shares `StreamCatalogRefs`'s scan, and
+    `TestIndexGroupsLikeTheAdminCatalog` pins the grouping against
+    `librarycat`. **Don't group by folder.** Routed rows and SACD virtual
+    tracks never count: neither is rendered here.
+  - **The switch-on is the DSD schema `v2`, never a re-render under `v1`.** A
+    phone applies a rendition's `appliedGainDB` to the bytes of its
+    downloaded copy, looked up by id, so re-rendering an id in place gives old
+    bytes the new gain. v2 mints new ids, and **a `v1` row stays while its file
+    exists** (nothing reaps it). **Don't add a reaper until the app records the
+    gain with its downloaded copy, plus a grace period.** `variantsAggSQL`
+    lists a track's renditions newest first (`created_at DESC, variant_id
+    DESC`), because iOS takes the first prefix match
+    (`TestVariantsListTheNewestRenditionFirst`).
+  - **A DSD source's coverage needs a fresh row of the CURRENT DSD schema**
+    (`manifest.DSDRenditionSchemaVersion`, the mirror
+    `TestManifestMirrorsTheDSDRenditionSchema` pins); a PCM source's stays
+    version-agnostic. A phone never requests a family it holds, so the bridge
+    drives the move. The sweeper's compact pass moves by that coverage rule.
+    `drainSupersededPCMRenditions` moves the faithful tier after it, under the
+    same cap and disk budgets, and **only for tracks that already hold a
+    `pcm-` row** (never a new 5 GB-an-hour tier). The card's "remaining"
+    counts both. Without auto-optimize, `bridge optimize` / `bridge render`
+    move them: their skip check is the exact current id.
+  - **Wiring.** Serve: `wireAlbumGain` (`albumgain.New` with
+    `upscaleEnqueuerAdapter.albumMateSpec`, then `Pool.SetAlbumGainer`), and
+    `Invalidate()` in the post-scan hook. CLI: `newCLIAlbumGainer` /
+    `cliAlbumMateSpec`, the run's own classifier with `--filter` and the resume
+    check lifted, because a mate outside the filter still bounds the album.
+    Both build a mate's spec the way a render of it would be built, with the
+    source facts from the TRACK ROW, which a peak's freshness is judged
+    against. `TestAlbumGainEndToEnd_RealToolchain` (serve) and
+    `TestRenderCLIAlbumGainEndToEnd_RealToolchain` (CLI) render one album of two
+    real tones and check the published files keep the source's 9 dB between them.
 
 - **`Enqueue` fires `fireStateChange()` UNDER the lock, before the unlock**, in
   both pools. Workers are bounded by `Stop`'s `wg.Wait()`; `Enqueue` is not, so
@@ -3999,6 +4075,18 @@ its twin.** The top list is older, shorter, and read first.
 
 ### Build, CI, and test discipline
 
+- **SonarCloud's `go:S2077` follows a named const to its concatenation.** A
+  query argument stays quiet only as ONE string literal, or as a function
+  parameter; a const assembled with `+` is flagged even behind a name. `main`
+  carries about 30 open S2077s of exactly that shape, and several comments in
+  `internal/manifest` say a named const is enough: they are wrong. Measured on
+  #1053 / #1054 (2026-09-27): a two-statement fix built from a shared SELECT
+  was flagged, while one literal statement (`freshDSDPeaksSQL`) and helpers that
+  take the statement as a parameter (`listRenditionCandidates`,
+  `countRenditionCandidates`) were not. **Prefer one literal statement;** when
+  a statement must share predicate constants, run it through such a helper.
+  SonarCloud is not a required check, but a MEDIUM "vulnerability" on a
+  constant query is noise that buries a real one.
 - **A `needs` entry only makes a job WAIT; something has to READ its
   result.** `gate`'s `needs` listed six jobs and its verification step
   checked five, so with `if: always()` a failing `dsd-measure` produced a

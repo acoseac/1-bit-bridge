@@ -128,9 +128,9 @@ func TestSubmitOptimize_DSDNeedsWiredCaps(t *testing.T) {
 		{"unwired", func(*Coordinator) {}, []string{"DSD/04.flac|optimized-v2-48000-16"}, 5},
 		{"zero caps", func(c *Coordinator) { c.WithDSDRender(capsFn(DSDRenderCaps{})) }, []string{"DSD/04.flac|optimized-v2-48000-16"}, 5},
 		{"caps on", func(c *Coordinator) { c.WithDSDRender(capsFn(dsdCapsOn)) },
-			[]string{"DSD/01.dsf|optimized-dsd-v1-44100-16", "DSD/03.dff|optimized-dsd-v1-48000-16", "DSD/04.flac|optimized-v2-48000-16"}, 3},
+			[]string{"DSD/01.dsf|optimized-dsd-v2-44100-16", "DSD/03.dff|optimized-dsd-v2-48000-16", "DSD/04.flac|optimized-v2-48000-16"}, 3},
 		{"caps with dst", func(c *Coordinator) { c.WithDSDRender(capsFn(dsdCapsWithDST)) },
-			[]string{"DSD/01.dsf|optimized-dsd-v1-44100-16", "DSD/02.dff|optimized-dsd-v1-44100-16", "DSD/03.dff|optimized-dsd-v1-48000-16", "DSD/04.flac|optimized-v2-48000-16"}, 2},
+			[]string{"DSD/01.dsf|optimized-dsd-v2-44100-16", "DSD/02.dff|optimized-dsd-v2-44100-16", "DSD/03.dff|optimized-dsd-v2-48000-16", "DSD/04.flac|optimized-v2-48000-16"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,8 +171,8 @@ func TestSubmitPCMRender_MixedAlbumSkipsNonDSD(t *testing.T) {
 		want    []string
 		skipped int
 	}{
-		{"caps on", dsdCapsOn, []string{"DSD/01.dsf|pcm-v1-176400-24", "DSD/03.dff|pcm-v1-192000-24"}, 4},
-		{"caps with dst", dsdCapsWithDST, []string{"DSD/01.dsf|pcm-v1-176400-24", "DSD/02.dff|pcm-v1-176400-24", "DSD/03.dff|pcm-v1-192000-24"}, 3},
+		{"caps on", dsdCapsOn, []string{"DSD/01.dsf|pcm-v2-176400-24", "DSD/03.dff|pcm-v2-192000-24"}, 4},
+		{"caps with dst", dsdCapsWithDST, []string{"DSD/01.dsf|pcm-v2-176400-24", "DSD/02.dff|pcm-v2-176400-24", "DSD/03.dff|pcm-v2-192000-24"}, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,8 +213,8 @@ func TestSubmitPCMRender_CoverageIsThePCMPrefixOnly(t *testing.T) {
 	s := openTempStoreForBatch(t)
 	t.Cleanup(func() { _ = s.Close() })
 	seedDSDBatchFixture(t, s)
-	seedVariantOn(t, s, "DSD/01.dsf", "pcm-v1-176400-24", 176400, 24)
-	seedVariantOn(t, s, "DSD/03.dff", "optimized-dsd-v1-48000-16", 48000, 16)
+	seedVariantOn(t, s, "DSD/01.dsf", "pcm-v2-176400-24", 176400, 24)
+	seedVariantOn(t, s, "DSD/03.dff", "optimized-dsd-v2-48000-16", 48000, 16)
 	c, p, _ := newTestCoordinatorWithStubbedPool(t, s)
 	blockRunner(t, p)
 	c.WithDSDRender(capsFn(dsdCapsOn))
@@ -226,7 +226,7 @@ func TestSubmitPCMRender_CoverageIsThePCMPrefixOnly(t *testing.T) {
 	if pcm.AlreadyCovered != 1 || pcm.EnqueuedCount != 1 {
 		t.Errorf("pcm result = %+v, want the pcm-covered DSF skipped and the optimized-dsd DFF enqueued", pcm)
 	}
-	if got, want := inflightKeys(p), []string{"DSD/03.dff|pcm-v1-192000-24"}; joined(got) != joined(want) {
+	if got, want := inflightKeys(p), []string{"DSD/03.dff|pcm-v2-192000-24"}; joined(got) != joined(want) {
 		t.Errorf("pcm enqueued %v, want %v", got, want)
 	}
 
@@ -295,7 +295,7 @@ func TestSubmitPCMRenderPaths_EnqueuesOnlyTheGivenSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitPCMRenderPaths: %v", err)
 	}
-	if got, want := inflightKeys(p), []string{"DSD/01.dsf|pcm-v1-176400-24"}; joined(got) != joined(want) {
+	if got, want := inflightKeys(p), []string{"DSD/01.dsf|pcm-v2-176400-24"}; joined(got) != joined(want) {
 		t.Errorf("enqueued %v, want %v", got, want)
 	}
 	if res.EnqueuedCount != 1 {
@@ -356,16 +356,16 @@ func TestEnqueuedDSDJobSpecsCarryTheRenderFacts(t *testing.T) {
 				key, sp, isDSD, compression, kind, rate, bits)
 		}
 	}
-	check("DSD/01.dsf|pcm-v1-176400-24", true, "", JobKindPCMRender, 176400, 24)
-	check("DSD/02.dff|pcm-v1-176400-24", true, "DST", JobKindPCMRender, 176400, 24)
-	check("DSD/03.dff|pcm-v1-192000-24", true, "", JobKindPCMRender, 192000, 24)
-	check("DSD/01.dsf|optimized-dsd-v1-44100-16", true, "", JobKindOptimize, 44100, 16)
-	check("DSD/02.dff|optimized-dsd-v1-44100-16", true, "DST", JobKindOptimize, 44100, 16)
-	check("DSD/03.dff|optimized-dsd-v1-48000-16", true, "", JobKindOptimize, 48000, 16)
+	check("DSD/01.dsf|pcm-v2-176400-24", true, "", JobKindPCMRender, 176400, 24)
+	check("DSD/02.dff|pcm-v2-176400-24", true, "DST", JobKindPCMRender, 176400, 24)
+	check("DSD/03.dff|pcm-v2-192000-24", true, "", JobKindPCMRender, 192000, 24)
+	check("DSD/01.dsf|optimized-dsd-v2-44100-16", true, "", JobKindOptimize, 44100, 16)
+	check("DSD/02.dff|optimized-dsd-v2-44100-16", true, "DST", JobKindOptimize, 44100, 16)
+	check("DSD/03.dff|optimized-dsd-v2-48000-16", true, "", JobKindOptimize, 48000, 16)
 	check("DSD/04.flac|optimized-v2-48000-16", false, "", JobKindOptimize, 48000, 16)
 	// The nominal DSD rate rides SourceSampleRate — what the chain's
 	// geometry check and the pool's timeout derive from.
-	if sp := got["DSD/03.dff|pcm-v1-192000-24"]; sp.SourceSampleRate != 3072000 || sp.SourceBits != 1 {
+	if sp := got["DSD/03.dff|pcm-v2-192000-24"]; sp.SourceSampleRate != 3072000 || sp.SourceBits != 1 {
 		t.Errorf("DSD spec source geometry = %d/%d, want the nominal 3072000/1", sp.SourceSampleRate, sp.SourceBits)
 	}
 }

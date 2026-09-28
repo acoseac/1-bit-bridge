@@ -536,8 +536,8 @@ Hands a track or folder to the long-lived transcode worker pool inside `bridge s
 | `kind` | Family minted | Sources admitted | Gate (`/v1/health.features`) |
 |---|---|---|---|
 | `"upscale"` | `upscaled-v2-<rate>-<bits>` | lossless PCM below the target | `upscaleEnabled` |
-| `"optimize"` | `optimized-v2-<44100\|48000>-16`, or `optimized-dsd-v1-<44100\|48000>-16` for a DSD source | lossless PCM above the CarPlay floor; **DSD (DSF / DFF) when `dsdRender` is advertised** | `carPlayOptimize` |
-| `"pcm"` | `pcm-v1-<176400\|192000>-24` | **DSD only** — the faithful tier for a wired DAC that cannot take the file's DSD rate; a non-DSD source is silently ineligible | `dsdRender` |
+| `"optimize"` | `optimized-v2-<44100\|48000>-16`, or `optimized-dsd-v2-<44100\|48000>-16` for a DSD source | lossless PCM above the CarPlay floor; **DSD (DSF / DFF) when `dsdRender` is advertised** | `carPlayOptimize` |
+| `"pcm"` | `pcm-v2-<176400\|192000>-24` | **DSD only** — the faithful tier for a wired DAC that cannot take the file's DSD rate; a non-DSD source is silently ineligible | `dsdRender` |
 
 An unknown `kind` is `400 bad_request`. A kind whose gate is off answers `503 upscale_disabled` **before the path is resolved** — a client asking for `"pcm"` on a bridge that does not advertise `dsdRender` gets the same 503 for a real path and a nonexistent one, never a 404 that would say whether the path exists. The DSD tiers are documented under [Upscaling](#upscaling-offline-pcm-variants-additive-since-v12).
 
@@ -816,7 +816,7 @@ Backwards compatibility: the 202 branch is a v1.1 addition; the `no_image` termi
 
 The bridge supports an opt-in offline PCM-upscaling feature that pre-renders high-rate FLAC sidecars from CD-rate PCM sources via `sox(1)`. The feature is **disabled by default**; operators enable it via `upscale.enabled: true` in `bridge.yaml` and run `bridge upscale` to populate the sidecar cache. Conversion is always offline — the bridge never modulates bytes in flight, preserving the bit-exact mission.
 
-**DSD → PCM renditions** (additive; `dsdRender`) extend the same machinery to DSD sources (DSF / DSDIFF, including DST-compressed DSDIFF when the bridge's ffmpeg carries the `dst` decoder). They exist for the places DSD cannot play as DSD — CarPlay, wireless outputs, the phone's speaker, a DAC that cannot take the file's DSD rate — where the app would otherwise download the whole DSD file and convert it on the phone. The bridge decodes once (ffmpeg's `dsd_*` decoders, at unity gain) and decimates with sox into two tiers: the **compact** `optimized-dsd-v1-<44100|48000>-16` (the CarPlay / wireless tier; the family rate follows the source — 44.1 kHz for the 2.8224 MHz family, 48 kHz for 3.072 MHz) and the **faithful** `pcm-v1-<176400|192000>-24` (a wired DAC that cannot take DSD256 still gets 24-bit at 176.4 kHz). It is never called "upscaled": the transformation is decimation. Gated on `upscale.dsdRender.enabled` (default OFF) AND an ffmpeg with the DSD decoders on the bridge host; `/v1/health.features` advertises `dsdRender` only while both hold, and it is the same predicate the `pcm` kind reads. A DAC that takes DSD over DoP is never affected — the app keeps sending the original bytes. Both tiers are served through `/v1/download?variant=` bit-exact like every other variant.
+**DSD → PCM renditions** (additive; `dsdRender`) extend the same machinery to DSD sources (DSF / DSDIFF, including DST-compressed DSDIFF when the bridge's ffmpeg carries the `dst` decoder). They exist for the places DSD cannot play as DSD — CarPlay, wireless outputs, the phone's speaker, a DAC that cannot take the file's DSD rate — where the app would otherwise download the whole DSD file and convert it on the phone. The bridge decodes once (ffmpeg's `dsd_*` decoders, at unity gain) and decimates with sox into two tiers: the **compact** `optimized-dsd-v2-<44100|48000>-16` (the CarPlay / wireless tier; the family rate follows the source — 44.1 kHz for the 2.8224 MHz family, 48 kHz for 3.072 MHz) and the **faithful** `pcm-v2-<176400|192000>-24` (a wired DAC that cannot take DSD256 still gets 24-bit at 176.4 kHz). It is never called "upscaled": the transformation is decimation. Gated on `upscale.dsdRender.enabled` (default OFF) AND an ffmpeg with the DSD decoders on the bridge host; `/v1/health.features` advertises `dsdRender` only while both hold, and it is the same predicate the `pcm` kind reads. A DAC that takes DSD over DoP is never affected — the app keeps sending the original bytes. Both tiers are served through `/v1/download?variant=` bit-exact like every other variant.
 
 #### Wire shape
 
@@ -857,7 +857,7 @@ A DSD source carries its renditions in the same array, each with the additive **
   "bitsPerSample": 1,
   "variants": [
     {
-      "id": "optimized-dsd-v1-44100-16",
+      "id": "optimized-dsd-v2-44100-16",
       "format": "flac",
       "sampleRate": 44100,
       "bitsPerSample": 16,
@@ -866,7 +866,7 @@ A DSD source carries its renditions in the same array, each with the additive **
       "appliedGainDB": 6
     },
     {
-      "id": "pcm-v1-176400-24",
+      "id": "pcm-v2-176400-24",
       "format": "flac",
       "sampleRate": 176400,
       "bitsPerSample": 24,
@@ -878,7 +878,9 @@ A DSD source carries its renditions in the same array, each with the additive **
 }
 ```
 
-`appliedGainDB` (additive, `omitempty`, present ONLY on DSD-sourced renditions) is the gain baked into the rendition relative to the decoded DSD source, in dB. The nominal value is **+6** — the SACD authoring convention leaves DSD about 6 dB below PCM full scale, and the app's own on-device converter applies the same +6 — but it is **clip-guarded per track**: the bridge measures the decimated signal's true peak (4× oversampled) and applies `clamp(0, 6, −truePeak − 1 dBTP)`, so a hot master gets less and the field can legitimately be `0`. A client that wants the source at 0 dB attenuates by exactly this value; a client that wants the +6 plays the file as-is. PCM-sourced variants never carry the field (a nil pointer is omitted; a clamped `0` ships as `0`).
+`appliedGainDB` (additive, `omitempty`, present ONLY on DSD-sourced renditions) is the gain baked into the rendition relative to the decoded DSD source, in dB. The nominal value is **+6** — the SACD authoring convention leaves DSD about 6 dB below PCM full scale, and the app's own on-device converter applies the same +6 — but it is **clip-guarded per album** (since the DSD `v2` schema; `v1` renditions were guarded per track): the bridge measures each track's decimated true peak (4× oversampled), and every track of an album gets the boost its hottest track allows, `clamp(0, 6, −truePeak − 1 dBTP)` of the album's highest peak — so a hot master gets less, the field can legitimately be `0`, and an album keeps the balance between its tracks that it was mastered with. A track never gets more than its own guard, and one the bridge cannot place on an album is guarded alone. The album is the one the app groups the track under: its album artist (the artist when untagged), album and year, resolved from the manifest the way the app resolves them. The two tiers are guarded separately, so the compact and faithful renditions of one track can carry different values. A client that wants the source at 0 dB attenuates by exactly this value; a client that wants the +6 plays the file as-is. PCM-sourced variants never carry the field (a nil pointer is omitted; a clamped `0` ships as `0`).
+
+**The value belongs to the rendition id, and a track can list more than one rendition of a family.** When the DSD schema moves (the `v1` → `v2` move is the album-level gain), the bridge renders the new id beside the old one and keeps the old row while its file exists, so a client holding a downloaded copy of the old id still finds that id — and the gain baked into those bytes — in the manifest. A track's `variants` are listed **newest first**, so a client that resolves a family by prefix and takes the first match streams and downloads the current rendition. A client that applies `appliedGainDB` to a downloaded copy must read it from the entry with that copy's own id, never from the first entry of the family.
 
 #### Variant identifier scheme
 
@@ -888,12 +890,12 @@ A DSD source carries its renditions in the same array, each with the additive **
 |---|---|---|---|
 | `upscaled-v2-<rate>-<bits>` | `kind: "upscale"` | lossless PCM below the target | the share-level "prefer upscaled" toggle (prefix `upscaled-`) |
 | `optimized-v2-<44100\|48000>-16` | `kind: "optimize"` | lossless PCM above the CarPlay floor | CarPlay / cellular / wireless routing (prefix `optimized-`) |
-| `optimized-dsd-v1-<44100\|48000>-16` | `kind: "optimize"` under `dsdRender` | DSD | the SAME `optimized-` prefix — every existing `optimized-` routing site admits it unchanged; the hyphenated family is safe because neither repo splits ids on `-` |
-| `pcm-v1-<176400\|192000>-24` | `kind: "pcm"` | DSD | prefix `pcm-` — the faithful tier for a wired DAC that cannot take the source's DSD rate |
+| `optimized-dsd-v2-<44100\|48000>-16` | `kind: "optimize"` under `dsdRender` | DSD | the SAME `optimized-` prefix — every existing `optimized-` routing site admits it unchanged; the hyphenated family is safe because neither repo splits ids on `-` |
+| `pcm-v2-<176400\|192000>-24` | `kind: "pcm"` | DSD | prefix `pcm-` — the faithful tier for a wired DAC that cannot take the source's DSD rate |
 
 Clients resolve by prefix only. Future variant kinds get their own prefixes without disturbing legacy resolution.
 
-The schema version bumps only when the on-disk sidecar layout or the sox command shape changes in a way that makes prior sidecars semantically different from a fresh run. The PCM families share `v2`; the DSD families carry their own `v1`, versioned INDEPENDENTLY, so a change to the decimation recipe (filter, gain policy, dither) invalidates only the DSD renditions and never the PCM optimizes. Operators don't manage schema versions directly; `bridge upscale --force` re-converts to the current schema.
+The schema version bumps only when the on-disk sidecar layout or the sox command shape changes in a way that makes prior sidecars semantically different from a fresh run. The PCM families share `v2`; the DSD families carry their own version, currently `v2` (the album-level gain; `v1` was the per-track guard), versioned INDEPENDENTLY, so a change to the decimation recipe (filter, gain policy, dither) invalidates only the DSD renditions and never the PCM optimizes. Operators don't manage schema versions directly; `bridge upscale --force` re-converts to the current schema. A DSD schema move is driven by the bridge, since a client never requests a family it already holds: the auto-optimize sweep re-renders every DSD compact rendition not on the current schema, and every faithful one a track already holds (it never adds a faithful rendition a track did not have); a bridge without the sweep moves when the operator runs `bridge optimize` and `bridge render`. The superseded rows stay, per the paragraph on `appliedGainDB` above.
 
 #### Feature gate semantics
 

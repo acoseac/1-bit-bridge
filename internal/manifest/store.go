@@ -2086,6 +2086,26 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 47,
+		name:    "dsd_peaks (a DSD track's true peak per render profile, for the album-level gain)",
+		// See dsd_peaks.go. Keyed (path, profile) because a peak is a fact
+		// about one Stage A intermediate, and the two tiers decode to
+		// different ones. CASCADE rides the tracks PK like track_variants:
+		// a rename inserts a new path and the old peak goes with the old row.
+		// The post() seed is INSERT OR IGNORE, so re-running it after a
+		// failed boot is harmless.
+		sql: `CREATE TABLE IF NOT EXISTS dsd_peaks (
+			source_path     TEXT    NOT NULL REFERENCES tracks(path) ON DELETE CASCADE,
+			profile         TEXT    NOT NULL,
+			true_peak_dbtp  REAL,
+			source_mtime_ns INTEGER NOT NULL,
+			source_size     INTEGER NOT NULL,
+			measured_at     INTEGER NOT NULL,
+			PRIMARY KEY (source_path, profile)
+		);`,
+		post: seedDSDPeaksFromVariants,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -3708,6 +3728,16 @@ func boolPtr(b bool) *bool { return &b }
 // into a JSON null, which decodes to a nil *float64 and is dropped from
 // the wire by `omitempty` — so a PCM variant carries NO key, while a DSD
 // rendition clamped to 0 dB carries `0` (see Variant.AppliedGainDB).
+//
+// **NEWEST FIRST, and that is a wire guarantee (PROTOCOL.md).** iOS resolves
+// a family by id prefix and takes the FIRST match, and a track can hold two
+// rows of one family: a superseded schema version (the DSD v1 → v2 move keeps
+// v1 for the phones that downloaded it) or a pre-re-rip target rate. Before
+// this ORDER BY the array came out in primary-key order, which listed
+// `…-v1-…` ahead of `…-v2-…`, so every shipped app version would have
+// streamed and downloaded the superseded file. Newest first is version-
+// agnostic: the current schema is always the one written last. The id is
+// the tie-break so the order is deterministic.
 const variantsAggSQL = `
 	(SELECT json_group_array(json_object(
 	            'id',            v.variant_id,
@@ -3716,7 +3746,8 @@ const variantsAggSQL = `
 	            'bitsPerSample', v.bits_per_sample,
 	            'sizeBytes',     v.size_bytes,
 	            'appliedGainDB', v.applied_gain_db,
-	            'label',         v.variant_id))
+	            'label',         v.variant_id)
+	        ORDER BY v.created_at DESC, v.variant_id DESC)
 	 FROM track_variants v
 	 WHERE v.source_path = tracks.path) AS variants_json`
 
@@ -6542,7 +6573,7 @@ const (
 	VariantKindPrefixUpscaled  = "upscaled"
 	VariantKindPrefixOptimized = "optimized"
 	// VariantKindPrefixOptimizedDSD is the DSD compact tier
-	// (`optimized-dsd-v1-<44100|48000>-16`). It STARTS WITH
+	// (`optimized-dsd-v2-<44100|48000>-16`). It STARTS WITH
 	// VariantKindPrefixOptimized on purpose: `LIKE 'optimized-%'` and
 	// every `optimized-` prefix check — the coverage counters, the
 	// sweeper's already-covered test, iOS routing — admit it unchanged.
@@ -6550,9 +6581,16 @@ const (
 	// matches the whole `<prefix>-v<n>-<rate>-<bits>` segment.
 	VariantKindPrefixOptimizedDSD = VariantKindPrefixOptimized + "-dsd"
 	// VariantKindPrefixPCM is the DSD faithful tier
-	// (`pcm-v1-<176400|192000>-24`): a NEW family, never "upscaled".
+	// (`pcm-v2-<176400|192000>-24`): a NEW family, never "upscaled".
 	VariantKindPrefixPCM = "pcm"
 )
+
+// DSDRenditionSchemaVersion mirrors transcode.DSDRenditionSchemaVersion for
+// the SQL that must tell the CURRENT DSD renditions from superseded ones:
+// the sweeper's coverage and the faithful tier's migration pass. This
+// package cannot import transcode; transcode's
+// TestManifestMirrorsTheDSDRenditionSchema keeps the two equal.
+const DSDRenditionSchemaVersion = "v2"
 
 // childFolderRollupSelect is the shared SELECT-projection block used
 // by ListChildFolders + ListChildFoldersPage's `parent == ""` AND
@@ -7718,7 +7756,12 @@ type VariantRow struct {
 	// is a real, stored 0).
 	AppliedGainDB *float64
 	TruePeakDBTP  *float64
-	CreatedAt     int64
+	// PeakProfile is the transcode.DSDPeakProfile TruePeakDBTP was measured
+	// on. Set on a DSD rendition, it makes UpsertVariant record the peak in
+	// dsd_peaks in the same transaction, which is how every render feeds
+	// the album-level gain without a second write path. Empty on PCM rows.
+	PeakProfile string
+	CreatedAt   int64
 }
 
 // nullFloat maps an optional gain fact onto its SQL bind: nil → NULL.
@@ -7778,6 +7821,15 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt,
 		nullFloat(v.AppliedGainDB), nullFloat(v.TruePeakDBTP)); err != nil {
 		return err
+	}
+	// The render's Stage B peak, for the album-level gain (dsd_peaks.go).
+	// Only a DSD rendition carries both facts; its measured TruePeakDBTP is
+	// nil exactly when the source is silent, which the row records as such.
+	if v.PeakProfile != "" && v.AppliedGainDB != nil {
+		if _, err := tx.ExecContext(ctx, upsertDSDPeakSQL, v.SourcePath, v.PeakProfile,
+			nullFloat(v.TruePeakDBTP), v.SourceMTimeNS, v.SourceSize, v.CreatedAt); err != nil {
+			return err
+		}
 	}
 	// Parent indexed_at bump. UPDATE on a missing parent is a no-op
 	// (RowsAffected=0) but the FK on track_variants.source_path with

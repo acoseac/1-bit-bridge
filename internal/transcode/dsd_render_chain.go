@@ -35,11 +35,18 @@ import (
 //	   phase overshoot is bounded by the taps' ℓ1 norm well under 6 dB.
 //	B  the scratch's BS.1770 true peak (4× oversampled at its native rate)
 //	   → TP_unity = TP + 6.0206 (the pre-attenuation removed)
-//	   → G = clamp(0, 6, −TP_unity − 1 dBTP), rounded to 0.1 dB.
+//	   → G = clamp(0, 6, −TP_unity − 1 dBTP), rounded to 0.1 dB — the
+//	   track's own guard. When the job carries an AlbumGainer, G is the
+//	   album's shared boost instead, never above the track's own guard
+//	   (album_gain.go).
 //	C  sox reads the scratch and writes the FLAC sidecar with
 //	   `gain 6.0206 + G` — exactly the pre-attenuation undone PLUS the
 //	   clip-guarded gain, so the rendition sits at unity + G and its true
-//	   peak lands at or below −1 dBTP by construction — then `dither -s`.
+//	   peak lands at or below −1 dBTP for any source that peaks at or below
+//	   −1 dBTP at unity. The guard cannot attenuate (its clamp stops at 0),
+//	   so a hotter source keeps its own peak, and one above 0 dBTP clips in
+//	   this stage and is refused (ErrDSDClipped; plan-2026-09-09-loupe-w5.md
+//	   P0d, escalated) — then `dither -s`.
 //
 // Both sox stages FAIL on any `clipped` line in sox's stderr: the arithmetic
 // says it cannot happen, and the check is the belt. Measured (and pinned by
@@ -71,6 +78,10 @@ type RunResult struct {
 	// before the applied gain; nil for PCM jobs and for a digitally silent
 	// source (nothing measured).
 	TruePeakDBTP *float64
+	// PeakProfile is the DSDPeakProfile TruePeakDBTP was measured on, so
+	// the writer can record the peak for the album-level gain beside the
+	// rendition (manifest.VariantRow.PeakProfile). Empty for PCM jobs.
+	PeakProfile string
 }
 
 const (
@@ -363,10 +374,16 @@ type dsdRenderSettings struct {
 	NominalGainDB        float64  `json:"nominalGainDB"`
 	AppliedGainDB        *float64 `json:"appliedGainDB"`
 	TruePeakDBTP         *float64 `json:"truePeakDBTP"`
-	Lowpass              string   `json:"lowpass,omitempty"`
+	// GainScope says which rule decided AppliedGainDB: GainScopeTrack (the
+	// track's own clip guard) or GainScopeAlbum (the album's shared boost,
+	// bounded by that guard). TrackGainDB is the track's own guard, recorded
+	// either way, so an album-scoped row still says what the album cost it.
+	GainScope   string   `json:"gainScope"`
+	TrackGainDB *float64 `json:"trackGainDB"`
+	Lowpass     string   `json:"lowpass,omitempty"`
 }
 
-func (j JobSpec) dsdSettings(geo sourceGeometry, appliedGainDB float64, truePeakUnity *float64) (string, error) {
+func (j JobSpec) dsdSettings(geo sourceGeometry, appliedGainDB float64, truePeakUnity *float64, gainScope string, trackGainDB float64) (string, error) {
 	s := dsdRenderSettings{
 		Resampler:            "sox",
 		Decoder:              routeFFmpegDSDPipe.String(),
@@ -385,6 +402,8 @@ func (j JobSpec) dsdSettings(geo sourceGeometry, appliedGainDB float64, truePeak
 		NominalGainDB:        dsdNominalGainDB,
 		AppliedGainDB:        &appliedGainDB,
 		TruePeakDBTP:         truePeakUnity,
+		GainScope:            gainScope,
+		TrackGainDB:          &trackGainDB,
 	}
 	if j.Kind == JobKindPCMRender {
 		s.Lowpass = strings.Join(dsdLowpassArgs, " ")
@@ -410,6 +429,8 @@ type SoxSettingsView struct {
 	Guard         bool     `json:"guard"`
 	AppliedGainDB *float64 `json:"appliedGainDB"`
 	TruePeakDBTP  *float64 `json:"truePeakDBTP"`
+	GainScope     string   `json:"gainScope"`
+	TrackGainDB   *float64 `json:"trackGainDB"`
 	Lowpass       string   `json:"lowpass"`
 }
 
@@ -447,20 +468,106 @@ func publishSidecar(ctx context.Context, tmpPath, finalPath string) (int64, erro
 	return info.Size(), nil
 }
 
+// dsdGeometry probes the decoder's geometry and checks it, and the job's
+// target, before any stage runs — the checks a render and a measurement
+// share.
+func (j JobSpec) dsdGeometry(ctx context.Context) (sourceGeometry, error) {
+	geo, err := probeSourceGeometry(ctx, j.SourceAbsPath)
+	if err != nil {
+		return sourceGeometry{}, err
+	}
+	if err := validateDSDGeometry(geo, j); err != nil {
+		return sourceGeometry{}, err
+	}
+	if j.TargetSampleRate <= 0 || j.TargetBits <= 0 {
+		return sourceGeometry{}, fmt.Errorf("dsd render: target %d Hz / %d bit is not a rendition (%s)",
+			j.TargetSampleRate, j.TargetBits, j.SourceLibraryRel)
+	}
+	return geo, nil
+}
+
+// decodeAndMeasure runs Stage A into scratchPath and Stage B over it,
+// returning the true peak at UNITY decode — nil for a digitally silent
+// source. The caller owns scratchPath and removes it on every exit; a
+// render keeps it for Stage C, a measurement discards it.
+func (j JobSpec) decodeAndMeasure(ctx context.Context, geo sourceGeometry, scratchDir, scratchPath string) (*float64, error) {
+	// Stage A — decode at unity (×0.5 on the pipe), decimate into the scratch.
+	soxStderr, err := runFFmpegPipe(ctx, j.dsdStageAArgs(geo, scratchDir, scratchPath), ffmpegDSDDecodeArgs(j.SourceAbsPath))
+	if err != nil {
+		return nil, err
+	}
+	if soxReportedClipping(soxStderr) {
+		return nil, fmt.Errorf("%w in stage A (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(soxStderr))
+	}
+	expected := dsdExpectedDurationSec(geo.Duration, j.SourceDurationSec)
+	if produced := soxFileDuration(ctx, scratchPath); decodeLengthDisagrees(expected, produced) {
+		return nil, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+			ErrFFmpegDecodeIncomplete, expected, produced, j.SourceLibraryRel)
+	}
+
+	// Stage B — true peak of the scratch, back at unity.
+	tp, measured, err := analyze.TruePeakDBTP(ctx, scratchPath, geo.Channels)
+	if err != nil {
+		return nil, fmt.Errorf("dsd render: true peak of %s: %w", j.SourceLibraryRel, err)
+	}
+	if !measured {
+		return nil, nil
+	}
+	u := tp + dsdPreAttenuationDB
+	return &u, nil
+}
+
+// MeasureDSDPeak runs Stages A and B for j and returns the source's true
+// peak at unity decode — nil for a digitally silent source — publishing
+// nothing. It is how the album survey measures a track that has no rendition
+// yet: the render's own decode, scratch and meter, so the number is the one
+// a render of j would measure. Its scratch is removed before it returns.
+//
+// It refuses what Run refuses: a source that is not DSD, or one that does not
+// route to the DSD chain (ErrDSDDecodeUnavailable).
+func MeasureDSDPeak(ctx context.Context, j JobSpec) (*float64, error) {
+	if !j.SourceIsDSD {
+		return nil, fmt.Errorf("measure dsd peak: %s is not a DSD source", j.SourceLibraryRel)
+	}
+	if !needsDecodeRouting(j.SourceAbsPath) ||
+		decodeRouteFor(SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
+			FFmpegSnapshot(), j.SourceAbsPath) != routeFFmpegDSDPipe {
+		return nil, fmt.Errorf("%w (source %q)", ErrDSDDecodeUnavailable, filepath.Base(j.SourceAbsPath))
+	}
+	geo, err := j.dsdGeometry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scratchDir := renderScratchDir(j.TempDir)
+	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir render scratch dir: %w", err)
+	}
+	scratchPath := filepath.Join(scratchDir, nextSidecarTmpToken()+renderScratchSuffix)
+	_ = os.Remove(scratchPath)
+	defer func() { _ = os.Remove(scratchPath) }()
+	return j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
+}
+
 // renderDSD is the DSD branch of Run — see the chain docblock at the top of
 // this file. It owns its scratch and its temp sidecar and reaps both on every
 // exit; only a successful publish keeps the final file.
 func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
-	geo, err := probeSourceGeometry(ctx, j.SourceAbsPath)
+	// Claim this track's peak before anything can fail, and resolve the
+	// claim on every exit: an album-mate's survey waiting on it must never
+	// wait on a render that already gave up.
+	var resolveClaim func(*float64, error)
+	if j.AlbumGain != nil {
+		resolveClaim = j.AlbumGain.Claim(ctx, j)
+		defer func() {
+			if resolveClaim != nil {
+				resolveClaim(nil, fmt.Errorf("dsd render of %s ended before its peak was measured", j.SourceLibraryRel))
+			}
+		}()
+	}
+
+	geo, err := j.dsdGeometry(ctx)
 	if err != nil {
 		return RunResult{}, err
-	}
-	if err := validateDSDGeometry(geo, j); err != nil {
-		return RunResult{}, err
-	}
-	if j.TargetSampleRate <= 0 || j.TargetBits <= 0 {
-		return RunResult{}, fmt.Errorf("dsd render: target %d Hz / %d bit is not a rendition (%s)",
-			j.TargetSampleRate, j.TargetBits, j.SourceLibraryRel)
 	}
 
 	finalPath := j.SidecarPath()
@@ -484,31 +591,28 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 		}
 	}()
 
-	// Stage A — decode at unity (×0.5 on the pipe), decimate into the scratch.
-	soxStderr, err := runFFmpegPipe(ctx, j.dsdStageAArgs(geo, scratchDir, scratchPath), ffmpegDSDDecodeArgs(j.SourceAbsPath))
+	// Stages A and B — decode into the scratch and measure it at unity.
+	truePeakUnity, err := j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
 	if err != nil {
 		return RunResult{}, err
 	}
-	if soxReportedClipping(soxStderr) {
-		return RunResult{}, fmt.Errorf("%w in stage A (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(soxStderr))
+	if resolveClaim != nil {
+		resolveClaim(truePeakUnity, nil)
+		resolveClaim = nil
 	}
-	expected := dsdExpectedDurationSec(geo.Duration, j.SourceDurationSec)
-	if produced := soxFileDuration(ctx, scratchPath); decodeLengthDisagrees(expected, produced) {
-		return RunResult{}, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
-			ErrFFmpegDecodeIncomplete, expected, produced, j.SourceLibraryRel)
+	trackGain := dsdNominalGainDB
+	if truePeakUnity != nil {
+		trackGain = ClipGuardedGainDB(*truePeakUnity)
 	}
-
-	// Stage B — true peak of the scratch, at unity, → the clip-guarded gain.
-	tp, measured, err := analyze.TruePeakDBTP(ctx, scratchPath, geo.Channels)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("dsd render: true peak of %s: %w", j.SourceLibraryRel, err)
-	}
-	gain := dsdNominalGainDB
-	var truePeakUnity *float64
-	if measured {
-		u := tp + dsdPreAttenuationDB
-		truePeakUnity = &u
-		gain = ClipGuardedGainDB(u)
+	gain, gainScope := trackGain, GainScopeTrack
+	if j.AlbumGain != nil {
+		albumGain, ok, aerr := j.AlbumGain.AlbumGainDB(ctx, j, truePeakUnity)
+		if aerr != nil {
+			return RunResult{}, fmt.Errorf("dsd render: album gain for %s: %w", j.SourceLibraryRel, aerr)
+		}
+		if ok {
+			gain, gainScope = albumBoundedGain(trackGain, albumGain), GainScopeAlbum
+		}
 	}
 
 	// Stage C — undo the pre-attenuation, apply the gain, dither, publish.
@@ -521,7 +625,7 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	if soxReportedClipping(string(out)) {
 		return RunResult{}, fmt.Errorf("%w in stage C (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(string(out)))
 	}
-	settings, err := j.dsdSettings(geo, gain, truePeakUnity)
+	settings, err := j.dsdSettings(geo, gain, truePeakUnity, gainScope, trackGain)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("dsd render: settings: %w", err)
 	}
@@ -534,6 +638,8 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 		"path", j.SourceLibraryRel,
 		"variant", j.VariantID(),
 		"applied_gain_db", gain,
+		"gain_scope", gainScope,
 		"sidecar_bytes", size)
-	return RunResult{SizeBytes: size, Settings: settings, AppliedGainDB: &gain, TruePeakDBTP: truePeakUnity}, nil
+	return RunResult{SizeBytes: size, Settings: settings, AppliedGainDB: &gain,
+		TruePeakDBTP: truePeakUnity, PeakProfile: j.DSDPeakProfile()}, nil
 }

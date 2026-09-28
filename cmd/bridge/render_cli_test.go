@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -111,8 +112,8 @@ func TestClassifyUpscaleTrack_DSDKindArms(t *testing.T) {
 		{"upscale never admits DSD, caps or not", transcode.JobKindUpscale, cliCapsDSDDST, false, 0, 0, ""},
 		{"optimize without caps refuses", transcode.JobKindOptimize, cliCapsOff, false, 0, 0, ""},
 		{"pcm without caps refuses", transcode.JobKindPCMRender, cliCapsOff, false, 0, 0, ""},
-		{"optimize under caps takes the compact tier", transcode.JobKindOptimize, cliCapsDSD, true, 44100, 16, "optimized-dsd-v1-44100-16"},
-		{"pcm under caps takes the faithful tier", transcode.JobKindPCMRender, cliCapsDSD, true, 176400, 24, "pcm-v1-176400-24"},
+		{"optimize under caps takes the compact tier", transcode.JobKindOptimize, cliCapsDSD, true, 44100, 16, "optimized-dsd-v2-44100-16"},
+		{"pcm under caps takes the faithful tier", transcode.JobKindPCMRender, cliCapsDSD, true, 176400, 24, "pcm-v2-176400-24"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.dsf", codec: "DSF", rateHz: 2822400, isDSD: true, durationSec: 300, channels: 2})
@@ -336,5 +337,65 @@ func TestRenderCmd_RefusesWhenTheFlagIsOff(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("upscale.dsdRender.enabled")) {
 		t.Errorf("stderr does not name the flag to set: %q", stderr.String())
+	}
+}
+
+// TestCLIAlbumMateSpecIsTheRunsOwnSpec: `bridge render` measures an
+// album-mate with the spec this run would render it with — its kind, quality
+// and directories — even when `--filter` excludes the mate or it is already
+// rendered, since it still bounds the album; the source facts are the track
+// row's, which a recorded peak's freshness is judged against. A mate this
+// run cannot render, or one not in the library, is refused.
+func TestCLIAlbumMateSpecIsTheRunsOwnSpec(t *testing.T) {
+	ctx := context.Background()
+	store, resolver, tr := renderCLIFixture(t, renderSource{
+		rel: "A/DSD/02.dsf", codec: "DSF", rateHz: 2822400, isDSD: true, durationSec: 240, channels: 2,
+	})
+	tr.ModTime = time.Unix(1_700_000_000, 0)
+	if err := store.UpsertTrack(ctx, &tr); err != nil {
+		t.Fatal(err)
+	}
+	p := runUpscaleParams{
+		targetBits: 24, quality: transcode.QualityHigh, kind: transcode.JobKindPCMRender,
+		dsdCaps: cliCapsDSD, tempDir: "/scratch/render", outputDir: "/out",
+		filter: "Elsewhere/", dryRun: true,
+	}
+	// The render's quality, not the run's, is the profile the mate is
+	// measured on (they agree in practice; the render's is the one that must).
+	like := transcode.JobSpec{Kind: transcode.JobKindPCMRender, SourceIsDSD: true, TargetSampleRate: 176400,
+		TargetBits: 24, Quality: transcode.QualityMedium}
+	// Already rendered on this run's id: the resume check would skip it.
+	if err := store.UpsertVariant(ctx, manifest.VariantRow{
+		SourcePath: tr.Path, VariantID: "pcm-" + transcode.DSDRenditionSchemaVersion + "-176400-24",
+		SidecarPath: "/out/x.flac", Format: "flac", SampleRate: 176400, BitsPerSample: 24,
+		SourceMTimeNS: tr.ModTime.UnixNano(), SourceSize: tr.Size, SoxSettings: "{}", CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := cliAlbumMateSpec(store, resolver, p)(ctx, tr.Path, like)
+	if err != nil {
+		t.Fatalf("a mate outside the filter and already rendered must still be measured: %v", err)
+	}
+	if got, want := spec.DSDPeakProfile(), like.DSDPeakProfile(); got != want {
+		t.Errorf("measured on %q, the render's profile is %q", got, want)
+	}
+	if spec.Kind != transcode.JobKindPCMRender || spec.TempDir != "/scratch/render" || spec.OutputDir != "/out" {
+		t.Errorf("kind/tempDir/outputDir %q/%q/%q, want the run's", spec.Kind, spec.TempDir, spec.OutputDir)
+	}
+	if spec.SourceMTimeNS != tr.ModTime.UnixNano() || spec.SourceSize != tr.Size {
+		t.Errorf("source facts %d/%d, want the row's %d/%d", spec.SourceMTimeNS, spec.SourceSize, tr.ModTime.UnixNano(), tr.Size)
+	}
+	if spec.SourceDurationSec != 240 || spec.SourceChannels != 2 {
+		t.Errorf("duration/channels %v/%d, want the row's", spec.SourceDurationSec, spec.SourceChannels)
+	}
+
+	noCaps := p
+	noCaps.dsdCaps = cliCapsOff
+	if _, err := cliAlbumMateSpec(store, resolver, noCaps)(ctx, tr.Path, like); err == nil {
+		t.Error("a run that cannot render DSD must not measure a DSD mate")
+	}
+	if _, err := cliAlbumMateSpec(store, resolver, p)(ctx, "A/DSD/gone.dsf", like); err == nil {
+		t.Error("a mate not in the library must be refused")
 	}
 }
