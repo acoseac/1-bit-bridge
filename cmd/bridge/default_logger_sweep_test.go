@@ -99,9 +99,11 @@ func scanDefaultLoggerSetters(r docScanReporter, root string, wholeTree bool) lo
 		r.Fatalf("walking %s: %v", root, err)
 		return sweep
 	}
-	// A walk that reads nothing reports nothing. The tree held 823 test
-	// files when these floors were set, 24 of them importing log/slog, the
-	// package whose calls this scan exists for.
+	// A walk that reads nothing reports nothing. The tree held 824 test
+	// files when these floors were set, 23 of them importing a setter's
+	// package by name. The second floor is the one that catches a skip rule
+	// swallowing internal/: cmd/bridge alone holds 103 test files, and 3 of
+	// them import one.
 	if wholeTree && (sweep.testFiles < 100 || sweep.importers < 10) {
 		r.Fatalf("parsed %d test files, %d of them importing a setter's package by name, want >=100 and >=10 — "+
 			"the scan is not seeing the tree", sweep.testFiles, sweep.importers)
