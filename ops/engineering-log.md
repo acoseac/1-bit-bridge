@@ -26047,3 +26047,272 @@ controls of the first draft's `dirIsEmpty` arms went with it.
 - `VariantWatcher`'s mass-delete refusal WARNs on every tick, unlatched.
 - `bridge init` ignores `--listen-address` and `--admin-address` without
   `--public`, without a word.
+
+## 2026-09-28 — the discovery caches hold at most 256 devices, a broken renderer's stub expires, and the dlna tests keep their SSDP on this host (backlog B47 and B38)
+
+B47 collected what #1072 left in discovery: its claims bound the goroutines a
+flood of new devices costs, not what a fetch leaves behind. B38 was the test
+runs' own traffic, which #1069's field data had found: the only LOCATIONs off
+their source on the LAN were this repo's `internal/dlna` test advertisers. Both
+live in the SSDP code and share the measurements, so they went together.
+
+### B38: what a test run put on the LAN
+
+macOS keeps `/dev/bpf*` root's, so the vantage point was a listener: a small Go
+program joining 239.255.255.250:1900 on en0 and writing one line per datagram
+(source, start line, NT, NTS, USN, LOCATION, ST, SERVER, USER-AGENT). Each
+package's test binary ran three times while it listened, and the other test
+binaries alive were logged every half second; none were, in any window. On
+main (a415a69b):
+
+| package, one run | on en0 |
+|---|---|
+| `internal/dlna` | about 312 NOTIFYs: `Test_SSDPAdvertiser_StartStopRaceFree` about 277 alive and 25 byebye (a 1 ms advertise interval, five Start/Stop cycles of five targets), `Test_Server_StartStop_LifecycleBindsLoopbackPort` 5 and 5; every one a fake MediaServer with a loopback LOCATION, from the Mac's LAN address |
+| `internal/dlna/discovery` | 1 M-SEARCH for MediaRenderer (`TestStopWaitsForInFlightFetch`) |
+| `internal/upnp` | 1 or 2 M-SEARCHes for MediaServer (`TestStopWaitsForInFlightFetch`, which starts twice; a restart's send can lose to Stop) |
+
+The fix changes tests only. `loopbackInterface(t)` gives both advertiser tests
+the loopback interface, so the group join, the NOTIFY sends (pinned by
+`SetMulticastInterface`) and the M-SEARCH listener stay on the host. The
+renderer's `newTestClient` and upstream's `newServerDiscoveryTestClient`
+install a `writeMSearch` that sends nothing. After, three runs of each package:
+0 datagrams from the tests on en0 (two M-SEARCHes in the upnp windows came from
+another process on the Mac, `ssdp:all` and `InternetGatewayDevice:1` with no
+USER-AGENT, where every bridge send carries one), while a listener on lo0 heard
+898 NOTIFYs, so the advertisers still send and the race test still races.
+Both tests PASS rather than skip.
+
+The isolated control built the branch with the two B38 changes undone
+(`loopbackInterface` answering nil, no discarding `writeMSearch`) and ran it
+alternately with the branch: 899 NOTIFYs on en0 in the control's windows,
+none in the branch's, every test passing in both, and 2 renderer and 5
+upstream M-SEARCHes from the control's discovery runs.
+
+Linux, in a `golang:1.26.6` container on dido: tcpdump on the host's `docker0`
+(every container's traffic to the bridge) carried 299 datagrams from main's
+tests (268 alive, 30 byebye, 1 M-SEARCH) and 0 from the branch's. A listener in
+a second container on the bridge agreed (285 and 0). Both advertiser tests
+PASS with `-v` in the container, so Linux's loopback takes the join and the
+sends, and the race job keeps the race test.
+
+**A listener in the SAME network namespace measures nothing on Linux.** The
+first Linux run listened on eth0 and on lo inside the test container: with the
+branch, the eth0 listener heard 286 datagrams, and on main the lo listener
+heard all 300 of eth0's. Go's `ListenMulticastUDP` binds the socket to the
+group address, and Linux's default `IP_MULTICAST_ALL` delivers the group's
+datagrams to it whatever interface they arrived on, as long as some socket on
+the host joined there. The same default reaches production: a multi-homed
+Linux bridge runs one advertiser per interface, and each would hear, and
+answer with its own LOCATION, the M-SEARCHes arriving on the others. That is
+reasoned from the kernel's rule and the measurement above, not measured end
+to end; backlog B71. On macOS the NOTIFYs sent through lo0 carry the Mac's LAN
+address as their source (the sender's local address was fixed at DialUDP, by
+the group's route through en0) and still never left the host.
+
+### B47 (1): a structural stub, reproduced first
+
+`TestAFloodOfBrokenRenderersStaysBounded` was written against main before any
+change: 5,000 distinct renderer UDNs whose LOCATION answers 404, fetched in
+batches of the claims bound so none is refused there. On main it failed on
+every count: 5,000 cache entries and 5,000 location records after the flood,
+and the same 5,000 and 5,000 after an eviction pass an hour later, since a
+structural failure's stub carried a year-2999 LastSeenAt that `EvictStale`
+treats as fresh. Throwaway probes on main put numbers on both faces:
+
+- 100,000 such UDNs grew the heap by 49 MB, about 491 bytes a UDN (stub plus
+  record), for the life of the process. A LAN peer with an HTTP server
+  answering 404 fills that at the fetch rate.
+- A REAL renderer whose description answered 404 once (while it booted, say)
+  and was healthy after: one description GET, and nothing in two hours of
+  announcements every 30 s from the same address, with an eviction pass before
+  each. It stayed out of `/v1/renderers` until the bridge restarted or the
+  renderer changed address, since this M-SEARCH-only client rarely hears the
+  byebye that would have removed the stub.
+
+### B47 (2): the upstream cache under fake servers
+
+Measured on main: 100,000 fake MediaServers serving a valid description (a
+ContentDirectory on the fetched host) all cached, 45 MB (448 bytes each), gone
+at the first tick past ServerTTL if the flood stopped and kept for as long as it
+did not. Two readers pay per entry: the console's discovered-servers list, which
+lists every cached server nobody configured, and `LiveHost`'s case-folded
+fallback, which copies the whole cache for every routed byte fetch of an
+upstream whose UDN carries an uppercase letter: 7.7 ms and 18 MB allocated per
+lookup at 100,000 entries. After: 256 entries (0.8 MB), and the fallback costs
+6.8 µs and 48 KB. `/v1/health`'s public list walks the configured servers only.
+Worth bounding.
+
+### B47 (3): a dual-homed upstream server
+
+Measured on main: a server answering each M-SEARCH from two addresses, one
+response each, cost 120 description GETs in 60 cycles (an hour at the default
+cadence), and its cached control URL moved to the other address twice a cycle.
+The upstream move detector keeps one location per UDN, so each response from
+the other address reads as a move. Not changed: both addresses are valid (the
+same-host rule keeps each description's control URL on its own host), the
+re-fetch runs in place (the entry never leaves the cache), and one claim bounds
+it. Porting the renderer's location set, with its freshness floor, into the
+move detector that #1050 and #1069 harden would cost more than two GETs a
+minute. If a server's second address answers M-SEARCH and refuses HTTP, each
+cycle also holds a fetch slot for its timeout, which is still one claim.
+
+### B47 (4): the advertiser's failed NOTIFY bursts
+
+On main a burst whose writes failed logged one Debug line per target, so at
+the default level an advertiser that could no longer announce said nothing:
+with the report removed (NC11 below), Start's failed burst writes no line at
+Info, and neither do the bursts after it. The failure is persistent by nature, as an M-SEARCH
+send's is: the advertiser is pinned to one interface and bursts on a ticker, and
+an interface that lost its address or route fails every burst until it returns.
+So the bursts report through `discovery.SendFailureLog`, one result per burst:
+the first failure of its writes, or nil when all went out. Counted per write,
+the log's Error (at the second failure, ten minutes of the 14-minute cadence
+rounded up and floored at 2) would land inside the first burst (NC12).
+`NewSendFailureLog` takes what it reports on, so the lines read "NOTIFY send
+failed", "NOTIFY send failing persistently; DLNA advertising is degraded" and
+"NOTIFY send recovered". Start builds the log, so each run starts a fresh
+streak, and notes its initial burst before it spawns the periodic goroutine;
+Stop's byebye burst notes nothing, since that goroutine may be mid-burst. The
+per-write Debug lines stay.
+
+### B47 (5): a dispatch refused at the claims bound
+
+Not changed. Neither bound this batch has is reached by a real LAN: a
+renderer or server burst takes one claim per device (1 for a 50-packet burst,
+measured in #1072), so 64 pending fetches means 64 new devices within one fetch
+round, and a full cache means 256 devices a phone could list. Under a flood the
+refusals are the protection working (#1072: 10,000 distinct UDNs, 64 claims,
+9,936 refused), and what they cost is a new device's delay while the flood
+lasts. A Warn once per episode needs a latch with its own ending rule, since a
+flood that refuses on alternate ticks would otherwise warn and recover every
+tick; that is the second streak policy #1072 declined for the same event. The
+refusals added here (a result the cache refuses) log at Debug, for the same
+reason. If a flood is ever seen in the field, decide with its shape.
+
+### Also found: the upstream refresh could bring back a removed server
+
+The upstream handler refreshed a known server with a `Get` and then an
+`Upsert` of `{UDN, LastSeenAt}`. When `EvictStale` removed the entry between
+the two, the Upsert inserted a server with no control URL; the next
+announcement found it cached, compared its location with the recorded one
+(same host), and fetched nothing, so `LiveHost` failed for it for as long as
+it kept announcing. A stress probe on main (the announcement and an eviction
+pass racing, 200,000 times) left 2 such entries, each still without a control
+URL after ten more announcements with a tick's prune between each; the branch
+left 0 of 200,000. `ServerCache.Touch` now looks the server up and refreshes it
+under one lock and stores nothing for an unknown one, which the handler then
+fetches as a first sighting. The renderer handler's refresh is the same shape
+and was left: what it inserts there is a stub, which ages out after RendererTTL.
+
+### What changed
+
+- `discovery.MaxCachedDevices` (256), the bound of both caches.
+- `RendererCache.Upsert` and `Replace` report whether they stored; a new UDN
+  at the bound goes through `makeRoomLocked`, which evicts the stub (an entry
+  with no ControlURL) with the earliest LastSeenAt, the one `EvictStale` would
+  drop first, and refuses when none is left.
+- `structuralStubHold` (5 minutes): a structural stub is stamped
+  `structuralStubLastSeen(failedAt, ttl)` = failedAt + hold - ttl, so the
+  existing `EvictStale` drops it on time. Only stubs carry a future
+  LastSeenAt, and `Snapshot` never serves a stub.
+- The renderer client: `store` (a refused result drops the location record the
+  fetch had just written) and a reap of its records whenever they reach
+  `maxLocationUDNs` (2 × (256 + 64)), since the cache is shared by one client
+  per interface and an evicting write cannot clean another client's map.
+- `ServerCache.Upsert` refuses a new server at the bound and reports it;
+  `UpsertConfigured` never refuses (the manual poller, and the SSDP client for
+  a UDN `DiscoveryConfig.Configured` names); `Touch`; the merge moved to
+  `mergeServerInfo`, which both share.
+- `cmd/bridge`'s `upstreamDiscoveryConfig` builds each interface's client with
+  `Configured` from the configured UDNs, trimmed and lowercased like
+  `StableServerKey` (`configuredUDNSet`, which `foreignConfiguredUDNs` now
+  reuses).
+- The advertiser's `notifyErrs`, `announceAlive`, and `sendAliveAll` returning
+  the burst's result.
+- Tests: the loopback interface for the two advertiser tests, and a
+  send-nothing `writeMSearch` in both discovery test-client constructors.
+
+### Decisions, and what was rejected
+
+- **Refuse, never evict, a served device.** LRU eviction would keep the cache
+  bounded and drop the real device: under a flood of well-formed fakes the
+  least recently seen entry is the renderer that answers our M-SEARCH every
+  30 s (or the server every 60 s) while the fakes are refreshed as fast as the
+  peer sends. A full cache refusing newcomers keeps every device already there,
+  and a new real one waits until the fakes stop and expire.
+- **The server cache exempts what the operator configured.** Refusing alone
+  turns the bound into a cheap way to keep a configured server out (256 fakes
+  refreshed every three minutes), and the configured servers are the ones the
+  ingest walks and the proxy dials. The manual poller's entries are exempt for
+  the same reason.
+- **Five minutes for the hold**, not the sentinel's forever and not the
+  RendererTTL a transient stub gets: a broken renderer costs 12 description
+  GETs an hour, and one that recovers (the boot-time 404) is back within five
+  minutes and a cycle. Ten minutes was considered and halves the GETs for twice
+  the wait.
+- **No separate stub cap.** Stubs evict each other first, so they never hold a
+  slot a renderer needs.
+- **No stale-entry eviction at admission.** The cache does not know the TTL;
+  the tick removes stale entries within an M-SEARCH interval.
+- **Loopback over a send seam for B38.** The seam would have needed a socket
+  seam as well (the listener joins the group, and its responder answers
+  M-SEARCHes it hears), both in production code; the loopback interface needs
+  none and keeps every socket real.
+
+### Tests
+
+- Renderer: `TestAFloodOfBrokenRenderersStaysBounded` (red on main, as
+  above), `TestARendererWhoseDescriptionFailedOnceComesBackAfterTheHold`
+  (nothing fetched while the stub holds, the renderer served after it),
+  `TestAFloodNeverDisplacesACachedRenderer`,
+  `TestACacheFullOfRenderersRefusesANewOne` (and leaves no record, and is
+  cached once one leaves), `TestAStubMakesRoomInTheOrderItWouldExpire`. The
+  four tests that pinned the year-2999 sentinel pin the hold now
+  (`TestHandlePacket_StructuralFailureStubPersistsAndIsHidden` evicts a second
+  after it, not a second before;
+  `TestHandlePacket_StructuralStubStillRecoversAfterLongSilence` goes quiet
+  for half the hold, past RendererTTL).
+- Upstream: `TestAFloodOfFakeServersStaysBounded` (the servers cached before
+  the flood are the ones after it; a refused one leaves no record and is
+  cached once room is made), `TestAConfiguredServerIsCachedPastTheBound` (by
+  UDN and by manual URL), `TestTouchStoresNothingNew`, and cmd/bridge's
+  `TestUpstreamDiscoveryConfigNamesTheConfiguredServers`.
+- Advertiser: `Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak`,
+  from Start's own burst on the loopback interface, with a Location that makes
+  every NOTIFY larger than a datagram. Its recovery burst first went to
+  loopback's discard port, where an ICMP port-unreachable from an earlier write
+  failed a later one with "connection refused" in 7 runs of 20 under `-race`
+  with its siblings; it recovers through a bound socket now (100 of 100).
+- Every new test in `internal/dlna/...` and `internal/upnp` 20 times under
+  `-race`, with the tests they share fixtures with.
+
+### Negative controls
+
+On the committed branch, one mutation at a time, the file restored after each:
+
+| mutation | red |
+|---|---|
+| NC1: the renderer cache unbounded | `TestAFloodOfBrokenRenderersStaysBounded`, `TestAFloodNeverDisplacesACachedRenderer`, `TestACacheFullOfRenderersRefusesANewOne`, `TestAStubMakesRoomInTheOrderItWouldExpire` |
+| NC2: a served renderer evictable | `TestAFloodNeverDisplacesACachedRenderer`, `TestACacheFullOfRenderersRefusesANewOne`, `TestAStubMakesRoomInTheOrderItWouldExpire` |
+| NC3: the stub that expires LAST evicted | `TestAStubMakesRoomInTheOrderItWouldExpire` |
+| NC4: the structural stub back to year 2999 | `TestAFloodOfBrokenRenderersStaysBounded`, `TestARendererWhoseDescriptionFailedOnceComesBackAfterTheHold`, `TestHandlePacket_StructuralFailureStubPersistsAndIsHidden` |
+| NC5: no reap of the location records | `TestAFloodOfBrokenRenderersStaysBounded` |
+| NC6: a refused fetch keeps its record | `TestACacheFullOfRenderersRefusesANewOne` |
+| NC7: the server cache unbounded | `TestAFloodOfFakeServersStaysBounded`, `TestAConfiguredServerIsCachedPastTheBound` (its precondition) |
+| NC8: the SSDP client ignores `Configured` | `TestAConfiguredServerIsCachedPastTheBound` |
+| NC9: the manual poller writes through the bound | `TestAConfiguredServerIsCachedPastTheBound` |
+| NC10: `Touch` stores a missing server | `TestTouchStoresNothingNew` and eight handler tests: a new server reads as known and is never fetched |
+| NC11: the advertiser notes nothing | `Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak` |
+| NC12: the advertiser notes each write | the same test (alone: with its siblings the mutation panics an earlier test whose advertiser was never started, which hid it) |
+| NC13: every line says M-SEARCH | the same test |
+| NC14: the wiring builds no `Configured` | `TestUpstreamDiscoveryConfigNamesTheConfiguredServers` |
+| NC15: the wiring compares case | the same test |
+| B38: the loopback binding and the discarding `writeMSearch` undone | not a test: the listener, as above (899 NOTIFYs and 7 M-SEARCHes on en0 against 0) |
+
+### Left open
+
+- Windows: loopback multicast was not measured there; the two advertiser
+  tests skip if its loopback refuses the join, as they did where multicast was
+  unavailable.
+- B71: `IP_MULTICAST_ALL` and a multi-homed Linux bridge's advertisers.
+- (3) and (5), as decided above.
