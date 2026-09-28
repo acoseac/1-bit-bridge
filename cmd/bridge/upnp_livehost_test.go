@@ -1,9 +1,11 @@
 package main
 
 import (
+	"net"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 )
@@ -26,10 +28,12 @@ func TestLiveHostResolvesRoutingKeySpelling(t *testing.T) {
 	const advertisedUDN = "uuid:4D696E69-DLNA-1234-ABCD-0011223344FF"
 
 	cache := upnp.NewServerCache()
+	announced := discovery.AnnouncedFrom(&net.UDPAddr{IP: net.ParseIP("192.168.1.44"), Port: 1900})
 	cache.Upsert(upnp.ServerInfo{
 		UDN:                        advertisedUDN,
 		FriendlyName:               "Chord 2Go",
 		ContentDirectoryControlURL: "http://192.168.1.44:8200/ctl/ContentDir",
+		DialApproval:               announced,
 	})
 	r := &serverCacheHostResolver{cache: cache}
 
@@ -39,7 +43,7 @@ func TestLiveHostResolvesRoutingKeySpelling(t *testing.T) {
 			"advertised spelling unchanged, so the exact Get would have hit anyway", advertisedUDN)
 	}
 
-	host, ok := r.LiveHost(routingKey)
+	host, approval, ok := r.LiveHost(routingKey)
 	if !ok {
 		t.Fatalf("LiveHost(%q) missed: the routing key's folded spelling did not reach the "+
 			"cache entry stored under %q — every byte fetch for this upstream 503s "+
@@ -47,6 +51,11 @@ func TestLiveHostResolvesRoutingKeySpelling(t *testing.T) {
 	}
 	if host != "192.168.1.44:8200" {
 		t.Errorf("host = %q, want 192.168.1.44:8200", host)
+	}
+	// The folded lookup hands back the approval of the entry it found, the
+	// one the host came from.
+	if approval != announced {
+		t.Errorf("approval = %+v, want the cached entry's %+v", approval, announced)
 	}
 }
 
@@ -62,10 +71,10 @@ func TestLiveHostExactHitStillWins(t *testing.T) {
 	})
 	r := &serverCacheHostResolver{cache: cache}
 
-	if host, ok := r.LiveHost("manual:abc123"); !ok || host != "10.0.0.9:9000" {
+	if host, _, ok := r.LiveHost("manual:abc123"); !ok || host != "10.0.0.9:9000" {
 		t.Errorf("exact hit: got (%q, %v), want (10.0.0.9:9000, true)", host, ok)
 	}
-	if host, ok := r.LiveHost("uuid:some-other-server"); ok {
+	if host, _, ok := r.LiveHost("uuid:some-other-server"); ok {
 		t.Errorf("unknown key resolved to %q — the fallback must not match an unrelated entry", host)
 	}
 }
@@ -83,7 +92,7 @@ func TestLiveHostRefusesAControlURLThatNamesNoHost(t *testing.T) {
 		cache := upnp.NewServerCache()
 		cache.Upsert(upnp.ServerInfo{UDN: "uuid:hostless", ContentDirectoryControlURL: ctrl})
 		r := &serverCacheHostResolver{cache: cache}
-		if host, ok := r.LiveHost("uuid:hostless"); ok {
+		if host, _, ok := r.LiveHost("uuid:hostless"); ok {
 			t.Errorf("control URL %q: LiveHost = %q; the proxy would dial it on this host", ctrl, host)
 		}
 	}

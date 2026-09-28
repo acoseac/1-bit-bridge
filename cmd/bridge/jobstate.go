@@ -207,32 +207,47 @@ func valueOr[T any](f func() T, fallback T) T {
 }
 
 // autoOptimizeStateClosure adapts the auto-optimize sweeper's recorder
-// to the admin's card DTO. `enabled` is a LIVE reader (not a snapshot):
-// the flag hot-applies via a settings PATCH, so a captured boolean would
-// leave the card claiming the opposite of reality until a restart.
+// to the admin's card DTO. Both readers are LIVE (not snapshots): the
+// switches hot-apply via a settings PATCH and the toolchain verdict is a
+// TTL-cached probe, so a captured boolean would leave the card claiming
+// the opposite of reality until a restart.
+//
+// `enabled` is the operator's switches, `active` the sweeper's own gate
+// (the switches AND a usable sox). They differ only when the toolchain
+// is missing, and the card then says so with the degraded key rather
+// than reading as switched off: a card that answered the switches alone
+// said "on" through every sweep a missing sox turned into failures.
 //
 // nil recorder → nil closure → the card is omitted entirely, which is
 // what a bridge with no upscale pool should render.
-func autoOptimizeStateClosure(enabled func() bool, degradedReason string, status *sweepStatus[admin.AutoOptimizeSweepCounts]) func() *admin.AutoOptimizeJobState {
-	if status == nil || enabled == nil {
+func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[admin.AutoOptimizeSweepCounts]) func() *admin.AutoOptimizeJobState {
+	if status == nil || enabled == nil || active == nil {
 		return nil
 	}
 	return func() *admin.AutoOptimizeJobState {
 		running, lastStart, lastEnd, nextDue, last := status.snapshot()
 		on := enabled()
-		return &admin.AutoOptimizeJobState{
-			Enabled: on,
-			// Active means "the sweeper will do work on its next tick".
-			// The sweeper goroutine exists (status is non-nil) and the
-			// pool is wired, so the flag is the only remaining variable.
-			Active:         on,
-			DegradedReason: degradedReason,
+		// Active means "the sweeper will do work on its next tick": it
+		// reads the same predicate the sweep does, so the card cannot
+		// claim work every sweep refuses.
+		act := active()
+		state := &admin.AutoOptimizeJobState{
+			Enabled:        on,
+			Active:         act,
 			Running:        running,
 			LastStartedAt:  timePtrIfSet(lastStart),
 			LastFinishedAt: timePtrIfSet(lastEnd),
 			NextDueAt:      timePtrIfSet(nextDue),
 			Last:           last,
 		}
+		if on && !act {
+			// The switches are on and the gate is not: the one thing the
+			// gate adds to them is a usable sox (soxUsable: on PATH, and
+			// with FLAC). The key the analysis card sends for the same
+			// verdict, so the console words both alike.
+			state.DegradedReason = "sox_missing"
+		}
+		return state
 	}
 }
 

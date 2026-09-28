@@ -23936,6 +23936,779 @@ Each on the committed tree, restored with `git checkout --` before the next.
   (`handshaketest.go` is one) that swapped the default by hand would pass.
   Among such files only loggingtest's own calls `slog.SetDefault`.
 
+## 2026-09-28 — the console's size projection follows the live upscale switch
+
+Backlog B25. runServe built `admin.Deps.ProjectedSize` and
+`AvailableDiskSpace` as function literals called in place, each answering
+nil unless `cfgHolder.Load().Upscale.Enabled` was true at that moment, and
+`apiLibraryBrowseProjection` read a nil helper as "feature off" (503
+`upscale-disabled`). So the projection took `upscale.enabled` at boot while
+`ops/settings-apply-semantics.md` calls the field `live` and the settings
+PATCH reports it `live`. The literals sat directly above `OptimizeEligible`,
+whose comment records the same fix for `optimizeEnabled` (the WIRED vs
+ACTIVE split); the upscale half was left. `AvailableDiskSpace` has a second
+reader, `probeVariantsDirUsage` behind `GET /api/upscale/variants-dir`, which
+feeds the Library roots page's "Free on that volume": nil there reads as 0.
+
+No page of the console calls the projection since the Library Inspector
+went; any loopback process or public-mode session can. The free-space figure
+is on a page every operator sees.
+
+### Measured
+
+`TestServeProjectionFollowsTheLiveUpscaleGate`, written first and run on the
+unchanged tree (99b6d1e6): the real `serve` over an empty library, booted
+with `upscale.enabled` false and then true, the flag flipped twice through
+`PATCH /api/settings` (both answered `live`), and after every step
+`/v1/health`'s `upscaleEnabled`, the projection and the variants-dir figure
+read. A stand-in `sox` (a `/bin/sh` script answering `--help` with a format
+list) is first on PATH, so health follows the flag on a host without sox.
+
+- Booted off: `freeBytes=0` at all three steps; after the switch went on,
+  health said on and the projection answered 503 `upscale-disabled`.
+- Booted on: after the switch went off, health said off and the projection
+  answered 200 with a projection.
+- The same on dido in the stock `golang:1.26.6` image (no sox, no lsof),
+  under `-race`, with the new tests copied onto `origin/main`.
+- With no sox on PATH at all (the Mac's PATH cut to `/usr/bin:/bin`, the shape
+  of CI's Windows leg, which gets no stand-in): booted on, the projection
+  answered 200 at all three steps while health said off at all three, since
+  the literal read the flag and not the sox half.
+
+### Decisions
+
+- Both helpers are wired on every bridge, and the handler refuses on
+  `s.upscaleActive()`: `Deps.UpscaleActive`, which runServe wires to
+  `upscaleActiveFn`, the closure `WithUpscale` gives /v1 and the batch submit
+  reads (#1060; `TestConsoleBatchGateIsTheV1UpscaleGate` pins that identity,
+  so no new wiring line needs its own pin). One predicate, so the projection
+  and `/v1/health` cannot disagree, a nil gate reads as off, and the refusal
+  is the same 503 `upscale-disabled` for every kind.
+- Rejected: gating inside `ProjectedSize`. It returns an int64, so "off"
+  would have to be a 0, and the endpoint would answer 200 with an empty
+  projection, a plausible wrong answer. Rejected: re-deriving the helpers on
+  each PATCH (a setter the settings handler calls), a second lifecycle for two
+  pure functions. Rejected: gating on the config flag. It is live, but it has
+  no sox half, and NC3 below shows the admin test is what catches it on a host
+  whose sox works.
+- Where the gate sits: after the path normalisation (no work, and a traversal
+  stays a 400 whatever the switch) and the manifest check, before the target
+  read, the projection walk and the disk probe. No WARN on the refusal: a read
+  refused is not worth a line, where the batch's refused mutation logs /v1's.
+- `AvailableDiskSpace` is a fact about the disk, so the variants-dir figure
+  answers whatever the switch; only the projection reads the gate.
+- A sweep for the shape: `TestNoDependencyIsDecidedFromTheConfigAtConstruction`
+  reads every admin.Deps value and every argument of a `With*` call in
+  runServe that is a function literal called in place, and reports one whose
+  own body reads `cfg`, `cfgHolder`, calls `liveCfg()`, or calls a live
+  predicate (a name ending in ActiveFn, CapsFn or EnabledFn). A read inside a
+  literal it returns runs per call and is left alone, as is a field name
+  (`x.cfg`, a `cfg:` key). The census it rests on: runServe has eleven such
+  literals, all in the admin.Deps literal; the two above read the config, and
+  the other nine (`TriggerCadenceRearm`, `BookletPath`, `BookletNudge`,
+  `OptimizeEligible`, `TargetRateForOptimize`, `DSDRenderEligible`,
+  `TargetRateForPCMRender`, `BatchCoordinator`, `VariantDeleter`) decide on a
+  slice or a nil handle, the harvest client's being the deliberately boot-bound
+  atlas posture. No `With*` argument is one. Reads of the boot `cfg` outside
+  such literals were read too: the api options take `cfg.Atlas.Enabled`,
+  `cfg.Demo.Enabled` and the DLNA verdict, none of them live, and the updater's
+  boot values sit beside the live providers it reads.
+- The boot test costs 1.1 s under `-race` on dido (two boots). The stand-in sox
+  is POSIX-only, as the Tailscale fake is; on Windows the boot-on leg still
+  fails the old code, as the no-sox run above shows.
+
+### Tests and controls
+
+`cmd/bridge/serve_projection_gate_test.go` (the boot test),
+`cmd/bridge/admin_upscale_gate_wiring_test.go` (the sweep and
+`TestConstructionTimeConfigReadsOnAFixture`, which runs it over synthetic
+source holding each shape it reports and each it leaves alone), and
+`internal/admin/handlers_projection_gate_test.go`
+(`TestProjectionAnswersTheUpscaleGateLive`: on, off, on for the upscale,
+optimize and pcm kinds, with the disk probes counted, so a refusal is shown to
+come before the probe; `TestProjectionReadsANilUpscaleGateAsOff`).
+`TestMatrixDocMatchesWhatTheHandlerReports/upscaleEnabled` passes before and
+after: it checks the PATCH report, and the report was never wrong.
+
+Negative controls on the committed tree (3bdb47cb), each restored with
+`git checkout --` and the tests re-run green:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| NC1: main.go's two literals put back (the handler keeps its gate) | the sweep, naming exactly `ProjectedSize` and `AvailableDiskSpace`; the boot test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg (the handler's gate answers the off step), the fixture test, the identity test |
+| NC2: the handler's `!s.upscaleActive()` removed | the boot test at every step health said off (booted off, steps 0 and 2; booted on, step 1); the admin live test for all three kinds; the nil-gate test | the sweep |
+| NC3: the handler gated on `cfg.Upscale.Enabled` instead | the admin live test (all three kinds) and the nil-gate test | the boot test with the stand-in sox; with no sox on PATH it goes red at the three steps where the flag is on |
+| NC4: the detector descends into nested literals | the sweep (`DSDRenderEligible` calls `dsdRenderCapsFn()`, `BatchCoordinator` reads `cfgHolder`, both inside the closures they return); the fixture (its read-inside-the-returned-closure case) | |
+| NC5: the detector counts field names as reads | the fixture (its `cfg:` key and `s.cfg` case) | the sweep (no such field on the tree) |
+| NC6: the stand-in sox prints nothing | the boot test's fixture check, at the first step with the flag on in each leg | |
+
+The sweep was then split into small helpers (53db0ae4; its own function had
+shadowed the package's `run`). NC5 re-run there, as the `cfg:` key
+collection now goes through `forEachKeyedElement`: dropping that collection
+turns the fixture red on its `cfg:` key alone, and the sweep stays green.
+
+### The four consumers without the sox half
+
+Found while measuring the projection, and fixed in the same PR on the
+orchestrator's request (a second commit, ae8a43fa). Four consumers read
+`upscale.enabled` live but without the sox half of `upscaleActiveFn`, so on
+a bridge whose sox is missing they disagreed with `/v1/health`: the
+console's upscale tile (`admin.Deps.UpscaleStats` and `UpscaleBusy`, and the
+Settings chip beside the switch, which takes its verdict from the tile's
+`enabled`), `/v1/upscale/stats`' `enabled` (`upscaleStatsAdapter`, whose own
+comment said it keeps "the wire semantics in lockstep with
+/v1/health.upscaleEnabled"), the auto-optimize sweeper's gate
+(`autoOptimizeEnabledFn`, which the Jobs card also reported as `active`),
+and `admin.Deps.OptimizeActive`.
+
+#### Measured, before
+
+The binary at 9776892c (these consumers as on main), `upscale.enabled` and
+`upscale.autoOptimize.enabled` true with `intervalSec: 20`, PATH cut to
+`/usr/bin:/bin`, over six 96 kHz / 24-bit FLACs and one 44.1 kHz / 16-bit,
+made with sox beforehand:
+
+- `/v1/health`: `upscaleEnabled: false`, no `carPlayOptimize`.
+  `/api/upscale/stats`: `enabled: true`, `soxAvailable: false`, a pool.
+  `/api/jobs` auto-optimize: `enabled: true, active: true`.
+- The first three sweeps (after the 3-minute settle, then every 20 s) each
+  enqueued 6, with `remaining` 6, 6 and 5: 18 jobs, 18 failed, 18
+  `pool: sox failed` WARNs (`exec: "sox": executable file not found in
+  $PATH`). The 16-bit track sits at the CarPlay floor and was never offered.
+- Every failure struck its file (`RecordVariantFailure`). After the third,
+  all six held `variant_fail_count` 3 and the suppression predicate took
+  them (`suppressedFailures: 6`), 40 s after the first sweep. Every later
+  sweep enqueued 0 with `remaining: 0`, which `formatAutoOptimizeRemaining`
+  renders "all caught up", over a library holding no CarPlay variant.
+- Restarted on the same data WITH sox on PATH: two sweeps enqueued 0,
+  `remaining: 0`, `suppressedFailures: 6`, `soxAvailable: true`. The
+  suppression is keyed on the file's (size, mtime) for `variantFailureTTL`,
+  30 days, and installing sox changes neither.
+- `POST /api/upscale/failures/retry` answered `{"cleared":6}`, and a nudged
+  sweep then enqueued 6: 6 done, 0 failed, 6 optimized variants.
+
+Why every job: `planCandidate` asks `soxInfo.CanDecode`, and
+`transcode.SnapshotOrOpen` answers a failed probe with the zero `SoxInfo`,
+whose `CanDecode` fails open (formats unknown), so without sox every eligible
+track reads as decodable. On the default cadence (the scan interval, 6 h,
+plus a nudge after every scan) with `maxPerSweep` 200, that is up to 200
+WARNs a sweep, and 200 files suppressed per three sweeps.
+
+#### Measured, after
+
+The binary at ae8a43fa, the same fixture, PATH `$W/bin:/usr/bin:/bin` with
+`$W/bin` empty:
+
+- `/v1/health` `upscaleEnabled: false`; `/api/upscale/stats` `enabled:
+  false`, `soxAvailable: false`, no pool; the card `enabled: true, active:
+  false, degradedReason: "sox_missing"`.
+- Three sweeps, each recorded `disabled` with 0 enqueued: 0 WARN lines and
+  `suppressedFailures: 0`.
+- A symlink to sox dropped into `$W/bin`, a directory the running bridge
+  already searches: the card read active 24 s later, with no restart (the
+  probe's TTL is 30 s), and a nudged sweep enqueued 6: 6 done, 0 failed,
+  `suppressedFailures` 0. For those seconds `/api/upscale/stats` said
+  `enabled: true` beside `soxAvailable: false`: the admin keeps its own 30 s
+  cache of the probe on top of runServe's. Left, since it only lags.
+- In a browser: the card's badge "degraded", its hint "Enabled but inactive:
+  sox is not installed on the bridge host, or has no FLAC support. No
+  restart is needed once it is fixed…", Sweep now hidden and Remaining "—".
+  The Settings chip beside "Enable PCM upscaling" read "not running — sox
+  not found" (the old binary said "active"), above the banner.
+
+#### Decisions
+
+- The CarPlay kind reads one closure, `carPlayOptimizeActiveFn` (the upscale
+  gate AND the optimize switch): `WithCarPlayOptimize`, `OptimizeActive`,
+  and, with the pre-generation flag, the sweeper. `OptimizeActive` changes
+  nothing a request can see, since both of its readers ask `UpscaleActive`
+  first; it was the copy that would let a reader hear "on" without sox, so
+  it is pinned by identity (`TestConsoleCarPlayGateIsTheV1CarPlayGate`,
+  which shares `requireConsoleGateIsTheV1Gate` with the batch pin).
+- The card: `enabled` is the three switches (`autoOptimizeSwitchedOnFn`),
+  `active` the sweeper's gate, `degradedReason: "sox_missing"` when they
+  differ. The key is the analysis card's, since the gate adds exactly
+  `soxUsable` (sox on PATH, and with FLAC); the console's label now names
+  both halves. The hint is an element of its own, so the description comes
+  back when the gate opens, which it now does live, and a refused sweep's
+  `disabled` reads "not run" there, not "turned off". It does not say
+  "Restart after fixing", as the analysis card's hint still does (stale
+  since #781; left).
+- `/v1/upscale/stats`: not a wire change. PROTOCOL.md's `enabled` row says
+  it is false when the sox precheck says no, "matching
+  `/v1/health.upscaleEnabled`"; the code drifted when #781 made the pool
+  unconditional and the adapter's `upscalePool != nil` stopped meaning
+  anything. No iOS code decodes the endpoint (the app names the
+  `upscale.stats` SSE topic in a doc comment and its parser tests; nothing
+  reads the payload), and the SSE frame comes from the same adapter. The row
+  still says the precheck "demoted the feature at startup", stale wording for
+  a live gate; left for a Mirror-PR, since the two PROTOCOL.md copies must
+  stay byte-identical and this change could not touch the app's.
+- The Settings chip reads the tile's `enabled`, now the gate, beside the
+  saved switch (the page renders the checkbox from the config, and the chip
+  runs once, at load): switch on and verdict off is `sox_missing`, painted as
+  "not running — <the doctor's audio-toolchain summary>". Its other arm said
+  "restart to apply" where the doctor finds sox and the gate does not; with
+  both gates live that is a probe about to catch up, and it says so. The sox
+  banners under the upscale and analysis switches said the bridge "will
+  degrade to feature-off at startup"; they now say the feature stays off
+  until sox is installed, with no restart needed.
+- The settings PATCH gives `optimizeEnabled` and `autoOptimizeEnabled`,
+  switched on, the sox reason `upscaleEnabled` and `analysisEnabled` carry;
+  `autoOptimizeEnabled` only where it reported `live`, since a restart-bound
+  report already says why.
+- Not changed: the transcode pool strikes a file for any runner error, a
+  missing sox included, where the analysis pool's rule is that a missing
+  tool is transient and records nothing. The gate now keeps the sweeper away
+  from the pool without sox; what remains is a job queued inside the probe's
+  30 s TTL after sox disappears. Reported for its own change.
+
+#### Tests and controls
+
+`cmd/bridge/serve_upscale_sox_gate_test.go`
+(`TestServeWithoutSoxReportsUpscalingOffOnEverySurface`): the real serve
+with upscale, the CarPlay kind and pre-generation on, `minFreeBytes: 1` and
+a 1 ms settle, over two hand-written 96 kHz / 24-bit FLACs (STREAMINFO and a
+Vorbis comment, no frames), on a PATH with every directory holding a sox
+removed (`exec.LookPath` must then fail). It asks `/v1/health` (must say
+off: a fixture check), `/api/upscale/stats`, `/v1/upscale/stats` with a
+bearer token minted through the console, and, once the scan has indexed both
+tracks, the Jobs card after a nudged sweep. 0.7 s. `TestUpscaleDegradedReason`
+gained the two CarPlay switches, both started off.
+
+Red on the old code first: the three tests copied into an archive of
+9776892c (where `carPlayOptimizeActiveFn`, `autoOptimizeSwitchedOnFn` and
+`optimizeOn` are all absent). The boot test failed on the console's stats,
+on `/v1/upscale/stats`, on the card's `active` and `degradedReason`, and on
+its sweep (`Disabled:false Enqueued:2`), with six `pool: sox failed` WARNs in
+its log; the pin failed on "WithCarPlayOptimize is handed *ast.FuncLit"; the
+report test on both switches' reasons, for both probe failures.
+
+Negative controls on ae8a43fa, each restored from the commit:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the boot test (both readers ask `UpscaleActive` first) |
+| the card's degraded key not set | `degradedReason` only | |
+| `optimizeEnabled`'s sox reason not set | the report test, that field, both probe failures | `autoOptimizeEnabled` |
+| `autoOptimizeOn` not set | the report test, that field, both probe failures | `optimizeEnabled` |
+
+`UpscaleBusy` moved with `UpscaleStats`, and no test tells the two apart:
+with the gate closed the sweeper queues nothing, so the pool is idle
+whichever predicate asks.
+
+### Review round 1: the two boot tests share their setup
+
+SonarCloud's quality gate failed the PR on duplicated new code, 3.7% against
+a 3% ceiling. Its component tree put the duplicated new lines in the two boot
+tests (23 in `serve_projection_gate_test.go`, 24 in
+`serve_upscale_sox_gate_test.go`), and its duplications API named three
+blocks: the tests' boot blocks against each other (23 lines, from the config
+write to the phone client), and each against the inline boot of
+`TestServeRedeemsThePairingLinksCode` and
+`TestServeBakesHealthEndpointsIntoThePairingQR` (16 to 20 lines). A new line
+that repeats OLD code counts as duplicated new code.
+
+`startServedBridge` (`cmd/bridge/served_bridge_test.go`) now writes the
+config (a library under the test's own directory, `yamlTail` appended as
+written, and a `fill` callback for files the startup scan must find), boots
+serve, registers its drain, waits for both listeners and builds the console
+and phone clients. Both tests call it, and everything they assert is
+unchanged. It is spelled with names of its own: SonarCloud's duplication
+detector for Go keeps identifiers and folds only string literals, so a helper
+written with the old tests' names would repeat their token runs as new code.
+The older boot tests keep their inline blocks, which are old code.
+
+Moving the launch into a helper took both tests out of
+`TestEveryBackgroundGoroutineDrainsOnCleanup`'s population, which read Test
+functions only, and its docblock asked for the match to be widened in the
+same change that adds such a helper. It now reads every function in the
+package's test files and wants the drain in the function that launches. A
+census before the change, the guard's own shape run over every function: 45
+Test functions and 2 helpers (`runOneFingerprintPass` and
+`runOneSmartPlaylistPass` in `sweep_cancel_test.go`) launch the shape, and all
+47 drain in the same function, so the widening reports nothing it did not
+already cover. A helper that hands its channel back for the caller to drain
+would be reported, and none exists.
+
+Controls re-run on this commit's code, each restored from the commit. Every
+earlier row came out as recorded above:
+
+| mutation | goes red | stays green |
+|---|---|---|
+| main.go's two literals put back | the projection test's booted-off leg (`freeBytes=0` at every step, the 503 after the switch went on) | the booted-on leg |
+| the handler's `!s.upscaleActive()` removed | the projection test at every step health said off (booted off, steps 0 and 2; booted on, step 1) | |
+| the handler gated on `cfg.Upscale.Enabled` | | the projection test with the stand-in sox (the admin live test catches it) |
+| the stand-in sox prints nothing | the fixture check, at the first step with the flag on in each leg | |
+| the sweeper's gate back to the three switches | the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`) | the stats surfaces |
+| the `/v1/upscale/stats` adapter back to the flag | `/v1/upscale/stats` only | |
+| `Deps.UpscaleStats` back to the flag | `/api/upscale/stats` only | |
+| `OptimizeActive` back to a flags-only closure | the pin only | the sox test |
+| the card's degraded key not set | `degradedReason` only | |
+| the helper's drain replaced by `t.Cleanup(stop)` | the drain guard, naming `startServedBridge` | |
+| the same, with the guard's Test-only filter put back | | the drain guard: the widening is what sees it |
+
+Gemini's two MEDIUM comments asked `putUsableSoxOnPath` and
+`withoutSoxOnPath` to call `t.Setenv` first, so that a parallel test is
+refused. Each helper's one PATH change already is a `t.Setenv`, which refuses
+a parallel test and restores PATH, so both were declined on the threads.
+
+SonarCloud re-analysed the pushed refactor within two minutes: the gate
+passed, with 0.0% duplicated new lines and no file holding one. It raised one
+new smell, on the helper itself: `godre:S8242`, a `context.Context` stored in
+a struct field (`servedBridge.ctx`, serve's own context, which the tests
+handed to their console requests). The follow-up keeps serve's context a
+local of `startServedBridge`, where only the serve goroutine and the drain
+use it, and the requests take `t.Context()`, which is live for the whole test
+body: `patchUpscaleEnabled` reads it itself, and `pairViaAdmin` is handed it.
+Re-run on the follow-up, each as recorded above: the handler's
+`!s.upscaleActive()` removed, the sweeper's gate back to the three switches,
+the `/v1/upscale/stats` adapter back to the flag, and the helper's drain
+replaced by `t.Cleanup(stop)`. The PR's three `go:S3776` cognitive-complexity
+smells (`requireConsoleGateIsTheV1Gate` at 28, `constructionTimeConfigReads`
+at 19, the projection test at 24, against 15) do not gate, since the
+maintainability rating on new code stays A, and are left.
+
+### Review round 2: a clock tick on Windows, and #1071's boot helper
+
+The helper round 1 describes is `startConsoleBridge` since this round, and
+its type `consoleBridge`: `servedBridge` is #1071's.
+
+**CI on `6c34070d` failed on test (windows-latest)** (run 36447240629, job
+109012588718): `TestServeWithoutSoxReportsUpscalingOffOnEverySurface` ran
+out its 30 s wait with the card reading `Enabled:true Active:false
+DegradedReason:sox_missing`, a sweep recorded, and `lastFinishedAt` set.
+The test decided that a sweep had run after its nudge by comparing that
+`lastFinishedAt` with a `time.Now()` taken before the nudge. A sweep the
+gate refuses finishes within a millisecond, which on Windows is inside one
+tick of the wall clock, and a time decoded from JSON carries no monotonic
+reading, so `After` compared wall clocks, found them equal, and never held.
+The cadence is long, so no later sweep moved the time on. CLAUDE.md
+already said "assert on counted events" for this clock.
+
+serve takes `serveOpts.autoOptimizeSwept`, nil in production and called
+once a sweep's result is on the Jobs card. `startConsoleBridge` counts with
+it, and the test reads the count after the scan, nudges, waits until the
+count passes the one it read, and then reads the card once (`/api/jobs`
+reads the sweep status live, uncached). It asks what the timestamp asked,
+a sweep that finished after the nudge was sent, where a sweep already
+running can count, as before, and a refused sweep has nothing to show
+either way. The projection boot test compares no times. A grep of the
+tree's tests for `After` against a captured instant found one more of the
+kind, `internal/auth`'s `TestValidateUpdatesLastUsedAt` (`time.Now().UTC()`,
+which strips the monotonic reading, then a 5 ms sleep), outside this PR
+and not examined further.
+
+Controls, on the committed fix, each restored with `git checkout --`. The
+coarse clock is simulated by snapping both the finish time
+(`sweepFinished`) and the test's instant to a 15.625 ms tick with
+`Truncate`:
+
+| mutation | result |
+|---|---|
+| the timestamp wait put back, under the simulated tick | red 6 runs of 6, each after 30 s, with `lastFinishedAt` on a tick boundary: the CI failure |
+| the counted wait, under the same tick | green 6 runs of 6 |
+| the hook never called | red: no sweep finished within 30 s (0 before the nudge, 0 after) |
+| the sweeper's gate back to the three switches | red on the card's `active`, `degradedReason` and sweep (`Disabled:false Enqueued:2`, so the sweep it read had the two tracks) |
+
+**#1071 merged first, with a boot helper and a drain-guard widening of its
+own.** Both widenings were the same change, the Test-prefix filter dropped,
+so the merge keeps one guard: this branch's name for the audit helper
+(`auditBackgroundLaunchesIn`, since it reads helpers too) and its error
+text (which says the drain goes in the function that launches), and both
+docblocks' reasons. #1071's `servedBridge` and this branch's type shared a
+name, so the branch renamed its own to `consoleBridge` before the merge,
+and the merge commit builds with both boot helpers launching serve. After
+it, both start serve through `launchServe` (main_test.go): the goroutine,
+the drain and the wait for the banner, around a function that runs serve.
+`bootServe` hands it `run` with a command line, as before, so #1071's two
+tests boot exactly as they did; `startConsoleBridge` hands it `runServe`
+with the `serveOpts` the hook needs, then waits for the console and builds
+the clients. The guard's shape now finds 42 tests and three helpers
+(`launchServe`, `runOneFingerprintPass`, `runOneSmartPlaylistPass`), each
+draining where it launches: 46 at the merge commit, when both boot helpers
+launched. #1071's record of its own controls is under its entry above.
+
+Controls on the unified launch, each restored with `git checkout --`:
+
+| mutation | result |
+|---|---|
+| `launchServe`'s drain replaced by `t.Cleanup(cancel)` | the drain guard red, naming `launchServe` |
+| the same, with the guard back to Test functions | the drain guard green: the gap each PR recorded for its own helper |
+| the projection handler's `!s.upscaleActive()` removed | the projection test red at every step health said off (booted off, steps 0 and 2; booted on, step 1) |
+| runServe wires a nil `OrphanSweepStatus` (with `_ = orphanSweepStatus`, or it does not build) | #1071's Jobs-card test red, booted through `bootServe` |
+
+**Then #1068 merged**, while this round's push was going out (c1bdedf4
+merges it; the one conflict was the log's end). It serves
+`Server.optimizeActive` in the album and artist variant summaries, and the
+panel names the CarPlay switch ("CarPlay-optimized variants are switched
+off for this bridge", with a gear for that switch) when `optimizeActive` is
+false and no panel-wide note has closed both kinds. The panel-wide notes
+come from the summary's `enabled` (the configured flag) and `soxAvailable`,
+which was the precheck alone. This branch makes `Deps.OptimizeActive` the
+upscale gate (the flag and a usable sox) and the CarPlay switch, and a
+usable sox is found AND able to write FLAC where the build's formats are
+known (cmd/bridge's `soxUsable`). So with both switches on and a sox
+without FLAC, the merge showed no panel-wide note, the CarPlay row called
+a switch that was on "switched off" and offered its gear, and the hi-res
+Generate stayed live over a submit that answered 503 `upscale-disabled`.
+The last was already so on main, whose batch submit has read the full gate
+since #1060; the false "switched off" came with this branch.
+
+The summary's `soxAvailable` is `Server.soxUsable` now (1f28f692): the
+precheck finds sox, and `UpscaleSoxFLAC` does not report a build known to
+lack FLAC, which is `soxUsable`'s verdict over the same cached probe. The
+panel's sox note reads "sox is not installed on the bridge host, or has no
+FLAC support, so no variants can be generated.", the Jobs card's words for
+the same verdict. #1068's panel test wires its gates as cmd/bridge does
+now (the CarPlay predicate through the upscale gate, the upscale gate with
+a FLAC probe) and gains a fourth state: both switches on, a sox without
+FLAC, both submits refused, and the panel showing one note naming FLAC, no
+row note and no tray. Red on the merge commit, as above.
+`TestTheVariantSummaryReadsSoxAsTheGateDoes` pins the three FLAC answers.
+
+| mutation | result |
+|---|---|
+| the summary's `soxAvailable` back to the precheck alone | the new test's "without FLAC" case, and the panel test's fourth state (the CarPlay row's "switched off", the hi-res Generate live), both red |
+| `soxUsable` counting an unread build as without FLAC (`_ = known`, or it does not build) | the new test's "could not be read" case and `TestAlbumDetailVariantSummarySeparatesOffFromNoSox` red; the panel test green, its probe always known |
+| the panel's sox note back to its old words | the panel test's fourth state red (no note naming FLAC) |
+
+## 2026-09-28 — the ingest's SOAP and the byte proxy dial an upstream under the approval its control URL came with (backlog B36)
+
+#1069 checked every connect of the discovery clients' description fetch and
+recorded what it left: a routed server's control URL is checked once, when
+the server is found, and dialled for as long as it is cached, by two clients
+with no dial check. The ingest's SOAP Browse used `upnpUpstreamSOAPHTTPClient`
+(`http.DefaultTransport`), and every byte fetch of a routed track goes through
+`internal/upnpproxy` to the host:port `LiveHost` derives from the control
+URL. A NAME in that URL resolves again at each dial. This entry closes that,
+and the three validators #1069 left accepting a URL that names a port and no
+host.
+
+### What was measured on the old code
+
+Two throwaway tests on main at 37807845, with `net.DefaultResolver` replaced
+by a DNS server the test controlled (`internal/dnstest`, below), a stand-in
+for the console on 127.0.0.1 and a stand-in for the attacker on this host's
+LAN address at the same port.
+
+- **The later dials** (cmd/bridge: `discoveryServerResolver`,
+  `upnpUpstreamSOAPHTTPClient` under `upnp.ContentDirectoryClient`, and
+  `upnpproxy.New` over `serverCacheHostResolver`). A cache entry holding
+  `http://upstream.rebind.test:<port>/ctl`, the name answering the LAN
+  address: the attacker stand-in saw `POST /ctl` and `GET /api/stats`. The
+  name then answering 127.0.0.1: the console stand-in saw `POST /ctl` and
+  `GET /api/stats`, and the proxy relayed its `200` with its body. macOS
+  (Go 1.27.1) and Linux (the golang:1.26.6 image on dido, the container's
+  eth0 as the LAN address), the same sequence. The first attempt, whose
+  stand-ins kept connections alive, showed nothing in the second phase: both
+  clients reused the first phase's idle connections to the attacker (four
+  DNS queries in all, against eight). A rebinding server closes each
+  connection, or waits out the idle timeout (30 s for the proxy's old pool,
+  90 s for `http.DefaultTransport`).
+- **The discovery half** (internal/upnp, `handlePacket` with the production
+  default client). A known server's UDN, re-announced from this host's LAN
+  address with `LOCATION: http://upstream.rebind.test:<port>/desc.xml`, the
+  name answering that address: the move detector re-fetched (#1069's dial
+  check allows a LAN address) and the cached control URL became
+  `http://upstream.rebind.test:7789/ctl`. The same-host rule compares host
+  names and ignores the port, so the name's console port passes it. macOS and
+  Linux.
+
+After the fix the same throwaway test refused both second-phase requests
+(`dial tcp 127.0.0.1:<port>: refusing to connect to this machine or a
+link-local address that neither the SSDP packet the URL came from nor the
+operator's configured URL named`), and the console saw nothing.
+
+### Decisions
+
+- **The approval travels with the URL.** `discovery.DialApproval` is what
+  lets a request to a device connect to this machine or a link-local
+  address: `AnnouncedFrom(src)`, the announcing packet's own address and no
+  other (#1069's rule), or `OperatorChose(url)` for a manual upstream, every
+  address of the kind the operator's URL names. `upnp.ServerInfo.DialApproval`
+  records it beside `ContentDirectoryControlURL`; the SSDP fetch writes
+  `AnnouncedFrom(src)` and the manual poller `OperatorChose(url)`.
+  `discoveryServerResolver.ResolveControlURL` and
+  `serverCacheHostResolver.LiveHost` return URL and approval from one cache
+  entry, and `upnpingest` and `upnpproxy` put the approval in each request's
+  context (`WithDialApproval`), where the dial check reads it.
+- **The source, not the string's kind.** A rule that needed no new state was
+  considered: allow a local connect only when the control URL's host STRING
+  is of that kind. It refuses a zero-configuration device that announces from
+  its link-local address with a `.local` name resolving to that address:
+  #1069 fetches its description (the name resolves to the packet's source),
+  and its later dials would have been refused. The recorded source keeps
+  every flow #1069 allows.
+- **`Upsert` keeps and replaces the approval with the control URL, never
+  alone.** An update carrying a control URL carries that URL's approval, a
+  zero one included; one that keeps the cached URL keeps the cached approval.
+  Merged like the other fields (keep the old one when the update's is zero),
+  an old approval outlives the URL it came with (NC8). A server configured
+  with both a UDN and a manual URL is written by both writers under one key,
+  so the pairing is also what keeps their approvals apart.
+- **A NAME in an operator's URL approves no local address.** The operator
+  chose the name, not an answer another LAN host can give for it (mDNS
+  answers anyone's query), and a name answered with 127.0.0.1 at a later
+  dial is the rebinding itself. So `localhost` or a loopback literal keeps a
+  manual upstream's local services, and this host's own host name does not:
+  Debian maps it to 127.0.1.1, and such a manual upstream now fails its walk
+  with the dial check's error (at Warn, every ingest tick) until its URL
+  says `localhost`. Nothing measured uses that shape. The manual poller's own
+  description fetch keeps #1069's decision (no dial check): the operator
+  chose its path and port, and what it returns is parsed, never relayed.
+- **No kept-alive connections, measured rather than argued.** With the
+  proxy's old pool, a fetch approved on this machine followed by one approved
+  only from a LAN address reached 127.0.0.1 twice: the second rode the idle
+  connection past the check (NC12,
+  `TestProxy_Serve_NeverCarriesARequestOnAConnectionAnotherApprovalOpened`).
+  net/http also hands a connection dialed for one request to another that is
+  waiting (`tryPutIdleConn`'s late binding), so partitioning by request would
+  not have been enough; `DisableKeepAlives` returns before that hand-off.
+  Cost, 2,000 sequential POSTs to a loopback server on macOS: 38 to 43 µs
+  each kept alive, 102 to 108 µs each not. On a LAN add a round trip. A
+  stream is one request, a seek one more, and an ingest walk one connection
+  per 200-item Browse page.
+- **One constructor.** `discovery.NewDeviceTransport(dialer)` is the
+  transport of `NewDeviceFetchClient` (both discovery clients and, now, the
+  ingest's SOAP) and of the proxy, which adds its streaming settings
+  (`MaxConnsPerHost` 4, `ResponseHeaderTimeout` 10 s, no whole-request
+  timeout). It replaces any `ControlContext` its template carries (NC13).
+- **Declined: requiring SSDP control URLs to be IP literals.** It would pin
+  every later dial to the address checked at discovery. Against it: #1069's
+  three devices on one LAN are thin evidence that no device announces a
+  name; UDA 1.1 says a LOCATION host is "normally" a literal, which is not
+  "always"; the dial check already covers the dangerous targets for names;
+  and a literal can name a tailnet or public host (#1069's "still fetched"),
+  so the rule would not bound a third host either.
+- **The test resolver is a seam, not `net.DefaultResolver`.**
+  `discovery.UseResolverForTest` sets an atomic pointer that
+  `NewDeviceTransport`'s dials read. Replacing `net.DefaultResolver` (what the
+  throwaway reproduction did) writes a global that every goroutine in the
+  process reads with no synchronisation, which the race detector reports
+  whenever another test's goroutine resolves a name meanwhile. The price: a
+  client swapped away from `NewDeviceTransport` resolves through the system
+  resolver, fails to resolve the test's name, and the end-to-end test goes
+  red as "the LAN stand-in saw nothing" rather than as the console reached
+  (NC2, NC3). The literal-address tests in `internal/upnpproxy` and #1069's
+  in `internal/dlna/discovery` show the check itself.
+- **A URL naming a port and no host.** `customEndpoints` kept
+  `https://:8443` and advertised it to every phone (it read `u.Host`);
+  it now prunes it with the other entries a phone cannot use. The harvest
+  credential endpoint accepted it as the base its client dials with the
+  token; it now answers 400 (`config.BaseURLNamesHost`). A configured enrich
+  or harvest base URL of that shape is warned about in `Normalize` and still
+  loads: a refusal there stops a bridge that loaded it before.
+  `CanonicalHTTPSBase`'s reduction is unchanged on purpose: with the host test
+  in it, a hostless pin reduced to "" and `Validate` refused the config (NC18),
+  and without `Validate` it would read as unpinned. As it stands the pin keeps
+  pinning, to a value no accepted credential can carry. No wire change:
+  PROTOCOL.md's `atlasBaseUrl` rule is an https URL, and the refusal is the
+  existing `400 bad_request`.
+- **Gemini consult**: not available (the API's monthly cap). The mechanisms
+  were settled against the Go 1.26.6 source: `net/http/transport.go`
+  (`dialConnFor` puts an undelivered connection in the idle pool;
+  `tryPutIdleConn` hands it to a waiting request unless `DisableKeepAlives`),
+  `net/conf.go` (`PreferGo` with a `Dial` selects the Go resolver on darwin
+  and windows too, which the stub server needs).
+
+### Tests and controls
+
+- `cmd/bridge/upnp_rebinding_test.go`:
+  `TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine`, four
+  servers cached as discovery leaves them, each driven through a real
+  `Ingester.Run` and a proxy byte fetch, with the name answering this host's
+  LAN address (skipped with a log line on a host without one) and then
+  127.0.0.1. A server announcing from a LAN address and a manual server
+  named by a name reach nothing; one announcing from 127.0.0.1 and a manual
+  server on `localhost` reach this machine, which is what shows the refusal
+  is the check and that both paths carry the approval.
+- `internal/upnp/dial_approval_test.go`: the SSDP path records the packet's
+  address with the URL (first sighting, a move, a refresh from elsewhere, a
+  move to a description with no control URL); the merge; the manual poller.
+- `internal/dlna/discovery/dial_approval_test.go`: `OperatorChose`'s table
+  on the address a connect targets, and `NewDeviceTransport`.
+- `internal/upnpproxy/dial_check_test.go`: a server approved from the LAN
+  refused on 127.0.0.1, one approved there served; the kept-alive test; the
+  streaming settings.
+- `internal/config/port_only_url_test.go`,
+  `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost`, and a row in
+  `TestAtlasHarvestBaseURLValidation`.
+- `internal/dnstest`, a DNS server on 127.0.0.1 for one name, with its own
+  test. Existing stubs of the two resolver interfaces gained the approval;
+  the api, dlna and proxy stubs answer with a server announcing from
+  127.0.0.1, where their stub upstreams listen.
+- Negative controls on the committed tree, each restored with
+  `git checkout --` and checked green, `-count=1`:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | the dial check permits every address | the E2E's two refusals (the console saw `POST /ctl`, `POST /ctl`, `GET /MediaItems/1.flac`), the proxy's refusal and kept-alive tests, `OperatorChose`'s table, the transport test, and #1069's `TestDefaultClientDialCheck`, `TestDefaultClient_NeverConnectsToThisHostOnAnotherAddressesSay`, `TestServerDiscoveryDefaultClientNeverConnectsToThisHostOnAnotherAddressesSay` |
+  | NC2 | the SOAP client back on `http.DefaultTransport` | the E2E, all four cases (the ingest's name no longer resolves through the test's DNS) |
+  | NC3 | the proxy back on its old transport | the proxy's three new tests, and the E2E's four cases (as NC2) |
+  | NC4 | the ingest does not put the approval in the context | the E2E's two positive cases, ingest half only |
+  | NC5 | the proxy does not | the E2E's two positive cases (proxy half), the proxy's two new behaviour tests, and every existing proxy test with a stub upstream (5 in upnpproxy, 4 in api, 3 in dlna) |
+  | NC6 | `LiveHost` returns a zero approval | the E2E's positive cases (proxy half), `TestLiveHostResolvesRoutingKeySpelling` |
+  | NC7 | `ResolveControlURL` returns a zero approval | the E2E's positive cases (ingest half), `TestResolveControlURLResolvesAManualServer` |
+  | NC8 | `Upsert` merges the approval alone | the merge test, two steps |
+  | NC9 | the SSDP fetch records no approval | the SSDP recording test, four steps |
+  | NC10 | the manual poller records none | the manual poller test |
+  | NC11 | a name in an operator's URL approves this machine | `OperatorChose`'s two name rows, the E2E's manual-by-name case |
+  | NC12 | the device transport keeps connections alive | the proxy's kept-alive and settings tests, the transport test, #1069's `TestDefaultClient_ChecksTheDevicesAddressNotAProxys` |
+  | NC13 | a template's `ControlContext` survives | the transport test only |
+  | NC14 | the dials ignore the test resolver | the E2E, all four cases |
+  | NC15 | `customEndpoints` reads `Host` | the prune test |
+  | NC16 | the credential endpoint takes a base with no host | its test, three cases |
+  | NC17 | `Normalize` does not warn | the three "names no host" subtests |
+  | NC18 | the host test moves into `CanonicalHTTPSBase` | the pin row (reduces to "" and `Validate` refuses it), the harvest warning subtest |
+
+  NC7 first ran with the resolver test's fixture on a LAN manual URL, whose
+  `OperatorChose` is the zero approval, and that test stayed green: the
+  assertion could not tell "returned" from "dropped". The fixture now holds a
+  non-zero approval, with a guard that fails if it ever does not.
+
+### Out of scope
+
+- **An SSDP packet's source is not authenticated.** A peer on the bridge's L2
+  segment can send one from a link-local address that is not a cloud
+  metadata address, and the same-address exception then approves exactly
+  that address, for the description fetch (#1069) and now for the later
+  dials. The metadata addresses are refused whatever the source (review
+  round 1, `cloudMetadataAddrs`). A loopback source is the case #1069 relies
+  on RFC 1122 for: a host discards 127/8 arriving on any other interface.
+- The harvest client dials a stored base as it is, so a hostless base stored
+  before this change (only a paired device could have sent one) is not
+  re-checked.
+- The manual poller's description fetch still has no dial check (above).
+
+### Review round 1 (CodeRabbit, three findings, all taken)
+
+- **CLAUDE.md named `http.DefaultTransport` as the SOAP client's transport
+  in the present tense** (Minor). It says "then on" now.
+- **The port-only warning logged the base URL whole** (Major).
+  `normalizeBaseURL` accepts userinfo, so `http://user:password@:5000` put
+  the password in the journal. `url.URL.Redacted` is not the fix, measured:
+  it masks the password and returned `http://s3cret-token@:5001/?apikey=s3cret`
+  whole (a token written as the user name, and the query). So the warning
+  logs `urlOriginForLog`, the scheme and host alone (`http://:5000`), which
+  is what it is about. The custom-endpoint drop warnings had the same leak,
+  and a parse failure quoted the entry twice (`customEndpoints["https://user:s3cret x@…"]:
+  parse "https://user:s3cret x@…": net/url: invalid userinfo`); they name an
+  entry by position and origin now, and a parse failure by position alone,
+  since the parse error quotes the value. The harvest-base warning cannot
+  carry userinfo: `CanonicalHTTPSBase` refuses a URL with one, so such a pin
+  reduces to "" and is never warned about (`Validate` refuses it).
+  `ValidateCustomEndpoints`' docblock said the admin PATCH handler shows its
+  warnings to the operator; nothing but `Normalize` calls it, and they reach
+  the journal only. `TestNoConfigWarningCarriesAURLsCredentials` puts a
+  secret in each URL a warning names (a password, a token as the user name,
+  a query) and requires every warning, and the secret in none.
+- **The same-address exception approved a spoofed cloud metadata address**
+  (Major). An SSDP source is not authenticated, so a peer on the link can
+  send a packet from 169.254.169.254, and the exception approved exactly
+  that address: for the description fetch (#1069), and since B36 for the
+  ingest's SOAP and every byte fetch, whose answer the proxy relays to the
+  unauthenticated DLNA listener. The chain, on a cloud VM: the peer answers
+  the LOCATION's name with its own address while discovery fetches the
+  description, then with 169.254.169.254 (IMDSv1 answers a plain GET with
+  the instance's credentials). Reproduced through the real ingest and proxy
+  with the rule off (NC M1 below): both dialled
+  `169.254.169.254:63371: connect: host is down` on the dev Mac, which is
+  the connect the exception approved.
+
+  `cloudMetadataAddrs` in `url_policy.go` is one list, from each provider's
+  documentation (2026-09-28):
+
+  | address | what | source |
+  |---|---|---|
+  | 169.254.169.254 | instance metadata on AWS, Azure, Google Cloud, Oracle Cloud, OpenStack, DigitalOcean, Hetzner, IBM Cloud, Linode | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
+  | fd00:ec2::254 | AWS instance metadata, IPv6 (Nitro) | same |
+  | 169.254.169.253, fd00:ec2::253 | AWS Route 53 Resolver | https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html |
+  | 169.254.169.123, fd00:ec2::123 | AWS Time Sync Service | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html |
+  | 169.254.170.2 | AWS ECS task metadata and credentials | https://docs.aws.amazon.com/sdkref/latest/guide/feature-container-credentials.html |
+  | 169.254.170.23, fd00:ec2::23 | AWS EKS Pod Identity Agent | https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html |
+  | fd20:ce::254 | Google Cloud metadata, IPv6-only instances | https://docs.cloud.google.com/compute/docs/metadata/querying-metadata |
+  | fd00:c1::a9fe:a9fe | Oracle Cloud instance metadata, IPv6 | https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/gettingmetadata.htm, cloud-init issue 6849 |
+  | fe80::a9fe:a9fe | OpenStack (since Victoria) and Linode metadata, IPv6 | https://docs.openstack.org/nova/latest/admin/metadata-service.html |
+  | fd00:a9fe:a9fe::1 | Linode metadata, IPv6 | https://linode.com/docs/products/compute/compute-instances/guides/metadata-api |
+  | 169.254.42.42, fd00:42::42 | Scaleway metadata | https://www.scaleway.com/en/developers/api/instance/user-data |
+  | 169.254.0.23, 169.254.10.10 | Tencent Cloud metadata (metadata.tencentyun.com) | https://www.tencentcloud.com/document/product/213/4934 |
+  | 100.100.100.200 | Alibaba Cloud metadata | https://www.alibabacloud.com/help/en/ecs/user-guide/view-instance-metadata/ |
+  | 168.63.129.16 | Azure WireServer (the host's endpoint: agent, DHCP, DNS, health probes) | https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16 |
+
+  `addrKind` names them first (`hostMetadata`), so the string check
+  (`LocationFromSource`), the service-URL rule (`resolveServiceURL`, for
+  every source, with its own error) and the dial check (`permits`, before
+  its same-address arm) refuse them whatever approved the request, and
+  `OperatorChose` approves nothing for a URL on one. Ten are not link-local
+  (the eight in fd00::/8, 100.100.100.200 and 168.63.129.16), so they were
+  fetched on ANY device's say-so, exception or not, and no string rule saw
+  them. **Exact addresses, never a range**: a direct-cable device
+  self-assigns anywhere in 169.254/16 or fe80::/10, and a /24 around
+  169.254.169.254 would refuse one such device in 254 (NC M8 shows the
+  cost: the direct-cable rows at 169.254.7.7 and #1069's own link-local
+  rows go red). Costs accepted: a tailnet node may hold 100.100.100.200
+  (it is in 100.64/10, where Tailscale assigns node addresses: one address
+  in 4,194,304) and would lose its routed dials. Azure's DNS on 168.63.129.16 is unaffected: the resolver dials
+  with a dialer of its own, which the check does not see. Left out: Oracle
+  Cloud Classic's 192.0.0.192, a retired service. CI runs on Azure VMs,
+  where 169.254.169.254 and 168.63.129.16 answer: the tests' refusals come
+  before any connect, and the controls that connect ran on the dev Mac only.
+
+  Tests, each through a real entry point: the list against its sources
+  (`TestCloudMetadataAddrsAreTheDocumentedOnes`, which also fails on an
+  address added without a row); both SSDP clients' packet paths, from each
+  address and from a LAN address
+  (`TestHandlePacket_NeverFetchesACloudMetadataLocation`,
+  `TestServerCloudMetadataLocationIsNeverFetched`, the second with a
+  direct-cable server at 169.254.7.7 fetched and approved); the production
+  client resolving a name to a metadata address under four approvals,
+  through `internal/dnstest`
+  (`TestDefaultClient_RefusesACloudMetadataAddressWhateverApprovedTheFetch`);
+  the service URLs, for every source
+  (`TestParseDeviceDescription_NeverKeepsACloudMetadataServiceURL`); the
+  chain end to end, through the real ingest and proxy
+  (`TestAPacketFromAMetadataAddressApprovesNoLaterDialThere`); rows in the
+  dial check's, the string check's and `OperatorChose`'s tables; and a
+  property in `FuzzParseDeviceDescription` (no kept service URL names a
+  metadata address; it reads the list, which is data) with three seeds.
+  One existing row asserted the defect: `OperatorChose`'s "link-local URL,
+  another link-local address" connected to 169.254.169.254 and wanted it
+  allowed. It dials 169.254.7.7 now, with the metadata address its own
+  refused row.
+
+  Negative controls, each committed first, restored with `git checkout --`
+  and checked green, `-count=1`:
+
+  | | mutation | red |
+  |---|---|---|
+  | M1 | `addrKind` never names a metadata address (the rule off) | the string check (both packet paths, its table), the dial check (its table, `OperatorChose`'s, the transport test, which ran 9.0 s against 0.0 s green, its connects running into the 3 s fetch timeout; the E2E, `connect: host is down`), the service-URL test, the fuzz seeds. Green: the list test, the list being intact |
+  | M2 | `LocationFromSource` sends a metadata literal on to the source comparison | the string check only: both packet paths, its table |
+  | M3 | `permits` keeps its same-address arm for a metadata address | the dial check only: its table, the transport test, the E2E |
+  | M4 | `resolveServiceURL` loses its metadata case | the refusal's reason only: every row still refused, as "names this machine or a link-local address", by `hostKindAllowed` |
+  | M4b | `hostKindAllowed` loses its metadata arm | nothing: a belt, since both callers check first. With M4 as well, a description at a metadata address keeps its own service URLs (the service-URL test, the fuzz seed at fe80::a9fe:a9fe) |
+  | M5 | the base-URL warning logs the value | the redaction test: the password, the token and the query in the line |
+  | M6 | the endpoint warnings quote the entry | the redaction test, three lines, the parse failure's twice. Its first form did not build (the naming closure unused) and was redone with the closure kept |
+  | M7 | 100.100.100.200 dropped from the list | the list test, and every row naming it (string check, dial check, service URLs, the transport test, the upnp packet path) |
+  | M8 | the range: every IPv4 link-local address counts as metadata | the direct-cable rows at 169.254.7.7 (both packet paths, the dial check, `OperatorChose`, the service-URL test's positive), the list test's neighbours, and #1069's link-local rows |
+
+### Out of scope (round 1)
+
+- Two REFUSALS still quote a configured URL whole, userinfo included:
+  `normalizeBaseURL`'s (`must be an absolute http(s) URL, got %q`) and
+  `Validate`'s harvest-pin one (`must be a plain https base URL …, got %q`).
+  They stop the bridge from starting and print to its log; they were not
+  warnings and were not changed here.
+- A custom endpoint that carries userinfo and is otherwise valid
+  (`https://user:password@host:7788`) is KEPT, and `/v1/health` advertises
+  it as written, to a caller with no token too.
+- A manual upstream's own description fetch has no metadata check (the
+  operator's URL; upstream ingest is refused in public mode), though no
+  later dial of one reaches a metadata address.
+
 ## 2026-09-28 — a library root that is a link to a directory is walked through
 
 Backlog B41, found by #1070's session with a throwaway program and left
