@@ -478,9 +478,19 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 			len(full.queue), len(full.pending), sourceRescanQueueCap+5, sourceRescanQueueCap)
 	}
 
+	// Queued before the loop runs, so which requests share a scan does not
+	// depend on when the loop takes one.
 	r := newSourceRescanner()
-	scanned := make(chan string, 4)
-	hold := make(chan struct{})
+	r.request("/lib/A/01.flac", "A/01.flac")
+	r.request("/lib/A/02.flac", "A/02.flac")
+	r.request("/lib/B/01.flac", "B/01.flac")
+	if len(r.queue) != 2 {
+		t.Fatalf("%d scans queued for two directories, want 2: two files of one directory share a scan", len(r.queue))
+	}
+
+	// Every scan waits for the test to release it, so the loop takes the
+	// next directory only when the test says so.
+	scanned, release := make(chan string, 4), make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -488,41 +498,41 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 		r.run(ctx, func(ctx context.Context, dir string) (int, error) {
 			scanned <- dir
 			select {
-			case <-hold:
+			case <-release:
 			case <-ctx.Done():
 			}
 			return 0, nil
 		})
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
-
-	next := func(what string) string {
+	next := func(want string) {
 		t.Helper()
 		select {
 		case dir := <-scanned:
-			return dir
+			if dir != want {
+				t.Fatalf("scanned %s, want %s", dir, want)
+			}
 		case <-time.After(5 * time.Second):
-			t.Fatalf("no %s within 5 s", what)
-			return ""
+			t.Fatalf("no scan of %s within 5 s", want)
 		}
 	}
-	r.request("/lib/A/01.flac", "A/01.flac")
-	r.request("/lib/A/02.flac", "A/02.flac")
-	if got := next("scan"); got != "/lib/A" {
-		t.Fatalf("scanned %q, want /lib/A", got)
-	}
-	r.request("/lib/A/01.flac", "A/01.flac")
+
+	next("/lib/A")
+	// A's scan has started, and may already have passed these files.
 	r.request("/lib/A/03.flac", "A/03.flac")
-	close(hold)
-	if got := next("second scan, for the requests made during the first"); got != "/lib/A" {
-		t.Fatalf("second scan of %q, want /lib/A again", got)
-	}
+	r.request("/lib/A/04.flac", "A/04.flac")
+	release <- struct{}{}
+	next("/lib/B")
+	release <- struct{}{}
+	next("/lib/A")
+	// The third scan is held, so the loop takes nothing more: what is
+	// still queued now would be a fourth.
 	r.mu.Lock()
 	queued, pending := len(r.queue), len(r.pending)
 	r.mu.Unlock()
 	if queued != 0 || pending != 0 {
-		t.Errorf("after the second scan started: %d queued, %d pending, want none — four requests for one directory, "+
-			"two before its scan started and two during it, are two scans", queued, pending)
+		t.Errorf("%d queued, %d pending after the second scan of A started, want none: "+
+			"two requests made during A's first scan are one more scan", queued, pending)
 	}
 }
 
