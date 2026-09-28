@@ -5485,7 +5485,10 @@ tick. Two consequences that were not in the finding:
   The test creates `b := t.TempDir()` BEFORE `a` (sequential names, so `b`
   sorts first), sweeps under `a`, plants a cursor under `a`, switches to
   `b`, and asserts `b`'s orphan is reaped. Removing the reset turns it red
-  independently of memoising the root.
+  independently of memoising the root. *(2026-09-28: the cursor is gone,
+  since every tick walks the whole tree; the test keeps the live-root half
+  and gained its converse, an orphan planted in the OLD root after the move
+  survives. See that day's entry.)*
 - **An empty answer is a refusal.** The old string argument could not be
   empty; the provider returns `""` on a nil config snapshot, and
   `WalkDir("")` walks the process working directory. Same rule as
@@ -6275,7 +6278,8 @@ outcome. Declined on the thread with the evidence.
   that needs its own justification. A background sweeper also gets no override
   by the rule this file already records — nobody is in the loop to express
   intent — so the guard there would have to be right first time. Worth doing;
-  worth doing on its own.
+  worth doing on its own. *(Done 2026-09-28: each tick takes the whole-tree
+  inventory and decides alone; see that day's entry.)*
 - **`artwork --gc`**: keyed by content hash and MBID, not by an absolute path a
   relocation can strand. Exempted by name in the sweep test.
 - **The refusal deliberately does NOT name `bridge variants move`**, though the
@@ -8184,6 +8188,8 @@ configured one.
 A symlinked SUBDIRECTORY is the same hazard one level down and is skipped
 rather than classified. `analyze --gc` was never exposed: its `Consider`
 requires the `.1bwf` suffix, which a directory symlink does not have.
+*(Corrected 2026-09-28: the suffix is `analyze.WaveformExt`,
+`.waveform.bin`, and has been since #395. The conclusion holds either way.)*
 
 ### Two more paths that turned a missing recorded path into a deletion (#959)
 
@@ -12965,7 +12971,7 @@ and 21 leads turned out to be handled already (below).
   said the aborted walk also resets the resume cursor. That is true and
   inert: the sweeper runs on `scanCtx`, which has no deadline, so the
   walk's only error is a shutdown, and the cursor is in memory and ends
-  with the process.
+  with the process. (The cursor went on 2026-09-28.)
 - **The tsnet start goroutine is still not joined.** Its log is quiet on a
   shutdown now, but joining it (cancel the start, wait before
   `Store.Close`) is #997's class, not this one. (#1009 joined it on
@@ -20869,3 +20875,200 @@ absolute path would have missed one. Found while merging main into #1055.
   `Unwrap`.
 - Gemini did not review it: its GitHub app was out of quota and the API project had
   reached its monthly spending cap.
+
+
+## 2026-09-28 — the background orphan sweep refuses a mass orphaning, as `--gc` does
+
+`integrity.OrphanSidecarSweeper` (opt-in, off by default:
+`integrity.orphanSidecarSweepIntervalSec`) is the background half of
+`bridge upscale --gc`'s forward sweep. #940 gave the CLI sweeps
+`MassOrphanRefusal` on a whole-tree `TakeSidecarInventory` and left this one
+open on purpose ("Not in scope" in #940's entry): it unlinked INSIDE a
+`filepath.WalkDir` chunked at 5,000 entries, with a cursor carried across
+ticks, so no tick could see a whole-tree ratio, and a background sweeper gets
+no override, so its guard had to be right first time. Its only guard was the
+empty-known-set refusal, which one row satisfies.
+
+### The defect, measured on the old code
+
+The pre-change tree (`git archive ec20ac1c`, outside the worktree) with
+adapted tests on its three-argument constructor:
+
+- #940's literal shape, 200 rows each with its file over 10,048 stranded
+  files, at the production chunk: **4,800, 5,000 and 248 unlinked** in three
+  ticks, the whole stranded tree, every line at Info. `--gc` refuses the same
+  tree.
+- The test fixture (20 rows over 1,000 stranded, chunk 500): 480, 500, 20. The
+  old chunk counted known files among the entries it examined, which is why
+  the first tick is short of the chunk.
+- A symlinked variants directory (`/srv/variants -> /mnt/vol/…`):
+  `examined=0 unlinked=0`. WalkDir Lstats its root, so the tree behind the
+  link was never swept at all.
+
+### Rejected: a verdict tallied across ticks
+
+Keep the chunked walk and accumulate orphans/files/rows over a full pass,
+deciding once the cursor wraps. Rejected in review before any code: a verdict
+across ticks can come from a PARTIAL walk (an unmount between ticks, a
+cancel, a root pruned or moved mid-pass) or from a catalog that changed
+mid-pass, so it is a ratio over two different trees; and a deletion budget
+carried between passes can be spent on files it never counted. #937's and
+#940's rule one layer up: a guard must be computed from what the deletion
+will act on, at the time it acts.
+
+### Chosen: each tick decides alone, the forward half of `--gc`
+
+1. Resolve the live variants dir; refuse `""` (as before).
+2. `AllVariants`, then `KnownSidecarSet`, then the empty-known-set refusal,
+   unchanged, still a WARN every tick. Kept AHEAD of the mass-orphan refusal
+   because that one does not cover it: with no rows, fewer than ten orphans
+   are under its floor and would all go.
+3. `TakeSidecarInventory(ctx, root, known, {Consider:
+   shouldConsiderSidecarFile, MaxOrphanPaths: chunk})`, with NO `MaxEntries`
+   (inventory.go: a sweep that deletes on a truncated inventory deletes on a
+   ratio from part of the tree). A walk error unlinks nothing; a shutdown's
+   cancel is not reported (`ctxerr.WithoutCancellation`), a deadline or a read
+   failure is.
+4. `MassOrphanRefusal(inv.Orphans, inv.Files, len(rows),
+   cfg.VariantSweepMaxDeletePercent())`. **`inv.Orphans`, never
+   `len(inv.OrphanPaths)`**: `MaxOrphanPaths` caps only the retained list.
+5. Unlink at most the chunk's worth of the retained paths through
+   `reclaimOrphan`, which re-checks each one freshly: `os.Lstat` (ENOENT is
+   done, not failed; so is ENOENT from `os.Remove`), the inventory's own
+   `classifyWalkEntry` (a link to a directory or a Windows junction is left;
+   an unstattable one is left), the grace against the tick start, then
+   `os.Remove`. The inventory keeps no mtimes, so the tick needed a stat
+   there anyway.
+
+The only state crossing ticks is a log latch (`refusing`,
+`lastRefusalLog`, run-goroutine owned): the refusal WARNs once when a streak
+starts and at most once a day while it lasts (the M-SEARCH rule); a tick
+that decided nothing (a failed or stopped listing or walk, an empty catalog)
+leaves it alone; the first tick whose walk finished and whose verdict
+proceeds logs one Info line. That line claims only that the check passed:
+an unmounted variants volume leaves an empty inventory whose verdict
+proceeds, and the counts on the line say so; a remount that is still
+stranded starts a new streak with a fresh WARN. The refusal's hint is the
+CLI's (`gcRefuseMassOrphans`) in one line and never names `bridge variants
+move`, which needs the rows a lost index lacks. Every tick that reaches the
+walk logs one Info summary (`tick complete` / `tick cut short`) with files,
+known, orphans, unreadable, refused, unlinked, gone, in_grace, not_a_file,
+failed and cancelled; a walk that did not finish omits the inventory counts
+rather than print zeros that read as an empty tree. Per-path lines are
+sampled at ten per message per tick.
+
+### Consequences, stated
+
+- **Parity with `--gc` by construction**: the root resolved and paths
+  reported under the configured one (#959), the dot-directory prune, #969's
+  "not a regular file" rule, a walk error that fails closed. The symlinked
+  variants directory is a BEHAVIOUR CHANGE: it is walked now.
+- **The `.flac` Consider stays, deliberately**, so the ratio is over the
+  files this sweep would remove, as `analyze --gc`'s is over
+  `.waveform.bin`; `upscale --gc`'s nil Consider counts and removes every
+  file. `shouldConsiderSidecarFile`'s docblock said "the operator-triggered
+  `--gc` uses the same shape", which was never true: at #284, where the
+  predicate came in, `--gc`'s forward sweep already removed every
+  unreferenced file.
+- **The chunk caps UNLINKS, not the walk.** Every tick walks the whole tree
+  read-only.
+- **A stranded tree no larger than the catalog is still reaped**, exactly as
+  `--gc` reaps it: the refusal needs its floor, `orphans > rows` and the
+  ratio. Not claimed as covered anywhere.
+- **A failed unlink keeps its slot.** The retained list is the tree's first
+  chunk of orphans in walk order on every tick, so a chunk's worth or more of
+  files this user cannot remove at the head of the walk stalls the rest
+  (fewer only shrink each tick's share). The old cursor moved past them.
+  Named in `gcChunkSize`'s docblock; each tick's sampled WARN names them.
+
+### Measurement
+
+`TakeSidecarInventory` with the sweep's options over 100,001 files in 111
+directories (the doctor's variants-index shape), dev Mac, Apple silicon,
+APFS, warm cache, load ~3 on 12 cores, 7 runs each, two sessions:
+
+| known set | median | range |
+|---|---|---|
+| 100,001 rows (every file known) | 128 ms | 124–142 ms |
+| 200 rows (lost index, 99,801 orphans, 5,000 retained) | 117–118 ms | 116–123 ms |
+
+`KnownSidecarSet` over 100,001 rows: 49–52 ms (a cost the tick already
+paid). The per-entry figure the old `gcChunkSize` docblock carried for the
+pathological tier (~50 µs, cold, NTFS or exFAT on USB spinning rust) was an
+estimate, not a measurement; it puts the same tree at ~5 s a tick. On the new
+code the literal #940 tree (10,248 files) took 11–54 ms a tick, unlinked
+nothing over four ticks, and logged one WARN.
+
+### Tests
+
+New: `TestOrphanSidecarSweeperRefusesAStrandedTree` (20 rows over 1,000
+stranded, chunk 500: three ticks, nothing unlinked, exactly one WARN naming
+"1000 of 1020", three summaries with `refused=true`; red on the old code as
+above), `TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount` (chunk 100, 150
+rows with files, 1,000 orphans: refused), `TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing`
+(refuse / listing fails, walk fails, walk stopped, catalog empty / refuse:
+one refusal line, no lifted line), `TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing`,
+`TestOrphanSidecarSweeperRepeatsARefusalOnceADay` (a minute short of a day:
+no repeat; a minute past: one), `TestReclaimOrphanRechecksThePathBeforeUnlinkingIt`
+(the (lstat, stat) seam, so the Windows junction row runs on every leg; the
+path is a real file whenever there is one, so reaching `os.Remove` shows),
+`TestReclaimOrphanLeavesALinkToADirectory` (a real symlink; the tick starts
+an hour ahead with a nanosecond's grace, so the grace cannot be what keeps
+it), `TestOrphanSidecarSweeperWalksASymlinkedVariantsDir` (red on the old
+code: `examined=0`).
+
+Adapted: `TestOrphanSidecarSweeperWalksTheLiveVariantsDir` (the cursor
+half gone; an orphan planted in the OLD root after the move must survive),
+`TestOrphanSidecarSweeperRespectsChunkCap` (150 orphans against 150 rows
+whose files are gone, so not a mass: 100, then 50, then 0),
+`TestOrphanSidecarSweeperHonoursCancellation` (now asserts zero unlinks and
+all 200 files: the walk stops at its first entry and the unlinks follow only
+a finished walk), `TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir`
+(now asserts no WARN), `TestOrphanSidecarSweeperRefusesAnEmptyRoot` (the
+orphan in the working directory is aged, so a sweep of it would really
+unlink it; two refusals now stand in front of it, the tick's and
+`TakeSidecarInventory`'s), `TestShouldConsiderSidecarFile` (basenames).
+Every constructor call gained the threshold
+(`config.DefaultVariantSweepMaxDeletePercent` in the tests).
+Deleted with the code they pinned: `…DirEntirelyBehindCursor`,
+`…PathWalkCompare_MatchesActualWalkDirOrder`, `…PathWalkCompare_ZeroAlloc`,
+`…OrphanSidecarSweeper_SiblingDashDir_NotPruned`,
+`…OrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans`, and the
+`seedSidecarAlbum` helper only they used. The #466 entry's citations are
+elided for `TestEveryCitedTestNameExists`.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+NC1 to NC4 are the four the change was specified with; NC5 to NC8 check that
+the latch's other halves, the moved grace check and the Consider are each
+pinned by something. Every one failed only the tests listed.
+
+| mutation | goes red |
+|---|---|
+| NC1: the refusal skipped (`false && reason != ""`) | the stranded tree (tick 1 unlinked 500), the full count, all four latch subtests, says-once, daily repeat |
+| NC2: `len(inv.OrphanPaths)` fed to the refusal | the full count (100 unlinked, no refusal); the stranded tree on its numbers only ("500 of 1020") since 500 > 20 still refuses |
+| NC3: `reclaimOrphan` without `classifyWalkEntry` | the junction, symlink-to-directory and unstattable-link rows, and the real-symlink test |
+| NC4: `s.refusing = false` in the walk-error branch | exactly the latch test's "walk fails" and "walk is stopped" subtests |
+| NC5: the refusal logged every tick | the stranded tree, all four latch subtests, says-once, daily repeat |
+| NC6: the lifted line logged outside a streak | says-once, alone |
+| NC7: the grace check dropped | the helper's grace row and `TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites` |
+| NC8: a nil Consider | `TestOrphanSidecarSweeperPreservesNonFlacFiles`, alone |
+
+### Also corrected
+
+- CLAUDE.md's #959 bullet and this log's #959 entry said `analyze --gc`'s
+  Consider requires `.1bwf`. It is `analyze.WaveformExt`, `.waveform.bin`,
+  since #395; the tenth stale claim in CLAUDE.md's tally.
+- `config.go`'s `OrphanSidecarSweepIntervalSec` docblock said a tick
+  processes "`gcChunkSize` filesystem entries (100…)" (5,000 since #282) and
+  takes a "`BEGIN DEFERRED` snapshot" (a plain SELECT under WAL, as the
+  sweeper's docblock already said). `VariantSweepMaxDeletePercent`'s now says
+  it bounds the file side too.
+- `cmd/bridge/main.go` pointed at a CLAUDE.md section "Bridge background GC"
+  that does not exist.
+- One claim went the other way: `variantsIndexCounts`' docblock
+  (`cmd/bridge/doctor.go`) says the doctor reuses "the enumeration `bridge
+  upscale --gc` and the background orphan sweeper already walk with". The
+  sweeper shared only `KnownSidecarSet` until now and walked with its own
+  WalkDir; it is true as of this change, so the doctor's count is the one
+  both sweeps act on.

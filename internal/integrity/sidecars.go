@@ -823,9 +823,11 @@ func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]stru
 //
 // Narrower than `upscale --gc` on purpose, and this docblock said the
 // opposite until 2026-09-28 ("the operator-triggered `--gc` uses the same
-// shape"): `--gc` passes a nil Consider and counts and removes EVERY file
-// in the variants directory, while this sweep never unlinks anything but a
-// `.flac`, and so measures its mass-orphan ratio over `.flac` files only.
+// shape"), which was never true — at #284, where this predicate came in,
+// `--gc`'s forward sweep already removed every unreferenced file. `--gc`
+// passes a nil Consider and counts and removes EVERY file in the variants
+// directory, while this sweep never unlinks anything but a `.flac`, and so
+// measures its mass-orphan ratio over `.flac` files only.
 //
 // Future variant formats (FLAC-only today; opus / wavpack are
 // hypothetical follow-ups) would extend the predicate rather than

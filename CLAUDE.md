@@ -236,7 +236,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Nine claims in this list have been wrong and been corrected** — the
+**Ten claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -245,8 +245,9 @@ falsified two days earlier by wiring `integrity.LocateWaveform` into
 the re-init that replaces it", which held for config-file and not for the port
 checks, (2026-09-26) "`os.ReadDir("")` reads the process working
 directory", (2026-09-27) "init never prompts for `customEndpoints`, so
-the old value survives the rewrite", and (2026-09-27) "`Load` serves a config
-giving a blank name `DefaultLibraryName`". The first five cost a later session real
+the old value survives the rewrite", (2026-09-27) "`Load` serves a config
+giving a blank name `DefaultLibraryName`", and (2026-09-28) "`analyze --gc`'s
+`Consider` requires `.1bwf`". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -259,7 +260,10 @@ was the premise a preflight judgement rested on, and no rewrite had ever
 kept the value: measured, the same run also minted a new TLS pair over an
 install that named its own. The ninth sat in a test docblock whose own table
 asserted the opposite (`served: "  "`, as written), and `Load` gave the
-default only to an exactly-empty name until #1042.
+default only to an exactly-empty name until #1042. The tenth named an
+extension the bridge has never written (waveforms have been `.waveform.bin`
+since #395), and survived because its conclusion, that a directory symlink
+is no candidate there, holds for either spelling.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -609,7 +613,10 @@ lost my library."
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —
   pruning on a raw `<` permanently skipped a still-unwalked subtree. Use the
   segment-wise comparison, and keep it allocation-free (it runs per entry on the
-  walk hot path).
+  walk hot path). The one such cursor, the orphan sweeper's, went on
+  2026-09-28 with `pathWalkCompare` and `dirEntirelyBehindCursor`: every tick
+  walks the whole tree now (under **Job pools**). The rule is for any cursor
+  that comes back.
 - **New shared scanner fixtures go in the untagged `scanner_fixture_test.go`**,
   never a build-tagged file — untagged siblings referencing them broke the
   Windows compile of the whole `manifest` test binary, invisibly.
@@ -1603,12 +1610,14 @@ no failing test — which is the shape to expect in this area.
   construction, so after a move the orphan GC walked the tree the operator
   had left while new sidecars landed where it never looked, and the
   mount-loss guard probed the wrong volume. Both constructors take a
-  `func() string`. A root change drops the sweeper's chunk-resume cursor —
-  a position in ONE tree; against another root `dirEntirelyBehindCursor`
-  can prune that whole tree as "already swept" — and an empty answer is a
+  `func() string`. A root change also had to drop the sweeper's
+  chunk-resume cursor, a position in ONE tree, until 2026-09-28, when the
+  cursor went: every tick walks the whole tree (the "…and the background
+  `OrphanSidecarSweeper`" bullet below). An empty answer is a
   refusal, taken before anything can resolve `""` to the working directory
   (the `ReapOrphans` bullet under Config; `WalkDir("")` itself only
-  errors). The Jobs chips gate on the INTERVAL, as the
+  errors), and `TakeSidecarInventory`, the walker the sweep uses now,
+  refuses it again. The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
   the watchers tick regardless. (#917)
 
@@ -1668,7 +1677,8 @@ no failing test — which is the shape to expect in this area.
   cannot be STATTED is counted `Unreadable` rather than classified — "not
   there" and "could not find out" are different questions and only the
   first is junk. `analyze --gc` was never exposed: its `Consider` requires
-  `.1bwf`. (#959)
+  `analyze.WaveformExt`, `.waveform.bin` (this bullet said `.1bwf`, an
+  extension nothing writes, until 2026-09-28). (#959)
 - **A sweep that would reap more than `integrity.variantSweepMaxDeletePercent`
   (default 20, floor 10 rows) of the catalog while the tree still holds
   sidecar-shaped files is REFUSED, and every tick that saw rows logs one
@@ -1780,14 +1790,42 @@ no failing test — which is the shape to expect in this area.
   already destroyed, so the test asserts on the FILES.
   `--allow-mass-orphans` is the CLI's way past it on upscale / optimize /
   render / analyze; `artwork --gc` is exempt BY NAME in the sweep test
-  (content/MBID-keyed, no absolute path a relocation can strand), and the
-  background `OrphanSidecarSweeper` is deliberately left for its own
-  change — chunked at 5,000 entries it cannot see a whole-tree ratio, a
-  per-chunk one is a different statistic, and a background sweeper gets no
-  override, so it has to be right first time. `analyze --gc` shares both
+  (content/MBID-keyed, no absolute path a relocation can strand). #940 left
+  the background `OrphanSidecarSweeper` for its own change, which is the
+  next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
   with them; its `.tmp` scratch is removed unconditionally and kept OUT of
   the ratio, or a crashed run trips the guard on the next one. (#940)
+- **…and the background `OrphanSidecarSweeper` makes the same decision
+  every tick, with no override** (2026-09-28). It unlinked INSIDE a walk
+  chunked at 5,000 entries, with a cursor across ticks, and its only guard
+  was the empty-known-set one, so #940's own shape (200 rows over 10,048
+  stranded files) went in three ticks on the old code: 4,800, 5,000, 248.
+  Each tick now lists the catalog, takes the whole tree's inventory
+  (`TakeSidecarInventory`, read-only, a `.flac` Consider, NO `MaxEntries`),
+  refuses on `MassOrphanRefusal` of the FULL `Orphans` count, and only then
+  unlinks at most `gcChunkSize`, each path re-checked first
+  (`reclaimOrphan`: a fresh Lstat, the inventory's own `classifyWalkEntry`,
+  the grace against the tick start). **The chunk caps UNLINKS, never the
+  walk**, and the retained `OrphanPaths` are capped with it, so a refusal
+  fed their length reads 100 where there are 1,000 and proceeds (the
+  full-count test pins it). The walk costs 128 ms per 100,001 files warm on
+  the dev Mac, every tick. **No verdict crosses a tick**: a tally across
+  ticks was rejected, because its verdict can come from a partial walk (an
+  unmount, a cancel, a pruned root) or a catalog that changed mid-pass, and
+  a budget carried between passes can be spent on files it never counted.
+  The one cross-tick state is a LOG latch, the M-SEARCH rule: the refusal
+  WARNs once when a streak starts and at most daily while it lasts; a tick
+  that decided nothing (a failed or stopped listing or walk, an empty
+  catalog) leaves the latch alone; the first tick that proceeds after it
+  logs one Info line. Its hint never names `bridge variants move` (it needs
+  the rows a lost index lacks). **A stranded tree no larger than the
+  catalog is still reaped**, exactly as `--gc` reaps it: the refusal needs
+  its floor, `orphans > rows` AND the ratio. The shared walker changed one
+  behaviour on purpose: a SYMLINKED variants directory is walked now (the
+  old WalkDir Lstat'd the link and swept nothing). The `.flac` Consider
+  stays, so the ratio is over the files this sweep would remove, where
+  `upscale --gc`'s nil Consider counts and removes every file.
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);
