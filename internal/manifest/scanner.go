@@ -946,25 +946,26 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 		// For a linked root, the directory the walk found empty is the
 		// one the link points at, and that is where the sentinel is
 		// looked for (through the link), so the line names it.
+		target := rootLinkTarget(root)
 		hint := "place .bridge-allow-empty at the root to confirm intent"
-		if rootLinkTarget(root) != "" {
+		if target != "" {
 			hint = "the root is a link and the directory it links to is empty: check that volume is mounted; " +
 				"place .bridge-allow-empty in that directory to confirm intent"
 		}
 		scanLogger.Error("suspected clean-empty mount failure",
-			rootLineAttrs(root, "rows_in_db", n, "hint", hint)...)
+			rootLineAttrs(root, target, "rows_in_db", n, "hint", hint)...)
 		return true
 	}
 	return false
 }
 
 // rootLineAttrs is a log line's attributes about a library root: the root,
-// then, when it is a link, what it links to (rootLinkTarget), then attrs. A
-// line about what a walk of the root saw names the directory the walk looked
-// in, which for a linked root is not the path in the config.
-func rootLineAttrs(root string, attrs ...any) []any {
+// then what it links to when target (rootLinkTarget) is not "", then attrs.
+// A line about what a walk of the root saw names the directory the walk
+// looked in, which for a linked root is not the path in the config.
+func rootLineAttrs(root, target string, attrs ...any) []any {
 	out := []any{"root", root}
-	if target := rootLinkTarget(root); target != "" {
+	if target != "" {
 		out = append(out, "links_to", target)
 	}
 	return append(out, attrs...)
@@ -2412,7 +2413,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
-		scanLogger.Error("root unreachable", rootLineAttrs(root, "err", err,
+		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
 			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")...)
 		errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
 		return 0, nil

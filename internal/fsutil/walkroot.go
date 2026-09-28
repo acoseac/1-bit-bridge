@@ -2,16 +2,16 @@ package fsutil
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 )
 
-// ErrRootNotEntered is WalkableRoot's answer for a root that stats through
-// to a directory which a separator still does not lead into. No platform Go
-// supports produces it; it exists so that a platform that did would make the
-// walk fail, not read as an empty one.
+// ErrRootNotEntered is the cause, inside an *fs.PathError, of WalkableRoot's
+// answer for a root that stats through to a directory which a separator
+// still does not lead into. No platform Go supports produces it; it exists
+// so that a platform that did would make the walk fail, not read as an
+// empty one.
 var ErrRootNotEntered = errors.New("links to a directory the walk cannot enter")
 
 // WalkableRoot returns the path to hand filepath.WalkDir so that the walk
@@ -89,7 +89,9 @@ func walkableRoot(root string, lstat, stat func(string) (fs.FileInfo, error)) (s
 		return "", err
 	}
 	if !entered.IsDir() {
-		return "", fmt.Errorf("library root %s: %w", root, ErrRootNotEntered)
+		// A PathError, like every other error here, so a caller that
+		// strips the path before an error leaves the host does so here too.
+		return "", &fs.PathError{Op: "walk", Path: root, Err: ErrRootNotEntered}
 	}
 	return walkPath, nil
 }
