@@ -763,8 +763,8 @@ func (s *Server) cachedArtistImages() map[string]string {
 	}
 	s.artistImagesMu.Unlock()
 
-	// Read UNLOCKED — a cold directory read must not block concurrent
-	// page requests, the cachedSoxAvailability convention.
+	// Read UNLOCKED: a cold directory read must not block concurrent
+	// page requests behind artistImagesMu.
 	files, err := s.deps.ArtistImages()
 	if err != nil {
 		logger.Warn("artist image set", "err", err)

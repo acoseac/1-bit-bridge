@@ -1160,53 +1160,6 @@ func TestStatsCompositionFields(t *testing.T) {
 	}
 }
 
-// TestUpscaleSoxAvailabilityCached pins the TTL cache (CodeRabbit
-// major on PR #110): the precheck closure shells out to sox and
-// can wait up to 2 s, so polling at 5 s would 12×/min spend that
-// time. The handler caches the result for soxAvailabilityCacheTTL
-// (30 s) and reuses across calls.
-func TestUpscaleSoxAvailabilityCached(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	h := srv.Handler()
-
-	var calls int
-	srv.deps.UpscalePrecheck = func() error {
-		calls++
-		return nil
-	}
-
-	// Three back-to-back calls within the TTL window MUST
-	// invoke the precheck closure exactly once.
-	for i := 0; i < 3; i++ {
-		var got upscaleStatsResponse
-		code := doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
-		if code != 200 {
-			t.Fatalf("stats[%d]: %d", i, code)
-		}
-		if got.SoxAvailable == nil || !*got.SoxAvailable {
-			t.Errorf("stats[%d]: SoxAvailable wrong", i)
-		}
-	}
-	if calls != 1 {
-		t.Errorf("PrecheckSox invoked %d times; should have been cached after the first call", calls)
-	}
-
-	// Forcing the cache to expire (zero out the timestamp)
-	// MUST trigger a fresh probe. Done via the test seam of
-	// taking the lock + clearing the timestamp directly —
-	// matches the project convention for `internal` test-
-	// only state mutation.
-	srv.soxAvailabilityMu.Lock()
-	srv.soxAvailabilityAt = time.Time{}
-	srv.soxAvailabilityMu.Unlock()
-
-	var got upscaleStatsResponse
-	doJSON(t, h, "GET", "/api/upscale/stats", nil, &got)
-	if calls != 2 {
-		t.Errorf("after expiry, PrecheckSox should have re-run; calls=%d", calls)
-	}
-}
-
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

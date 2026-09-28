@@ -232,12 +232,16 @@ type Deps struct {
 	Pairing *pairing.Store
 
 	// UpscalePrecheck probes whether the upscale feature can run on
-	// this host (sox on PATH, --version returns within 2 s). Wired
-	// to `transcode.PrecheckSox` via a closure in cmd/bridge/main.go
-	// so this package doesn't import internal/transcode (matches the
-	// MBIDProbe / UpdateProvider decoupling pattern). Nil-safe — when
-	// absent the Settings response omits the `upscaleSoxAvailable`
-	// field and the UI hides the warning banner.
+	// this host (sox on PATH, `sox --help` answers within 2 s). Called
+	// for every stats snapshot, the SSE tick's included, and cached by
+	// nothing in this package, so the wiring must be cheap: cmd/bridge
+	// wires the shared TTL-cached probe (`soxToolchainCache.precheck`),
+	// the one the upscale and analysis gates read, which is what keeps
+	// `soxAvailable` and `enabled` on one probe (soxAvailability).
+	// A closure rather than a transcode import (the MBIDProbe /
+	// UpdateProvider decoupling pattern). Nil-safe — when absent the
+	// Settings response omits the `upscaleSoxAvailable` field and the
+	// UI hides the warning banner.
 	UpscalePrecheck func() error
 
 	// UpscaleSoxFLAC reports whether the host sox build has FLAC
@@ -1376,17 +1380,6 @@ type Server struct {
 	// before we return from Serve". Capped by the same 5s shutdown
 	// grace as the HTTP listener.
 	bgScans sync.WaitGroup
-
-	// soxAvailability cache. The /api/upscale/stats handler is
-	// polled every 5 s by the Settings page; per-call PrecheckSox
-	// would shell out 12×/min on every open Settings tab and pay
-	// up to 2 s per probe (CodeRabbit major on PR #110). The TTL
-	// is soxAvailabilityCacheTTL — short enough that an operator
-	// installing sox sees the UI reflect within ~30 s, long
-	// enough that Settings polling stays cheap.
-	soxAvailabilityMu sync.Mutex
-	soxAvailability   bool
-	soxAvailabilityAt time.Time
 
 	// artistImages caches the "which artists have a cached portrait"
 	// set for the player's artist grid. One ReadDir behind a short TTL;
