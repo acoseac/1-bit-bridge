@@ -24808,19 +24808,24 @@ that followed: the rule was applied to four sites of five.
 ### What changed
 
 - `callbackHostAllowed`: the callback host is an IP literal (a name is still
-  refused outright, and so is a zoned IPv6 literal, as `net.ParseIP` did);
-  then the unspecified address never, a loopback or link-local address only
-  when it IS the SUBSCRIBE's address (compared unmapped, the source without
-  its zone), a private address from any source (held), any other only when
-  it is the source. `callbackAddr` and `subscriberAddr` are the one parse of
-  each side, shared with `callbackHostMatchesSource`.
+  refused outright, and so is a zoned IPv6 literal, as `net.ParseIP` did).
+  It then asks the NOTIFY's dial approval first,
+  `discovery.SubscribedFrom(src).Permits(cb)` (#1074's `DialApproval`, with
+  the SUBSCRIBE as the approving peer): a loopback or link-local address
+  only when it IS the SUBSCRIBE's address (compared unmapped, the source
+  without its zone), never the unspecified address or a cloud metadata
+  address. Of what that admits, a private address from any source (held),
+  any other only when it is the source. `callbackAddr` and `subscriberAddr`
+  are the one parse of each side, shared with `callbackHostMatchesSource`.
 - `newNotifyClient` is `discovery.NewDeviceFetchClient`: no redirect, no
-  proxy, no kept-alive connection, and the dial check, with the SUBSCRIBE's
-  address carried in the request context by the new
-  `discovery.WithRequestSource` (`WithAnnouncementSource` now delegates to
-  it). Start and the GENA test helper both build it, so every GENA test
-  sends through the production client. The dial check's refusal text no
-  longer says "an SSDP packet".
+  proxy, no kept-alive connection, and the dial check, under the approval
+  `fireInitialNotify` puts in the request context
+  (`discovery.WithDialApproval(ctx, discovery.SubscribedFrom(src))`). Start
+  and the GENA test helper both build it, so every GENA test sends through
+  the production client. In `internal/dlna/discovery`, `SubscribedFrom` is
+  new, `DialApproval.permits` is exported as `Permits` (the guard asks it),
+  and the dial check's refusal text names a GENA SUBSCRIBE beside an SSDP
+  packet.
 - `noteCallbackRefusal`: a refused loopback or link-local callback is a Warn
   once per (callback, source) pair, in the observer's set and within its
   bound of 64 (`firstSighting`, now shared). Other refusals stay the Debug
@@ -24829,6 +24834,25 @@ that followed: the rule was applied to four sites of five.
   context. `NewRequestWithContext` failed quietly on it; wrapping it in the
   source panics ("cannot create context from nil parent"), so
   `fireInitialNotify` returns first.
+
+### Merged with #1074
+
+#1074 landed while this was open, and replaced the dial check's
+"announcement source" with `discovery.DialApproval` (`AnnouncedFrom`,
+`OperatorChose`), adding cloud metadata addresses that no approval permits
+(`cloudMetadataAddrs`: three of them private or public, `fd00:ec2::254`,
+`100.100.100.200` and `168.63.129.16`). The first form of this change
+carried the SUBSCRIBE's address in a context key #1074 removed
+(`WithRequestSource`), and its guard admitted `fd00:ec2::254` from any
+source (a private address) while the dial check would then refuse the
+connect. So the guard now asks the approval itself, and the two cannot
+disagree: `metadata_ula_from_lan_source`, `metadata_from_itself` and
+`metadata_public_from_itself` pin it. One control changed its answer with
+the merge: keeping the zone in `subscriberAddr` (NC9) went green, since the
+approval strips the zone for the host-local decision; what still depended on
+it was the observer, which would have logged every IPv6 link-local
+subscriber calling back on its own unzoned address as a divergence.
+`ipv6_same_zoned_source` pins that, and turns NC9 red again.
 
 ### Decisions, and what was rejected
 
@@ -24866,6 +24890,10 @@ WARN GENA callback names this machine or a link-local address the SUBSCRIBE did 
 WARN … callbackHost=::ffff:127.0.0.1  subscribeSource=172.19.0.3
 ```
 
+(The merge with #1074 reworded the line to "GENA callback on this machine
+or a link-local address refused — …"; the run below repeats this one on the
+merged build.)
+
 From inside the bridge's container (a control point on the bridge's own
 host): a SUBSCRIBE to `127.0.0.1:7790` with a 127.0.0.1 callback got its
 NOTIFY; one to the container's own LAN address (172.19.0.2) with a
@@ -24890,20 +24918,21 @@ LAN-peer test running on the container's eth0 rather than skipping.
   occupied port has built the notify state already) and
   `TestGENASubscribeOnAnUnstartedServerSendsNothing` (through `mountedMux`,
   the real handler tree with no Start).
-- `Test_callbackHostAllowed` gained 18 rows (the host-local ones, the
-  unspecified address, a name, a numeric spelling, zones, a ULA), and its
-  two host-local rows flipped;
-  `Test_callbackHostMatchesSource`'s wide column moved for the two B39 rows;
-  the divergence log tests became `Test_callbackNotes_*`, run over both
-  warnings. `internal/dlna/discovery/request_source_test.go`:
-  `TestWithRequestSourceComparesUnmappedAndWithoutAZone`.
+- `Test_callbackHostAllowed` gained 21 rows (the host-local ones, the
+  unspecified address, a name, a numeric spelling, zones, a ULA, three cloud
+  metadata addresses), and its two host-local rows flipped;
+  `Test_callbackHostMatchesSource`'s wide column moved for the two B39 rows,
+  and it gained `ipv6_same_zoned_source`; the divergence log tests became
+  `Test_callbackNotes_*`, run over both warnings.
+  `internal/dlna/discovery/subscribed_from_test.go`:
+  `TestSubscribedFromApprovesTheSubscribersOwnAddress`, on the dial check.
 - **Negative controls**, each applied once to the committed branch by a
   script that requires its target text exactly once, `-count=1`, restored
   with `git checkout --`, green again after:
 
   | | mutation | red |
   |---|---|---|
-  | NC1 | loopback and link-local admitted from any source again | 10 table rows (8 + 2), the refusal-report test. **Not** the end-to-end loopback test: the dial check refuses the connect |
+  | NC1 | the guard stops asking the approval (loopback, link-local and metadata admitted from any source) | 13 table rows (8 host-local and 3 metadata in `Test_callbackHostAllowed`, 2 in the divergence table), the refusal-report test. **Not** the end-to-end loopback test: the dial check refuses the connect |
   | NC2 | the notify client keeps no-redirect and no-proxy, loses the dial check | the client test only |
   | NC3 | fireInitialNotify drops the source from the context | the positive twin, the redirect test, the Start test, `Test_genaHandler_FiresInitialNotify` |
   | NC4 | the pre-B39 plain client | the redirect test, the LAN-peer test, the client test, the Start test |
@@ -24912,13 +24941,14 @@ LAN-peer test running on the container's eth0 rather than skipping.
   | NC6 | every refusal at Debug | the refusal-report test |
   | NC7 | no cap on the shared set | both `CapSuppressesRatherThanFloods` subtests |
   | NC8 | the refusal keyed on host:port | the refusal-report test, `WarnOncePerPair/refusal` |
-  | NC9 | the source keeps its zone | `ipv6_link_local_from_its_zoned_source` |
-  | NC10 | a zoned callback accepted | first run: nothing (see below); then `zoned_private_callback` |
-  | NC11 | no unspecified arm | both unspecified rows |
-  | NC12 | `WithRequestSource` stores the source as given | the discovery normalization test |
+  | NC9 | `subscriberAddr` keeps the zone | before the merge `ipv6_link_local_from_its_zoned_source`; after it nothing, then `ipv6_same_zoned_source` (above) |
+  | NC10 | a zoned callback accepted | first run: nothing (see below); then `zoned_private_callback`, and after the merge `ipv6_link_local_zoned_callback` too |
+  | NC11 | no unspecified arm (before the merge) | both unspecified rows; after it the arm is the approval's (`Permits`), pinned by the same rows and `SubscribedFrom`'s |
+  | NC12 | `SubscribedFrom` keeps the source as given | the discovery table's mapped and zoned rows |
   | NC13 | no nil-context guard | the unstarted-server test (`panic: cannot create context from nil parent`) |
 
-  NC10 went green on its first run: every zoned link-local row is refused by
+  NC1, NC2, NC3, NC6, NC8, NC9, NC10 and NC12 ran again on the merged
+  code, with the results above. NC10 went green on its first run: every zoned link-local row is refused by
   the zone-stripped comparison anyway, so the zone refusal in `callbackAddr`
   was pinned by nothing, while a zoned private address would have been
   admitted. The `zoned_private_callback` row was added, and NC10 turns it
