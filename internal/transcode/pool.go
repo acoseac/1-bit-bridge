@@ -231,6 +231,11 @@ type Pool struct {
 	// Same DI shape `runner` uses for the sox subprocess.
 	fsyncFn func(path string) error
 
+	// outages reports the tools this pool's jobs could not run: once when a
+	// tool's outage starts, once when a job proves it back
+	// (tool_unavailable.go). The zero value is ready.
+	outages toolOutages
+
 	// Coalescing publisher (CLAUDE.md: "Bounded SSE publisher
 	// goroutine for transcode events"). Replaces the prior pattern
 	// of spawning a fresh `go fire()` goroutine per state transition,
@@ -366,8 +371,13 @@ var ErrDuplicateInflight = errors.New("transcode pool: job already queued or run
 // called. `store` is the SQLite-backed manifest store the
 // completion path writes the row into.
 //
-// Caller is expected to have already verified sox is on PATH via
-// PrecheckSox — the worker doesn't repeat the probe per job.
+// The worker doesn't probe for sox per job. `bridge serve` builds the
+// pool whether or not sox is there (#781) and keeps work away from it with
+// the live upscale gate at every enqueue site; a job that reaches the
+// runner without its tool anyway (queued before the tool went, or inside
+// the gate's 30 s probe window) fails without a strike against its source
+// (tool_unavailable.go). This said the caller had verified sox with
+// PrecheckSox until 2026-09-28.
 func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 	if workers < 1 {
 		workers = 1
@@ -1299,13 +1309,24 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// timeout exit above never needs them.
 		msg := redactSoxErr(err.Error(), job.spec)
 		end = failedEnd(msg)
+		// A tool this host lacks is a fact about the HOST: the job failed,
+		// and is counted and announced like any other failure, but it
+		// reached no verdict on its file, so it strikes nothing. Striking
+		// here suppressed every file queued behind a missing sox for 30
+		// days, past the install that fixed it (tool_unavailable.go). The
+		// outage is reported once, not per job.
+		if tool, ok := unavailableTool(err); ok {
+			p.outages.fail(tool, job.spec.SourceLibraryRel, msg)
+			return
+		}
 		logger.Warn("pool: sox failed",
 			"path", job.spec.SourceLibraryRel,
 			"err", msg)
 		// One strike against this file version. Only HERE: shutdown is
-		// excluded by the closed check above, and the timeout exit is
+		// excluded by the closed check above, the timeout exit is
 		// excluded because a deadline says as much about a hung mount as
-		// about the source. A failed job writes no variant row, so without
+		// about the source, and a missing tool by the exit just above. A
+		// failed job writes no variant row, so without
 		// this the candidate queries re-select the same doomed source on
 		// every sweep, forever. Suppression needs `variantFailureThreshold`
 		// CONSECUTIVE strikes on the same (size, mtime), so a transient
@@ -1326,6 +1347,10 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		}
 		return
 	}
+	// The run's chain started every tool it needed and saw them through, so
+	// any outage of those tools is over. Here rather than after the commit:
+	// a fsync or store failure below says nothing about the tools.
+	p.outages.proven(settings)
 
 	sidecarPath := job.spec.SidecarPath()
 

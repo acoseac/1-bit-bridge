@@ -2106,6 +2106,25 @@ var migrations = []migration{
 		);`,
 		post: seedDSDPeaksFromVariants,
 	},
+	{
+		// v48 expires every transcode-failure suppression once. Until the
+		// transcode pool told a missing tool from a bad file
+		// (internal/transcode/tool_unavailable.go), a job that could not run
+		// sox struck its source as one sox refused did, so a host that ran
+		// without sox can hold suppressions of files nothing is wrong with,
+		// and installing sox does not lift them: they are keyed on the file's
+		// size and mtime. v39's strike records carry no reason, so those
+		// cannot be told from the rest. Every suppression is expired instead,
+		// as its 30-day TTL would expire it (variant_fail_at = 0 is older than
+		// any cutoff), and the count, size and mtime are kept: a file that is
+		// still broken fails once more and is suppressed again
+		// (RecordVariantFailure counts on from the same version), and one
+		// whose tool is back converts. No indexed_at: nothing a client sees
+		// changes. Idempotent.
+		version: 48,
+		name:    "expire every transcode-failure suppression once (a missing tool used to strike the file)",
+		sql:     `UPDATE tracks SET variant_fail_at = 0 WHERE variant_fail_count != 0;`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

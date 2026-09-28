@@ -1717,6 +1717,52 @@ no failing test — which is the shape to expect in this area.
   dedup against, and silencing a missing sox behind the fix for truncated files
   is how one alarm hides another. Measured end to end with a real decoder: 4
   WARN lines over 5 runs of 4 broken files, and zero work at all from run 4.
+- **…and the TRANSCODE pool strikes a file only for what a tool said about
+  it: a tool the host lacks strikes nothing** (2026-09-28). `processJob`
+  struck the source for every runner error but a timeout and a shutdown, a
+  missing sox included, and three strikes on one (size, mtime) suppress the
+  file from every candidate query for 30 days, keyed on what installing sox
+  does not change. The live upscale gate refuses NEW work within its 30 s
+  probe, and that is all it can do: a job already queued (up to 5,000 a lane)
+  or queued inside the probe window still reached the runner. Measured with the
+  real `serve`: sox removed after the gate probed it, three `POST /v1/upscale`
+  of a 3-track album failed 9 jobs, logged 9 identical WARNs, suppressed all 3
+  files, and with sox back the batch over the album found `totalFiles: 0`.
+  `unavailableTool` (internal/transcode/tool_unavailable.go) classifies at the
+  site where the fact is known, by TYPE, never by message: an `*exec.Error`
+  (exec's PATH lookup), a fork/exec `*fs.PathError` (the OS could not start
+  the tool: gone since the lookup, a missing interpreter, the wrong
+  architecture), and `Run`'s own route mark (`markToolUnavailable`) where the
+  decoder probe found no route on this host's toolchain: a `.dsf` / `.dff`
+  whose ffmpeg is missing, lacks the `dsd_*` decoders or has an unreadable
+  listing, and an MP4 source sox has no reader for with ffmpeg or ffprobe
+  missing. **A DSD-flagged row under another extension keeps its strike**: the
+  same `ErrDSDDecodeUnavailable`, but a fact about the row. Such a job is still
+  counted and announced (its batch row and `jobFailed` event say what
+  happened), and #988's ordered tail is unchanged; the exit is a row in both
+  terminal-order tables. **The default is the opposite of the analysis
+  pool's**, which strikes only on a classified verdict: this debounce predates
+  classification, so everything not classified as the host's still strikes,
+  a tool that ran and refused the file included, which is what it is for. **The
+  outage is reported per TOOL, once**: one Warn when it starts, the jobs after
+  it at Debug under the same message, one Info when a job whose chain ran the
+  tool succeeds (read from the settings' `decoder`, the route the run took),
+  and a re-Warn after 24 h of silence. Per tool, because a FLAC success ran
+  sox alone: ending every outage on any success reported ffmpeg back, then
+  missing again, once per DSD job. This is not the analysis pool's
+  per-FILE dedup the bullet above warns against: the key is the tool, so the
+  alarm stays up until the tool is proven back. **v48 expired every
+  suppression once**, as the TTL would (`variant_fail_at = 0`, the count
+  kept): the strike records carry no reason, so a missing tool's cannot be
+  told from the rest; a still-broken file costs one more attempt and is
+  suppressed again. Measured on main's struck v47 database: the branch
+  binary's first batch converted all 3. It leans on #1067 for the sweeper:
+  with no strike, only the gate keeps the sweeper from re-offering the
+  backlog to a host without sox (each such job fails in microseconds at exec).
+  `TestAJobThatCannotRunItsToolStrikesNoSource` (the real pool and runner on an
+  empty PATH), `TestAToolThatRanAndRefusedTheFileStillStrikesIt` (the positive
+  control), `TestAToolOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
+  `TestMigration48ExpiresEverySuppressionOnceAndKeepsTheCount`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,
@@ -3886,11 +3932,12 @@ mentions across the four `ops/audit-*.md` files.
   `upscaleEnabled` had. `TestServeWithoutSoxReportsUpscalingOffOnEverySurface`
   boots the real serve on a PATH with no sox and asks every surface; it and
   the report test were red on the old code, and seven controls each turn red
-  only the assertions of the surface they revert. **Still open**: the
-  transcode pool strikes a file for ANY runner error, a missing sox
-  included, where the analysis pool records a missing tool as transient. The
-  gate now keeps the sweeper away without sox, and what remains is a job
-  queued inside the probe's TTL after sox disappears.
+  only the assertions of the surface they revert. The transcode pool struck
+  a file for ANY runner error, a missing sox included, which left a job
+  queued inside the probe's TTL after sox disappears; this said "Still open"
+  until the next change the same day made a tool the host lacks strike
+  nothing and v48 expire the suppressions it had written (the TRANSCODE
+  bullet under **Job pools**).
 - **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
   belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
