@@ -45,6 +45,8 @@ const OPTIMIZE_SWITCH_ROW = {
  *   caller can re-fetch. The panel deliberately does NOT re-fetch itself:
  *   generation is asynchronous, so the numbers that matter arrive later,
  *   from the live refresh rather than from the response to the click.
+ *   Also called after a tray saves a switch that changes what the panel
+ *   draws, since only a re-fetch learns what the switch now allows.
  * @param {object} [opts]
  * @param {boolean} [opts.plain=false] - drop the heading and the card
  *   chrome, for a container that already frames and labels the panel —
@@ -83,6 +85,13 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
         OPTIMIZE_SWITCH_ROW,
       ],
       link: { href: "/settings?tab=audio", text: "All audio settings →" },
+      // Redrawn for the upscaling switch only. While generation is off
+      // nothing here depends on the CarPlay one, so a redraw for it would
+      // repaint the same panel and take the tray and its "Saved." with it:
+      // Generate does not redraw for the same reason (kindActions). A
+      // redraw once upscaling is on reads the CarPlay switch from the
+      // server anyway.
+      onSaved: (field) => { if (field === "upscaleEnabled" && onChanged) onChanged(); },
     });
     if (tray) {
       root.appendChild(el("div", { class: "variants-blocked-row" }, note, tray.button));
@@ -159,8 +168,13 @@ function kindOffReason(key, summary) {
  * that opens that one switch: the panel-wide note's shape, one kind down.
  * The fallback, when app.js did not publish the tray, is the same link the
  * panel-wide note falls back to.
+ *
+ * A save of that switch redraws the panel through onChanged, so the note,
+ * the gear and the disabled button go as the switch comes on. Without it
+ * the row said "switched off" beside the tray's "Saved." until the next
+ * render (CodeRabbit on #1068).
  */
-function kindOffNote(reason) {
+function kindOffNote(reason, onChanged) {
   const note = el("p", { class: "variants-blocked small", text: reason });
   const tray = window.BridgeFeatureTray?.build({
     title: "CarPlay-optimized variants",
@@ -168,6 +182,7 @@ function kindOffNote(reason) {
       "by sox. The originals are untouched.",
     rows: [OPTIMIZE_SWITCH_ROW],
     link: { href: "/settings?tab=audio", text: "All audio settings →" },
+    onSaved: onChanged,
   });
   if (tray) {
     return el("div", { class: "variant-kind-off" },
@@ -194,7 +209,7 @@ function kindRow(kind, cov, scope, actionable, off, onChanged) {
     kindActions(kind, c, scope, actionable, onChanged, status));
   row.appendChild(head);
   row.appendChild(bar(c, kind.title));
-  if (off) row.appendChild(kindOffNote(off));
+  if (off) row.appendChild(kindOffNote(off, onChanged));
 
   // One note, not a list. An empty denominator and a non-zero exempt
   // count are the SAME fact told twice — "2 need nothing · nothing here

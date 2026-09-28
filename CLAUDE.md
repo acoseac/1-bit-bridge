@@ -4476,10 +4476,33 @@ its twin.** The top list is older, shorter, and read first.
   tests `=== false`: an unknown leaves the button live and lets the
   endpoint answer, the folder view's rule, since `/api/library/browse`
   carries no feature state. The #1060 AST sweep counts a call of
-  `optimizeActive` as reading the CarPlay switch. **A player tray's save
-  does not re-render the view** (this one, the panel-wide one, the Smart
-  mixes one): after "Saved." the row still says "switched off" until the
-  next render, a follow-up.
+  `optimizeActive` as reading the CarPlay switch. A save from either tray
+  redraws the panel: the next bullet.
+- **A tray redraws the page only through its spec's `onSaved`, and a page
+  redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
+  #1068). A feature tray saves one switch and repaints nothing else, so
+  after the CarPlay kind's tray said "Saved." the row beside it still said
+  "switched off" over a disabled button until the next render.
+  `saveTrayField` calls `onSaved(field)` once for a save the server
+  answered `live` (with a reason or without), after the snapshot, the
+  status line and every other tray have the new value, and outside the
+  `try`, so a callback that throws cannot turn a save that landed into
+  "Save failed". Never for `restart` or `unchanged`: nothing on the page
+  moved, and a redraw takes the tray, and the restart instruction in it,
+  with it. The variant panel hands its `onChanged` (the view's re-render)
+  to the CarPlay kind's tray for its one switch, and to the panel-wide
+  tray for `upscaleEnabled` ALONE: nothing the panel draws while
+  generation is off depends on the CarPlay switch, so a redraw for it
+  would repaint the same panel and take the tray and its "Saved." away
+  for nothing, the reason Generate does not redraw either. **Don't make
+  a tray redraw by itself, or a page redraw for every field.** The Smart
+  mixes tray takes no hook: its off state is `seed.mixesEnabled`, read
+  once per page load, which a re-render repaints unchanged, so it still
+  needs a reload (a follow-up).
+  `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` runs the
+  shipped `buildFeatureTray` and save under node, and
+  `TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt` the shipped
+  panel on the summaries the album detail serves.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the

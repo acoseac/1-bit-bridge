@@ -87,13 +87,15 @@ type panelRow struct {
 
 // renderedPanel is one variant panel as the node harness reads it back: its
 // rows, the notes above them, and the trays it asked app.js to build.
+// RedrawnBy lists the tray's fields whose live save redraws the panel.
 type renderedPanel struct {
 	Name       string     `json:"name"`
 	Rows       []panelRow `json:"rows"`
 	PanelNotes []string   `json:"panelNotes"`
 	Trays      []struct {
-		Title  string   `json:"title"`
-		Fields []string `json:"fields"`
+		Title     string   `json:"title"`
+		Fields    []string `json:"fields"`
+		RedrawnBy []string `json:"redrawnBy"`
 	} `json:"trays"`
 }
 
@@ -106,7 +108,9 @@ type renderedPanel struct {
 // evaluating. window.BridgeFeatureTray is app.js's, a classic script this
 // harness does not load, so a case that asks for a tray gets a stand-in
 // that records the spec; one that does not gets none, the panel's fallback
-// path.
+// path. Once the panel is built, each tray's onSaved is called with each of
+// its fields, as saveTrayField calls it after a save the server applied
+// live, and a field whose call reaches the panel's onChanged is recorded.
 const panelHarness = `
 class Node {
   constructor(tag) {
@@ -137,13 +141,23 @@ const walk = (n, f) => { f(n); for (const c of n.children) walk(c, f); };
 const out = [];
 for (const c of cases) {
   const trays = [];
+  let redraws = 0;
   window.BridgeFeatureTray = c.tray ? {
     build(spec) {
-      trays.push({ title: spec.title, fields: (spec.rows || []).map((r) => r.field) });
+      trays.push({ title: spec.title, fields: (spec.rows || []).map((r) => r.field), spec });
       return { button: new Node("button"), tray: new Node("div") };
     },
   } : undefined;
-  const panel = variantPanel(c.summary, { albumIds: ["0123456789abcdef"] }, () => {}, { plain: true });
+  const panel = variantPanel(c.summary, { albumIds: ["0123456789abcdef"] }, () => { redraws++; }, { plain: true });
+  for (const t of trays) {
+    t.redrawnBy = [];
+    for (const field of t.fields) {
+      const before = redraws;
+      t.spec.onSaved?.(field);
+      if (redraws > before) t.redrawnBy.push(field);
+    }
+    delete t.spec;
+  }
   const rows = [];
   const panelNotes = [];
   for (const child of panel.children) {
@@ -328,4 +342,114 @@ func TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt(t *testin
 			}
 		}
 	}
+}
+
+// TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt pins which of
+// the variant panel's trays redraw it after a save, and that the redraw
+// then shows what the switch allows.
+//
+// A tray saves a switch and redraws nothing else, so until 2026-09-28 the
+// CarPlay row kept its "switched off" note and a disabled Generate beside
+// the tray's "Saved." until the next render (CodeRabbit on #1068). Each tray
+// now calls the panel's onChanged from its onSaved: the CarPlay kind's own
+// tray for its one switch, and the panel-wide tray for the upscaling switch
+// alone, since nothing the panel draws while generation is off depends on
+// the CarPlay one, and a redraw for it would take the tray and its "Saved."
+// away for nothing. TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive
+// pins the other half, that a tray calls onSaved after a live save.
+//
+// Each panel is built from the summary the album detail serves after the
+// settings PATCH, and the save a tray makes is then sent as the same PATCH,
+// so the redrawn panel is the one the re-fetch the redraw makes would draw.
+func TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; this test executes the shipped panel")
+	}
+	srv, _, _ := newTestServer(t)
+	seedVariantAlbum(t, srv.deps.Manifest)
+	srv.deps.UpscalePrecheck = func() error { return nil }
+	srv.deps.UpscaleActive = func() bool { return srv.deps.CfgHolder.Load().Upscale.Enabled }
+	srv.deps.OptimizeActive = func() bool {
+		live := srv.deps.CfgHolder.Load()
+		return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
+	}
+	albumID := albumIDByTitle(t, srv, "Album")
+	type panelCase struct {
+		Name    string          `json:"name"`
+		Summary json.RawMessage `json:"summary"`
+		Tray    bool            `json:"tray"`
+	}
+	summaryAfter := func(name string, settings map[string]any) panelCase {
+		t.Helper()
+		if code := doJSON(t, srv.Handler(), http.MethodPatch, "/api/settings", settings, nil); code != http.StatusOK {
+			t.Fatalf("%s: PATCH /api/settings %v answered %d", name, settings, code)
+		}
+		w, body := playerGet(t, srv, "/api/player/albums/"+albumID)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: album detail: status %d", name, w.Code)
+		}
+		summary, err := json.Marshal(body["variants"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return panelCase{Name: name, Summary: summary, Tray: true}
+	}
+	cases := []panelCase{
+		summaryAfter("CarPlay off", map[string]any{"upscaleEnabled": true, "optimizeEnabled": false}),
+		summaryAfter("CarPlay switched on from its tray", map[string]any{"optimizeEnabled": true}),
+		summaryAfter("upscaling off", map[string]any{"upscaleEnabled": false, "optimizeEnabled": false}),
+		summaryAfter("upscaling switched on from the panel's tray", map[string]any{"upscaleEnabled": true}),
+	}
+	panels := renderPanelsUnderNode(t, node, cases)
+	if len(panels) != len(cases) {
+		t.Fatalf("the harness rendered %d panels for %d cases", len(panels), len(cases))
+	}
+	carPlayRow := func(p renderedPanel) panelRow {
+		t.Helper()
+		for _, row := range p.Rows {
+			if row.Title == "CarPlay-optimized" {
+				return row
+			}
+		}
+		t.Fatalf("%s: no CarPlay row in %+v", p.Name, p.Rows)
+		return panelRow{}
+	}
+	trayIs := func(p renderedPanel, fields, redrawnBy string) {
+		t.Helper()
+		if len(p.Trays) != 1 {
+			t.Errorf("%s: trays %+v, want one", p.Name, p.Trays)
+			return
+		}
+		tr := p.Trays[0]
+		if got := strings.Join(tr.Fields, ","); got != fields {
+			t.Errorf("%s: the tray holds %s, want %s", p.Name, got, fields)
+		}
+		if got := strings.Join(tr.RedrawnBy, ","); got != redrawnBy {
+			t.Errorf("%s: a save of [%s] redraws the panel, want [%s]", p.Name, got, redrawnBy)
+		}
+	}
+
+	off, on, blocked, unblocked := panels[0], panels[1], panels[2], panels[3]
+	// The CarPlay kind's own tray redraws the panel for its one switch, and
+	// the redrawn row is live: no note, no gear, and Generate enabled.
+	trayIs(off, "optimizeEnabled", "optimizeEnabled")
+	if row := carPlayRow(off); !row.GenerateDisabled {
+		t.Errorf("%s: Generate CarPlay is enabled with its switch off", off.Name)
+	}
+	if row := carPlayRow(on); row.GenerateDisabled || len(row.Notes) != 0 || len(on.Trays) != 0 {
+		t.Errorf("%s: the redrawn CarPlay row has Generate disabled=%v, notes %q and trays %+v, "+
+			"want a live row", on.Name, row.GenerateDisabled, row.Notes, on.Trays)
+	}
+	// The panel-wide tray redraws for the upscaling switch alone, and the
+	// redrawn panel reads the CarPlay switch from the server: still off, so
+	// the CarPlay row now says so itself, with its own tray.
+	trayIs(blocked, "upscaleEnabled,optimizeEnabled", "upscaleEnabled")
+	if row := carPlayRow(unblocked); len(unblocked.PanelNotes) != 0 || !row.GenerateDisabled ||
+		len(row.Notes) != 1 || !strings.Contains(row.Notes[0], "switched off") {
+		t.Errorf("%s: panel notes %q, and the CarPlay row has Generate disabled=%v and notes %q; "+
+			"want no block and the CarPlay switch's own note", unblocked.Name, unblocked.PanelNotes,
+			row.GenerateDisabled, row.Notes)
+	}
+	trayIs(unblocked, "optimizeEnabled", "optimizeEnabled")
 }

@@ -22603,13 +22603,89 @@ Negative controls on the committed code, each restored with
 | the sweep does not count `optimizeActive` | the tree sweep (the real handler) and the fixture's shared-predicate submitter |
 | the `.variant-kind-off` rule removed | `TestPlayerEmittedClassesAreStyled` |
 
+### Review round 1: a tray save redraws the panel
+
+CodeRabbit's one finding on the head: after the CarPlay kind's tray saved
+its switch, the row kept "switched off" and the disabled button beside the
+tray's "Saved." until the next render, the first item this entry had left
+open. Fixed in the shared tray rather than in the panel:
+
+- `buildFeatureTray`'s spec takes `onSaved(field)`, carried into each row's
+  control, and `saveTrayField` calls it once for a save the server
+  answered `live`, with a reason or without (`upscaleEnabled` answers live
+  with a reason when sox is unusable, and the panel's block changes then
+  too). It runs after `traySettings`, the status line and the other
+  mounted trays have the new value, and outside the `try`: a callback that
+  throws leaves "Saved." and rejects the save's promise, which the console
+  reports. Never for `restart`, `unchanged` or a failed save.
+- The variant panel passes its `onChanged` (`rerenderView`) to the CarPlay
+  kind's tray, and to the panel-wide tray for `upscaleEnabled` only. While
+  generation is off the panel draws nothing that depends on the CarPlay
+  switch (the per-kind reason is not shown under a panel-wide block), so a
+  redraw for it closed the tray and dropped its "Saved." with nothing else
+  changed, the reason `kindActions` gives for Generate not redrawing.
+  Rejected: redrawing for every field, which is simpler and makes the tray
+  vanish after a save that changed nothing on screen.
+- The Smart mixes tray is not covered. Its off state is
+  `seed.mixesEnabled`, which boot.js's `route()` reads from the page seed,
+  so a re-render repaints "Smart mixes are off" unchanged; covering it
+  needs the view to read the live value. `renderMixes`' comment still
+  calls that switch restart-required, which it has not been since the
+  hot-apply stack (`smartPlaylistsEnabled` answers `live`).
+
+In a browser, a throwaway bridge of the same shape (two sox-synthesised
+96/24 FLACs in one album, 127.0.0.1:17788/17789), with a marker on
+`window` to show the page never reloaded:
+
+- Upscaling on, CarPlay off: the CarPlay gear's switch saved on, and the
+  panel redrew (the PATCH, then the album GET): the note and the gear gone,
+  "Generate CarPlay" live, the Variants tab still selected.
+- Upscaling off (switched off from outside the page, then a load), CarPlay
+  on: in the panel-wide gear the CarPlay switch saved off with no redraw
+  (no album GET), the tray still open on "Saved."; then PCM upscaling saved
+  on, and the panel redrew with the block gone, the CarPlay row saying
+  "switched off" over a disabled "Generate CarPlay", and the row's own
+  gear, whose switch then saved on and made the row live again.
+
+Found on the way and not fixed: `traySettings` is dropped on
+`dispatchPageInit`, which the player never runs for its own navigation, so
+a player tray shows a switch changed elsewhere (the Settings page in
+another tab, the CLI) as it was when the page loaded. With upscaling
+switched off from outside and the album reopened through the player's own
+links, the panel-wide gear showed it on.
+
+`internal/admin/feature_tray_onsaved_test.go`:
+`TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` extracts the
+tray's functions from the shipped app.js (`buildFeatureTray` down to
+`saveTrayField`), runs them under node on a small DOM with the PATCH
+answered per case (live, live with a reason, restart, unchanged, a
+refusal, no hook, a hook that throws), and records every `onSaved` call
+with what the tray showed at that moment. In
+`player_variants_optimize_test.go`, the panel harness now calls each
+tray's `onSaved` with each of its fields and records which reach the
+panel's `onChanged`, and
+`TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt` checks that
+on the summaries the album detail serves before and after each tray's
+save, sent as the same PATCH.
+
+| mutation | goes red |
+|---|---|
+| `buildFeatureTray` does not pass the spec's `onSaved` on | the tray test's two live cases and the throwing hook's |
+| `saveTrayField` never calls it | the same |
+| it is called on `restart` too | the restart case |
+| it is called on `unchanged` too | the unchanged case |
+| it is called after a failed save | the refused case |
+| it is called in the `try`, as soon as the PATCH answers live | the live cases (status "Saving…", switch disabled) and the throwing hook's ("Save failed") |
+| the CarPlay kind's tray has no `onSaved` | the panel test's CarPlay-off tray, before and after the upscaling save |
+| the kind row does not hand its note `onChanged` | the same |
+| the panel-wide tray redraws for every field | the upscaling-off tray |
+| the panel-wide tray has no `onSaved` | the same |
+
 ### Left open
 
-- A player tray's save does not re-render the view. After the gear's
-  switch saves, the row still says "switched off" and the button stays
-  disabled until the next render (a reload, a navigation, a variant job
-  landing). The panel-wide tray and the Smart mixes tray behave the same;
-  closing it needs a hook in app.js's shared `buildFeatureTray`.
+- The Smart mixes tray's save still shows only after a reload (above).
+- A player tray's snapshot is held across the player's own navigation
+  (above).
 - The folder view still offers both Generate buttons whatever the
   switches say, by its own design, because `/api/library/browse` carries
   no feature state.
