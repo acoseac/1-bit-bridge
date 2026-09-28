@@ -24828,9 +24828,9 @@ that followed: the rule was applied to four sites of five.
   and the dial check's refusal text names a GENA SUBSCRIBE beside an SSDP
   packet.
 - `noteCallbackRefusal`: a refused loopback or link-local callback is a Warn
-  once per (callback, source) pair, in the observer's set and within its
-  bound of 64 (`firstSighting`, now shared). Other refusals stay the Debug
-  line they were.
+  once per (callback, source) pair, bounded at 64 like the observer
+  (`firstSighting`, now shared, each warning with a set of its own since
+  review round 1, below). Other refusals stay the Debug line they were.
 - A server whose handlers were mounted without Start has no notify
   context. `NewRequestWithContext` failed quietly on it; wrapping it in the
   source panics ("cannot create context from nil parent"), so
@@ -24976,3 +24976,15 @@ inside the container asked for over `127.0.0.1`.
 - No guard finds "a client that sends to a LAN peer's URL": the no-redirect
   rule reached four of five such clients by hand, and a structural sweep
   cannot tell one from a MusicBrainz client.
+
+### Review round 1 (CodeRabbit, one finding, taken)
+
+- **The refusal line shared the observer's bound** (Minor). One set of 64
+  held both warnings' pairs, and a peer reaches a refusal at will: 64
+  distinct refused pairs filled it, and the next divergence line, the
+  evidence B56 (the private half of step two) waits for, was suppressed.
+  Each warning has its own set now, under the one mutex, bounded alike.
+  `Test_callbackNotes_ARefusalFloodDoesNotSilenceTheDivergenceObserver`
+  sends 192 refused pairs and then one divergence: red on 4c36f34e ("logged
+  0 lines, want 1"), green on 8ebf29f3, and red again with the refusal
+  pointed back at the shared set (NC, run on the committed fix).

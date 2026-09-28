@@ -2417,7 +2417,9 @@ no failing test — which is the shape to expect in this area.
   subscribes over the host's LAN address with a loopback callback (measured:
   refused), and admitting it trusts every NAT that rewrites a peer's source
   to a local address. A refusal is a Warn once per (callback, source) pair
-  (`noteCallbackRefusal`, inside the observer's bound of 64), so a control
+  (`noteCallbackRefusal`, bounded at 64 in a set of its own, since a peer
+  reaches a refusal at will and a shared bound let refusals silence the
+  divergence lines step two waits for), so a control
   point that needs the shape names itself. **#818's step two is only HALF
   done**: refusing a private callback other than the source stays held,
   because the observer it was gated on (`noteCallbackDivergence`, shipped in
