@@ -57,7 +57,7 @@ func writeAll(t *testing.T, m *Manager, sid, fid string, data []byte, chunk int)
 // ---------------------------------------------------------------------------
 
 // TestStagingDirIsInvisibleToScanner is the load-bearing property behind
-// staging inside the root: the scanner's shouldSkipDir returns SkipDir for any
+// staging inside the root: the scanner's ShouldSkipDir returns SkipDir for any
 // "."-prefixed directory BEFORE it upserts a folder row, so nothing under
 // staging is ever walked. That is what makes commit a same-filesystem rename
 // rather than a cross-device copy.

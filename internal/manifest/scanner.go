@@ -623,10 +623,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// track-upsert path (which holds s.mu).
 	//
 	// FUSE drop mode (b) — clean-empty mount: immediately after each
-	// per-root walk, if zero entries were observed AND the DB carries
-	// history for this root AND no `.bridge-allow-empty` sentinel
-	// file is present, sentinel the whole root so the deletion pass
-	// spares its rows. Without this guard a cleanly-unmounted FUSE
+	// per-root walk, if the walk found no library content (the
+	// directories it descends into and the files it indexes,
+	// isLibraryEntry: a .DS_Store or a Synology @eaDir is none) AND the
+	// DB carries history for this root AND no `.bridge-allow-empty`
+	// sentinel file is present, sentinel the whole root so the deletion
+	// pass spares its rows. The sentinel is the operator saying the root
+	// is empty on purpose, and it is the only thing that says so: it
+	// used to count as an entry like any other, so it, and any stray
+	// dot-file, disarmed the guard by making the root "non-empty".
+	// Without this guard a cleanly-unmounted FUSE
 	// mount (host directory still exists, contents vanished) is
 	// indistinguishable from "operator legitimately wiped the root"
 	// — `os.Stat(root)` and `WalkDir(root)` both succeed silently,
@@ -923,7 +929,8 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// emptyRootMustBeSpared audits a root whose walk observed nothing and
+// emptyRootMustBeSpared audits a root whose walk found no library content
+// (isLibraryEntry) and holds no `.bridge-allow-empty`, and
 // reports whether the deletion pass must spare it: when the DB carries rows
 // for it (a suspected clean-empty mount), and when the count fails.
 //
@@ -943,12 +950,54 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 		return true
 	}
 	if n > 0 {
+		// For a linked root, the directory the walk found empty is the
+		// one the link points at, and that is where the sentinel is
+		// looked for (through the link), so the line names it.
+		target := rootLinkTarget(root)
+		hint := "place .bridge-allow-empty at the root to confirm intent"
+		if target != "" {
+			hint = "the root is a link and the directory it links to is empty: check that volume is mounted; " +
+				"place .bridge-allow-empty in that directory to confirm intent"
+		}
 		scanLogger.Error("suspected clean-empty mount failure",
-			"root", root, "rows_in_db", n,
-			"hint", "place .bridge-allow-empty at the root to confirm intent")
+			rootLineAttrs(root, target, "rows_in_db", n, "hint", hint)...)
 		return true
 	}
 	return false
+}
+
+// rootLineAttrs is a log line's attributes about a library root: the root,
+// then what it links to when target (rootLinkTarget) is not "", then attrs.
+// A line about what a walk of the root saw names the directory the walk
+// looked in, which for a linked root is not the path in the config.
+func rootLineAttrs(root, target string, attrs ...any) []any {
+	out := []any{"root", root}
+	if target != "" {
+		out = append(out, "links_to", target)
+	}
+	return append(out, attrs...)
+}
+
+// rootLinkTarget names what a library root links to: the fully resolved
+// directory when filepath.EvalSymlinks resolves it, else the link's own
+// destination, which is what a dangling link (EvalSymlinks cannot resolve
+// one) and a Windows junction (EvalSymlinks leaves one as it is, since Go
+// 1.23) give. "" when the root is not a link, or its destination cannot be
+// read.
+func rootLinkTarget(root string) string {
+	own, err := os.Lstat(filepath.Clean(root))
+	if err != nil || own.IsDir() || own.Mode().IsRegular() {
+		return ""
+	}
+	if own.Mode()&fs.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			return resolved
+		}
+	}
+	if dest, err := os.Readlink(root); err == nil {
+		return dest
+	}
+	return ""
 }
 
 // reportReconciliation logs a reconciliation pass that failed. One the
@@ -1934,6 +1983,28 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
 	}
 
+	// A subtree scan OF the root walks the root as Scan does: through it,
+	// when the root is a link to a directory (fsutil.WalkableRoot, the
+	// walkRoot docblock), with every path below it in the configured
+	// spelling. Walked as the link, it saw one entry that is not a
+	// directory, and the bounded deletion pass below, whose scope is then
+	// the whole root, reaped every row under it at the threshold
+	// (measured: three subtree scans of a linked root deleted every row,
+	// and so did three of a DANGLING one). A root this walk cannot see
+	// through (missing, a dangling link, a link into a mount that went
+	// away) is "could not see": the scan stops here, before any row is
+	// touched, as the owning-root audit stops it for a missing subtree.
+	// Only the root is followed; a link to a directory below it is not
+	// walked, by this scan or by Scan.
+	walkFrom := absDir
+	atRoot := false
+	if rel, relErr := filepath.Rel(owningRoot, absDir); relErr == nil && rel == "." {
+		atRoot = true
+		if walkFrom, err = fsutil.WalkableRoot(absDir); err != nil {
+			return 0, fmt.Errorf("library root %q cannot be seen: %w", owningRoot, err)
+		}
+	}
+
 	// `relScope` is the library-relative path of the subtree being
 	// scanned, used as the predicate for the bounded deletion pass.
 	// Same form `relPath` produces for everything the walker upserts,
@@ -1984,7 +2055,11 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// Subtree walker: same shape as walkRoot, including the err-
 	// callback's errored-subtree recording so the deletion pass
 	// below skips rows under transiently-unreachable directories.
-	walkErr := filepath.WalkDir(absDir, func(abs string, d fs.DirEntry, err error) error {
+	// `observed` counts the library content below the walk's start
+	// (isLibraryEntry, as walkRoot counts it), for the clean-empty
+	// guard a scan of the root runs after the walk.
+	var observed int
+	walkErr := filepath.WalkDir(walkFrom, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// `fs.ErrNotExist` on the subtree root (or any descendant)
 			// is the SIGNAL we're here for — fsnotify fired because the
@@ -2005,10 +2080,11 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			//   (i) os.Stat root — if missing/unreadable, hard error.
 			//   (ii) os.ReadDir root — any error is a hard stop (we
 			//        can't audit the root, so the state is untrusted).
-			//   (iii) only if ReadDir succeeds AND zero entries AND no
-			//        .bridge-allow-empty sentinel AND DB has tracks →
-			//        hard error.
-			// Otherwise (root alive AND non-empty, or sentinel present)
+			//   (iii) only if ReadDir succeeds AND the root holds no
+			//        library content (holdsLibraryContent: a .DS_Store
+			//        or an @eaDir is none) AND no .bridge-allow-empty
+			//        sentinel AND DB has tracks → hard error.
+			// Otherwise (root alive AND holding content, or sentinel present)
 			// fs.ErrNotExist on the subtree is a legitimate operator
 			// delete and the bounded deletion pass runs as before.
 			if errors.Is(err, fs.ErrNotExist) {
@@ -2028,12 +2104,15 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			return ctx.Err()
 		}
 		if d.IsDir() {
-			// `abs != absDir` exempts the walk entry — same contract as
+			// `abs != walkFrom` exempts the walk entry — same contract as
 			// walkRoot's: the skip heuristic prunes DISCOVERED
 			// descendants, never the explicitly-targeted directory.
 			// Reachable when a configured root is itself dot-named.
-			if abs != absDir && shouldSkipDir(d.Name()) {
-				return filepath.SkipDir
+			if abs != walkFrom {
+				if !isLibraryEntry(abs, d.Name(), true) {
+					return filepath.SkipDir
+				}
+				observed++
 			}
 			info, err := d.Info()
 			if err != nil {
@@ -2067,12 +2146,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			seenFolders[rel] = struct{}{}
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".") {
+		if !isLibraryEntry(abs, d.Name(), false) {
 			return nil
 		}
-		if !enqueueableAudioFile(abs, d.Name()) {
-			return nil
-		}
+		observed++
 		// The same decision walkRoot makes (walkedFileInfo), and the same
 		// answer to each verdict.
 		rel := relPath(owningRoot, abs, multiRoot)
@@ -2119,6 +2196,22 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return int(committed.Load()), walkErr
 	}
 	tallies.report()
+
+	// FUSE drop mode (b), the guard Scan runs after each root's walk, for a
+	// subtree scan of the root: a root that holds nothing, over a store
+	// that carries rows for it and with no `.bridge-allow-empty`, is a
+	// suspected clean-empty mount, and its rows are spared. The owning-root
+	// audit covers a subtree that is not there; nothing covered the root
+	// itself, so a subtree scan of an emptied mount point, or of a linked
+	// root whose target is one, reaped every row under it at the threshold
+	// while Scan spared them (measured on a plain root: three subtree scans,
+	// every row deleted, no line logged). A root whose walk already failed
+	// is spared by that failure and says so, as in Scan.
+	rootSentinel := relPath(owningRoot, owningRoot, multiRoot)
+	if _, errored := errorSubtrees[rootSentinel]; atRoot && !errored && observed == 0 &&
+		!hasAllowEmptySentinel(owningRoot) && s.emptyRootMustBeSpared(ctx, owningRoot, multiRoot) {
+		errorSubtrees[rootSentinel] = struct{}{}
+	}
 
 	// Bounded deletion pass: only rows that were under `relScope`
 	// to begin with are candidates, so a cross-root move (the
@@ -2297,33 +2390,48 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // that are not files, for the lines the caller logs about them
 // (walkedFileInfo).
 //
-// Returns the count of entries observed beneath the root (file or
-// dir DirEntries excluding the root itself) and any walk error. The
-// count drives the caller's "clean-empty mount" detection — zero
-// entries beneath a root that the DB carries history for is a strong
-// FUSE-drop signal, since `os.Stat(root)` and `WalkDir(root)` both
-// succeed silently in that scenario.
+// Returns the count of library-content entries beneath the root
+// (isLibraryEntry: the directories it descends into and the files it
+// indexes, the root itself excluded) and any walk error. The count
+// drives the caller's "clean-empty mount" detection — no content
+// beneath a root that the DB carries history for is a strong FUSE-drop
+// signal, since `os.Stat(root)` and `WalkDir(root)` both succeed
+// silently in that scenario. What the walk does not take as content
+// (a dot-file, a directory ShouldSkipDir names, a file it does not
+// index) is not counted: a .DS_Store Finder wrote into an unmounted
+// mount point made the root "non-empty" until 2026-09-28, and the
+// deletion pass reaped every row under it.
 //
 // FUSE drop mode (a) — unreadable / nonexistent root: explicit
-// upfront `os.Stat(root)` so the operator gets a clear .error log
-// keyed on the root rather than a generic mid-walk warning. Sentinel
-// the whole root into errorSubtrees and return (0, nil) so the
-// outer Scan loop continues to the next root rather than fatal-
-// aborting. In a multi-root deployment (local SSD + remote FUSE
-// archive), a cloud outage on the archive must NOT block cleanup
+// upfront stat of the root (fsutil.WalkableRoot) so the operator gets
+// a clear .error log keyed on the root rather than a generic mid-walk
+// warning. Sentinel the whole root into errorSubtrees and return
+// (0, nil) so the outer Scan loop continues to the next root rather
+// than fatal-aborting. In a multi-root deployment (local SSD + remote
+// FUSE archive), a cloud outage on the archive must NOT block cleanup
 // of legitimately-deleted files on the SSD.
+//
+// A root that is itself a link to a directory (`/music ->
+// /mnt/nas/music`), or on Windows a junction, is walked THROUGH:
+// WalkDir starts from the path fsutil.WalkableRoot answers, and every
+// path below keeps the configured spelling, so relPath stores what it
+// always stored and a multi-root prefix is the configured root's
+// basename, never the target's. Walked as the link, the root was one
+// entry that is not a directory: nothing was indexed under it, and an
+// install whose root became a link after it was indexed was told every
+// scan that its mount looked empty. A link that dangles (the mount it
+// points into went away) is the unreachable case above, never an
+// empty library.
 func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
-	if _, err := os.Stat(root); err != nil {
-		scanLogger.Error("root unreachable", "root", root, "err", err,
-			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")
+	walkFrom, err := fsutil.WalkableRoot(root)
+	if err != nil {
+		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
+			"hint", "the library root can't be reached — is the volume/mount present? On Docker check the -v / compose volumes mapping. See docs/docker.md")...)
 		errorSubtrees[relPath(root, root, multiRoot)] = struct{}{}
 		return 0, nil
 	}
 	var observed int
-	walkErr := filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
-		if abs != root {
-			observed++
-		}
+	walkErr := filepath.WalkDir(walkFrom, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission error on one dir shouldn't kill the whole scan.
 			scanLogger.Warn("walk", "path", abs, "err", err)
@@ -2350,7 +2458,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			// .Spotlight-V100, $RECYCLE.BIN, etc. land in the folders
 			// table and the iOS client sees them in the manifest.
 			//
-			// `abs != root` exempts the WALK ROOT itself: the skip
+			// `abs != walkFrom` exempts the WALK ROOT itself: the skip
 			// heuristic applies to DISCOVERED DESCENDANTS, never to a
 			// path the operator explicitly configured. Without it, a
 			// root whose own basename starts with a dot
@@ -2361,15 +2469,22 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			//
 			// String identity is the right test, not a relative-path
 			// compare: WalkDir invokes the callback for the root with
-			// the `root` string VERBATIM (no Clean, no Abs — see
-			// path/filepath.WalkDir), and only descendants go through
-			// Join. So this holds for a relative root, a trailing
-			// slash, or an uncleaned symlink alike. A `rel != "."`
-			// form would be WRONG: relPath returns `<rootBase>/.` for
-			// the root in multi-root mode, so the guard would never
-			// fire there.
-			if abs != root && shouldSkipDir(d.Name()) {
-				return filepath.SkipDir
+			// the string it was handed VERBATIM (no Clean, no Abs —
+			// see path/filepath.WalkDir), and only descendants go
+			// through Join. So this holds for a relative root, a
+			// trailing slash, or a linked root alike, provided it
+			// compares against walkFrom, the string WalkDir was handed
+			// (a linked root's carries the separator WalkableRoot
+			// appended; comparing against root would count the root
+			// as an entry and could prune it). A `rel != "."` form
+			// would be WRONG: relPath returns `<rootBase>/.` for the
+			// root in multi-root mode, so the guard would never fire
+			// there.
+			if abs != walkFrom {
+				if !isLibraryEntry(abs, d.Name(), true) {
+					return filepath.SkipDir
+				}
+				observed++
 			}
 			// Record folder mtimes for the manifest / future skip logic.
 			info, err := d.Info()
@@ -2401,13 +2516,13 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			seenFolders[rel] = struct{}{}
 			return nil
 		}
-		// Skip dot-files and unsupported extensions.
-		if strings.HasPrefix(d.Name(), ".") {
+		// Skip dot-files and anything else the walk does not index;
+		// what is left is library content, which is all the
+		// clean-empty guard counts.
+		if !isLibraryEntry(abs, d.Name(), false) {
 			return nil
 		}
-		if !enqueueableAudioFile(abs, d.Name()) {
-			return nil
-		}
+		observed++
 
 		rel := relPath(root, abs, multiRoot)
 		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
@@ -2494,17 +2609,21 @@ func hasAllowEmptySentinel(root string) bool {
 //     ReadDir failure (permission drop, transient FUSE disruption)
 //     means we can't audit the root state, so the safe default is
 //     to refuse the deletion.
-//   - root exists AND has entries (including the `.bridge-allow-empty`
-//     sentinel if present, since os.ReadDir surfaces it as a
-//     directory entry): trustworthy — fs.ErrNotExist on the subtree
-//     is a legitimate operator delete, return nil. Gemini medium
-//     review on PR #289 caught the redundant explicit-sentinel
-//     check that this branch already subsumes.
-//   - root exists AND is empty AND CountTracksUnderRoot > 0:
+//   - root holds library content (holdsLibraryContent: a directory
+//     the walk would descend into, or a file it would index), or the
+//     `.bridge-allow-empty` sentinel: trustworthy — fs.ErrNotExist on
+//     the subtree is a legitimate operator delete, return nil. The
+//     sentinel is asked for by name since 2026-09-28: until then any
+//     entry made the root "non-empty", the sentinel included (Gemini on
+//     PR #289 called an explicit check redundant on that ground), and
+//     so did a .DS_Store or a Synology @eaDir, so an emptied mount point
+//     holding one passed this audit and the bounded pass reaped the
+//     subtree's rows.
+//   - root holds no content AND CountTracksUnderRoot > 0:
 //     untrusted — DB carries history but the root has nothing, this
 //     looks like a mount drop. Return a suspected-mount-drop error
 //     to abort the deletion pass.
-//   - root exists AND is empty AND CountTracksUnderRoot == 0:
+//   - root holds no content AND CountTracksUnderRoot == 0:
 //     trustworthy — fresh install or post-wipe state with no rows
 //     to protect.
 func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot string, multiRoot bool) error {
@@ -2515,7 +2634,7 @@ func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot 
 	if err != nil {
 		return fmt.Errorf("audit owning root: read dir: %w", err)
 	}
-	if len(entries) > 0 {
+	if holdsLibraryContent(owningRoot, entries) || hasAllowEmptySentinel(owningRoot) {
 		return nil
 	}
 	n, err := store.CountTracksUnderRoot(ctx, owningRoot, multiRoot)
@@ -2523,7 +2642,7 @@ func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot 
 		return fmt.Errorf("audit owning root: count tracks: %w", err)
 	}
 	if n > 0 {
-		return fmt.Errorf("audit owning root %q: empty on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
+		return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
 	}
 	return nil
 }
@@ -2715,16 +2834,63 @@ func (s *Scanner) routedPathSet(ctx context.Context) map[string]struct{} {
 	return routedSet
 }
 
-// shouldSkipDir returns true for directories we never want to traverse.
-// Classic metadata / trash / hidden dirs.
-func shouldSkipDir(name string) bool {
+// ShouldSkipDir reports whether a walk of a library root leaves out a
+// directory of this name: never descended, never a folder row, never
+// watched, never counted by the doctor's inotify budget, and never taken as
+// content by the clean-empty guard (isLibraryEntry). Every dot-directory
+// (.Trashes, .Spotlight-V100, .fseventsd, a Samba .recycle, a ZFS .zfs, the
+// bridge's own upload staging and trash), and the directories an operating
+// system or NAS firmware puts in a volume or share: Windows' recycle bin
+// (`$RECYCLE.BIN`, `$Recycle.Bin` on a system drive) and System Volume
+// Information, ext4's lost+found, Synology's @eaDir (thumbnails and metadata
+// beside every media folder, holding one directory per file, named like the
+// file), #recycle and #snapshot, QNAP's @Recycle and @Recently-Snapshot, and
+// NetApp's snapshots as an SMB client sees them (~snapshot). A recycle bin or
+// a snapshot holds copies of library files, which the walk indexed as tracks
+// of their own until 2026-09-28. The names are exact, case included: a
+// folder named for an artist or an album ("Lost+Found", "Recycler") must
+// never match one.
+//
+// Exported for internal/doctor, whose inotify count must skip exactly what
+// the watcher skips.
+func ShouldSkipDir(name string) bool {
 	switch name {
-	case ".Trash", ".Trashes", "$RECYCLE.BIN", "System Volume Information",
-		".AppleDouble", ".AppleDesktop", ".DocumentRevisions-V100",
-		".Spotlight-V100", ".TemporaryItems", ".fseventsd":
+	case "$RECYCLE.BIN", "$Recycle.Bin", "System Volume Information",
+		"lost+found",
+		"@eaDir", "#recycle", "#snapshot",
+		"@Recycle", "@Recently-Snapshot",
+		"~snapshot":
 		return true
 	}
 	return strings.HasPrefix(name, ".")
+}
+
+// isLibraryEntry reports whether a walk of a library root takes an entry as
+// library content, by the walk's own rules: a directory it descends into
+// (ShouldSkipDir says no), or a file it indexes (not a dot-file, and an
+// audio file it can enqueue). Both walks skip by it, and it is all the
+// clean-empty guard counts, in the walks and in the owning-root audit
+// (holdsLibraryContent), so to the guard a root holding only what it
+// refuses (a .DS_Store Finder wrote into an unmounted mount point, a
+// Synology @eaDir, a desktop.ini, a cover image) is empty. The guard
+// counted every entry until 2026-09-28, so one stray .DS_Store let the
+// deletion pass reap every row under an emptied mount point.
+func isLibraryEntry(abs, name string, isDir bool) bool {
+	if isDir {
+		return !ShouldSkipDir(name)
+	}
+	return !strings.HasPrefix(name, ".") && enqueueableAudioFile(abs, name)
+}
+
+// holdsLibraryContent reports whether a directory's listing holds an entry
+// isLibraryEntry takes as library content.
+func holdsLibraryContent(dir string, entries []fs.DirEntry) bool {
+	for _, e := range entries {
+		if isLibraryEntry(filepath.Join(dir, e.Name()), e.Name(), e.IsDir()) {
+			return true
+		}
+	}
+	return false
 }
 
 // variantIDInfixRe matches a bridge variant ID EXACTLY:

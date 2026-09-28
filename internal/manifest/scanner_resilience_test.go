@@ -131,10 +131,16 @@ func TestScannerReapsAfterThresholdMissedScans(t *testing.T) {
 // TestScannerThreshold1PreservesImmediateDelete verifies the operator
 // opt-out path: setting threshold=1 reverts to the pre-resilience
 // behaviour (delete on the very first missing scan).
+//
+// The root keeps a track. A root whose last track is gone, holding nothing
+// else the walk takes as library content (the database files here are not
+// audio), is the clean-empty guard's case, which spares its rows at any
+// threshold until .bridge-allow-empty is placed.
 func TestScannerThreshold1PreservesImmediateDelete(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "doomed.flac")
 	writeMinimalAudio(t, target)
+	writeMinimalAudio(t, filepath.Join(dir, "keep.flac"))
 
 	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
 	if err != nil {
@@ -154,8 +160,8 @@ func TestScannerThreshold1PreservesImmediateDelete(t *testing.T) {
 	if _, err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
-	if got := countTracksHelper(t, store); got != 0 {
-		t.Errorf("threshold=1 should reap on first miss: got tracks = %d", got)
+	if got := countTracksHelper(t, store); got != 1 {
+		t.Errorf("threshold=1 should reap on first miss: got tracks = %d, want 1 (keep.flac)", got)
 	}
 }
 
