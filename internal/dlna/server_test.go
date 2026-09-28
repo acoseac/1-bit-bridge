@@ -388,6 +388,7 @@ func Test_callbackHostAllowed(t *testing.T) {
 		{"link_local_from_itself", "169.254.10.20", "169.254.10.20:5", true},
 		{"ipv6_link_local_from_its_zoned_source", "fe80::1", "[fe80::1%en0]:5", true},
 		{"ipv6_link_local_zoned_callback", "fe80::1%en0", "[fe80::1%en0]:5", false},
+		{"zoned_private_callback", "fd00::5%en0", "192.168.1.9:5", false}, // refused before B39 too (net.ParseIP took no zone)
 		{"loopback_from_itself", "127.0.0.1", "127.0.0.1:5", true},
 		{"loopback_from_another_loopback_address", "127.0.0.1", "127.0.0.2:5", false},
 		{"ipv6_loopback_from_itself", "::1", "[::1]:5", true},
