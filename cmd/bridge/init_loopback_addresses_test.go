@@ -63,19 +63,26 @@ func TestInitLoopbackRunWritesTheAddressesItIsGiven(t *testing.T) {
 	}
 }
 
-// writeLoopbackInstall writes the config of a loopback install at cfgDir, as
-// `bridge init` lays one out (bridge.yaml beside its data dir), listening on
-// the two given loopback ports, with its data dir made and no bridge running:
-// no pid file.
+// writeLoopbackInstall writes the config of a loopback install at cfgDir
+// listening on the two given loopback ports (writeInstallConfig).
 func writeLoopbackInstall(t *testing.T, cfgDir, lib string, api, admin int) {
+	t.Helper()
+	writeInstallConfig(t, cfgDir, lib, loopbackAddr(api), loopbackAddr(admin))
+}
+
+// writeInstallConfig writes the config of an install at cfgDir, as `bridge
+// init` lays one out (bridge.yaml beside its data dir), named "Existing" and
+// listening on the two given addresses, with its data dir made and no bridge
+// running: no pid file.
+func writeInstallConfig(t *testing.T, cfgDir, lib, listen, admin string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(cfgDir, "data"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	body := "libraryRoots:\n  - " + lib + "\n" +
 		"dataDir: " + filepath.Join(cfgDir, "data") + "\n" +
-		"listenAddress: \"" + loopbackAddr(api) + "\"\n" +
-		"adminAddress: \"" + loopbackAddr(admin) + "\"\n" +
+		"listenAddress: \"" + listen + "\"\n" +
+		"adminAddress: \"" + admin + "\"\n" +
 		"libraryName: Existing\n"
 	if err := os.WriteFile(filepath.Join(cfgDir, "bridge.yaml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)

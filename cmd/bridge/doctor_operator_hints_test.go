@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,15 +33,8 @@ func TestPrintedHintsSpeakToTheOperator(t *testing.T) {
 		{"bridge doctor over a config naming port 0", "port-api", func(t *testing.T) string {
 			isolateConfigEnv(t)
 			dir := t.TempDir()
-			cfgPath := filepath.Join(dir, "bridge.yaml")
-			body := "libraryRoots:\n  - " + testLibrary(t) + "\n" +
-				"dataDir: " + filepath.Join(dir, "data") + "\n" +
-				"listenAddress: \":0\"\n" +
-				"adminAddress: \"127.0.0.1:0\"\n"
-			if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return runDoctor(t, "--config", cfgPath)
+			writeInstallConfig(t, dir, testLibrary(t), ":0", "127.0.0.1:0")
+			return runDoctor(t, "--config", filepath.Join(dir, "bridge.yaml"))
 		}},
 		{"bridge doctor before bridge init", "tls-cert", func(t *testing.T) string {
 			isolateConfigEnv(t)

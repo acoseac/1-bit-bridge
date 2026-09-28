@@ -111,17 +111,10 @@ func TestInitForceRewriteStillRefusesAPortItKeeps(t *testing.T) {
 
 				code, out := forceRewrite(t, cfgDir, posture.flags(t, api, admin)...)
 				defer logRunOnFailure(t, out)
-				if code != 1 {
-					t.Fatalf("a --force rewrite onto :%d and :%d exited %d while another process holds :%d",
-						api, admin, code, kept)
-				}
-				assertPortFailed(t, out, "port-api", kept)
+				assertRewriteRefused(t, cfgDir, out, code, kept)
 				if !strings.Contains(out, portsThisInitWrites()) {
 					t.Errorf("the refusal does not say the port is one this init would write: no %q",
 						portsThisInitWrites())
-				}
-				if cfg := loadInstallConfig(t, cfgDir); cfg.LibraryName != "Existing" {
-					t.Errorf("the config was rewritten despite the refusal: libraryName %q", cfg.LibraryName)
 				}
 			})
 		}
@@ -142,15 +135,9 @@ func TestInitForceRewriteGradesThePortItMovesTo(t *testing.T) {
 
 			code, out := forceRewrite(t, cfgDir, posture.flags(t, api, freeLoopbackPort(t))...)
 			defer logRunOnFailure(t, out)
-			if code != 1 {
-				t.Fatalf("a --force rewrite moving the API to :%d exited %d while another process holds it", api, code)
-			}
-			assertPortFailed(t, out, "port-api", api)
+			assertRewriteRefused(t, cfgDir, out, code, api)
 			if strings.Contains(out, ":"+strconv.Itoa(oldAPI)+" in use") {
 				t.Errorf("the refusal grades :%d, the port the rewrite moves off", oldAPI)
-			}
-			if cfg := loadInstallConfig(t, cfgDir); cfg.LibraryName != "Existing" {
-				t.Errorf("the config was rewritten despite the refusal: libraryName %q", cfg.LibraryName)
 			}
 		})
 	}
@@ -177,6 +164,20 @@ func TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt(t *testing.T) {
 	assertPortFailed(t, printed, "port-api", oldAPI)
 	if strings.Contains(printed, portsThisInitWrites()) {
 		t.Errorf("the refusal says the port is one this init would write, and the run may keep the install's")
+	}
+}
+
+// assertRewriteRefused requires a --force rewrite to have exited 1 on a FAIL
+// of port-api on port, a port it writes and another process holds, and to
+// have left the install's config as it was.
+func assertRewriteRefused(t *testing.T, cfgDir, out string, code, port int) {
+	t.Helper()
+	if code != 1 {
+		t.Fatalf("the rewrite exited %d while another process holds :%d, a port it writes", code, port)
+	}
+	assertPortFailed(t, out, "port-api", port)
+	if cfg := loadInstallConfig(t, cfgDir); cfg.LibraryName != "Existing" {
+		t.Errorf("the config was rewritten despite the refusal: libraryName %q", cfg.LibraryName)
 	}
 }
 
