@@ -20869,3 +20869,117 @@ absolute path would have missed one. Found while merging main into #1055.
   `Unwrap`.
 - Gemini did not review it: its GitHub app was out of quota and the API project had
   reached its monthly spending cap.
+
+## 2026-09-28 — the console's batch submit honours the live upscale gate, and its variant delete reads paths with safeQuery
+
+`POST /api/upscale/batch` gated on `s.deps.BatchCoordinator == nil` alone.
+runServe constructs the upscale pool and its coordinator whatever
+`upscale.enabled` says (#781), so the adapter is never nil and the check gated
+nothing. Every pass on the class stopped short of it: #781 converted the
+readers, #852 restored `POST /v1/upscale` and `DELETE /v1/upscale/variants`,
+and #878 (the 2026-09-09 LOUPE) restored `POST /v1/upscale/batch`. The
+optimize kind had a second hole: the /v1 batch refuses it while the CarPlay
+switch is off, and the console accepted it. The admin variant delete was also
+still reading its paths through `r.URL.Query()`.
+
+### Measured
+
+The real `serve`, built once from `ec20ac1c` (the six production files restored
+from that commit in this worktree, and the tree checked for the new identifiers
+before building) and once from the branch, over a two-track library synthesised
+with sox (96 kHz/24 in `Test Artist/Test Album/`, 44.1 kHz/16 in
+`AC+DC/Live/`), with mDNS and HTTP/3 off:
+
+- Upscale off, the default. main: `/v1/health` said `upscaleEnabled: false`,
+  `POST /api/upscale/batch {"path":""}` answered 202 with `enqueuedCount: 2`,
+  the batch completed, and two `upscaled-v2-192000-24.flac` renditions were
+  written. Branch: 503 `upscale-disabled`, no batch, no file.
+- Upscale on, `optimizeEnabled: false`. main: `{"path":"Test Artist",
+  "kind":"optimize"}` answered 202 and wrote an `optimized-v2-48000-16.flac`.
+  Branch: 503 `optimize-disabled`.
+- On that bridge, after an upscale of `AC+DC`: `curl -X DELETE
+  '…/api/upscale/variants?prefix=AC+DC'`. main answered `deletedCount: 0` and
+  the rendition stayed (the handler read `AC DC`). Branch: `deletedCount: 1`,
+  363,808 bytes freed.
+
+### Decisions
+
+- `admin.Deps.UpscaleActive`, wired to `upscaleActiveFn`, the closure
+  `WithUpscale` gives /v1: one predicate, so the console refuses exactly when
+  `/v1/health` says the feature is off. A nil gate reads as off, /v1's rule
+  (`TestNilFeatureGatesReadAsOff`).
+- The submit takes /v1's order: the gate (with /v1's WARN line), the body, the
+  kind, the optimize switch, and only then `resolveVariantScope` and the
+  coordinator. The optimize switch reads `OptimizeActive` as
+  `apiLibraryBrowseProjection` does (nil means wired is active), so the
+  console's two optimize surfaces share one reading; its 503 carries
+  `optimize-disabled`, the projection endpoint's code. The player keeps
+  "Generate CarPlay" live whenever upscaling is on, so that message is what an
+  operator reads.
+- The delete, cancel, list and failure retry stay ungated: the owner's decision,
+  so an operator who switched upscaling off, or whose sox went missing, can
+  reclaim the disk. `RunVariantDelete` checks only that a deleter is wired, so
+  the console's delete works in that state while `DELETE /v1/upscale/variants`
+  refuses. None of the four starts sox work.
+- The delete's query is read once, through `safeQuery`, and `deleteVariants`
+  moved from `URLSearchParams` to `encodeURIComponent` in the same commit. The
+  old pair handled spaces only because both halves form-coded; either change
+  alone breaks every path with a space. A census of the admin package's
+  remaining `r.URL.Query()` reads found no other library path (ids, tokens,
+  sizes, limits, a search query, the login `next`).
+- No boot test. cmd/bridge's race leg is the race job's floor, and the one line
+  no admin test can see, the wiring, is pinned by AST instead
+  (`TestConsoleBatchGateIsTheV1UpscaleGate`). The end-to-end behaviour was
+  measured once, above.
+
+### Tests and controls
+
+`internal/admin/handlers_upscale_gate_test.go`; the base fixture now wires the
+gate on, since a nil gate would describe a bridge with the feature off.
+
+- `TestBatchSubmitRefusesBeforeResolvingTheScope` runs eight bodies with the
+  gate on, where each earns its own answer (202; 400 for a traversal, an
+  unknown kind or bad JSON; 404 for an album id nothing has), then off, where
+  each must get 503 with zero Submit calls. The admin folder form never stats
+  its path, so a folder that does not exist earns 202 with the gate on, not
+  404: the order is shown by the cases resolution refuses, not by the missing
+  folder.
+- `TestBatchSubmitReadsANilUpscaleGateAsOff` (and exactly one WARN line),
+  `TestBatchSubmitAnswersTheUpscaleGateLive` (on, off, on), and
+  `TestBatchSubmitOptimizeKindReadsItsOwnGate` (three refusals before the
+  scope, the upscale kind unaffected, a nil switch read as wired).
+- `TestVariantDeleteStaysOpenWithUpscaleOff` (folder, album and confirm forms,
+  with the gate off and unwired), `TestVariantDeleteReadsAPlusInAPathLiterally`,
+  and `TestDeleteVariantsClientRoundTripsThroughTheServer`, which runs the
+  shipped `deleteVariants` under node and sends the URL it builds to the
+  handler.
+- `TestEveryBatchSubmitReadsTheUpscaleGateFirst`: every function that calls a
+  `Submit*` on a `….BatchCoordinator` selector must read `s.upscaleActive()`
+  before `resolveVariantScope` and its first submit, and one that submits the
+  optimize kind must read `OptimizeActive` before both. It has a floor of one
+  submitter, and `TestBatchSubmitGateSweepReportsEveryMisorder` runs it over
+  synthetic source holding each misorder it exists to catch.
+- cmd/bridge: `TestConsoleBatchGateIsTheV1UpscaleGate`.
+
+Negative controls on the committed tree, each restored with `git checkout --`:
+
+1. The gate reduced to main's `BatchCoordinator == nil`: the ordering test (all
+   eight cases), the nil-gate test, the live test and the AST sweep went red;
+   the optimize, delete and round-trip tests stayed green.
+2. `deleteVariants` back on `URLSearchParams`: the round trip alone went red.
+   The client wrote `prefix=AC+DC%2FA%2BB+Album`, which reached the deleter as
+   `AC+DC/A+B+Album`.
+3. The handler back on `r.URL.Query()`: the `+` test alone went red, all three
+   rows (`AC+DC/Live` read as `AC DC/Live`). The round trip stayed green, as it
+   must: the new client never writes a literal `+`.
+4. The gate moved below `resolveVariantScope`: the four ordering cases whose
+   gate-on answer is not 202 (traversal, unknown album, unknown kind, bad JSON)
+   and the AST sweep went red. The missing folder stayed green, for the reason
+   above.
+5. The optimize switch removed: its three refusal cases and the AST sweep went
+   red.
+6. The wiring line deleted, then replaced by a flag-only closure without the
+   sox half: `TestConsoleBatchGateIsTheV1UpscaleGate` went red both times.
+7. The base fixture's gate removed: eight submit tests went red (KindDispatch,
+   NormalisesPath, the optimize test and five variant-scope submit tests), and
+   every delete test stayed green.
