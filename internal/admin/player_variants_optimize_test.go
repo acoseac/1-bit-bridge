@@ -29,7 +29,11 @@ import (
 // each state of the switch (on, off, on again, and unwired, which reads as
 // on) is checked against a real submit of the optimize kind for the same
 // album, on one server whose switch moves between requests as a settings
-// PATCH moves it.
+// PATCH moves it. The submit's answer is pinned both ways: an accepted one
+// is a 202 that reached the coordinator once, and a refused one is the
+// switch's own 503 that reached it never. The test pinned only the refusal
+// at first, so a submit that failed some other way (a 400, a 500, a 202
+// that queued nothing) passed as an accepted one (CodeRabbit on #1068).
 func TestTheVariantSummaryCarriesTheSwitchTheSubmitReads(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedVariantAlbum(t, srv.deps.Manifest)
@@ -51,10 +55,16 @@ func TestTheVariantSummaryCarriesTheSwitchTheSubmitReads(t *testing.T) {
 		{"unwired", nil, true},
 	} {
 		srv.deps.OptimizeActive = step.gate
-		_, errCode, _ := submitCounting(t, srv, stub, `{"albumIds":["`+albumID+`"],"kind":"optimize"}`)
-		refused := errCode == "optimize-disabled"
-		if refused == step.want {
-			t.Errorf("switch %s: the submit answered %q", step.name, errCode)
+		code, errCode, calls := submitCounting(t, srv, stub, `{"albumIds":["`+albumID+`"],"kind":"optimize"}`)
+		accepted := code == http.StatusAccepted && calls == 1
+		refused := code == http.StatusServiceUnavailable && errCode == "optimize-disabled" && calls == 0
+		switch {
+		case step.want && !accepted:
+			t.Fatalf("switch %s: the submit answered %d %q with %d coordinator calls, "+
+				"want 202 and one call", step.name, code, errCode, calls)
+		case !step.want && !refused:
+			t.Fatalf("switch %s: the submit answered %d %q with %d coordinator calls, "+
+				"want 503 optimize-disabled and none", step.name, code, errCode, calls)
 		}
 		for _, target := range []string{"/api/player/albums/" + albumID, "/api/player/artists/" + artistID} {
 			w, body := playerGet(t, srv, target)
@@ -63,14 +73,10 @@ func TestTheVariantSummaryCarriesTheSwitchTheSubmitReads(t *testing.T) {
 			}
 			sum, _ := body["variants"].(map[string]any)
 			says, ok := sum["optimizeActive"].(bool)
-			if !ok || says != step.want {
-				t.Errorf("switch %s: %s reports optimizeActive %v, want %v",
-					step.name, target, sum["optimizeActive"], step.want)
-			}
-			if ok && says == refused {
-				t.Errorf("switch %s: %s says optimizeActive %v while the submit answered %q; "+
+			if !ok || says != accepted {
+				t.Errorf("switch %s: %s reports optimizeActive %v while the submit answered %d %q; "+
 					"the panel would offer a button the submit refuses, or disable one it accepts",
-					step.name, target, says, errCode)
+					step.name, target, sum["optimizeActive"], code, errCode)
 			}
 		}
 	}

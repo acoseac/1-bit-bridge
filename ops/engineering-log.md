@@ -23234,6 +23234,35 @@ save, sent as the same PATCH.
 | the panel-wide tray redraws for every field | the upscaling-off tray |
 | the panel-wide tray has no `onSaved` | the same |
 
+### Review round 2: the summary test pins an accepted submit
+
+CodeRabbit's one finding on the round-1 head (Trivial):
+`TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` read an enabled
+step's submit only as "not `optimize-disabled`", so a submit that failed
+some other way passed as an accepted one, and the summary was compared
+with a submit that had accepted nothing. The submit is now pinned both
+ways: an accepted one is a 202 that reached the coordinator once, a
+refused one is the switch's own 503 that reached it never, and each
+summary is compared with that answer (the two summary checks became one,
+since the expectation and the answer now agree by the time it runs).
+
+Each mutation was run against this test and against its version before
+the change (checked out from 2dd915a9, the new identifiers absent):
+
+| mutation, in `apiUpscaleBatchSubmit` | this test | the version before | elsewhere in `internal/admin` |
+|---|---|---|---|
+| the enabled optimize submit fails (500 `submit-failed`) | red ("switch on: … 500 … want 202 and one call") | green | the panel test red: it reads any error code as a refusal |
+| it answers 202 without reaching the coordinator | red ("… 202 "" with 0 coordinator calls") | green | `TestBatchSubmitByAlbumIDExcludesDirectoryNeighbours` red (it counts the calls); the whole package run otherwise green |
+| the switch's refusal answers 400, same code | red ("switch off: … 400 …") | green | |
+
+Within this test the new assertion is what catches each one. The
+package already guarded the handler's acceptance elsewhere, so the gap
+was in this test's own claim (that the summary agrees with a submit the
+test had not seen accept), not a hole in the handler's coverage. The two
+summary controls from the first table (the summary never setting the
+field, and serving the configured switch) still go red after the merge
+of the two checks.
+
 ### Left open
 
 - The Smart mixes tray's save still shows only after a reload (above).

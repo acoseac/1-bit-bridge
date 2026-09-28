@@ -4607,7 +4607,11 @@ its twin.** The top list is older, shorter, and read first.
   on, as `Deps.OptimizeActive` always has), so the button is disabled
   exactly where the submit refuses.
   `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` compares the served
-  value with a real submit for every state of the switch, and
+  value with a real submit for every state of the switch, and pins that
+  submit BOTH ways (a 202 that reached the coordinator once, or the
+  switch's own 503 that reached it never): read as merely "not
+  `optimize-disabled`", a submit failing some other way passed as an
+  accepted one (CodeRabbit on #1068). And
   `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt` runs
   the SHIPPED panel under node on the summary the album detail serves,
   kind by kind against the submit, with the switches moved through the
