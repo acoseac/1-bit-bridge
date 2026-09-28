@@ -39,18 +39,30 @@ func TestPlayerByteRoutesRefuseWhatIsNotAFile(t *testing.T) {
 	st := srv.deps.Manifest
 	const rel = "Rock/Alpha/01.flac"
 	_, info := seedPlayerTrack(t, cfg, st, rel, "One")
-	const variantID = "optimized-v2-44100-16"
-	sidecar := transcode.VariantSidecarPath(cfg.Upscale.EffectiveVariantsDir(cfg.DataDir), rel, variantID)
-	if err := os.MkdirAll(filepath.Dir(sidecar), 0o755); err != nil {
-		t.Fatal(err)
+	// Two renditions whose sidecars are not files: a named pipe, which the
+	// old open waited on, and a socket, which no open reaches and which
+	// only the stat before the open refuses as a rendition that is gone.
+	renditions := map[string]func(*testing.T, string){
+		"optimized-v2-44100-16": func(t *testing.T, p string) { fsutiltest.MakeFIFO(t, p) },
+		"upscaled-v1-176400-24": fsutiltest.BindSocket,
 	}
-	fsutiltest.MakeFIFO(t, sidecar)
-	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: rel, VariantID: variantID, SidecarPath: sidecar,
-		Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 7,
-		SourceMTimeNS: info.ModTime().UnixNano(), SourceSize: info.Size(),
-	}); err != nil {
-		t.Fatal(err)
+	var sidecar string
+	for variantID, plant := range renditions {
+		p := transcode.VariantSidecarPath(cfg.Upscale.EffectiveVariantsDir(cfg.DataDir), rel, variantID)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		plant(t, p)
+		if variantID == "optimized-v2-44100-16" {
+			sidecar = p
+		}
+		if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+			SourcePath: rel, VariantID: variantID, SidecarPath: p,
+			Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 7,
+			SourceMTimeNS: info.ModTime().UnixNano(), SourceSize: info.Size(),
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	kinds, pipe := fsutiltest.PlantNotAFiles(t, filepath.Join(cfg.LibraryRoots[0], "Rock", "Alpha"))
 	h := srv.Handler()
@@ -77,10 +89,12 @@ func TestPlayerByteRoutesRefuseWhatIsNotAFile(t *testing.T) {
 			refused(route+" of a "+kind, rec, http.StatusBadRequest, "bad_path")
 		}
 	}
-	rec := serve(http.MethodGet, "/api/player/audio?path="+rel+"&variant="+variantID)
-	refused("a rendition whose sidecar is a named pipe", rec, http.StatusGone, "variant_missing_on_disk")
+	for variantID := range renditions {
+		rec := serve(http.MethodGet, "/api/player/audio?path="+rel+"&variant="+variantID)
+		refused("the rendition "+variantID, rec, http.StatusGone, "variant_missing_on_disk")
+	}
 
-	rec = serve(http.MethodGet, "/api/player/audio?path="+rel)
+	rec := serve(http.MethodGet, "/api/player/audio?path="+rel)
 	if rec.Code != http.StatusOK || rec.Body.String() != "source" {
 		t.Errorf("the track beside them: status %d, %q; want 200 with its bytes", rec.Code, rec.Body.String())
 	}
