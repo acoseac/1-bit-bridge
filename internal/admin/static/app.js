@@ -3430,6 +3430,7 @@ function traySettingsSnapshot() {
  *   blurb?: string,         // one line: what turning this on does
  *   rows: Row[],
  *   link?: { href, text },  // deep link to the full settings section
+ *   onSaved?: (field) => void, // after a save the server applied live; see saveTrayField
  * }
  * Row =
  *   { field, type: "switch", label, hint?, restart? }
@@ -3482,7 +3483,7 @@ function buildFeatureTray(spec) {
   const body = document.createElement("div");
   body.className = "tray-rows";
   for (const row of spec.rows || []) {
-    const built = buildTrayRow(row, status, controls);
+    const built = buildTrayRow(row, status, controls, spec.onSaved);
     if (built) body.appendChild(built);
   }
   tray.appendChild(body);
@@ -3570,7 +3571,7 @@ function buildFeatureTray(spec) {
 // function: the two type switches are independent decisions (what
 // element the value lives in, and where the badge sits relative to it)
 // and reading them apart is what makes the badge rule legible.
-function buildTrayRow(row, status, controls) {
+function buildTrayRow(row, status, controls, onSaved) {
   if (row.type === "note") {
     const p = document.createElement("p");
     p.className = "tray-note";
@@ -3597,7 +3598,7 @@ function buildTrayRow(row, status, controls) {
     wrap.appendChild(hint);
   }
 
-  const ctl = { row, input };
+  const ctl = { row, input, onSaved };
   controls.push(ctl);
   // change, not input: a number field would otherwise PATCH on every
   // keystroke, and "6" on the way to "60" is a real, saved value.
@@ -3736,6 +3737,7 @@ async function saveTrayField(ctl, status) {
   status.dataset.tone = "";
   status.textContent = "Saving…";
   ctl.input.disabled = true;
+  let appliedLive = false;
   try {
     const r = await API.patch("/api/settings", { [ctl.row.field]: value });
     if (traySettings) traySettings[ctl.row.field] = value;
@@ -3761,6 +3763,7 @@ async function saveTrayField(ctl, status) {
       status.dataset.tone = "ok";
       status.textContent = "Saved.";
     }
+    appliedLive = applied.status === "live";
     // Every OTHER tray on the page, so a shared field can't show two
     // different answers at once.
     for (const other of mountedTrays) syncTray(other);
@@ -3773,6 +3776,17 @@ async function saveTrayField(ctl, status) {
   } finally {
     ctl.input.disabled = false;
   }
+  // A save the server applied live can change what the page around the
+  // tray shows, and only the page can redraw that: the variant panel's
+  // "switched off" note sat beside "Saved." until the next render
+  // (CodeRabbit on #1068). The field goes with it, so a caller redraws
+  // only for a switch that changes what it draws. Not on "restart" or
+  // "unchanged": nothing on the page has moved, and a redraw would take
+  // the tray, and the restart instruction in it, away with it. After the
+  // snapshot, the status and every other tray have taken the new value,
+  // and outside the try, so a callback that throws cannot turn a save
+  // that landed into "Save failed".
+  if (appliedLive && ctl.onSaved) ctl.onSaved(ctl.row.field);
 }
 
 /**
