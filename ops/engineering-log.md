@@ -21856,6 +21856,11 @@ Negative controls on the committed tree (3bdb47cb), each restored with
 | NC5: the detector counts field names as reads | the fixture (its `cfg:` key and `s.cfg` case) | the sweep (no such field on the tree) |
 | NC6: the stand-in sox prints nothing | the boot test's fixture check, at the first step with the flag on in each leg | |
 
+The sweep was then split into small helpers (53db0ae4; its own function had
+shadowed the package's `run`). NC5 re-run there, as the `cfg:` key
+collection now goes through `forEachKeyedElement`: dropping that collection
+turns the fixture red on its `cfg:` key alone, and the sweep stays green.
+
 ### Not fixed here
 
 Four consumers of `upscale.enabled` read it live but without the sox half,
