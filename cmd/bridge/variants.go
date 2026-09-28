@@ -21,6 +21,16 @@
 // skipped with a warning. CASCADE on track delete would have
 // pruned the variant too; an orphan variant DB row is a sign of
 // inconsistent state and shouldn't be moved.
+//
+// Run as root (the usual way to move the variants onto a new disk,
+// whose mount point root owns), a move keeps what it moves the
+// service's, as mv does: a renamed sidecar keeps its owner by itself, a
+// copied one is given the owner of the file it replaces (copyAndFsync),
+// the --to directory it creates the owner of the variants directory it
+// replaces (fsutil.MkdirAllLike), and an album directory beneath the
+// owner of the directory it is created in (fsutil.MkdirAll). Before,
+// every one of those was root's, and the service could not add a
+// rendition to the tree it was pointed at next.
 
 package main
 
@@ -130,7 +140,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 	// touching the filesystem — on a preview an operator may well be running
 	// against a path they have not decided on yet.
 	if !*dryRun {
-		if err := os.MkdirAll(*to, 0o755); err != nil {
+		if err := fsutil.MkdirAllLike(*to, 0o755, cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)); err != nil {
 			fmt.Fprintf(stderr, "mkdir destination: %v\n", err)
 			return 1
 		}
@@ -224,7 +234,7 @@ func moveOneVariant(ctx context.Context, store *manifest.Store, v manifest.Varia
 		return fmt.Errorf("stat source: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir destination parent: %w", err)
 	}
 
@@ -276,6 +286,13 @@ func copyAndFsync(src, dst string) error {
 	// the explicit Close at the success tail is what catches
 	// flush-on-close errors.
 	defer out.Close()
+	// The copy stands in for src, which the move then unlinks: run as
+	// root it keeps src's owner, as a rename would have. KeepOwner reads
+	// the owner of the entry at the path it is given, and that entry is
+	// src here.
+	if err := fsutil.KeepOwner(out, src); err != nil {
+		return err
+	}
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}

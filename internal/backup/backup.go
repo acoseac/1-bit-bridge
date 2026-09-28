@@ -20,6 +20,18 @@
 // running bridge. Restoring the manifest db while the bridge is
 // running is unsafe (the WAL would be inconsistent with the new
 // main file), so `bridge restore` warns + requires `--yes`.
+//
+// Run as root over an install another user owns (`sudo bridge backup`,
+// and `sudo bridge restore`, the usual form with the service stopped),
+// everything either writes keeps the install's owner: a new directory
+// its parent's (fsutil.MkdirAll / fsutil.Mkdir), a copied or restored
+// file the owner of what it replaces, or of its directory
+// (fsutil.KeepOwner in copyFile and writeManifest), and the snapshot's
+// database, which VACUUM INTO writes, the snapshot directory's
+// (fsutil.Precreate). Before, a root snapshot was root's 0700, which the
+// service's own prune could not remove, and a root restore left the
+// config, the database, the token store and the TLS pair root's 0600,
+// so the service could not start.
 package backup
 
 import (
@@ -37,6 +49,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
@@ -125,7 +138,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		return "", errors.New("backup: DataDir is required")
 	}
 	backupsRoot := filepath.Join(src.DataDir, BackupsDirName)
-	if err := os.MkdirAll(backupsRoot, 0o700); err != nil {
+	if err := fsutil.MkdirAll(backupsRoot, 0o700); err != nil {
 		return "", fmt.Errorf("create backups root: %w", err)
 	}
 	dst, err := createUniqueSnapshotDir(backupsRoot, time.Now().UTC())
@@ -248,7 +261,7 @@ func Restore(snapshotDir string, dst Targets) error {
 		// `config.Save` would land if the operator hand-edited via
 		// the admin console.
 		var mode os.FileMode = 0o600
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		if err := fsutil.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("create dir for %s: %w", name, err)
 		}
 		if name == ManifestDBFileName {
@@ -569,6 +582,14 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	// it so re-running a snapshot in the same second (collision-
 	// suffix paths) doesn't bail. The parent dir is already 0700.
 	_ = os.Remove(dstDB)
+	// SQLite, not this process, creates the destination, so as root it
+	// was root's. VACUUM INTO accepts an EMPTY file as well as none, and
+	// writes into it, so an empty one precreated with the snapshot
+	// directory's owner keeps that owner. A no-op unless this process is
+	// root.
+	if err := fsutil.Precreate(dstDB, 0o600, dstDB); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dstDB); err != nil {
 		// A failed VACUUM INTO can leave a partial/corrupt fragment on
 		// disk. Remove it so the snapshot dir doesn't accumulate broken
@@ -614,6 +635,11 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 	// Panic-safety FD close (LIFO order — runs before Remove). See
 	// internal/auth/auth.go for the rationale.
 	defer func() { _ = tmp.Close() }()
+	// The owner of what this replaces (a restore's live file), or of the
+	// directory (a snapshot's copy): the service must read both.
+	if err := fsutil.KeepOwner(tmp, dstPath); err != nil {
+		return err
+	}
 
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
@@ -679,6 +705,9 @@ func writeManifest(path string, m Manifest) error {
 	// Panic-safety FD close (LIFO order — runs before Remove). See
 	// internal/auth/auth.go for the rationale.
 	defer func() { _ = tmp.Close() }()
+	if err := fsutil.KeepOwner(tmp, path); err != nil {
+		return err
+	}
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -728,7 +757,7 @@ func createUniqueSnapshotDir(backupsRoot string, t time.Time) (string, error) {
 		if i > 0 {
 			candidate = fmt.Sprintf("%s-%d", base, i)
 		}
-		if err := os.Mkdir(candidate, 0o700); err == nil {
+		if err := fsutil.Mkdir(candidate, 0o700); err == nil {
 			return candidate, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", err
@@ -737,26 +766,11 @@ func createUniqueSnapshotDir(backupsRoot string, t time.Time) (string, error) {
 	return "", fmt.Errorf("backup: 100 snapshot dirs already exist for %s", base)
 }
 
-// EnsureFreshDataDirSibling helps tests construct a writable scratch
-// `dataDir` that isn't the live bridge state. Returns the path on
-// success; callers `defer os.RemoveAll(path)` to clean up.
-func EnsureFreshDataDirSibling(prefix string) (string, error) {
-	dir, err := os.MkdirTemp("", prefix)
-	if err != nil {
-		return "", err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", err
-	}
-	return dir, nil
-}
-
 // EnsureBackupsDir is a small convenience that creates the backups
 // root with the right permissions if it doesn't yet exist. Useful
 // for the periodic ticker on a fresh `bridge init`.
 func EnsureBackupsDir(dataDir string) error {
-	return os.MkdirAll(filepath.Join(dataDir, BackupsDirName), 0o700)
+	return fsutil.MkdirAll(filepath.Join(dataDir, BackupsDirName), 0o700)
 }
 
 // SensitivityNotice is the warning Snapshot writes to the operator
