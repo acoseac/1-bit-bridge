@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -27,10 +28,15 @@ var logger = logging.Component("upnpingest")
 // upnp.MediaServerDiscoveryClient's ServerCache; tests pass a stub.
 type ServerResolver interface {
 	// ResolveControlURL returns the live controlURL for the configured
-	// server entry. Returns "" + nil when the server is not currently
-	// discoverable (the caller logs + skips that server for this tick;
-	// the next tick re-tries).
-	ResolveControlURL(ctx context.Context, server config.UPnPUpstreamServerConfig) (string, error)
+	// server entry, and the approval it was found under
+	// (upnp.ServerInfo.DialApproval), read in ONE lookup so the two cannot
+	// come from different writes. Every SOAP request to the URL carries
+	// the approval, and the device transport's dial check refuses a
+	// connect to this machine or a link-local address it does not cover.
+	// Returns "" + nil when the server is not currently discoverable (the
+	// caller logs + skips that server for this tick; the next tick
+	// re-tries).
+	ResolveControlURL(ctx context.Context, server config.UPnPUpstreamServerConfig) (string, discovery.DialApproval, error)
 }
 
 // UpdateIDStore stores + retrieves the last-known SystemUpdateID per
@@ -360,11 +366,16 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	udn := StableServerKey(srv)
 	res.ServerUDN = udn
 
-	controlURL, err := i.resolver.ResolveControlURL(ctx, srv)
+	controlURL, approval, err := i.resolver.ResolveControlURL(ctx, srv)
 	if err != nil {
 		res.Err = fmt.Errorf("resolve controlURL: %w", err)
 		return
 	}
+	// Every SOAP request below is sent to controlURL, and a name in it
+	// resolves again at each connect. The approval the URL was found under
+	// rides in the context, so a name answered with 127.0.0.1 after
+	// discovery cannot take the Browse to this machine (backlog B36).
+	ctx = discovery.WithDialApproval(ctx, approval)
 	if controlURL == "" {
 		// A manual-URL entry resolves through the SAME cache, under the
 		// StableServerKey the ManualPoller writes it to, so a miss here

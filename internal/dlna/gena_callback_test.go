@@ -136,7 +136,7 @@ func TestGENAHostLocalRefusalIsReportedOncePerPeer(t *testing.T) {
 	}
 	subscribe(t, s, "192.168.1.9:49160", "http://example.com/evt")
 	out := buf.String()
-	if c := strings.Count(out, "GENA callback names this machine"); c != 1 {
+	if c := strings.Count(out, "GENA callback on this machine or a link-local address refused"); c != 1 {
 		t.Errorf("want one refusal line for one peer, got %d:\n%s", c, out)
 	}
 	if !strings.Contains(out, "callbackHost=127.0.0.1") || !strings.Contains(out, "subscribeSource=192.168.1.9") {
@@ -230,9 +230,9 @@ func TestGENANotifyClientChecksTheConnectAgainstTheSubscriber(t *testing.T) {
 		ctx     context.Context
 		reaches bool
 	}{
-		{"a LAN subscriber", discovery.WithRequestSource(context.Background(), netip.MustParseAddr("192.168.1.9")), false},
+		{"a LAN subscriber", discovery.WithDialApproval(context.Background(), discovery.SubscribedFrom(netip.MustParseAddr("192.168.1.9"))), false},
 		{"no subscriber", context.Background(), false},
-		{"the loopback subscriber", discovery.WithRequestSource(context.Background(), netip.MustParseAddr("127.0.0.1")), true},
+		{"the loopback subscriber", discovery.WithDialApproval(context.Background(), discovery.SubscribedFrom(netip.MustParseAddr("127.0.0.1"))), true},
 	} {
 		before := len(sink.requests())
 		req, err := http.NewRequestWithContext(tc.ctx, "NOTIFY", sink.URL+"/evt", strings.NewReader("<e:propertyset/>"))

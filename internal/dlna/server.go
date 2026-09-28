@@ -619,7 +619,7 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 	}
 
 	body := initialNotifyBody(service)
-	ctx := discovery.WithRequestSource(s.notifyCtx, subscriberAddr(remoteAddr))
+	ctx := discovery.WithDialApproval(s.notifyCtx, discovery.SubscribedFrom(subscriberAddr(remoteAddr)))
 	s.notifyWG.Add(1)
 	go func() {
 		defer s.notifyWG.Done()
@@ -671,10 +671,10 @@ func firstCallbackURL(header string) string {
 // a renderer; this is the bridge's own MediaServer GENA handler, and the
 // docblock said "renderer" for its whole life. The callback's host must
 // be an IP literal (a name is refused outright, and so is an IPv6
-// literal with a zone), and then:
+// literal with a zone), and then it asks, first, what the NOTIFY's dial
+// check will ask at the connect (discovery.SubscribedFrom(...).Permits),
+// so the two cannot disagree:
 //
-//   - the unspecified address, never (a connect to it reaches this
-//     machine);
 //   - a loopback or link-local address, only when it is the address the
 //     SUBSCRIBE came from (backlog B39). A loopback address names the
 //     host that SENDS the NOTIFY, so a subscriber at another address
@@ -685,29 +685,35 @@ func firstCallbackURL(header string) string {
 //     control point on this host that subscribes over loopback calls
 //     back on its own loopback address, and a zero-configuration one on
 //     its own link-local address;
+//   - the unspecified address and a cloud metadata address (#1074's
+//     list, some of them private or public), never.
+//
+// Then, of what the approval admits:
+//
 //   - a private (RFC 1918 / ULA) address, from any source: held, see
 //     callbackHostMatchesSource;
 //   - any other address, only when it is the SUBSCRIBE's source.
-//
-// The source is compared unmapped and without its zone, as the dial check
-// in newNotifyClient's client compares it, so the two cannot disagree.
 func callbackHostAllowed(host, remoteAddr string) bool {
 	cb, ok := callbackAddr(host)
-	switch {
-	case !ok, cb.IsUnspecified():
+	if !ok {
 		return false
-	case cb.IsLoopback(), cb.IsLinkLocalUnicast():
-		return cb == subscriberAddr(remoteAddr)
-	case cb.IsPrivate():
+	}
+	from := subscriberAddr(remoteAddr)
+	if !discovery.SubscribedFrom(from).Permits(cb) {
+		return false
+	}
+	if cb.IsLoopback() || cb.IsLinkLocalUnicast() || cb.IsPrivate() {
+		// A loopback or link-local one IS the source here: nothing else
+		// of that kind passed the approval.
 		return true
 	}
-	return cb == subscriberAddr(remoteAddr)
+	return cb == from
 }
 
 // callbackNamesThisHostOrLink reports whether a callback host is a
 // loopback or link-local literal: the kind callbackHostAllowed admits only
-// from the subscriber's own address, whose refusal noteCallbackRefusal
-// reports.
+// from the subscriber's own address (and a cloud metadata address among
+// them never), whose refusal noteCallbackRefusal reports.
 func callbackNamesThisHostOrLink(host string) bool {
 	cb, ok := callbackAddr(host)
 	return ok && (cb.IsLoopback() || cb.IsLinkLocalUnicast())
@@ -740,12 +746,13 @@ func subscriberAddr(remoteAddr string) netip.Addr {
 // discovery.NewDeviceFetchClient: the one the SSDP clients fetch a device
 // with. It follows no redirect (a 3xx comes back as the answer), uses no
 // proxy and keeps no connection alive, and every connect goes through its
-// dial check, which allows this machine or a link-local address only when
-// it is the address in the request's context; fireInitialNotify puts the
-// SUBSCRIBE's source there (discovery.WithRequestSource). A callback is an
-// IP literal, so the connect targets the address callbackHostAllowed judged
-// and the two checks agree; the dial check is the one that still holds if
-// a later change lets a name or a redirect through the first.
+// dial check, which allows this machine or a link-local address only as the
+// approval in the request's context permits; fireInitialNotify puts the
+// SUBSCRIBE's there (discovery.WithDialApproval, discovery.SubscribedFrom).
+// A callback is an IP literal, so the connect targets the address
+// callbackHostAllowed judged by that same approval, and the two agree; the
+// dial check is the one that still holds if a later change lets a name or
+// a redirect through the first.
 func newNotifyClient() *http.Client {
 	return discovery.NewDeviceFetchClient(genaInitialNotifyTimeout)
 }
@@ -805,7 +812,8 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 
 // noteCallbackRefusal logs, once per (callbackHost, sourceIP) pair and
 // within the same bound, a callback refused because it names this machine
-// or a link-local address that is not the subscriber's own: B39's rule.
+// or a link-local address that is not the subscriber's own, or a cloud
+// metadata address among them: B39's rule.
 // Most such lines are a peer aiming the bridge's NOTIFY at this host or the
 // link. A real control point that needs one names itself here, which is
 // what a change to the rule would have to see, and it is why this is a
@@ -815,7 +823,7 @@ func (s *Server) noteCallbackRefusal(service, callbackHost, remoteAddr string) {
 	if !s.firstSighting("refused|" + callbackHost + "|" + sourceIPOf(remoteAddr)) {
 		return
 	}
-	s.log.Warn("GENA callback names this machine or a link-local address the SUBSCRIBE did not come from — initial NOTIFY not sent",
+	s.log.Warn("GENA callback on this machine or a link-local address refused — the NOTIFY goes only to the subscriber's own, never to a cloud metadata address",
 		slog.String("service", service),
 		slog.String("callbackHost", callbackHost),
 		slog.String("subscribeSource", sourceIPOf(remoteAddr)))

@@ -56,9 +56,9 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `FuzzValidateRelPath` (an accepted upload path meets every invariant the commit relies
   on), `FuzzAcceptedExt` (an audio extension is always accepted) and
   `FuzzParseDeviceDescription` (every service URL the parser keeps, re-parsed, is http(s)
-  with a host, stays on the description's host when discovered, and names this machine or a
-  link-local address only from a description URL that does too; it fuzzes the base URL as
-  well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
+  with a host, stays on the description's host when discovered, names this machine or a
+  link-local address only from a description URL that does too, and never names a cloud
+  metadata address; it fuzzes the base URL as well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
   them, and then "Twelve" and "Thirteen" that same day, as two more joined: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
@@ -2202,7 +2202,9 @@ no failing test — which is the shape to expect in this area.
   `CheckRedirect: ErrUseLastResponse` — without it a rogue LAN upstream can aim
   a `<res>` fetch at the bridge's own no-auth loopback admin API, reachable
   unauthenticated. A caller needing a different Content-Type wraps the writer;
-  don't change the package.
+  don't change the package. Its client dials through
+  `discovery.NewDeviceTransport` under the server's approval (the B36 bullet
+  below), with no kept-alive connections.
 - **A DISCOVERED description's service URLs stay on its own host** (external
   audit 2026-09-23, M3). `resolveServiceURL`
   (`internal/dlna/discovery/url_policy.go`) is the one home: every
@@ -2285,12 +2287,93 @@ no failing test — which is the shape to expect in this area.
   support the general rule (LOCATION host == source for every address, which
   would also bound names and tailnet addresses): multi-homed hosts and some
   NAS firmware are reported to break it, and a renderer has no escape hatch,
-  so **measure before tightening further**. **Not covered**: a HOSTNAME control
-  URL is resolved again at every later dial (the ingest's SOAP Browse, the
-  `upnpproxy` byte fetch), which a discovery-time check cannot pin, so DNS
-  rebinding can still steer a configured upstream's fetches; and a LOCATION
-  on a tailnet or public address is still fetched. The app's SSDP path has
-  no LOCATION-versus-source check either.
+  so **measure before tightening further**. **Not covered**: a LOCATION on a
+  tailnet or public address is still fetched, and the app's SSDP path has no
+  LOCATION-versus-source check either. (This bullet also said the later dials
+  of a HOSTNAME control URL were not covered; the next bullet covers them.)
+- **…and every LATER request to a device dials under the approval its URL
+  came with, because a NAME in it resolves again at each dial** (backlog B36,
+  2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, then on
+  `http.DefaultTransport`) and every `upnpproxy` byte fetch dialled the cached
+  control URL's host with no dial check, so a peer that passed discovery with
+  a name answering its own LAN address and then answered 127.0.0.1 took both
+  to the console, and the proxy relayed its 200 (measured, macOS and Linux:
+  `CONSOLE POST /ctl`, `CONSOLE GET /api/stats`). What approved a local
+  connect is `discovery.DialApproval`: `AnnouncedFrom(src)` (the packet's own
+  address, #1069's rule) or `OperatorChose(manualURL)` (every address of the
+  kind the URL's host names; **a NAME approves no local address**, so a manual
+  URL naming this host by its host name, which Debian maps to 127.0.1.1, is
+  refused; write `localhost`). It is recorded as `upnp.ServerInfo.DialApproval`
+  beside the control URL, and **`Upsert` keeps and replaces the two together,
+  never the approval alone**: a merged-alone approval outlives the URL it
+  came with, or pairs one writer's URL with another's approval.
+  `ResolveControlURL` and `LiveHost` return both from ONE lookup, and the
+  ingest and the proxy carry the approval in each request's context. **Every
+  client that sends a device a request is built on
+  `discovery.NewDeviceTransport`**: the dial check (it replaces any
+  `ControlContext` the dialer template carries), no proxy, **no kept-alive
+  connections**, no TLS dialer. The keep-alive rule is measured, not
+  argued: with the proxy's old pool a second fetch, approved only for a LAN
+  address, rode the first fetch's idle connection to 127.0.0.1 past the check
+  (`TestProxy_Serve_NeverCarriesARequestOnAConnectionAnotherApprovalOpened`),
+  and net/http also hands a connection dialed for one request to another
+  waiting one. Cost: about 65 µs a request on loopback, one round trip on a
+  LAN. **Declined, on evidence**: requiring SSDP control URLs to be IP
+  literals. Three devices on one LAN (#1069) are thin evidence against names,
+  UDA 1.1 says LOCATION hosts are "normally" literals, not always, the dial
+  check already covers the dangerous targets, and a literal can name a
+  tailnet host anyway (the previous bullet), so the rule would bound no third
+  host either. Tests resolve through `discovery.UseResolverForTest` (atomic)
+  and `internal/dnstest`, **never by replacing `net.DefaultResolver`**, which
+  every goroutine in the process reads unsynchronised. **Residual**: an SSDP
+  source is not authenticated, and a peer on the same L2 segment can send a
+  packet FROM a link-local address; the same-address exception then
+  approves exactly that address, for the description fetch and the later
+  dials, and never a cloud metadata one (the next bullet). A loopback source
+  is what RFC 1122 has a host discard from any other interface.
+- **…and no device's say-so and no approval reaches a cloud metadata
+  address** (CodeRabbit on #1074, 2026-09-28). The residual above said
+  169.254.169.254 was included: a packet spoofed from it approved it for the
+  description fetch and every later dial, whose answers the proxy relays to
+  the unauthenticated DLNA listener (a cloud VM's credentials, on IMDSv1).
+  `cloudMetadataAddrs` (`url_policy.go`) is the ONE list, from each
+  provider's documentation (AWS's IMDS, DNS, NTP, ECS and EKS Pod Identity
+  addresses in both families; the IPv6 metadata addresses of Google Cloud,
+  Oracle, Linode, OpenStack and Scaleway; Scaleway's and Tencent's IPv4
+  ones; Alibaba's 100.100.100.200; Azure's 168.63.129.16). `addrKind` names
+  them first (`hostMetadata`), so the string check (`LocationFromSource`),
+  the service-URL rule (`resolveServiceURL`, for every source) and the dial
+  check (`DialApproval.Permits`) refuse them whatever approved the request.
+  **Exact addresses, never a range**: a direct-cable device self-assigns
+  anywhere in 169.254/16 and fe80::/10, and a /24 around 169.254.169.254
+  would refuse one such device in 254 (the tests keep one at 169.254.7.7).
+  Ten of them are not link-local (the fd00::/8 ones, 100.100.100.200,
+  168.63.129.16) and were fetched on ANY device's say-so, exception or not.
+  A tailnet node may hold 100.100.100.200 (it is in 100.64/10, one address
+  in four million) and would lose its routed dials. The resolver's own DNS
+  connects do not pass the dial check, so Azure's DNS on 168.63.129.16 keeps
+  working. A manual upstream's own description fetch is not checked (the
+  operator's URL; upstream ingest is refused in public mode), and no later
+  dial of one reaches a metadata address. `TestCloudMetadataAddrsAreTheDocumentedOnes`
+  holds the list to its sources, and
+  `TestAPacketFromAMetadataAddressApprovesNoLaterDialThere` drives the chain
+  through the real ingest and proxy.
+- **A URL that names a port and no host (`https://:8443`) is not a URL of any
+  host, and Go dials it on THIS machine**, so every validator reads
+  `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
+  to every phone); the harvest credential endpoint answers 400
+  (`config.BaseURLNamesHost`); a configured enrich or harvest base URL of that
+  shape is WARNED about in `Normalize`, never refused, because it loaded
+  before and a refusal stops a bridge from starting after an update. **Don't
+  move the host test into `CanonicalHTTPSBase`'s reduction**: a hostless pin
+  would reduce to "" (unpinned) or, through `Validate`, refuse to load; as it
+  stands it pins to a value no accepted credential can carry. **A warning
+  about a configured URL logs its scheme and host alone**
+  (`urlOriginForLog`), never the value (review round 1 on #1074): an enrich
+  base accepts userinfo, so `http://user:password@:5000` reached the journal
+  whole, and a dropped custom endpoint was quoted whole, a parse failure
+  twice (the parse error quotes it). `url.URL.Redacted` is not enough: it
+  keeps a token written as the user name, and the query.
 - **…and a GENA callback on THIS machine or a link-local address gets the
   initial NOTIFY only when the SUBSCRIBE came from that address, and the
   NOTIFY follows no redirect** (backlog B39, 2026-09-28). The DLNA listener
@@ -2308,16 +2391,20 @@ no failing test — which is the shape to expect in this area.
   `GET /redirected` on the bridge's loopback). **It was the one client
   sending to a LAN peer's URL that followed redirects**: `upnpproxy`, both
   discovery dispatchers, the upstream SOAP client and the manual poller all
-  relay a 3xx. Now `callbackHostAllowed` takes a loopback or link-local
-  callback only when it IS the SUBSCRIBE's address (#1069's rule for a
-  LOCATION, and for the same reason: the subscriber's own address, never
-  "any address like it"; a loopback callback names the host that SENDS the
-  NOTIFY, and a link-local source proves nothing, since any device on the
-  segment can take one), never the unspecified address, and still a private
-  address from any source. The NOTIFY goes out through
+  relay a 3xx. Now `callbackHostAllowed` asks the NOTIFY's own dial approval
+  FIRST (`discovery.SubscribedFrom(src).Permits(cb)`, #1074's
+  `DialApproval` with the SUBSCRIBE as the approving peer), so the guard and
+  the dial check cannot disagree: a loopback or link-local callback only
+  when it IS the SUBSCRIBE's address (#1069's rule for a LOCATION, and for
+  the same reason: the subscriber's own address, never "any address like
+  it"; a loopback callback names the host that SENDS the NOTIFY, and a
+  link-local source proves nothing, since any device on the segment can take
+  one), never the unspecified address or a cloud metadata address (three of
+  those are private or public, and were admitted before), and still a
+  private address from any source. The NOTIFY goes out through
   `discovery.NewDeviceFetchClient` (no redirect, no proxy, no kept-alive
-  connection, the dial check) with the SUBSCRIBE's address in the context
-  (`discovery.WithRequestSource`), so each layer holds without the other:
+  connection, the dial check) under that approval
+  (`discovery.WithDialApproval`), so each layer holds without the other:
   with the predicate reverted, `TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe`
   stays green on the dial check, and with redirects followed,
   `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` does;

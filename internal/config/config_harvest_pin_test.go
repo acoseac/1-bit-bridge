@@ -21,6 +21,11 @@ func TestAtlasHarvestBaseURLValidation(t *testing.T) {
 		{"path is refused", "https://atlas.example/v1", "", true},
 		{"query is refused", "https://atlas.example?a=b", "", true},
 		{"http is refused", "http://atlas.example", "", true},
+		// A port and no host still pins, to a value the credential endpoint
+		// refuses on the wire, so it matches nothing: never "unpinned", and
+		// never a load error that stops a bridge that loaded it before
+		// (backlog B36; Normalize warns about it).
+		{"a port with no host pins to nothing", "https://:8443", "https://:8443", false},
 		{"no scheme is refused", "atlas.example", "", true},
 		{"garbage is refused", "://nope", "", true},
 	} {

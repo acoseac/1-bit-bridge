@@ -86,7 +86,7 @@ type callbackNote struct {
 var callbackNotes = []callbackNote{
 	{"divergence", "192.168.1.250", "GENA callback host differs",
 		func(s *Server, host, remoteAddr string) { s.noteCallbackDivergence("cds", host, remoteAddr) }},
-	{"refusal", "127.0.0.1", "GENA callback names this machine",
+	{"refusal", "127.0.0.1", "GENA callback on this machine or a link-local address refused",
 		func(s *Server, host, remoteAddr string) { s.noteCallbackRefusal("cds", host, remoteAddr) }},
 }
 

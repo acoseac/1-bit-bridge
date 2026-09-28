@@ -408,6 +408,11 @@ func Test_callbackHostAllowed(t *testing.T) {
 		{"ipv6_unspecified", "::", "[::]:5", false},
 		{"localhost_name", "localhost", "127.0.0.1:5", false},
 		{"numeric_spelling", "127.1", "127.0.0.1:5", false},
+		// A cloud metadata address, never: the NOTIFY's dial check refuses
+		// every connect to one (#1074), so the guard refuses it first.
+		{"metadata_from_itself", "169.254.169.254", "169.254.169.254:5", false},
+		{"metadata_ula_from_lan_source", "fd00:ec2::254", "192.168.1.9:5", false},
+		{"metadata_public_from_itself", "168.63.129.16", "168.63.129.16:5", false},
 
 		// Unchanged by B39.
 		{"rfc1918_192", "192.168.1.4", "8.8.8.8:5", true},
