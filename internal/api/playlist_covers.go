@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -116,7 +117,7 @@ func (s *Server) serveCover(w http.ResponseWriter, r *http.Request, scope, key s
 		return
 	}
 	path := manifest.PlaylistCoverPath(cfg.DataDir, scope, key, "jpg")
-	f, err := os.Open(path)
+	f, info, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "not_found", "no custom cover for this item")
@@ -127,12 +128,6 @@ func (s *Server) serveCover(w http.ResponseWriter, r *http.Request, scope, key s
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat playlist cover", "scope", scope, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
-		return
-	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)

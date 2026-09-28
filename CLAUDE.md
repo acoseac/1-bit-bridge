@@ -399,7 +399,8 @@ lost my library."
   never one per link: a mount takes every link into it at once. **A link to a
   DIRECTORY is not a track**, whatever its name, and the walk still follows no
   directory link (loops). **Nor is a named pipe, a socket or a device, or a
-  link to one** (`notAFile`): whatever stat the row would carry must describe
+  link to one** (`fsutil.NotAFile`, the list every byte route refuses by too:
+  the next bullet): whatever stat the row would carry must describe
   something that opens as a file, and a regular file whose own stat says
   otherwise is judged through. A worker opens what the walk hands it, and
   opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
@@ -431,6 +432,44 @@ lost my library."
   that is itself a symlink to a directory is never walked** (`WalkDir` lstats
   its root, so it visits one non-directory entry and stops: 0 rows, measured),
   which is not this rule's shape.
+- **…and a route that serves a file's bytes opens it with
+  `fsutil.OpenAsFile`, never `os.Open`** (2026-09-28, B46). Keeping such
+  entries out of the manifest stopped nothing a client names:
+  `/v1/download`, `/v1/read`, the player's audio and download routes and the
+  DLNA file route opened the path with `os.Open`, and opening a named pipe
+  waits for a writer with nothing that can cancel the wait (a blocked
+  open(2) cannot be interrupted from Go). Measured over the real
+  `api.Server`: the client gave up at 2 s, and both handlers, and the two
+  updater sessions they had begun (a pinned one keeps auto-install
+  deferring on every poll), stayed until a writer came 7 s in; `/v1/stat`
+  and `/v1/list` answered at once. A link to `/dev/null` was served as an
+  empty 200, a socket as a 500. The DLNA route serves the MANIFEST's path,
+  and a row outlives its file until the scan that reaps it. **One list**:
+  `fsutil.NotAFile` is #1070's, moved out of the scanner, so the manifest and
+  the routes cannot disagree about what a track can be; never a second copy.
+  `OpenAsFile` opens `O_NONBLOCK|O_NOCTTY` on unix, refuses by the OPENED
+  file's own stat (so a path replaced after a caller's stat is judged as
+  what it is now), and clears `O_NONBLOCK` again for a file, because a FUSE
+  daemon is handed the flags with every read. **Its EWOULDBLOCK fallback to
+  a plain open is load-bearing**: a nonblocking open of a file under another
+  process's write lease (Samba's kernel oplocks, an NFS delegation) fails
+  where a plain open waits for the break (up to lease-break-time, 45 s),
+  and a FIFO's nonblocking open never answers EWOULDBLOCK. The
+  resolver-backed routes ALSO refuse on the resolver's stat before any open:
+  that is what refuses a socket (the kernel refuses its open itself,
+  EOPNOTSUPP on macOS, ENXIO on Linux, so `OpenAsFile` cannot name it) and
+  keeps a device from being opened at all. The answers reuse existing codes,
+  so there is no wire change and no Mirror-PR: 400 `bad_request` "path is a
+  <kind>, not a file" (what a directory already got), 400 `bad_path` on the
+  player, 404 on DLNA, 410 `variant_missing_on_disk` for a rendition whose
+  sidecar is not a file. **`TestEveryServedFileIsOpenedAsAFile` fails on any
+  production declaration that passes `http.ServeContent` a file it opened
+  with `os.Open`/`os.OpenFile`**, so the cache routes (artwork, booklets,
+  playlist covers, waveforms) open through it too and the rule has no
+  exceptions; it reads one declaration at a time, so an open in one function
+  served from another goes unseen. Still `os.Open`: the scanner's
+  extractors, which open what the walk judged a moment earlier (a swap in
+  between is a race), and the background jobs that open manifest paths.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs

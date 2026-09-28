@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // artworkPendingRetryAfterSeconds is the value the handlers set on
@@ -62,7 +63,7 @@ var artworkServeSizes = []int{1200, 500, 250}
 // serve-size ladder, with the requested size deduped out of the ladder
 // portion — when the request names a ladder size (500 is every current
 // client), a naive prepend would retry the same path twice on a full
-// cache miss (one redundant os.Open per miss).
+// cache miss (one redundant open per miss).
 func artworkLadderCandidates(size int) []int {
 	candidates := make([]int, 0, len(artworkServeSizes)+1)
 	candidates = append(candidates, size)
@@ -233,7 +234,7 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := enrich.ArtistImagePath(s.artworkDirs.ArtworkCacheDir(), mbid)
-	f, err := os.Open(path)
+	f, info, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Three-way miss split (see MBIDProbe): 202 only while
@@ -260,12 +261,6 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat artist image", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
-		return
-	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Header().Set("ETag", artworkETag(info))
@@ -361,9 +356,10 @@ func (s *Server) ServeArtwork(w http.ResponseWriter, r *http.Request, key string
 	// size gets whichever right-sized file exists rather than a
 	// misleading per-size 404.
 	var f *os.File
+	var info os.FileInfo
 	for _, candidate := range artworkLadderCandidates(size) {
 		path := enrich.ArtworkCachePath(cacheDir, mbid, candidate)
-		f, err = os.Open(path)
+		f, info, err = fsutil.OpenAsFile(path)
 		if err == nil {
 			break
 		}
@@ -391,12 +387,6 @@ func (s *Server) ServeArtwork(w http.ResponseWriter, r *http.Request, key string
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		logger.Error("stat release artwork", "mbid", mbid, "size", size, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
-		return
-	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Header().Set("ETag", artworkETag(info))
