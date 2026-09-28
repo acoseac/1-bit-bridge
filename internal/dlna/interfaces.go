@@ -15,8 +15,9 @@ import (
 type EligibilityOpts struct {
 	// TsnetIfaceName is the OS-level interface name of the Tailscale
 	// tsnet socket (e.g. "utun7" on macOS, "tailscale0" on Linux).
-	// Empty disables tsnet binding (the production default — operators
-	// must explicitly flip `cfg.DLNA.AllowTsnet`).
+	// Empty disables tsnet binding, and it is empty in production: no
+	// caller passes a name yet, so `cfg.DLNA.AllowTsnet` opts nothing in
+	// (cmd/bridge/dlna_wiring.go).
 	TsnetIfaceName string
 }
 
