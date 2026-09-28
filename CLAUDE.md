@@ -4859,7 +4859,17 @@ its twin.** The top list is older, shorter, and read first.
   endpoint answer, the folder view's rule, since `/api/library/browse`
   carries no feature state. The #1060 AST sweep counts a call of
   `optimizeActive` as reading the CarPlay switch. A save from either tray
-  redraws the panel: the next bullet.
+  redraws the panel: the next bullet. **The panel-wide note must close
+  wherever the upscale gate does**, because `Deps.OptimizeActive` includes
+  that gate (the flag and a usable sox: `carPlayOptimizeActiveFn`, under The
+  CLI and the serve wiring), and a block the panel-wide note does not
+  show falls through to the CarPlay row's "switched off". The summary's
+  `soxAvailable` is therefore `Server.soxUsable`, the gate's sox half
+  (found, and FLAC when the build's formats are known): with the precheck
+  alone a sox without FLAC read as available, and the panel named a switch
+  that was on while the hi-res Generate stayed live over a refusal
+  (`TestTheVariantSummaryReadsSoxAsTheGateDoes`, and the panel test's
+  fourth state).
 - **A tray redraws the page only through its spec's `onSaved`, and a page
   redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
   #1068). A feature tray saves one switch and repaints nothing else, so
