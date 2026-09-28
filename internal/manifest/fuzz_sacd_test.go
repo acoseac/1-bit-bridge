@@ -235,7 +235,7 @@ func FuzzParseSACDArea(f *testing.F) {
 			b = b[:1<<20]
 		}
 		for _, g := range []sacdGeometry{sacdPlain2048, sacdRaw2064} {
-			_, _ = parseSACDArea(sacdFuzzImage{base: g.payloadOffset, data: b}, g, 0)
+			_, _, _ = parseSACDArea(sacdFuzzImage{base: g.payloadOffset, data: b}, g, 0)
 		}
 	})
 }
@@ -266,7 +266,10 @@ func TestSACDFuzzSeedsReachTheParser(t *testing.T) {
 	})
 
 	t.Run("area seed parses to a stereo area with a track", func(t *testing.T) {
-		area, ok := parseSACDArea(sacdFuzzImage{data: sacdSeedArea()}, sacdPlain2048, 0)
+		area, ok, err := parseSACDArea(sacdFuzzImage{data: sacdSeedArea()}, sacdPlain2048, 0)
+		if err != nil {
+			t.Fatalf("seed area TOC: a read failed on an in-memory image: %v", err)
+		}
 		if !ok {
 			t.Fatal("seed area TOC was refused — it never reaches the track " +
 				"table or the TTxt bank walk, which is the arithmetic this " +

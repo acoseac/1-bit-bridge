@@ -21011,3 +21011,183 @@ panic in the decode path), but the cost was persistent.
   the next render waited the full 2 s and answered `context deadline exceeded`.
   The negative control on the committed tree (the defer removed) failed the same
   two assertions.
+
+## 2026-09-28 — a failed SACD read keeps the album's rows instead of retiring them
+
+`processSACDISO` retires every virtual row under an `.iso` container that a
+fresh expansion no longer mints, at threshold 1, through
+`IncrementMissingTracksAndDeleteAtThreshold`, which journals each deletion:
+a tombstone reaches every paired device. When the expansion answers
+`(nil, nil)`, that is every row. Three reads in `sacd.go` answered `(nil, nil)`
+when they FAILED:
+
+1. the geometry probe in `parseSACDTOC`, `if n, _ := r.ReadAt(probe, …); n ==
+   8 && …`: the error dropped, no signature found, `return nil, nil // not an
+   SACD image`;
+2. `parseSACDArea`, which folded a failed `sacdReadSectors` into `ok=false`, so
+   no copy yielded a stereo area and `ExpandSACDISO` returned `(nil, nil)` on
+   `!toc.hasStereo`;
+3. the DST probe, `if n, _ := r.ReadAt(probe, …); n == 1 {…}`: a failed read
+   left `stereoIsDST` false, and `(nil, nil)` followed.
+
+So an EIO, ETIMEDOUT or ESTALE from a NAS still serving the file deleted the
+album's rows and tombstoned them to every device. The skip gate re-enters the
+path on any size or mtime change and on every `ExtractorVersion` bump, so a
+flaky mount could do it on any such scan. The master-TOC loop already failed
+closed ("no readable master TOC copy") and is unchanged. The iOS reader
+(`SACDISOFormat.swift`) already made the split: its `ByteReader` contract
+returns short data past EOF and THROWS a transport failure, which propagates
+out of `load` as transient and demotes nothing.
+
+### Decisions
+
+- **Only a COMPLETED read may answer.** `sacdReadOutcome(n, want, err)` is the
+  one classifier. A read is full when `n >= want`, judged BEFORE the error,
+  because `io.ReaderAt` permits `(len(p), io.EOF)`. A short read ending in
+  `io.EOF` or `io.ErrUnexpectedEOF` (`errors.Is`) is the end of the file:
+  structural, so a truncated image still answers `(nil, nil)` and a re-rip
+  that stopped being an SACD still retires. Any other short read is a failure,
+  a nil error included (`errSACDShortRead`: it breaks the `io.ReaderAt`
+  contract, so it says nothing about the file). `sacdReadSectors` takes the
+  same classifier; its one behaviour change is `(short, nil)`, which it used to
+  read as the end of the file.
+- **A phase keeps its FIRST failure and returns it only if it ends with
+  nothing found**: the geometry probe over its six positions, the area loop
+  over each pointer's two copies (`parseSACDArea` returns `(area, ok, err)`,
+  err only for a read failure), and the DST probe, one read. Returning at the
+  first failure would also keep the rows, and would lose every disc with one
+  bad sector on the copy the doubled TOC exists to stand in for (NC13, NC14).
+- **The in-motion guard** (`expandSACDContainer`, `sacdContainerChange`). A
+  container being written in place (cp over it, a download to its final name,
+  a NAS sync) reads as a file that ends early, which is a COMPLETED read and
+  retires as surely as a junk image. Two comparisons, each between two stats
+  that describe one thing the same way: the handle's stat, taken before the
+  first read, against a stat of the path after it (`os.SameFile`, size,
+  mtime); and the walk's stat against an lstat of the path after it (size,
+  mtime), which covers the time between the walk and the open, long because
+  the walk runs ahead of the workers. Any difference, or a stat that fails,
+  skips the retire AND the upsert: a torn read's tracks would carry the walk's
+  size and mtime over content from another version, and the next scan
+  re-expands either way.
+- **Rejected: `os.SameFile(pi.info, post)`**, the obvious form. `pi.info` is
+  `fs.DirEntry.Info()`, and on Windows that is the directory listing's
+  `fileStat` (Go 1.26.6, `os/dir_windows.go`). On a volume without
+  `FILE_SUPPORTS_OBJECT_IDS` (FAT, exFAT) the listing carries no file index and
+  no path to load one from, so `sameFile` compares zero with the file's real
+  index and answers false for every file: every container on an exFAT drive
+  would skip, forever. Read from the source; this host cannot show it. The
+  handle's stat (`File.Stat`, `GetFileInformationByHandle`, the index set at
+  once) against a path's stat (the index loaded at `SameFile` time, from the
+  same call on a fresh handle) compares like with like.
+- **Rejected: the walk's stat against a STAT after the read.** The walk's is
+  an lstat (`DirEntry.Info()` on Unix; on Windows a directory entry, which
+  likewise describes a link itself), so every symlinked container would read
+  as moved and never expand (NC9, `TestScanner_SACDSymlinkedContainer_Expands`).
+- **The path is stat'ed after the handle is closed.** The zero-access open
+  `os.SameFile` makes on Windows skips the share check, so holding the handle
+  should not matter; closing first means that argument never has to be right.
+- **Residuals, in the docblock**: an in-place overwrite that keeps size and
+  inode inside one coarse mtime tick (FAT's 2 s); a write to a symlinked
+  container's target before the open (the walk's stat is the link's own); and
+  where a listing and a stat of an unchanged file disagree (Windows documents
+  that a listing's attributes on NTFS may lag the file's), the container reads
+  as changed and keeps its rows, unwritten, until they agree.
+- **The "sacd expand" line** names `pi.rel` and rewrites the absolute path an
+  `*os.File` read error carries (`sacdLibraryRelative`), #1055's rule. It was
+  one of the older lines #1055 disclosed rather than fixed; it is the line a
+  NAS read failure lands on now, where the failure used to retire rows under
+  a line that already named `pi.rel`.
+- **No `ExtractorVersion` bump.** Every readable file expands byte-identically,
+  and a container whose rows the old code retired has no representative row,
+  so the skip gate re-expands it on the next scan regardless. A bump would
+  re-expand every container and re-upsert every virtual row (that leg has no
+  diff-guard, the v17 entry records), and the upsert's conflict arm sets
+  `enriched_at = 0` and advances `indexed_at`: a re-enrichment wave and a delta
+  to every device for rows that do not change. #779's note that its bump
+  "makes any FUTURE sacd.go fix re-expand" says what a bump does, not that
+  every sacd.go change needs one.
+- **The opener is a per-scanner seam** (`Scanner.openSACD`, nil means
+  `os.Open`), not a package var, per the 2026-09-09 export-cap lesson.
+  `ExpandSACDISO` stays as open + `expandSACD` for callers that have a path;
+  the scanner no longer calls it.
+
+### Tests and controls
+
+- `sacd_read_failure_test.go`: `TestSACDExpand_AReadThatDidNotCompleteIsAnError`
+  (each failure site, and short reads with and without an error, come back as
+  an error wrapping what failed; every case asserts a fault was reached),
+  `TestSACDExpand_AFailedCopyFallsBackToTheNext` (an unreadable 510 master copy
+  and an unreadable first area-TOC copy still expand), and
+  `TestSACDExpand_AReadThatStopsAtTheEndIsStillAnAnswer` (images cut before the
+  area TOC and before the first audio sector answer `(nil, nil)`, as EOF and as
+  ErrUnexpectedEOF; a reader that returns io.EOF beside every full read still
+  expands).
+- `scanner_sacd_read_failure_test.go`: `TestScanner_SACDReadFailure_RetiresNothing`
+  (per site: both rows remain, no tombstone in `DeletedSince` or in the
+  `manifest_deletions` table, the first row keeps the initial scan's mtime so
+  nothing was rewritten, and one "sacd expand" line names the container
+  library-relative); `TestScanner_SACDContainerChangingDuringTheScan_KeepsItsRows`
+  (a write during the read, a write after the walk and idle during the read,
+  and a same-size, same-mtime rename over the path during the read; each keeps
+  the rows and logs the arm that caught it; the rename case skips on Windows,
+  where `os.Open` shares no DELETE access and the rename is refused);
+  `TestSACDContainerChange` (every arm alone, from real stats, since
+  `os.SameFile` answers only for the platform's own FileInfo);
+  `TestScanner_SACDSymlinkedContainer_Expands`; and the positive control
+  `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` (a container
+  read whole as junk retires both rows with both tombstones, so the
+  "untouched" assertions can see a retire when one happens). Tombstones are
+  read from the epoch, not from a `time.Now()` taken before the rescan: the
+  initial scan journals none, and a Windows clock tick could put the retire in
+  the same instant as the bound (`DeletedSince` is strictly after).
+- Red-first by negative control on the committed tree (the scanner tests
+  cannot run on main, which has no seam), each run with `-count=1` and each
+  turning exactly the predicted tests red:
+  - NC1, the geometry probe swallowing its failure: the three probe cases and
+    the scanner's probe case (rows retired).
+  - NC2, the area loop swallowing its failure: the area case and the scanner's
+    area case (rows retired).
+  - NC3, the DST probe swallowing its failure: the DST case and the scanner's
+    DST case (rows retired).
+  - NC4, `sacdReadOutcome` never failing (the old `n, _ :=` everywhere): all
+    five unit failure cases and all three scanner cases.
+  - NC5, the in-motion guard removed: all three in-motion cases (rows retired).
+  - NC6, the walk arm removed: the walk-window case (rows retired) and two
+    table rows.
+  - NC7, the during-read arm removed: the during-read case through its log
+    assertion (the walk arm still kept the rows, as predicted) and two table
+    rows. The table test is what isolates this arm.
+  - NC8, the identity arm removed: the rename case (rows retired) and the
+    table's identity row. That row first used a file with another mtime, which
+    the during-read arm caught; it now matches `a0`'s size and mtime, so the
+    row differs in identity alone (`change = ""` under NC8).
+  - NC9, the walk's stat against a stat instead of the lstat: the symlinked
+    container never expands, and the table's symlink case.
+  - NC10, `(short, nil)` read as the end of the file: the no-error short read.
+  - NC11, the error judged before the byte count: the io.EOF-beside-full-reads
+    case.
+  - NC12, `io.ErrUnexpectedEOF` not the end: the two ErrUnexpectedEOF cuts.
+  - NC13 and NC14, the geometry and area phases returning their first failure
+    at once: the master-copy and the area-copy fallback cases, one each.
+  - NC15, the raw error logged: the three scanner failure cases, through the
+    library-relative assertion.
+- `go test -count=1 -race ./internal/manifest/ -run 'SACD|Sacd|Scanner'` (69
+  tests): ok, 40.8 s.
+
+### Fuzz
+
+Run after the change, before the PR, at `-fuzztime 60s -fuzzminimizetime 1s
+-parallel 4` (four workers, the host being shared): `FuzzParseSACDTOC`
+603,027 execs, 110 new interesting, no crasher; `FuzzParseSACDArea` 710,384
+execs, 103 new interesting, no crasher. Nothing to commit under
+`testdata/fuzz/`.
+
+### Out of scope, noticed
+
+- A symlinked container's virtual rows carry the LINK's size and mtime:
+  `pi.info` is an lstat and the expansion stamps it (`Size: size, // the
+  CONTAINER's size`). The generic path stamps every symlinked file the same
+  way. Whether the app reads a virtual row's `size` as the container's byte
+  count for its ranged reads was not checked.
+- The fuzz targets read through `sacdFuzzImage`, which never fails a read, so
+  they do not reach the new failure paths; the unit tests do.

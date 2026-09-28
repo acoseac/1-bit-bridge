@@ -285,6 +285,45 @@ lost my library."
   reap ahead of it and reaped live rows of a case-twin directory during a
   permission flap; each new classification branch is a fresh chance to delete
   rows the walk never observed.
+- **…and a read that did not complete is the same case: only a COMPLETED read
+  may answer "not an SACD"** (2026-09-28). `processSACDISO` retires every
+  virtual row under an `.iso` container at threshold 1, journaled (a tombstone
+  to every paired device), whenever the expansion answers `(nil, nil)`, and
+  three reads in `sacd.go` answered exactly that when they FAILED: the
+  master-signature probe and the DST probe dropped their error (`n, _ :=`),
+  and `parseSACDArea` folded a failed area-TOC read into `ok=false`. An EIO,
+  ETIMEDOUT or ESTALE from a NAS deleted the album while the file sat on
+  disk, on any scan that missed the skip gate (a size or mtime change, every
+  `ExtractorVersion` bump). `sacdReadOutcome` is the rule: a read is full when
+  it returned the bytes the parse needs, judged BEFORE its error
+  (`io.ReaderAt` permits `(len(p), io.EOF)`); a short read ending in `io.EOF`
+  or `io.ErrUnexpectedEOF` is the end of the file, structural, so a truncated
+  image still answers `(nil, nil)`; any other short read, a nil error
+  included, is an error, and an error retires nothing. Each phase keeps its
+  FIRST failure and returns it only if it ends with nothing found, so one bad
+  copy still expands from the next (the doubled-TOC design); `parseSACDArea`
+  returns `(area, ok, err)`, err only for a read. The iOS reader makes the
+  same split (transport errors throw, past-EOF reads come back short). **A
+  container written in place reads as one that ends early, which IS a
+  completed read**, so the scanner also skips, retiring and writing nothing,
+  a container that changed during the scan (`expandSACDContainer`): the
+  handle's stat before the first read against a stat of the path after it
+  (`os.SameFile`, size, mtime), and the walk's stat against an LSTAT after it
+  (size, mtime). **Never `os.SameFile` against the walk's stat**: on Windows
+  a directory entry carries no file index on FAT or exFAT, so every container
+  there would skip, forever. **Never compare the walk's stat with a stat**:
+  the walk's is an lstat, so every symlinked container would read as moved
+  (`TestScanner_SACDSymlinkedContainer_Expands`). Residual: an in-place
+  overwrite that keeps size and inode inside one coarse mtime tick (FAT's
+  2 s). **No `ExtractorVersion` bump for this**: readable files expand
+  byte-identically, a wrongly retired container has no representative row so
+  the gate re-expands it anyway, and a bump re-upserts every virtual row (that
+  leg has no diff-guard). `TestScanner_SACDReadFailure_RetiresNothing` (a
+  case per site) and `TestScanner_SACDContainerChangingDuringTheScan_KeepsItsRows`
+  (a case per arm) drive it through a per-scanner opener seam
+  (`Scanner.openSACD`), and
+  `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` is the positive
+  control: a container read whole as junk still retires, with tombstones.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
