@@ -111,7 +111,17 @@ func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
 	if !ok {
 		t.Fatalf("default dispatcher = %T, want *HTTPClientDispatcher", c.dispatcher)
 	}
-	resp, err := disp.Client.Get(redirector.URL)
+	// Both servers listen on 127.0.0.1, which the client's dial check
+	// refuses unless the announcement came from there; say it did, so the
+	// redirect (which would be followed to the same address) is what this
+	// test measures.
+	req, err := http.NewRequestWithContext(
+		WithAnnouncementSource(context.Background(), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}),
+		http.MethodGet, redirector.URL, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := disp.Client.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
