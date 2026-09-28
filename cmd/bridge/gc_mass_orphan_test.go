@@ -356,7 +356,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	writeFixtureFile(t, filepath.Join(sub, "child.flac"), 1)
 	stderr.Reset()
 	_, _, failed, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
-		integrity.SidecarInventory{OrphanPaths: []string{sub}})
+		integrity.SidecarInventory{OrphanPaths: []string{sub}, OrphanWalkedPaths: []string{sub}})
 	if failed != 1 {
 		t.Errorf("a genuine remove failure was swallowed (failed=%d): %s", failed, stderr.String())
 	}

@@ -2,14 +2,27 @@ package integrity
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
+
+// sweepPercent is the mass-orphan threshold the sweeper tests run under:
+// the shipped default, taken from config rather than retyped, so a change
+// to it re-asks these tests at the value bridges actually run (the #940
+// property test's rule).
+const sweepPercent = config.DefaultVariantSweepMaxDeletePercent
 
 // fakeSidecarLister is the test-side SidecarLister implementation.
 // Returns a snapshot of the configured `known` set; thread-safe
@@ -31,7 +44,7 @@ type fakeSidecarLister struct {
 // The path names no file on disk, deliberately: a `track_variants` row whose
 // sidecar is gone is a real state (it is what the REVERSE sweeper exists for),
 // and seeding an actual file would add an entry to the walk and perturb the
-// chunk-cap arithmetic the caller is measuring.
+// counts the caller is measuring.
 func withLiveRow(outputDir string) map[string]struct{} {
 	return map[string]struct{}{
 		filepath.Join(outputDir, "live-row.upscaled-v1-96000-24.flac"): {},
@@ -54,6 +67,17 @@ func (f *fakeSidecarLister) AllVariants(ctx context.Context) ([]VariantSnapshot,
 	return out, nil
 }
 
+// pathSet is a known set naming each of paths, for fakeSidecarLister.
+func pathSet(paths ...[]string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, group := range paths {
+		for _, p := range group {
+			out[p] = struct{}{}
+		}
+	}
+	return out
+}
+
 // seedTestSidecarTree writes `n` `.flac` files into outputDir, named
 // `<prefix><i>.flac` with `i` left-padded to 4 digits for lexical
 // ordering predictability. Returns the absolute paths in lexical
@@ -65,8 +89,7 @@ func seedTestSidecarTree(t *testing.T, outputDir, prefix string, n int) []string
 	}
 	paths := make([]string, n)
 	for i := 0; i < n; i++ {
-		// Pad to 4 digits so 100+ entries sort lexically correctly
-		// (test files use up to 250 entries for the chunk-cap case).
+		// Pad to 4 digits so up to 10,000 entries sort lexically.
 		name := prefix
 		istr := strconv.Itoa(i)
 		for len(istr) < 4 {
@@ -83,32 +106,6 @@ func seedTestSidecarTree(t *testing.T, outputDir, prefix string, n int) []string
 	return paths
 }
 
-// seedSidecarAlbum writes n `.flac` files into outputDir/<album>/, named
-// 0i.flac, and returns their absolute paths. Companion to seedTestSidecarTree
-// for NESTED-tree tests (the flat helper can't exercise directory SkipDir).
-// Extracted from the SkipDir test to keep that test's cognitive complexity
-// under the gate.
-func seedSidecarAlbum(t *testing.T, outputDir, album string, n int) []string {
-	t.Helper()
-	dir := filepath.Join(outputDir, album)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
-	out := make([]string, n)
-	for i := 0; i < n; i++ {
-		p := filepath.Join(dir, "0"+strconv.Itoa(i)+".flac")
-		if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
-			t.Fatalf("write %s: %v", p, err)
-		}
-		out[i] = p
-	}
-	return out
-}
-
-// TestShouldConsiderSidecarFile pins the pure file-type predicate.
-// `.flac` is the only extension considered today; mismatched
-// extensions (incl. case variation) are skipped.
-
 // ageFixtures back-dates every file under dir so the sweeper's
 // grace-period check sees them as settled.
 //
@@ -119,8 +116,7 @@ func seedSidecarAlbum(t *testing.T, outputDir, album string, n int) []string {
 // ~15ms, while Go's time.Now() reads a high-resolution source — so a
 // just-written file can carry a stamp AHEAD of a tickStart sampled
 // afterwards. The difference goes negative, every candidate looks
-// too-fresh, and the sweeper correctly skips all of them
-// (`examined=1 unlinked=0`).
+// too-fresh, and the sweeper correctly skips all of them.
 //
 // Back-dating states the precondition directly instead of inferring it
 // from a clock race, which is both portable and a better description of
@@ -141,6 +137,64 @@ func ageFixtures(t *testing.T, dir string) {
 	}
 }
 
+// strandedTree is #940's shape at a test's scale: 20 rows, each with its
+// file, over 1,000 files no row names. Returns the directory and the live
+// rows' paths.
+func strandedTree(t *testing.T) (string, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	live := seedTestSidecarTree(t, dir, "live-", 20)
+	seedTestSidecarTree(t, dir, "stranded-", 1000)
+	ageFixtures(t, dir)
+	return dir, live
+}
+
+// countFiles is how many regular files dir holds, recursively.
+func countFiles(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			n++
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("count files under %q: %v", dir, err)
+	}
+	return n
+}
+
+// switchableLister answers AllVariants with its fields as they are at the
+// call, so a test can fail or empty the listing for one tick. The ticks it
+// serves run on the test goroutine, so it needs no lock.
+type switchableLister struct {
+	rows []VariantSnapshot
+	err  error
+}
+
+func (l *switchableLister) AllVariants(context.Context) ([]VariantSnapshot, error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	return l.rows, nil
+}
+
+// rowsNaming is one row with no source identity per path.
+func rowsNaming(paths ...[]string) []VariantSnapshot {
+	var out []VariantSnapshot
+	for _, group := range paths {
+		for _, p := range group {
+			out = append(out, VariantSnapshot{SidecarPath: p})
+		}
+	}
+	return out
+}
+
+// TestShouldConsiderSidecarFile pins the pure file-type predicate.
+// `.flac` is the only extension considered today; mismatched
+// extensions (incl. case variation) are skipped. TakeSidecarInventory
+// hands it BASENAMES, so the bare names must answer as their paths do.
 func TestShouldConsiderSidecarFile(t *testing.T) {
 	cases := []struct {
 		path string
@@ -153,6 +207,9 @@ func TestShouldConsiderSidecarFile(t *testing.T) {
 		{"/tmp/transcoded/Album/01.wav", false},
 		{"/tmp/transcoded/Album/01", false},
 		{"", false},
+		{"01.flac", true},
+		{"01 Track.flac.upscaled-v2-176400-24.flac", true},
+		{"01 Track.flac.upscaled-v2-176400-24.flac.tmp", false},
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {
@@ -170,43 +227,37 @@ func TestShouldConsiderSidecarFile(t *testing.T) {
 // which was true and was the defect): new sidecars landed where it never
 // looked, and orphans there were never reclaimed.
 //
-// The second half is the cursor. A chunk-capped tick leaves a resume
-// cursor, which is a position in ONE tree; compared against another root
-// it can classify that whole root as "already swept" and prune it. `b` is
-// created FIRST so it sorts before `a` in walk order — a cursor under `a`
-// then reads as past the whole of `b`, which is exactly the case the reset
-// on a root change exists for.
+// Asked per tick in both directions: after the move the new root's orphan
+// goes, and an orphan that appears in the OLD root afterwards stays, since
+// that tree is no longer the one configured. (This test also pinned the
+// chunk-resume cursor's reset on a root change until 2026-09-28; there is
+// no cursor now, because every tick walks the whole tree.)
 func TestOrphanSidecarSweeperWalksTheLiveVariantsDir(t *testing.T) {
-	b := t.TempDir()
-	a := t.TempDir()
-	if pathWalkCompare(b, a) >= 0 {
-		t.Fatalf("fixture: %q must sort before %q in walk order", b, a)
-	}
-	orphansA := seedTestSidecarTree(t, a, "a", 1)
-	orphansB := seedTestSidecarTree(t, b, "b", 1)
+	a, b := t.TempDir(), t.TempDir()
+	orphanA := seedTestSidecarTree(t, a, "a", 1)[0]
+	orphanB := seedTestSidecarTree(t, b, "b", 1)[0]
 	ageFixtures(t, a)
 	ageFixtures(t, b)
 
 	current := a
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(a)}, func() string { return current }, time.Hour)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(a)}, func() string { return current }, time.Hour, sweepPercent)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 
 	if n := s.tick(context.Background()); n != 1 {
-		t.Fatalf("first tick unlinked %d, want 1 (%s)", n, orphansA[0])
+		t.Fatalf("first tick unlinked %d, want 1 (%s)", n, orphanA)
 	}
-	// A chunk-capped tick left its cursor under the OLD root; the operator
-	// then moved the variants dir.
-	s.lastProcessedPath = filepath.Join(a, "zzz-past-everything.flac")
 	current = b
+	lateA := seedTestSidecarTree(t, a, "late", 1)[0]
+	ageFixtures(t, a)
 	if n := s.tick(context.Background()); n != 1 {
 		t.Fatalf("tick after the variants dir moved unlinked %d, want 1 — the sweeper walked the "+
-			"tree captured at construction, or pruned the new one behind a stale cursor", n)
+			"tree captured at construction", n)
 	}
-	if _, err := os.Stat(orphansB[0]); !os.IsNotExist(err) {
-		t.Errorf("orphan under the new root %q survived: %v", orphansB[0], err)
+	if _, err := os.Stat(orphanB); !os.IsNotExist(err) {
+		t.Errorf("orphan under the new root %q survived: %v", orphanB, err)
 	}
-	if s.lastProcessedPath != "" {
-		t.Errorf("cursor after a complete walk = %q, want empty", s.lastProcessedPath)
+	if _, err := os.Stat(lateA); err != nil {
+		t.Errorf("a file under the OLD root was unlinked after the move: %v", err)
 	}
 }
 
@@ -218,14 +269,19 @@ func TestOrphanSidecarSweeperWalksTheLiveVariantsDir(t *testing.T) {
 // and Windows). So the test passed with the refusal deleted, from a working
 // directory with no sidecar in it. The hazard is a root RESOLVED before the
 // walk, as #959 made the CLI sweeps do (resolveSidecarRoot), since
-// filepath.EvalSymlinks("") is ".". So the working directory here holds a
-// sidecar-shaped orphan past its grace, which such a sweep would unlink.
+// filepath.EvalSymlinks("") is "." — and since 2026-09-28 this sweep walks
+// through TakeSidecarInventory, which resolves. So the working directory
+// here holds a sidecar-shaped orphan past its grace, which such a sweep
+// would unlink. Two refusals stand in front of it now, the tick's and
+// TakeSidecarInventory's own, and this pins the pair: either alone keeps
+// the file.
 func TestOrphanSidecarSweeperRefusesAnEmptyRoot(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	orphan := seedTestSidecarTree(t, cwd, "t", 1)[0]
+	ageFixtures(t, cwd)
 	for name, provider := range map[string]func() string{"an empty answer": staticDir(""), "a nil provider": nil} {
-		s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow("/nowhere")}, provider, time.Hour)
+		s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow("/nowhere")}, provider, time.Hour, sweepPercent)
 		s.gracePeriodForTest = 1 * time.Nanosecond
 		if n := s.tick(context.Background()); n != 0 {
 			t.Errorf("%s: tick unlinked %d, want 0", name, n)
@@ -238,7 +294,9 @@ func TestOrphanSidecarSweeperRefusesAnEmptyRoot(t *testing.T) {
 
 // TestOrphanSidecarSweeperTickUnlinksOrphans is the headline contract:
 // files on disk that have no matching `track_variants.sidecar_path`
-// entry get unlinked; files that ARE in the snapshot stay put.
+// entry get unlinked; files that ARE in the snapshot stay put. Three
+// orphans are below the mass-orphan floor of ten, so the refusal stays
+// out of it.
 func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 	outputDir := t.TempDir()
 	paths := seedTestSidecarTree(t, outputDir, "t", 6)
@@ -251,9 +309,8 @@ func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 	}
 	lister := &fakeSidecarLister{known: known}
 
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
-	// Bypass the 10-minute production grace floor — the seeded files
-	// are brand new (modtime ≈ now), and the race-protection
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
+	// Bypass the 10-minute production grace floor — the race-protection
 	// regression has its own dedicated test below.
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
@@ -293,7 +350,7 @@ func TestOrphanSidecarSweeperCaseInsensitive(t *testing.T) {
 	dbPath := filepath.Join(outputDir, "artist", "album", "track.flac")
 	lister := &fakeSidecarLister{known: map[string]struct{}{dbPath: {}}}
 
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
 	if unlinked := s.tick(context.Background()); unlinked != 0 {
@@ -304,87 +361,619 @@ func TestOrphanSidecarSweeperCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestOrphanSidecarSweeperRespectsChunkCap pins the chunked-walk
-// contract: one tick processes at most `gcChunkSize` entries; the
-// remainder is left for subsequent ticks. The cursor advances so
-// the next tick doesn't re-walk the same prefix.
+// TestOrphanSidecarSweeperRespectsChunkCap pins what the chunk bounds
+// now: UNLINKS per tick, not the walk. 150 orphans against a catalog of
+// 150 rows (whose files are gone, so every file on disk is an orphan) are
+// not a MASS — `orphans > rows` fails, the refusal's lost-index term — so
+// they drain as 100 on the first tick and 50 on the second, and a third
+// tick finds nothing.
 func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	outputDir := t.TempDir()
-	// Test-local chunk size so we don't have to seed gcChunkSize (5000)
-	// files for every run. 100 is small enough for sub-second test
-	// wall-clock; the chunked-walk + cursor contract is the same shape
-	// regardless of the constant. The chunkSizeForTest seam matches
-	// the gracePeriodForTest convention.
 	const testChunk = 100
-	totalEntries := testChunk + 50 // 150 entries → splits into 100 + 50
-	paths := seedTestSidecarTree(t, outputDir, "x", totalEntries)
-	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
+	totalEntries := testChunk + 50
+	orphans := seedTestSidecarTree(t, outputDir, "x", totalEntries)
+	gone := make([]string, totalEntries)
+	for i := range gone {
+		gone[i] = filepath.Join(outputDir, "rows", "row-"+strconv.Itoa(i)+".upscaled-v1-96000-24.flac")
+	}
+	lister := &fakeSidecarLister{known: pathSet(gone)}
 
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	s.chunkSizeForTest = testChunk
-	// Same bypass as TestOrphanSidecarSweeperTickUnlinksOrphans —
-	// freshly-seeded files would otherwise hit the 10-min grace floor.
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
 
-	tick1 := s.tick(context.Background())
-	if tick1 != testChunk {
-		t.Errorf("tick1 unlinked = %d, want %d (chunk cap)", tick1, testChunk)
+	if n := s.tick(context.Background()); n != testChunk {
+		t.Errorf("tick1 unlinked = %d, want %d (the chunk)", n, testChunk)
 	}
-	if s.lastProcessedPath == "" {
-		t.Errorf("cursor should be set after hitting chunk cap; got empty")
+	if n := s.tick(context.Background()); n != totalEntries-testChunk {
+		t.Errorf("tick2 unlinked = %d, want %d (the remainder)", n, totalEntries-testChunk)
 	}
-	// The cursor should be the testChunk-th path (the last one
-	// processed this tick).
-	wantCursor := paths[testChunk-1]
-	if s.lastProcessedPath != wantCursor {
-		t.Errorf("cursor = %q, want %q (last processed path of tick1)",
-			s.lastProcessedPath, wantCursor)
+	if n := s.tick(context.Background()); n != 0 {
+		t.Errorf("tick3 unlinked = %d, want 0 (nothing left)", n)
+	}
+	for _, p := range orphans {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("orphan %q survived two ticks: %v", p, err)
+		}
+	}
+}
+
+// TestOrphanSidecarSweeperRefusesAStrandedTree is #940's shape, the one
+// that change left the background sweep open to: after a lost index the
+// catalog holds a handful of rows (the auto-optimize sweeper's fresh
+// renders, each with its file) over a stranded tree many times its size.
+// The only guard this sweep had asked whether the catalog was EMPTY, which
+// one row answers "no", and its chunked walk then unlinked the tree a
+// chunk a tick — measured on the old code with this fixture, 480, 500 and
+// the last 20 — while `bridge upscale --gc` refused the same tree. Every
+// tick refuses it now, nothing is unlinked on any of them, and the refusal
+// is logged ONCE, not once a tick.
+func TestOrphanSidecarSweeperRefusesAStrandedTree(t *testing.T) {
+	dir, live := strandedTree(t)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	s.chunkSizeForTest = 500
+
+	rec := loggingtest.Record(t)
+	for i := 1; i <= 3; i++ {
+		if n := s.tick(context.Background()); n != 0 {
+			t.Fatalf("tick %d unlinked %d file(s) of a stranded tree, want 0", i, n)
+		}
+	}
+	if got := countFiles(t, dir); got != 1020 {
+		t.Errorf("%d of 1,020 files survive the ticks", got)
+	}
+	warns := rec.Failures()
+	if len(warns) != 1 || !strings.Contains(warns[0], msgOrphanRefusal) {
+		t.Fatalf("want exactly one WARN, the refusal; got %d:\n%s", len(warns), strings.Join(warns, "\n"))
+	}
+	if !strings.Contains(warns[0], "1000 of 1020 file(s)") || !strings.Contains(warns[0], "20 row(s)") {
+		t.Errorf("the refusal should name the numbers: %s", warns[0])
+	}
+	if strings.Contains(warns[0], "variants move") {
+		t.Errorf("the refusal names `bridge variants move`, which needs the rows a lost index lacks: %s", warns[0])
+	}
+	summaries := rec.Lines(msgOrphanTickComplete)
+	if len(summaries) != 3 {
+		t.Fatalf("want one summary per tick, got %d:\n%s", len(summaries), strings.Join(summaries, "\n"))
+	}
+	for _, line := range summaries {
+		if !strings.Contains(line, " refused=true") || !strings.Contains(line, " orphans=1000") {
+			t.Errorf("a refused tick's summary should say so, with the count: %s", line)
+		}
+	}
+}
+
+// TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount — the inventory keeps
+// only a chunk's worth of orphan PATHS (MaxOrphanPaths) and counts all of
+// them. The refusal must read the COUNT: 1,000 orphans against a catalog of
+// 150 rows is a lost index, while the 100 paths a chunk of 100 retains are
+// fewer than the rows, and a refusal fed that number would proceed and
+// unlink them.
+func TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount(t *testing.T) {
+	dir := t.TempDir()
+	live := seedTestSidecarTree(t, dir, "live-", 150)
+	seedTestSidecarTree(t, dir, "orphan-", 1000)
+	ageFixtures(t, dir)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	s.chunkSizeForTest = 100
+
+	rec := loggingtest.Record(t)
+	if n := s.tick(context.Background()); n != 0 {
+		t.Errorf("unlinked %d, want 0 — the refusal read the retained paths, not the count", n)
+	}
+	if got := countFiles(t, dir); got != 1150 {
+		t.Errorf("%d of 1,150 files survive", got)
+	}
+	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 || !strings.Contains(lines[0], "1000 of 1150 file(s)") {
+		t.Errorf("want one refusal naming the full count, got %q", lines)
+	}
+}
+
+// TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing
+// — the refusal is logged once per streak, and a tick that never reached a
+// verdict is evidence of nothing: a listing that failed, a walk that failed
+// or was stopped, a catalog that read empty. None of them may end the
+// streak, which would have the next refused tick WARN again, and none may
+// claim the check passed.
+func TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// middle runs the second of three ticks, the one that decides
+		// nothing, and puts the lister back.
+		middle func(s *OrphanSidecarSweeper, l *switchableLister)
+	}{
+		{"the listing fails", func(s *OrphanSidecarSweeper, l *switchableLister) {
+			l.err = errors.New("database is locked")
+			s.tick(context.Background())
+			l.err = nil
+		}},
+		{"the walk fails", func(s *OrphanSidecarSweeper, _ *switchableLister) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+			s.tick(ctx)
+		}},
+		{"the walk is stopped", func(s *OrphanSidecarSweeper, _ *switchableLister) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			s.tick(ctx)
+		}},
+		{"the catalog reads empty", func(s *OrphanSidecarSweeper, l *switchableLister) {
+			rows := l.rows
+			l.rows = nil
+			s.tick(context.Background())
+			l.rows = rows
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, live := strandedTree(t)
+			l := &switchableLister{rows: rowsNaming(live)}
+			s := NewOrphanSidecarSweeper(l, staticDir(dir), time.Hour, sweepPercent)
+			s.gracePeriodForTest = time.Nanosecond
+
+			rec := loggingtest.Record(t)
+			s.tick(context.Background())
+			tc.middle(s, l)
+			s.tick(context.Background())
+
+			if got := rec.Lines(msgOrphanRefusal); len(got) != 1 {
+				t.Errorf("refusal logged %d times over refuse / %s / refuse, want once:\n%s",
+					len(got), tc.name, strings.Join(got, "\n"))
+			}
+			if got := rec.Lines(msgOrphanRefusalLifted); len(got) != 0 {
+				t.Errorf("a tick that decided nothing ended the streak:\n%s", strings.Join(got, "\n"))
+			}
+			if got := countFiles(t, dir); got != 1020 {
+				t.Errorf("%d of 1,020 files survive", got)
+			}
+		})
+	}
+}
+
+// TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing — the other end of
+// the latch. A tick that proceeds outside a streak says nothing beyond its
+// summary; the refusal WARNs once however many ticks refuse; the first tick
+// that proceeds after it logs one Info line, and the ticks after that
+// nothing. The catalog is what moves here, as it would when an operator
+// restores the rows `bridge doctor` said were lost.
+func TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing(t *testing.T) {
+	dir := t.TempDir()
+	live := seedTestSidecarTree(t, dir, "live-", 20)
+	stranded := seedTestSidecarTree(t, dir, "stranded-", 1000)
+	ageFixtures(t, dir)
+	restored := rowsNaming(live, stranded)
+	l := &switchableLister{rows: restored}
+	s := NewOrphanSidecarSweeper(l, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	rec := loggingtest.Record(t)
+	counts := func() (refused, lifted int) {
+		return len(rec.Lines(msgOrphanRefusal)), len(rec.Lines(msgOrphanRefusalLifted))
 	}
 
-	tick2 := s.tick(context.Background())
-	want2 := totalEntries - testChunk
-	if tick2 != want2 {
-		t.Errorf("tick2 unlinked = %d, want %d (remainder after chunk cap)",
-			tick2, want2)
+	s.tick(context.Background())
+	if r, lf := counts(); r != 0 || lf != 0 {
+		t.Fatalf("a healthy tick outside a streak logged %d refusal(s) and %d lifted line(s), want neither", r, lf)
 	}
-	if s.lastProcessedPath != "" {
-		t.Errorf("cursor should reset to empty after a full-tree pass; got %q",
-			s.lastProcessedPath)
+
+	l.rows = rowsNaming(live)
+	s.tick(context.Background())
+	s.tick(context.Background())
+	if r, lf := counts(); r != 1 || lf != 0 {
+		t.Fatalf("two refused ticks logged %d refusal(s) and %d lifted line(s), want 1 and 0", r, lf)
+	}
+	if lines := rec.Failures(msgOrphanRefusal); len(lines) != 1 {
+		t.Errorf("the refusal is not at WARN: %q", rec.Lines(msgOrphanRefusal))
+	}
+
+	l.rows = restored
+	s.tick(context.Background())
+	s.tick(context.Background())
+	if r, lf := counts(); r != 1 || lf != 1 {
+		t.Fatalf("after the rows came back: %d refusal(s), %d lifted line(s), want 1 and 1", r, lf)
+	}
+	lifted := rec.Lines(msgOrphanRefusalLifted)[0]
+	if !strings.HasPrefix(lifted, "INFO ") || !strings.Contains(lifted, " rows=1020") {
+		t.Errorf("the lifted line should be Info and carry the counts it passed on: %s", lifted)
+	}
+	if got := countFiles(t, dir); got != 1020 {
+		t.Errorf("%d of 1,020 files survive; nothing here was an orphan once the rows came back", got)
+	}
+}
+
+// TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree is
+// CodeRabbit's finding on #1063: a stranded tree whose larger part sits
+// behind a directory the bridge's user cannot list. The walk sees 20 live
+// files and 15 stranded ones, 15 orphans against 20 rows, which the
+// mass-orphan check lets through; on the head it was found on, the tick
+// unlinked those 15, while the 1,000 behind the locked directory make the
+// whole tree refuse. Each tick refuses the partial walk now, under its own
+// WARN, once for the streak. Once the directory is readable the whole tree
+// refuses as a lost index, and that WARN comes at once, because a refusal
+// of the other kind starts a new streak. Nothing is unlinked on any tick.
+func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testing.T) {
+	skipWhereModesDenyNothing(t)
+	dir := t.TempDir()
+	live := seedTestSidecarTree(t, dir, "live-", 20)
+	seedTestSidecarTree(t, dir, "stranded-", 15)
+	locked := filepath.Join(dir, "locked")
+	seedTestSidecarTree(t, locked, "stranded-", 1000)
+	ageFixtures(t, dir)
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	rec := loggingtest.Record(t)
+
+	requireTicksUnlinkNothing(t, s, 2, "the walk could not read part of the tree")
+	requireLinesSay(t, rec.Failures(msgOrphanPartialWalk), 1,
+		"the partial-walk WARN, once for two ticks, naming what the walk could not read and what it counted",
+		"could not read 1 entr(y/ies)", "15 orphan(s) of 35 file(s) against 20 row(s)")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusal), 0,
+		"the part the walk saw passes the mass-orphan check, so no lost-index WARN")
+	requireLinesSay(t, rec.Lines(msgOrphanTickComplete), 2,
+		"each refused tick's summary, with the unreadable count", " refused=true", " unreadable=1")
+
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	requireTicksUnlinkNothing(t, s, 1, "the whole tree is readable")
+	requireLinesSay(t, rec.Failures(msgOrphanRefusal), 1,
+		"the whole tree refuses as a lost index at once, naming its count", "1015 of 1035 file(s)")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 0,
+		"a refusal of the other kind is not the check passing")
+	if got := countFiles(t, dir); got != 1035 {
+		t.Errorf("%d of 1,035 files survive", got)
+	}
+}
+
+// skipWhereModesDenyNothing stops a test that locks a directory by its
+// mode where no mode can deny this user: chmod 0 denies nothing on
+// Windows, and root reads through any mode.
+func skipWhereModesDenyNothing(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes deny nothing on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+}
+
+// requireTicksUnlinkNothing runs n ticks of s and fails the test at the
+// first that unlinks anything; what says which state the ticks ran in.
+func requireTicksUnlinkNothing(t *testing.T, s *OrphanSidecarSweeper, n int, what string) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		if got := s.tick(context.Background()); got != 0 {
+			t.Fatalf("%s: tick %d unlinked %d file(s), want 0", what, i, got)
+		}
+	}
+}
+
+// requireLinesSay checks that lines holds exactly count lines, each
+// carrying every one of wants, and fails the test for each that does not;
+// what names the expectation in the failure.
+func requireLinesSay(t *testing.T, lines []string, count int, what string, wants ...string) {
+	t.Helper()
+	if len(lines) != count {
+		t.Errorf("%s: want %d line(s), got %d:\n%s", what, count, len(lines), strings.Join(lines, "\n"))
+		return
+	}
+	for _, line := range lines {
+		for _, w := range wants {
+			if !strings.Contains(line, w) {
+				t.Errorf("%s: %q is missing from: %s", what, w, line)
+			}
+		}
+	}
+}
+
+// TestReclaimOrphansRefusesAnUnpairedInventory — the unlink step refuses an
+// inventory whose listed and walked paths do not pair up, unlinking
+// nothing (Gemini on #1063), rather than index past the shorter list or cut
+// it to the chunk, either of which panics in `bridge serve`'s sweep
+// goroutine. The walked lists here are slices of their own, as a list built
+// apart would be. Driven directly: TakeSidecarInventory cannot return such
+// an inventory, which is the premise the check guards.
+func TestReclaimOrphansRefusesAnUnpairedInventory(t *testing.T) {
+	dir := t.TempDir()
+	files := seedTestSidecarTree(t, dir, "orphan-", 3)
+	ageFixtures(t, dir)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	walkedCopy := func(n int) []string { return append([]string(nil), files[:n]...) }
+
+	for _, tc := range []struct {
+		name  string
+		inv   SidecarInventory
+		chunk int
+	}{
+		{"a walked path missing", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(2)}, 10},
+		{"a walked path missing, cut to a chunk", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(1)}, 2},
+		{"a walked path with no orphan", SidecarInventory{OrphanPaths: files[:2], OrphanWalkedPaths: walkedCopy(3)}, 10},
+		{"the scratch lists unpaired", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(3), ScratchPaths: files[:1]}, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tally, err := s.reclaimOrphans(context.Background(), tc.inv, tc.chunk, time.Now())
+			if !errors.Is(err, ErrUnpairedInventory) {
+				t.Errorf("reclaimOrphans() error = %v, want ErrUnpairedInventory", err)
+			}
+			if tally != (orphanTally{}) {
+				t.Errorf("tally = %+v, want nothing done", tally)
+			}
+			if got := countFiles(t, dir); got != 3 {
+				t.Errorf("%d of 3 files survive an inventory that was refused", got)
+			}
+		})
+	}
+}
+
+// TestOrphanSidecarSweeperRepeatsARefusalOnceADay — a streak that goes on
+// is logged again once a day, so a journal read a week later still shows
+// the sweep refusing, and never more often than that.
+func TestOrphanSidecarSweeperRepeatsARefusalOnceADay(t *testing.T) {
+	dir, live := strandedTree(t)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	rec := loggingtest.Record(t)
+
+	s.tick(context.Background())
+	s.lastRefusalLog = s.lastRefusalLog.Add(-(orphanRefusalRepeat - time.Minute))
+	s.tick(context.Background())
+	if got := len(rec.Lines(msgOrphanRefusal)); got != 1 {
+		t.Fatalf("a refusal a minute short of a day old was repeated: %d lines", got)
+	}
+	s.lastRefusalLog = s.lastRefusalLog.Add(-2 * time.Minute)
+	s.tick(context.Background())
+	if got := len(rec.Lines(msgOrphanRefusal)); got != 2 {
+		t.Fatalf("a refusal over a day old was not repeated: %d lines, want 2", got)
+	}
+}
+
+// fakeLstat is the fs.FileInfo reclaimOrphan reads from an Lstat: a mode
+// and a modification time, and nothing else.
+type fakeLstat struct {
+	fs.FileInfo
+	mode  fs.FileMode
+	mtime time.Time
+}
+
+func (f fakeLstat) Mode() fs.FileMode  { return f.mode }
+func (f fakeLstat) ModTime() time.Time { return f.mtime }
+
+// TestReclaimOrphanRechecksThePathBeforeUnlinkingIt pins the re-check the
+// unlink step makes. The inventory classified the path during the walk;
+// by the unlink the tree may have moved on, and the sweep needs the mtime
+// anyway, so the path is asked again — through the inventory's own
+// classifyWalkEntry, so the two cannot disagree about what a candidate is.
+//
+// Driven through the (lstat, stat) seam, because the Windows junction
+// shape (ModeIrregular without ModeDir, since Go 1.23) cannot be built on
+// any other platform, and a guard that only runs on one CI leg looks
+// exactly like one that passed. The path is a REAL regular file in every
+// row that has one, so whenever the helper reaches os.Remove it removes
+// something the assertion can see.
+func TestReclaimOrphanRechecksThePathBeforeUnlinkingIt(t *testing.T) {
+	tickStart := time.Now()
+	const grace = time.Minute
+	old := tickStart.Add(-time.Hour)
+	lstatOf := func(mode fs.FileMode, mtime time.Time) func(string) (fs.FileInfo, error) {
+		return func(string) (fs.FileInfo, error) { return fakeLstat{mode: mode, mtime: mtime}, nil }
+	}
+	failing := func(err error) func(string) (fs.FileInfo, error) {
+		return func(string) (fs.FileInfo, error) { return nil, err }
+	}
+	toDir := func(string) (fs.FileInfo, error) { return fakeFileInfo{dir: true}, nil }
+	toFile := func(string) (fs.FileInfo, error) { return fakeFileInfo{}, nil }
+
+	for _, tc := range []struct {
+		name        string
+		lstat, stat func(string) (fs.FileInfo, error)
+		noFile      bool // the path holds nothing on disk
+		want        orphanOutcome
+		wantErr     bool
+		wantRemoved bool
+	}{
+		{name: "an old regular file is unlinked", lstat: lstatOf(0, old), stat: toFile,
+			want: orphanUnlinked, wantRemoved: true},
+		{name: "a Windows junction to a directory is left", lstat: lstatOf(fs.ModeIrregular, old), stat: toDir,
+			want: orphanNotAFile},
+		{name: "a symlink to a directory is left", lstat: lstatOf(fs.ModeSymlink, old), stat: toDir,
+			want: orphanNotAFile},
+		{name: "a link it cannot stat is left", lstat: lstatOf(fs.ModeSymlink, old), stat: failing(fs.ErrPermission),
+			want: orphanUnreadable, wantErr: true},
+		{name: "an lstat that fails leaves the path", lstat: failing(fs.ErrPermission), stat: toFile,
+			want: orphanUnreadable, wantErr: true},
+		{name: "a dangling link is junk, and unlinked", lstat: lstatOf(fs.ModeSymlink, old), stat: failing(fs.ErrNotExist),
+			want: orphanUnlinked, wantRemoved: true},
+		{name: "a file inside the grace is left", lstat: lstatOf(0, tickStart.Add(-time.Second)), stat: toFile,
+			want: orphanInGrace},
+		{name: "a path that vanished before the re-check counts as done", lstat: failing(fs.ErrNotExist), stat: toFile,
+			noFile: true, want: orphanGone},
+		{name: "a path that vanished before the unlink counts as done", lstat: lstatOf(0, old), stat: toFile,
+			noFile: true, want: orphanGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "x.upscaled-v2-176400-24.flac")
+			if !tc.noFile {
+				if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := reclaimOrphan(path, tickStart, grace, tc.lstat, tc.stat)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("reclaimOrphan = (%d, %v), want (%d, error %v)", got, err, tc.want, tc.wantErr)
+			}
+			if tc.noFile {
+				return
+			}
+			_, statErr := os.Lstat(path)
+			if removed := errors.Is(statErr, fs.ErrNotExist); removed != tc.wantRemoved {
+				t.Errorf("file removed = %v, want %v", removed, tc.wantRemoved)
+			}
+		})
+	}
+}
+
+// TestReclaimOrphanLeavesALinkToADirectory is the same re-check on a real
+// filesystem: a symlink to a directory where the orphan stood is never
+// unlinked, since it may be the only reference to an album parked on
+// another volume. The tick starts an hour ahead with a nanosecond's grace,
+// so the grace cannot be what keeps it.
+func TestReclaimOrphanLeavesALinkToADirectory(t *testing.T) {
+	base := t.TempDir()
+	parked := filepath.Join(base, "volume", "Album")
+	if err := os.MkdirAll(parked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	track := filepath.Join(parked, "01.flac")
+	if err := os.WriteFile(track, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "variants", "Album.flac")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(parked, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	got, err := reclaimOrphan(link, time.Now().Add(time.Hour), time.Nanosecond, os.Lstat, os.Stat)
+	if got != orphanNotAFile || err != nil {
+		t.Fatalf("reclaimOrphan = (%d, %v), want (%d, nil)", got, err, orphanNotAFile)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("the link was removed or replaced: %v", err)
+	}
+	if _, err := os.Stat(track); err != nil {
+		t.Errorf("the parked album's file is gone: %v", err)
+	}
+
+	gone, err := reclaimOrphan(filepath.Join(base, "variants", "never-there.flac"), time.Now(), time.Nanosecond, os.Lstat, os.Stat)
+	if gone != orphanGone || err != nil {
+		t.Errorf("a path with nothing at it = (%d, %v), want (%d, nil)", gone, err, orphanGone)
+	}
+}
+
+// TestOrphanSidecarSweeperWalksASymlinkedVariantsDir — a behaviour change,
+// on purpose. This sweep's own WalkDir Lstat'd its root, so a variants
+// directory that is itself a symlink (`/srv/variants -> /mnt/vol/…`, the
+// ordinary mountpoint alias) was one non-directory entry and the sweep
+// found nothing there, ever. TakeSidecarInventory resolves the root and
+// reports under the configured spelling (#959), so the orphan behind the
+// link is reclaimed like any other, while the known file beside it and the
+// link itself — never a candidate — stay.
+func TestOrphanSidecarSweeperWalksASymlinkedVariantsDir(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "volume", "variants")
+	paths := seedTree(t, target, "Artist/Album/01.flac.upscaled-v2-176400-24.flac", "Artist/Album/orphan.flac")
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	ageFixtures(t, target)
+	known := map[string]struct{}{filepath.Join(link, "Artist", "Album", filepath.Base(paths[0])): {}}
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: known}, staticDir(link), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+
+	if n := s.tick(context.Background()); n != 1 {
+		t.Fatalf("unlinked %d through a symlinked variants dir, want 1 (the orphan)", n)
+	}
+	if _, err := os.Stat(paths[1]); !os.IsNotExist(err) {
+		t.Errorf("the orphan survived: %v", err)
+	}
+	if _, err := os.Stat(paths[0]); err != nil {
+		t.Errorf("the known sidecar was unlinked: %v", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("the variants directory's link was removed or replaced: %v", err)
+	}
+}
+
+// TestAnOrphanSweepUnlinksInTheTreeItWalked pins that a tick unlinks the
+// files its walk counted, by the paths the walk visited, never through
+// the configured spelling. The variants directory here is a symlink, and
+// the test repoints it at a second tree between the walk and the first
+// unlink (beforeUnlinksForTest), as an operator moving the alias to
+// another volume while the bridge runs would. Through the link, the
+// unlink found the same name in the second tree and removed it: a file
+// the walk never counted, past the mass-orphan refusal, whose verdict
+// was taken over the first tree (CodeRabbit on #1063).
+func TestAnOrphanSweepUnlinksInTheTreeItWalked(t *testing.T) {
+	base := t.TempDir()
+	rels := []string{"Artist/Album/01.flac.upscaled-v2-176400-24.flac", "Artist/Album/orphan.flac"}
+	first := filepath.Join(base, "first", "variants")
+	second := filepath.Join(base, "second", "variants")
+	firstPaths := seedTree(t, first, rels...)
+	secondPaths := seedTree(t, second, rels...)
+	ageFixtures(t, first)
+	ageFixtures(t, second)
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(first, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	known := map[string]struct{}{filepath.Join(link, filepath.FromSlash(rels[0])): {}}
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: known}, staticDir(link), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	s.beforeUnlinksForTest = func() {
+		if err := os.Remove(link); err != nil {
+			t.Fatalf("repoint the variants link: %v", err)
+		}
+		if err := os.Symlink(second, link); err != nil {
+			t.Fatalf("repoint the variants link: %v", err)
+		}
+	}
+
+	if n := s.tick(context.Background()); n != 1 {
+		t.Fatalf("unlinked %d, want 1 (the orphan the walk counted)", n)
+	}
+	if _, err := os.Stat(firstPaths[1]); !os.IsNotExist(err) {
+		t.Errorf("the orphan the walk counted survived: %v", err)
+	}
+	if _, err := os.Stat(secondPaths[1]); err != nil {
+		t.Errorf("the file of that name in the tree the link now points at was unlinked: %v", err)
+	}
+	for _, p := range []string{firstPaths[0], secondPaths[0]} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a known sidecar was unlinked: %s: %v", p, err)
+		}
 	}
 }
 
 // TestOrphanSidecarSweeperHonoursCancellation pins the ctx-cancel
-// contract: a context cancelled mid-walk returns promptly. Important
-// for graceful shutdown on libraries with hundreds of thousands of
-// variants where one tick's walk could otherwise hold the process
-// up for seconds.
+// contract: a context cancelled before the walk returns promptly and
+// unlinks nothing — the walk stops at its first entry, and the unlinks
+// come only after a walk that finished. (Until the walk and the unlinks
+// were split, a few entries could go before the check.)
 func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 	outputDir := t.TempDir()
-	seedTestSidecarTree(t, outputDir, "c", 200) // plenty to walk
+	seedTestSidecarTree(t, outputDir, "c", 200)
 	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel BEFORE the tick starts
 
-	// The tick should not panic and should return quickly. We do
-	// NOT assert "zero unlinks" here because between the snapshot
-	// fetch and the ctx-check inside filepath.Walk's callback, the
-	// walk may have processed a small number of entries — that's
-	// fine; the contract is "returns promptly", not "processes
-	// zero entries".
 	done := make(chan int, 1)
 	go func() {
 		done <- s.tick(ctx)
 	}()
 	select {
-	case <-done:
-		// Good.
+	case n := <-done:
+		if n != 0 {
+			t.Errorf("a stopped tick unlinked %d, want 0", n)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("tick did not return within 5s after ctx cancel")
+	}
+	if got := countFiles(t, outputDir); got != 200 {
+		t.Errorf("%d of 200 files survive a stopped tick", got)
 	}
 }
 
@@ -394,7 +983,7 @@ func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 func TestOrphanSidecarSweeperStartIntervalZeroIsNoOp(t *testing.T) {
 	dir := t.TempDir()
 	lister := &fakeSidecarLister{known: withLiveRow(dir)}
-	s := NewOrphanSidecarSweeper(lister, staticDir(dir), 0)
+	s := NewOrphanSidecarSweeper(lister, staticDir(dir), 0, sweepPercent)
 	stop := s.Start(context.Background())
 	// stopFn must be idempotent and safe.
 	stop()
@@ -409,7 +998,7 @@ func TestOrphanSidecarSweeperStartTickFires(t *testing.T) {
 	outputDir := t.TempDir()
 	seedTestSidecarTree(t, outputDir, "s", 3) // all orphan
 	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
 
@@ -463,7 +1052,7 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 	}
 
 	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
 	unlinked := s.tick(context.Background())
@@ -496,7 +1085,7 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 // the grace:
 //   - Sidecar present in known-set: protected by the known-set check.
 //   - Sidecar absent from known-set + modtime < grace: protected by
-//     the grace gate (this test).
+//     the grace gate, at the re-check before the unlink (this test).
 //   - Sidecar absent + modtime >= grace: ordinary orphan, unlinked.
 //
 // Test shape: seed one fresh file (modtime ≈ now), set
@@ -510,11 +1099,11 @@ func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
 		t.Fatalf("write fresh file: %v", err)
 	}
 
-	// Empty known-set: the file is NOT in track_variants (writer's
-	// row hasn't committed yet). Without the grace gate, the sweeper
-	// would unlink immediately.
+	// The known set does not hold the file: the writer's row hasn't
+	// committed yet. Without the grace gate, the sweeper would unlink
+	// immediately.
 	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
+	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour, sweepPercent)
 	// Grace period longer than test wall-clock — the fresh file's
 	// modtime (just now) is firmly inside the grace window.
 	s.gracePeriodForTest = 5 * time.Second
@@ -546,96 +1135,6 @@ func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
 	if _, err := os.Stat(flacFile); !os.IsNotExist(err) {
 		t.Errorf("backdated orphan %q was NOT unlinked: stat err=%v",
 			flacFile, err)
-	}
-}
-
-// TestDirEntirelyBehindCursor pins the chunk-resume SkipDir predicate,
-// including the '.'-vs-separator collation gotcha that a bare-name compare
-// would get wrong. Native separators throughout (portable across POSIX/Windows
-// because '/' and '\' both sort after '.').
-func TestDirEntirelyBehindCursor(t *testing.T) {
-	sep := string(filepath.Separator)
-	cases := []struct {
-		name   string
-		dir    string
-		cursor string
-		want   bool
-	}{
-		{"empty cursor never skips", "A", "", false},
-		{"straddling sibling fully behind", "A", "B" + sep + "c.flac", true},
-		{"ancestor of cursor must descend", "A" + sep + "B", "A" + sep + "B" + sep + "c.flac", false},
-		// A dir is fully walked BEFORE its sibling file (base names "B" < "B.flac"),
-		// so a cursor on "A/B.flac" means "A/B" is already swept → prune. (The prior
-		// implementation left this un-pruned on the mistaken belief that "A/B/02.flac"
-		// sorts after "A/B.flac" — it's visited before.)
-		{"dir A/B fully behind sibling file A/B.flac", "A" + sep + "B", "A" + sep + "B.flac", true},
-		{"later sibling not behind", "C", "B" + sep + "c.flac", false},
-		{"earlier sibling fully behind", "AlbumA", "AlbumB" + sep + "01.flac", true},
-		// The bridge02-04 regression: WalkDir visits all of "A/" before sibling
-		// "A-Bonus/" (base names "A" < "A-Bonus"), so "A-Bonus" is still unwalked when
-		// the cursor sits inside "A" — must NOT be pruned even though "A-Bonus/…" <
-		// "A/…" as a raw string ('-' < '/').
-		{"sibling A-Bonus after A must descend (dash<sep)", "A-Bonus", "A" + sep + "track.flac", false},
-		{"sibling 'A B' after A must descend (space<sep)", "A B", "A" + sep + "track.flac", false},
-		{"A-Bonus genuinely behind when cursor in later sibling", "A-Bonus", "B" + sep + "x.flac", true},
-		{"root dir is ancestor of in-tree cursor", "out", "out" + sep + "A" + sep + "x.flac", false},
-		{"volume/filesystem root is ancestor of in-tree cursor", sep, sep + "A" + sep + "x.flac", false},
-		{"trailing-separator dir is ancestor of in-tree cursor", "out" + sep, "out" + sep + "A" + sep + "x.flac", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := dirEntirelyBehindCursor(c.dir, c.cursor); got != c.want {
-				t.Errorf("dirEntirelyBehindCursor(%q, %q) = %v, want %v", c.dir, c.cursor, got, c.want)
-			}
-		})
-	}
-}
-
-// TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans is the headline
-// PR D contract: across a chunk-split sweep of a NESTED tree, (a) an orphan in
-// a not-yet-covered subtree is still found and unlinked — proving SkipDir never
-// prunes a live branch (under-sweep guard) — and (b) SkipDir actually fires on a
-// fully-behind-cursor subtree on a resume tick (the O(N²) short-circuit engaged).
-//
-// The existing chunk-cap test uses a FLAT tree, where the only directory is the
-// root (always an ancestor of the cursor → never pruned), so it can't exercise
-// SkipDir at all. This test uses album subdirectories.
-func TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans(t *testing.T) {
-	outputDir := t.TempDir()
-	// Lexical full-path order: AlbumA/00,01  AlbumB/00,01  AlbumC/00
-	a := seedSidecarAlbum(t, outputDir, "AlbumA", 2)
-	b := seedSidecarAlbum(t, outputDir, "AlbumB", 2)
-	c := seedSidecarAlbum(t, outputDir, "AlbumC", 1) // the orphan album
-
-	// AlbumA + AlbumB known; AlbumC's lone file is the orphan.
-	known := map[string]struct{}{a[0]: {}, a[1]: {}, b[0]: {}, b[1]: {}}
-	lister := &fakeSidecarLister{known: known}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
-	s.chunkSizeForTest = 2 // forces 3 ticks: A/* | B/* | C/*
-	s.gracePeriodForTest = 1 * time.Nanosecond
-	ageFixtures(t, outputDir)
-
-	total := 0
-	for i := 0; i < 10; i++ { // bounded; sweep completes in 3
-		total += s.tick(context.Background())
-		if s.lastProcessedPath == "" {
-			break // cursor reset → full tree covered
-		}
-	}
-
-	if total != 1 {
-		t.Errorf("total unlinked across sweep = %d, want 1 (only the AlbumC orphan)", total)
-	}
-	if _, err := os.Stat(c[0]); !os.IsNotExist(err) {
-		t.Errorf("orphan %q survived the chunked sweep — SkipDir wrongly pruned a live subtree (under-swept): err=%v", c[0], err)
-	}
-	for _, p := range append(append([]string{}, a...), b...) {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("known sidecar %q was unlinked (should have survived): %v", p, err)
-		}
-	}
-	if got := s.skippedDirsForTest.Load(); got < 1 {
-		t.Errorf("skippedDirsForTest = %d, want >= 1 (SkipDir short-circuit never engaged across the resume ticks)", got)
 	}
 }
 
@@ -673,114 +1172,6 @@ func TestOrphanSidecarSweeperEffectiveOverrides(t *testing.T) {
 	}
 }
 
-// TestOrphanSidecarSweeper_SiblingDashDir_NotPruned is the bridge02-04 regression:
-// a sibling album directory whose name sorts BEFORE an earlier-walked sibling as a raw
-// string ("A-Bonus" vs "A/…", '-' 0x2D < '/' 0x2F) must NOT be pruned by the chunk-
-// resume SkipDir short-circuit — filepath.WalkDir visits "A-Bonus/" AFTER all of "A/",
-// so its orphan is still unswept when the cursor sits inside "A". Fails on the pre-fix
-// raw-string dirEntirelyBehindCursor (the orphan survives the sweep).
-func TestOrphanSidecarSweeper_SiblingDashDir_NotPruned(t *testing.T) {
-	outputDir := t.TempDir()
-	// Walk order (base-name sort): A/ (whole subtree) THEN A-Bonus/.
-	a := seedSidecarAlbum(t, outputDir, "A", 2)           // both known
-	bonus := seedSidecarAlbum(t, outputDir, "A-Bonus", 1) // the orphan
-
-	known := map[string]struct{}{a[0]: {}, a[1]: {}}
-	lister := &fakeSidecarLister{known: known}
-	s := NewOrphanSidecarSweeper(lister, staticDir(outputDir), 1*time.Hour)
-	s.chunkSizeForTest = 2 // tick 1 fills on A/*, forcing a resume that must reach A-Bonus
-	s.gracePeriodForTest = 1 * time.Nanosecond
-	ageFixtures(t, outputDir)
-
-	total := 0
-	for i := 0; i < 10; i++ { // bounded; sweep completes in 2 ticks
-		total += s.tick(context.Background())
-		if s.lastProcessedPath == "" {
-			break // cursor reset → full tree covered
-		}
-	}
-
-	if total != 1 {
-		t.Errorf("total unlinked = %d, want 1 (the A-Bonus orphan)", total)
-	}
-	if _, err := os.Stat(bonus[0]); !os.IsNotExist(err) {
-		t.Errorf("orphan %q survived — SkipDir wrongly pruned the A-Bonus subtree (raw-string collation bug): err=%v", bonus[0], err)
-	}
-	for _, p := range a {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("known sidecar %q was unlinked (should have survived): %v", p, err)
-		}
-	}
-}
-
-// TestPathWalkCompare_MatchesActualWalkDirOrder empirically locks the helper against
-// filepath.WalkDir's real traversal order: it builds a tree seeded with dir/file
-// collation traps (sibling names with '-' and ' '; a dir vs a sibling file of the same
-// stem; nested subtrees), records the ACTUAL visit order, and asserts pathWalkCompare
-// reproduces it (strictly increasing across every consecutive pair).
-func TestPathWalkCompare_MatchesActualWalkDirOrder(t *testing.T) {
-	root := t.TempDir()
-	mk := func(rel string) {
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", p, err)
-		}
-		if err := os.WriteFile(p, []byte{0}, 0o644); err != nil {
-			t.Fatalf("write %s: %v", p, err)
-		}
-	}
-	for _, rel := range []string{
-		"A/00.flac", "A/01.flac",
-		"A B/00.flac",     // space sibling (' ' < '/')
-		"A-Bonus/00.flac", // dash sibling ('-' < '/')
-		"B/nested/00.flac",
-		"B/nested.flac", // file sibling of the "nested" dir ('.' < '/')
-		"B.flac",        // file sibling of the "B" dir
-	} {
-		mk(rel)
-	}
-
-	var order []string
-	if err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		order = append(order, p)
-		return nil
-	}); err != nil {
-		t.Fatalf("walk: %v", err)
-	}
-
-	for i := 0; i+1 < len(order); i++ {
-		if got := pathWalkCompare(order[i], order[i+1]); got >= 0 {
-			t.Errorf("pathWalkCompare(%q, %q) = %d, want < 0 (WalkDir visited them in this order)",
-				order[i], order[i+1], got)
-		}
-	}
-	// Sanity: equal compares 0; the compare is antisymmetric.
-	if got := pathWalkCompare(order[0], order[0]); got != 0 {
-		t.Errorf("pathWalkCompare(x, x) = %d, want 0", got)
-	}
-	if len(order) > 1 {
-		if a, b := pathWalkCompare(order[0], order[1]), pathWalkCompare(order[1], order[0]); a != -b {
-			t.Errorf("not antisymmetric: cmp(a,b)=%d cmp(b,a)=%d", a, b)
-		}
-	}
-}
-
-// TestPathWalkCompare_ZeroAlloc locks the zero-alloc contract (see the helper doc): the
-// function runs on every walk entry until the resume cursor clears, so a future refactor
-// to strings.Split would reintroduce per-entry GC pressure on large libraries.
-func TestPathWalkCompare_ZeroAlloc(t *testing.T) {
-	a := filepath.Join("music", "Diana Krall", "The Look of Love", "01 Love Letters.flac")
-	b := filepath.Join("music", "Diana Krall", "The Look of Love", "02 I Remember You.flac")
-	if allocs := testing.AllocsPerRun(100, func() {
-		_ = pathWalkCompare(a, b)
-	}); allocs != 0 {
-		t.Errorf("pathWalkCompare allocated %v times/run, want 0", allocs)
-	}
-}
-
 // TestOrphanSidecarSweepRefusesAnEmptyKnownSet is the guard the FORWARD sweep
 // did not have while its reverse twin had two.
 //
@@ -793,7 +1184,7 @@ func TestPathWalkCompare_ZeroAlloc(t *testing.T) {
 func TestOrphanSidecarSweepRefusesAnEmptyKnownSet(t *testing.T) {
 	outputDir := t.TempDir()
 	seedTestSidecarTree(t, outputDir, "orphan", 3)
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, staticDir(outputDir), time.Hour)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, staticDir(outputDir), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond
 	ageFixtures(t, outputDir)
 
@@ -810,8 +1201,8 @@ func TestOrphanSidecarSweepRefusesAnEmptyKnownSet(t *testing.T) {
 
 	// NEGATIVE CONTROL, and what stops this passing against a sweeper that
 	// simply never unlinks anything: with ONE row in the catalog the same
-	// three orphans go.
-	s2 := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, staticDir(outputDir), time.Hour)
+	// three orphans go (three is below the mass-orphan floor of ten).
+	s2 := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, staticDir(outputDir), time.Hour, sweepPercent)
 	s2.gracePeriodForTest = time.Nanosecond
 	if n := s2.tick(context.Background()); n != 3 {
 		t.Errorf("unlinked = %d with a populated catalog, want 3 — the refusal is now unconditional", n)
@@ -824,9 +1215,13 @@ func TestOrphanSidecarSweepRefusesAnEmptyKnownSet(t *testing.T) {
 // operator has to interpret.
 func TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir(t *testing.T) {
 	outputDir := t.TempDir()
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, staticDir(outputDir), time.Hour)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, staticDir(outputDir), time.Hour, sweepPercent)
+	rec := loggingtest.Record(t)
 	if n := s.tick(context.Background()); n != 0 {
 		t.Errorf("unlinked = %d, want 0", n)
+	}
+	if got := rec.Failures(); len(got) != 0 {
+		t.Errorf("an empty catalog over an empty directory warned:\n%s", strings.Join(got, "\n"))
 	}
 }
 
@@ -835,7 +1230,8 @@ func TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir(t *testing.T) {
 // timer, did not. With `variantsDir` on a dedicated volume, `.Trashes/<uid>/`
 // and `.Trash-1000/` sit under the walk root, so any `.flac` inside one is
 // missing from the catalog and older than the grace: files an operator put in
-// the Trash specifically so they could get them back.
+// the Trash specifically so they could get them back. Pruned now by the walk
+// the sweep shares with `--gc` (TakeSidecarInventory).
 //
 // Asserted with a POPULATED catalog, so it pins the walk prune rather than
 // riding on the empty-set refusal above.
@@ -853,7 +1249,7 @@ func TestOrphanSidecarSweepSkipsDotDirectories(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, staticDir(outputDir), time.Hour)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, staticDir(outputDir), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond
 	ageFixtures(t, outputDir)
 

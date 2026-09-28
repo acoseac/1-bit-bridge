@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -241,16 +240,14 @@ func TestTakeSidecarInventoryTreatsAMissingRootAsNothingToDo(t *testing.T) {
 }
 
 // TestTakeSidecarInventoryCountsADirectoryItCannotRead — an unreadable
-// subtree can only make the deletion set SMALLER (the known set comes from
-// the database, not the walk), so it is reported rather than refused. But
-// a report built from part of a tree has to say so.
+// subtree is absent from every count and from the deletion list, and the
+// inventory reports it rather than failing the walk. Whether a sweep may
+// go on over part of a tree is the sweep's decision: the background one
+// refuses (TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree),
+// since a count taken over part of the tree can pass a mass-orphan check
+// the whole would fail. A report built from part of a tree has to say so.
 func TestTakeSidecarInventoryCountsADirectoryItCannotRead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0 does not deny directory reads on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 directory anyway")
-	}
+	skipWhereModesDenyNothing(t)
 	root := t.TempDir()
 	seedTree(t, root, "ok/a.flac", "locked/b.flac")
 	locked := filepath.Join(root, "locked")
@@ -534,6 +531,58 @@ func TestSidecarInventoryResolvesASymlinkedRoot(t *testing.T) {
 	}
 }
 
+// TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked pins the
+// pairing every sweep unlinks by: OrphanWalkedPaths[i] and
+// ScratchWalkedPaths[i] are the files OrphanPaths[i] and ScratchPaths[i]
+// name, as the walk visited them under the RESOLVED root. Through a
+// symlinked root the two spellings differ, and that is the case the
+// pairing exists for: a sweep that unlinks the configured spelling after
+// the link was repointed reaches a tree the walk never counted
+// (CodeRabbit on #1063).
+func TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "real")
+	seedTree(t, target, "Artist/Album/one.flac", "Artist/Album/two.flac", "Artist/Album/three.flac.tmp")
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inv, err := TakeSidecarInventory(context.Background(), link, knownOf(), SidecarInventoryOptions{
+		Consider: func(name string) bool { return strings.HasSuffix(name, ".flac") },
+		Scratch:  func(name string) bool { return strings.HasSuffix(name, ".tmp") },
+	})
+	if err != nil {
+		t.Fatalf("TakeSidecarInventory through a symlinked root: %v", err)
+	}
+	for _, c := range []struct {
+		name           string
+		listed, walked []string
+		want           int
+	}{
+		{"orphans", inv.OrphanPaths, inv.OrphanWalkedPaths, 2},
+		{"scratch", inv.ScratchPaths, inv.ScratchWalkedPaths, 1},
+	} {
+		if len(c.listed) != c.want || len(c.walked) != c.want {
+			t.Fatalf("%s: %d listed and %d walked, want %d of each", c.name, len(c.listed), len(c.walked), c.want)
+		}
+		for i, p := range c.listed {
+			rel, ok := strings.CutPrefix(p, link+string(filepath.Separator))
+			if !ok {
+				t.Fatalf("%s: listed %s is not under the configured root %s", c.name, p, link)
+			}
+			if want := filepath.Join(resolved, rel); c.walked[i] != want {
+				t.Errorf("%s: walked[%d] = %s, want %s, the file listed as %s under the resolved root",
+					c.name, i, c.walked[i], want, p)
+			}
+		}
+	}
+}
+
 // TestSidecarInventoryTreatsADanglingRootAsNothingToDo — the error path
 // of the fix above, pinned rather than assumed.
 //
@@ -603,12 +652,7 @@ func TestSidecarInventorySkipsASymlinkedDirectory(t *testing.T) {
 // "the target is not there" and "I could not find out", and only the
 // second is a reason to leave it alone. (CodeRabbit Major on #959.)
 func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory modes do not deny stat on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory modes")
-	}
+	skipWhereModesDenyNothing(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "variants")
 	seedTree(t, root, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
@@ -717,5 +761,58 @@ func TestClassifyWalkEntryHandlesAWindowsJunction(t *testing.T) {
 		return fakeFileInfo{}, nil
 	}); got != walkEntryClassify || statted {
 		t.Errorf("a regular file: verdict %d, statted %v — want classify with no stat", got, statted)
+	}
+}
+
+// TestCheckPairedRefusesListsThatDoNotPairUp pins the check each deleting
+// sweep makes before it unlinks anything (Gemini on #1063): every listed
+// path has its walked path beside it, orphans and scratch alike, or the
+// inventory is refused with ErrUnpairedInventory. An inventory
+// TakeSidecarInventory returned always passes, capped or not, which the
+// real walks at the end check.
+func TestCheckPairedRefusesListsThatDoNotPairUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		inv  SidecarInventory
+		ok   bool
+	}{
+		{"nothing listed", SidecarInventory{}, true},
+		{"orphans paired", SidecarInventory{OrphanPaths: []string{"a", "b"}, OrphanWalkedPaths: []string{"A", "B"}}, true},
+		{"scratch paired", SidecarInventory{ScratchPaths: []string{"t"}, ScratchWalkedPaths: []string{"T"}}, true},
+		{"an orphan with no walked path", SidecarInventory{OrphanPaths: []string{"a", "b"}, OrphanWalkedPaths: []string{"A"}}, false},
+		{"a walked path with no orphan", SidecarInventory{OrphanPaths: []string{"a"}, OrphanWalkedPaths: []string{"A", "B"}}, false},
+		{"orphans listed and none walked", SidecarInventory{OrphanPaths: []string{"a"}}, false},
+		{"scratch listed and none walked", SidecarInventory{ScratchPaths: []string{"t"}}, false},
+		{"scratch walked and none listed", SidecarInventory{ScratchWalkedPaths: []string{"T"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.inv.CheckPaired()
+			switch {
+			case tc.ok && err != nil:
+				t.Errorf("a paired inventory was refused: %v", err)
+			case !tc.ok && !errors.Is(err, ErrUnpairedInventory):
+				t.Errorf("CheckPaired() = %v, want ErrUnpairedInventory", err)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	seedTree(t, root, "a/x.flac", "a/y.flac", "b/z.flac", "b/half.flac.tmp")
+	isScratch := func(name string) bool { return strings.HasSuffix(name, ".tmp") }
+	for _, limit := range []int{0, 1} {
+		inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
+			Scratch:        isScratch,
+			MaxOrphanPaths: limit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inv.OrphanPaths) == 0 || len(inv.ScratchPaths) == 0 {
+			t.Fatalf("MaxOrphanPaths=%d: the fixture listed %d orphan(s) and %d scratch file(s), want some of each",
+				limit, len(inv.OrphanPaths), len(inv.ScratchPaths))
+		}
+		if err := inv.CheckPaired(); err != nil {
+			t.Errorf("MaxOrphanPaths=%d: an inventory TakeSidecarInventory returned was refused: %v", limit, err)
+		}
 	}
 }

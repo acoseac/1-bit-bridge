@@ -348,7 +348,7 @@ func TestOrphanSweeperKnowsARelocatedCatalogsCanonicalPaths(t *testing.T) {
 	}
 	ageFixtures(t, newDir)
 
-	s := NewOrphanSidecarSweeper(&fakeSidecarLister{rows: rows}, staticDir(newDir), time.Hour)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{rows: rows}, staticDir(newDir), time.Hour, sweepPercent)
 	s.gracePeriodForTest = time.Nanosecond
 	if n := s.tick(context.Background()); n != 1 {
 		t.Fatalf("tick unlinked %d files, want exactly the one orphan", n)

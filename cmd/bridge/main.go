@@ -4101,23 +4101,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Background forward-sweep GC: walks the variants directory
 		// for `.flac` files NOT present in `track_variants.sidecar_path`
 		// and unlinks them. Pairs with the operator-triggered
-		// `bridge upscale --gc` (cmd/bridge/upscale.go) — that path
-		// keeps its unbounded-sweep semantics for one-shot operator
-		// cleanups; this background variant is chunked + opt-in via
-		// `cfg.Integrity.OrphanSidecarSweepIntervalSec`. Default zero
-		// (disabled) — operators on minimal deploys see zero
-		// behavioural change. Skipped silently when the interval is
-		// ≤ 0. See CLAUDE.md "Bridge background GC" for the snapshot
-		// + chunking + cursor invariants. The tree to walk is
-		// liveVariantsDir, resolved per tick — a boot-time path had
-		// this sweeper walking the directory the operator moved away
-		// from while new sidecars landed where it never looked.
+		// `bridge upscale --gc` (cmd/bridge/upscale.go) and, since
+		// 2026-09-28, decides as it does: each tick takes the whole
+		// tree's inventory and refuses a mass orphaning
+		// (integrity.MassOrphanRefusal) — with no override, where `--gc`
+		// has --allow-mass-orphans — then unlinks at most a chunk of
+		// orphans. Opt-in via `cfg.Integrity.OrphanSidecarSweepIntervalSec`;
+		// default zero (disabled), skipped silently when ≤ 0. The rules
+		// are in CLAUDE.md under "Job pools" (the forward sweep's
+		// denominator bullet). The tree to walk is liveVariantsDir,
+		// resolved per tick — a boot-time path had this sweeper walking
+		// the directory the operator moved away from while new sidecars
+		// landed where it never looked. The refusal threshold is the
+		// variant watcher's, a boot value like the interval: none of the
+		// integrity knobs are on the settings page.
 		gcInterval := cfg.OrphanSidecarSweepInterval()
 		if gcInterval > 0 {
 			orphanSweeper := integrity.NewOrphanSidecarSweeper(
 				&integritySidecarListerAdapter{store: manifestStore},
 				liveVariantsDir,
 				gcInterval,
+				cfg.VariantSweepMaxDeletePercent(),
 			)
 			stopOrphanSweeper := orphanSweeper.Start(scanCtx)
 			defer stopOrphanSweeper()
