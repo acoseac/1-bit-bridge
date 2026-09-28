@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -47,18 +46,9 @@ func TestServeRevokesAHarvestCredentialWithTheHarvestOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	stdout, stderr := &safeBuffer{}, &safeBuffer{}
-	done := make(chan int, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		done <- run(ctx, []string{"serve", "--config", cfgPath, "--addr", "127.0.0.1:0"}, stdout, stderr)
-	}()
-	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	served := bootServe(t, "--config", cfgPath, "--addr", "127.0.0.1:0")
 
-	req, err := http.NewRequest(http.MethodDelete, "https://"+addr+"/v1/atlas-harvest/credential", nil)
+	req, err := http.NewRequest(http.MethodDelete, "https://"+served.addr+"/v1/atlas-harvest/credential", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +59,7 @@ func TestServeRevokesAHarvestCredentialWithTheHarvestOff(t *testing.T) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("DELETE: %v; stderr=%s", err, stderr.String())
+		t.Fatalf("DELETE: %v; stderr=%s", err, served.stderr.String())
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()

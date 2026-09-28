@@ -105,16 +105,18 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	dlnaLog := logger.With(slog.String("component", "dlna"))
 
 	// Pick a LAN-eligible interface for SSDP multicast. Tsnet
-	// binding deferred: `cfg.DLNA.AllowTsnet` is honoured at the
-	// admin-config layer but the Eligibility picker needs the live
+	// binding deferred: `cfg.DLNA.AllowTsnet` is parsed and read by
+	// nothing, because the Eligibility picker needs the live
 	// tsnet interface name (resolved from the tsnet.Server's bound
 	// listener at startup) which lives outside this helper's scope.
 	// v1 ships LAN-only by design — Phase 0 confirmed SSDP doesn't
 	// traverse the Tailscale tunnel, so the cross-network path is
 	// PR 5+6's bridge-mediated discovery rather than tsnet-bound
 	// SSDP. Leaving `TsnetIfaceName` empty here keeps the picker
-	// on LAN-only interfaces; a future PR threading the tsnet
-	// interface name through will set this field per operator opt-in.
+	// on LAN-only interfaces (since 2026-09-28: until then Tailscale's
+	// fd7a:115c:a1e0::/48 address admitted its interface anyway); a
+	// future PR threading the tsnet interface name through will set
+	// this field per operator opt-in.
 	iface, ifaceErr := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
 	if ifaceErr != nil {
 		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", ifaceErr.Error()))

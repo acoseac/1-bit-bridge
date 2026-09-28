@@ -745,7 +745,9 @@ type IntegrityConfig struct {
 	// of the files in the variants directory when there are also more
 	// unreferenced files than rows (`--allow-mass-orphans` passes it),
 	// and since 2026-09-28 the background orphan sweep above does too,
-	// with no way past it. 100 disables that guard as well.
+	// with no way past it. 100 disables that guard as well, and with it
+	// the refusal of a walk that could not list part of the tree
+	// (integrity.PartialWalkRefusal), which exists only to protect it.
 	// Pointer-typed like its siblings; read via
 	// Config.VariantSweepMaxDeletePercent(). Config-file / env only, as
 	// the two intervals above are: none of the integrity knobs are on
@@ -1557,7 +1559,9 @@ type DLNAConfig struct {
 	// playback. Setting this true is only useful for the
 	// uncommon case where renderer + iOS are BOTH on the same
 	// tailnet (renderer published via subnet router with
-	// multicast forwarding hacks).
+	// multicast forwarding hacks). Nothing reads it yet: serve
+	// passes the LAN pickers no tsnet interface name, so setting
+	// it changes nothing (cmd/bridge/dlna_wiring.go).
 	AllowTsnet bool `yaml:"allowTsnet,omitempty"`
 
 	// TelemetryEnabled wires the per-request middleware that

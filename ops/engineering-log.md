@@ -23051,6 +23051,522 @@ PathError branch also requires a non-nil `pe`, which `errors.As` sets for a
 typed nil. The six rows pass, and none names the absolute path. No other
 dereference of a cause is in the change.
 
+## 2026-09-28 — the `--gc` sweeps refuse a partial walk, the background sweep walks past files it cannot remove, and the Jobs card shows its refusal
+
+Three leftovers of #1063 (backlog B30 and B26), in one PR.
+
+### B30: the CLI sweeps took a verdict over a walk that could not read part of the tree
+
+`bridge upscale --gc` (and optimize / render, which reach `runGC`) and
+`bridge analyze --gc` applied `MassOrphanRefusal` to the counts of the part
+of the tree their walk could read, printed "N entr(y/ies) … could not be
+read; they were neither counted nor removed", and went on. #1063 fixed the
+background sweep only.
+
+Measured on main (99b6d1e6) with #1063's shape, through the real `runGC`
+and `runAnalyzeGC`: 20 rows each with its file, 15 stranded files in view,
+1,000 stranded files behind a `chmod 000` directory. The visible counts,
+15 orphans of 35 files against 20 rows, pass the check; the whole tree,
+1,015 of 1,035, refuses. Both sweeps printed the unreadable count, removed
+the 15 (`GC forward sweep: removed 15 orphan file(s), kept 20 known
+sidecar(s)`; `analyze --gc: removed 15 orphan sidecar(s), kept 20`) and
+exited 0. 1,020 of 1,035 files were left.
+
+**Decided: split the unknowns, refuse the unbounded one, weigh the bounded
+one.**
+
+- `SidecarInventory.UnlistedDirs` counts the directories among `Unreadable`.
+  A directory the walk could not list may hold any number of files, so
+  `integrity.PartialWalkRefusal` refuses a verdict over such a walk. All
+  three deleting sweeps ask it after the mass-orphan check (whose advice,
+  a lost index, is the more urgent when the visible part already refuses),
+  and the doctor reports it (`GCRefusesPartialWalk`, sound on a truncated
+  prefix: a directory this walk could not list is one the whole walk cannot
+  list either).
+- The CLI's way past it is a new `--allow-partial-walk` on upscale /
+  optimize / render / analyze, which waives only that refusal; the
+  mass-orphan check still runs over what was read. **Rejected: reusing
+  `--allow-mass-orphans`**, which gives up the whole mass-orphan protection
+  to get past one directory. But `--allow-mass-orphans` waives the
+  partial-walk refusal too: that refusal exists only to protect the verdict
+  the flag has set aside, so asking for both flags would add nothing. A
+  threshold of 100 disables it the same way (`MassOrphanRefusal` never
+  refuses there, however much a directory hides). The background sweep has
+  no override, as before.
+- A link the walk could not stat (the rest of `Unreadable`) is never walked
+  into, so it is nothing, one known file or one orphan.
+  `integrity.MassOrphanRefusalFor` counts every such entry as an orphan
+  (o+k of f+k). That is exact, not merely conservative: a known file adds
+  to the files alone and can only lower the ratio; an orphan adds to both,
+  and the floor and `orphans > rows` grow with it while 100·(o+1) >
+  pct·(f+1) follows from 100·o > pct·f for pct ≤ 100; so the all-orphans
+  reading refuses whenever any reading does, and every reading proceeds
+  when it proceeds. `TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`
+  checks that against every reading by brute force (74,250 shapes: six
+  thresholds, rows and orphans 0–14, files up to orphans+10, 0–4 links).
+  Before this change the background sweep refused every tick over a single
+  such link. The refusal's reason says when its numbers are a worst case
+  ("counting the N entr(y/ies) the walk could not stat as unreferenced
+  files").
+
+**The ordinary false positive: `lost+found`.** mke2fs creates a root-owned,
+0700 `lost+found` at the top of every ext2/3/4 filesystem, so a variants
+directory that IS such a volume's mount point holds one the service user
+can never list. Since #1063 it made the background sweep refuse every tick,
+and `bridge doctor` warned about it on every run; with the CLI refusal above
+it would have made every `--gc` on such a host partial.
+
+- Decided (D1): a directory named exactly `lost+found`, directly under the
+  RESOLVED walk root, whose listing fails with a PERMISSION error, is the
+  filesystem's and not counted (`isFilesystemLostFound`, in
+  `TakeSidecarInventory`, so the three sweeps and the doctor agree). The
+  resolved root is where the volume is, so a symlinked variants directory
+  gets the rule too. A readable one is walked as before.
+- What else that name can be: the variants layout mirrors library-relative
+  paths, so `<variantsDir>/lost+found` is also what a single-root library
+  with a top-level folder of that name, or (multi-root) a library root with
+  that basename, would render into. The bridge creates that directory as its
+  own user and can list it, so D1 walks it. If the volume's own 0700
+  `lost+found` is already there, the bridge (non-root) cannot write into it
+  at all. The one way sidecars could sit in an unreadable one is a render
+  run as ROOT for such a library folder; left as a residual.
+- Rejected (D2): prune `lost+found` at the walk root always, like a
+  dot-directory. It would have kept `sudo bridge upscale --gc` from
+  unlinking fsck's recovered inodes (a nil Consider counts every file) and
+  made the verdict independent of the user running it; but it also hides a
+  readable, bridge-created directory from every forward sweep, and `--gc`'s
+  nil Consider already treats everything in the variants directory as its
+  own. Narrower is the smaller change.
+- Rejected: requiring the walk root to be a mount point (st_dev against its
+  parent) or the directory to be owned by uid 0. Both are POSIX-only, and
+  neither excludes the one residual (a root-run render makes a uid-0
+  directory under a mount point too).
+- Not covered: a volume mounted DEEPER in the tree keeps its `lost+found`
+  counted (nothing about the walk root vouches for it), and an I/O error on
+  the top one counts as any other. `TreeHoldsVariantSidecars`, the reverse
+  guard's probe, still fails closed on an unreadable `lost+found`, which can
+  only refuse a mass row deletion (the safe direction).
+- A Gemini consult on D1/D2 and on the link weighing was attempted; the API
+  answered HTTP 429 (the project's monthly spending cap). Decided here.
+
+**Doctor.** `variants-index`'s hint said `--gc` "measures the whole tree and
+unlinks nothing when it refuses", false past a directory it could not list;
+it now says `--gc` refuses such a walk and names `--allow-partial-walk`. Its
+summary called every unreadable entry a directory ("director(y/ies) could
+not be read"), the wording #969 fixed in both CLI sweeps and not here; it
+names directories and links apart now. `WouldRefuseGC` is withheld only for
+an unlisted directory, since a link is weighed as `--gc` weighs it.
+
+### B26 (1): a tick stalled behind files it could not remove
+
+Each tick retained the first `gcChunkSize` (5,000) orphan paths in walk
+order and every attempt spent a slot, so a chunk's worth of files the
+service user cannot unlink at the head of the walk (a root-owned directory
+from a `sudo bridge upscale` run) blocked every orphan behind them, every
+tick. The cursor this sweep had until #1063 moved past them. Measured on
+main with a chunk of 5: 30 rows with files, eight orphans in a read-only
+directory (`a-locked`, walked first) and ten deletable ones after it; four
+ticks, `unlinked=0 failed=5` each, 48 files left.
+
+- Decided: keep `gcRetainedPerUnlink` (4) chunks of paths and cap SUCCESSFUL
+  unlinks at the chunk; a tick tries the retained paths in walk order until
+  it has unlinked a chunk. After: 5, 5, 0 on the same shape.
+- The bound, measured (Apple silicon, go1.26.6, 21,000 files with 205-byte
+  paths): 10.8 MB of heap for 20,000 retained paths (two spellings each,
+  `OrphanPaths` and `OrphanWalkedPaths`), 3.0 MB at the old 5,000, freed
+  when the tick ends. A head of up to 15,000 undeletable files still leaves
+  a full chunk per tick; 20,000 or more stall again. The summary line gained
+  `retained`, so `failed == retained` with `unlinked == 0` shows it.
+- Nothing crosses a tick, #1063's rule. Rejected: remembering failed paths
+  between ticks (state carried across ticks, which #1063 refused);
+  reservoir-sampling the retained list (no stall in expectation, but a
+  tick's work stops being reproducible from its inputs, and tests would need
+  an RNG seam); predicting undeletable files from the parent directory's
+  writability (`access(W_OK)`: POSIX-only, blind to sticky bits and to
+  Windows' delete semantics).
+- The refusal still reads the full `Orphans` count. The full-count test
+  (`TestOrphanSidecarSweeperRefusesOnTheFullOrphanCount`) had 150 rows and a
+  chunk of 100: at four chunks the retained 400 outnumber 150 rows, so a
+  refusal fed the retained count still refused, and the test caught that
+  mutation only through its wording check. Its fixture is now 500 rows, with
+  a guard that fails if the retained count ever reaches the rows again.
+
+### B26 (2): the Jobs chip said "on" while the sweep refused
+
+The "Orphan sidecar GC" line read the interval alone. A sweep refusing every
+tick, with no override and one WARN a day, looked healthy on the Jobs page.
+
+- `OrphanSidecarSweeper` keeps its latch as a kind
+  (`integrity.OrphanRefusalKind`: `massOrphans`, `partialWalk`) and the start
+  of the streak, and publishes both through an atomic snapshot (`Status`),
+  written by the run goroutine when the latch moves. The ticks' own latch
+  logic is unchanged (a tick that decided nothing leaves it).
+- `admin.Deps.OrphanSweepStatus` (wired by runServe to the sweep's `Status`,
+  nil when it does not run) fills `maintenance.orphanSidecarGCRefusal` (a
+  key) and `orphanSidecarGCRefusingSince` on `/api/jobs`, omitted while the
+  sweep is not refusing or its interval is off.
+- The card shows a "refusing" badge and when it started on the line, and
+  the reason in a `hint warn` paragraph under the list. The first draft put
+  the sentence in the list cell: in a browser at 375 px it wrapped into a
+  163 px column 170 px tall.
+- Verified in a real browser on a throwaway bridge (ports 27788 / 27789, the
+  orphan sweep at 5 s, two rows over 45 stranded files): the lost-index
+  refusal; then, with the 40-file directory locked, the partial-walk refusal
+  (a new streak, so a new start); then, with that directory removed and a
+  locked `lost+found` at the variants root, a tick that proceeded
+  (`unreadable=0 refused=false unlinked=5`, one "no longer refusing" line)
+  and the chip back to "on". At 375 and 1024 px, light and dark, no
+  horizontal scroll.
+- Not shown: the empty-catalog refusal, which is not a latch kind (it WARNs
+  every tick and decides nothing about the tree).
+
+### Tests
+
+New: `TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut`,
+`TestIsFilesystemLostFoundReadsAllThreeTerms`,
+`TestMassOrphanRefusalForWeighsWhatTheWalkCouldNotStat`,
+`TestPartialWalkRefusalNeedsADirectoryItCouldNotList`,
+`TestOrphanSidecarSweeperProceedsPastTheFilesystemsLostFound`,
+`TestOrphanSidecarSweeperWeighsALinkItCouldNotStat`,
+`TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove`,
+`TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch`,
+`TestOrphanSidecarSweeperStatusIsReadableBesideTheRunningLoop` (the atomic
+publication under `-race`), `TestRunGCRefusesAPartialWalkUntilAllowed`
+(with the control that the whole tree refuses as a lost index),
+`TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`,
+`TestRunGCProceedsPastTheFilesystemsLostFound`,
+`TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`,
+`TestEveryForwardSweepingGCCommandOffersThePartialWalkOverride` (the
+mass-orphan sweep test's body is now a helper both flags share),
+`TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk`,
+`TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`,
+`TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`,
+`TestMaintenanceChipSaysTheOrphanSweepIsRefusing`,
+`TestEveryOrphanRefusalKindIsWorded` (node) and
+`TestServeReportsTheOrphanSweepRefusalOnTheJobsCard` (boots serve).
+Adapted: the doctor fixtures that meant directories now say so
+(`UnlistedDirs`), `TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory`
+requires the new hint and forbids the old claim, the partial-walk WARN test
+reads "could not list", and the full-count test's fixture (above).
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| `upscale --gc`'s partial-walk refusal skipped | `TestRunGCRefusesAPartialWalkUntilAllowed`, alone |
+| `analyze --gc`'s skipped | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed`, alone |
+| `isFilesystemLostFound` answers false | the inventory, unit, sweeper, `runGC` and doctor lost+found tests (five) |
+| its permission term dropped | the unit table's I/O-error row, alone |
+| its walk-root term dropped | the inventory test and the unit table's nested row |
+| `MassOrphanRefusalFor` weighs no links | the brute-force test and the sweeper's tenth-orphan row |
+| `PartialWalkRefusal` keyed on `Unreadable` | its own test and the sweeper's ordinary-crop row |
+| `PartialWalkRefusal` ignores pct 100 | its own test, alone |
+| `--allow-mass-orphans` no longer waives it | `TestRunGCWaivesThePartialWalkRefusalWithTheMassOrphanOne`, alone |
+| render.go's flag misnamed | the partial-walk flag sweep, alone ("only 3 command(s)") |
+| the doctor's partial-walk hint case disabled | the doctor package test and the end-to-end doctor test |
+| the doctor's summary stops naming links apart | `TestVariantsIndexNamesEachKindOfEntryItCouldNotResolve`, alone |
+| the doctor probe withholds the verdict for links | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC`, alone |
+| the unlink loop caps attempts (`i >= chunk`) | both rows of `TestOrphanSidecarSweeperUnlinksPastOrphansItCannotRemove` |
+| one chunk of paths retained | the same two rows |
+| the refusal fed `len(inv.OrphanPaths)` | the full-count test ("unlinked 100, want 0") and the tenth-orphan row |
+| app.js stops reading `orphanSidecarGCRefusal` | `TestEveryJobsFieldIsRenderedSomewhere` (run again after the layout commit) |
+| app.js stops reading `orphanSidecarGCRefusingSince` | `TestEveryJobsFieldIsRenderedSomewhere` |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` ("falls through to the fallback") |
+| the handler never fills the refusal | the handler test and the serve boot test |
+| runServe wires nil | the serve boot test, alone |
+| the lifted streak is not published | `TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch` |
+| the handler ignores the interval gate | the handler test's interval-off block |
+
+One control was invalid on its first form: deleting the wiring line in
+`main.go` left `orphanSweepStatus` unused and the package did not build; it
+was rewritten to wire nil and keep a use.
+
+### Review round 1: SonarCloud's duplication gate
+
+CodeRabbit (on `4948fd32`) and Gemini left no findings. SonarCloud's
+quality gate failed on duplication: 3.3% of the new code (60 lines in 9
+blocks, over 1,797 new lines; the gate is 3%). Read through its
+`duplications/show` API, every block but three was test setup this change
+repeated from a test that already had it: the serve boot (the Jobs-card
+test against the harvest-revoke test, 12 lines), the lost-index seed (the
+same test against the doctor fixture, 20), the waveform seed (the
+partial-walk test against the mass-orphan one, 12), and the node runner
+(the orphan-refusal wording test against the sweep-line one, 13). Each is
+one helper now: `bootServe` (main_test.go), `seedVariantCatalog`
+(doctor_variants_index_test.go), `waveformTree` (moved beside
+`strandedTree`), and `runConsoleFunction` (internal/admin). The older side
+of each pair uses its helper too, since a helper only the new test called
+would still repeat the old test's lines.
+
+**The drain guard had to widen to take `bootServe`.**
+`TestEveryBackgroundGoroutineDrainsOnCleanup` read Test functions alone, so
+a boot moved into a helper left its audit. It reads every function in the
+test files now: 45 match (42 tests and three helpers, two of which,
+`runOneFingerprintPass` and `runOneSmartPlaylistPass`, already launched
+unaudited, and both drain). With `bootServe`'s drain deleted it goes red
+naming `bootServe`; with the same deletion and the Test-only filter put
+back, it stays green, which is the gap it had.
+
+**The three `--allow-partial-walk` lines stay.** Each extends the flag
+block `upscale`, `optimize` and `render` already repeat, and its help text
+is one const, so the wording cannot drift. A helper registering that one
+flag would still sit inside the repeated block; removing the block means
+one helper for every `--gc` override, which the per-file flag sweeps
+(anchored on each command declaring `fs.Bool("<flag>"` itself) would have
+to follow. Three lines of 1,797 is 0.17%.
+
+Controls re-run on the refactored tests, each restored with
+`git checkout --` (the code under them is the refactor commit's):
+
+| mutation | result |
+|---|---|
+| runServe wires a nil `OrphanSweepStatus` | the serve Jobs-card test red |
+| the jobs handler never fills the refusal | the serve Jobs-card test red |
+| serve's harvest-off clearer clears nothing | the harvest-revoke test red ("re-enabling the harvest would find the revoked credential") |
+| `bootServe` registers no drain | the drain guard red, naming `bootServe` |
+| the same, with the guard back to Test functions | the drain guard GREEN (the gap) |
+| `describeOrphanGCRefusal` loses `partialWalk` | `TestEveryOrphanRefusalKindIsWorded` red |
+| `describeAnalysisSweep` drops `alreadyQueued` | `TestDescribeAnalysisSweepAccountsForEveryTrack` red |
+| `analyze --gc` skips the mass-orphan refusal | `TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed` red |
+| `analyze --gc` skips the partial-walk refusal | `TestRunAnalyzeGCRefusesAPartialWalkUntilAllowed` red |
+| the doctor's partial-walk hint case disabled | `TestDoctorVariantsIndexSaysWhatGCDoesWithAPartialWalk` red |
+| the doctor probe never says the sweep would refuse | `TestDoctorReportsAVariantCatalogThatLostItsIndex` red |
+| the doctor verdict withheld for a link too | `TestDoctorVariantsIndexWeighsALinkItCouldNotStatLikeGC` red |
+
+### Review round 2: an empty refusal reason
+
+CodeRabbit (on `615ec468`, one Trivial comment) found that
+`TestEveryOrphanRefusalKindIsWorded` did not reject an EMPTY reason: its
+cases were the fallback, the bare key and another kind's words, and an
+empty line is none of them. Measured with `partialWalk`'s case in
+`describeOrphanGCRefusal` returning `""`, returning nothing, returning
+`null` and returning `" "`: the test on `615ec468` passed all four, while
+the Jobs card would have read "Orphan sidecar GC is refusing." with no
+reason, or with "undefined" or "null" as one. It now rejects a line that is
+blank, `undefined` or `null` before its other cases, taking CodeRabbit's
+suggestion and adding the two spellings it did not name (`null` prints as
+"null"; a blank passes `== ""`). The same four mutations turn the new
+test red with "has no refusal reason", and each is green against the old
+one, so nothing else in the test caught them. Gemini was at its daily
+quota this round.
+
+## 2026-09-28 — a tailnet interface needs the opt-in, the SSDP set leaves out a member with no IPv4, and the mDNS responder rebuilds only when its advertisement changes (backlog B15, #1051's follow-ups)
+
+#1051's entry left three things: Tailscale's interface was eligible through
+its ULA, members with no IPv4 address still got SSDP clients, and the mDNS
+rebind loop rebuilt on addresses its records do not carry. Each was measured
+before anything was changed.
+
+### What was measured on the old code
+
+- **Tailscale's interface is LAN-eligible without the opt-in, through its
+  ULA.** A throwaway program called `IsLANEligibleInterface` on every
+  interface twice, with all its addresses and with the
+  `fd7a:115c:a1e0::/48` one removed, and printed both pickers:
+
+  | host | Tailscale interface | eligible | without the ULA | multicast set |
+  |---|---|---|---|---|
+  | the dev Mac (darwin/arm64) | `utun12`: up, pointtopoint, multicast, running; fe80, a 100.64/10 address, a ULA in the /48 | true | false | en0 awdl0 llw0 utun12 |
+  | dido (Linux 7.0, `--network host`) | `tailscale0`: the same flags, 100.64/10 /32, the ULA /128, fe80 | true | false | enp1s0f0 docker0 br-… tailscale0 and four veths |
+
+  The ULA is inside fc00::/7, so `net.IP.IsPrivate` counts it and
+  `hasPrivate` admitted the interface; the 100.64/10 address has always
+  counted as public. No production caller sets `TsnetIfaceName`, and
+  `dlna.allowTsnet` is read by nothing, so the opt-in the docs describe was
+  never what admitted it.
+- **What the bridge did with it.** The real binary on the Mac (DLNA with
+  renderer discovery and UPnP upstream on, a throwaway config, the HTTP
+  listener on `:17790`) logged `SSDP advertiser started` twice,
+  `interface=en0` and `interface=utun12`, the second with its LOCATION on
+  the tunnel's 100.x address; `UPnP upstream started … interfaces=4`; and
+  four renderer-discovery clients (en0, awdl0, llw0, utun12). Per member,
+  the probe did what each consumer does first: on utun12 and on dido's
+  tailscale0 `ListenMulticastUDP` joined the SSDP group and an M-SEARCH send
+  succeeded, written into the tunnel. Windows was not measured: Wintun is
+  `IF_TYPE_PROP_VIRTUAL`, which Go gives no point-to-point flag, so by
+  #1051's ranking its adapter (class "other usable", from the ULA) outranks
+  a zero-config LAN (link-local only) and is the single pick the mDNS
+  responder binds; beside a private-IPv4 LAN it ranks below it and is still
+  in the set.
+- **Whether that multicast reaches a peer.** Between the Mac and dido (one
+  tailnet, no exit node, no subnet router): a sender pinned to the tunnel
+  (`IP_MULTICAST_IF`) wrote 32 SSDP-shaped datagrams to 239.255.255.250:1900,
+  all without error, and a listener joined to the group on the other side's
+  tunnel received 0, in both directions, while 32 of 32 unicast datagrams
+  sent beside them to the peer's 100.x address arrived. A multicast M-SEARCH
+  from dido's tailscale0 drew 0 answers from the Mac's bridge (the one with
+  an advertiser on utun12). So in this tailnet the advertiser and the
+  clients on the tunnel reached no peer; what the fix removes is that work,
+  and, on Windows, the responder's pick.
+- **Members with no IPv4 address.** On the Mac, awdl0 and llw0 (fe80 only,
+  not point-to-point) each got a renderer client; each client's first
+  M-SEARCH failed with `sendto: can't assign requested address`, logged as
+  a WARN `M-SEARCH send failed` (two in the probe bridge's first seconds,
+  naming no interface before #1072; since #1072 the UPnP-upstream clients
+  on the same two members report theirs too), and
+  `ListenMulticastUDP("udp4", awdl0, …)` failed
+  `no such network interface` (the advertiser already skipped both, through
+  `firstIPv4OnInterface`). On dido the four veths (fe80 only, not
+  point-to-point) each got a client too, and there the join and the sends
+  succeed, since Linux joins by interface index. `ip -o link` shows each
+  veth as a port (`master`) of `docker0` or `br-46c2e99686b3`, both of them
+  members with a private IPv4. Every consumer of the set is IPv4 SSDP
+  (udp4, 239.255.255.250): the advertisers, the renderer clients and the
+  UPnP-upstream clients (a grep of `PickAllLANEligibleInterfaces`'s three
+  callers).
+- **The mDNS rebind loop.** `maybeRebind` compared `ipsForAdvertise()`
+  (every up interface's addresses) with the set cached at the last rebuild,
+  while `rebuildLocked` narrowed the records to the pinned interface's. A
+  copy of `ipsForAdvertise` and the picker sampled once a minute for 80
+  minutes, as the loop ticks, and counted where each comparison differed:
+  on dido the full set changed 21 times, every one a docker veth coming or
+  going (16 distinct veths, one per container), and the advertised set
+  (the pick and its addresses) 0 times; on the dev Mac the full set changed
+  once, a new tunnel (`utun13`) coming up, #1051's case, and the advertised
+  set 0 times. So all 22 rebuilds the old loop would have made in those two
+  windows changed nothing it advertised.
+- hashicorp/mdns pins a responder to the loopback interface on macOS and on
+  Linux, whose `lo` carries no multicast flag (both `ListenMulticastUDP`
+  calls and `NewServer` succeed, in a container's namespace and the host's),
+  which is what lets the rebind tests run on a CI runner.
+
+### Decisions
+
+- **The Tailscale ULA is classified before `IsPrivate` and counts as
+  public.** Public, not merely "not private", because a tailnet with IPv4
+  switched off leaves the ULA beside an fe80, which the zero-config arm
+  (`hasLinkLocal && !hasPublic`) would otherwise admit. By ADDRESS, not by
+  name: macOS numbers its utuns, and nothing in Windows' adapter says
+  tunnel. 100.64/10 needed nothing: it was already refused, and a LAN
+  genuinely numbered in CGNAT space is refused as before. A LAN that uses
+  Tailscale's own ULA prefix would lose eligibility through it; RFC 4193's
+  40-bit global ID makes a collision a one-in-2^40 case, and a private IPv4
+  beside it still admits. The prefix is a local `netip.Prefix`, pinned to
+  `tsaddr.TailscaleULARange()` by a test, rather than an import of tsaddr
+  into `internal/dlna`, which imports nothing of tailscale.com; this is
+  `internal/advertise`'s precedent too. `lanPreferenceOf` is unchanged: an
+  eligible interface carrying the ULA has a real private address, whose
+  class the ULA cannot better.
+- **The IPv4 rule is the SET's, not the SSDP call sites'.** Every consumer
+  of the set runs IPv4 SSDP, the advertisers already skipped such a member,
+  and #1051 justified its tunnel rule on the set by the same failed send.
+  Filtering at the two discovery wirings instead was rejected: it leaves the
+  set holding members no consumer can use, and puts the rule in two places.
+  **Conditional**, like the tunnel rule: when no member carries IPv4 the set
+  is kept, so an IPv6-only host behaves as before; unconditional would empty
+  the set there and, through `startUPnPUpstreamIfEnabled`'s early return,
+  switch off UPnP upstream's manual URLs, which need no multicast.
+  **After the tunnel rule**, so where the tunnel rule leaves no IPv4 member
+  the set is exactly #1051's: the other order readmits a self-assigned
+  tunnel beside an fe80-only interface. A 169.254 address counts: that is
+  the direct-cable renderer #1051 kept the zero-config arm for.
+- **The single pick may now sit outside the set**, and only one way:
+  carrying no IPv4 while a member does. The responder answers over IPv6
+  too, and #1051's ranking puts a non-tunnel first, so an IPv6-only LAN
+  beside a tunnel holding a private IPv4 is its pick and is rightly outside
+  an IPv4 set. No single-pick key keeps strict membership there without
+  ranking the tunnel first. `assertPickIsInTheSet` and the host coherence
+  test allow exactly that case.
+- **The rebind compares the advertisement.** `advertisementOf` is the one
+  computation of what a rebuild stands up (the pinned interface, and the
+  addresses narrowed to it, or all of them when nothing is pinned or none
+  is on it); `rebuildLocked` builds from it and records it as `running`,
+  and `maybeRebind` rebuilds only when a fresh one is not `same`: the
+  interface by name and index, the addresses as a set. Rejected: skipping
+  point-to-point interfaces in `ipsForAdvertise`, which misses Wintun and
+  the docker veths (every change measured on dido) and would change what a
+  responder with nothing pinned advertises.
+- **The InterfaceSource is asked every tick**, where it was asked only
+  inside a rebuild; the responder now follows a better pick when the picker
+  names it, rather than on the next address change anywhere. The
+  cmd/bridge closure printed every failed pick, which per tick is a line a
+  minute on a host with no LAN-eligible interface, so `lanInterfaceSource`
+  prints once per streak (and again when the error's text changes), and an
+  AST test requires the Config literal to take it.
+- **Stale comments corrected.** `internal/dlna`'s package doc said the DLNA
+  listener "is bound ONLY to LAN-eligible interfaces"; eligibility governs
+  SSDP and the single pick, and the HTTP listener binds
+  `dlna.listenAddress`. `cmd/bridge/dlna_wiring.go` said `AllowTsnet` is
+  "honoured at the admin-config layer" and that the empty
+  `TsnetIfaceName` "keeps the picker on LAN-only interfaces": nothing reads
+  `AllowTsnet`, and the second was true only from this change on; the
+  config field's doc now says it changes nothing yet.
+- A Gemini consult on the classification and the placement was refused by
+  the API (the project's spending cap), so these were decided on the
+  measurements above.
+
+### Tests and controls
+
+- `internal/dlna`: 11 rows in `TestIsLANEligibleInterface` (the three
+  platforms' Tailscale shapes without the opt-in, IPv4 switched off, the ULA
+  alone, the /48's last address, a ULA just outside it on either side, a
+  private IPv4 and a ULA beside Tailscale's, and the opt-in);
+  `TestPickersLeaveOutATailnetInterfaceWithoutTheOptIn` (7 hosts, both
+  pickers); `TestPickAllLANInterfacesLeavesOutAMemberWithNoIPv4` (10 hosts);
+  `TestTailscaleULAIsTailscalesRange`. `macos_host`'s set lost utun12 and
+  awdl0, the Windows single-pick row became a WireGuard adapter numbered
+  with a ULA (Tailscale's is no longer a candidate, and the row exists for
+  Wintun's missing flag), and the Tailscale key row became the opted-in
+  one.
+- `internal/mdns`: `TestAdvertisementSameIsWhatARebuildWouldChange` (10
+  rows), `TestTheRunningAdvertisementIsTheOneBuilt`, and, in their own file
+  so they build on the old code, `TestRebindIgnoresAddressesOffThePinnedInterface`
+  and `TestRebindFollowsTheInterfaceSource`, which drive `maybeRebind` with
+  the responder pinned to the loopback interface. The two filter tests
+  became `advertisementOf` tests.
+- `cmd/bridge`: `TestLANInterfaceSourcePrintsAFailureOncePerStreak` and
+  `TestMDNSInterfaceSourceIsTheOncePerStreakOne`.
+- **Red first**, on the pre-fix commit in a throwaway worktree with the
+  new test files copied in (those that build there): 19 subtests red in
+  `internal/dlna` (6 eligibility rows, 6 of the 7 tailnet hosts, 6 of the
+  10 IPv4 hosts, `macos_host`), the guards green; both rebind tests red on
+  macOS and on Linux (golang:1.26.6 on dido). The new functions' own tables
+  (`advertisementOf`, `same`, `lanInterfaceSource`) have no old form.
+- **Negative controls**, each applied once to the committed fix by a script
+  that requires its target text exactly once, `-count=1`, restored with
+  `git checkout --` and checked clean:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | no Tailscale case (the ULA private again) | the 6 eligibility rows, 6 tailnet hosts, `macos_host` |
+  | NC2a | the prefix widened to /32 | the two just-outside rows, the tsaddr pin |
+  | NC2b | the prefix narrowed to /64 | the /48's last address, the Linux shape (`…:ab12::1`), the tsaddr pin |
+  | NC3 | the ULA admits nothing but blocks nothing | `tailscale_ipv6_only_no_optin`, `ipv6_only_tailnet_beside_a_zero_config_lan` |
+  | NC4 | no IPv4 rule | 6 IPv4 hosts, `macos_host` |
+  | NC5 | the IPv4 rule unconditional | 3 IPv4 hosts, `tunnels_alone_are_kept`, one tailnet host, 2 single-pick rows through membership |
+  | NC6 | 169.254 does not count as IPv4 | `link_local_ipv4_counts`, `direct_cable_kept_beside_en0`, `macos_host`, one single-pick row through membership |
+  | NC7 | the IPv4 rule before the tunnel rule | `tunnel_rule_first` |
+  | NC8 | the membership check strict again | `opted_in_tsnet_counts_as_ipv4`, `ipv6_only_lan_beside_an_ipv4_tunnel` |
+  | NC9 | no narrowing | the two "off the pinned interface" rows, the narrowing test, the running test, `TestRebindIgnoresAddressesOffThePinnedInterface` |
+  | NC10 | `same` ignores the interface | the new-index row, `TestRebindFollowsTheInterfaceSource` |
+  | NC11 | `same` compares the name only | the new-index row |
+  | NC13 | every failed pick printed | the streak test |
+  | NC14 | an inline closure in the Config literal | the AST test |
+  | NC15 | a success does not end the streak | the streak test, once fixed (below) |
+
+  The first draft's `tunnel_rule_first` row (two fe80-only interfaces) could
+  not tell the two orders apart, which planning NC7 showed before it ran;
+  that row became `neither_rule_empties_the_set`, and `tunnel_rule_first`
+  a self-assigned tunnel beside an fe80-only interface. NC15 went green on
+  its first run: the streak test's last failure had a different text from
+  the one printed before the success, so it printed with or without the
+  reset. It now repeats that text, and NC15 turns it red.
+- **After**, on the Mac: the set is en0 alone, one advertiser, one renderer
+  client, `UPnP upstream started … interfaces=1`, no send failure, and the
+  bridge holds 4 UDP sockets where it held 12; with mDNS on, `dns-sd -B`
+  finds it on en0 beside the NUC's bridge. On dido: the set is enp1s0f0,
+  docker0 and br-46c2e99686b3, with two veths up at the time.
+
+### Out of scope
+
+- The single picker ranks a non-tunnel fe80-only interface (awdl0) and a
+  169.254 one equally, so on a Mac with no private-IPv4 LAN, enumeration
+  order would give the responder awdl0 over a direct cable. An IPv4
+  tie-break after the class would take the cable; not measured on a host
+  that has both.
+- `dlna.allowTsnet` does nothing until serve passes the pickers the
+  tsnet interface's name.
+
 ## 2026-09-28 — the ingest's SOAP and the byte proxy dial an upstream under the approval its control URL came with (backlog B36)
 
 #1069 checked every connect of the discovery clients' description fetch and
