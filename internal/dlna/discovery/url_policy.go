@@ -457,8 +457,8 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 // (WithDialApproval). The zero DialApproval covers neither kind, so a
 // request that carries none reaches other hosts only.
 //
-// Two things approve such a connect, the same two that let a device's URL
-// name such an address at all:
+// Three things approve such a connect: the two that let a device's URL name
+// such an address at all, and the peer a GENA callback came from:
 //
 //   - AnnouncedFrom: the SSDP packet the URL came from was sent from that
 //     very address. It approves that address and no other, and never the
@@ -467,9 +467,12 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 //     machine or a link-local address. It approves every address of that
 //     kind, as resolveServiceURL keeps a service URL of that kind from such
 //     a description.
+//   - SubscribedFrom: the GENA SUBSCRIBE whose CALLBACK names the URL came
+//     from that very address (internal/dlna's initial NOTIFY). AnnouncedFrom's
+//     rule, for a TCP source.
 //
-// Neither approves a cloud metadata address (cloudMetadataAddrs), not even
-// a packet's own: a peer on the link can send one from 169.254.169.254.
+// None approves a cloud metadata address (cloudMetadataAddrs), not even a
+// peer's own: a peer on the link can send from 169.254.169.254.
 //
 // A URL is checked when it is found and dialled for as long as it is cached,
 // and a name in it resolves again at every dial. So the approval is recorded
@@ -478,8 +481,9 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 // every byte fetch of a routed track. Comparable, so a cache can store it and
 // a test can compare it.
 type DialApproval struct {
-	// source is the announcing packet's address, unmapped and without a
-	// zone, or the zero Addr for an approval that came from no packet.
+	// source is the approving peer's address (the announcing packet's, or
+	// the SUBSCRIBE's), unmapped and without a zone, or the zero Addr for an
+	// approval that came from no peer.
 	source netip.Addr
 	// chosen is the kind of host an operator's URL named: hostThisMachine
 	// or hostLinkLocal, or hostElsewhere (the zero value) when it named
@@ -492,6 +496,15 @@ type DialApproval struct {
 // address only. A nil src, or one that holds no address, approves none.
 func AnnouncedFrom(src *net.UDPAddr) DialApproval {
 	return DialApproval{source: announcerAddr(src)}
+}
+
+// SubscribedFrom is the approval a GENA SUBSCRIBE from `from` gives the
+// callback URL it names, which internal/dlna sends its initial NOTIFY to
+// (backlog B39): a connect to this machine or a link-local address at that
+// address only, as AnnouncedFrom gives an SSDP packet's LOCATION. from is
+// compared unmapped and without its zone; the zero Addr approves none.
+func SubscribedFrom(from netip.Addr) DialApproval {
+	return DialApproval{source: from.Unmap().WithZone("")}
 }
 
 // OperatorChose is the approval the operator's configured URL gives a manual
@@ -530,12 +543,14 @@ func (d DialApproval) String() string {
 	return "no local address"
 }
 
-// permits reports whether the approval lets a connect reach a, the address a
+// Permits reports whether the approval lets a connect reach a, the address a
 // dial resolved to: never for a cloud metadata address; always for any other
 // address elsewhere; and for this machine or a link-local address when an
-// operator's URL named that kind of host, or when a is the announcing
-// packet's own address (never the unspecified address).
-func (d DialApproval) permits(a netip.Addr) bool {
+// operator's URL named that kind of host, or when a is the approving peer's
+// own address (never the unspecified address). The dial check asks it at
+// every connect, and internal/dlna's GENA callback guard asks it before it
+// sends anything, so the two cannot disagree.
+func (d DialApproval) Permits(a netip.Addr) bool {
 	a = a.Unmap()
 	kind := addrKind(a)
 	if kind == hostMetadata {
@@ -570,7 +585,7 @@ func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Conte
 // machine or a link-local address that the request's approval does not
 // cover.
 var errUnapprovedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
-	"that neither the SSDP packet the URL came from nor the operator's configured URL named")
+	"that neither the peer the URL came from (an SSDP packet, a GENA SUBSCRIBE) nor the operator's configured URL named")
 
 // errCloudMetadataAddr is the dial check's refusal of a connect to a cloud
 // metadata address, which no approval covers.
@@ -593,7 +608,7 @@ func refuseUnapprovedHostLocal(ctx context.Context, _, address string, _ syscall
 		return fmt.Errorf("device dial check: %q: %w", address, err)
 	}
 	approval, _ := ctx.Value(dialApprovalKey{}).(DialApproval)
-	if approval.permits(ap.Addr()) {
+	if approval.Permits(ap.Addr()) {
 		return nil
 	}
 	if isCloudMetadataAddr(ap.Addr()) {
@@ -658,10 +673,13 @@ func NewDeviceTransport(d net.Dialer) *http.Transport {
 // follows no redirect (a 3xx comes back as itself, so a device cannot
 // redirect the bridge anywhere), with timeout bounding each request. Both
 // SSDP discovery clients fetch an announced device with it when their config
-// names no Dispatcher (cmd/bridge names none), and the upstream ingest sends
-// its SOAP with it. A manual upstream's description is fetched with a client
-// of its own (internal/upnp's ManualPoller), without the dial check: its URL
-// is the operator's choice, and a URL on this machine is legitimate there.
+// names no Dispatcher (cmd/bridge names none), the upstream ingest sends its
+// SOAP with it, and internal/dlna sends its GENA initial NOTIFY with it
+// (backlog B39: that NOTIFY once followed a callback's redirect anywhere, the
+// bridge's own console included). A manual upstream's description is
+// fetched with a client of its own (internal/upnp's ManualPoller), without
+// the dial check: its URL is the operator's choice, and a URL on this
+// machine is legitimate there.
 func NewDeviceFetchClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,

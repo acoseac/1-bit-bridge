@@ -2488,7 +2488,7 @@ no failing test — which is the shape to expect in this area.
   ones; Alibaba's 100.100.100.200; Azure's 168.63.129.16). `addrKind` names
   them first (`hostMetadata`), so the string check (`LocationFromSource`),
   the service-URL rule (`resolveServiceURL`, for every source) and the dial
-  check (`DialApproval.permits`) refuse them whatever approved the request.
+  check (`DialApproval.Permits`) refuse them whatever approved the request.
   **Exact addresses, never a range**: a direct-cable device self-assigns
   anywhere in 169.254/16 and fe80::/10, and a /24 around 169.254.169.254
   would refuse one such device in 254 (the tests keep one at 169.254.7.7).
@@ -2519,6 +2519,60 @@ no failing test — which is the shape to expect in this area.
   whole, and a dropped custom endpoint was quoted whole, a parse failure
   twice (the parse error quotes it). `url.URL.Redacted` is not enough: it
   keeps a token written as the user name, and the query.
+- **…and a GENA callback on THIS machine or a link-local address gets the
+  initial NOTIFY only when the SUBSCRIBE came from that address, and the
+  NOTIFY follows no redirect** (backlog B39, 2026-09-28). The DLNA listener
+  binds every interface, and `callbackHostAllowed` admitted a loopback or
+  link-local callback from ANY source, so a LAN peer could aim the NOTIFY at
+  the bridge's own loopback services, the unauthenticated console among
+  them. Measured with the real binary (two containers on dido): a peer
+  container's `CALLBACK: <http://127.0.0.1:9999/…>`, or the
+  `[::ffff:127.0.0.1]` spelling, made the bridge NOTIFY a listener on its own
+  loopback. **The redirect was the wider hole**: the NOTIFY client followed
+  the callback's 3xx, a 307/308 re-sending the NOTIFY and a 301/302/303
+  turning it into a GET, which the console's `csrfGuard` passes. A peer whose
+  callback is its OWN address, which every rule admits (#818's narrow one
+  included), steered the bridge to any URL, by address or by name (measured:
+  `GET /redirected` on the bridge's loopback). **It was the one client
+  sending to a LAN peer's URL that followed redirects**: `upnpproxy`, both
+  discovery dispatchers, the upstream SOAP client and the manual poller all
+  relay a 3xx. Now `callbackHostAllowed` asks the NOTIFY's own dial approval
+  FIRST (`discovery.SubscribedFrom(src).Permits(cb)`, #1074's
+  `DialApproval` with the SUBSCRIBE as the approving peer), so the guard and
+  the dial check cannot disagree: a loopback or link-local callback only
+  when it IS the SUBSCRIBE's address (#1069's rule for a LOCATION, and for
+  the same reason: the subscriber's own address, never "any address like
+  it"; a loopback callback names the host that SENDS the NOTIFY, and a
+  link-local source proves nothing, since any device on the segment can take
+  one), never the unspecified address or a cloud metadata address (#1074's
+  list; `fd00:ec2::254` is a ULA, which the private arm admitted from any
+  source before), and still a private address from any source. The NOTIFY goes out through
+  `discovery.NewDeviceFetchClient` (no redirect, no proxy, no kept-alive
+  connection, the dial check) under that approval
+  (`discovery.WithDialApproval`), so each layer holds without the other:
+  with the predicate reverted, `TestGENANotifyNeverReachesThisHostForAnotherAddressesSubscribe`
+  stays green on the dial check, and with redirects followed,
+  `TestGENASubscriberCannotRedirectTheNotifyOntoThisHost` does;
+  `TestGENANotifyClientChecksTheConnectAgainstTheSubscriber` and
+  `TestGENAInitialNotifyFollowsNoRedirect` pin each alone. **Don't drop the
+  dial check because a callback is an IP literal**: it is what still holds
+  when a later change lets a name or a redirect past the string check, as
+  the redirect did. **Don't widen loopback to "any address of this host"**:
+  the one shape that costs is a control point ON the bridge's host that
+  subscribes over the host's LAN address with a loopback callback (measured:
+  refused), and admitting it trusts every NAT that rewrites a peer's source
+  to a local address. A refusal is a Warn once per (callback, source) pair
+  (`noteCallbackRefusal`, bounded at 64 in a set of its own, since a peer
+  reaches a refusal at will and a shared bound let refusals silence the
+  divergence lines step two waits for), so a control
+  point that needs the shape names itself. **#818's step two is only HALF
+  done**: refusing a private callback other than the source stays held,
+  because the observer it was gated on (`noteCallbackDivergence`, shipped in
+  v0.2.0) has watched no SUBSCRIBE: public mode never starts the DLNA
+  listener, the NUC's `/v1/health` carries no `dlnaServer` (2026-09-28), and
+  home-pc has not been updated since before #818. The evidence needs a LAN
+  bridge with `dlna.enabled` running the observer for a release. The iOS app
+  subscribes to nothing (`subscribeGENA` is a stub), so no Mirror-PR.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
