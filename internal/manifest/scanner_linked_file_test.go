@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -317,7 +318,9 @@ func describeStat(fi os.FileInfo) string {
 // gives what it refused, and that the two kinds it indexes get none: a
 // regular file, and a Windows cloud placeholder (ModeIrregular), which opens
 // as a file. A character device carries ModeDevice too, so the order of the
-// kinds decides its name.
+// kinds decides its name. The list is fsutil.NotAFile's since 2026-09-28,
+// shared with every route that serves a file's bytes (fsutil.OpenAsFile), so
+// a kind added or dropped here is added or dropped there.
 func TestNotAFileNamesEachKindTheWalkRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		mode fs.FileMode
@@ -331,8 +334,8 @@ func TestNotAFileNamesEachKindTheWalkRefuses(t *testing.T) {
 		{fs.ModeDevice | fs.ModeCharDevice | 0o666, "character device"},
 		{fs.ModeDevice | 0o660, "device"},
 	} {
-		if got := notAFile(tc.mode); got != tc.want {
-			t.Errorf("notAFile(%v) = %q, want %q", tc.mode, got, tc.want)
+		if got := fsutil.NotAFile(tc.mode); got != tc.want {
+			t.Errorf("fsutil.NotAFile(%v) = %q, want %q", tc.mode, got, tc.want)
 		}
 	}
 }

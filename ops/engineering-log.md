@@ -25318,6 +25318,175 @@ for #131 and #132, with the #1055 re-fingerprint named; `SplitRoot`,
 re-fingerprints it, as #1055 did to #7 and #8: read the new alert's flow
 from the SARIF, and dismiss it again only while its barrier still stands.
 
+## 2026-09-28 — every route that serves a file's bytes refuses what is not a file, and never waits on a named pipe (backlog B46)
+
+#1070 stopped the scanner indexing a named pipe, a socket or a device, or a
+link to one. Nothing stopped a client naming one: `/v1/list` still lists
+such an entry (as a zero-byte file), and `/v1/download`, `/v1/read`, the web
+player's audio and download routes and the DLNA file route opened the path
+with `os.Open`. Opening a named pipe waits for a writer, and nothing can
+cancel the wait: open(2) is a blocking system call and Go cannot interrupt
+one.
+
+### The measurement
+
+A throwaway program (never committed) over the real `api.Server` behind
+`httptest`, with a session tracker from `internal/updater`, a regular track
+and a FIFO named `02 Pipe.flac` beside it, and a client timeout of 2 s, on
+unchanged code (4cd133e1), macOS:
+
+```
+/v1/stat?path=Artist/Album/02%20Pipe.flac               -> 200 in 2ms: {"isDir":false,"size":0,...}
+/v1/list?path=Artist/Album                              -> 200 in 0s: [...,{"name":"02 Pipe.flac",...,"isDir":false,"size":0,...}]
+/v1/download?path=Artist/Album/02%20Pipe.flac           -> client gave up after 2.002s: ... (Client.Timeout exceeded while awaiting headers)
+/v1/read?path=Artist/Album/02%20Pipe.flac bytes=0-65535 -> client gave up after 2.002s: ...
+updater sessions in flight right after both clients gave up: 2
+updater sessions in flight 3 s later:                       2
+ERROR http ... path=/v1/download status=500 duration_ms=7005
+ERROR http ... path=/v1/read status=500 duration_ms=5003
+sessions in flight after a writer came and went (11ms): 0
+```
+
+Both handlers, and the two updater sessions they had begun, stayed until
+the program played the writer 7 s in; then ServeContent failed its seek
+("seeker can't seek", 500). A session left in flight keeps auto-install
+deferring on every poll (`Tracker.Inflight`). The same program on the fix:
+400 at once with `{"error":"bad_request","message":"path is a named pipe,
+not a file"}`, no session left, and one Warn line naming the
+library-relative path (`err="named pipe is not a file"`). The red runs of
+the new tests below measured the rest: a link to `/dev/null` was served as
+an empty 200 by all three route families, a socket as a 500 by the two
+resolver-backed ones (the kernel refuses its open), and a rendition whose
+sidecar is a FIFO held its request the same way. The DLNA route serves the
+manifest's path, and a row outlives its file until the scan that reaps it,
+after the missing-count grace, so a track replaced by a FIFO was served
+until then.
+
+### The change
+
+- `fsutil.NotAFile` is #1070's list (`notAFileKinds`, `notAFile`), moved out
+  of `internal/manifest` so the scanner and the routes refuse by one list.
+  `internal/fsutil` imports nothing internal, so every caller can import it.
+- `fsutil.OpenAsFile` opens `O_RDONLY|O_NONBLOCK|O_NOCTTY` on unix, takes
+  the opened file's own stat, refuses a `NotAFile` kind with a
+  `*NotAFileError` inside the `*fs.PathError`, and clears `O_NONBLOCK` again
+  for a file. The nonblocking open is what makes a FIFO's open return, and
+  refusing by the OPENED file's stat is what closes the window between a
+  caller's stat and the open (a path replaced in between is judged as what
+  it is now). Open errors come back exactly as `os.OpenFile` gives them, so
+  every caller's `os.IsNotExist` arm answers as before.
+- The resolver-backed routes (`serveFile`, `servePlayerBytes`) ALSO refuse on
+  the resolver's stat before opening anything. That stat is free (the
+  resolver already took it), keeps a device from being opened at all, and
+  is the only thing that refuses a socket, because the kernel refuses a
+  socket's open itself (EOPNOTSUPP on macOS, ENXIO on Linux) before there is
+  a file to stat. The player stats a rendition's sidecar before opening it
+  for the same reason.
+- Answers, all existing codes: 400 `bad_request` "path is a <kind>, not a
+  file" on `/v1/download` and `/v1/read` (a directory already got 400
+  `bad_request`, and PROTOCOL.md's table gives it a malformed path), 400
+  `bad_path` "not a file" on the player (its directory answer), 404 on DLNA
+  (its answer for a source it cannot open), and 410
+  `variant_missing_on_disk` for a rendition whose sidecar is not a file, on
+  all three ("was here, fall back to the source"; `serveVariant` does not
+  reap for it, since nothing says the file is gone). No wire change, so no
+  PROTOCOL.md edit and no Mirror-PR.
+- Every production declaration that passes `http.ServeContent` a file now
+  opens it through `OpenAsFile`: the four byte routes, and the cache routes
+  (the artwork ladder and the artist image, both booklet routes, playlist
+  covers, waveforms, the console's cache files), which serve files the
+  bridge wrote itself. Converting those costs one fcntl a request and
+  removes each site's separate `f.Stat()` block, and it is what lets
+  `TestEveryServedFileIsOpenedAsAFile` hold with no exceptions.
+
+### Decided against
+
+- A stat before the open alone: the window between the stat and the open
+  stays, and a FIFO swapped in there (a symlink repointed, say) holds the
+  request forever.
+- A plain open on a goroutine with a timeout: the handler returns, but the
+  goroutine and the descriptor it eventually gets stay until a writer
+  comes, since a blocked open cannot be cancelled.
+- `O_NONBLOCK` with no fallback. It changes one answer for a regular file:
+  while another open holds a write lease on it (Samba's kernel oplocks take
+  one, an NFS server's delegation another), a nonblocking open fails with
+  EWOULDBLOCK where a plain open waits for the break, up to
+  lease-break-time (45 s by default). Measured on Linux (NC7 below): without
+  the fallback `OpenAsFile` answers "resource temporarily unavailable" at
+  once; with it, it waits out the test's 300 ms lease and opens (0.30 s). A
+  FIFO's nonblocking open never answers EWOULDBLOCK, so the fallback is no
+  way back to the wait.
+- Leaving `O_NONBLOCK` set on the file served. POSIX gives it no effect on a
+  regular file's reads, but a FUSE daemon (rclone, sshfs) is handed the
+  file's flags with every read, and one that honours the flag can answer
+  EAGAIN mid-stream. `setBlocking` clears it (NC6).
+- A new error code such as `not_a_file`: a wire change, which needs the iOS
+  mirror. `bad_request` already carries the directory case.
+- `O_NOCTTY` is kept and not pinned by a test: it matters only if a
+  terminal is swapped in after the caller's stat, and a systemd service is
+  a session leader with no controlling terminal, which on Linux an open of
+  a terminal without the flag hands it. It is inert for everything else.
+
+### Tests and negative controls
+
+`internal/fsutil`: `TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError`
+(every platform), `TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting` and
+`TestOpenAsFileLeavesTheFileItOpensBlocking` (unix),
+`TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes` (Linux; it takes a
+write lease on its own file and skips where a host refuses one). The route
+tests drive the real handlers through `fsutiltest.ServeWithin`, which
+bounds a request at 5 s and then plays the writer on the test's FIFOs, so a
+red run neither hangs the suite nor leaves a handler behind:
+`TestByteRoutesRefuseWhatIsNotAFile` (api, with a counting session tracker:
+every request must begin one and end it), `TestPlayerByteRoutesRefuseWhatIsNotAFile`
+(admin, the same for playback sessions, with renditions whose sidecars are
+a FIFO and a socket) and `Test_FileHandler_RefusesWhatIsNotAFile` (dlna).
+Each plants the same entries (`fsutiltest.PlantNotAFiles`: a FIFO, a link
+to it, a link to `/dev/null`, a socket) beside a track that must still be
+served. `internal/fsutil/fsutiltest` also took over #1070's scanner test
+helpers (`MakeFIFO`, `BindSocket`, the writer loop as `AwaitPastFIFOs`), so
+there is one copy of each. `TestEveryServedFileIsOpenedAsAFile` (cmd/bridge)
+reads every production file (438 of them, holding 12 `http.ServeContent`
+calls, when its floors were set); `TestServedFileSweepOnFixtures` runs its
+scan over six sources whose findings are known.
+
+On the committed fix (6e0247b2 and a8886f47, which are 86ac29fc and
+e2cc1d21 after the rebase onto 73ef5b58), each restored and re-run
+green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `internal/api/files.go` as on main | `TestByteRoutesRefuseWhatIsNotAFile`: the six requests on the pipe and the link to it, and the FIFO rendition, held 5 s each, then 500; the link to `/dev/null` 200 three times; the socket 500 three times. The sweep names `serveFile` and `serveVariant` |
+| NC2: `internal/admin/player_audio.go` as on main | the player test: the pipe and its link held 5 s on both routes, then 500; `/dev/null` 200 twice; the socket 500 twice; the FIFO rendition held, then 500; the socket rendition 500. The sweep names `servePlayerBytes` |
+| NC3: `internal/dlna/file_handler.go` as on main | the DLNA test: `/dev/null` 200 on GET and HEAD, the pipe and its link held 5 s then 500 on both, the FIFO rendition held then 500 (the socket passed, 404 from the failed open, as before). The sweep names `serveFromFilesystem` |
+| NC4: `openNoWait` without `O_NONBLOCK` | the fsutil test's pipe and link rows (held 5 s); the api test's FIFO rendition only, since its sources are refused on the resolver's stat; the DLNA test's pipe and link rows and its rendition. The player test stayed green: it stats the source and the sidecar before opening |
+| NC5: the api's refusal on the resolver's stat disabled | the api test's three socket rows only (500 from the refused open) |
+| NC5b: the player's refusal on the source's stat disabled | the player test's two socket rows only |
+| NC5c: the player's refusal on the sidecar's stat disabled | the socket rendition only (500) |
+| NC6: `O_NONBLOCK` left set | `TestOpenAsFileLeavesTheFileItOpensBlocking` (flags 0x4) |
+| NC7 (dido, golang:1.26.6): the EWOULDBLOCK fallback removed | `TestOpenAsFileWaitsOutALeaseBreakAsAPlainOpenDoes`: "resource temporarily unavailable" |
+| NC8: `internal/api/booklet.go` and `internal/admin/handlers_library_meta.go` as on main | the sweep names `booklet`, `serveCacheFile` and `apiLibraryBooklet` |
+| NC8b: the sweep ignores `os.OpenFile` | `TestServedFileSweepOnFixtures`' `os.OpenFile` row only |
+| NC9: the named pipe dropped from `NotAFile`'s list | both sides: `TestNotAFileNamesEachKindTheWalkRefuses`, `TestScanner_AnEntryThatIsNotAFileIsNotATrack` (the scans held 10 s, a row minted "01" at 0 bytes), the fsutil pipe rows ("opened a named pipe as a file"), and the api pipe rows (500 at once, since the open no longer waits) |
+
+The route tests were red on main for every refusal row but the DLNA
+socket rows, which answered 404 there too, and the track beside the
+entries was served on both.
+
+### Not covered
+
+- `/v1/list` lists such an entry as a zero-byte file. A client that follows
+  the listing now gets the 400 at once; hiding the entry is a listing
+  decision (a dangling link deliberately still appears).
+- The listing's own `os.Open` of a directory has the same window: a
+  directory replaced by a FIFO between the resolver's stat and the open
+  holds the request. An `O_DIRECTORY` open would close it.
+- The scanner's extractors open with `os.Open` what the walk judged a moment
+  earlier, and the background jobs that open manifest paths
+  (`acoustid.ComputeFromPrefix`, `analyze`'s STREAMINFO read) do too; a FIFO
+  reaches them only through a swap after the walk, or a row whose file was
+  replaced before its reap.
+
 ## 2026-09-28 — every rendition records its track row's version, and a changed file is not rendered until its row is read again
 
 Backlog B24; PR #1077. A rendition records the version of its source it was made

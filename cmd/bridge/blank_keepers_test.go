@@ -261,11 +261,12 @@ func findBlankKeepers(root string) (keepers []blankKeeper, nonTest, test int, er
 }
 
 // moduleDirRule is the answer about a directory for a walk of the Go files
-// this module's build reads (findBlankKeepers, findDefaultLoggerSetters):
-// nil to descend, SkipDir for one no build of this module compiles, which is
-// vendor, testdata and node_modules, a nested module, and a name the go tool
-// ignores (goToolIgnores), or for another checkout
-// (sweeptest.IsOtherCheckout), decided before anything under it is opened.
+// this module's build reads (findBlankKeepers, findDefaultLoggerSetters,
+// TestEveryServedFileIsOpenedAsAFile): nil to descend, SkipDir for one no
+// build of this module compiles, which is vendor, testdata and
+// node_modules, a nested module, and a name the go tool ignores
+// (goToolIgnores), or for another checkout (sweeptest.IsOtherCheckout),
+// decided before anything under it is opened.
 func moduleDirRule(root, path, name string) error {
 	if path == root {
 		return nil
