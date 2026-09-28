@@ -90,6 +90,9 @@ func TestHandlePacket_NeverFetchesAHostLocalLocationFromAnotherAddress(t *testin
 func TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress(t *testing.T) {
 	for _, tc := range []struct{ source, location, wantControl string }{
 		{"169.254.10.20", "http://169.254.10.20:8080/description.xml", "http://169.254.10.20:8080/avtransport/control"},
+		// A direct-cable device, which the cloud metadata rule beside it
+		// (cloudMetadataAddrs) must leave alone.
+		{"169.254.7.7", "http://169.254.7.7:8080/description.xml", "http://169.254.7.7:8080/avtransport/control"},
 		{"127.0.0.1", "http://127.0.0.1:8080/description.xml", "http://127.0.0.1:8080/avtransport/control"},
 	} {
 		disp := &requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +331,21 @@ func TestDefaultClientDialCheck(t *testing.T) {
 		{"192.0.2.7", "169.254.169.254:80", false},
 		{"169.254.10.20", "169.254.10.20:8080", true},
 		{"169.254.10.20", "169.254.10.21:8080", false},
+		{"169.254.7.7", "169.254.7.7:8080", true}, // a direct-cable device beside the metadata addresses
+		{"fe80::7", "[fe80::7%en0]:8080", true},
 		{"192.0.2.7", "[fe80::1%en0]:8080", false},
+		// A cloud metadata address is approved by nothing, not even a
+		// packet from that very address (a peer on the link can spoof one),
+		// and the ones that are not link-local by no announcement at all.
+		{"169.254.169.254", "169.254.169.254:80", false},
+		{"169.254.170.2", "169.254.170.2:80", false},
+		{"::ffff:169.254.169.254", "[::ffff:169.254.169.254]:80", false},
+		{"fe80::a9fe:a9fe", "[fe80::a9fe:a9fe%en0]:80", false},
+		{"fd00:ec2::254", "[fd00:ec2::254]:80", false},
+		{"", "[fd20:ce::254]:80", false},
+		{"192.0.2.7", "100.100.100.200:80", false},
+		{"100.100.100.200", "100.100.100.200:80", false},
+		{"", "168.63.129.16:80", false},
 		{"192.0.2.7", "not-an-address", false}, // fail closed on anything unparseable
 	} {
 		ctx := context.Background()
@@ -372,7 +389,20 @@ func TestLocationFromSource(t *testing.T) {
 		{"http://0.0.0.0:7789/d.xml", "0.0.0.0", false},
 		{"http://169.254.10.20:8080/d.xml", "169.254.10.20", true},
 		{"http://169.254.10.20:8080/d.xml", "169.254.10.21", false},
+		{"http://169.254.7.7:8080/d.xml", "169.254.7.7", true}, // a direct-cable device
+		{"http://[fe80::7%25en0]:8080/d.xml", "fe80::7", true},
 		{"http://[fe80::1%25en0]:8080/d.xml", "192.0.2.7", false},
+		// A cloud metadata address, from any source, that address included:
+		// the metadata service sends no SSDP, so such a packet was spoofed.
+		{"http://169.254.169.254/latest/meta-data/", "169.254.169.254", false},
+		{"http://169.254.170.2/v2/credentials/x", "169.254.170.2", false},
+		{"http://[::ffff:169.254.169.254]/latest/meta-data/", "169.254.169.254", false},
+		{"http://[fe80::a9fe:a9fe%25en0]/latest/", "fe80::a9fe:a9fe", false},
+		{"http://[fd00:ec2::254]/latest/meta-data/", "fd00:ec2::254", false},
+		{"http://[fd00:ec2::254]/latest/meta-data/", "192.0.2.7", false},
+		{"http://100.100.100.200/latest/meta-data/", "192.0.2.7", false},
+		{"http://100.100.100.200/latest/meta-data/", "100.100.100.200", false},
+		{"http://168.63.129.16/machine/", "192.0.2.7", false},
 		{"", "192.0.2.7", false},
 	} {
 		var src *net.UDPAddr

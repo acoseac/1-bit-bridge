@@ -294,3 +294,33 @@ func TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine(t *testing.T
 		t.Error("a stand-in saw a request no case accounted for")
 	}
 }
+
+// TestAPacketFromAMetadataAddressApprovesNoLaterDialThere is the chain the
+// cloud metadata rule closes (CodeRabbit on #1074), on a cloud VM. A peer on
+// the link spoofs an SSDP packet from 169.254.169.254 whose LOCATION names
+// its host by a name, which it answers with its own address while discovery
+// fetches the description, so the server is cached under
+// AnnouncedFrom(169.254.169.254). Then the name answers 169.254.169.254, and
+// the same-address exception approved that connect for the ingest's SOAP and
+// for every byte fetch, whose answer the proxy relays to the unauthenticated
+// DLNA listener: the instance's credentials, on AWS's IMDSv1. Neither may
+// connect there now, and both are refused at the dial check, before any
+// packet leaves.
+func TestAPacketFromAMetadataAddressApprovesNoLaterDialThere(t *testing.T) {
+	h := newRebindingHosts(t)
+	spoofed := &net.UDPAddr{IP: net.ParseIP("169.254.169.254"), Port: 1900}
+	server := newRoutedServer(t, config.UPnPUpstreamServerConfig{Name: "Spoofed", UDN: "uuid:rebind-metadata"},
+		"http://"+rebindingName+":"+h.port+"/ctl", discovery.AnnouncedFrom(spoofed))
+	h.dns.Answer(netip.MustParseAddr("169.254.169.254"))
+	ingestErr, proxyErr := server.fetchBoth(t)
+	const refusal = "refusing to connect to a cloud metadata address"
+	if ingestErr == nil || !strings.Contains(ingestErr.Error(), refusal) {
+		t.Errorf("ingest error = %v, want the dial check's refusal (%q)", ingestErr, refusal)
+	}
+	if proxyErr == nil || proxyErr.Code != "upnp_upstream_unreachable" || !strings.Contains(proxyErr.Error(), refusal) {
+		t.Errorf("proxy error = %v, want upnp_upstream_unreachable with the dial check's refusal (%q)", proxyErr, refusal)
+	}
+	if h.console.take() != nil || (h.lanHost != nil && h.lanHost.take() != nil) {
+		t.Error("a stand-in saw a request, which no case here sends")
+	}
+}

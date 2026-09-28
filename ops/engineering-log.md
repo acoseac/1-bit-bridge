@@ -23773,3 +23773,128 @@ operator's configured URL named`), and the console saw nothing.
   before this change (only a paired device could have sent one) is not
   re-checked.
 - The manual poller's description fetch still has no dial check (above).
+
+### Review round 1 (CodeRabbit, three findings, all taken)
+
+- **CLAUDE.md named `http.DefaultTransport` as the SOAP client's transport
+  in the present tense** (Minor). It says "then on" now.
+- **The port-only warning logged the base URL whole** (Major).
+  `normalizeBaseURL` accepts userinfo, so `http://user:password@:5000` put
+  the password in the journal. `url.URL.Redacted` is not the fix, measured:
+  it masks the password and returned `http://s3cret-token@:5001/?apikey=s3cret`
+  whole (a token written as the user name, and the query). So the warning
+  logs `urlOriginForLog`, the scheme and host alone (`http://:5000`), which
+  is what it is about. The custom-endpoint drop warnings had the same leak,
+  and a parse failure quoted the entry twice (`customEndpoints["https://user:s3cret x@…"]:
+  parse "https://user:s3cret x@…": net/url: invalid userinfo`); they name an
+  entry by position and origin now, and a parse failure by position alone,
+  since the parse error quotes the value. The harvest-base warning cannot
+  carry userinfo: `CanonicalHTTPSBase` refuses a URL with one, so such a pin
+  reduces to "" and is never warned about (`Validate` refuses it).
+  `ValidateCustomEndpoints`' docblock said the admin PATCH handler shows its
+  warnings to the operator; nothing but `Normalize` calls it, and they reach
+  the journal only. `TestNoConfigWarningCarriesAURLsCredentials` puts a
+  secret in each URL a warning names (a password, a token as the user name,
+  a query) and requires every warning, and the secret in none.
+- **The same-address exception approved a spoofed cloud metadata address**
+  (Major). An SSDP source is not authenticated, so a peer on the link can
+  send a packet from 169.254.169.254, and the exception approved exactly
+  that address: for the description fetch (#1069), and since B36 for the
+  ingest's SOAP and every byte fetch, whose answer the proxy relays to the
+  unauthenticated DLNA listener. The chain, on a cloud VM: the peer answers
+  the LOCATION's name with its own address while discovery fetches the
+  description, then with 169.254.169.254 (IMDSv1 answers a plain GET with
+  the instance's credentials). Reproduced through the real ingest and proxy
+  with the rule off (NC M1 below): both dialled
+  `169.254.169.254:63371: connect: host is down` on the dev Mac, which is
+  the connect the exception approved.
+
+  `cloudMetadataAddrs` in `url_policy.go` is one list, from each provider's
+  documentation (2026-09-28):
+
+  | address | what | source |
+  |---|---|---|
+  | 169.254.169.254 | instance metadata on AWS, Azure, Google Cloud, Oracle Cloud, OpenStack, DigitalOcean, Hetzner, IBM Cloud, Linode | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
+  | fd00:ec2::254 | AWS instance metadata, IPv6 (Nitro) | same |
+  | 169.254.169.253, fd00:ec2::253 | AWS Route 53 Resolver | https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html |
+  | 169.254.169.123, fd00:ec2::123 | AWS Time Sync Service | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html |
+  | 169.254.170.2 | AWS ECS task metadata and credentials | https://docs.aws.amazon.com/sdkref/latest/guide/feature-container-credentials.html |
+  | 169.254.170.23, fd00:ec2::23 | AWS EKS Pod Identity Agent | https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html |
+  | fd20:ce::254 | Google Cloud metadata, IPv6-only instances | https://docs.cloud.google.com/compute/docs/metadata/querying-metadata |
+  | fd00:c1::a9fe:a9fe | Oracle Cloud instance metadata, IPv6 | https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/gettingmetadata.htm, cloud-init issue 6849 |
+  | fe80::a9fe:a9fe | OpenStack (since Victoria) and Linode metadata, IPv6 | https://docs.openstack.org/nova/latest/admin/metadata-service.html |
+  | fd00:a9fe:a9fe::1 | Linode metadata, IPv6 | https://linode.com/docs/products/compute/compute-instances/guides/metadata-api |
+  | 169.254.42.42, fd00:42::42 | Scaleway metadata | https://www.scaleway.com/en/developers/api/instance/user-data |
+  | 169.254.0.23, 169.254.10.10 | Tencent Cloud metadata (metadata.tencentyun.com) | https://www.tencentcloud.com/document/product/213/4934 |
+  | 100.100.100.200 | Alibaba Cloud metadata | https://www.alibabacloud.com/help/en/ecs/user-guide/view-instance-metadata/ |
+  | 168.63.129.16 | Azure WireServer (the host's endpoint: agent, DHCP, DNS, health probes) | https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16 |
+
+  `addrKind` names them first (`hostMetadata`), so the string check
+  (`LocationFromSource`), the service-URL rule (`resolveServiceURL`, for
+  every source, with its own error) and the dial check (`permits`, before
+  its same-address arm) refuse them whatever approved the request, and
+  `OperatorChose` approves nothing for a URL on one. Ten are not link-local
+  (the eight in fd00::/8, 100.100.100.200 and 168.63.129.16), so they were
+  fetched on ANY device's say-so, exception or not, and no string rule saw
+  them. **Exact addresses, never a range**: a direct-cable device
+  self-assigns anywhere in 169.254/16 or fe80::/10, and a /24 around
+  169.254.169.254 would refuse one such device in 254 (NC M8 shows the
+  cost: the direct-cable rows at 169.254.7.7 and #1069's own link-local
+  rows go red). Costs accepted: a tailnet node may hold 100.100.100.200
+  (it is in 100.64/10, where Tailscale assigns node addresses: one address
+  in 4,194,304) and would lose its routed dials. Azure's DNS on 168.63.129.16 is unaffected: the resolver dials
+  with a dialer of its own, which the check does not see. Left out: Oracle
+  Cloud Classic's 192.0.0.192, a retired service. CI runs on Azure VMs,
+  where 169.254.169.254 and 168.63.129.16 answer: the tests' refusals come
+  before any connect, and the controls that connect ran on the dev Mac only.
+
+  Tests, each through a real entry point: the list against its sources
+  (`TestCloudMetadataAddrsAreTheDocumentedOnes`, which also fails on an
+  address added without a row); both SSDP clients' packet paths, from each
+  address and from a LAN address
+  (`TestHandlePacket_NeverFetchesACloudMetadataLocation`,
+  `TestServerCloudMetadataLocationIsNeverFetched`, the second with a
+  direct-cable server at 169.254.7.7 fetched and approved); the production
+  client resolving a name to a metadata address under four approvals,
+  through `internal/dnstest`
+  (`TestDefaultClient_RefusesACloudMetadataAddressWhateverApprovedTheFetch`);
+  the service URLs, for every source
+  (`TestParseDeviceDescription_NeverKeepsACloudMetadataServiceURL`); the
+  chain end to end, through the real ingest and proxy
+  (`TestAPacketFromAMetadataAddressApprovesNoLaterDialThere`); rows in the
+  dial check's, the string check's and `OperatorChose`'s tables; and a
+  property in `FuzzParseDeviceDescription` (no kept service URL names a
+  metadata address; it reads the list, which is data) with three seeds.
+  One existing row asserted the defect: `OperatorChose`'s "link-local URL,
+  another link-local address" connected to 169.254.169.254 and wanted it
+  allowed. It dials 169.254.7.7 now, with the metadata address its own
+  refused row.
+
+  Negative controls, each committed first, restored with `git checkout --`
+  and checked green, `-count=1`:
+
+  | | mutation | red |
+  |---|---|---|
+  | M1 | `addrKind` never names a metadata address (the rule off) | the string check (both packet paths, its table), the dial check (its table, `OperatorChose`'s, the transport test, which ran 9.0 s against 0.0 s green, its connects running into the 3 s fetch timeout; the E2E, `connect: host is down`), the service-URL test, the fuzz seeds. Green: the list test, the list being intact |
+  | M2 | `LocationFromSource` sends a metadata literal on to the source comparison | the string check only: both packet paths, its table |
+  | M3 | `permits` keeps its same-address arm for a metadata address | the dial check only: its table, the transport test, the E2E |
+  | M4 | `resolveServiceURL` loses its metadata case | the refusal's reason only: every row still refused, as "names this machine or a link-local address", by `hostKindAllowed` |
+  | M4b | `hostKindAllowed` loses its metadata arm | nothing: a belt, since both callers check first. With M4 as well, a description at a metadata address keeps its own service URLs (the service-URL test, the fuzz seed at fe80::a9fe:a9fe) |
+  | M5 | the base-URL warning logs the value | the redaction test: the password, the token and the query in the line |
+  | M6 | the endpoint warnings quote the entry | the redaction test, three lines, the parse failure's twice. Its first form did not build (the naming closure unused) and was redone with the closure kept |
+  | M7 | 100.100.100.200 dropped from the list | the list test, and every row naming it (string check, dial check, service URLs, the transport test, the upnp packet path) |
+  | M8 | the range: every IPv4 link-local address counts as metadata | the direct-cable rows at 169.254.7.7 (both packet paths, the dial check, `OperatorChose`, the service-URL test's positive), the list test's neighbours, and #1069's link-local rows |
+
+### Out of scope (round 1)
+
+- Two REFUSALS still quote a configured URL whole, userinfo included:
+  `normalizeBaseURL`'s (`must be an absolute http(s) URL, got %q`) and
+  `Validate`'s harvest-pin one (`must be a plain https base URL …, got %q`).
+  They stop the bridge from starting and print to its log; they were not
+  warnings and were not changed here.
+- A custom endpoint that carries userinfo and is otherwise valid
+  (`https://user:password@host:7788`) is KEPT, and `/v1/health` advertises
+  it as written, to a caller with no token too.
+- A manual upstream's own description fetch has no metadata check (the
+  operator's URL; upstream ingest is refused in public mode), though no
+  later dial of one reaches a metadata address.

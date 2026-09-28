@@ -64,3 +64,53 @@ func TestNormalizeWarnsOfABaseURLThatNamesNoHostAndStillLoads(t *testing.T) {
 		}
 	}
 }
+
+// TestNoConfigWarningCarriesAURLsCredentials drives the load sequence with a
+// credential in every URL a warning names (review round 1 on #1074). An
+// enrich base URL may carry userinfo (normalizeBaseURL accepts it), so the
+// warning about a base that names no host logged the password whole; and a
+// dropped custom endpoint was quoted whole in its warning, a parse failure
+// twice (the parse error quotes it too). Each warning still fires, still
+// says which entry, and none carries the secret: not a password, not a token
+// written as the user name (which url.URL.Redacted would have kept), not a
+// query.
+func TestNoConfigWarningCarriesAURLsCredentials(t *testing.T) {
+	const secret = "s3cret-Pw"
+	rec := loggingtest.Record(t)
+	c := mkLoopbackConfig(t)
+	c.Enrich.MusicBrainzBaseURL = "http://user:" + secret + "@:5000"
+	c.Enrich.CoverArtBaseURL = "http://" + secret + "@:5001/?apikey=" + secret
+	c.CustomEndpoints = []string{
+		"https://user:" + secret + "@:8443",              // names no host
+		"http://user:" + secret + "@bridge.example:7788", // not https
+		"https://user:" + secret + " x@bridge.example",   // does not parse
+		"https://bridge.example:8443",                    // kept
+	}
+	if err := c.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate: %v; the bridge would not start", err)
+	}
+	if len(c.CustomEndpoints) != 1 {
+		t.Errorf("kept endpoints = %q, want only the one with a host", c.CustomEndpoints)
+	}
+	lines := rec.Failures()
+	for _, want := range []string{
+		"field=enrich.musicbrainzBaseURL value=http://:5000",
+		"field=enrich.coverArtBaseURL value=http://:5001",
+		"customEndpoints[0] (https://:8443): missing host",
+		"customEndpoints[1] (http://bridge.example:7788): scheme must be https",
+		"customEndpoints[2]: does not parse as a URL",
+	} {
+		found := false
+		for _, l := range lines {
+			found = found || strings.Contains(l, want)
+		}
+		if !found {
+			t.Errorf("no warning says %q; warnings: %q", want, lines)
+		}
+	}
+	for _, l := range lines {
+		if strings.Contains(l, secret) {
+			t.Errorf("a warning carries the URL's secret: %s", l)
+		}
+	}
+}

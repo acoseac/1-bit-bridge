@@ -580,6 +580,22 @@ func BaseURLNamesHost(raw string) bool {
 const baseURLNamesNoHostWarning = "base URL names a port and no host, which reaches this machine; " +
 	"write the host (localhost for this machine)"
 
+// urlOriginForLog renders a configured URL for a log line as its scheme and
+// host alone (`http://:5000`), or "" when it does not parse. The rest of a
+// URL can carry a credential the journal must not: its userinfo
+// (`user:password@`, or a token written as the user name, which
+// url.URL.Redacted keeps whole) and its query (`?apikey=`). The scheme and
+// host are what a warning about a URL here is about. normalizeBaseURL
+// accepts userinfo, so `http://user:password@:5000` reached the log whole
+// until review round 1 on #1074.
+func urlOriginForLog(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+}
+
 // LyricsTierActive is the ONE definition of whether the network lyrics tier
 // should be doing anything.
 //
@@ -2858,14 +2874,17 @@ func (c *Config) Normalize() error {
 	// THIS machine. Warned about, not refused (backlog B36): the value
 	// loaded before, and a refusal here would stop the bridge from starting
 	// after an update. The harvest pin is checked in its canonical form, so
-	// a malformed one (which Validate refuses anyway) is not reported twice.
+	// a malformed one (which Validate refuses anyway) is not reported twice,
+	// and it carries no userinfo (CanonicalHTTPSBase refuses it). The value
+	// is logged as its scheme and host alone (urlOriginForLog): an enrich
+	// base may carry a password.
 	for _, base := range []struct{ field, value string }{
 		{"enrich.musicbrainzBaseURL", mbBase},
 		{"enrich.coverArtBaseURL", caaBase},
 		{"atlas.harvestBaseUrl", c.Atlas.CanonicalHarvestBaseURL()},
 	} {
 		if base.value != "" && !BaseURLNamesHost(base.value) {
-			validateLogger.Warn(baseURLNamesNoHostWarning, "field", base.field, "value", base.value)
+			validateLogger.Warn(baseURLNamesNoHostWarning, "field", base.field, "value", urlOriginForLog(base.value))
 		}
 	}
 
@@ -3415,9 +3434,12 @@ const maxCustomEndpointHostLen = 255
 
 // ValidateCustomEndpoints filters the input to entries that parse as
 // absolute HTTPS URLs with a non-empty host. Returns (kept, warnings)
-// where `warnings` is one error per dropped entry. Used by Validate()
-// to scrub the persisted list and by the admin patch handler to
-// surface per-entry errors back to the operator.
+// where `warnings` is one error per dropped entry. Normalize, which scrubs
+// the persisted list for every writer (the admin settings PATCH included),
+// logs each warning. So a warning names its entry by position and by its
+// scheme and host (urlOriginForLog), never by the whole value: an entry can
+// carry a password (`https://user:password@host`), and one that does not
+// parse is not echoed at all, since the parse error quotes it.
 //
 // Why HTTPS-only: iOS clients won't speak plain-HTTP to the bridge
 // (ATS rejects it before our pinning runs even on a local-network
@@ -3427,18 +3449,26 @@ const maxCustomEndpointHostLen = 255
 func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 	kept = make([]string, 0, len(in))
 	seen := make(map[string]bool, len(in))
-	for _, raw := range in {
+	// entry names the i-th entry for a warning: its position, and its
+	// scheme and host when it has either.
+	entry := func(i int, raw string) string {
+		if o := urlOriginForLog(raw); o != "" {
+			return fmt.Sprintf("customEndpoints[%d] (%s)", i, o)
+		}
+		return fmt.Sprintf("customEndpoints[%d]", i)
+	}
+	for i, raw := range in {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
 		u, err := url.Parse(raw)
 		if err != nil {
-			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: %w", raw, err))
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: does not parse as a URL", i))
 			continue
 		}
 		if u.Scheme != "https" {
-			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: scheme must be https, got %q", raw, u.Scheme))
+			warnings = append(warnings, fmt.Errorf("%s: scheme must be https, got %q", entry(i, raw), u.Scheme))
 			continue
 		}
 		// Hostname, never Host: `https://:8443` has Host ":8443" and no
@@ -3447,11 +3477,11 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 		// no machine, and Go's own client dials one on the machine it
 		// runs on (#1069).
 		if u.Hostname() == "" {
-			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: missing host", raw))
+			warnings = append(warnings, fmt.Errorf("%s: missing host", entry(i, raw)))
 			continue
 		}
 		if hostLen := len(u.Hostname()); hostLen > maxCustomEndpointHostLen {
-			warnings = append(warnings, fmt.Errorf("customEndpoints[%q]: hostname is %d characters, exceeds %d-character limit", raw, hostLen, maxCustomEndpointHostLen))
+			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: hostname is %d characters, exceeds %d-character limit", i, hostLen, maxCustomEndpointHostLen))
 			continue
 		}
 		// Dedupe on a canonical form so two paste-friendly equivalents
