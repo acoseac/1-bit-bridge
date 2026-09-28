@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -75,6 +76,34 @@ func TestTheV1StatsAdaptersAnswerSoxFromTheirPrecheckEverySnapshot(t *testing.T)
 	}
 	if an.SoxAvailable != nil {
 		t.Errorf("with no precheck wired, soxAvailable is %v, want it left out", *an.SoxAvailable)
+	}
+}
+
+// TestTheBootSoxLineSaysNoRestartIsNeeded pins serve's one boot-time line
+// about a feature switched on without a usable sox.
+//
+// It said "— disabling", which reads as a demotion a restart undoes, while
+// the gate is live: a sox installed later is picked up by the shared probe
+// with no restart. The console's banners said "degrade to feature-off at
+// startup" for the same gate until #1067 (backlog B45).
+func TestTheBootSoxLineSaysNoRestartIsNeeded(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		info transcode.SoxInfo
+		err  error
+	}{
+		{"no sox", transcode.SoxInfo{}, errors.New("sox binary not found on PATH")},
+		{"sox without FLAC", transcode.SoxInfo{FormatsKnown: true}, nil},
+	} {
+		var out strings.Builder
+		if soxUsable(c.info, c.err, "analysis", &out) {
+			t.Fatalf("%s: soxUsable answered usable, so this case measures nothing", c.name)
+		}
+		line := out.String()
+		if !strings.Contains(line, "no restart needed") || strings.Contains(line, "disabling") {
+			t.Errorf("%s: the boot line reads %q; the gate is live, so it must say no restart is "+
+				"needed and not read as a demotion", c.name, line)
+		}
 	}
 }
 

@@ -1525,12 +1525,14 @@ func printSoxFormatHint(w io.Writer) {
 // feature (upscale / analysis) at `bridge serve` startup: present on PATH
 // AND its build has FLAC support (the bridge forces `-t flac`, so a
 // FLAC-less sox would fail every job at runtime). On any disqualifying
-// condition it writes an operator-facing reason to stderr and returns false
-// so the caller degrades the feature to "off" in-memory — the rest of the
-// server keeps running. An unparseable `sox --help` is treated
-// conservatively as "FLAC present": never disable a working install over a
-// help-output reword. ctx is propagated so a SIGINT during startup aborts
-// the probe; the 2 s cap lives inside ProbeSox regardless.
+// condition it writes an operator-facing reason to stderr and returns
+// false. Serve calls it for that one line only: the features' gates are
+// live (the flag AND the shared, TTL-cached probe), so a sox installed
+// later is picked up without a restart, and the line says so. An
+// unparseable `sox --help` is treated conservatively as "FLAC present":
+// never disable a working install over a help-output reword. ctx is
+// propagated so a SIGINT during startup aborts the probe; the 2 s cap
+// lives inside ProbeSox regardless.
 func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool {
 	info, err := transcode.ProbeSox(ctx)
 	return soxUsable(info, err, feature, stderr)
@@ -1549,15 +1551,22 @@ func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool
 // ONE boot-time caller passes a writer so an operator who enabled the
 // feature without sox still gets told once.
 func soxUsable(info transcode.SoxInfo, err error, feature string, stderr io.Writer) bool {
+	// "Stays off until", never "disabling": the gate is live, and a line
+	// that reads as a demotion sent operators to restart the bridge after
+	// installing sox, which it never needed (backlog B45; the console's
+	// banners said the same until #1067).
 	if err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", feature, err)
+			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but sox is not available, so it stays off "+
+				"until sox is installed (no restart needed): %v\n", feature, err)
 		}
 		return false
 	}
 	if info.FormatsKnown && !info.HasFLAC {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but the installed sox build lacks FLAC support (needed for the internal pipeline) — disabling\n", feature)
+			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but the installed sox build lacks FLAC support "+
+				"(needed for the internal pipeline), so it stays off until a sox with FLAC is installed "+
+				"(no restart needed)\n", feature)
 		}
 		return false
 	}
