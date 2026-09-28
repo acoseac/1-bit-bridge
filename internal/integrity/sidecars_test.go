@@ -1440,6 +1440,36 @@ func TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove(t 
 	}
 }
 
+// TestEmptyCatalogRefusalCountsWhatTheSweepWouldRemove — with no row naming
+// a sidecar, a tick refuses over a file it would remove, below the
+// mass-orphan floor too, and over an entry the walk could not stat,
+// weighed as one such file as MassOrphanRefusalFor weighs it. Never over a
+// known set with anything in it, and never over a directory the walk could
+// not list, which is the partial walk's refusal and may hold nothing.
+func TestEmptyCatalogRefusalCountsWhatTheSweepWouldRemove(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		inv   SidecarInventory
+		known int
+		// want is a part of the reason; "" when the tick must not refuse.
+		want string
+	}{
+		{"files it would remove", SidecarInventory{Files: 12, Orphans: 12}, 0, "over 12 sidecar file(s)"},
+		{"one file, below the mass-orphan floor", SidecarInventory{Files: 1, Orphans: 1}, 0, "over 1 sidecar file(s)"},
+		{"an entry the walk could not stat", SidecarInventory{Unreadable: 1}, 0, "counting the 1 entr(y/ies) the walk could not stat"},
+		{"nothing it would remove", SidecarInventory{}, 0, ""},
+		{"a directory the walk could not list", SidecarInventory{Unreadable: 1, UnlistedDirs: 1}, 0, ""},
+		{"a known set with anything in it", SidecarInventory{Files: 12, Orphans: 12}, 1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := emptyCatalogRefusal(c.inv, c.known, 0)
+			if (got == "") != (c.want == "") || !strings.Contains(got, c.want) {
+				t.Errorf("emptyCatalogRefusal = %q, want one saying %q", got, c.want)
+			}
+		})
+	}
+}
+
 // TestOrphanSidecarSweepSkipsDotDirectories — `bridge upscale --gc` has pruned
 // these since it was written; this sweeper, the same walk unattended on a
 // timer, did not. With `variantsDir` on a dedicated volume, `.Trashes/<uid>/`
