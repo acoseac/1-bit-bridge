@@ -48,21 +48,27 @@ func (d *controlURLByHost) requests() []string {
 // SSDP path (handlePacket → fetchAndCacheDetails → FetchDeviceDescription)
 // for a first-time server whose description names a ContentDirectory on
 // another host: the bridge's own no-auth console, the target the audit
-// named. Nothing is cached, so nothing can resolve a LiveHost from it.
+// named, and another LAN host. The second is the case only the same-host
+// rule refuses (the console is also refused by the host-kind rule added
+// after it, backlog B14), so it is what pins that this path parses with the
+// strict source. Nothing is cached, so nothing can resolve a LiveHost from
+// either.
 func TestDiscoveredServerWithAnOffHostControlURLIsNotCached(t *testing.T) {
-	disp := &controlURLByHost{ctrl: map[string]string{
-		"192.0.2.7:8200": "http://127.0.0.1:7789/api/stats",
-	}}
-	cache := NewServerCache()
-	c := newServerDiscoveryTestClient(t, disp, cache)
-	c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://192.0.2.7:8200/desc.xml"), nil)
-	c.wg.Wait() // the detail fetch is the only goroutine: no run loops were started
+	for _, offHost := range []string{"http://127.0.0.1:7789/api/stats", "http://192.0.2.200:8200/ctl/ContentDir"} {
+		disp := &controlURLByHost{ctrl: map[string]string{
+			"192.0.2.7:8200": offHost,
+		}}
+		cache := NewServerCache()
+		c := newServerDiscoveryTestClient(t, disp, cache)
+		c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://192.0.2.7:8200/desc.xml"), nil)
+		c.wg.Wait() // the detail fetch is the only goroutine: no run loops were started
 
-	if reqs := disp.requests(); len(reqs) != 1 {
-		t.Fatalf("requests = %q, want the one description GET (the fetch must have run)", reqs)
-	}
-	if info, ok := cache.Get("uuid:ms"); ok {
-		t.Errorf("cached %+v: a discovered description named a ContentDirectory on another host", info)
+		if reqs := disp.requests(); len(reqs) != 1 {
+			t.Fatalf("control URL %s: requests = %q, want the one description GET (the fetch must have run)", offHost, reqs)
+		}
+		if info, ok := cache.Get("uuid:ms"); ok {
+			t.Errorf("cached %+v: a discovered description named a ContentDirectory on another host", info)
+		}
 	}
 }
 
