@@ -249,6 +249,27 @@ func TestGENANotifyClientChecksTheConnectAgainstTheSubscriber(t *testing.T) {
 	}
 }
 
+// TestGENASubscribeOnAnUnstartedServerSendsNothing: a handler tree mounted
+// without Start, as mountedMux mounts it, has no notify context. A SUBSCRIBE
+// through it still answers 200 and sends nothing, as it did when the nil
+// context failed NewRequestWithContext; wrapping a nil context in the
+// SUBSCRIBE's source would panic instead.
+func TestGENASubscribeOnAnUnstartedServerSendsNothing(t *testing.T) {
+	sink := newGENASink(t, nil)
+	mux := mountedMux(t, ServerConfig{Library: newTestLib()})
+	req := httptest.NewRequest("SUBSCRIBE", "/dlna/cds/event", nil)
+	req.RemoteAddr = "127.0.0.1:49152"
+	req.Header.Set("CALLBACK", "<"+sink.URL+"/evt>")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("SUBSCRIBE answered %d, want 200", rec.Code)
+	}
+	if got := sink.requests(); len(got) != 0 {
+		t.Errorf("an unstarted server sent %q", got)
+	}
+}
+
 // hostLANIPv4 returns a non-loopback, non-link-local IPv4 address of this
 // host, or skips.
 func hostLANIPv4(t *testing.T) string {

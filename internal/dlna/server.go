@@ -612,6 +612,11 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 		return
 	}
 	s.noteCallbackDivergence(service, host, remoteAddr)
+	if s.notifyCtx == nil {
+		// Not started (a handler tree mounted without Start): nothing can
+		// send, as a nil context always made NewRequestWithContext fail.
+		return
+	}
 
 	body := initialNotifyBody(service)
 	ctx := discovery.WithRequestSource(s.notifyCtx, subscriberAddr(remoteAddr))
