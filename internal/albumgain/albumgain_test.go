@@ -80,6 +80,10 @@ type fakeMeasurer struct {
 	errs  map[string]error
 	calls map[string]int
 	delay time.Duration
+	// hook, when set, runs for every measurement after it is counted and
+	// outside the lock: a test's way into the middle of a survey's measure,
+	// where the survey holds the album-mate's claim.
+	hook func(path string)
 }
 
 func (f *fakeMeasurer) measure(ctx context.Context, j transcode.JobSpec) (*float64, error) {
@@ -87,7 +91,11 @@ func (f *fakeMeasurer) measure(ctx context.Context, j transcode.JobSpec) (*float
 	f.calls[j.SourceLibraryRel]++
 	tp, err := f.peaks[j.SourceLibraryRel], f.errs[j.SourceLibraryRel]
 	delay := f.delay
+	hook := f.hook
 	f.mu.Unlock()
+	if hook != nil {
+		hook(j.SourceLibraryRel)
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):

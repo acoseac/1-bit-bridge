@@ -20983,3 +20983,31 @@ Negative controls on the committed tree, each restored with `git checkout --`:
 7. The base fixture's gate removed: eight submit tests went red (KindDispatch,
    NormalisesPath, the optimize test and five variant-scope submit tests), and
    every delete test stayed green.
+
+## 2026-09-28 — a survey releases its album-mate claim on every exit, a panic included
+
+An external severity review (2026-09-28, finding 3) found that
+`albumgain.survey.measureClaimed` released the claim it holds on an album-mate
+with plain calls placed after the measurement, while the render's own claim has
+resolved on every exit since #1053 (`renderDSD` defers it). The measurement is a
+decode (`MeasureDSDPeak`), and `transcode.Pool.processJob` recovers a panic in its
+runner and keeps the worker. So a panic there left the claim registered and its
+`done` channel open for the life of the process: every later render whose album
+included that mate found the claim held, waited on it until its job deadline,
+failed, and did the same on retry, until the bridge restarted. Latent (it needs a
+panic in the decode path), but the cost was persistent.
+
+- The fix is `defer s.r.release(key, c)` as `measureClaimed`'s first statement,
+  in the direct call form, so the arguments are bound at entry. The explicit
+  releases stay where they were, in the documented release-before-record order.
+  `release` is idempotent (a pointer-checked map delete and a `sync.Once` on
+  `close(done)`), so the deferred call does nothing after them.
+- Test: `TestAMateWhoseMeasurementPanicsReleasesItsClaim`. A fake measurement
+  takes the claim the survey holds through `tryClaim`, then panics, and the test
+  recovers the panic the way the pool does. It then requires the claim's `done`
+  closed, and requires the next render of the album (a different track) to
+  measure the mate itself inside a 2 s deadline.
+- Before the fix the test failed on both counts: the claim was still open, and
+  the next render waited the full 2 s and answered `context deadline exceeded`.
+  The negative control on the committed tree (the defer removed) failed the same
+  two assertions.
