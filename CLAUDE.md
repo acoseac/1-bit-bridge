@@ -5485,9 +5485,9 @@ its twin.** The top list is older, shorter, and read first.
   state points at the gear only where the gear can turn it on. The page
   redraws for `smartPlaylistsEnabled` alone, and IN PLACE: toolbar and tray
   are built once per route, the redraw repaints the view and the bar ahead
-  of the gear, and is refused once the route has moved on, so the tray's
-  "Saved." and the focus in it survive, which the variant panel's
-  whole-route redraw does not (a follow-up). **The player also drops the
+  of the gear, and is refused once the route has moved on, so the tray and
+  its "Saved." survive, which the variant panel's whole-route redraw does
+  not (a follow-up; the focus is the next bullet's). **The player also drops the
   trays' shared settings snapshot on every route**
   (`BridgeFeatureTray.invalidate`, from boot.js's `route()`), the drop an
   operator page gets from its page init, which the player never runs: a
@@ -5497,6 +5497,21 @@ its twin.** The top list is older, shorter, and read first.
   shipped view under node; `TestThePlayerRouteDropsTheTraySnapshot` pins
   the drop structurally, since `route()` cannot run without booting the
   player.
+- **…and a tray save gives focus back to its switch** (2026-09-28). A save
+  disables its switch while the PATCH is out, and a browser moves focus off
+  a focused control that becomes disabled (the focus fixup rule) and does
+  not give it back when the control is enabled again (measured on Chrome
+  152). So every tray save left a keyboard user's focus on the body,
+  whatever the answer and whether or not the page redrew: on the Smart
+  mixes page the focus was gone before the in-place redraw ran, and
+  equally for the Audio analysis switch beside it, whose save redraws
+  nothing. `saveTrayField` notes whether the switch had focus before it
+  disables it and gives focus back once the save is over, unless something
+  else took focus meanwhile, and never takes focus the switch did not have.
+  `TestATraySaveGivesFocusBackToItsSwitch` runs the shipped save under node
+  with the fixup rule modelled in the harness. **Every other control the
+  console disables while a request is out loses focus the same way** (the
+  Jobs page's `wireJobButton` buttons among them): open (a follow-up).
 - **A tray offers no switch the control plane owns** (2026-09-28, backlog
   B35). Trays ignored `deployment.managedSettings`, so on a managed bridge
   they offered switches the settings PATCH refuses whole: the album page's

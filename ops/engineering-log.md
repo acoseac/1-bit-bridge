@@ -27088,6 +27088,15 @@ and `managedControls: [updates, backups]` (seven fields in the effective set).
   wrapper, disables its input, and hides the gear (closing the tray) when no
   field row and no note row is left; `saveTrayField` refuses a managed field
   before anything is sent.
+- **A tray save gives focus back.** `saveTrayField` disables its switch while
+  the PATCH is out, and Chrome 152 moves focus off a focused control that
+  becomes disabled (the focus fixup rule) and leaves it on the body when the
+  control is enabled again: measured with a bare checkbox (focused, then
+  `disabled = true`, then `false`: `document.activeElement` is the body after
+  both). So every tray save, redraw or not, left a keyboard user on the body.
+  The save now notes whether the switch had focus before it disables it, and
+  in its `finally` gives focus back (`preventScroll`) when the switch is
+  still connected and nothing else has taken focus meanwhile.
 
 ### Decisions
 
@@ -27111,6 +27120,19 @@ and `managedControls: [updates, backups]` (seven fields in the effective set).
   page keeps its tray and redraws the view and the controls ahead of the
   gear. The generation guard is the one `route()` would have given for free,
   written out.
+- **Focus comes back only to a switch that had it, and only to an empty
+  place.** Found on the final build: keyboard saves on the Smart mixes page
+  left focus on the body, for the Smart mixes switch (whose save redraws the
+  page) and for Audio analysis beside it (whose save redraws nothing), so the
+  in-place redraw was not what lost it; the tray's own disable was, since the
+  save began. Not "keep the switch enabled during the save": the disable is
+  what stops a second change while the first is out. Restoring only when
+  focus is on the body is what keeps a reader who
+  moved on during the save where they went; restoring only to a switch that
+  had focus keeps a pointer save from taking focus it never gave. The rest of
+  the console's controls that disable themselves during a request lose focus
+  the same way (`wireJobButton`'s buttons among them) and are left for their
+  own change.
 - **`managed` on the mixes answer.** With the switch managed and off, the
   page's own sentence ("Turn them on with the gear above") would point at a
   gear that no longer offers the switch. The server knows it; the tray's
@@ -27169,6 +27191,12 @@ and `managedControls: [updates, backups]` (seven fields in the effective set).
   cannot run without booting the player. #1068's tray harness gained the
   managed set and a settings answer copied per fetch (one shared object let
   one case's save leak into the next).
+- `feature_tray_onsaved_test.go`, `TestATraySaveGivesFocusBackToItsSwitch`:
+  the harness models the fixup rule (a focused element that becomes disabled
+  hands focus to the body, and `focus()` takes it only while enabled), and
+  checks the switch took focus before each change so the model cannot pass
+  vacuously. Red on the code before the fix: focus on the body after a live,
+  restart, unchanged and refused save.
 
 Negative controls on the committed code, each restored with `git checkout
 --` and the test re-run green:
@@ -27190,6 +27218,9 @@ Negative controls on the committed code, each restored with `git checkout
 | NC13: the save re-runs `renderMixes` (a whole-page rebuild) | the view test: a tray built per save, and the stale-route step |
 | NC14: the mixes answer ignores the switch | the endpoint test's off steps |
 | NC15: `route()` no longer drops the snapshot | the route test |
+| NC16: the save gives focus back to nothing | the focus test's four "switch" cases |
+| NC17: focus goes back even when something else took it | the focus test's "focus taken during the save" case alone |
+| NC18: focus goes back to a switch that never had it | the focus test's "never focused" case alone |
 
 ### In a browser, after
 
@@ -27214,10 +27245,13 @@ a build of this branch taken before its rebases onto main's #1078–#1083
   disagreed through t=72.
 - Smart mixes, loopback: the gear saved the switch on and the page showed
   "No mixes generated yet" with "Regenerate all" beside the gear, the tray
-  still open on "Saved.", focus still on the switch, the same gear element
-  and the same document. Saved off again: the off state and no "Regenerate
-  all". Switched on by a PATCH from outside the page, then Albums → Smart
-  mixes by the player's own links: the page and the reopened tray both on.
+  still open on "Saved.", the same gear element and the same document. Saved
+  off again: the off state and no "Regenerate all". Switched on by a PATCH
+  from outside the page, then Albums → Smart mixes by the player's own
+  links: the page and the reopened tray both on. (This run also recorded
+  "focus still on the switch", in a hidden pane whose document did not
+  necessarily have focus; the next section's keyboard run, on a focused
+  document, found focus lost with the tray code this build had.)
 - Managed bridge: the Variants note "Variant generation is switched off for
   this bridge." stood alone, no gear, both Generate buttons disabled; the
   Jobs page's managed rows hidden and disabled, the Backups and Update checks
@@ -27231,6 +27265,29 @@ a build of this branch taken before its rebases onto main's #1078–#1083
   inside their 343 px cards, and the Smart mixes toolbar holding "Regenerate
   all" and the gear on one line.
 
+### On the final build
+
+#1084 changed `describeOrphanGCRefusal` in app.js, so once the branch was
+rebased onto it the three checks the backlog named were repeated on a build
+of the branch, on the same two bridges:
+
+- Analysis: without sox the note shown under the list with the description
+  intact; sox linked back and the same page's snapshot refreshed: "active",
+  "Analyze now", the note hidden and empty.
+- Smart mixes, by keyboard (the switch focused, Space): switched on, the
+  page redrew in place with the same gear element, the tray on "Saved." and
+  focus on the switch. That last one failed on the build before the focus
+  fix: focus on the body, for this switch and for Audio analysis beside it,
+  a `focusout` logged as the save began. With the fix, off again and Audio
+  analysis off and on: focus stayed on each switch.
+- Managed bridge: on the Jobs page the rows for `upscaleEnabled`,
+  `optimizeEnabled`, `smartPlaylistsEnabled`, `backupIntervalHours`,
+  `backupKeep`, `updateCheckIntervalHours` and `updateAutoInstall` hidden and
+  disabled, every other row shown and enabled, the Backups and Update checks
+  gears hidden; the Hi-Res album's Variants gear hidden beside "Variant
+  generation is switched off for this bridge.", both Generate buttons
+  disabled. No console errors on either bridge.
+
 ### Left open (backlog B68)
 
 - Two controls outside the trays still offer a managed field: the Jobs
@@ -27242,3 +27299,6 @@ a build of this branch taken before its rebases onto main's #1078–#1083
   others.
 - `fingerprintFeatureReady` in cmd/bridge/upscale.go has no caller; its
   messages still say "disabling".
+- Every other control the console disables while a request is out loses
+  focus the same way the tray switch did (`wireJobButton`'s buttons on the
+  Jobs page among them).
