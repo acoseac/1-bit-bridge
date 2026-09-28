@@ -231,7 +231,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 		// underlying `*net.UDPConn` continues to function for
 		// direct Write calls, which is how `sendAlive` / `sendByebye`
 		// use it.
-		if err := ipv4.NewPacketConn(sender).SetMulticastInterface(s.cfg.Interface); err != nil {
+		if err := pinMulticastInterface(sender, s.cfg.Interface); err != nil {
 			// Soft-fail: log + continue. A failure here means
 			// multicast goes via the OS default — degraded but
 			// not broken; renderers on that interface still
@@ -561,4 +561,14 @@ func interfaceName(iface *net.Interface) string {
 		return "(any)"
 	}
 	return iface.Name
+}
+
+// pinMulticastInterface pins conn's outgoing multicast to iface. Start calls
+// it on each advertiser's sender and only warns when it fails, so that
+// advertiser's NOTIFYs take the OS default interface. The tests that start an
+// advertiser on the loopback interface make the same call on a socket of
+// their own first, and skip where it fails: on that fallback their NOTIFYs
+// would reach the LAN (loopbackInterface, backlog B38).
+func pinMulticastInterface(conn *net.UDPConn, iface *net.Interface) error {
+	return ipv4.NewPacketConn(conn).SetMulticastInterface(iface)
 }

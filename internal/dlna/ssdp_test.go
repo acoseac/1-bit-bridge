@@ -142,7 +142,12 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 // (backlog B38; measured with a listener joined on the LAN interface).
 //
 // It skips where the host has no loopback interface that is up, which a test
-// that must not reach the LAN cannot replace with another interface.
+// that must not reach the LAN cannot replace with another interface, and
+// where multicast cannot be pinned to it. Start only warns when that pin
+// fails, and sends on the OS default interface instead, so a test whose
+// Start succeeded would multicast onto the LAN there; the skip decides with
+// the call Start makes (pinMulticastInterface), on a socket dialed the way
+// Start dials its sender, before any advertiser starts (CodeRabbit on #1086).
 func loopbackInterface(t *testing.T) *net.Interface {
 	t.Helper()
 	ifaces, err := net.Interfaces()
@@ -151,11 +156,30 @@ func loopbackInterface(t *testing.T) *net.Interface {
 	}
 	for i := range ifaces {
 		if ifaces[i].Flags&net.FlagLoopback != 0 && ifaces[i].Flags&net.FlagUp != 0 {
+			skipUnlessMulticastPins(t, &ifaces[i])
 			return &ifaces[i]
 		}
 	}
 	t.Skip("no loopback interface is up")
 	return nil
+}
+
+// skipUnlessMulticastPins skips the test unless outgoing multicast can be
+// pinned to iface.
+func skipUnlessMulticastPins(t *testing.T, iface *net.Interface) {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp4", SSDPMulticastAddr)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", SSDPMulticastAddr, err)
+	}
+	probe, err := net.DialUDP("udp4", nil, addr)
+	if err != nil {
+		t.Skipf("cannot open a UDP socket to the SSDP group: %v", err)
+	}
+	defer probe.Close()
+	if err := pinMulticastInterface(probe, iface); err != nil {
+		t.Skipf("cannot pin multicast to %s, where Start would send on the OS default interface: %v", iface.Name, err)
+	}
 }
 
 // Test_SSDPAdvertiser_StartStopRaceFree exercises the teardown race the
