@@ -38,9 +38,10 @@ const reachabilityProbeTimeout = 2 * time.Second
 // only tests override it, through swapStatFunc, so they can simulate a
 // hard-mount NFS stat that never returns — the one failure mode the
 // in-flight guard exists for, and one there is no portable way to stage
-// with a real filesystem. A probe's stat goroutine reads it before it
-// parks, so the original may go back only once every such goroutine has
-// returned, which swapStatFunc's cleanup waits for. Same convention as
+// with a real filesystem. A probe's stat goroutine reads it and then
+// blocks in the stat for as long as the stand-in holds it, so a test may
+// put the original back only once every such goroutine has returned,
+// which swapStatFunc's cleanup waits for. Same convention as
 // atomicwrite.renameFunc and tailscale.commandContext.
 var statFunc = os.Stat
 
