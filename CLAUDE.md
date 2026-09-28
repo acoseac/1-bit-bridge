@@ -2070,6 +2070,22 @@ no failing test — which is the shape to expect in this area.
   failure mode is persistent by nature: unsuppressed it produced **199,078 of
   the last 200,000 log lines**. The cost isn't disk — it's that every other line
   becomes unfindable.
+- **…and a send Stop's close cut short is a STOP, not a failure**
+  (2026-09-28). `sendMSearch` snapshots the socket and then writes, and Stop
+  can close it in between: the write fails with `net.ErrClosed`, which logged
+  "M-SEARCH send failed … use of closed network connection" and took the
+  streak to 1 on 4 of 6,000 plain Start→Stop cycles on macOS (43 under
+  `-race`) and 24 of 4,000 on Linux under `-race`. It is dropped before
+  `noteSendResult` sees it (0 of 12,000 after, on each host). **The ERROR
+  decides, never the run's context**: the socket is the client's own and only
+  Stop closes it, so `net.ErrClosed` names the stop exactly, while a write
+  takes no context and a genuine failure that lands during Stop is still a
+  failure (#998's second condition, under The CLI and the serve wiring).
+  `TestSendMSearchReportsAFailureThatLandsDuringStop` goes red if the check is
+  widened to `ctx.Err() != nil`. `HandleReadErr`'s ctx arm is no precedent: it
+  decides whether the READ loop exits, not what a result means. The upstream
+  MediaServer client (`internal/upnp`) discards every send error, so it has no
+  such line, and no line about a dead route either.
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -3471,7 +3487,11 @@ mentions across the four `ops/audit-*.md` files.
   next pass redoes. That looser form is RIGHT only where the error cannot
   carry the cancellation: a tsnet node the shutdown closed under
   `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
-  context alone. **A stopped pass reports no failure the stop caused, and
+  context alone. Where the stop leaves its OWN mark on the error, ask the
+  error and not the context: the renderer discovery's M-SEARCH send drops
+  `net.ErrClosed`, which only its `Stop`'s close produces, and still reports
+  a genuine failure that lands during the stop (2026-09-28, under DLNA,
+  UPnP and discovery). **A stopped pass reports no failure the stop caused, and
   records no verdict, count or status for the work the stop
   interrupted.** A `ctxerr` site still reports any other failure, even
   one that lands during the shutdown (#998's second condition). The
@@ -4955,6 +4975,33 @@ its twin.** The top list is older, shorter, and read first.
   after `Stop` (which joins it). One that did neither raced under `-race` on CI
   and was not reproducible locally in 26 runs. Adding a mutex would pay
   production for a test's convenience.
+- **…and a test that starts the loop decides what the loop's own sends do**
+  (2026-09-28). `TestSendMSearchStreakResetsOnRestart` kept that ordering and
+  still failed 10 of 200 runs on the dev Mac and 17 of 1,000 on Linux under
+  `-race`: `Start` spawns the tick loop, whose first send lost a race with
+  `Stop`'s close and took the streak to 1 before the failure the test drove,
+  so that one logged nothing. Moving the capture before `Start` is not the
+  fix: where a send goes through, the loop's SUCCESS resets the streak, and
+  that version passed 5 of 5 on both hosts with `Start`'s reset deleted. The
+  per-client `writeMSearch` seam makes the restarted loop's own first send
+  fail on every host, and the test asserts that send's Warn; with the reset
+  deleted it fails 20 of 20 on both. A test whose subject a live loop also
+  moves cannot leave that loop's I/O to the host.
+- **Putting back slog's previous default does not put back the `log`
+  package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28).
+  `slog.SetDefault` points the log package's output at the new handler and
+  zeroes its flags, and `slog.SetDefault(prev)` with slog's own default (the
+  one every test binary starts with) undoes neither, while that handler
+  writes THROUGH the log package. So after the first capture in a binary,
+  every later default-logger line went into the finished test's buffer: of
+  200 runs of one discovery test, 1 printed its lines (200 after), and a
+  failing test's diagnostics are what that swallows. It is also why the
+  restart flake above showed no Warn. `SetDefault` puts back the default, the
+  output and the flags; `Record`, `ParkOn` and both capture helpers in
+  `internal/dlna` use it (`handshaketest`, which redirects the log package
+  itself, already put back its output, flags and prefix).
+  Eleven test files elsewhere still restore only the default, listed in the
+  log's 2026-09-28 entry.
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
   a `defer cancel()` plus a cancel-and-assert tail.** The tail runs only when
   the body completes: a `t.Fatalf` above it Goexits, the deferred cancel fires,

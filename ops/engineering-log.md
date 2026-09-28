@@ -21750,3 +21750,139 @@ the refactored test and still go red. A third goes red only now: with the
 partial-walk refusal's summary line removed, the old loop passed over zero
 lines, and the count reports "want 2 line(s), got 0".
 
+## 2026-09-28 — an M-SEARCH send a Stop cut short is not a failure, and the restart test decides its loop's send
+
+`TestSendMSearchStreakResetsOnRestart` (`internal/dlna/discovery`) failed
+under load, and two earlier entries recorded it and left it: the #993 entry
+(2026-09-24), which guessed at a send the host refused, and the #1051 entry
+(2026-09-27), which read the closed-socket mechanism from the code and noted
+the `captureLogs` defect beside it. This change measures both, fixes the
+product half, and makes the test decide what the live loop's sends do.
+
+### What was measured on main
+
+- **The flake.** 10 of 200 runs failed under `-race` on the dev Mac with
+  other sessions loading it, "a restarted client logged 0 first-failure
+  Warns, want 1". A probe copy of the test that captured from before
+  `Start` showed what the live loop logged: 5 of 400 runs failed on the
+  Mac and 17 of 1,000 on Linux (`golang:1.26.6` on dido, `-race`), and in
+  every failing run, and in no passing one, the tick loop had logged
+  `M-SEARCH send failed … err="write udp4 0.0.0.0:PORT->239.255.255.250:1900:
+  use of closed network connection"`. `Start` spawns the tick loop, whose
+  first send runs at once: it took its `snapshotConn()` before the test's
+  `Stop` closed the socket and wrote after, and its failure took the streak
+  to 1, so the failure the test drove next took it to 2, which logs nothing.
+  Sends go through on both hosts (a probe's `WriteToUDP` answered nil), so
+  the #993 entry's "a send the host refuses" was not what happened here; it
+  is the same mechanism's other door on a host whose multicast route is gone.
+- **The shutdown line.** Counting over plain `Start` then `Stop` cycles with
+  nothing failing on purpose, "M-SEARCH send failed … use of closed network
+  connection" appeared in 2, 1 and 1 of three runs of 2,000 cycles on the Mac
+  (9, 11 and 23 under `-race`), and in 0 of 2,000 and 12 and 12 of 2,000
+  under `-race` on Linux. No other send-failure line appeared. Each is a
+  false report of a failed send at shutdown, and it moved the streak.
+- **The swallowed lines.** In the 200-run reproduction only the first run's
+  log lines reached stderr: 1 of 200 runs printed the pre-capture
+  "failing persistently" line. `slog.SetDefault` points the log package's
+  output at the new handler and sets its flags to 0; `captureLogs` put back
+  the previous default, which was slog's own, and `SetDefault` does not
+  undo the redirect for that handler, which writes THROUGH the log package
+  (`log/slog/logger.go`, the same in 1.26.6 and 1.27.1). Every later line in
+  the binary went into the first test's buffer, which is also why the failing
+  runs above showed no Warn.
+
+### What changed
+
+- **`sendMSearch` drops `net.ErrClosed`** before `noteSendResult`: no Warn,
+  no count. The socket is the client's own and only `Stop` closes it, so the
+  error names the stop exactly. 0 of 12,000 cycles after (6,000 with and
+  6,000 without `-race`) on the Mac, and 0 of 12,000 on Linux. A UDP write
+  that races a close returns either its own result or `ErrNetClosing` on
+  every platform (`internal/poll`'s `WriteTo` takes the write lock, and
+  Windows' `execIO` puts `waitIO`'s `ErrNetClosing` in place of the aborted
+  operation), so there is no second spelling to catch.
+- **Rejected: classifying by the run's context.** `HandleReadErr` exits its
+  read loop on `ctx.Err() != nil || errors.Is(err, net.ErrClosed)`, and the
+  same test here was proposed in the task. A write takes no context and fails
+  for the same reasons during a shutdown as at any other time, so a context
+  check would drop a genuine failure that lands while `Stop` runs, the #998
+  rule's second condition. The read side is not a precedent: there the
+  context decides whether the LOOP returns.
+- **`writeMSearch`**, a per-client seam set to `(*net.UDPConn).WriteToUDP`
+  by the constructor, lets a test decide what the tick loop's send returns
+  and when. Set before `Start`, never while a loop runs, like `sendErrStreak`.
+- **The restart test** pre-fails through the escalation before `Start`,
+  makes every send fail through the seam, captures from before `Start`, waits
+  for the loop's first send, stops, and requires exactly one Warn carrying the
+  seam's error, and a streak of 1. The first failure of the new run is now the
+  loop's own, which is the case the test's docblock describes.
+- **Rejected: moving the capture before `Start` and counting Warns**, with
+  the loop's real send left to the host. With `Start`'s reset deleted it
+  passed 5 of 5 on the Mac and 5 of 5 on Linux (a probe that let the loop's
+  first send land before `Stop`): where a send goes through, the loop's
+  success resets the streak, "recovered", and the driven failure is again the
+  first. It cannot guard the rule on the hosts CI runs.
+- **`loggingtest.SetDefault(t, l)`** installs `l` and puts back the default,
+  the log package's output and its flags. `Record` and `ParkOn` go through it
+  (their `install` restored only the default), and so do the two capture
+  helpers in `internal/dlna` (`captureLogs` in `discovery`,
+  `captureDLNALogs`). `internal/upnp` has no such helper: its tests inject a
+  logger. `handshaketest` already put back output, flags and prefix.
+  1 of 200 runs printed its lines before; 200 of 200 after.
+
+### Tests
+
+- `TestSendMSearchStreakResetsOnRestart`, rewritten as above.
+- `TestSendMSearchCutShortByStopIsNotAFailure`: `holdPastStop` holds the
+  loop's send until `Stop` has closed the socket (it waits on the run's
+  context, then takes `runMu`'s read lock, which `Stop` holds across its
+  cancel and close), and then writes with the socket's own `WriteToUDP`, so
+  the error is the real one. Requires no Warn and a streak of 0. It failed
+  red-first on the tree with the seam and without the drop, with exactly the
+  shutdown line above.
+- `TestSendMSearchReportsAFailureThatLandsDuringStop`: the same hold, then a
+  genuine error. Requires one Warn and a streak of 1.
+- `TestSetDefaultPutsBackTheLogPackage` and
+  `TestRecordAndParkOnPutBackTheLogPackage` run an installer in a subtest
+  over a log output of the test's own, then require the output and flags
+  back and a line logged afterwards to reach that output. Both first check
+  that the default is slog's own, since with any other handler
+  `slog.SetDefault(prev)` re-points the log package itself and the defect
+  cannot show.
+- 300 runs of the three M-SEARCH tests under `-race` and 10 of the
+  `internal/dlna/...` and `internal/logging/...` packages: all green.
+
+| Control | Red |
+|---|---|
+| NC1: `Start` no longer resets `sendErrStreak` | `TestSendMSearchStreakResetsOnRestart` only, 20 of 20 on the Mac and 20 of 20 on Linux, where sends go through ("logged 0 first-failure Warns", streak 26) |
+| NC2: `sendMSearch` no longer drops `net.ErrClosed` | `TestSendMSearchCutShortByStopIsNotAFailure` only; the restart test stays green, since its seam's error is not the close's |
+| NC3: the drop widened to "the run's context is done" | `TestSendMSearchReportsAFailureThatLandsDuringStop` only |
+| NC4: `SetDefault` puts back the slog default alone | `TestSetDefaultPutsBackTheLogPackage` and both subtests of `TestRecordAndParkOnPutBackTheLogPackage` (output `*slog.handlerWriter`, flags 0) |
+| NC5: `install` back to its old body | the two subtests of `TestRecordAndParkOnPutBackTheLogPackage` only |
+
+### Left as they are
+
+- **Eleven test files elsewhere still restore only the slog default**, and
+  where the default they put back is slog's own, as it is at the start of
+  every test binary, they leave the same redirect: `internal/api`
+  (`errors_test.go`, three tests, and `middleware_test.go`),
+  `internal/updater/verify_darwin_test.go`,
+  `internal/transcode/pool_log_redaction_test.go`,
+  `internal/pairing/store_test.go`,
+  `internal/manifest/store_probe_ctx_log_test.go` and
+  `log_library_paths_test.go`, `internal/integrity/relocation_test.go`,
+  `internal/analyze/pool_failure_test.go`,
+  `internal/albumgain/mate_log_redaction_test.go`, and
+  `internal/metrics/metrics_test.go` (after `logging.Init`).
+  `internal/logging/logging_test.go` sets defaults and restores none, which
+  its own tests of `SetDefault` may mean. Moving them onto
+  `loggingtest.SetDefault` and a sweep that refuses a bare `slog.SetDefault`
+  in a test file are one change of their own.
+- **The upstream MediaServer client's `sendMSearch` discards every send
+  error** (`_, _ = conn.WriteToUDP`), so it has no shutdown line, and also
+  no line at all when the multicast route is gone: upstream discovery goes
+  quiet with nothing in the log. Giving it the streak is a feature of its own.
+- **The server-side advertiser's `sendAliveAll` logs a failed NOTIFY at
+  Debug**, so a periodic send that meets `Stop`'s close there is a Debug
+  line, which the default Info level does not print.
+
