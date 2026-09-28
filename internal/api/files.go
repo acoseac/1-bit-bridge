@@ -520,11 +520,14 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 // (`/v1/stat`, `/v1/read`, `/v1/download`, `/v1/lyrics`, `/v1/waveform`,
 // the upscale path scope) goes through `ResolveChecked`'s `os.Stat`, so
 // the listing is the one surface that ever saw the link itself. The
-// SCANNER is a separate, deliberate story: `filepath.WalkDir` Lstats and
-// descends into no link of any kind, on any platform, so an album behind
-// one has never reached the manifest — a pre-existing property of the
-// walk, not of this decision, and widening it would raise the cycle
-// question.
+// SCANNER is a separate, deliberate story for DIRECTORIES:
+// `filepath.WalkDir` Lstats and descends into no link of any kind, on any
+// platform, so an album behind a directory link has never reached the
+// manifest — a pre-existing property of the walk, not of this decision,
+// and widening it would raise the cycle question. A FILE behind a link is
+// indexed, and since 2026-09-28 under its target's stat (the manifest's
+// walkedFileInfo, which makes this function's "not a regular file" test),
+// so the manifest's size and mtime for it agree with this listing's.
 //
 // **CodeQL `go/path-injection` on the Join below is a false positive of
 // the class dismissed for alerts #1-4** (see CLAUDE.md v0.1.4). Both
