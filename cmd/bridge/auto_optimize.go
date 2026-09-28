@@ -248,6 +248,11 @@ const (
 	planIneligible
 	// planUnresolvable: the file isn't readable right now.
 	planUnresolvable
+	// planChangedSinceScan: the file on disk is not the version its row
+	// records, so a render would record a version the serve path or the
+	// next sweep calls stale (rendition_stamp.go). The scan that reads the
+	// file offers it again.
+	planChangedSinceScan
 )
 
 // planCandidate turns one candidate row into a submittable JobSpec, or
@@ -301,14 +306,18 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, k
 		// "mark this permanently un-optimizable" bug during a mount outage.
 		return transcode.JobSpec{}, projected, planUnresolvable
 	}
+	if !sourceIsAtRow(info, c.MTimeNS, c.Size) {
+		return transcode.JobSpec{}, projected, planChangedSinceScan
+	}
 
-	// SourceMTimeNS / SourceSize come from the TRACK ROW, not from `info`.
-	// Matches Coordinator.buildOptimizeCandidates so a swept variant is
-	// indistinguishable from an on-demand one — and it is what keeps the
-	// staleness predicate self-consistent (see the
-	// autoOptimizeCandidateSQL docblock: stamping a live stat would make
-	// freshly built variants read as stale on the next tick whenever the
-	// scanner hadn't caught up, regenerating them forever).
+	// SourceMTimeNS / SourceSize come from the TRACK ROW, not from `info`,
+	// as every writer's do (rendition_stamp.go), the on-demand path's and
+	// the CLI's included. It is what keeps the staleness predicate
+	// self-consistent (see the autoOptimizeCandidateSQL docblock: stamping
+	// a live stat would make freshly built variants read as stale on the
+	// next tick whenever the scanner hadn't caught up, regenerating them
+	// forever). Here the two agree: a file that has moved past its row was
+	// passed over above.
 	spec := transcode.JobSpec{
 		SourceAbsPath:    abs,
 		SourceLibraryRel: c.Path,
@@ -362,6 +371,9 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			continue
 		case planUnresolvable:
 			counts.Unresolvable++
+			continue
+		case planChangedSinceScan:
+			counts.ChangedSinceScan++
 			continue
 		}
 		if freeBytes-(projectedTotal+projected) < floor {
@@ -447,6 +459,9 @@ func (sw *autoOptimizeSweeper) planPCMRender(c manifest.AutoOptimizeCandidate, o
 	if rerr != nil || info.IsDir() {
 		return transcode.JobSpec{}, projected, planUnresolvable
 	}
+	if !sourceIsAtRow(info, c.MTimeNS, c.Size) {
+		return transcode.JobSpec{}, projected, planChangedSinceScan
+	}
 	return transcode.JobSpec{
 		SourceAbsPath:     abs,
 		SourceLibraryRel:  c.Path,
@@ -518,6 +533,7 @@ func logAutoOptimizeSweep(counts *admin.AutoOptimizeSweepCounts) {
 		logger.Info("auto-optimize sweep enqueued variants",
 			"count", counts.Enqueued,
 			"regenerated", counts.Regenerated,
+			"changedSinceScan", counts.ChangedSinceScan,
 			"remaining", counts.Remaining,
 			"projectedBytes", counts.ProjectedBytes,
 			"queueSaturated", counts.QueueSaturated,
