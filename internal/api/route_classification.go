@@ -317,6 +317,7 @@ func (s *Server) routeRegistry() []route {
 		// Phase-H bulk-harvest credential handoff from the iOS app — a single
 		// small atomic file write.
 		{pattern: "POST /v1/atlas-harvest/credential", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitWrite(s.atlasHarvestCredential)))},
+		{pattern: "DELETE /v1/atlas-harvest/credential", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitWrite(s.atlasHarvestCredentialDelete)))},
 
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).
@@ -330,6 +331,7 @@ func (s *Server) routeRegistry() []route {
 		// Pairing — small JSON / 204 responses (unauthed by
 		// design; pollSecret + cert pin are the trust anchors).
 		{pattern: "POST /v1/pairing/requests", kind: boundedRoute, rateClass: rateNone, handler: s.pairingRequest},
+		{pattern: "POST /v1/pairing/redeem", kind: boundedRoute, rateClass: rateNone, handler: s.pairingRedeem},
 		{pattern: "GET /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingPoll},
 		{pattern: "DELETE /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingDelete},
 	}

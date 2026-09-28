@@ -34,9 +34,10 @@ mDNS is a LAN convenience only — once paired, the client stores a durable endp
 ## Authentication
 
 - The default rule: every request must carry `Authorization: Bearer <token>` where `<token>` is a minted bearer.
-- Three documented exceptions:
+- Four documented exceptions:
   - **`GET /v1/health`** — no auth, so the iOS "Add Bridge" sheet can surface a useful error before the user has pasted a token.
   - **`POST /v1/pairing/requests`** — no auth. The body's `pollSecretHash` (SHA-256 hex of the iOS-generated `pollSecret`) IS the binding: subsequent polls present the matching `pollSecret` raw, server hashes and constant-time-compares.
+  - **`POST /v1/pairing/redeem`** — no auth. The body's one-time `code`, from a pairing link, IS the credential (see that endpoint and "Pairing URL scheme").
   - **`GET /v1/pairing/{requestId}` and `DELETE /v1/pairing/{requestId}`** — `Authorization: Bearer <pollSecret>` where `<pollSecret>` is the request-creator's textual encoded form (see "pollSecret wire encoding" below). Server applies `SHA-256` to the bytes of the bearer string and constant-time-compares against the stored hash.
 - Tokens are minted by `bridge pair` (or by approving an admin-approval pairing request) and stored server-side as a salted hash.
 - An unauthenticated request is answered with `401 Unauthorized` and a JSON body:
@@ -187,7 +188,7 @@ A client that adds the upstream as its own source will then see the same albums 
 
 `features` (additive, `omitempty`) is an array of stable, alpha-sorted string capability keys — never top-level boolean fields. Pre-feature bridges omit the array entirely (and any given key may be absent on bridges where its underlying wiring is off); clients treat an absent key as "feature absent". The full key set is documented per feature throughout this spec (`waveform`, `loudness`, `playlistBackup`, `smartPlaylists`, …); two generic ones belong here: `pushEventsSupported` and `pairingEventsSupported` (both additive since v1.3) advertise that this bridge implements the SSE streams documented at `/v1/events` (`upscale.*` + generic push events) and `/v1/pairing/{id}/events` (per-pairing-request push) respectively. iOS uses them to decide whether to subscribe via SSE or fall back to the polling endpoints — bridges that omit them are treated as "polling only". Splitting the two keys means a bridge can support generic push without pairing push (or vice versa) as separate rollout vectors.
 
-`demoMode` (additive, v0.1.9) advertises the read-only public demo posture (`demo.enabled` in bridge.yaml — the `bridge.1-bit.app` fixture behind the iOS app's "Add demo bridge" action). On such a bridge the user-data stores are deliberately unwired, so `playlistBackup`, `playlistsCrossDevice`, `favorites`, `playbackHistory` and `playbackHistoryRead` are honestly absent from this array and their mutation endpoints return the same typed `404`s a feature-off bridge returns. Clients should treat `demoMode` as "label the source as a demo and hard-lock the sync toggles off" — presenting sync controls the server would refuse is the failure this flag exists to prevent. Everything read-side (manifest, streaming, artwork, waveforms, analysis scalars, smart playlists) behaves normally — including SERVING upscaled / CarPlay-optimized variants when the operator enabled upscaling. The four upscale MUTATION endpoints (`POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`) return `403` `demo_read_only` on a demo bridge regardless of bearer: its token is effectively public, so submitting server work must be impossible even though the feature flags advertise the (read-side) capability. `POST /v1/atlas-ingest` returns the same `403` `demo_read_only` there (v0.1.9): the ingest trusts the authenticated client's PAYLOAD, and a public bearer would let anyone poison the bios served to every demo user. `POST /v1/atlas-harvest/credential` and the `/v1/atlas-meta/*` reads stay open — a demo bridge gets its rich-tier metadata exclusively via its own harvest pull from Atlas (authentic, server-to-server), bootstrapped by an attested client handing it a capability token. `ProtocolVersion` stays `1` — the flag is additive and the absences are the existing feature-off shapes.
+`demoMode` (additive, v0.1.9) advertises the read-only public demo posture (`demo.enabled` in bridge.yaml — the `bridge.1-bit.app` fixture behind the iOS app's "Add demo bridge" action). On such a bridge the user-data stores are deliberately unwired, so `playlistBackup`, `playlistsCrossDevice`, `favorites`, `playbackHistory` and `playbackHistoryRead` are honestly absent from this array and their mutation endpoints return the same typed `404`s a feature-off bridge returns. Clients should treat `demoMode` as "label the source as a demo and hard-lock the sync toggles off" — presenting sync controls the server would refuse is the failure this flag exists to prevent. Everything read-side (manifest, streaming, artwork, waveforms, analysis scalars, smart playlists) behaves normally — including SERVING upscaled / CarPlay-optimized variants when the operator enabled upscaling. The four upscale MUTATION endpoints (`POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`) return `403` `demo_read_only` on a demo bridge regardless of bearer: its token is effectively public, so submitting server work must be impossible even though the feature flags advertise the (read-side) capability. `POST /v1/atlas-ingest` returns the same `403` `demo_read_only` there (v0.1.9): the ingest trusts the authenticated client's PAYLOAD, and a public bearer would let anyone poison the bios served to every demo user. `POST /v1/atlas-harvest/credential` and the `/v1/atlas-meta/*` reads stay open — a demo bridge gets its rich-tier metadata exclusively via its own harvest pull from Atlas (authentic, server-to-server), bootstrapped by an attested client handing it a capability token. `DELETE /v1/atlas-harvest/credential` returns `403 demo_read_only` there: that one credential is shared by every demo user, so one of them switching the harvest off must not stop it for all. `ProtocolVersion` stays `1` — the flag is additive and the absences are the existing feature-off shapes.
 
 **Ordering** (reflects the server's recommendation — clients pick the first URL they can reach):
 
@@ -1158,6 +1159,12 @@ Provisions the bridge-driven **bulk harvest**. The iOS app (which alone holds an
 
 `token` is required; `atlasBaseUrl` MUST be an `https` URL (the bridge dials it with the bearer — http is rejected to avoid cleartext token transport); `expiresInSeconds` ≤ 0 (or omitted) means "unknown expiry". **`200`** `{ "ok": true }` on success. Advertised by the bridge accepting the route; gated on `atlas.harvestEnabled` (a bridge with the feature off returns `404 harvest_not_supported`). The harvest client is dormant (cheap idle ticks) until a credential is provisioned.
 
+#### `DELETE /v1/atlas-harvest/credential` (bearer-authenticated — additive)
+
+Revokes the bulk harvest: the bridge forgets the credential it holds at once, so its harvest client stops using it at its next tick and the token leaves the bridge's state file. Clients call it when the user switches the library harvest off; before this route, switching off only stopped the app's renewals, and the credential the bridge already held stayed usable until it expired. The harvest's sync position is kept, so a later `POST` for the same Atlas resumes where it stopped.
+
+No body. **`204`** with or without a credential held, so a client can call it on every switch-off without asking first. That includes a bridge with `atlas.harvestEnabled` off: its state file can still hold the credential from when the harvest was on, and re-enabling the harvest reads that file again, so the bridge clears it there too. **`204` is the only answer that means revoked.** **`403 demo_read_only`** on a `demoMode` bridge, whatever its harvest setting, whose one harvest credential is shared by every demo user and is not revoked by one of them; clients skip the call there. A bridge that predates the route answers `405`: it **cannot revoke**, and a credential it holds stays usable until it expires, so a client must not report the credential as cleared. The same holds for any other answer, and when the call does not reach the bridge. `ProtocolVersion` stays `1`.
+
 ### PDF album booklets (additive, since v1.8)
 
 Digital booklets for releases, sourced through the operator's Atlas mirror and cached on the bridge. **No provenance is exposed anywhere on this surface — by design.** The wire never names where a booklet came from; clients present booklets as library content.
@@ -1444,6 +1451,32 @@ Cancel a pending request OR acknowledge receipt of an approved token. Same `Auth
 
 The handler treats "already deleted" as success (returns 204), so a duplicate DELETE from a retrying iOS client is a no-op rather than a 404. This is the iOS-visible side of the read-many delivery contract.
 
+### `POST /v1/pairing/redeem` (unauthenticated — additive)
+
+Trades the one-time `code` a pairing link carries (see "Pairing URL scheme") for the device's bearer token. The link's `token` has been in a QR, a deep link or a clipboard, where anything that saw the URL saw it too. Redeeming the code gives the device a token that never travelled in a link, and ends the one that did.
+
+**Authentication**: none. The `code` is the credential, and the TLS fingerprint the link carries is the trust anchor, as for `POST /v1/pairing/requests`: a client MUST make this request over a connection pinned to the link's `fingerprint`.
+
+**Request body**:
+```json
+{ "code": "<the 43-char base64url code from the link>" }
+```
+
+**Response** (`200 OK`):
+```json
+{ "token": "<43-char base64url bearer>", "tokenId": "<token record id>" }
+```
+
+`token` is a fresh secret for the SAME token record the link's `token` belongs to (its name, ID, last-used history and any expiry are kept, as for a rotation in the admin console), and the link's `token` stops validating in the same step. The client stores `token`, never the link's. A code is single-use and valid for 10 minutes from when the console made the QR. The console keeps one code per token, so rotating a token, which makes a fresh QR, ends the previous QR's code as well. Codes are held in memory, so a bridge restart ends every code, and the operator makes a fresh QR.
+
+**Errors**:
+- **`400 bad_request`** — the body is not `{"code": "..."}`, or the code is not 43 characters of base64url.
+- **`410 pairing_code_invalid`** — the code is unknown, already redeemed or expired, or its token has since been revoked or has expired. One answer for all of them, so the endpoint reveals nothing about which codes exist. The client shows it (the fix is a new QR) and does NOT fall back to the link's `token`: if a copy of the link was redeemed first, that token no longer works, and a device that paired with it anyway would hold the weaker secret this exchange exists to replace.
+- **`404 pairing_code_not_supported`** — a bridge that issues no codes. Such a bridge never puts `code` in a link.
+- **`429 rate_limited`** with `Retry-After` — the per-IP pairing limiter `POST /v1/pairing/requests` uses.
+
+`ProtocolVersion` stays `1`: the route and the link's `code` are additive, and a client that predates them ignores `code` and pairs with `token` as before.
+
 ### `GET /v1/search?q=<text>[&limit=<int>]` (additive, since v1.11)
 
 Server-side library search over the FTS5 index the bridge already maintains. A client that has not finished (or does not want) a full manifest sync can still find a track.
@@ -1493,11 +1526,13 @@ All errors are JSON:
 |    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
+|    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
 |    404 | `favorites_not_supported` | Bridge build doesn't store favorites backups (pre-v1.10) — no `/v1/favorites` |
 |    409 | `stale`                  | PUT `/v1/playlists/{id}` or `/v1/favorites` carried a `lastModifiedAt` strictly older than the stored copy; body includes the full server copy |
-|    429 | `rate_limited`           | Per-IP pairing-create rate-limit, or a per-token `/v1/manifest`, write or search rate-limit tripped |
+|    410 | `pairing_code_invalid`   | Pairing-link code unknown, already redeemed or expired, or its token revoked or expired since |
+|    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |
@@ -1521,7 +1556,7 @@ Operators can disable the limiter by setting `limits.manifest.requestsPerMinute:
 
 Every **mutating** `/v1` route draws from a second per-token bucket, sized via `limits.write.requestsPerMinute` (default `120`) and `limits.write.burst` (default `300`). The routes covered are:
 
-`POST /v1/upscale` · `POST /v1/upscale/batch` · `DELETE /v1/upscale/batches/{id}` · `DELETE /v1/upscale/variants` · `PUT /v1/playlists/{id}` · `DELETE /v1/playlists/{id}` · `PUT /v1/favorites` · `POST /v1/history/batch` · `POST /v1/atlas-ingest` · `POST /v1/atlas-harvest/credential`
+`POST /v1/upscale` · `POST /v1/upscale/batch` · `DELETE /v1/upscale/batches/{id}` · `DELETE /v1/upscale/variants` · `PUT /v1/playlists/{id}` · `DELETE /v1/playlists/{id}` · `PUT /v1/favorites` · `POST /v1/history/batch` · `POST /v1/atlas-ingest` · `POST /v1/atlas-harvest/credential` · `DELETE /v1/atlas-harvest/credential`
 
 Pairing routes are excluded: they are unauthenticated (no token to key a bucket on) and carry their own per-IP limiter. **Read routes are deliberately unlimited** — the artwork sweep legitimately issues hundreds of requests in a burst, and a bucket there would break it.
 
@@ -1536,17 +1571,20 @@ Operators can disable it with `limits.write.requestsPerMinute: 0`.
 Out-of-band setup path: the admin console emits a custom-scheme URL that carries everything the iOS app needs to add a bridge share in one tap (QR scan or deep link), so the operator never has to paste three separate fields by hand.
 
 ```text
-bridge://pair?url=<https bridge URL>&token=<base64url bearer>&fingerprint=<AB:CD:…:EF>&name=<library display name>
+bridge://pair?url=<https bridge URL>&token=<base64url bearer>&code=<base64url one-time code>&fingerprint=<AB:CD:…:EF>&name=<library display name>
 ```
 
-**Query parameters** — all required (iOS MUST reject URLs missing any of these):
+**Query parameters** — `url`, `token`, `fingerprint` and `name` are required (iOS MUST reject URLs missing any of these); `code` is optional:
 
 | Name          | Value                                                                 |
 |---------------|-----------------------------------------------------------------------|
 | `url`         | The HTTPS URL iOS should dial, including `https://` scheme and port.  |
 | `token`       | Raw bearer token (the same 43-char base64url string `bridge pair` prints). |
+| `code`        | Optional (additive). A one-time code, 43 characters of base64url, that redeems once, within 10 minutes, for the device's token (`POST /v1/pairing/redeem`). Present in the links the admin console makes on a bridge that issues codes. |
 | `fingerprint` | Server TLS cert SHA-256 in colon-delimited uppercase hex. Used for pinning. |
 | `name`        | Human-readable library name (shown in the iOS UI). |
+
+**`code`.** A client that understands `code` MUST redeem it over a connection pinned to the link's `fingerprint` before it stores anything, and store the token the redemption returns, never the link's `token`, which stops working at that moment. If the redemption is refused, the client shows the refusal and does not fall back to the link's `token`. A client that predates `code` ignores it, per the unknown-parameter rule below, and pairs with `token`, which is why `token` is still in the link.
 
 **Encoding.** Each value is percent-encoded as a URI query component (RFC 3986): a space is `%20` and a literal `+` is `%2B`. iOS reads the query with Foundation's `URLComponents.queryItems`, which keeps a raw `+` as a plus, so a space written as `+` (the form encoding of Go's `url.Values.Encode`) arrives as a `+`. Bridges up to and including v0.2.0 wrote the library name that way, so a bridge named `My Library` pre-fills the pairing sheet with `My+Library`.
 
@@ -1554,7 +1592,7 @@ bridge://pair?url=<https bridge URL>&token=<base64url bearer>&fingerprint=<AB:CD
 
 Unknown query parameters MUST be ignored — future additive fields (e.g. a display hint for the pairing modal) stay at the same protocol version.
 
-**iOS behaviour**: after parsing, the client runs the same `/v1/health` probe + authed `/v1/manifest?since=<future>` verify steps it uses for manual pairing, then persists the share on success. A malformed URL (missing fields, token/fingerprint fail regex sanity) is rejected before any network call.
+**iOS behaviour**: after parsing, the client runs the same `/v1/health` probe + authed `/v1/manifest?since=<future>` verify steps it uses for manual pairing, then persists the share on success. With a `code`, it redeems the code after the probe and verifies with the redeemed token. A malformed URL (missing fields, token/fingerprint fail regex sanity) is rejected before any network call.
 
 The scheme is **additive** — bridges that don't ship the admin console (pre-0.0.x builds, bespoke integrations) still work fine with the three-field manual paste path.
 

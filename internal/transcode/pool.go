@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1212,12 +1213,16 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// the job once: `end` holds one outcome, where the old per-exit
 		// tails had counted before the panic and the recover counted again.
 		if r := recover(); r != nil {
+			// Redacted like sox's stderr: a panic value can quote any path
+			// the job had in hand, and this message reaches the batch row
+			// the app reads (GET /v1/upscale/batches) as well as the log.
+			panicMsg := redactSoxErr(fmt.Sprint(r), job.spec)
 			logger.Error("pool: recovered panic in job",
 				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
-				"panic", r)
+				"panic", panicMsg)
 			if !p.closed.Load() {
-				end = failedEnd(fmt.Sprintf("panic recovered in worker: %v", r))
+				end = failedEnd("panic recovered in worker: " + panicMsg)
 			}
 		}
 		p.finishJob(workerID, job, end.outcome)
@@ -1277,10 +1282,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			// Logged distinctly so operators can tell a hung-sox kill from
 			// an internal sox failure.
 			end = failedEnd("sox timed out after " + timeout.String())
+			// Redacted: on the ffmpeg routes the error carries ffmpeg's
+			// stderr, which names the input by its absolute path.
 			logger.Warn("pool: sox timed out",
 				"path", job.spec.SourceLibraryRel,
 				"timeout", timeout,
-				"err", err)
+				"err", redactSoxErr(err.Error(), job.spec))
 			return
 		}
 		// The REDACTED message, for the log line as for the row and the
@@ -1340,8 +1347,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		if p.closed.Load() {
 			return
 		}
-		end = failedEnd("fsync sidecar: " + err.Error())
-		logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
+		// The error names the sidecar by its absolute path, under the
+		// variants directory. Redacted before it reaches the batch row the
+		// app reads (GET /v1/upscale/batches), the SSE frame and the log.
+		fsyncMsg := redactSoxErr(err.Error(), job.spec)
+		end = failedEnd("fsync sidecar: " + fsyncMsg)
+		logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", fsyncMsg)
 		_ = os.Remove(sidecarPath)
 		return
 	}
@@ -1416,8 +1427,9 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// Surface store-side failures to the Coordinator too — the admin
 		// Jobs page distinguishes them from sox failures via the errMsg
 		// prefix.
-		end = failedEnd("store variant: " + err.Error())
-		logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
+		storeMsg := redactSoxErr(err.Error(), job.spec)
+		end = failedEnd("store variant: " + storeMsg)
+		logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", storeMsg)
 		// Best-effort: remove the orphan sidecar so a retry from a clean
 		// slate succeeds — before the release, for the fsync exit's reason.
 		_ = os.Remove(row.SidecarPath)
@@ -1502,8 +1514,11 @@ func redactSoxErr(s string, spec JobSpec) string {
 		s = strings.ReplaceAll(s, spec.SourceAbsPath, spec.SourceLibraryRel)
 	}
 	// Pass 2: scrub OutputDir prefix from sidecar paths. We strip
-	// the directory prefix only — the sidecar basename is opaque
-	// hash + variant ID, no operator-identifying information.
+	// the directory prefix only. What is left mirrors the source's
+	// library-relative path (the sidecar layout has mirrored the library
+	// since #241; this comment called the name an opaque hash until
+	// 2026-09-27), which is the form the privacy page allows in an error
+	// line.
 	//
 	// TrimRight first: sox's real path comes from SidecarPath(), which
 	// builds with filepath.Join and therefore Cleans, so an OutputDir
@@ -1530,18 +1545,31 @@ func redactSoxErr(s string, spec JobSpec) string {
 	// is an absolute HOST path that lands in sox's argv as Stage A's output
 	// and Stage B/C's input, so a failing stage names it in stderr and a
 	// mkdir failure names it in the PathError. The scratch basename is an
-	// opaque token, so the prefix goes and the name stays; the bare
-	// directory (a mkdir error) becomes a placeholder rather than a hole in
-	// the sentence. Then the configured tempDir itself, for a MkdirAll that
-	// failed on the parent. Longest first, so the scratch subdirectory is
-	// consumed before its parent could match inside it. A no-op for every
+	// opaque token, so the prefix goes and the name stays. A no-op for every
 	// PCM job — nothing in a sox-direct run mentions the directory.
 	scratch := strings.TrimRight(renderScratchDir(spec.TempDir), `/\`)
 	s = strings.ReplaceAll(s, scratch+"/", "")
 	s = strings.ReplaceAll(s, scratch+`\`, "")
-	s = strings.ReplaceAll(s, scratch, "<render-scratch>")
-	if tmp := strings.TrimRight(spec.TempDir, `/\`); tmp != "" {
-		s = strings.ReplaceAll(s, tmp, "<tempDir>")
+	// Pass 2c: the bare directories, each a placeholder rather than a hole
+	// in the sentence. A mkdir failure names the scratch directory or the
+	// configured tempDir bare, and a root-level source's sidecar sits
+	// directly in the variants directory, so a failed parent-directory
+	// fsync names that directory with no separator after it for Pass 2 to
+	// match (CodeRabbit on #1055). Longest first, so a directory is consumed
+	// before a shorter one can match inside it: the scratch sits below
+	// tempDir, and the variants directory and tempDir can nest either way
+	// or share a string prefix (`/srv/v` and `/srv/v-tmp`).
+	type bareDir struct{ dir, placeholder string }
+	bare := []bareDir{
+		{scratch, "<render-scratch>"},
+		{strings.TrimRight(spec.TempDir, `/\`), "<tempDir>"},
+		{strings.TrimRight(spec.OutputDir, `/\`), "<variantsDir>"},
+	}
+	slices.SortStableFunc(bare, func(a, b bareDir) int { return len(b.dir) - len(a.dir) })
+	for _, b := range bare {
+		if b.dir != "" {
+			s = strings.ReplaceAll(s, b.dir, b.placeholder)
+		}
 	}
 	// Pass 3: drop leading prefixes the sox runner / exec wrapper
 	// adds.

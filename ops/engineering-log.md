@@ -19620,7 +19620,7 @@ closes the part of it that is one file replaced by one write.
   data dir) is not warned about: the case needs a shared-group layout nobody
   runs here.
 
-## 2026-09-27 — the LAN interface pickers prefer a real LAN over a link-local tunnel (this PR)
+## 2026-09-27 — the LAN interface pickers prefer a real LAN over a link-local tunnel (#1051)
 
 #1046's entry filed it: on the dev Mac, `dlna.PickLANEligibleInterface`
 returned `18 utun0`, so the mDNS responder listened on a tunnel and even a
@@ -19801,7 +19801,7 @@ system utuns ahead of `en0`.
   member with no IPv4 at all should start one (SSDP here is IPv4-only) is its
   own decision.
 
-## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3)
+## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3, #1050)
 
 The external audit of 2026-09-23 filed M3, "a discovered UPnP device's URLs
 are its own say-so". The iOS app closed it on its own SSDP path (#1911) and for
@@ -20212,3 +20212,287 @@ and every started test accounted for:
 - The card's remaining without the faithful backlog: exactly the same subtest,
   on `Remaining = 1, want 3`.
 - The manifest's mirror at "v3": exactly `TestManifestMirrorsTheDSDRenditionSchema`.
+
+## 2026-09-27 — a pairing link's one-time code replaces the token it carries (audit H1, #1052)
+
+The 2026-09-23 external audit's H1: the admin console's pairing QR and its
+`bridge://pair` deep link carried the device's long-lived bearer token. The
+link travels through surfaces the bridge does not control (a photo of the
+screen, the clipboard, a link opened on the device, a preview), and anything
+that kept a copy held the device's credential until the operator revoked it.
+The iOS half of H1 (never persisting the link, redacting it from logs) had
+shipped; this is the bridge half, in v0.2.1 at the user's request, with the
+iOS redemption as the Mirror-PR twin.
+
+### Decisions
+
+- **Token AND code, not a code alone.** Every shipped app refuses a link
+  without `token=` (`BridgePairingURL` throws `missingField("token")`), and it
+  ignores unknown parameters. A code-only link would stop every installed app
+  from pairing. So the link keeps `token` for those apps and gains `code`,
+  and an app that understands the code redeems it and never stores the
+  link's token. The user chose this shape (2026-09-27) over a short-lived
+  link token, which would still be a bearer in the link.
+- **Redeeming ROTATES the token the code names** (`auth.Store.Rotate`), not
+  a mint. The device keeps the record the operator made (its name, ID and
+  any expiry, and the Devices row), and the link's token stops validating in
+  the same commit. So once the real device has paired, a copy of the link is
+  worth nothing. If a copy is redeemed first, the real device's redemption
+  fails where the user sees it, rather than both devices sharing a token.
+- **In memory, in the serving process.** The console issues and the v1 API
+  redeems, both in `bridge serve`, so nothing crosses a process. A restart
+  ends every code, which costs the operator one fresh QR; the login ticket's
+  sidecar file (a cross-process design) was not needed. `bridge pair` issues
+  no code, because nothing in the serving process could redeem it.
+- **One live code per token.** Issuing drops the token's previous code, so a
+  console rotation leaves the old QR nothing to redeem, just as the old token
+  has nothing left to use. The drop comes BEFORE the new code is drawn
+  (CodeRabbit on #1052): the console issues after the rotation has already
+  replaced the token, and an issue that failed with the old code still live
+  would let that code rotate the token again for whoever holds the old QR.
+  `TestAFailedIssueStillEndsTheTokensPreviousCode` pins it with a failing
+  random source; with the draw first again, it alone goes red. At most 64 codes are held, the oldest evicted
+  first, which bounds memory against a script minting in a loop.
+- **Take before judging**, the login ticket's rule: the code is deleted
+  before its age is read, so it is accepted at most once whatever the
+  answer.
+- **One refusal.** Unknown, used, expired, and a token revoked or expired
+  since are all `410 pairing_code_invalid`, so the endpoint answers nothing
+  about which codes exist. Shape is checked before the store (43 characters
+  of base64url, `400`). The route is unauthenticated, like
+  `POST /v1/pairing/requests`, and shares its per-IP limiter (burst 5, one
+  per 5 s). It is `rateNone`, so it goes in the mutating-route exemption list
+  with its reason. The code is 256 bits, so the limiter bounds the load, not
+  the odds of guessing one.
+- **An expired token is refused.** `Rotate` keeps `ExpiresAt` and `Validate`
+  refuses a token past it, so handing over the fresh secret would pair a
+  device that 401s on its first request.
+- **No fallback on a refusal** (PROTOCOL.md, and the iOS half): a client that
+  understands `code` shows the refusal and does not pair with the link's
+  token. A copy redeemed first has already killed it, and a device paired
+  with it would keep exactly the secret the exchange exists to replace.
+- **Additive.** No `ProtocolVersion` bump. The route, the optional `code`
+  row in the pairing URL table and the client rule are in PROTOCOL.md; the
+  iOS repo's `docs/BridgeProtocol.md` mirrors it.
+
+### Tests and controls
+
+- `internal/pairingcode`: the issued shape, single use, the TTL boundary to
+  the nanosecond (plus a clock stepped back, which must not revive an
+  expired code), one live code per token, the 64-code bound, and
+  `ValidShape`.
+- `internal/api/pairing_redeem_test.go`: the swap (the same record ID, a
+  fresh token that validates, the link's token dead), single use, every
+  refusal (not wired `404`; not JSON, no code, a short or non-base64url code
+  `400`; never issued, token expired since, token revoked since `410`, the
+  last consuming the code), and the per-IP limiter.
+- `internal/admin/pairing_code_test.go`: the link carries `code` only when
+  one is issued, read the way the app reads a query; mint and rotate issue
+  codes bound to the token they pair, and the rotation's code replaces the
+  mint's; a nil store or a failing issue leaves the old shape, still with
+  its token.
+- `cmd/bridge/serve_pairing_code_test.go`
+  (`TestServeRedeemsThePairingLinksCode`): the real serve. It mints through
+  the console, reads `token` and `code` from the link as the app does,
+  redeems over TLS, checks that the redeemed token answers `GET /v1/list`
+  200 and the link's 401, and that a second redemption is `410`.
+- Fourteen negative controls on the committed tree, each `-count=1`, each
+  restored with `git checkout`. Every one turned the tests it targets red:
+  Take keeping the code; deleting after judging (only the clock-back
+  assertion); Issue keeping the token's old code; no eviction; minting
+  instead of rotating; no expiry check; a revoked token answering 500; no
+  shape check; no limiter; the console never issuing; the link dropping the
+  code; serve wiring two stores (only the boot test); serve leaving the API
+  unwired (only the boot test); rotate issuing no code.
+- **Review round 3 (CodeRabbit).** `ValidShape` took any 43 base64url
+  characters, but 43 characters carry 258 bits for a 256-bit code, so the
+  last character's two low bits are zero in every issued code and 48 of the
+  64 characters can never end one. Such a code reached the store and was
+  answered `410` where a malformed code is `400`. It now decodes strictly
+  (`base64.RawURLEncoding.Strict()`) and requires 32 bytes, and it keeps the
+  length check, because the decoder skips line breaks and a real code with
+  one inserted decodes to the same 32 bytes. Two controls: the old character
+  loop turns exactly the two impossible-ending cases red, and dropping the
+  length check turns exactly the inserted-line-break case red.
+
+## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential (#1049)
+
+The 2026-09-23 external audit's H3, bridge half. Turning off the app's
+"Bulk-harvest the whole library" stopped only the app's renewals; the
+`bulk_harvest` credential the bridge already held stayed usable until it
+expired, and the privacy policy said so, telling users to switch the harvest
+off on the bridge to stop it at once. The bridge had only
+`POST /v1/atlas-harvest/credential`. Reported by the iOS audit session and
+taken into v0.2.1 at the user's request (backlog B12); the app's call ships
+in the iOS twin.
+
+### Decisions
+
+- **`Clear()`, the store's existing forget.** It drops the token and its
+  expiry and keeps the base URL and the sync cursor, the same state an
+  Atlas-rejected token leaves, so a re-provision of the same library
+  resumes rather than re-submitting everything.
+- **204 whether or not a credential was held.** The app calls it on every
+  switch-off, including a second one, and must not have to ask first.
+- **The demo refuses with 403 `demo_read_only`.** A demo bridge's bearer is
+  public and its one harvest credential is shared by every demo user; one
+  user switching harvest off would stop it for all. The POST's accepted
+  residual (a public bearer can overwrite the token for the pinned host) is
+  a denial of function by an attacker; this would have been one by an
+  ordinary user, and on every switch-off.
+- **Harvest off answers 404 `harvest_not_supported`,** the POST's shape. The
+  store is opened only when harvest is on, so a credential file left from
+  before is not touched; nothing on that bridge reads it.
+- **Write-rate-limited** (`rateWrite`), like the POST, and listed in
+  PROTOCOL.md's write-limit section.
+
+### Tests and controls
+
+- `internal/api/atlas_harvest_revoke_test.go`:
+  `TestAtlasHarvestCredentialDeleteForgetsIt` (204 twice, the sink cleared
+  each time), `TestAtlasHarvestCredentialDeleteRefusals` (harvest off 404,
+  demo 403 with nothing cleared, no bearer 401), and
+  `TestAtlasHarvestCredentialDeleteClearsTheStoredToken` against the real
+  `atlasharvest.StateStore`: after the DELETE `AtlasCredential()` finds
+  nothing, the token is gone from the file, and the cursor is still 42.
+  All red on main (405: no route).
+- Controls: without the demo check only the demo case goes red; without the
+  `Clear()` call the two clearing tests go red.
+- **Review round (CodeRabbit on the app's #1981): the harvest-off 404 was
+  not "nothing held".** The route answered 404 `harvest_not_supported` on a
+  bridge with `atlas.harvestEnabled` off without touching the state file,
+  and this entry's CLAUDE.md rule said why: nothing there reads the file.
+  Re-enabling the harvest does, so a credential the app had asked to revoke
+  came back into use, while the app had read the 404 as nothing held. `serve`
+  now wires `atlasharvest.ClearStoredCredential` whenever no live store is
+  open. It drops the token and expiry and keeps the sync position, and it
+  writes nothing when nothing is held (no file created, none rewritten). The
+  route answers 204 either way. The demo check moved ahead of both clears:
+  a demo bridge refuses whatever its harvest setting. PROTOCOL.md now says
+  204 is the only answer that means revoked (the same review asked the app
+  to stop taking a 200 for one).
+- Tests: `TestClearStoredCredential` (a held credential cleared, the cursor
+  kept; no file not created; a file with nothing held not rewritten, judged
+  by planted content, not mtime);
+  `TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile`;
+  `TestAtlasHarvestCredentialDeleteOnADemoBridgeWithTheHarvestOffClearsNothing`;
+  and the boot test `TestServeRevokesAHarvestCredentialWithTheHarvestOff`,
+  which runs the real serve over a seeded state file.
+- Four controls, each turning exactly its predicted tests red: serve wiring
+  no clearer (the boot test alone); the handler ignoring the clearer (the
+  harvest-off route test and the boot test); the demo check after the clear
+  (the demo tests); a clear that writes with nothing held
+  (`TestClearStoredCredential`).
+
+## 2026-09-27 — the v0.2.1 logging audit: no client address in the error log, and failures stop naming absolute paths (#1055)
+
+`docs/release-process.md` step 1 reads the code against the published bridge
+privacy page before each release. An agent swept every log call and error
+body added since v0.2.0, the four open v0.2.1 PRs, and the paths the process
+names; each consequential claim was then re-checked by hand. Most of what it
+found predates v0.2.0, which the v0.2.0 audit had not seen.
+
+### Found
+
+- **Client IPs** (pre-existing). net/http prints the peer's address in a
+  failed TLS handshake (`http: TLS handshake error from <ip>:<port>`), a
+  recovered panic, and the HTTP/2 connection errors. Only the silent local
+  probe was dropped (#986), so a phone with a stale pin, a cancelled endpoint
+  probe and a scanner each left an address in the journal, against "client
+  IP addresses are not logged for the iOS-facing /v1/* API".
+- **An absolute path on the wire** (pre-existing, rare). The transcode pool's
+  fsync exit built the batch row's message from `err.Error()`, an
+  `*os.PathError` naming the sidecar under the variants directory, and
+  `GET /v1/upscale/batches` serves that row. The store exit and a recovered
+  panic had the same shape; the timeout warning logged ffmpeg's stderr raw.
+- **Absolute library paths in the log.** The file API logged `os.Stat` and
+  `os.Open` errors raw (pre-existing); three extractor warnings added since
+  v0.2.0 (#935, #991) and the per-file DST info line logged `absPath`; the
+  subtree-removed info line logged `abs` (from #160, moved in #1000). The
+  DST line would have logged every DST file's absolute path during
+  ExtractorVersion 17's re-extract.
+- **Disclosed rather than fixed**, by the operator's call for this release:
+  the startup banner prints the library roots; about 36 older scanner and
+  extractor error lines name absolute paths; the integrity sweeps log
+  rendition and waveform paths when they adopt, move or remove one (#937,
+  #954, #959); the bridge names its own files in fault lines (the token
+  store, the certificate, adminauth); and `enrichment skipped` is an info
+  line naming a track library-relative. The page also says rendition names
+  are content-hash-derived, false since #241, and puts a 60-second bound on
+  login tickets that `login-link --ttl` exceeds. The 1-bit.app page update
+  carries all of it.
+
+### Fixed
+
+- `handshakelog`: `RedactPeers` replaces an IPv4 or bracketed IPv6 address
+  with its port after "from ", "client " or "serving ", the words the Go
+  1.26 formats put before a peer. The anchoring keeps a local listen address
+  in an accept error. `Wrap`'s logger redacts after `isSilentProbe`, which
+  identifies the probe by the address; redacting first turns every probe
+  into a logged line (control D). `ErrorLog()` is the redaction alone, for
+  the tailnet server, whose listener yields `*tls.Conn`. HTTP/3 needs
+  nothing: its `Logger` is nil in this wiring. DLNA's renderers are the
+  page's disclosed exception, and the console's plain-HTTP modes see only
+  loopback peers.
+- `transcode`: the fsync, store, panic and timeout exits pass their messages
+  through `redactSoxErr`. Its Pass 2 comment called the stripped sidecar
+  name an opaque hash, false since #241; what remains is library-relative.
+- `api`: `writeFileErrorLog` logs the client's library-relative path and
+  `redactWalkErr(err)`; `writeResolveError` takes the client path, and the
+  open and readdir sites use it.
+- `manifest`: `trackLogPath` (the track's `Path`, or the base name) for the
+  three warnings and the DST line; `relPath` for both subtree-miss lines.
+
+### Tests and controls
+
+- `TestRedactPeers` (every Go 1.26 peer shape, two local addresses kept,
+  idempotent), `TestAPanicLineLosesThePeerAddress` (the real server, a
+  panicking handler), `TestErrorLogRedactsAndDropsNothing`. The probe tests
+  had found the filtered server's line by its address, which a redacted line
+  no longer carries, so each "was not logged" check would have passed
+  vacuously; they now look by the placeholder too.
+  `TestEveryServeHTTPServerRedactsPeerAddresses` sweeps `cmd/bridge`'s
+  `http.Server` literals by AST, with a floor of two.
+- `TestPoolFailureMessagesCarryNoAbsolutePath` (fsync and panic),
+  `TestWriteResolveError_LogsTheLibraryPathNotTheAbsoluteOne` (a real
+  `*os.PathError`; the older test's plain-string fixture was not the shape a
+  failure takes), `TestTrackLogPath`,
+  `TestTheDSTLineNamesTheTrackByItsLibraryPath`,
+  `TestSubtreeRemovedNamesTheSubtreeByItsLibraryPath`.
+- Ten negative controls, each turning exactly its predicted tests red: the
+  kept lines unredacted (five tests across three packages); `RedactPeers` a
+  no-op (seven); the tailnet `ErrorLog` removed (the sweep alone); redaction
+  before the probe check (the four probe tests); the fsync and the panic
+  message raw; the file error logging the raw error; the resolve default on
+  `writeErrorLog`; `trackLogPath` returning the absolute path; the subtree
+  line logging `abs`.
+
+### Review round (CodeRabbit)
+
+- **A bare variants directory leaked.** A root-level source's sidecar sits
+  directly in the variants directory (`VariantSidecarPath` joins no
+  subdirectory for a `Dir` of "."), so a failed parent-directory fsync reads
+  `fsync parent dir: open dir "<dir>": open <dir>: …` with no separator after
+  the directory, and Pass 2 strips only `dir/` and `dir\`. The absolute path
+  reached the log, the batch row and the SSE frame. Pass 2c now turns each
+  bare directory into a placeholder (`<render-scratch>`, `<tempDir>`,
+  `<variantsDir>`), longest first: the variants directory and tempDir can
+  nest either way or share a string prefix, and the shorter one replaced
+  first leaves the rest of the longer behind (`<tempDir>/variants`). A
+  directory below the variants directory still reads relative to it, as a
+  sidecar does, because Pass 2 runs first. The pool test's parent-directory
+  case skips on Windows, where `syncDir` is a no-op and the failure cannot
+  happen; there `%q` would also double the backslashes the bare replacement
+  looks for.
+- **The ErrorLog sweep accepted an assignment after the server served.** It
+  now requires the handshakelog assignment before the first `Serve`,
+  `ServeTLS`, `ListenAndServe` or `ListenAndServeTLS` call on that server
+  (a call inside a goroutine's closure counts at its place in the source).
+- Both tests were split into helpers for Sonar's cognitive-complexity notes.
+- Three more controls, each turning exactly its predicted tests red: the
+  variants directory dropped from Pass 2c (the placeholder test and the pool
+  test); the bare directories replaced shortest first (the placeholder test
+  alone, through the nesting case); and the LAN `ErrorLog` assignment moved
+  after `ServeTLS` (the sweep alone, which passed that shape before this
+  round).
+

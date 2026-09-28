@@ -58,6 +58,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/pairingcode"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
@@ -2962,7 +2963,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// file failed to open.
 	var harvestState *atlasharvest.StateStore
 	if cfg.Atlas.HarvestEnabled && cfg.Atlas.Enabled {
-		hs, herr := atlasharvest.OpenStateStore(filepath.Join(cfg.DataDir, "atlas-harvest.json"))
+		hs, herr := atlasharvest.OpenStateStore(harvestStatePath(cfg.DataDir))
 		if herr != nil {
 			fmt.Fprintf(stderr, "atlas harvest: open state: %v (feature disabled)\n", herr)
 		} else {
@@ -3366,12 +3367,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		leCertExpiry = func() time.Time { return am.Status().NotAfter }
 	}
 
+	// The pairing link's one-time codes (internal/pairingcode): the
+	// console issues them into this store (admin.Deps.PairingCodes, below)
+	// and POST /v1/pairing/redeem takes them from it. ONE store in THIS
+	// process: a code issued anywhere else could never be redeemed.
+	pairingCodes := pairingcode.New()
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
+		WithPairingCodes(pairingCodes).
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider, store: manifestStore, variantsDir: liveVariantsDir}).
@@ -3510,6 +3518,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			harvestClient.BookletFiles = bookletDiskStore{dir: bookletsDir}
 		}
 		apiSrv.WithBooklets(manifestStore, bookletsDir, harvestClient.NudgeBookletFetch)
+	} else {
+		// No live store, so no sink: the harvest is off (or its state file
+		// would not open). DELETE /v1/atlas-harvest/credential still clears
+		// a credential the file holds from when the harvest was on, because
+		// re-enabling the harvest reads that file again.
+		apiSrv.WithStoredHarvestCredentialClearer(func() error {
+			return atlasharvest.ClearStoredCredential(harvestStatePath(cfg.DataDir))
+		})
 	}
 	if harvestClient != nil {
 		bgWriters.Add(1)
@@ -4595,6 +4611,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// host-network walk, which is the no-Tailscale shape both shipped
 		// in from PR #269 until 2026-09-20 (see advertisedEndpoints).
 		Endpoints:       apiSrv.ReachableEndpoints,
+		PairingCodes:    pairingCodes,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: soxCache.precheck,
@@ -4978,9 +4995,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// The image's HEALTHCHECK (`bridge health`) connects and closes before
 	// any ClientHello, and net/http logs every failed handshake: one line
 	// per probe, every 30 s. Wrap drops exactly that line (see
-	// internal/handshakelog). It needs a RAW listener, so the tsnet one
-	// below, which yields *tls.Conn and never sees a local peer, goes
-	// without.
+	// internal/handshakelog), and takes the peer's address out of every
+	// line it keeps. It needs a RAW listener, so the tsnet server, whose
+	// listener yields *tls.Conn and never sees a local peer, takes
+	// handshakelog.ErrorLog for the redaction alone.
 	lis, httpSrv.ErrorLog = handshakelog.Wrap(lis)
 
 	// Format string uses bare %s — ServerVersion already carries the
@@ -5373,4 +5391,11 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Scan complete: %d tracks indexed in %s\n", n, time.Since(start).Round(time.Millisecond))
 	return 0
+}
+
+// harvestStatePath is the bulk harvest's state file, holding its credential
+// and sync position: opened by serve when the harvest is on, and cleared of
+// its credential by the revoke route when it is off.
+func harvestStatePath(dataDir string) string {
+	return filepath.Join(dataDir, "atlas-harvest.json")
 }

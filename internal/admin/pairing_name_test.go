@@ -59,6 +59,7 @@ func TestBuildPairURLWritesWhatTheAppReads(t *testing.T) {
 	const (
 		primary = "https://nuc.local:7788"
 		token   = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE"
+		code    = "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210_-ZyXwV"
 		fp      = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
 	)
 	alts := []string{primary, "https://192.168.0.24:7788", "https://[fd7a:115c:a1e0::1]:7788"}
@@ -75,7 +76,7 @@ func TestBuildPairURLWritesWhatTheAppReads(t *testing.T) {
 		"x",
 	} {
 		t.Run(name, func(t *testing.T) {
-			out := buildPairURL(primary, token, fp, name, alts)
+			out := buildPairURL(primary, token, code, fp, name, alts)
 			u, err := url.Parse(out)
 			if err != nil {
 				t.Fatalf("parse %q: %v", out, err)
@@ -87,6 +88,7 @@ func TestBuildPairURLWritesWhatTheAppReads(t *testing.T) {
 			assertAppReads(t, items, "name", name)
 			assertAppReads(t, items, "url", primary)
 			assertAppReads(t, items, "token", token)
+			assertAppReads(t, items, "code", code)
 			assertAppReads(t, items, "fingerprint", fp)
 			assertAppReads(t, items, "urls", strings.Join(alts, "\n"))
 		})

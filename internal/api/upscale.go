@@ -270,8 +270,8 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, bridgefs.ErrNotFound), errors.Is(err, bridgefs.ErrUnknownRoot):
 			writeError(w, http.StatusNotFound, "not_found", "path does not exist")
 		default:
-			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-				"the bridge couldn't resolve this path", err)
+			writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"the bridge couldn't resolve this path", libraryRel, err)
 		}
 		return
 	}

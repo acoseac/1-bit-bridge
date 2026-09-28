@@ -121,6 +121,7 @@ type Server struct {
 	sessions               SessionTracker
 	pairing                *pairing.Store
 	pairingRateLimiter     *pairingRateLimiter
+	pairingCodes           PairingCodeTaker             // nil unless WithPairingCodes wired; POST /v1/pairing/redeem 404s without it
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
@@ -197,6 +198,10 @@ type Server struct {
 	// hands the bridge an App-Attest-minted bulk_harvest token here. Nil unless
 	// WithAtlasHarvest is wired (gated on cfg.Atlas.HarvestEnabled).
 	atlasHarvestCred AtlasHarvestCredentialSink
+	// clearStoredHarvestCredential backs DELETE /v1/atlas-harvest/credential
+	// on a bridge whose harvest is off, so no sink is wired: it forgets a
+	// credential the state file still holds from when the harvest was on.
+	clearStoredHarvestCredential func() error
 	// atlasHarvestPinnedBase is cfg.Atlas.CanonicalHarvestBaseURL() — the only
 	// Atlas host POST /v1/atlas-harvest/credential accepts. "" = unpinned,
 	// which demo mode refuses. See refuseUnpinnedHarvestBaseURL.
@@ -999,6 +1004,14 @@ func (s *Server) reapDeviceSeen(now time.Time) int {
 // behaviour for free (404 from the unregistered route).
 func (s *Server) WithPairing(p *pairing.Store) *Server {
 	s.pairing = p
+	return s
+}
+
+// WithPairingCodes wires the one-time codes the console's pairing links
+// carry (internal/pairingcode), enabling POST /v1/pairing/redeem. The
+// console issues from the same store in the same process.
+func (s *Server) WithPairingCodes(c PairingCodeTaker) *Server {
+	s.pairingCodes = c
 	return s
 }
 
@@ -2651,6 +2664,26 @@ func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, use
 			l.Error("request failed", "code", code, "status", status, "err", err)
 		default:
 			l.Warn("request failed", "code", code, "status", status, "err", err)
+		}
+	}
+	writeError(w, status, code, userMsg)
+}
+
+// writeFileErrorLog is writeErrorLog for a failure on a library file the
+// client named: it logs the library-relative path the client asked for, and
+// the error without the absolute path an *os.PathError embeds (redactWalkErr).
+// The bridge's privacy page promises that paths into the library appear
+// library-relative, and only in error lines; os.Stat and os.Open errors put
+// the absolute path in the journal beside a request that named the file
+// relatively.
+func writeFileErrorLog(w http.ResponseWriter, r *http.Request, status int, code, userMsg, libraryPath string, err error) {
+	if err != nil {
+		l := LoggerFromContext(r.Context())
+		attrs := []any{"code", code, "status", status, "path", libraryPath, "err", redactWalkErr(err)}
+		if status >= 500 {
+			l.Error("request failed", attrs...)
+		} else {
+			l.Warn("request failed", attrs...)
 		}
 	}
 	writeError(w, status, code, userMsg)

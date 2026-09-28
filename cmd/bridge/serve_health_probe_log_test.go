@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog/handshaketest"
 )
 
@@ -80,10 +81,13 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 	}
 
 	rejecter := handshaketest.RejectTheCert(t, addr)
-	want := "http: TLS handshake error from " + rejecter + ": remote error: tls: bad certificate"
+	want := "http: TLS handshake error from " + handshakelog.ClientPlaceholder + ": remote error: tls: bad certificate"
 	handshaketest.WaitForLine(t, logs, want, 10*time.Second)
 	// The probe connected first; a little slack for its goroutine anyway.
 	time.Sleep(300 * time.Millisecond)
+	if strings.Contains(logs.String(), rejecter) {
+		t.Errorf("the rejecting client's address %s reached the log:\n%s", rejecter, logs.String())
+	}
 
 	for _, line := range strings.Split(logs.String(), "\n") {
 		if strings.Contains(line, "TLS handshake error") && strings.HasSuffix(line, ": EOF") {

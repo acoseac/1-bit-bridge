@@ -100,7 +100,7 @@ func (s *Server) lookupAnalysisForRequest(w http.ResponseWriter, r *http.Request
 	// Validate the SOURCE path (traversal guard + the canonical stat the
 	// freshness check uses). Neither payload is at a user-controlled path.
 	_, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
+	if ok := writeResolveError(w, r, clientPath, err); ok {
 		return nil, nil, false
 	}
 	if info.IsDir() {

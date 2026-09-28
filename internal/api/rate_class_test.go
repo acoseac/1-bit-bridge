@@ -37,6 +37,10 @@ func TestRouteRegistry_everyMutatingRouteIsRateWrite(t *testing.T) {
 		// is UNAUTHENTICATED, so there is no token to key a bucket on.
 		"POST /v1/pairing/requests":      "unauthenticated; own per-IP limiter",
 		"DELETE /v1/pairing/{requestID}": "unauthenticated; own per-IP limiter",
+		// A pairing link's code is redeemed BEFORE the device holds a token
+		// of its own, so it too has no bearer to key a write bucket on, and
+		// it draws from the same per-IP pairing limiter.
+		"POST /v1/pairing/redeem": "unauthenticated; shares the per-IP pairing limiter",
 	}
 	s := newRouteRegistryTestServer(t)
 	for _, rt := range s.routeRegistry() {
