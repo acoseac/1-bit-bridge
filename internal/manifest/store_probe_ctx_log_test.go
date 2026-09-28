@@ -8,17 +8,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
-// captureDefaultLogger installs a buffer-backed slog default for the test
-// and restores the previous one. Safe because `logging.Component` resolves
-// `slog.Default()` at LOG time (dynamicHandler), not at package-init time.
+// captureDefaultLogger installs a buffer-backed slog default for the test,
+// through loggingtest.SetDefault, which puts back the previous default and
+// the log package's output and flags when the test ends. Safe because
+// `logging.Component` resolves `slog.Default()` at LOG time
+// (dynamicHandler), not at package-init time.
 func captureDefaultLogger(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return &buf
 }
 

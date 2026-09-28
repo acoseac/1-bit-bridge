@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -28,14 +29,13 @@ import (
 
 // captureLogs redirects the default slog handler into a buffer. The
 // package logger resolves slog.Default() at log time, so swapping the
-// default is enough. Tests that capture logs must not run in parallel
-// with anything else that logs — none in this package do.
+// default is enough. loggingtest.SetDefault puts back the previous default
+// and the log package's output and flags when the test ends, and refuses a
+// test that runs in parallel, since the default is one per process.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return &buf
 }
 

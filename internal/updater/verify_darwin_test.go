@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // TestNotarizationFlagUnsupported_PinsClassification locks the
@@ -52,9 +54,7 @@ func TestNotarizationFlagUnsupported_PinsClassification(t *testing.T) {
 // process, not on every install attempt.
 func TestWarnIfTeamIDUnpinned_LogsOncePerProcess(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(&buf, nil)))
 
 	unpinnedTeamIDWarnOnce = sync.Once{}
 	t.Cleanup(func() { unpinnedTeamIDWarnOnce = sync.Once{} })

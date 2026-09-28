@@ -3778,7 +3778,10 @@ mentions across the four `ops/audit-*.md` files.
   the closure `WithUpscale` hands /v1 (`TestConsoleBatchGateIsTheV1UpscaleGate`
   requires the same identifier; a nil gate reads as off), and the optimize kind
   reads `OptimizeActive` too, as the projection endpoint does: /v1 refused that
-  kind with the CarPlay switch off and the console accepted it. Both come before
+  kind with the CarPlay switch off and the console accepted it. Both read it
+  through `Server.optimizeActive` since 2026-09-28, the predicate the player's
+  variant summary serves, so "Generate CarPlay" is disabled where this refuses
+  (the Admin console section). Both come before
   the scope, and `TestEveryBatchSubmitReadsTheUpscaleGateFirst` sweeps every
   `BatchCoordinator.Submit*` caller by AST. **The console's delete stays open on
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
@@ -4843,6 +4846,60 @@ its twin.** The top list is older, shorter, and read first.
   at 375 px with a deliberately long fixture string**, and check
   `scrollWidth == clientWidth` rather than eyeballing it. (2026-09-20)
 
+- **A control the server will refuse must not look live, and the panel
+  reads the refusal's own predicate** (2026-09-28). With upscaling on and
+  `upscale.optimizeEnabled` off, "Generate CarPlay" stayed enabled on the
+  album and artist Variants panels and a click answered 503
+  `optimize-disabled`: #1060 made the console's submit refuse the kind, and
+  the summary the panel reads carried no switch. The summary now carries
+  `optimizeActive`, which is `Server.optimizeActive`, the ONE predicate the
+  batch submit, the projection endpoint and the summary read (nil reads as
+  on, as `Deps.OptimizeActive` always has), so the button is disabled
+  exactly where the submit refuses.
+  `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` compares the served
+  value with a real submit for every state of the switch, and pins that
+  submit BOTH ways (a 202 that reached the coordinator once, or the
+  switch's own 503 that reached it never): read as merely "not
+  `optimize-disabled`", a submit failing some other way passed as an
+  accepted one (CodeRabbit on #1068). And
+  `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt` runs
+  the SHIPPED panel under node on the summary the album detail serves,
+  kind by kind against the submit, with the switches moved through the
+  settings PATCH. **Don't serve the configured `optimizeEnabled` instead**:
+  it agrees with the submit only while the gate is wired from the same
+  config, and a control that served it went red on the summary test alone.
+  The reason sits in the kind's own row with a gear for that one switch (a
+  block that stops both kinds stays one note above them), and the panel
+  tests `=== false`: an unknown leaves the button live and lets the
+  endpoint answer, the folder view's rule, since `/api/library/browse`
+  carries no feature state. The #1060 AST sweep counts a call of
+  `optimizeActive` as reading the CarPlay switch. A save from either tray
+  redraws the panel: the next bullet.
+- **A tray redraws the page only through its spec's `onSaved`, and a page
+  redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
+  #1068). A feature tray saves one switch and repaints nothing else, so
+  after the CarPlay kind's tray said "Saved." the row beside it still said
+  "switched off" over a disabled button until the next render.
+  `saveTrayField` calls `onSaved(field)` once for a save the server
+  answered `live` (with a reason or without), after the snapshot, the
+  status line and every other tray have the new value, and outside the
+  `try`, so a callback that throws cannot turn a save that landed into
+  "Save failed". Never for `restart` or `unchanged`: nothing on the page
+  moved, and a redraw takes the tray, and the restart instruction in it,
+  with it. The variant panel hands its `onChanged` (the view's re-render)
+  to the CarPlay kind's tray for its one switch, and to the panel-wide
+  tray for `upscaleEnabled` ALONE: nothing the panel draws while
+  generation is off depends on the CarPlay switch, so a redraw for it
+  would repaint the same panel and take the tray and its "Saved." away
+  for nothing, the reason Generate does not redraw either. **Don't make
+  a tray redraw by itself, or a page redraw for every field.** The Smart
+  mixes tray takes no hook: its off state is `seed.mixesEnabled`, read
+  once per page load, which a re-render repaints unchanged, so it still
+  needs a reload (a follow-up).
+  `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` runs the
+  shipped `buildFeatureTray` and save under node, and
+  `TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt` the shipped
+  panel on the summaries the album detail serves.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the
@@ -5485,17 +5542,36 @@ its twin.** The top list is older, shorter, and read first.
   and adopted here; swapped, its two such cases go red and every test over
   slog's own default stays green). `Record`, `ParkOn` and both capture
   helpers in `internal/dlna` use it (`handshaketest`, which redirects the
-  log package itself, already put back its output, flags and prefix).
-  Eleven test files elsewhere still restore only the default, listed in the
-  log's 2026-09-28 entry. **It refuses a parallel test, and a refusal changes
-  nothing**: it calls `t.Setenv` before anything else, so a parallel test (or
-  one with a parallel ancestor) panics there, and a later `t.Parallel`
-  panics too. Two overlapping captures put back each other's state and leave
-  the default on a finished test's handler, and `-race` cannot see it, since
-  slog's default is an atomic pointer and the log package locks its output.
-  Gemini on #1064 asked for a docblock warning; a rule stated only in prose
-  (the `omitempty` time rule) was broken in ten fields before a guard went
-  in, so this one is enforced.
+  log package itself, already put back its output, flags and prefix), and so
+  does every capture outside the logging packages' own tests (the sweep
+  below). **It refuses a parallel test, and a refusal changes nothing**: it
+  calls `t.Setenv` before anything else, so a parallel test (or one with a
+  parallel ancestor) panics there, and a later `t.Parallel` panics too. Two
+  overlapping captures put back each other's state and leave the default on
+  a finished test's handler, and `-race` cannot see it, since slog's default
+  is an atomic pointer and the log package locks its output. Gemini on
+  #1064 asked for a docblock warning; a rule stated only in prose (the
+  `omitempty` time rule) was broken in ten fields before a guard went in, so
+  this one is enforced. **And outside the logging packages' own tests, a
+  test file may not swap the default by hand** (#1075): twelve files still
+  put back only the default (29 references), and after each one's test a
+  later test's `slog.Info` and `log.Print` both went into the finished
+  test's handler, 0 of 2 lines reaching the output against 2 of 2 run alone
+  (14 tests, go1.26.6); 2 of 2 once they went through `SetDefault`.
+  `TestNoTestSetsTheDefaultLoggerByHand`
+  (cmd/bridge) fails on a TEST file naming `slog.SetDefault` outside
+  loggingtest's own tests (which build a prior default by hand, since the
+  restore is their subject) or `logging.Init` outside internal/logging:
+  through any import name, called or not (a `defer`, a method value), and on
+  a dot import of either, whose calls carry no package name to read. `Init`
+  counts because it is `slog.SetDefault` behind a once, with no restore; the
+  metrics test called it. A test that wants a handler of its own installs it
+  with `SetDefault`, never `Init`. **internal/logging's own tests call `Init`
+  unqualified, which the scan cannot read**, so there `resetOnce(t)` puts
+  back the default, the log package and Init's once, and the package's
+  `TestMain` fails the run when a test left any of the four changed: a test
+  that calls `Init` without `resetOnce(t)` passes itself and every other
+  test, and fails only there.
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
   a `defer cancel()` plus a cancel-and-assert tail.** The tail runs only when
   the body completes: a `t.Fatalf` above it Goexits, the deferred cancel fires,

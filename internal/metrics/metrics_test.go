@@ -1,7 +1,7 @@
 package metrics
 
 import (
-	"bytes"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +12,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // Test_LogEventsCounter_IncrementsViaLoggingHook verifies the
@@ -22,15 +23,18 @@ import (
 func Test_LogEventsCounter_IncrementsViaLoggingHook(t *testing.T) {
 	// The hook fires inside `dynamicHandler.Handle` — which is what
 	// `logging.Component(...)` returns. Plain `slog.Warn` goes
-	// through `slog.Default()`, which `logging.Init` configures
-	// as a stdlib text handler (NOT our dynamicHandler), so the
-	// hook would never fire on the default path. Component loggers
-	// are the production surface — every component-tagged logger
-	// in the bridge codebase routes through dynamicHandler and
-	// triggers the counter.
-	prior := slog.Default()
-	defer slog.SetDefault(prior)
-	logging.Init(&bytes.Buffer{})
+	// through `slog.Default()`'s own handler (in production the
+	// stdlib text handler `logging.Init` installs, NOT our
+	// dynamicHandler), so the hook would never fire on the default
+	// path. Component loggers are the production surface — every
+	// component-tagged logger in the bridge codebase routes through
+	// dynamicHandler and triggers the counter.
+	//
+	// The default discards, so the Warn stays out of the output.
+	// loggingtest.SetDefault puts back the default and the log
+	// package's output and flags; the logging.Init this used to call
+	// left the log package on its buffer for the rest of the binary.
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	component := logging.Component("metrics-test")
 	before := readCounter(LogEventsCounter.WithLabelValues("WARN"))

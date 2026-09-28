@@ -13,10 +13,13 @@
 // else was logged: Record installs a Recorder on its own, and a Park is one.
 //
 // SetDefault is the way both install their handler, and the way any other
-// test that points slog.Default at its own logger should: it puts back the
+// test that points slog.Default at its own logger does: it puts back the
 // log package's output and flags as well as the previous default, which a
-// bare slog.SetDefault(prev) does not. What it changes is one per process,
-// so it refuses a parallel test, as t.Setenv does.
+// bare slog.SetDefault(prev) does not. TestNoTestSetsTheDefaultLoggerByHand,
+// in cmd/bridge, refuses a test file that calls slog.SetDefault by hand
+// outside this package's own tests, or logging.Init outside
+// internal/logging's. What SetDefault changes is one per process, so it
+// refuses a parallel test, as t.Setenv does.
 package loggingtest
 
 import (

@@ -53,6 +53,18 @@ func (s *Server) upscaleActive() bool {
 	return s.deps.UpscaleActive != nil && s.deps.UpscaleActive()
 }
 
+// optimizeActive reports whether the CarPlay kind may be generated right
+// now, by the live switch cmd/bridge wires into Deps.OptimizeActive
+// (`upscale.enabled` and `upscale.optimizeEnabled`). A nil switch reads as
+// on, the meaning Deps.OptimizeActive has always given it (wired is
+// active). The batch submit, the projection endpoint and the player's
+// variant summary all read this one predicate, so the console cannot offer
+// "Generate CarPlay" where the submit would refuse it
+// (TestTheVariantSummaryCarriesTheSwitchTheSubmitReads).
+func (s *Server) optimizeActive() bool {
+	return s.deps.OptimizeActive == nil || s.deps.OptimizeActive()
+}
+
 // adminBatchSubmitRequest is the JSON shape POST /api/upscale/batch
 // accepts. Optional `targetRate` / `targetBits` fall back to the
 // scan_state-stored admin Settings.
@@ -118,13 +130,15 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
 		return
 	}
-	// The CarPlay kind has a switch of its own, read the way the projection
-	// endpoint reads it (a nil OptimizeActive means wired == active). The
+	// The CarPlay kind has a switch of its own, read through the predicate
+	// the projection endpoint and the player's variant summary read too. The
 	// /v1 batch refuses this kind while the switch is off; this handler
 	// accepted it until 2026-09-28, so the same kind answered 503 there and
-	// 202 here on one bridge. The player keeps "Generate CarPlay" live
-	// whenever upscaling is on, so the message is what the operator reads.
-	if kind == "optimize" && s.deps.OptimizeActive != nil && !s.deps.OptimizeActive() {
+	// 202 here on one bridge. The player's album and artist panels disable
+	// "Generate CarPlay" on the same answer, so this message is what the
+	// folder view (whose endpoint carries no switch) and a page rendered
+	// before the switch moved still meet.
+	if kind == "optimize" && !s.optimizeActive() {
 		logger.Warn("optimize batch refused: the CarPlay optimize kind is not active")
 		writeError(w, http.StatusServiceUnavailable, "optimize-disabled",
 			"CarPlay-optimized variants are switched off for this bridge")

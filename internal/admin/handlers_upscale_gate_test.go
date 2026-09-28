@@ -401,7 +401,7 @@ type batchSubmitter struct {
 	name         string
 	pos          token.Pos
 	upscaleGate  token.Pos // first s.upscaleActive() call
-	optimizeGate token.Pos // first reference to OptimizeActive
+	optimizeGate token.Pos // first reference to OptimizeActive, or s.optimizeActive() call
 	resolve      token.Pos // first resolveVariantScope call
 	submit       token.Pos // first Submit* call on a BatchCoordinator
 	submitOpt    token.Pos // first SubmitOptimize* call on a BatchCoordinator
@@ -437,8 +437,11 @@ func batchSubmitters(f *ast.File) []batchSubmitter {
 	return out
 }
 
-// recordBatchCall notes one call the sweep cares about: the upscale gate, the
-// scope resolution, or a submit through the coordinator.
+// recordBatchCall notes one call the sweep cares about: a gate, the scope
+// resolution, or a submit through the coordinator. The CarPlay switch is read
+// through Server.optimizeActive, the predicate the player's variant summary
+// shares, and a direct read of Deps.OptimizeActive counts too (batchSubmitters
+// sees that one as a selector).
 func recordBatchCall(b *batchSubmitter, call *ast.CallExpr) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
@@ -447,6 +450,8 @@ func recordBatchCall(b *batchSubmitter, call *ast.CallExpr) {
 	switch name := sel.Sel.Name; {
 	case name == "upscaleActive":
 		earliestPos(&b.upscaleGate, call.Pos())
+	case name == "optimizeActive":
+		earliestPos(&b.optimizeGate, call.Pos())
 	case name == "resolveVariantScope":
 		earliestPos(&b.resolve, call.Pos())
 	case strings.HasPrefix(name, "Submit") && onBatchCoordinator(sel.X):
@@ -565,6 +570,17 @@ func gated(s *Server) {
 	s.deps.BatchCoordinator.SubmitOptimize(nil, scope.Prefix)
 }
 
+func gatedByTheSharedPredicate(s *Server) {
+	if !s.upscaleActive() {
+		return
+	}
+	if !s.optimizeActive() {
+		return
+	}
+	scope, _ := s.resolveVariantScope(nil, scopeRequest{})
+	s.deps.BatchCoordinator.SubmitOptimizePaths(nil, "", scope.Paths)
+}
+
 func ungated(s *Server) {
 	s.deps.BatchCoordinator.Submit(nil, "", 0, 0)
 }
@@ -613,12 +629,13 @@ func notASubmitter(s *Server) {
 		got[b.name] = b.problems()
 	}
 	want := map[string]string{
-		"gated":                  "",
-		"ungated":                "submits without reading the live upscale gate",
-		"gateAfterScope":         "reads the live upscale gate (s.upscaleActive()) only after resolving the scope",
-		"gateAfterSubmit":        "reads the live upscale gate (s.upscaleActive()) only after submitting",
-		"optimizeUngated":        "submits without reading the CarPlay switch",
-		"optimizeGateAfterScope": "reads the CarPlay switch (OptimizeActive) only after resolving the scope",
+		"gated":                     "",
+		"gatedByTheSharedPredicate": "",
+		"ungated":                   "submits without reading the live upscale gate",
+		"gateAfterScope":            "reads the live upscale gate (s.upscaleActive()) only after resolving the scope",
+		"gateAfterSubmit":           "reads the live upscale gate (s.upscaleActive()) only after submitting",
+		"optimizeUngated":           "submits without reading the CarPlay switch",
+		"optimizeGateAfterScope":    "reads the CarPlay switch (OptimizeActive) only after resolving the scope",
 	}
 	if len(got) != len(want) {
 		t.Errorf("the sweep found %d submitters, want %d: %v", len(got), len(want), got)
