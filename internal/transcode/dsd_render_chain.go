@@ -139,6 +139,11 @@ var ErrDSDClipped = errors.New("dsd render: sox reported clipping")
 // under a DSD variant id with none of the DSD semantics: no clip guard,
 // no measured true peak, no appliedGainDB. Refusing is the fail-closed
 // answer and it names the real cause (CodeRabbit on PR #863).
+//
+// The two shapes are different facts, and the pool strikes only one: Run
+// marks the first as this host's (markToolUnavailable), since installing a
+// DSD-capable ffmpeg is its remedy, and leaves the second, a row whose file
+// no toolchain can fix, to strike as before.
 var ErrDSDDecodeUnavailable = errors.New("dsd render: source is DSD but the DSD decode route is unavailable")
 
 // ffmpegDSDDecodeArgs is ffmpegDecodeArgs plus the ×0.5 pre-attenuation —

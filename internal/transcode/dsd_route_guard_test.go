@@ -33,6 +33,12 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 		if !errors.Is(err, ErrDSDDecodeUnavailable) {
 			t.Errorf("err = %v, want ErrDSDDecodeUnavailable", err)
 		}
+		// A fact about the ROW, which no toolchain fixes: it keeps its
+		// strike (tool_unavailable.go).
+		if tool, ok := unavailableTool(err); ok {
+			t.Errorf("unavailableTool = %+v for a DSD-flagged row under a .flac name, want no "+
+				"classification: that refusal is about the row, not the host", tool)
+		}
 	})
 
 	// Case 2: a real .dsf on a host whose ffmpeg is missing. decodeRouteFor
@@ -58,6 +64,11 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 		})
 		if !errors.Is(err, ErrDSDDecodeUnavailable) {
 			t.Errorf("err = %v, want ErrDSDDecodeUnavailable", err)
+		}
+		// A fact about the HOST: installing ffmpeg is the remedy, so the
+		// pool must not strike the file for it.
+		if tool, ok := unavailableTool(err); !ok || tool.name != toolFFmpeg {
+			t.Errorf("unavailableTool = (%+v, %v), want ffmpeg: this host cannot decode DSD", tool, ok)
 		}
 	})
 
