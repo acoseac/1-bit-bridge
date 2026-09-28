@@ -654,10 +654,9 @@ type Deps struct {
 	//
 	// Distinct from OptimizeEligible and TargetRateForOptimize, which say
 	// whether the feature is WIRED at all (the upscale pool exists on this
-	// bridge). This says
-	// whether it is switched ON right now, and it is separate precisely so
-	// cmd/bridge can wire the closures once at boot — the pool's own
-	// lifetime — while the operator's toggle stays hot.
+	// bridge). This says whether it is switched ON right now, and it is
+	// separate precisely so cmd/bridge can wire the closures once at boot —
+	// the pool's own lifetime — while the operator's toggle stays hot.
 	//
 	// Nil keeps the pre-existing behaviour (wired == active).
 	OptimizeActive func() bool
