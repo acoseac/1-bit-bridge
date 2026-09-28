@@ -100,9 +100,9 @@ type Deps struct {
 	// install it is about to write, and a broken existing config must
 	// not block the re-init that replaces it. Nor may its port checks,
 	// over the bridge's own listeners: for that config init sets
-	// OwnPIDPortsUnknown, so they grade init's defaults and the bridge
-	// recorded in the data dir init writes excuses a port it is seen
-	// listening on.
+	// OwnPIDPortsUnknown, so they grade the ports init writes and the
+	// bridge recorded in the data dir init writes excuses a port it is
+	// seen listening on.
 	//
 	// When it records a config that did not load, the port checks are
 	// not run: APIPort and AdminPort are then the caller's defaults, not
@@ -918,9 +918,9 @@ func chosenUnseenHint(ownPIDFile string, ownPID int, s ownerSighting) string {
 // the probe did not name, and could not rule out, warns, or is ok on Linux
 // when a listener of this user's is held by no process it can read. That
 // is sound for a port the bridge's config names, and here no config names
-// one. init writes its defaults, and an install that had moved off them
-// (because something else holds 7788, say) has a live bridge on its own
-// ports while another process holds the one init writes.
+// one. A loopback init writes its defaults, and an install that had moved
+// off them (because something else holds 7788, say) has a live bridge on its
+// own ports while another process holds the one init writes.
 // Excused, that port is saved, and the restarted bridge cannot bind it:
 // #970's defect, which the second port pass avoids by clearing the pid file
 // for a port the run is choosing. Cleared here, the bridge's own listeners
