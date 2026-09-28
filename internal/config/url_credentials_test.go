@@ -147,9 +147,9 @@ var credentialEndpointShapes = []struct{ name, in, published string }{
 // writer and every load runs (ValidateCustomEndpoints, through Normalize) over
 // an endpoint carrying the secret in each part of a URL that can carry one.
 // Each is KEPT, and kept without the part: /v1/health publishes the list to
-// any caller and every pairing QR carries it, and the phone uses none of it
-// (it sends its own Authorization header and cancels every challenge but the
-// server's certificate). Dropping the endpoint would cost the phone a route
+// any caller and every pairing QR carries it, and the phone relies on none
+// of it (errCustomEndpointCredentials says why). Dropping the endpoint would
+// cost the phone a route
 // for no reason, and refusing the config would stop a bridge that started
 // before. One warning per entry names it by position, scheme and host, and
 // says it was published without them, never that it was dropped.
