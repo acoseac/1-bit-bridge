@@ -2259,21 +2259,24 @@ no failing test — which is the shape to expect in this area.
   inside fc00::/7, so `net.IP.IsPrivate` counted it as a LAN address and
   admitted the interface with no opt-in (and no production caller sets one).
   Measured: the dev Mac's `utun12` and dido's `tailscale0` were eligible with
-  their addresses and not without the ULA; each then had an SSDP advertiser
-  (LOCATION on its 100.x address) and a renderer- and a UPnP-discovery client
-  sending into the tunnel. On Windows (reasoned from the ranking, not
-  measured) the Wintun adapter, which has no point-to-point flag, outranked a
-  zero-config LAN as the mDNS responder's single pick. `isTailscaleULA` sorts
-  the ULA out BEFORE `IsPrivate` and counts it as public, so it admits
-  nothing AND keeps the zero-config arm from admitting a tailnet with IPv4
-  switched off (fe80 plus the ULA). **Address-based, not name-based**: macOS
-  numbers its utuns, and Windows' adapter carries no flag that says tunnel.
-  100.64/10 needed no change: a LAN genuinely numbered in CGNAT space was
-  refused before and still is. `tailscaleULA` is pinned to
-  `tsaddr.TailscaleULARange()` by `TestTailscaleULAIsTailscalesRange`.
-  Multicast written to the tailnet interface reached no peer in the one
-  tailnet measured (no exit node, no subnet router): 0 of 32 datagrams each
-  way between the Mac and dido, beside 32 of 32 unicast controls.
+  their addresses and not without the ULA. The real bridge on the Mac then
+  ran an SSDP advertiser on utun12 (LOCATION on its 100.x address) and a
+  renderer- and a UPnP-discovery client sending into it, and on dido each
+  of those consumers' first step (the group join, an M-SEARCH send)
+  succeeded on tailscale0. On Windows (reasoned from the ranking and pinned
+  by a row, not measured) the Wintun adapter, which has no point-to-point
+  flag, outranked a zero-config LAN as the mDNS responder's single pick.
+  `isTailscaleULA` sorts the ULA out BEFORE `IsPrivate` and counts it as
+  public, so it admits nothing AND keeps the zero-config arm from admitting
+  a tailnet with IPv4 switched off (fe80 plus the ULA). **Address-based, not
+  name-based**: macOS numbers its utuns, and Windows' adapter carries no
+  flag that says tunnel. 100.64/10 needed no change: a LAN genuinely
+  numbered in CGNAT space was refused before and still is. `tailscaleULA`
+  is pinned to `tsaddr.TailscaleULARange()` by
+  `TestTailscaleULAIsTailscalesRange`. Multicast written to the tailnet
+  interface reached no peer in the one tailnet measured (no exit node, no
+  subnet router): 0 of 32 datagrams each way between the Mac and dido,
+  beside 32 of 32 unicast controls.
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns
