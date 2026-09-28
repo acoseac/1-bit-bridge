@@ -21989,7 +21989,9 @@ rendition's source from the row, and `serveVariant` compares it with
 
 - **Stat through anything that is not a regular file**
   (`walkedFileInfo(typ, own, through)`). A regular file keeps its own stat
-  and pays no second syscall. The test is "not a regular file", the listing's
+  and pays no second syscall, and nothing else: `-gcflags=-m` reports that
+  neither `d.Info` nor the `os.Stat` closure escapes, in either walk. The
+  test is "not a regular file", the listing's
   (`resolveEntryInfo`), never "is a symlink": since Go 1.23 a Windows
   junction is `ModeIrregular` with no `ModeDir`, and a stat through it says
   it names a directory. A reparse point that names nothing (a cloud
