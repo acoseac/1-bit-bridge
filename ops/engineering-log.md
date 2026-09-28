@@ -24154,7 +24154,8 @@ stated limit: it sees that the helper is called, not what is walked.
   with a `.DS_Store` written into it, as Finder does, logs no guard line and
   the third scan deletes both rows. The sentinel works the same way, by
   making the root non-empty; `hasAllowEmptySentinel` decides only for one
-  placed after the walk listed the root.
+  placed after the walk listed the root. Fixed in the same PR: the next
+  entry.
 - By reading: `CountTracksUnderRoot` in single-root mode counts every row,
   UPnP-routed ones included, so a single-root bridge whose root is empty and
   which routes an upstream logs the guard line every scan.
@@ -24167,3 +24168,118 @@ stated limit: it sees that the helper is called, not what is walked.
   variants-dir handler exist to refuse. The integrity walks'
   `resolveSidecarRoot` likewise leaves a junction'd variants directory
   unresolved, so its walk would visit one entry.
+
+## 2026-09-28 — the clean-empty guard counts only library content
+
+CodeRabbit's finding on #1076 (the first out-of-scope item above, backlog
+B50), folded into the same PR. The clean-empty guard spares a root whose walk
+found nothing when the store holds rows for it, and both walks counted every
+entry they were handed: `observed++` ran at the top of the callback, for
+dot-files and for the directories the walk then skipped. The owning-root
+audit a subtree scan runs when its subtree is missing asked
+`len(os.ReadDir(root)) > 0` the same way.
+
+Measured with the new tests on an export of fa378d0e (this PR's head before
+the change), on macOS (APFS), a root indexed with two FLACs under
+`Artist/Album` and the threshold at three:
+
+- An emptied root holding only a `.DS_Store`, or only a Synology
+  `@eaDir/01.flac/SYNOINDEX_MEDIA_INFO`: in all eight cases (each noise, in
+  Scan and in a subtree scan of the root, single- and multi-root) the third
+  scan deleted every row under the root. The first round's throwaway test
+  had seen the `.DS_Store` case log no guard line.
+- A subtree scan of `root/Artist`, with `Artist/` gone and the root holding
+  only one of the two: all four cases (each noise, single- and multi-root)
+  returned no error, and the bounded pass deleted the subtree's rows.
+- An album beside audio files in `#recycle`, `#snapshot`, `@Recycle`,
+  `@Recently-Snapshot`, `~snapshot`, `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `lost+found` and `System Volume Information`, with an `@eaDir` beside the
+  album: both walks indexed six tracks from the recycle bins and snapshots
+  (`$RECYCLE.BIN` and `System Volume Information` were already skipped, and
+  on a case-insensitive volume `$Recycle.Bin` is the same directory), and
+  wrote folder rows for `Artist/Album/@eaDir` and
+  `Artist/Album/@eaDir/01.flac`.
+
+### Decisions
+
+- **One predicate, the walk's own** (`isLibraryEntry`). A directory counts
+  when the walk descends into it (`ShouldSkipDir` says no), a file when the
+  walk indexes it (not a dot-file, an audio file `enqueueableAudioFile`
+  takes). Both walks skip by it and count what passes it, and the audit asks
+  it of the root's listing (`holdsLibraryContent`). The root entry itself is
+  never counted, as before.
+- **Every file the walk does not index counts as nothing, not a list of named
+  ones.** The request named dot-entries and some detritus (`Thumbs.db`,
+  `desktop.ini`, `lost+found`, `$RECYCLE.BIN`, `System Volume Information`,
+  `@eaDir`, `#recycle`). A list of FILES that are not content would be a
+  second rule beside the walk's, and would miss the next one (a
+  `NOT_MOUNTED` marker an administrator leaves in a mount point, a macOS
+  `Icon\r`). The cost, accepted: a mounted root whose last audio file went
+  while only non-audio files stayed (a cover image, a playlist) reads as
+  emptied and keeps its rows, with an error line per scan, until
+  `.bridge-allow-empty` is placed, which is what an emptied root has always
+  cost. A root holding a directory is unaffected, since a directory counts.
+  A directory LINK below a root is a file entry to the walk and counts as
+  nothing, as the walk sees it (the scanner follows no link below a root), so
+  rows once indexed under a path that later became such a link are spared
+  with a line rather than reaped at the threshold.
+- **The sentinel is asked for by name.** It is a dot-file, so it no longer
+  makes a root non-empty: `hasAllowEmptySentinel` is what decides, in Scan,
+  in a subtree scan of the root, and now in the audit, where a Gemini review
+  on #289 had called the explicit check redundant because the sentinel was
+  an entry like any other.
+- **The walk skips what operating systems and NAS firmware leave in a
+  volume.** `ShouldSkipDir` names `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `System Volume Information`, `lost+found`, `@eaDir`, `#recycle`,
+  `#snapshot`, `@Recycle`, `@Recently-Snapshot` and `~snapshot`, exactly and
+  case-sensitively, beside every dot-directory (the old list's dot-names
+  were redundant with the dot rule). Exact, so an album folder named
+  `Lost+Found` or `Recycler` is library content. A recycle bin's deleted
+  files and a snapshot's copies were tracks of their own; their rows now
+  take the usual missing-count grace and go, one delta to the paired
+  devices, which is the fix working.
+- **One rule for the scanner, the watcher and the doctor.** `ShouldSkipDir`
+  is exported, and `countDirs` (the doctor's inotify budget, Linux) skips by
+  it rather than by its own copy, `shouldSkipNoiseDir`, which would have
+  counted the `@eaDir` directories (one per file it describes) that the
+  watcher no longer watches.
+- **The audit's refusal says what it tested**: "no library content on disk
+  but N tracks in DB", where it said "empty on disk".
+- `TestScannerThreshold1PreservesImmediateDelete` kept its database file
+  inside the library root and deleted the root's one track; it passed only
+  because the database counted as an entry. The root keeps a second track
+  now, so the test pins threshold 1 on a root that still holds content.
+
+### Tests and negative controls
+
+New in `internal/manifest/scanner_root_noise_test.go`:
+`TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows` (both noises, in
+Scan and a subtree scan of the root, single- and multi-root; three scans
+keep the rows and log three guard lines, then with the sentinel placed three
+more delete them and leave the other root's row),
+`TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused` (both noises,
+single- and multi-root, with the sentinel as the positive control),
+`TestScanner_OSAndNASDetritusIsNotLibraryContent` (both walks, the exact
+track and folder rows) and `TestShouldSkipDirNamesExactlyTheDetritus` (every
+name, and near-misses that must stay content). `newIndexedRoot` became
+`newIndexedRootIn(t, multiRoot)`, whose multi-root form holds a second root
+with a row of its own. `TestCountDirsCountsThroughALinkedRoot` gained
+`@eaDir`, `#recycle` and `lost+found`.
+
+Negative controls on the committed round, each restored and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC-G1: the walks count every entry again | all eight `…AnEmptiedRootHoldingOnlyNoiseSparesItsRows` cases |
+| NC-G2: the audit counts every entry | all four `…ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused` cases |
+| NC-G3: `@eaDir` dropped from `ShouldSkipDir` | the four `@eaDir` guard cases, the two `@eaDir` audit cases, the detritus test (its folder rows), the exact test |
+| NC-G4: the guards ignore the sentinel | the sentinel half of all eight guard cases |
+| NC-G5: the audit ignores the sentinel | the sentinel half of all four audit cases |
+| NC-G6: `#recycle` dropped | the detritus test (a track and three folder rows), the exact test |
+| NC-G7: the watcher walks the root as it stands (`watchWalkStart` returns it) | `TestWatcherWatchesALinkedLibraryRoot`, the walk sweep |
+| NC-G8 (dido): `countDirs` back on its own list | `TestCountDirsCountsThroughALinkedRoot` |
+
+The watcher's `addTree` was split (`watchWalkStart`, `addWatch`) to bring it
+under SonarCloud's cognitive-complexity limit (S3776, 18 against 15), and the
+linked-root watcher test defers its cancel (S8188); NC-G7 is the control on
+the split.

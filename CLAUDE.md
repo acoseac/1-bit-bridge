@@ -491,12 +491,43 @@ lost my library."
   looked for in, is the link's target, so `suspected clean-empty mount
   failure` and `root unreachable` carry `links_to` (`rootLinkTarget`:
   `EvalSymlinks` for a live symlink, `os.Readlink` for a dangling one or a
-  junction) and the hint says to check that volume is mounted. **The guard
-  counts every entry the walk is handed, dot-files included**, so the
-  sentinel works by making the root non-empty (`hasAllowEmptySentinel`
-  decides only for a sentinel placed after the walk listed the root), and a
-  stray `.DS_Store` in an emptied mount point defeats the guard the same way
-  (measured: no line, every row deleted at the third scan). Still open.
+  junction) and the hint says to check that volume is mounted. What the
+  guard counts is the next bullet's.
+- **…and the guard counts only LIBRARY CONTENT, by the walk's own rule**
+  (2026-09-28, CodeRabbit on #1076). The walks counted every entry they were
+  handed, dot-files included, so a `.DS_Store` Finder wrote into an emptied
+  mount point, or a Synology `@eaDir`, made the root non-empty: no line, and
+  the third scan deleted every row, in Scan and in a subtree scan of the
+  root, single- and multi-root (measured, 8 cases of 8). The owning-root
+  audit a subtree scan runs when its subtree is missing counted
+  `len(entries)` the same way, and the bounded pass reaped the subtree.
+  `isLibraryEntry` is the one predicate: a directory the walk descends into
+  (`ShouldSkipDir` says no) or a file it indexes (not a dot-file, an audio
+  file `enqueueableAudioFile` takes). Both walks skip by it and count by
+  it, and the audit asks it of the root's listing (`holdsLibraryContent`).
+  **Every file the walk does not index counts as nothing**, not a list of
+  named ones (`Thumbs.db`, `desktop.ini`, a `NOT_MOUNTED` marker, a cover
+  image): a second list is a second rule, and a file the walk ignores is no
+  evidence the volume is there. The cost: a mounted root whose last audio
+  file went, with only such files left, reads as emptied too and keeps its
+  rows, with a line per scan, until the sentinel is placed, as an emptied
+  root always did (`TestScannerThreshold1PreservesImmediateDelete` kept its
+  database inside the root and passed only because that file counted; it
+  keeps a second track now). **The sentinel is asked for by name, in the
+  audit too**: it used to work by being an entry like any other, which is
+  why a review on #289 called the audit's explicit check redundant, and it
+  is now the only thing that says a root is empty on purpose. **`ShouldSkipDir`
+  also names the directories operating systems and NAS firmware leave in a
+  volume**, exactly, case included: `$RECYCLE.BIN`, `$Recycle.Bin`,
+  `System Volume Information`, `lost+found`, Synology's `@eaDir`,
+  `#recycle` and `#snapshot`, QNAP's `@Recycle` and `@Recently-Snapshot`,
+  NetApp's `~snapshot`. The walk descended them, so a recycle bin's deleted
+  files and a snapshot's copies were indexed as tracks of their own (the
+  old walk indexed six of the test's fixtures on macOS), and their rows now
+  go after the usual missing-count grace. It is exported so the doctor's inotify count skips
+  by it, not by a copy of its own that had drifted. `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
+  `TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused`,
+  `TestScanner_OSAndNASDetritusIsNotLibraryContent`.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
