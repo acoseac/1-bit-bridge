@@ -11,11 +11,17 @@
 //
 // The same handler keeps every record it sees, so a test can also ask what
 // else was logged: Record installs a Recorder on its own, and a Park is one.
+//
+// SetDefault is the way both install their handler, and the way any other
+// test that points slog.Default at its own logger should: it puts back the
+// log package's output and flags as well as the previous default, which a
+// bare slog.SetDefault(prev) does not.
 package loggingtest
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -117,12 +123,34 @@ func (h recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 // WithGroup returns the same handler, for the reason WithAttrs does.
 func (h recordHandler) WithGroup(string) slog.Handler { return h }
 
-// install points slog.Default at h and restores the previous default when
-// the test ends.
+// install points slog.Default at h until the test ends, through SetDefault.
 func install(t testing.TB, h slog.Handler) {
+	SetDefault(t, slog.New(h))
+}
+
+// SetDefault makes l the default slog logger until the test ends, and then
+// puts back everything slog.SetDefault changed: the previous default, and
+// the log package's output and flags.
+//
+// Putting back the previous default alone does not undo the rest.
+// slog.SetDefault also points the log package's output at l's handler and
+// zeroes its flags, and a default whose handler is slog's own (the one
+// every test binary starts with) is restored without either being undone:
+// that handler writes THROUGH the log package, whose output still points at
+// the handler the finished test installed. Every later line in the binary,
+// a failing test's own diagnostics included, then went into that test's
+// buffer. Measured in internal/dlna/discovery (2026-09-28): of 200 runs of
+// one test, only the first run's lines reached stderr.
+func SetDefault(t testing.TB, l *slog.Logger) {
+	t.Helper()
 	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	out, flags := log.Writer(), log.Flags()
+	slog.SetDefault(l)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	})
 }
 
 // Park holds the first goroutine that logs one message until the test lets
