@@ -1,8 +1,12 @@
 package atlasharvest
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -157,4 +161,82 @@ func TestStateSnapshotDeepCopiesPendingCovers(t *testing.T) {
 		_ = s.AddPendingCovers([]string{fmt.Sprintf("mbid-%d", i)})
 	}
 	<-done
+}
+
+// TestClearStoredCredential pins the harvest-off revoke: the credential
+// leaves the file and the sync position stays, and a file that holds no
+// credential, or no file at all, is not written.
+func TestClearStoredCredential(t *testing.T) {
+	t.Run("a held credential is forgotten, the cursor kept", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+		s, err := OpenStateStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetCredential("bh-secret-token", "https://atlas.example", time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetCursor(42); err != nil {
+			t.Fatal(err)
+		}
+		if err := ClearStoredCredential(path); err != nil {
+			t.Fatal(err)
+		}
+		onDisk, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(onDisk), "bh-secret-token") {
+			t.Fatalf("the credential is still in the file:\n%s", onDisk)
+		}
+		reopened, err := OpenStateStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := reopened.AtlasCredential(); ok {
+			t.Fatal("re-enabling the harvest would still find a credential")
+		}
+		if got := reopened.Snapshot().ResultCursor; got != 42 {
+			t.Fatalf("cursor = %d, want 42 (a re-provision resumes where it stopped)", got)
+		}
+	})
+	t.Run("no file is not created", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+		if err := ClearStoredCredential(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("a revoke with nothing held created the state file (stat err %v)", err)
+		}
+	})
+	t.Run("a file with no credential is not rewritten", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+		s, err := OpenStateStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetCursor(7); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Planted content, not an mtime compare: two writes in one tick
+		// leave the mtime equal (CLAUDE.md's Windows rule).
+		planted := append(append([]byte{}, before...), '\n')
+		if err := os.WriteFile(path, planted, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ClearStoredCredential(path); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(planted) {
+			t.Fatalf("a revoke with nothing held rewrote the file:\nbefore %q\nafter  %q", planted, after)
+		}
+	})
 }

@@ -10,9 +10,9 @@ package main
 // family rate, not an SACD virtual path, and DST-compressed only when
 // this ffmpeg carries the `dst` decoder. The target is
 // `TargetRateForPCMRender` (44.1-family → 176400, 48-family → 192000) at
-// a uniform 24 bits, mirroring `pcm-v1-<rate>-24`.
+// a uniform 24 bits, mirroring `pcm-v2-<rate>-24`.
 //
-// The COMPACT tier is not here: `optimized-dsd-v1-<44100|48000>-16` is
+// The COMPACT tier is not here: `optimized-dsd-v2-<44100|48000>-16` is
 // built by `bridge optimize`, which admits DSD sources under the same
 // `upscale.dsdRender.enabled` flag. One decode recipe, two commands,
 // split by which tier the operator wants — the same split the server has

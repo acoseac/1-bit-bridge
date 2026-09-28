@@ -30,8 +30,16 @@ const httpsScheme = "https://"
 //	  ?url=<https URL to the bridge — primary/most-likely>
 //	  &urls=<newline-joined alternates including the primary>
 //	  &token=<base64url bearer token>
+//	  &code=<base64url one-time pairing code, when the bridge issues one>
 //	  &fingerprint=<AB:CD:...:EF>
 //	  &name=<library display name>
+//
+// `code` (internal/pairingcode) lets an app that understands it trade the
+// link for a token that never travelled in it: it redeems the code over
+// the pinned connection (POST /v1/pairing/redeem), which rotates the
+// token the link carries. `token` stays because every shipped app
+// refuses a link without it; such an app ignores `code` and pairs with
+// the token, as it always has. Empty `code` is left out.
 //
 // `urls` is the v1-additive extension that lets iOS learn every address
 // the bridge self-reports at pairing time, so a phone paired on Wi-Fi
@@ -47,7 +55,7 @@ const httpsScheme = "https://"
 // pre-fills as the name it saves the bridge under. The bridge's own tests
 // decoded with u.Query(), a form decoder that reads "+" as a space, so
 // they could not see it.
-func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternates []string) string {
+func buildPairURL(bridgeURL, rawToken, code, fingerprint, libraryName string, alternates []string) string {
 	q := url.Values{}
 	q.Set("url", bridgeURL)
 	// Only emit `urls` when there are actual alternates to ship. An
@@ -59,9 +67,35 @@ func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternat
 		q.Set("urls", strings.Join(alternates, "\n"))
 	}
 	q.Set("token", rawToken)
+	if code != "" {
+		q.Set("code", code)
+	}
 	q.Set("fingerprint", fingerprint)
 	q.Set("name", libraryName)
 	return "bridge://pair?" + urlquery.Encode(q)
+}
+
+// PairingCodeIssuer issues the one-time code a pairing link carries for a
+// token. *pairingcode.Store satisfies it.
+type PairingCodeIssuer interface {
+	Issue(tokenID string) (string, error)
+}
+
+// pairingCodeFor returns a fresh code for tokenID, or "" when this bridge
+// issues none (Deps.PairingCodes nil) or the issue failed. A link without a
+// code still pairs, with its token, so a failure costs the link its code
+// and nothing else; it is logged, since that link is the old, weaker kind.
+func (s *Server) pairingCodeFor(tokenID string) string {
+	if s.deps.PairingCodes == nil {
+		return ""
+	}
+	code, err := s.deps.PairingCodes.Issue(tokenID)
+	if err != nil {
+		logger.Warn("pairing: no one-time code for this link; it pairs with its token alone",
+			"tokenId", tokenID, "err", err)
+		return ""
+	}
+	return code
 }
 
 // pairAlternates returns every URL the admin console should bake into

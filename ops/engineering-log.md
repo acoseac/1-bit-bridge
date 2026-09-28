@@ -19985,3 +19985,401 @@ operator-configured manual upstream (`internal/upnp/manual.go`).
 - The Build section says four fuzz targets carry PROPERTY assertions; the
   lyrics targets carry properties too, so the count was already stale.
   `FuzzParseDeviceDescription` could carry this change's policy as one.
+
+## 2026-09-27 — the album-level gain's parts: a peak per render profile, a measure-only pass, a claim-coordinated survey (dark)
+
+The plan is `ops/plan-2026-09-27-dsd-album-gain.md`; this PR builds its parts
+and switches nothing on. A DSD rendition's boost is `ClipGuardedGainDB` of the
+track's OWN true peak (Stage B), so the tracks of one album get different
+boosts. The B1 entry above deferred this ("album-level gain consistency
+(per-track clip guard, recorded for a later pass)"). A listener's report of a
+hot SACD rip brought it back.
+
+**Phase 0 decided that it is worth building.** It was measured on a
+backup-API snapshot of the operator's bridge (`v0.2.0-58`), grouped with the
+admin catalog's own album identity:
+- 57 % of the 143 multi-track DSD albums shift their tracks' relative levels by
+  more than 1 dB. The median spread is 1.2 dB and the maximum 4.7 dB.
+- A segued concept album steps 3.5 dB at boundaries that were mastered
+  seamless.
+- The fix costs the average track 0.8 dB of boost; 31 tracks lose more than
+  3 dB.
+- `ClipGuardedGainDB(true_peak_dbtp)` reproduced the stored `applied_gain_db`
+  on 1,707 of 1,707 rows. That is what makes seeding peaks from existing
+  renditions sound.
+
+**Decisions and what was rejected**
+- **Where peaks come from.** Not the scan-time analysis: it skips
+  `.dsf`/`.dff` entirely (sox cannot decode DSD), so no DSD track has a
+  pre-render peak. Peaks come from three places, all into `dsd_peaks`:
+  - renders, which measure in Stage B anyway;
+  - a measure-only pass that IS the render's Stages A and B
+    (`decodeAndMeasure`, shared);
+  - a one-time seed from `true_peak_dbtp`.
+- **Where the survey runs.** It runs inside the render, between Stage B and
+  Stage C. The alternative was separate measure jobs the render waits on, but
+  with 2 workers, two renders waiting on measure jobs that are queued behind
+  them deadlock the pool. In-job measurement plus claims cannot:
+  - a claim is only ever held by work that is decoding;
+  - a render resolves its own claim before it surveys;
+  - a survey claim is released before any wait.
+- **Deadline.** The pool widens the job's deadline by `SurveyBudget` (twice
+  each unmeasured album-mate's duration). Without it, a render surveying a
+  20-track album would outlive its own 10-minute budget and collect a failure
+  strike.
+- **Membership.** The admin catalog's key (`dupes.AlbumIDOf(dupes.Resolve(row))`),
+  never a folder: CLAUDE.md's "an album is a SET of tracks", and 69 of 880
+  albums on the reference library share a folder.
+- **The boost is derived from stored peaks at render time, never stored per
+  album.** This follows the catalog's computed-not-stored rule. A membership
+  change moves only renders made after it; re-gaining existing renditions is an
+  explicit act (the switch-on PR).
+- **The album figure is bounded by the track's own guard.** A stale peak can
+  make a file quieter than intended, never clip.
+
+**Tests**
+- `internal/albumgain` (15), with fakes. It pins:
+  - the grouping, partition-equal to `librarycat` over case, discs, a
+    compilation, an untagged folder and a year split;
+  - profile filtering (DSD64/128/256 share a profile, the 48k family does not);
+  - stored peaks used without decoding;
+  - missing peaks measured once and recorded with the mate's source facts;
+  - an unmeasurable mate left out;
+  - three concurrent renders of a six-track album measuring the three
+    unrendered tracks exactly once between them, and landing on one boost;
+  - a waiter measuring a track whose render failed;
+  - cancellation, the deadline budget, and index invalidation and TTL.
+
+  The three concurrency tests pass 100 runs under `-race`.
+- `transcode`: the profile literal and the pure gain and bound functions.
+- `transcode`, on the real toolchain:
+  - the published file's RMS moves with the album figure (−21.01 dB at +2
+    against −17.01 dB at +6 on a −20 dBFS tone);
+  - the bound holds;
+  - the claim resolves once, with the render's own peak;
+  - an early failure resolves it with an error;
+  - `MeasureDSDPeak` equals the render's peak exactly on both tiers.
+- `transcode`, the pool: it injects the gainer into DSD specs only, and widens
+  their deadline.
+- `manifest` (6): the seed's profile spelling, silent rows and idempotency;
+  `UpsertVariant` recording the peak; freshness and chunking; the FK and the
+  CASCADE; `StreamDSDCatalogRefs` equal to the full stream's DSD rows.
+
+**Negative controls.** Run on the committed tree with `-count=1`; each red
+set was predicted by name and matched.
+- Stage C ignoring the album figure and the pool not injecting the gainer:
+  9 tests, exactly 2 red. The render test's "below the guard" case failed
+  (applied +6 where +2 was decided) and the pool test failed (no gainer, and a
+  10-minute deadline instead of 40).
+- The seed spelling the tier `optimize` and `UpsertVariant` skipping the peak:
+  6 tests, exactly the 2 that pin them red.
+- A survey ignoring other renders' claims: 15 tests, exactly 2 red. The
+  concurrent case decoded rendered tracks and measured each unrendered track 3
+  times, and the cancellation case returned without waiting.
+
+### Review (round 1)
+
+Gemini was over its daily quota and CodeRabbit paused at its plan limit, so
+SonarCloud was the only reviewer. Its quality gate failed on one `go:S2077`,
+and it raised four smells. All five are fixed, plus a race its fix run found.
+- **`go:S2077`: `FreshDSDPeaks` built its IN list at the call site.** It is
+  now ONE literal statement binding the paths as one `json_each` argument, the
+  `VariantsForPaths` shape, plus one raw path. A path that is not valid UTF-8
+  goes in the raw slot, one at a time, because `encoding/json` rewrites it and
+  it would never match (`splitIllFormedUTF8Paths`;
+  `TestFreshDSDPeaksFindsAnIllFormedPath`). The rewrite also checks
+  `rows.Err()`, which the old loop dropped. The first fix, two statements
+  assembled from a shared constant, was flagged again: **SonarCloud reads
+  through a named const to its concatenation**, so a query argument is quiet
+  only when it is a literal or a function parameter. Several comments in this
+  package say a named const is enough; `main` carries 30 open S2077s that
+  show it is not.
+- `AlbumGainDB` (cognitive complexity 30) is a `survey` now: a pass, a claimed
+  measurement and the list of peaks. The no-op claim resolver says why it is
+  empty, `Catalog` is `CatalogStreamer`, and the real-toolchain test's
+  assertions moved into two helpers.
+- **A race: a mate could be measured twice.** Running the suite beside a full
+  `-race` run failed `TestConcurrentRendersShareOneSurvey` once ("unrendered
+  track 5 measured 2 times"), in code the refactor had not changed. A survey
+  reads the store, then claims each missing mate in turn. Another survey can
+  measure a mate, record it and release its claim in between, and the first
+  survey then finds the mate unclaimed with a stale read. In production the
+  gap is the survey's own earlier measurements, which take minutes, so this
+  would not have been rare. A survey now reads the store again under its
+  claim before it measures; a measurement records before it releases, so that
+  read sees it. `TestASurveyRereadsThePeakUnderItsClaim` holds survey B
+  between its read and its claims while survey A measures the mate, and B
+  must take A's peak.
+- The package's 16 tests pass 100 runs under `-race`.
+
+**Negative controls**, on the committed tree, both in one run of the two
+packages (944 tests, all accounted for): dropping the re-read under the claim
+turned exactly `TestASurveyRereadsThePeakUnderItsClaim` red ("measured 2
+times, want exactly 1"), and dropping the raw bind for ill-formed paths turned
+exactly `TestFreshDSDPeaksFindsAnIllFormedPath` red.
+
+## 2026-09-27 — the album-level gain switched on: DSD renditions move to schema v2
+
+The parts landed dark in #1053 (the entry above). This PR switches them on.
+Every DSD render the serve pool runs (on-demand, batch or swept) and every
+one `bridge optimize` / `bridge render` runs now shares its boost with its
+album, and the renditions already on disk move to it.
+
+**Decisions and what was rejected**
+- **A schema bump with new ids, not a re-render under v1.** The app applies a
+  rendition's `appliedGainDB` to the bytes of its downloaded copy, and it
+  looks the gain up by id. Checked in the iOS source: `downloadedOfflineVariant`
+  returns the copy's stored `offlineVariantID`, `dsdRenditionSource` reads that
+  id's `appliedGainDB` from the queue item's variants, and an id that has
+  vanished plays as plain PCM, untrimmed. Re-rendering `optimized-dsd-v1-…` in
+  place would have the app trim old bytes by the new gain. So v2 mints new
+  ids and **the v1 rows stay** while their files exist. The GC never reaps a
+  superseded row whose sidecar exists (two comments claimed it did; both are
+  corrected). They go only once the app records a downloaded copy's gain with
+  the copy, plus a grace period.
+- **Newest first.** iOS's `bestVariant` takes the first variant of a family at
+  the expected rate, so the manifest's order decides what every shipped app
+  streams and downloads. `variantsAggSQL` now orders each track's array by
+  `created_at DESC, variant_id DESC`. Filtering superseded rows out of the
+  manifest instead was rejected: it breaks the downloaded copies above. The
+  order reaches the PCM families too, and for the better: the app takes the
+  first `upscaled-` / `optimized-` match as well, and primary-key order listed
+  a superseded `upscaled-v1-…` (before sox's `-G` guard) ahead of its
+  `upscaled-v2-…` replacement.
+- **The bridge drives the move.** A phone never requests a family it already
+  holds, so nothing would ask for v2. A DSD source's sweeper coverage now needs
+  a fresh row of the CURRENT DSD schema. A PCM source's stays version-agnostic,
+  the rule that keeps the sweeper out of a regenerate loop.
+  `manifest.DSDRenditionSchemaVersion` mirrors transcode's, pinned by
+  `TestManifestMirrorsTheDSDRenditionSchema`.
+- **The faithful tier moves only where it exists.** It is rendered on request,
+  so `drainSupersededPCMRenditions` re-renders the tracks that already hold a
+  `pcm-` row and never adds one: a track without one would get a 5 GB-an-hour
+  rendition nobody asked for. It runs after the compact pass, under the same
+  per-sweep cap and disk budgets, and the card's "remaining" counts its
+  backlog too.
+- **Wiring, extracted so tests run it.** In serve, `wireAlbumGain`
+  (`albumgain.New` with the adapter's `albumMateSpec`, then
+  `Pool.SetAlbumGainer`), and the post-scan hook invalidates the album index.
+  In the CLI, `cliAlbumMateSpec` classifies a mate with the run's own
+  classifier, with `--filter` and the resume check lifted, because a mate
+  outside the filter still bounds the album. Both take a mate's source facts
+  from the track row, which a peak's freshness is judged against.
+- PROTOCOL.md: `appliedGainDB` is clip-guarded per album, the value belongs to
+  the rendition id, a track can list superseded renditions, the list is newest
+  first, and the DSD families are `v2`.
+
+**Cost on the reference bridge (the plan's Phase 0).** 1,704 compact
+renditions and 3 faithful ones re-render. That is about 5 hours of sweeping,
+and about 44 GB more on disk while v1 is kept.
+
+**Tests**
+- `manifest`: a DSD track holding only a v1 compact rendition is a candidate
+  again, while a current one and a PCM track's superseded row still cover
+  (`TestAutoOptimizeCandidatesMoveDSDToTheCurrentSchema`). The faithful pass
+  selects a v1-only track and one whose current rendition is stale, never a
+  current one or a track with none, and nothing without DSD caps
+  (`TestListSupersededPCMRenditions`). A track's renditions are listed newest
+  first, the v1 row keeps its own gain, and equal times fall back to the id
+  (`TestVariantsListTheNewestRenditionFirst`).
+- `transcode`: the mirror test checks the ids a render writes against the
+  manifest's LIKE patterns. `TestDSDFamilyPrefixes`' tripwire is `v2`.
+- `cmd/bridge`: the sweep runs both passes in one sweep, respects a cap the
+  compact pass spent, and moves nothing without caps. The two mate-spec
+  builders measure on the render's profile. **End to end on the real
+  toolchain**, through the serve wiring and through `runUpscaleBatch`: an
+  album of a −3 and a −12 dBFS DSF tone. The own guards are 2.0 and 6.0 dB;
+  both renditions carry 2.0, and the published files measure −4.01 and
+  −13.01 dB RMS, keeping the source's 9 dB. Per-track guards would have put
+  them 5 dB apart.
+- Every existing test expectation that spelled a v1 DSD id now spells v2
+  (eight files).
+
+**Negative controls**, on the committed tree, each red set predicted by name
+and every started test accounted for:
+- Four mutations in one run of `manifest` and `cmd/bridge` (1,416 tests):
+  version-agnostic DSD coverage, no `ORDER BY` on the variants, `wireAlbumGain`
+  and the CLI producer not setting the gainer, and both mate-spec builders
+  ignoring the render's quality. Exactly 7 went red:
+  - the schema-move and newest-first tests. Without the `ORDER BY`, the array
+    read `optimized-dsd-v1-…, pcm-v1-…, optimized-dsd-v2-…`: the primary-key
+    order the decision above rests on;
+  - the sweep test, through its "both passes" and "spent cap" subtests;
+  - both end-to-end tests, where the quiet track took its own +6, both scopes
+    read "track", and the files sat 5.00 dB apart;
+  - both mate-spec tests, on the profile's rate flag.
+- The faithful pass disabled: exactly the "both passes" subtest (1 job, not 3).
+- The card's remaining without the faithful backlog: exactly the same subtest,
+  on `Remaining = 1, want 3`.
+- The manifest's mirror at "v3": exactly `TestManifestMirrorsTheDSDRenditionSchema`.
+
+## 2026-09-27 — a pairing link's one-time code replaces the token it carries (audit H1, #1052)
+
+The 2026-09-23 external audit's H1: the admin console's pairing QR and its
+`bridge://pair` deep link carried the device's long-lived bearer token. The
+link travels through surfaces the bridge does not control (a photo of the
+screen, the clipboard, a link opened on the device, a preview), and anything
+that kept a copy held the device's credential until the operator revoked it.
+The iOS half of H1 (never persisting the link, redacting it from logs) had
+shipped; this is the bridge half, in v0.2.1 at the user's request, with the
+iOS redemption as the Mirror-PR twin.
+
+### Decisions
+
+- **Token AND code, not a code alone.** Every shipped app refuses a link
+  without `token=` (`BridgePairingURL` throws `missingField("token")`), and it
+  ignores unknown parameters. A code-only link would stop every installed app
+  from pairing. So the link keeps `token` for those apps and gains `code`,
+  and an app that understands the code redeems it and never stores the
+  link's token. The user chose this shape (2026-09-27) over a short-lived
+  link token, which would still be a bearer in the link.
+- **Redeeming ROTATES the token the code names** (`auth.Store.Rotate`), not
+  a mint. The device keeps the record the operator made (its name, ID and
+  any expiry, and the Devices row), and the link's token stops validating in
+  the same commit. So once the real device has paired, a copy of the link is
+  worth nothing. If a copy is redeemed first, the real device's redemption
+  fails where the user sees it, rather than both devices sharing a token.
+- **In memory, in the serving process.** The console issues and the v1 API
+  redeems, both in `bridge serve`, so nothing crosses a process. A restart
+  ends every code, which costs the operator one fresh QR; the login ticket's
+  sidecar file (a cross-process design) was not needed. `bridge pair` issues
+  no code, because nothing in the serving process could redeem it.
+- **One live code per token.** Issuing drops the token's previous code, so a
+  console rotation leaves the old QR nothing to redeem, just as the old token
+  has nothing left to use. The drop comes BEFORE the new code is drawn
+  (CodeRabbit on #1052): the console issues after the rotation has already
+  replaced the token, and an issue that failed with the old code still live
+  would let that code rotate the token again for whoever holds the old QR.
+  `TestAFailedIssueStillEndsTheTokensPreviousCode` pins it with a failing
+  random source; with the draw first again, it alone goes red. At most 64 codes are held, the oldest evicted
+  first, which bounds memory against a script minting in a loop.
+- **Take before judging**, the login ticket's rule: the code is deleted
+  before its age is read, so it is accepted at most once whatever the
+  answer.
+- **One refusal.** Unknown, used, expired, and a token revoked or expired
+  since are all `410 pairing_code_invalid`, so the endpoint answers nothing
+  about which codes exist. Shape is checked before the store (43 characters
+  of base64url, `400`). The route is unauthenticated, like
+  `POST /v1/pairing/requests`, and shares its per-IP limiter (burst 5, one
+  per 5 s). It is `rateNone`, so it goes in the mutating-route exemption list
+  with its reason. The code is 256 bits, so the limiter bounds the load, not
+  the odds of guessing one.
+- **An expired token is refused.** `Rotate` keeps `ExpiresAt` and `Validate`
+  refuses a token past it, so handing over the fresh secret would pair a
+  device that 401s on its first request.
+- **No fallback on a refusal** (PROTOCOL.md, and the iOS half): a client that
+  understands `code` shows the refusal and does not pair with the link's
+  token. A copy redeemed first has already killed it, and a device paired
+  with it would keep exactly the secret the exchange exists to replace.
+- **Additive.** No `ProtocolVersion` bump. The route, the optional `code`
+  row in the pairing URL table and the client rule are in PROTOCOL.md; the
+  iOS repo's `docs/BridgeProtocol.md` mirrors it.
+
+### Tests and controls
+
+- `internal/pairingcode`: the issued shape, single use, the TTL boundary to
+  the nanosecond (plus a clock stepped back, which must not revive an
+  expired code), one live code per token, the 64-code bound, and
+  `ValidShape`.
+- `internal/api/pairing_redeem_test.go`: the swap (the same record ID, a
+  fresh token that validates, the link's token dead), single use, every
+  refusal (not wired `404`; not JSON, no code, a short or non-base64url code
+  `400`; never issued, token expired since, token revoked since `410`, the
+  last consuming the code), and the per-IP limiter.
+- `internal/admin/pairing_code_test.go`: the link carries `code` only when
+  one is issued, read the way the app reads a query; mint and rotate issue
+  codes bound to the token they pair, and the rotation's code replaces the
+  mint's; a nil store or a failing issue leaves the old shape, still with
+  its token.
+- `cmd/bridge/serve_pairing_code_test.go`
+  (`TestServeRedeemsThePairingLinksCode`): the real serve. It mints through
+  the console, reads `token` and `code` from the link as the app does,
+  redeems over TLS, checks that the redeemed token answers `GET /v1/list`
+  200 and the link's 401, and that a second redemption is `410`.
+- Fourteen negative controls on the committed tree, each `-count=1`, each
+  restored with `git checkout`. Every one turned the tests it targets red:
+  Take keeping the code; deleting after judging (only the clock-back
+  assertion); Issue keeping the token's old code; no eviction; minting
+  instead of rotating; no expiry check; a revoked token answering 500; no
+  shape check; no limiter; the console never issuing; the link dropping the
+  code; serve wiring two stores (only the boot test); serve leaving the API
+  unwired (only the boot test); rotate issuing no code.
+- **Review round 3 (CodeRabbit).** `ValidShape` took any 43 base64url
+  characters, but 43 characters carry 258 bits for a 256-bit code, so the
+  last character's two low bits are zero in every issued code and 48 of the
+  64 characters can never end one. Such a code reached the store and was
+  answered `410` where a malformed code is `400`. It now decodes strictly
+  (`base64.RawURLEncoding.Strict()`) and requires 32 bytes, and it keeps the
+  length check, because the decoder skips line breaks and a real code with
+  one inserted decodes to the same 32 bytes. Two controls: the old character
+  loop turns exactly the two impossible-ending cases red, and dropping the
+  length check turns exactly the inserted-line-break case red.
+
+## 2026-09-27 — DELETE /v1/atlas-harvest/credential forgets the held credential (#1049)
+
+The 2026-09-23 external audit's H3, bridge half. Turning off the app's
+"Bulk-harvest the whole library" stopped only the app's renewals; the
+`bulk_harvest` credential the bridge already held stayed usable until it
+expired, and the privacy policy said so, telling users to switch the harvest
+off on the bridge to stop it at once. The bridge had only
+`POST /v1/atlas-harvest/credential`. Reported by the iOS audit session and
+taken into v0.2.1 at the user's request (backlog B12); the app's call ships
+in the iOS twin.
+
+### Decisions
+
+- **`Clear()`, the store's existing forget.** It drops the token and its
+  expiry and keeps the base URL and the sync cursor, the same state an
+  Atlas-rejected token leaves, so a re-provision of the same library
+  resumes rather than re-submitting everything.
+- **204 whether or not a credential was held.** The app calls it on every
+  switch-off, including a second one, and must not have to ask first.
+- **The demo refuses with 403 `demo_read_only`.** A demo bridge's bearer is
+  public and its one harvest credential is shared by every demo user; one
+  user switching harvest off would stop it for all. The POST's accepted
+  residual (a public bearer can overwrite the token for the pinned host) is
+  a denial of function by an attacker; this would have been one by an
+  ordinary user, and on every switch-off.
+- **Harvest off answers 404 `harvest_not_supported`,** the POST's shape. The
+  store is opened only when harvest is on, so a credential file left from
+  before is not touched; nothing on that bridge reads it.
+- **Write-rate-limited** (`rateWrite`), like the POST, and listed in
+  PROTOCOL.md's write-limit section.
+
+### Tests and controls
+
+- `internal/api/atlas_harvest_revoke_test.go`:
+  `TestAtlasHarvestCredentialDeleteForgetsIt` (204 twice, the sink cleared
+  each time), `TestAtlasHarvestCredentialDeleteRefusals` (harvest off 404,
+  demo 403 with nothing cleared, no bearer 401), and
+  `TestAtlasHarvestCredentialDeleteClearsTheStoredToken` against the real
+  `atlasharvest.StateStore`: after the DELETE `AtlasCredential()` finds
+  nothing, the token is gone from the file, and the cursor is still 42.
+  All red on main (405: no route).
+- Controls: without the demo check only the demo case goes red; without the
+  `Clear()` call the two clearing tests go red.
+- **Review round (CodeRabbit on the app's #1981): the harvest-off 404 was
+  not "nothing held".** The route answered 404 `harvest_not_supported` on a
+  bridge with `atlas.harvestEnabled` off without touching the state file,
+  and this entry's CLAUDE.md rule said why: nothing there reads the file.
+  Re-enabling the harvest does, so a credential the app had asked to revoke
+  came back into use, while the app had read the 404 as nothing held. `serve`
+  now wires `atlasharvest.ClearStoredCredential` whenever no live store is
+  open. It drops the token and expiry and keeps the sync position, and it
+  writes nothing when nothing is held (no file created, none rewritten). The
+  route answers 204 either way. The demo check moved ahead of both clears:
+  a demo bridge refuses whatever its harvest setting. PROTOCOL.md now says
+  204 is the only answer that means revoked (the same review asked the app
+  to stop taking a 200 for one).
+- Tests: `TestClearStoredCredential` (a held credential cleared, the cursor
+  kept; no file not created; a file with nothing held not rewritten, judged
+  by planted content, not mtime);
+  `TestAtlasHarvestCredentialDeleteWithTheHarvestOffClearsTheFile`;
+  `TestAtlasHarvestCredentialDeleteOnADemoBridgeWithTheHarvestOffClearsNothing`;
+  and the boot test `TestServeRevokesAHarvestCredentialWithTheHarvestOff`,
+  which runs the real serve over a seeded state file.
+- Four controls, each turning exactly its predicted tests red: serve wiring
+  no clearer (the boot test alone); the handler ignoring the clearer (the
+  harvest-off route test and the boot test); the demo check after the clear
+  (the demo tests); a clear that writes with nothing held
+  (`TestClearStoredCredential`).

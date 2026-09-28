@@ -67,8 +67,11 @@ var logger = logging.Component("transcode")
 // schema bump produces a fresh VariantID — operators run `bridge
 // upscale` once after upgrade and the iOS client picks up the new
 // guard-clean variants automatically. Pre-v2 sidecars stay served
-// by their existing track_variants rows until the next
-// `bridge upscale --gc` pass cleans them up.
+// by their existing track_variants rows. This said the next
+// `bridge upscale --gc` pass cleans them up; it does not — the GC
+// removes files without a row and rows without a file, never a
+// superseded row whose sidecar exists, and the DSD schema move
+// (DSDRenditionSchemaVersion) relies on exactly that.
 const VariantSchemaVersion = "v2"
 
 // sidecarTmpSuffix terminates the atomic-rename temp file sox writes
@@ -307,6 +310,13 @@ type JobSpec struct {
 	// the coordinator can attribute completion / failure to the
 	// right `upscale_batches` row without a path-to-batch lookup.
 	BatchID uuid.UUID
+
+	// AlbumGain, when set, decides the album-level boost of a DSD render
+	// (album_gain.go). Nil keeps the per-track clip guard, which is also
+	// what every PCM job gets. The pool and the CLI set it when the job
+	// RUNS, never at an enqueue site, so no path that builds a DSD spec can
+	// leave it out.
+	AlbumGain AlbumGainer
 }
 
 // RenderScratchBytes is the Stage A scratch this job holds on the temp
@@ -339,7 +349,7 @@ func (j JobSpec) RenderScratchBytes() int64 {
 //	pcm-<dsdSchemaVersion>-<targetRate>-<targetBits>            // JobKindPCMRender (DSD source only)
 //
 // e.g. `upscaled-v2-176400-24`, `optimized-v2-44100-16`,
-// `optimized-dsd-v1-44100-16` or `pcm-v1-176400-24`. iOS keys on the
+// `optimized-dsd-v2-44100-16` or `pcm-v2-176400-24`. iOS keys on the
 // prefix to slot the variant into the share-level "prefer upscaled"
 // toggle vs. the runtime CarPlay-routing path; the DSD families are
 // described in dsd_render.go. Future variant kinds (e.g. PCM→DSD
