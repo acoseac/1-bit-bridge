@@ -135,8 +135,9 @@ type jobsUpdates struct {
 // whether it is refusing.
 //
 // The refusal is the one piece of runtime state here. The sweep refuses a
-// tick that would reap a stranded tree, or that took its counts from a walk
-// that could not list part of the variants directory, with no override and
+// tick that would reap a stranded tree, that took its counts from a walk
+// that could not list part of the variants directory, or whose catalog
+// names no sidecar over a directory that holds some, with no override and
 // one journal line a day; the chip said "on" throughout, so a bridge whose
 // orphan GC had reclaimed nothing for weeks looked healthy. The kind is a
 // KEY (integrity.OrphanRefusalKind), worded by the console.

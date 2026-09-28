@@ -5798,9 +5798,10 @@ function renderJobCards(j) {
 
 // renderOrphanSidecarGC — the Jobs card's "Orphan sidecar GC" line: off,
 // on, or refusing. The background orphan sweep refuses a tick that would
-// reap a tree its catalog no longer describes, or that counted over a walk
-// which could not list part of the variants directory, and it has no
-// override; it says so in the journal once a day. This line read "on"
+// reap a tree its catalog no longer describes, that counted over a walk
+// which could not list part of the variants directory, or whose catalog
+// names no rendition at all, and it has no override; it says so in the
+// journal once a day. This line read "on"
 // throughout until 2026-09-28, so a sweep that had unlinked nothing for
 // weeks looked healthy here. The line carries the badge and when the
 // refusal started; the why goes in the warning under the card's list,
@@ -5841,6 +5842,11 @@ function describeOrphanGCRefusal(kind) {
       return "It could not list part of the variants directory, and a count over part of the tree could " +
         "let a lost index through, so nothing is unlinked. Make every directory there listable by the " +
         "user the bridge runs as.";
+    case "emptyCatalog":
+      return "No variant row names a rendition while the variants directory holds renditions, so every one " +
+        "of them would read as an orphan, and nothing is unlinked. The catalog is empty for a while after the " +
+        "database is reset or the library folders change; if it stays empty, check that the bridge is using " +
+        "the database you meant.";
     default:
       return `Nothing is unlinked (${kind}).`;
   }

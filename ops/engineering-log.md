@@ -25818,3 +25818,232 @@ Restored, all five auth tests and the tls test are green on APFS and on FAT
 builds a replacement with the old file's size and mtime to prove the store
 notices a rename by identity. `api/files_entryinfo_test.go` and the SACD
 scanner tests compare a stat they took with one they set, not two writes.
+
+## 2026-09-28 — the reverse guard and `artwork --gc` read the filesystem's lost+found as the inventory does, and the orphan sweep's empty catalog is a latched refusal decided from the inventory (backlog B42)
+
+Three leftovers of #1071, in one PR. Each was reproduced on main
+(172d4704) before any code changed, with a throwaway helper under a
+`_`-prefixed directory for the two library calls, the real `bridge` binary
+for everything else, and a real `bridge serve` for the sweep.
+
+### 1: the reverse guard's probe failed closed on the filesystem's lost+found
+
+#1071 taught `TakeSidecarInventory` that the root-owned, 0700 `lost+found`
+of an ext4 volume mounted AS the variants directory is the filesystem's
+(`isFilesystemLostFound`), and left `TreeHoldsVariantSidecars`, the
+probe behind the reverse guard, answering that directory's permission
+error. Measured on main, the directory locked with `chmod 000`:
+
+- A fresh volume holding only its `lost+found`:
+  `TreeHoldsVariantSidecars = false, err = open …/lost+found: permission
+  denied`, and `MassDeleteRefusal` over 30 of 30 missing rows refused "… and
+  the variants directory could not be read (open …/lost+found: permission
+  denied)". That is the refusal every `VariantWatcher` tick makes over a
+  replaced volume, whose rows' sidecars really went.
+- `bridge upscale --gc` over the same volume with 30 such rows: "GC:
+  refusing to run — 30 of 30 rows (100%) have no sidecar at either
+  location, over the 20% threshold, and the variants directory could not be
+  read (…)", the relocation advice, exit 1.
+- Sidecars only under `mozart/`, which sorts after `lost+found`: the same
+  error, so the guard refused for a read failure rather than for the
+  sidecars it would have found.
+
+After: the fresh volume answers `false, nil`, the refusal is empty and
+`upscale --gc` reaps the 30 rows ("GC reverse sweep: removed 30 orphan
+row(s)", exit 0); the `mozart/` tree answers `true, nil` and is refused
+"while the variants directory still holds sidecar files".
+
+- Decided: `IsFilesystemLostFound` is exported and the probe's walk skips
+  that one directory, as evidence neither way. Any other directory the
+  probe cannot list still fails it closed, the root included.
+- Found on the way: the rule compared `filepath.Dir(path)` with the walk
+  root as given, and `filepath.WalkDir` cleans every path below its root,
+  so a root handed over with a trailing separator lost the rule. Harmless
+  where the root is resolved first (`EvalSymlinks` cleans it), not for the
+  artwork GC, which walks its directory as configured. It compares against
+  `filepath.Clean(walkRoot)` now; the unit table has the row.
+
+### 2: `bridge artwork --gc` stopped at the first directory it could not list
+
+The cache held two referenced files, an unreferenced one at the top and an
+unreferenced thumbnail in `thumbs/`. Measured on main:
+
+- `thumbs/` locked: "walk artwork dir: open …/thumbs: permission denied",
+  exit 1, no summary, and the top-level orphan already removed (it sorts
+  ahead of `thumbs`). The run changed the cache and reported a failure.
+- The cache directory as a volume's mount root, its `lost+found` locked:
+  the same stop at `lost+found`, the top orphan removed, the one in
+  `thumbs/` never examined.
+- A fresh install (no track references any artwork) on that mount root:
+  "artwork gc: cannot inspect …/artwork: open …/lost+found: permission
+  denied", exit 1, from the empty-store guard's own walk.
+
+After: the first names the directory on stderr ("artwork gc: could not
+list a directory, so the files in it were neither examined nor removed:
+…"), ends "GC: removed 1 orphan(s), kept 2 known cache file(s), 0 skipped,
+0 failure(s), 1 director(y/ies) it could not list." and exits 0; the second
+removes both orphans without a word about `lost+found`; the third exits 0.
+
+- Decided: step over and report, not refuse. The artwork GC's verdict
+  about a file is that file's stem against `ArtworkMBIDsInUse`; there is no
+  count or ratio over the tree for an unseen part to flip, which is what
+  makes a partial walk dangerous for the sidecar sweeps
+  (`PartialWalkRefusal`). A file the walk did not reach is neither examined
+  nor removed, so stepping over its directory removes nothing a full walk
+  would keep. Exit 0 unless a removal failed: the directory is counted on
+  the summary and named on stderr, which is where an operator running the
+  command looks.
+- Rejected: a refusal with an `--allow-partial-walk` of its own. It would
+  protect no verdict, and a cache on an ext4 mount root would need the flag
+  on every run. Rejected: stepping over silently, which leaves an unlisted
+  `thumbs/` uncollected with nothing to say so.
+- A cache ROOT this user cannot list still fails: nothing was examined.
+  The empty-store guard (`artworkCacheHasFiles`) reads the cache as the
+  walk does, so the two cannot disagree about a fresh install.
+
+### 3: the orphan sweep's empty-catalog refusal
+
+Measured on main with a real `bridge serve`, the orphan sweep at 2 s and an
+empty catalog:
+
+- Over five renditions: five WARN lines ("refusing — no variant row
+  references any sidecar, but the variants directory holds files") in the
+  eight seconds after the console came up, and `/api/jobs` said
+  `{"orphanSidecarGC": true}` with no refusal. The M-SEARCH shape, and the
+  Jobs card said "on".
+- Over NO rendition, a variants directory holding a `.DS_Store`, empty
+  folders and a locked `lost+found`: the same five lines in eight seconds.
+  Main asked `dirIsEmpty`, whether the directory held any entry at all, so
+  a fresh ext4 volume mounted as the variants directory, before its first
+  rendition, WARNed "holds files" on every tick.
+
+**The first draft kept that question.** It made the refusal a third latch
+kind (`emptyCatalog`): one WARN per streak, at most daily, an Info line when
+it lifts, the card showing it. Checked in a browser on a throwaway bridge,
+the card read "refusing" as it should; then, with the renditions deleted
+and their folders and a `.DS_Store` left, it went on reading "refusing",
+over a tree the sweep would unlink nothing from. A streak that cannot end is
+the card's version of the WARN it replaced.
+
+**Decided: the verdict comes from the tick's inventory**, as the other two
+kinds' do (`emptyCatalogRefusal`). The tick walks first; with an empty
+known set it refuses when the walk found a sidecar file it would remove, or
+an entry it could not stat, weighed as one such file as
+`MassOrphanRefusalFor` weighs it. That check stays ahead of the mass-orphan
+one, which refuses most of the same trees but none under its floor of ten,
+and whose advice names a lost index. Nothing else counts, because nothing
+else is a file this sweep would remove: a directory, a file `Consider`
+rejects, anything under a pruned dot-directory, the filesystem's
+`lost+found`. A directory the walk could not list, with no file in view, is
+the partial walk's refusal, which says what is true of it. With nothing to
+remove the tick ends any streak (one Info line) and returns without a
+summary line, as main's empty catalog over an empty directory always did.
+
+- Consequences, each deliberate: an empty-catalog tick now walks the tree
+  (the sweep's own measurement is 128 ms per 100,001 files, and the
+  documented routes to an empty catalog are transient); an empty catalog
+  over an unreadable variants root is a partial-walk refusal, where main
+  said nothing (`dirIsEmpty`'s error was dropped), as a non-empty catalog
+  over it already was; a refused empty-catalog tick logs the per-tick
+  summary line at Info, as the other two kinds' do.
+- Rejected: counting every regular file (a nil `Consider`), since this
+  sweep removes `.flac` files only and the rest are nothing to protect.
+  Rejected: weighing a directory the walk could not list as a file: it may
+  hold nothing, and the empty-catalog wording would then be false (the
+  control below).
+- The card: `describeOrphanGCRefusal` words `emptyCatalog` ("No variant
+  row names a rendition while the variants directory holds renditions, so
+  every one of them would read as an orphan, and nothing is unlinked. …"),
+  and `OrphanRefusalKinds` lists it. `TestEveryOrphanRefusalKindIsListed`
+  scans the package's source for every constant of type
+  `OrphanRefusalKind`, since a kind the list omits is worded by nobody and
+  the wording test passes over it.
+
+After, on the same two shapes with the real binary: one WARN and
+`"orphanSidecarGCRefusal": "emptyCatalog"` over the renditions; no line at
+all and the card "on" over the folders, `.DS_Store` and `lost+found`.
+
+Verified in a real browser on a throwaway loopback bridge (the orphan sweep
+at 2 s, an empty catalog over five renditions): the card showed the
+"refusing" badge, "refusing since 16s ago" and the reason under the list.
+The renditions deleted, folders and a `.DS_Store` left: one "no longer
+refusing" Info line (`files=0 rows=0`) and the card "on". A locked
+`lost+found` added at the root: still "on", no line. Three renditions put
+back: a new streak, one WARN, the card refusing. Two WARN lines in all, over
+about 110 s of 2 s ticks. At 375 px in dark: no horizontal scroll, the line
+163 × 31, the reason paragraph 293 × 149.
+
+### Tests
+
+New: `TestTreeHoldsVariantSidecars`'s two lost+found subtests; the
+`TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars` rows for a
+fresh volume and for sidecars sorting after its `lost+found`;
+`TestRunGCReapsTheRowsOfAFreshVolume`; the trailing-separator check in
+`TestIsFilesystemLostFoundReadsAllThreeTerms`;
+`TestArtworkGCStepsOverADirectoryItCannotList`,
+`TestArtworkGCStepsOverTheFilesystemsLostFoundWithoutAWord`,
+`TestArtworkGCEmptyStoreGuardReadsTheCacheAsTheWalkDoes` and
+`TestArtworkGCStillFailsOnACacheItCannotList`;
+`TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal`,
+`TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove`
+(seven shapes: emptied, removed, empty folders left, only files the sweep
+never removes, the renditions in the Trash, only the filesystem's
+`lost+found`, and a directory the walk cannot list, which becomes the
+partial walk's refusal), `TestEmptyCatalogRefusalCountsWhatTheSweepWouldRemove`
+and `TestEveryOrphanRefusalKindIsListed`. Extended:
+`TestServeReportsTheOrphanSweepRefusalOnTheJobsCard` (an empty catalog,
+through the real serve), `TestOrphanSidecarSweeperStatusFollowsTheRefusalLatch`
+(an empty-catalog streak between the other two),
+`TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir` (no summary
+line either), `TestMaintenanceChipSaysTheOrphanSweepIsRefusing` (every
+kind) and `TestEveryOrphanRefusalKindIsWorded` (three kinds). Adapted:
+`TestOrphanSidecarSweeperKeepsItsRefusalStreakThroughATickThatDecidedNothing`
+lost its empty-catalog case, a verdict now, and requires that a tick which
+decided nothing logs no refusal of another kind.
+
+### Negative controls, each on a committed tree and restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| the probe stops skipping the filesystem's `lost+found` | the first new `TestTreeHoldsVariantSidecars` subtest, both new watcher rows, `TestRunGCReapsTheRowsOfAFreshVolume` |
+| the rule compares the walk root uncleaned | `TestIsFilesystemLostFoundReadsAllThreeTerms`, alone |
+| the artwork walks stop stepping over an unlisted directory | `TestArtworkGCStepsOverADirectoryItCannotList`, `…StepsOverTheFilesystemsLostFoundWithoutAWord` and every case of `…EmptyStoreGuardReadsTheCacheAsTheWalkDoes` |
+| the artwork walks forget the `lost+found` rule | `TestArtworkGCStepsOverTheFilesystemsLostFoundWithoutAWord`, alone |
+| the cache root itself is stepped over | `TestArtworkGCStillFailsOnACacheItCannotList`, alone |
+| the empty-store guard stops stepping over | every case of `TestArtworkGCEmptyStoreGuardReadsTheCacheAsTheWalkDoes` |
+| the summary stops counting unlisted directories | `TestArtworkGCStepsOverADirectoryItCannotList`, alone |
+| the walk stops naming the directory on stderr | the same test, and the guard's unlisted-only case |
+| the empty-catalog refusal bypasses the latch (main's WARN) | the latch test, the status test, all seven streak cases, the serve test's empty catalog |
+| `dirIsEmpty` decides it again (the first draft) | five streak cases: empty folders, files never removed, the Trash, `lost+found`, the unlisted directory; emptied and removed stay green |
+| it refuses on any empty known set | the quiet test, all seven streak cases, the pure test's two "must not" rows |
+| an entry the walk could not stat is not weighed | the pure test's unstat-able row, alone |
+| an unlisted directory is weighed as a file | the pure test's unlisted row and the streak's unlisted case |
+| the quiet return is dropped | the quiet test (a summary line), alone |
+| the mass-orphan check runs first | the status test and the serve test's empty catalog |
+| `OrphanRefusalKinds` drops `emptyCatalog` | `TestEveryOrphanRefusalKindIsListed` and `TestEveryOrphanRefusalKindIsWorded` |
+| `OrphanRefusalKinds` names a kind nothing declares | `TestEveryOrphanRefusalKindIsListed`, alone |
+| the console loses the `emptyCatalog` wording | `TestEveryOrphanRefusalKindIsWorded`, alone |
+| the jobs handler drops the `emptyCatalog` kind | `TestMaintenanceChipSaysTheOrphanSweepIsRefusing` and the serve test's empty catalog |
+
+The probe, artwork, list, wording and handler controls ran on the first
+commit (07b03731), whose code at those places is the final code but for the
+console's wording; the empty-catalog controls ran on the final tree. Three
+controls of the first draft's `dirIsEmpty` arms went with it.
+
+### Out of scope
+
+- `sweepArtworkCache`, the serve-time LRU cap on the same cache, still
+  stops at the first directory it cannot list, the filesystem's
+  `lost+found` included: its WARN every tick, and the cap never enforced.
+- `artwork --gc` removes `artist-<mbid>-<size>.jpg` portraits and the
+  16-hex version-alias thumbnails in `thumbs/` as orphans:
+  `ArtworkMBIDsInUse` returns only `artworkMBID`. Regenerable, not lost.
+- Neither artwork walk resolves a symlinked cache root, so both see one
+  entry and do nothing there.
+- The CLI `--gc` sweeps' own empty-catalog refusal
+  (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks `dirIsEmpty`, so a
+  variants directory holding only a `lost+found`, a `.DS_Store` or empty
+  folders needs `--allow-empty` for a GC with nothing to do.
+- `VariantWatcher`'s mass-delete refusal WARNs on every tick, unlatched.
+- `bridge init` ignores `--listen-address` and `--admin-address` without
+  `--public`, without a word.

@@ -98,7 +98,7 @@ type SidecarInventory struct {
 	//
 	// One unreadable directory is not counted: the `lost+found` directly
 	// under the walk root that a permission error keeps this user out of
-	// (isFilesystemLostFound).
+	// (IsFilesystemLostFound).
 	Unreadable int
 	// UnlistedDirs is how many of the Unreadable entries are DIRECTORIES
 	// the walk could not list. Each may hold any number of files, so no
@@ -204,7 +204,7 @@ type SidecarInventoryOptions struct {
 // TreeHoldsVariantSidecars takes. A directory that cannot be DESCENDED
 // into is the softer case — see SidecarInventory.Unreadable and
 // UnlistedDirs — except the filesystem's own `lost+found` at the top of
-// the walk root, which is not counted at all (isFilesystemLostFound).
+// the walk root, which is not counted at all (IsFilesystemLostFound).
 func TakeSidecarInventory(ctx context.Context, root string, known map[string]struct{}, opts SidecarInventoryOptions) (SidecarInventory, error) {
 	var (
 		inv SidecarInventory
@@ -269,7 +269,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 				return nil
 			}
 			if d != nil && d.IsDir() {
-				if isFilesystemLostFound(walkRoot, path, d, walkErr) {
+				if IsFilesystemLostFound(walkRoot, path, d, walkErr) {
 					return nil
 				}
 				inv.Unreadable++
@@ -423,10 +423,18 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 	return walkEntryClassify
 }
 
-// isFilesystemLostFound reports whether a directory the walk could not
+// IsFilesystemLostFound reports whether a directory the walk could not
 // list is the `lost+found` of the filesystem mounted AT the walk root:
 // named exactly that, directly under the (resolved) walk root, and kept
 // from this user by a PERMISSION error.
+//
+// Exported because three walks read that directory, and they must read it
+// the same way (2026-09-28): TakeSidecarInventory does not count it,
+// TreeHoldsVariantSidecars (the reverse guard's probe) takes it as no
+// evidence either way, and `bridge artwork --gc` steps over it without a
+// word, on a cache directory that is such a volume's mount root. Only the
+// first read it until then; the probe answered its permission error, and
+// the artwork GC stopped there with exit 1.
 //
 // mke2fs creates that directory at the root of every ext2/3/4 filesystem,
 // owned by root with mode 0700, and fsck puts the inodes it recovers
@@ -446,13 +454,18 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 // volume's 0700 one, or create its own under a restrictive umask), and
 // that is left as the residual it is.
 //
+// The artwork cache holds nothing of that name either: its layout is flat
+// `<key>-<size>.jpg` and `artist-*.jpg` files and one `thumbs/` directory.
+//
 // Only a permission error: an I/O error on it is a fault like any other,
 // and a lost+found deeper in the tree (a volume mounted INSIDE the variants
 // directory) still counts, because nothing about the walk root vouches for
-// it. Directories only, which the caller has checked.
-func isFilesystemLostFound(walkRoot, path string, d fs.DirEntry, err error) bool {
+// it. Directories only, which the caller has checked: d is the non-nil
+// entry the walk handed over with err. walkRoot is compared cleaned,
+// because filepath.WalkDir joins, and so cleans, every path below its root.
+func IsFilesystemLostFound(walkRoot, path string, d fs.DirEntry, err error) bool {
 	return d.Name() == "lost+found" &&
-		filepath.Dir(path) == walkRoot &&
+		filepath.Dir(path) == filepath.Clean(walkRoot) &&
 		errors.Is(err, fs.ErrPermission)
 }
 

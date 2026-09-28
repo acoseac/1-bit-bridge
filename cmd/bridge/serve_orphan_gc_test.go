@@ -13,22 +13,45 @@ import (
 )
 
 // TestServeReportsTheOrphanSweepRefusalOnTheJobsCard boots the real serve
-// with the background orphan sweep on, over the lost-index shape (2 rows
-// with their files, 40 stranded files no row names), and reads the Jobs
-// card's payload. The sweep refuses its boot tick; /api/jobs must say so.
+// with the background orphan sweep on and reads the Jobs card's payload,
+// over two shapes: the lost index (2 rows with their files, 40 stranded
+// files no row names) and the empty catalog (no row, the same 40 files).
+// The sweep refuses its boot tick in each; /api/jobs must say which.
 //
 // It pins the one line no package test can see, `OrphanSweepStatus:
 // orphanSweepStatus` in runServe's admin.Deps: without it every test in
 // internal/admin and internal/integrity stays green while the chip reads
-// "on" over a sweep that refuses every tick, which is the defect.
+// "on" over a sweep that refuses every tick, which is the defect. The
+// empty catalog is the refusal that was not on the card at all until
+// 2026-09-28: it WARNed on every tick, and the chip said "on".
 func TestServeReportsTheOrphanSweepRefusalOnTheJobsCard(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rows int
+		want string
+	}{
+		{"a lost index", 2, "massOrphans"},
+		{"an empty catalog", 0, "emptyCatalog"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			requireServeReportsTheOrphanSweepRefusal(t, c.rows, c.want)
+		})
+	}
+}
+
+// requireServeReportsTheOrphanSweepRefusal boots serve over rows variant
+// rows with their files and 40 stranded files no row names, and requires
+// /api/jobs to carry the refusal kind want, and every stranded file to
+// survive.
+func requireServeReportsTheOrphanSweepRefusal(t *testing.T, rows int, want string) {
+	t.Helper()
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "Music")
 	if err := os.MkdirAll(lib, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	dataDir, variantsDir := filepath.Join(dir, "data"), filepath.Join(dir, "variants")
-	seedVariantCatalog(t, dataDir, variantsDir, 2, 40)
+	seedVariantCatalog(t, dataDir, variantsDir, rows, 40)
 
 	adminPort := freeLoopbackPort(t)
 	cfgPath := filepath.Join(dir, "bridge.yaml")
@@ -51,8 +74,8 @@ func TestServeReportsTheOrphanSweepRefusalOnTheJobsCard(t *testing.T) {
 			break
 		}
 	}
-	if last["orphanSidecarGC"] != true || last["orphanSidecarGCRefusal"] != "massOrphans" {
-		t.Fatalf("the Jobs payload does not carry the sweep's refusal: %v\nstderr: %s", last, served.stderr.String())
+	if last["orphanSidecarGC"] != true || last["orphanSidecarGCRefusal"] != want {
+		t.Fatalf("the Jobs payload does not carry the sweep's %s refusal: %v\nstderr: %s", want, last, served.stderr.String())
 	}
 	if since, _ := last["orphanSidecarGCRefusingSince"].(string); since == "" {
 		t.Errorf("the refusal carries no start: %v", last)
