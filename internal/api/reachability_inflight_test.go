@@ -8,10 +8,13 @@ import (
 	"time"
 )
 
-// hangingStat returns a statFunc stand-in that parks forever, plus a
-// counter of how many times it was entered. Callers release the parked
-// goroutines via the returned close func so the test doesn't leak them
-// into the rest of the package's run.
+// hangingStat returns a statFunc stand-in that parks until released, a
+// counter of how many times it was entered, and the release. Install it
+// with swapStatFunc and hand that the release: its cleanup lets the parked
+// stats return before it puts statFunc back. The release registered here
+// is a backstop for a test that ends before it installs the stand-in, and
+// it runs after every cleanup registered later, so it can never be the
+// one a restore waits on.
 func hangingStat(t *testing.T) (fn func(string) (os.FileInfo, error), entered *atomic.Int64, release func()) {
 	t.Helper()
 	var n atomic.Int64
@@ -30,6 +33,60 @@ func hangingStat(t *testing.T) (fn func(string) (os.FileInfo, error), entered *a
 	}, &n, rel
 }
 
+// swapStatFunc installs fn as statFunc until the test ends. Its one
+// cleanup calls release (nil for a stand-in that never parks), waits
+// until no stat goroutine c started is still running, and only then puts
+// the original back.
+//
+// A probe's stat goroutine reads statFunc and then parks in the stand-in,
+// and the one thing that orders that read before the restore is what the
+// goroutine does once its stat returns: the c.mu-guarded delete of its
+// in-flight flag, which statsReturned observes. The release alone does
+// not order it. It is this goroutine's close, which puts the test before
+// the stat goroutine and not the other way round, so a restore straight
+// after it still races the read. And the three steps share ONE cleanup
+// because cleanups run last-registered-first: hangingStat registers its
+// release when it is called, so a restore registered after it ran BEFORE
+// the release, with the stat goroutine still parked (the race CI reported
+// on 2026-09-27).
+func swapStatFunc(t *testing.T, c *reachabilityCache, fn func(string) (os.FileInfo, error), release func()) {
+	t.Helper()
+	orig := statFunc
+	statFunc = fn
+	t.Cleanup(func() {
+		if release != nil {
+			release()
+		}
+		if !statsReturned(c, 2*time.Second) {
+			// Restoring anyway keeps the stand-in out of every later
+			// test; the race detector may report the restore as well.
+			t.Errorf("a probe's stat had not returned 2s after its release")
+		}
+		statFunc = orig
+	})
+}
+
+// statsReturned polls c.inflight under c.mu until no stat goroutine c
+// started is still running, and reports whether that happened within the
+// given time. Every such goroutine deletes its flag under c.mu after its
+// read of statFunc, so seeing the map empty orders all of those reads
+// before whatever the caller does next.
+func statsReturned(c *reachabilityCache, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		c.mu.Lock()
+		running := len(c.inflight)
+		c.mu.Unlock()
+		if running == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestReachabilityProbe_HungMountDoesNotStackGoroutines pins the
 // in-flight guard.
 //
@@ -45,12 +102,9 @@ func hangingStat(t *testing.T) (fn func(string) (os.FileInfo, error), entered *a
 // bounds, and it fails loudly on the pre-fix code (which would enter
 // once per call).
 func TestReachabilityProbe_HungMountDoesNotStackGoroutines(t *testing.T) {
-	fn, entered, release := hangingStat(t)
-	orig := statFunc
-	statFunc = fn
-	t.Cleanup(func() { statFunc = orig })
-
 	c := newReachabilityCache()
+	fn, entered, release := hangingStat(t)
+	swapStatFunc(t, c, fn, release)
 	const root = "/mnt/hung-nfs"
 
 	// First probe parks a stat and times out into an offline verdict.
@@ -85,18 +139,8 @@ func TestReachabilityProbe_HungMountDoesNotStackGoroutines(t *testing.T) {
 	// Self-healing: once the kernel releases the stat, the guard clears
 	// and a later probe is allowed to test the mount for real.
 	release()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		c.mu.Lock()
-		stillParked := c.inflight[root]
-		c.mu.Unlock()
-		if !stillParked {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("in-flight flag never cleared after the stat returned")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !statsReturned(c, 2*time.Second) {
+		t.Fatal("in-flight flag never cleared after the stat returned")
 	}
 
 	c.mu.Lock()
@@ -117,19 +161,15 @@ func TestReachabilityProbe_HungMountDoesNotStackGoroutines(t *testing.T) {
 // doesn't suppress probing of a healthy sibling — multi-root installs
 // where one NAS is down must still report the local disk correctly.
 func TestReachabilityProbe_InflightGuardIsPerRoot(t *testing.T) {
-	hung, _, _ := hangingStat(t)
+	c := newReachabilityCache()
+	hung, _, release := hangingStat(t)
 	healthy := t.TempDir()
-
-	orig := statFunc
-	statFunc = func(p string) (os.FileInfo, error) {
+	swapStatFunc(t, c, func(p string) (os.FileInfo, error) {
 		if p == healthy {
-			return orig(p)
+			return os.Stat(p)
 		}
 		return hung(p)
-	}
-	t.Cleanup(func() { statFunc = orig })
-
-	c := newReachabilityCache()
+	}, release)
 
 	if st := c.probe(context.Background(), "/mnt/hung-nfs"); st.Reachable {
 		t.Fatalf("hung root must be unreachable, got %+v", st)
