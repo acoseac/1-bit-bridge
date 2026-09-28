@@ -1679,10 +1679,16 @@ no failing test — which is the shape to expect in this area.
   counted, past the mass-orphan refusal, whose verdict was taken over the
   first tree (CodeRabbit on #1063, which named the background sweep;
   `TestAnOrphanSweepUnlinksInTheTreeItWalked` repoints the link in that
-  window). A hand-built inventory without the walked list panics in the
-  unlinking loop, deliberately: falling back to the listed spelling is
-  the defect. A dangling root is ENOENT and takes the missing-root reading;
-  neither error branch may fall back to the unresolved path, which IS the
+  window). An inventory whose two lists do not pair up is REFUSED before
+  anything is removed (`SidecarInventory.CheckPaired`, the one check all
+  three sweeps make; Gemini on #1063): falling back to the listed
+  spelling is the defect, and indexing past the shorter list is a panic,
+  which in the background sweep takes `bridge serve` down with it. This
+  sentence said the panic was deliberate until the same review.
+  `TakeSidecarInventory` cannot return such an inventory; the check is
+  for a later change that builds or trims one. A dangling root is ENOENT
+  and takes the missing-root reading; neither error branch may fall back
+  to the unresolved path, which IS the
   defect. A symlinked SUBDIRECTORY is skipped rather than classified
   (unlinking it takes a subtree's only reference), and a symlink that
   cannot be STATTED is counted `Unreadable` rather than classified — "not
@@ -1836,7 +1842,23 @@ no failing test — which is the shape to expect in this area.
   behaviour on purpose: a SYMLINKED variants directory is walked now (the
   old WalkDir Lstat'd the link and swept nothing). The `.flac` Consider
   stays, so the ratio is over the files this sweep would remove, where
-  `upscale --gc`'s nil Consider counts and removes every file.
+  `upscale --gc`'s nil Consider counts and removes every file. **A walk
+  that could not read an entry (`inv.Unreadable`) refuses too**, after the
+  mass-orphan check and under a WARN of its own (CodeRabbit on #1063). What
+  it could not read is missing from every count, and a directory the
+  service user cannot list may hold any number of orphans, so a verdict
+  that proceeds over the part it saw can be a refusal over the whole: 1,000
+  stranded files behind a locked directory and 15 in view, against 20
+  rows, pass the check, and the review head unlinked the 15. The
+  inventory's docblock said an unreadable entry "can only make the
+  deletion set SMALLER", which is true of the list and false of the
+  verdict. The latch keys on the KIND of refusal, so a streak that turns
+  into the other kind logs at once. **The cost is deliberate**: a variants
+  directory holding a directory the bridge may never list, a root-owned
+  `lost+found` at the top of an ext4 volume mounted there being the
+  ordinary one, reclaims nothing until it is readable, and its hint says
+  so once a day. The two CLI sweeps still report such entries and go on;
+  whether they should refuse too (and past which flag) is open.
 - **`bridge doctor`'s `variants-index` is the other side of
   `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
   recorded outside the current directory (a relocation the sweeps heal);

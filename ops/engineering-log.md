@@ -21100,7 +21100,8 @@ and `analyze --gc` unlinked the same spelling, so all three change here
   type change would churn every one for no reader's benefit. A deleting loop
   indexes the walked list by the listed one's index, so an inventory built
   by hand without it panics, which is the intended loud failure: a fallback
-  to the listed spelling is the defect. One existing fixture
+  to the listed spelling is the defect. (Round 2 replaced the panic with a
+  refusal; see below.) One existing fixture
   (`TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved`'s directory case)
   built one and now names both.
 - **`analyze --gc`'s removal loop moved into `removeAnalysisGCFiles`**, so a
@@ -21135,3 +21136,85 @@ compile, the loop index being unused, so it proved nothing and was
 rewritten to keep the index. CodeRabbit's second comment, on this entry's
 wording of the empty-catalog refusal (it WARNs only while the directory
 holds files, and returns quietly over an empty one), is fixed above.
+
+### Review round 2: a partial walk refuses, and an unpaired inventory is refused
+
+Both bots reviewed b14adda4. CodeRabbit (its second on-demand run) posted
+one finding and Gemini three; all four were accepted.
+
+**CodeRabbit: no verdict from a walk that could not read part of the tree.**
+The sweep took `MassOrphanRefusal` over the counts of the part it could
+read. An entry in `inv.Unreadable` is missing from every count, and a
+directory the service user cannot list may hold any number of orphans, so
+a proceed over the visible part can be a refusal over the whole. The case
+that pins it: 20 live files and 15 stranded ones in view, 1,000 stranded
+behind a `chmod 000` directory, and 20 rows. The visible counts, 15 orphans
+of 35 files, pass the check (15 is not more than 20 rows). On b14adda4 the
+first tick unlinked the 15; the whole tree, 1,015 orphans of 1,035 files,
+refuses. The inventory's docblock gave the reason for reporting rather than
+refusing, that an unreadable entry "can only make the deletion set
+SMALLER". That is true of the list the sweep may unlink from, and false of
+the verdict that decides whether it unlinks at all: it stood from #940 and
+was never true once the refusal existed.
+
+- The tick refuses such a walk AFTER the mass-orphan check, under its own
+  WARN (`msgOrphanPartialWalk`) and hint. Order: when the visible part
+  already refuses, that refusal's advice (a lost index) is the more urgent,
+  and its floor and `orphans > rows` terms only grow as more of the tree is
+  seen (`MassOrphanLowerBound`'s argument).
+- The latch now keys on the kind of refusal (`refusing` holds the streak's
+  message). A streak of one kind that turns into the other logs at once,
+  since the advice changed: in the test, unlocking the directory turns the
+  partial-walk refusal into a lost-index refusal, logged on that tick.
+- **The cost is accepted**: a variants directory that holds a directory
+  the bridge's user may never list refuses every tick. The ordinary case is
+  a root-owned `lost+found` (mode 0700) at the top of an ext4 volume mounted
+  as the variants directory. The hint names it and the remedy (make it
+  readable, or point the variants directory below the mount), and `bridge
+  doctor`'s `variants-index` already warns about the same entry. The sweep
+  is off by default, it has no operator to override it, and the other
+  direction's cost is renditions that must be rendered again.
+- **Not in this PR**: `upscale --gc` and `analyze --gc` make the same
+  partial-walk verdict and still report the unreadable count and go on.
+  Refusing there needs a decision about the way past it (reusing
+  `--allow-mass-orphans` would make every `--gc` on a `lost+found` host
+  give up the whole mass-orphan protection), so it is left open. The
+  doctor's hint that `--gc` "measures the whole tree" is false past an
+  unreadable directory, for the same reason.
+
+**Gemini (three comments): check the lists pair up before indexing them.**
+The three deleting sweeps index the walked list by the listed one's
+position, and round 1 called the panic on a hand-built inventory
+deliberate. Gemini proposed a length check at each site. Accepted with one
+definition, `SidecarInventory.CheckPaired` (both families, returning
+`ErrUnpairedInventory` with the counts), because a refusal dominates the
+panic: it does not fall back to the listed spelling either, and a panic in
+the background sweep's goroutine takes `bridge serve` down (the run loop
+has no recover). The background sweep checks in `reclaimOrphans`, which now
+also cuts the lists to the chunk AFTER the check, since cutting the shorter
+list is itself the panic; the tick logs the refusal at ERROR on every tick
+it happens, outside the latch, because it is a defect rather than a
+verdict. `upscale --gc` refuses with exit 1. `analyze --gc` reads only the
+walked lists, so it never panicked; it would have removed what they held
+and reported the rest as never there. It refuses with exit 1 too, and
+`removeAnalysisGCFiles` now returns the exit code. A length is all the
+check can see: two lists of one length in different orders pass, and
+nothing builds one.
+
+Tests: `TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree`
+(skipped on Windows and as root, as the inventory's own unreadable-directory
+test is), `TestReclaimOrphansRefusesAnUnpairedInventory`,
+`TestCheckPairedRefusesListsThatDoNotPairUp` (with real walks, capped and
+not, that must pass), `TestUpscaleGCForwardSweepRefusesAnUnpairedInventory`
+and `TestAnalyzeGCRefusesAnUnpairedInventory`. Negative controls on the
+committed tree (812d7d76), each restored before the next:
+
+| mutation | goes red |
+|---|---|
+| the partial-walk refusal skipped | the partial-walk test: tick 1 unlinks the 15 |
+| the latch ignores the refusal's kind | the partial-walk test, at the lost-index WARN after the unlock |
+| `reclaimOrphans` without the pairing check | the unpaired test, by `index out of range [2] with length 2` |
+| `upscale --gc` without it | its unpaired test, by `index out of range [1] with length 1` |
+| `analyze --gc` without it | its unpaired test (one file removed, exit 0) |
+| `CheckPaired` without its scratch arm | the two scratch rows of the table and the sweeper's scratch row |
+
