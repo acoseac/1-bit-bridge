@@ -360,6 +360,26 @@ func TestStopWaitsForInFlightFetch(t *testing.T) {
 	if n := cache.Len(); n != 0 {
 		t.Errorf("cache has %d entries after Stop; want 0 (no post-Clear Upsert)", n)
 	}
+
+	// The joined fetch released its claim before Stop returned, so a
+	// restarted client fetches the same server again rather than skipping
+	// it for a claim the old run still held.
+	if got := c.inFlightCount(); got != 0 {
+		t.Errorf("%d fetch claims outlived Stop, want 0", got)
+	}
+	if err := c.Start(parent); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	t.Cleanup(c.Stop)
+	c.runMu.RLock()
+	runCtx = c.runCtx
+	c.runMu.RUnlock()
+	c.handlePacket(runCtx, alivePacket("uuid:inflight", "http://192.0.2.10:8080/desc.xml"), nil)
+	select {
+	case <-disp.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the restarted client did not fetch the server whose fetch Stop had joined")
+	}
 }
 
 // TestDefaultDetailFetchClientRefusesRedirects pins the blind-SSRF
