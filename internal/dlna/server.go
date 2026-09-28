@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
@@ -182,23 +184,30 @@ type Server struct {
 	// an in-flight best-effort NOTIFY POST can't outlive the server;
 	// `notifyWG` lets Stop drain in-flight notifies (Adds happen inside
 	// the SUBSCRIBE handler, which `httpServer.Shutdown` drains before
-	// the Wait). `notifyClient` is the shared timeout-bounded HTTP client.
+	// the Wait). `notifyClient` is the shared client newNotifyClient
+	// builds: timeout-bounded, no redirect, no proxy, every connect
+	// checked against the SUBSCRIBE's source.
 	notifyCtx    context.Context
 	notifyCancel context.CancelFunc
 	notifyWG     sync.WaitGroup
 	notifyClient *http.Client
 
 	// Observation state for the callback-vs-source divergence warning
-	// (see callbackHostMatchesSource). One Warn per distinct
-	// (callbackHost, sourceIP) pair, bounded, so a control point that
-	// re-subscribes on a timer produces one line rather than one per
+	// (see callbackHostMatchesSource) and the host-local refusal warning
+	// (noteCallbackRefusal), a set for each under one mutex. One Warn per
+	// distinct (callbackHost, sourceIP) pair, bounded, so a control point
+	// that re-subscribes on a timer produces one line rather than one per
 	// renewal — this project has been bitten by a per-tick log before
-	// (199,078 of 200,000 lines from one ticker).
+	// (199,078 of 200,000 lines from one ticker). Two sets, because a peer
+	// reaches the refusal at will: sharing one bound let refused pairs use
+	// it up and silence the divergence lines, which are the evidence the
+	// private half of step two waits for.
 	callbackDivergeMu   sync.Mutex
 	callbackDivergeSeen map[string]struct{}
+	callbackRefusedSeen map[string]struct{}
 }
 
-// callbackDivergeSeenCap bounds the observation set. A LAN has a handful
+// callbackDivergeSeenCap bounds each observation set. A LAN has a handful
 // of control points; anything past this is either a fuzzer or a bug, and
 // silently not warning further is the right failure mode for a
 // diagnostic.
@@ -252,7 +261,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// before mountHandlers so the GENA handlers (which read these lazily
 	// at request time) always observe non-nil state once serving begins.
 	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
-	s.notifyClient = &http.Client{Timeout: genaInitialNotifyTimeout}
+	s.notifyClient = newNotifyClient()
 
 	// On any error return BEFORE the happy tail hands ownership of the
 	// cancel to Stop(), cancel the derived context so the child isn't
@@ -565,19 +574,27 @@ func (s *Server) genaHandler(label string) http.HandlerFunc {
 
 // fireInitialNotify sends a single best-effort GENA initial NOTIFY to
 // the control point's callback URL, carrying the service's evented
-// state. Guarded against being turned into an SSRF relay: the callback
-// host must be an on-LAN IP literal (loopback / RFC1918 / link-local) OR
-// match the SUBSCRIBE request's source IP; hostnames and arbitrary
-// public IPs are rejected (the NOTIFY is silently skipped — the
-// SUBSCRIBE already returned 200). Timeout-bounded, no retries, and
-// cancellable via the server's notify context so Stop() unparks it.
+// state. Timeout-bounded, no retries, and cancellable via the server's
+// notify context so Stop() unparks it. The callback is an
+// unauthenticated LAN peer's say-so, so the NOTIFY is guarded against
+// being turned into a relay twice, as the SSDP clients' fetches are:
 //
-// **Step one of a two-step narrowing.** The accepted set is wider than
-// the threat model needs — see callbackHostMatchesSource — and the plan
-// is to require the callback host to equal the SUBSCRIBE source IP. That
-// change is held for one release while noteCallbackDivergence observes
-// whether any real control point on a live LAN actually needs the wider
-// form. Nothing is refused here that was not refused before.
+//   - callbackHostAllowed judges the callback's host before anything is
+//     sent: an IP literal (names are refused outright), and on this
+//     machine or a link-local address only when it is the address the
+//     SUBSCRIBE came from. A refused callback is skipped without a word
+//     to the control point; the SUBSCRIBE already returned 200.
+//   - newNotifyClient's client follows no redirect and checks every
+//     connect against that same source, which rides in the request
+//     context. Until backlog B39 the NOTIFY followed the callback's 3xx:
+//     a 307/308 re-sent it to any URL, and a 301/302/303 turned it into
+//     a GET, which the console's csrfGuard passes, so a peer whose
+//     callback was its own address could still aim the bridge anywhere.
+//
+// **#818's step two is half done.** Its host-local half landed with B39
+// (callbackHostAllowed). The other half, refusing a private address
+// other than the source (callbackHostMatchesSource), stays held until
+// noteCallbackDivergence has watched a bridge with the DLNA listener up.
 func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr string) {
 	target := firstCallbackURL(callbackHeader)
 	if target == "" {
@@ -587,19 +604,30 @@ func (s *Server) fireInitialNotify(service, sid, callbackHeader, remoteAddr stri
 	if err != nil || u.Scheme != "http" || u.Host == "" {
 		return
 	}
-	if !callbackHostAllowed(u.Hostname(), remoteAddr) {
-		s.log.Debug("GENA initial NOTIFY skipped — callback host not on LAN",
+	host := u.Hostname()
+	if !callbackHostAllowed(host, remoteAddr) {
+		if callbackNamesThisHostOrLink(host) {
+			s.noteCallbackRefusal(service, host, remoteAddr)
+			return
+		}
+		s.log.Debug("GENA initial NOTIFY skipped — callback host not allowed",
 			slog.String("service", service),
-			slog.String("callbackHost", u.Hostname()))
+			slog.String("callbackHost", host))
 		return
 	}
-	s.noteCallbackDivergence(service, u.Hostname(), remoteAddr)
+	s.noteCallbackDivergence(service, host, remoteAddr)
+	if s.notifyCtx == nil {
+		// Not started (a handler tree mounted without Start): nothing can
+		// send, as a nil context always made NewRequestWithContext fail.
+		return
+	}
 
 	body := initialNotifyBody(service)
+	ctx := discovery.WithDialApproval(s.notifyCtx, discovery.SubscribedFrom(subscriberAddr(remoteAddr)))
 	s.notifyWG.Add(1)
 	go func() {
 		defer s.notifyWG.Done()
-		req, err := http.NewRequestWithContext(s.notifyCtx, "NOTIFY", target, strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "NOTIFY", target, strings.NewReader(body))
 		if err != nil {
 			return
 		}
@@ -642,67 +670,126 @@ func firstCallbackURL(header string) string {
 	return strings.TrimSpace(rest[:end])
 }
 
-// callbackHostAllowed is the SSRF guard for the initial NOTIFY. The
+// callbackHostAllowed is the callback guard for the initial NOTIFY. The
 // subscriber here is a CONTROL POINT (BubbleUPnP, mconnect, Kazoo) — not
 // a renderer; this is the bridge's own MediaServer GENA handler, and the
-// docblock said "renderer" for its whole life. Its event sink is on-LAN,
-// so we allow only IP literals that are loopback / RFC1918-private /
-// link-local, OR that match the SUBSCRIBE request's source IP.
-// Hostnames and arbitrary public IPs are rejected.
+// docblock said "renderer" for its whole life. The callback's host must
+// be an IP literal (a name is refused outright, and so is an IPv6
+// literal with a zone), and then it asks, first, what the NOTIFY's dial
+// check will ask at the connect (discovery.SubscribedFrom(...).Permits),
+// so the two cannot disagree:
 //
-// See callbackHostMatchesSource for the narrower predicate this is being
-// moved to, and why the move is held for one release.
+//   - a loopback or link-local address, only when it is the address the
+//     SUBSCRIBE came from (backlog B39). A loopback address names the
+//     host that SENDS the NOTIFY, so a subscriber at another address
+//     cannot mean itself by it: until B39 any LAN peer could aim the
+//     NOTIFY at the bridge's own loopback services, the loopback-only,
+//     unauthenticated console among them. The subscriber's own address,
+//     never "any address like it", as for an SSDP LOCATION (#1069): a
+//     control point on this host that subscribes over loopback calls
+//     back on its own loopback address, and a zero-configuration one on
+//     its own link-local address;
+//   - the unspecified address and a cloud metadata address (#1074's
+//     list, some of them private or public), never.
+//
+// Then, of what the approval admits:
+//
+//   - a private (RFC 1918 / ULA) address, from any source: held, see
+//     callbackHostMatchesSource;
+//   - any other address, only when it is the SUBSCRIBE's source.
 func callbackHostAllowed(host, remoteAddr string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false // reject hostnames outright
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-		return true
-	}
-	srcHost, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		// remoteAddr may lack a port (a reverse proxy rewrote it, or a
-		// custom test setup) — fall back to treating it as a bare host.
-		// A non-IP value still fails the ParseIP check below.
-		srcHost = remoteAddr
-	}
-	srcIP := net.ParseIP(srcHost)
-	return srcIP != nil && srcIP.Equal(ip)
-}
-
-// callbackHostMatchesSource is the NARROWER predicate callbackHostAllowed
-// is being moved to: the callback host must be the same IP that sent the
-// SUBSCRIBE. A control point's event sink is, by definition, the device
-// that subscribed, so this is the whole of the legitimate case — while
-// the current blanket loopback / RFC1918 / link-local acceptance lets a
-// subscriber nominate any other host on the network as the NOTIFY target,
-// which is what CodeQL's request-forgery alert flags.
-//
-// It is deliberately NOT wired as the gate yet. Some control points are
-// reported to bind their outgoing SUBSCRIBE socket to one interface while
-// requesting callbacks on another; this project cannot verify that claim
-// about specific hardware from here, and observing costs one release —
-// the same posture the Windows CI promotion was gated on. Step two swaps
-// callbackHostAllowed's body for this and deletes the observer.
-func callbackHostMatchesSource(host, remoteAddr string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
+	cb, ok := callbackAddr(host)
+	if !ok {
 		return false
 	}
-	srcHost, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		srcHost = remoteAddr
+	from := subscriberAddr(remoteAddr)
+	if !discovery.SubscribedFrom(from).Permits(cb) {
+		return false
 	}
-	srcIP := net.ParseIP(srcHost)
-	return srcIP != nil && srcIP.Equal(ip)
+	if cb.IsLoopback() || cb.IsLinkLocalUnicast() || cb.IsPrivate() {
+		// A loopback or link-local one IS the source here: nothing else
+		// of that kind passed the approval.
+		return true
+	}
+	return cb == from
+}
+
+// callbackNamesThisHostOrLink reports whether a callback host is a
+// loopback or link-local literal: the kind callbackHostAllowed admits only
+// from the subscriber's own address (and a cloud metadata address among
+// them never), whose refusal noteCallbackRefusal reports.
+func callbackNamesThisHostOrLink(host string) bool {
+	cb, ok := callbackAddr(host)
+	return ok && (cb.IsLoopback() || cb.IsLinkLocalUnicast())
+}
+
+// callbackAddr parses a callback URL's host (url.URL.Hostname) as the
+// address the NOTIFY would connect to, unmapped. ok is false for a name and
+// for an IPv6 literal with a zone, both of which the guard has always
+// refused (net.ParseIP, which it used until B39, takes neither).
+func callbackAddr(host string) (netip.Addr, bool) {
+	a, err := netip.ParseAddr(host)
+	if err != nil || a.Zone() != "" {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
+// subscriberAddr is the address a SUBSCRIBE came from as the guard compares
+// it: RemoteAddr's host (sourceIPOf), unmapped and without a zone. The zero
+// Addr when it does not parse, which equals no callback.
+func subscriberAddr(remoteAddr string) netip.Addr {
+	a, err := netip.ParseAddr(sourceIPOf(remoteAddr))
+	if err != nil {
+		return netip.Addr{}
+	}
+	return a.Unmap().WithZone("")
+}
+
+// newNotifyClient returns the client the GENA initial NOTIFY is sent with,
+// discovery.NewDeviceFetchClient: the one the SSDP clients fetch a device
+// with. It follows no redirect (a 3xx comes back as the answer), uses no
+// proxy and keeps no connection alive, and every connect goes through its
+// dial check, which allows this machine or a link-local address only as the
+// approval in the request's context permits; fireInitialNotify puts the
+// SUBSCRIBE's there (discovery.WithDialApproval, discovery.SubscribedFrom).
+// A callback is an IP literal, so the connect targets the address
+// callbackHostAllowed judged by that same approval, and the two agree; the
+// dial check is the one that still holds if a later change lets a name or
+// a redirect through the first.
+func newNotifyClient() *http.Client {
+	return discovery.NewDeviceFetchClient(genaInitialNotifyTimeout)
+}
+
+// callbackHostMatchesSource is the NARROWER predicate #818 planned to move
+// callbackHostAllowed to: the callback host must be the same IP that sent
+// the SUBSCRIBE. A control point's event sink is, by definition, the device
+// that subscribed, so this is the whole of the legitimate case — while the
+// blanket private-address acceptance lets a subscriber nominate any other
+// host on the network as the NOTIFY target, which is what CodeQL's
+// request-forgery alert flags.
+//
+// Since B39 callbackHostAllowed applies it to loopback and link-local
+// callbacks; it is deliberately NOT yet the gate for a private one. Some
+// control points are reported to bind their outgoing SUBSCRIBE socket to
+// one interface while requesting callbacks on another. This project cannot
+// verify that claim about specific hardware from here, so #818 held the
+// swap for a release of observation (noteCallbackDivergence). The observer
+// shipped, but when B39 landed it had run on no bridge with the DLNA
+// listener up (the record is in ops/engineering-log.md, 2026-09-28), so the
+// hold stands until one has. Step two then swaps the private arm for this
+// and deletes the observer.
+func callbackHostMatchesSource(host, remoteAddr string) bool {
+	cb, ok := callbackAddr(host)
+	return ok && cb == subscriberAddr(remoteAddr)
 }
 
 // noteCallbackDivergence logs once per distinct (callbackHost, sourceIP)
 // pair when a callback was accepted by the wide predicate but would be
-// refused by the narrow one. This is the evidence step two is gated on:
-// a release of silence means the narrowing is safe; a line here names the
-// exact addresses a real device needs.
+// refused by the narrow one. This is the evidence the held half of step two
+// is gated on: a release of silence on a bridge with the DLNA listener up
+// means the narrowing is safe; a line here names the exact addresses a real
+// device needs. Since B39 only a private callback can reach it.
 //
 // Deduped and bounded on purpose — a control point that renews its
 // subscription on a timer must not turn a diagnostic into a log flood.
@@ -716,24 +803,7 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 	// does nothing in production — the exact flood this function exists to
 	// avoid. (Caught in review; the first version's test used one fixed
 	// port and therefore passed against the bug.)
-	key := callbackHost + "|" + sourceIPOf(remoteAddr)
-
-	s.callbackDivergeMu.Lock()
-	if s.callbackDivergeSeen == nil {
-		s.callbackDivergeSeen = make(map[string]struct{}, 8)
-	}
-	_, seen := s.callbackDivergeSeen[key]
-	capped := !seen && len(s.callbackDivergeSeen) >= callbackDivergeSeenCap
-	if !seen && !capped {
-		s.callbackDivergeSeen[key] = struct{}{}
-	}
-	s.callbackDivergeMu.Unlock()
-
-	// Suppress once the set is full, rather than logging every unseen key
-	// forever. A host manufacturing unique addresses must not be able to
-	// turn a diagnostic into a flood by exhausting the cap — which is
-	// what a log-on-capped path would let it do.
-	if seen || capped {
+	if !s.firstSighting(&s.callbackDivergeSeen, callbackHost+"|"+sourceIPOf(remoteAddr)) {
 		return
 	}
 	s.log.Warn("GENA callback host differs from the SUBSCRIBE source — accepted for now, will be refused in a future release",
@@ -742,6 +812,47 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 		// The IP, not host:port: the port is ephemeral noise that changes
 		// on every renewal, and the address is what a field report needs.
 		slog.String("subscribeSource", sourceIPOf(remoteAddr)))
+}
+
+// noteCallbackRefusal logs, once per (callbackHost, sourceIP) pair and
+// within a bound of its own, a callback refused because it names this machine
+// or a link-local address that is not the subscriber's own, or a cloud
+// metadata address among them: B39's rule.
+// Most such lines are a peer aiming the bridge's NOTIFY at this host or the
+// link. A real control point that needs one names itself here, which is
+// what a change to the rule would have to see, and it is why this is a
+// Warn: a strict control point (Linn, Naim) waits for its initial NOTIFY,
+// and nothing else tells anyone why it never came.
+func (s *Server) noteCallbackRefusal(service, callbackHost, remoteAddr string) {
+	if !s.firstSighting(&s.callbackRefusedSeen, callbackHost+"|"+sourceIPOf(remoteAddr)) {
+		return
+	}
+	s.log.Warn("GENA callback on this machine or a link-local address refused — the NOTIFY goes only to the subscriber's own, never to a cloud metadata address",
+		slog.String("service", service),
+		slog.String("callbackHost", callbackHost),
+		slog.String("subscribeSource", sourceIPOf(remoteAddr)))
+}
+
+// firstSighting records key in one warning's observation set (a pointer to
+// the Server field, allocated here on first use) and reports whether it is
+// new. It answers false for a key already seen AND for every new key once
+// the set holds callbackDivergeSeenCap entries: suppress rather than log
+// every unseen key forever, so a host manufacturing unique addresses cannot
+// turn a diagnostic into a flood by exhausting the cap.
+func (s *Server) firstSighting(set *map[string]struct{}, key string) bool {
+	s.callbackDivergeMu.Lock()
+	defer s.callbackDivergeMu.Unlock()
+	if *set == nil {
+		*set = make(map[string]struct{}, 8)
+	}
+	if _, seen := (*set)[key]; seen {
+		return false
+	}
+	if len(*set) >= callbackDivergeSeenCap {
+		return false
+	}
+	(*set)[key] = struct{}{}
+	return true
 }
 
 // sourceIPOf strips the ephemeral port from a net/http RemoteAddr,
