@@ -2380,8 +2380,8 @@ no failing test — which is the shape to expect in this area.
   binds every interface, and `callbackHostAllowed` admitted a loopback or
   link-local callback from ANY source, so a LAN peer could aim the NOTIFY at
   the bridge's own loopback services, the unauthenticated console among
-  them. Measured with the real binary (two containers on dido): a peer at
-  172.19.0.3 with `CALLBACK: <http://127.0.0.1:9999/…>`, or the
+  them. Measured with the real binary (two containers on dido): a peer
+  container's `CALLBACK: <http://127.0.0.1:9999/…>`, or the
   `[::ffff:127.0.0.1]` spelling, made the bridge NOTIFY a listener on its own
   loopback. **The redirect was the wider hole**: the NOTIFY client followed
   the callback's 3xx, a 307/308 re-sending the NOTIFY and a 301/302/303

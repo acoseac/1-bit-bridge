@@ -24778,14 +24778,15 @@ the GENA test server's client was then the same plain client Start built):
 **The real binary, end to end** (origin/main `c6036d4a`, built with
 golang:1.26.6 on dido). The bridge ran in one container on a user-defined
 docker network with `dlna.enabled` and a request-logging listener on its
-own 127.0.0.1:9999; a second container, the LAN peer at 172.19.0.3, sent
-three SUBSCRIBEs to the bridge's `:7790/dlna/cds/event`. All three answered
-200, and the listener on the bridge's loopback logged:
+own 127.0.0.1:9999; a second container, the LAN peer (`<peer>` below; the
+bridge's own address on that network is `<bridge>`), sent three
+SUBSCRIBEs to the bridge's `:7790/dlna/cds/event`. All three answered 200,
+and the listener on the bridge's loopback logged:
 
 ```
 SINK NOTIFY /api/stats from 127.0.0.1:47100     CALLBACK <http://127.0.0.1:9999/api/stats>
 SINK NOTIFY /api/stats from 127.0.0.1:47112     CALLBACK <http://[::ffff:127.0.0.1]:9999/api/stats>
-SINK GET /redirected from 127.0.0.1:47100       CALLBACK <http://172.19.0.3:8080/evt>, answered 302
+SINK GET /redirected from 127.0.0.1:47100       CALLBACK <http://<peer>:8080/evt>, answered 302
 ```
 
 The third is the wider hole. The peer's callback was its OWN address, which
@@ -24882,12 +24883,12 @@ subscriber calling back on its own unzoned address as a divergence.
 
 The same end-to-end run on the branch build: the three SUBSCRIBEs answered
 200, the peer's own callback got its NOTIFY (`PEER NOTIFY /evt from
-172.19.0.2`), its 302 was not followed, and the loopback listener logged
+<bridge>`), its 302 was not followed, and the loopback listener logged
 nothing. The bridge logged two refusals, once each:
 
 ```
-WARN GENA callback names this machine or a link-local address the SUBSCRIBE did not come from — initial NOTIFY not sent  callbackHost=127.0.0.1  subscribeSource=172.19.0.3
-WARN … callbackHost=::ffff:127.0.0.1  subscribeSource=172.19.0.3
+WARN GENA callback names this machine or a link-local address the SUBSCRIBE did not come from — initial NOTIFY not sent  callbackHost=127.0.0.1  subscribeSource=<peer>
+WARN … callbackHost=::ffff:127.0.0.1  subscribeSource=<peer>
 ```
 
 (The merge with #1074 reworded the line to "GENA callback on this machine
@@ -24896,8 +24897,8 @@ merged build.)
 
 From inside the bridge's container (a control point on the bridge's own
 host): a SUBSCRIBE to `127.0.0.1:7790` with a 127.0.0.1 callback got its
-NOTIFY; one to the container's own LAN address (172.19.0.2) with a
-127.0.0.1 callback was refused, the Warn naming `subscribeSource=172.19.0.2`
+NOTIFY; one to the container's own LAN address (<bridge>) with a
+127.0.0.1 callback was refused, the Warn naming `subscribeSource=<bridge>`
 (the cost decision 3 accepts); one to that address with a callback on that
 address was sent (nothing listened there). `go test -race -count=1` over
 `internal/dlna` and `internal/dlna/discovery` passed in the same image, the
@@ -24907,7 +24908,7 @@ The merged build (with #1074), the same run: the three SUBSCRIBEs answered
 200, the peer got its NOTIFY and its 302 was not followed, the two loopback
 callbacks were refused with one Warn each (`GENA callback on this machine
 or a link-local address refused — the NOTIFY goes only to the subscriber's
-own, never to a cloud metadata address`, `subscribeSource=172.19.0.3`), and
+own, never to a cloud metadata address`, `subscribeSource=<peer>`), and
 the bridge's loopback listener logged only the NOTIFY a SUBSCRIBE from
 inside the container asked for over `127.0.0.1`.
 
