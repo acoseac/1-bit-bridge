@@ -2086,16 +2086,20 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 // passes auditOwningRootOnSubtreeMiss, and the audit's error otherwise,
 // which aborts the walk so the deletion pass never runs on untrusted state.
 func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, multiRoot bool) error {
+	// Logged by its library-relative path, the form the privacy page
+	// promises: "subtree removed" is an Info line in normal operation (the
+	// watcher, an upload, a delete).
+	rel := relPath(owningRoot, abs, multiRoot)
 	if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
 		// Returned either way, so the walk aborts. An audit the shutdown
 		// stopped is not reported.
 		if failure := ctxerr.WithoutCancellation(ctx, auditErr); failure != nil {
 			scanLogger.Error("subtree absent but owning root audit failed",
-				"path", abs, "root", owningRoot, "err", failure)
+				"path", rel, "root", owningRoot, "err", failure)
 		}
 		return auditErr
 	}
-	scanLogger.Info("subtree removed", "path", abs)
+	scanLogger.Info("subtree removed", "path", rel)
 	return nil
 }
 

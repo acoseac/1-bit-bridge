@@ -19620,7 +19620,7 @@ closes the part of it that is one file replaced by one write.
   data dir) is not warned about: the case needs a shared-group layout nobody
   runs here.
 
-## 2026-09-27 — the LAN interface pickers prefer a real LAN over a link-local tunnel (this PR)
+## 2026-09-27 — the LAN interface pickers prefer a real LAN over a link-local tunnel (#1051)
 
 #1046's entry filed it: on the dev Mac, `dlna.PickLANEligibleInterface`
 returned `18 utun0`, so the mDNS responder listened on a tunnel and even a
@@ -19801,7 +19801,7 @@ system utuns ahead of `en0`.
   member with no IPv4 at all should start one (SSDP here is IPv4-only) is its
   own decision.
 
-## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3)
+## 2026-09-27 — a discovered UPnP device's service URLs stay on its own host (external audit M3, #1050)
 
 The external audit of 2026-09-23 filed M3, "a discovered UPnP device's URLs
 are its own say-so". The iOS app closed it on its own SSDP path (#1911) and for
@@ -20383,3 +20383,146 @@ in the iOS twin.
   harvest-off route test and the boot test); the demo check after the clear
   (the demo tests); a clear that writes with nothing held
   (`TestClearStoredCredential`).
+
+## 2026-09-27 — the v0.2.1 logging audit: no client address in the error log, and failures stop naming absolute paths (#1055)
+
+`docs/release-process.md` step 1 reads the code against the published bridge
+privacy page before each release. An agent swept every log call and error
+body added since v0.2.0, the four open v0.2.1 PRs, and the paths the process
+names; each consequential claim was then re-checked by hand. Most of what it
+found predates v0.2.0, which the v0.2.0 audit had not seen.
+
+### Found
+
+- **Client IPs** (pre-existing). net/http prints the peer's address in a
+  failed TLS handshake (`http: TLS handshake error from <ip>:<port>`), a
+  recovered panic, and the HTTP/2 connection errors. Only the silent local
+  probe was dropped (#986), so a phone with a stale pin, a cancelled endpoint
+  probe and a scanner each left an address in the journal, against "client
+  IP addresses are not logged for the iOS-facing /v1/* API".
+- **An absolute path on the wire** (pre-existing, rare). The transcode pool's
+  fsync exit built the batch row's message from `err.Error()`, an
+  `*os.PathError` naming the sidecar under the variants directory, and
+  `GET /v1/upscale/batches` serves that row. The store exit and a recovered
+  panic had the same shape; the timeout warning logged ffmpeg's stderr raw.
+- **Absolute library paths in the log.** The file API logged `os.Stat` and
+  `os.Open` errors raw (pre-existing); three extractor warnings added since
+  v0.2.0 (#935, #991) and the per-file DST info line logged `absPath`; the
+  subtree-removed info line logged `abs` (from #160, moved in #1000). The
+  DST line would have logged every DST file's absolute path during
+  ExtractorVersion 17's re-extract.
+- **Disclosed rather than fixed**, by the operator's call for this release:
+  the startup banner prints the library roots; about 36 older scanner and
+  extractor error lines name absolute paths; the integrity sweeps log
+  rendition and waveform paths when they adopt, move or remove one (#937,
+  #954, #959); the bridge names its own files in fault lines (the token
+  store, the certificate, adminauth); and `enrichment skipped` is an info
+  line naming a track library-relative. The page also says rendition names
+  are content-hash-derived, false since #241, and puts a 60-second bound on
+  login tickets that `login-link --ttl` exceeds. The 1-bit.app page update
+  carries all of it.
+
+### Fixed
+
+- `handshakelog`: `RedactPeers` replaces an IPv4 or bracketed IPv6 address
+  with its port after "from ", "client " or "serving ", the words the Go
+  1.26 formats put before a peer. The anchoring keeps a local listen address
+  in an accept error. `Wrap`'s logger redacts after `isSilentProbe`, which
+  identifies the probe by the address; redacting first turns every probe
+  into a logged line (control D). `ErrorLog()` is the redaction alone, for
+  the tailnet server, whose listener yields `*tls.Conn`. HTTP/3 needs
+  nothing: its `Logger` is nil in this wiring. DLNA's renderers are the
+  page's disclosed exception, and the console's plain-HTTP modes see only
+  loopback peers.
+- `transcode`: the fsync, store, panic and timeout exits pass their messages
+  through `redactSoxErr`. Its Pass 2 comment called the stripped sidecar
+  name an opaque hash, false since #241; what remains is library-relative.
+- `api`: `writeFileErrorLog` logs the client's library-relative path and
+  `redactWalkErr(err)`; `writeResolveError` takes the client path, and the
+  open and readdir sites use it.
+- `manifest`: `trackLogPath` (the track's `Path`, or the base name) for the
+  three warnings and the DST line; `relPath` for both subtree-miss lines.
+
+### Tests and controls
+
+- `TestRedactPeers` (every Go 1.26 peer shape, two local addresses kept,
+  idempotent), `TestAPanicLineLosesThePeerAddress` (the real server, a
+  panicking handler), `TestErrorLogRedactsAndDropsNothing`. The probe tests
+  had found the filtered server's line by its address, which a redacted line
+  no longer carries, so each "was not logged" check would have passed
+  vacuously; they now look by the placeholder too.
+  `TestEveryServeHTTPServerRedactsPeerAddresses` sweeps `cmd/bridge`'s
+  `http.Server` literals by AST, with a floor of two.
+- `TestPoolFailureMessagesCarryNoAbsolutePath` (fsync and panic),
+  `TestWriteResolveError_LogsTheLibraryPathNotTheAbsoluteOne` (a real
+  `*os.PathError`; the older test's plain-string fixture was not the shape a
+  failure takes), `TestTrackLogPath`,
+  `TestTheDSTLineNamesTheTrackByItsLibraryPath`,
+  `TestSubtreeRemovedNamesTheSubtreeByItsLibraryPath`.
+- Ten negative controls, each turning exactly its predicted tests red: the
+  kept lines unredacted (five tests across three packages); `RedactPeers` a
+  no-op (seven); the tailnet `ErrorLog` removed (the sweep alone); redaction
+  before the probe check (the four probe tests); the fsync and the panic
+  message raw; the file error logging the raw error; the resolve default on
+  `writeErrorLog`; `trackLogPath` returning the absolute path; the subtree
+  line logging `abs`.
+
+### Review round (CodeRabbit)
+
+- **A bare variants directory leaked.** A root-level source's sidecar sits
+  directly in the variants directory (`VariantSidecarPath` joins no
+  subdirectory for a `Dir` of "."), so a failed parent-directory fsync reads
+  `fsync parent dir: open dir "<dir>": open <dir>: …` with no separator after
+  the directory, and Pass 2 strips only `dir/` and `dir\`. The absolute path
+  reached the log, the batch row and the SSE frame. Pass 2c now turns each
+  bare directory into a placeholder (`<render-scratch>`, `<tempDir>`,
+  `<variantsDir>`), longest first: the variants directory and tempDir can
+  nest either way or share a string prefix, and the shorter one replaced
+  first leaves the rest of the longer behind (`<tempDir>/variants`). A
+  directory below the variants directory still reads relative to it, as a
+  sidecar does, because Pass 2 runs first. The pool test's parent-directory
+  case skips on Windows, where `syncDir` is a no-op and the failure cannot
+  happen; there `%q` would also double the backslashes the bare replacement
+  looks for.
+- **The ErrorLog sweep accepted an assignment after the server served.** It
+  now requires the handshakelog assignment before the first `Serve`,
+  `ServeTLS`, `ListenAndServe` or `ListenAndServeTLS` call on that server
+  (a call inside a goroutine's closure counts at its place in the source).
+- Both tests were split into helpers for Sonar's cognitive-complexity notes.
+- Three more controls, each turning exactly its predicted tests red: the
+  variants directory dropped from Pass 2c (the placeholder test and the pool
+  test); the bare directories replaced shortest first (the placeholder test
+  alone, through the nesting case); and the LAN `ErrorLog` assignment moved
+  after `ServeTLS` (the sweep alone, which passed that shape before this
+  round).
+
+
+## 2026-09-28 — the album survey logs a mate it could not measure by its library path
+
+The album-level gain (#1053) logs one warning for each album-mate whose
+measurement fails: `album gain: an album-mate could not be measured, so it does
+not constrain the album`, with the measurement's error. That error is
+`MeasureDSDPeak`'s. Its ffprobe failure names no path (`ffprobe source: exit
+status 1`, measured on a corrupt DSF), but the render scratch's `mkdir` returns a
+`PathError` naming the scratch under the configured tempDir, and the ffmpeg | sox
+pipe's error carries sox's stderr, which quotes the source's absolute path and the
+scratch. A render's own failure goes through `redactSoxErr` at the pool (#1055);
+the survey's did not, so the v0.2.1 privacy page's list of lines that can name an
+absolute path would have missed one. Found while merging main into #1055.
+
+- `transcode.JobSpec.RedactError(err)` returns an error whose text is
+  `redactSoxErr(err.Error(), j)` and which keeps `err` behind `Unwrap`, so
+  `errors.Is` still sees a cancel. `albumgain.Resolver.measure` returns the
+  `Measure` error through it, by the mate's own spec.
+- The rest was checked: `SpecFor`'s errors name no absolute path (the CLI's name the
+  mate library-relative; serve's are API sentinels and target-rate errors), and the
+  other log lines #1053 and #1054 added log database errors.
+- Tests: `TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative` (a fake measurer
+  fails with the mate's absolute path and the tempDir; the warning names neither
+  and keeps the decoder's reason) and `TestRedactErrorKeepsTheChainAndDropsThePaths`.
+  The survey test failed before the fix on both paths.
+- Negative controls on the committed tree, each failing exactly its predicted test,
+  34 of 35 passing: `measure` returning the raw error, and `redactedError` without
+  `Unwrap`.
+- Gemini did not review it: its GitHub app was out of quota and the API project had
+  reached its monthly spending cap.

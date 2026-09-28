@@ -360,7 +360,10 @@ func (r *Resolver) measure(ctx context.Context, path string, like transcode.JobS
 	}
 	tp, err := r.cfg.Measure(ctx, spec)
 	if err != nil {
-		return nil, err
+		// A mate's decode names its absolute path and the scratch under the
+		// tempDir, and measureClaimed logs this error: the redaction a
+		// failed job's own message gets, by the mate's spec.
+		return nil, spec.RedactError(err)
 	}
 	r.record(ctx, spec, profile, tp)
 	return tp, nil

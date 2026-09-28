@@ -106,7 +106,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
+	if ok := writeResolveError(w, r, clientPath, err); ok {
 		return
 	}
 	if !info.IsDir() {
@@ -116,15 +116,15 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 
 	dir, err := os.Open(abs)
 	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't open this directory", err)
+		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't open this directory", clientPath, err)
 		return
 	}
 	defer dir.Close()
 	raw, err := dir.Readdir(-1)
 	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't read this directory", err)
+		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't read this directory", clientPath, err)
 		return
 	}
 
@@ -194,7 +194,7 @@ func (s *Server) stat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
+	if ok := writeResolveError(w, r, clientPath, err); ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, StatResponse{
@@ -281,7 +281,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	abs, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
+	if ok := writeResolveError(w, r, clientPath, err); ok {
 		return
 	}
 	if info.IsDir() {
@@ -312,8 +312,8 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 
 	f, err := os.Open(abs)
 	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't open this file", err)
+		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge couldn't open this file", clientPath, err)
 		return
 	}
 	defer f.Close()
@@ -626,7 +626,7 @@ func childPath(parent, name string) string {
 // The default branch is 5xx — for an UNKNOWN resolver error we don't
 // know the leak surface of err.Error(), so the wire body is the
 // generic "internal error" string.
-func writeResolveError(w http.ResponseWriter, r *http.Request, err error) bool {
+func writeResolveError(w http.ResponseWriter, r *http.Request, clientPath string, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -638,8 +638,11 @@ func writeResolveError(w http.ResponseWriter, r *http.Request, err error) bool {
 	case errors.Is(err, bridgefs.ErrNotFound):
 		writeErrorLog(w, r, http.StatusNotFound, "not_found", bridgefs.ErrNotFound.Error(), err)
 	default:
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge encountered an internal error", err)
+		// An EACCES or EIO from the resolver's os.Stat: an *os.PathError
+		// naming the absolute path. Logged by the path the client asked
+		// for instead.
+		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"the bridge encountered an internal error", clientPath, err)
 	}
 	return true
 }
