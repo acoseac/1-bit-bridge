@@ -16,8 +16,9 @@
 // test that points slog.Default at its own logger does: it puts back the
 // log package's output and flags as well as the previous default, which a
 // bare slog.SetDefault(prev) does not. TestNoTestSetsTheDefaultLoggerByHand,
-// in cmd/bridge, refuses a test file that calls slog.SetDefault or
-// logging.Init by hand. What SetDefault changes is one per process, so it
+// in cmd/bridge, refuses a test file that calls slog.SetDefault by hand
+// outside this package's own tests, or logging.Init outside
+// internal/logging's. What SetDefault changes is one per process, so it
 // refuses a parallel test, as t.Setenv does.
 package loggingtest
 

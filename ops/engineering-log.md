@@ -23567,7 +23567,7 @@ before anything was changed.
 - `dlna.allowTsnet` does nothing until serve passes the pickers the
   tsnet interface's name.
 
-## 2026-09-28 — every test that swaps slog's default goes through loggingtest.SetDefault, and a sweep refuses one that does not
+## 2026-09-28 — outside the logging packages' own tests, every test that swaps slog's default goes through loggingtest.SetDefault, and a sweep refuses one that does not
 
 #1064 added `loggingtest.SetDefault(t, l)` and listed, under "Left as they
 are", the test files that still put back only slog's default after swapping
@@ -23604,11 +23604,13 @@ Backlog B31; PR #1075.
 
 ### What changed
 
-- **Every capture goes through `loggingtest.SetDefault`.** Where a package
-  had a helper (`withTestSlog`, `captureLogs` in pairing, integrity and
-  analyze, manifest's `captureDefaultLogger` and `captureScanLogs`), the
-  helper changed and its callers did not. The three inline captures in
-  `internal/api/errors_test.go` were `withTestSlog`'s body, so they call it.
+- **Every capture in the twelve files goes through
+  `loggingtest.SetDefault`** (internal/logging's own `Init` calls aside;
+  see below). Where a package had a helper (`withTestSlog`, `captureLogs`
+  in pairing, integrity and analyze, manifest's `captureDefaultLogger` and
+  `captureScanLogs`), the helper changed and its callers did not. The three
+  inline captures in `internal/api/errors_test.go` were `withTestSlog`'s
+  body, so they call it.
 - **`internal/metrics` no longer calls `logging.Init`.** The test needs a
   default that keeps its Warn out of the output; a discarding handler
   installed through `SetDefault` is that, and is put back. `Init` cannot be

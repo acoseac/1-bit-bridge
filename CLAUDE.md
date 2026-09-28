@@ -5403,20 +5403,22 @@ its twin.** The top list is older, shorter, and read first.
   slog's own default stays green). `Record`, `ParkOn` and both capture
   helpers in `internal/dlna` use it (`handshaketest`, which redirects the
   log package itself, already put back its output, flags and prefix), and so
-  does every other capture in the tree (the sweep below). **It refuses a
-  parallel test, and a refusal changes nothing**: it calls `t.Setenv`
-  before anything else, so a parallel test (or one with a parallel
-  ancestor) panics there, and a later `t.Parallel` panics too. Two overlapping captures put back each other's state and leave
-  the default on a finished test's handler, and `-race` cannot see it, since
-  slog's default is an atomic pointer and the log package locks its output.
-  Gemini on #1064 asked for a docblock warning; a rule stated only in prose
-  (the `omitempty` time rule) was broken in ten fields before a guard went
-  in, so this one is enforced. **And a test file may not swap the default by
-  hand** (#1075): twelve files still put back only the default (29
-  references), and after each one's test a later test's `slog.Info` and
-  `log.Print` both went into the finished test's handler, 0 of 2 lines
-  reaching the output against 2 of 2 run alone (14 tests, go1.26.6); 2 of 2
-  once they went through `SetDefault`. `TestNoTestSetsTheDefaultLoggerByHand`
+  does every capture outside the logging packages' own tests (the sweep
+  below). **It refuses a parallel test, and a refusal changes nothing**: it
+  calls `t.Setenv` before anything else, so a parallel test (or one with a
+  parallel ancestor) panics there, and a later `t.Parallel` panics too. Two
+  overlapping captures put back each other's state and leave the default on
+  a finished test's handler, and `-race` cannot see it, since slog's default
+  is an atomic pointer and the log package locks its output. Gemini on
+  #1064 asked for a docblock warning; a rule stated only in prose (the
+  `omitempty` time rule) was broken in ten fields before a guard went in, so
+  this one is enforced. **And outside the logging packages' own tests, a
+  test file may not swap the default by hand** (#1075): twelve files still
+  put back only the default (29 references), and after each one's test a
+  later test's `slog.Info` and `log.Print` both went into the finished
+  test's handler, 0 of 2 lines reaching the output against 2 of 2 run alone
+  (14 tests, go1.26.6); 2 of 2 once they went through `SetDefault`.
+  `TestNoTestSetsTheDefaultLoggerByHand`
   (cmd/bridge) fails on a TEST file naming `slog.SetDefault` outside
   loggingtest's own tests (which build a prior default by hand, since the
   restore is their subject) or `logging.Init` outside internal/logging:

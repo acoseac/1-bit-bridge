@@ -46,7 +46,8 @@ var defaultLoggerSetters = []defaultLoggerSetter{
 	},
 }
 
-// TestNoTestSetsTheDefaultLoggerByHand refuses every test file that points
+// TestNoTestSetsTheDefaultLoggerByHand refuses every test file outside the
+// logging packages' own tests (defaultLoggerSetters) that points
 // slog.Default at a logger of its own by hand: with slog.SetDefault, or
 // with logging.Init, which calls it. A test does that through
 // loggingtest.SetDefault(t, l), which puts back the previous default and
