@@ -779,6 +779,26 @@ lost my library."
   A mention in running prose is NOT a contract — the guard accepts only a `### `
   heading or a bold `METHOD /path` lead-in, because prose-mention is the state
   six live endpoints were already in.
+- **`DELETE /v1/atlas-harvest/credential` forgets the harvest credential,
+  and a demo bridge refuses it** (#1049). Switching the app's library
+  harvest off stopped only the app's renewals: the `bulk_harvest`
+  credential the bridge held stayed usable until it expired (the audit's
+  H3). The route calls the store's `Clear()`, which drops the token and its
+  expiry and KEEPS the sync position (a re-provision resumes), answers 204
+  whether or not one was held, and draws from the write bucket. **The demo
+  answers 403 `demo_read_only`**: its one credential is shared by every
+  demo user, so one of them switching off must not stop the harvest for
+  all, and the POST's accepted residual (a public bearer can overwrite the
+  token) is not widened into a public off switch, whatever the harvest
+  setting. **A bridge with the harvest OFF clears the file too, and answers
+  204**: no store is open there, so `serve` wires
+  `atlasharvest.ClearStoredCredential` instead of the sink. This bullet said
+  "a credential file it may still hold is left alone, since nothing there
+  reads it" until CodeRabbit (on the app's #1981) caught the premise:
+  re-enabling the harvest reads that file again, so a 404 told the app
+  nothing was held while a credential waited to come back into use. **`204`
+  is the only answer that means revoked**; the app reports anything else,
+  405 from an older bridge included, as not revoked.
 - **Don't label a spec section with a version you cannot verify.** The `since
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client
@@ -3712,6 +3732,36 @@ its twin.** The top list is older, shorter, and read first.
   below the 16-pending queue it would otherwise fill alone. Don't remove
   the limiter to match the old prose. The 6-digit code is drawn from
   `crypto/rand`.
+- **A pairing link carries a one-time `code`, and the device keeps the token
+  the code redeems for, never the link's** (#1052, the 2026-09-23 audit's
+  H1). The console's QR and deep link carried the device's long-lived bearer
+  token, so anything that saw the URL (a screenshot, a clipboard manager, a
+  link preview) held the credential until someone revoked it. Every shipped
+  app refuses a link without `token=`, so the link keeps it and gains
+  `code=` (`internal/pairingcode`: 32 random bytes, single-use, 10 minutes,
+  one live code per token, held as a SHA-256; `Issue` drops the token's old
+  code BEFORE drawing the new one, so a failed issue after a console
+  rotation still ends the old QR's code, which would otherwise rotate the
+  token again for whoever holds that QR). `POST /v1/pairing/redeem`
+  trades the code by ROTATING the token it names: a fresh secret for the
+  same record, with the link's token dead in the same commit. So a copy of
+  the link is dead once the real device has paired, and a copy redeemed
+  first makes the real device's redemption fail where the user sees it.
+  **One store, in the serving process**: the console issues
+  (`admin.Deps.PairingCodes`) and the v1 API redeems, both in `bridge
+  serve`, which is what lets the codes live in memory (a restart costs a
+  fresh QR). `bridge pair`, another process, issues none, because a code
+  it minted could never be redeemed. No package test can see that wiring:
+  `TestServeRedeemsThePairingLinksCode` boots the real serve, and both
+  halves' negative controls turn only it red. **Take before judging**, the
+  login ticket's rule: the code is deleted before its age is read.
+  **Every refusal is the same 410** (unknown, used, expired, token revoked
+  or expired), and the route shares `POST /v1/pairing/requests`' per-IP
+  limiter. `Rotate` keeps `ExpiresAt`, so an expired token is refused
+  rather than handed over to 401 on its first request. **A client that
+  understands `code` never falls back to the link's token on a refusal**:
+  a copy redeemed first has killed it already, and a device paired with it
+  would keep the secret the exchange exists to replace.
 - **The login ticket is refused by SHAPE before anything else looks at it**
   (base64url, at most 64 bytes; a minted one is 43) — on the GET so an
   unbounded query is never echoed into the page, on the POST so it never

@@ -13,7 +13,7 @@ import (
 // about one endpoint — older iOS clients that don't handle `urls`
 // still see exactly what they've always seen.
 func TestBuildPairURLOmitsUrlsWhenOnlyPrimary(t *testing.T) {
-	out := buildPairURL("https://host:7788", "tok", "AB:CD", "Home", []string{"https://host:7788"})
+	out := buildPairURL("https://host:7788", "tok", "", "AB:CD", "Home", []string{"https://host:7788"})
 	if strings.Contains(out, "urls=") {
 		t.Errorf("urls= should be omitted when alternates is just the primary: %s", out)
 	}
@@ -28,7 +28,7 @@ func TestBuildPairURLEmitsUrlsWhenAlternatesPresent(t *testing.T) {
 		"https://homepc.local:7788",
 		"https://100.64.5.9:7788",
 	}
-	out := buildPairURL("https://192.168.1.10:7788", "tok", "AB:CD", "Home", alts)
+	out := buildPairURL("https://192.168.1.10:7788", "tok", "", "AB:CD", "Home", alts)
 	if !strings.Contains(out, "urls=") {
 		t.Fatalf("urls= missing: %s", out)
 	}
@@ -43,7 +43,7 @@ func TestBuildPairURLPrimaryStaysFirst(t *testing.T) {
 	// iOS fallback path (older builds ignoring `urls`) reads only
 	// `url`, so it has to be the operator's chosen primary, not
 	// whatever advertise.URLs returned first.
-	out := buildPairURL("https://pick-me:7788", "tok", "AB:CD", "Home",
+	out := buildPairURL("https://pick-me:7788", "tok", "", "AB:CD", "Home",
 		[]string{"https://otherhost:7788", "https://pick-me:7788"})
 	assertAppReads(t, appQueryItems(t, out), "url", "https://pick-me:7788")
 }

@@ -121,6 +121,7 @@ type Server struct {
 	sessions               SessionTracker
 	pairing                *pairing.Store
 	pairingRateLimiter     *pairingRateLimiter
+	pairingCodes           PairingCodeTaker             // nil unless WithPairingCodes wired; POST /v1/pairing/redeem 404s without it
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
@@ -197,6 +198,10 @@ type Server struct {
 	// hands the bridge an App-Attest-minted bulk_harvest token here. Nil unless
 	// WithAtlasHarvest is wired (gated on cfg.Atlas.HarvestEnabled).
 	atlasHarvestCred AtlasHarvestCredentialSink
+	// clearStoredHarvestCredential backs DELETE /v1/atlas-harvest/credential
+	// on a bridge whose harvest is off, so no sink is wired: it forgets a
+	// credential the state file still holds from when the harvest was on.
+	clearStoredHarvestCredential func() error
 	// atlasHarvestPinnedBase is cfg.Atlas.CanonicalHarvestBaseURL() — the only
 	// Atlas host POST /v1/atlas-harvest/credential accepts. "" = unpinned,
 	// which demo mode refuses. See refuseUnpinnedHarvestBaseURL.
@@ -999,6 +1004,14 @@ func (s *Server) reapDeviceSeen(now time.Time) int {
 // behaviour for free (404 from the unregistered route).
 func (s *Server) WithPairing(p *pairing.Store) *Server {
 	s.pairing = p
+	return s
+}
+
+// WithPairingCodes wires the one-time codes the console's pairing links
+// carry (internal/pairingcode), enabling POST /v1/pairing/redeem. The
+// console issues from the same store in the same process.
+func (s *Server) WithPairingCodes(c PairingCodeTaker) *Server {
+	s.pairingCodes = c
 	return s
 }
 

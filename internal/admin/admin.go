@@ -212,6 +212,15 @@ type Deps struct {
 	// here can tell a fixture from a forgotten line.
 	Endpoints func() []advertise.Endpoint
 
+	// PairingCodes issues the one-time code a pairing link carries beside
+	// its token (internal/pairingcode). Wired in cmd/bridge to the SAME
+	// store the v1 API redeems from (POST /v1/pairing/redeem), which is
+	// why it lives in the serving process: a code issued anywhere else
+	// could never be redeemed. Nil (test fixtures, a bridge that does not
+	// issue codes): the link carries no code, as before, and every app
+	// pairs with the token.
+	PairingCodes PairingCodeIssuer
+
 	// Pairing backs the admin-approval pairing flow. Optional — when
 	// nil, /api/pairing returns an empty list and the approve / decline
 	// handlers reply 503 (so a misconfigured deployment surfaces a
