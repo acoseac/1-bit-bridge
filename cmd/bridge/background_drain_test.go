@@ -48,8 +48,8 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 	// not the nil itself. Tolerating a nil stderr is the other wrong
 	// answer: it is the ONLY diagnostic either branch below has, so an
 	// empty `stderr=` would quietly remove the reason the grace window was
-	// worth reporting. Unreachable from the three current callers, which
-	// all pass the &safeBuffer{} they also hand to run, and the sweep test
+	// worth reporting. Unreachable from every current caller, each of which
+	// passes the &safeBuffer{} it also hands to run, and the sweep test
 	// means a new boot test arrives through here too. Both are checked, not
 	// just the one that was raised. (Gemini, PR #944.)
 	if cancel == nil || stderr == nil {
@@ -115,8 +115,8 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 // helpers: what needs pinning is the POPULATION, not the call sites.
 //
 // It was three sites when written (PR #944, the `serve` boot tests) and
-// is thirteen now (PR #945 added the in-process loops). That growth is
-// the argument for it. The boot tests were written months apart and the
+// thirteen once PR #945 added the in-process loops. That growth is the
+// argument for it. The boot tests were written months apart and the
 // surviving shape had reached only the newest; then the loop sweep's
 // own first enumeration — five files, listed by hand from a
 // `defer cancel()` grep — MISSED auto_optimize_test.go, which has the
@@ -146,14 +146,21 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 // -beats-t.Cleanup trap drainLoopOnCleanup's docblock describes and no
 // AST shape can catch. It matches the `go func(){ defer close(ch) … }()`
 // form in EVERY function of the package's test files, a helper as well as
-// a test: until 2026-09-28 it read Test functions only, so a launch
-// factored out into a fixture helper went unseen, and the floor could not
-// reveal it. That is the change that added bootServe (the boot every
-// `serve` test repeated), and two helpers already launched goroutines
-// unaudited then (runOneFingerprintPass, runOneSmartPlaylistPass; both
-// drain). A helper that launches must register the drain itself, which
-// is also where the drain's ordering against the caller's cleanups is
-// decided.
+// a test, and requires the drain in the function that launches. Until
+// 2026-09-28 it read Test functions only, so a launch factored out into a
+// fixture helper went unseen, and the floor could not reveal it, since the
+// tests that launched inline still satisfied it. Two changes that day
+// moved a boot into a helper and widened the scan for it, each unaware of
+// the other: bootServe (#1071, the boot every `serve` test repeated) and
+// startConsoleBridge (#1067, a boot with the console and a paired client).
+// Both now start serve through launchServe, so the scan finds one launch
+// where it found two. Two helpers already launched goroutines unaudited
+// then (runOneFingerprintPass, runOneSmartPlaylistPass; both drain). A
+// helper that launches must register the drain itself, which is also
+// where the drain's ordering against the caller's cleanups is decided;
+// one that handed its channel back for the CALLER to drain would be
+// reported, since a drain beside its launch is what one function's AST
+// can check.
 func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -175,24 +182,26 @@ func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 		if goToolIgnores(filepath.Base(path)) {
 			continue
 		}
-		checked += auditBackgroundTestsIn(t, fset, path)
+		checked += auditBackgroundLaunchesIn(t, fset, path)
 	}
 	// Thirteen when written, all tests; 45 on 2026-09-28, when helpers
-	// joined (42 tests and three helpers). Adding a drained launch only
-	// raises this, so the floor never needs bumping — it trips when the
-	// count DROPS, which is the scan silently ceasing to match.
+	// joined (42 tests, and three helpers: launchServe and the two sweep
+	// helpers). Adding a drained launch only raises this, so the floor
+	// never needs bumping — it trips when the count DROPS, which is the
+	// scan silently ceasing to match.
 	if checked < 13 {
-		t.Fatalf("matched %d function(s) starting a drainable goroutine, want at least 13 — "+
+		t.Fatalf("matched %d function(s) that start a drainable goroutine, want at least 13 — "+
 			"the scan has stopped matching what it is meant to match", checked)
 	}
 }
 
-// auditBackgroundTestsIn reports how many functions in one file, tests and
-// the helpers they call alike, start a drainable goroutine, and errors for
-// each that does so without registering a drain. Split out from the test
-// body to keep the nesting shallow (SonarCloud go:S3776 on PR #944); the
-// count it returns is what feeds the floor.
-func auditBackgroundTestsIn(t *testing.T, fset *token.FileSet, path string) int {
+// auditBackgroundLaunchesIn reports how many functions in one file, tests
+// and the helpers they call alike, start a drainable goroutine, and errors
+// for each that does so without registering a drain itself. Split out
+// from the test body to keep the nesting shallow (SonarCloud go:S3776 on
+// PR #944); the count it returns is what feeds the floor. It was
+// auditBackgroundTestsIn while it read tests alone.
+func auditBackgroundLaunchesIn(t *testing.T, fset *token.FileSet, path string) int {
 	t.Helper()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
@@ -210,10 +219,11 @@ func auditBackgroundTestsIn(t *testing.T, fset *token.FileSet, path string) int 
 		matched++
 		if !callsFunc(fn.Body, "drainServeOnCleanup") && !callsFunc(fn.Body, "drainLoopOnCleanup") {
 			t.Errorf("%s: %s starts a background goroutine without draining it on cleanup. "+
-				"A t.Fatalf in its body returns while that goroutine is still running, and "+
-				"the fixture's teardown — t.TempDir removal, store.Close, pool.Stop — then "+
+				"A t.Fatalf after the launch returns while that goroutine is still running, "+
+				"and the fixture's teardown — t.TempDir removal, store.Close, pool.Stop — then "+
 				"runs underneath it. What gets reported is the teardown, not the assertion "+
-				"that failed. Call drainServeOnCleanup or drainLoopOnCleanup.",
+				"that failed. Call drainServeOnCleanup or drainLoopOnCleanup in the function "+
+				"that launches it.",
 				fset.Position(fn.Pos()), fn.Name.Name)
 		}
 	}

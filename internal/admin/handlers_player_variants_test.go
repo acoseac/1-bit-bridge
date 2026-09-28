@@ -236,6 +236,40 @@ func TestAlbumDetailVariantSummarySeparatesOffFromNoSox(t *testing.T) {
 
 var errNoSoxForTest = errors.New("sox not found")
 
+// TestTheVariantSummaryReadsSoxAsTheGateDoes pins soxAvailable to the sox
+// half of the gate the batch submit reads (cmd/bridge's soxUsable): a sox
+// the precheck finds but whose build has no FLAC is as unusable as a
+// missing one, and a build whose formats could not be read is given the
+// benefit, as the gate gives it. With the precheck alone the first read as
+// available, and the panel, finding no panel-wide reason, named the
+// CarPlay switch for a refusal the sox made
+// (TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt).
+func TestTheVariantSummaryReadsSoxAsTheGateDoes(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	seedVariantAlbum(t, srv.deps.Manifest)
+	cfg.Upscale.Enabled = true
+	srv.deps.CfgHolder.Store(cfg)
+	srv.deps.UpscalePrecheck = func() error { return nil }
+	for _, c := range []struct {
+		name           string
+		hasFLAC, known bool
+		want           bool
+	}{
+		{"a build with FLAC", true, true, true},
+		{"a build without FLAC", false, true, false},
+		{"a build whose formats could not be read", false, false, true},
+	} {
+		srv.deps.UpscaleSoxFLAC = func() (bool, bool) { return c.hasFLAC, c.known }
+		sum, _ := albumDetailBody(t, srv, "Album")["variants"].(map[string]any)
+		if sum == nil {
+			t.Fatalf("%s: no variants summary", c.name)
+		}
+		if sum["soxAvailable"] != c.want {
+			t.Errorf("%s: soxAvailable = %v, want %v", c.name, sum["soxAvailable"], c.want)
+		}
+	}
+}
+
 // TestAlbumDetailCountsStaleVariantsAsCoveredAndSaysSo pins a
 // deliberately awkward pair of facts.
 //

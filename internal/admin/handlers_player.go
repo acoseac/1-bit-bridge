@@ -913,16 +913,20 @@ type playerVariantCoverageDTO struct {
 // Enabled and SoxAvailable are separate on purpose: the feature can be
 // switched off in config, or switched on with no toolchain to run it.
 // A UI that collapses them tells the operator "unavailable" when the
-// actionable answer is "install sox".
+// actionable answer is "install sox". SoxAvailable is Server.soxUsable, the
+// sox half of the gate the submit reads (found, and with FLAC when the
+// build's formats are known), so the two together close wherever the gate
+// does, and the panel says so once, above both kinds.
 //
 // OptimizeActive says whether the CarPlay kind may be generated. It is not
 // the configured `optimizeEnabled` but the predicate POST /api/upscale/batch
-// reads for the kind (Server.optimizeActive, which in production is
-// `upscale.enabled` and `upscale.optimizeEnabled` together): the panel
-// disables "Generate CarPlay" on it, so the button is off exactly where a
-// click would be refused `optimize-disabled`. Until 2026-09-28 the summary
-// carried no such field, and the button stayed live with upscaling on and
-// the CarPlay switch off.
+// reads for the kind (Server.optimizeActive, which in production is the
+// upscale gate and `upscale.optimizeEnabled` together): the panel disables
+// "Generate CarPlay" on it, so the button is off exactly where a click
+// would be refused. Until 2026-09-28 the summary carried no such field, and
+// the button stayed live with upscaling on and the CarPlay switch off. The
+// panel names the CarPlay switch as the reason only when nothing above it
+// has closed both kinds.
 type playerVariantSummaryDTO struct {
 	Upscale        playerVariantCoverageDTO `json:"upscale"`
 	Optimize       playerVariantCoverageDTO `json:"optimize"`

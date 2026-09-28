@@ -288,15 +288,15 @@
         {{if .Data.UpscaleSoxMissing}}
           <p class="warn-banner">
             <strong>sox is not on PATH.</strong> Enabling here will write the flag,
-            but the bridge will degrade to feature-off at startup until sox is
-            installed on the bridge host:
+            but upscaling, CarPlay variants and their pre-generation stay off until
+            sox is installed on the bridge host (no restart needed once it is):
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
         {{else if .Data.UpscaleSoxFLACMissing}}
           <p class="warn-banner">
             <strong>sox lacks FLAC support.</strong> The upscaler's pipeline writes
-            FLAC, so the feature will degrade to off at startup until you reinstall
-            sox with FLAC on the bridge host:
+            FLAC, so the feature stays off until you reinstall sox with FLAC on the
+            bridge host (no restart needed once you have):
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxFormatHint}}</pre>
         {{end}}
@@ -476,15 +476,15 @@
         {{if .Data.UpscaleSoxMissing}}
           <p class="warn-banner">
             <strong>sox is not on PATH.</strong> Audio analysis decodes through
-            sox; enabling here writes the flag, but the bridge will degrade to
-            feature-off at startup until sox is installed on the bridge host:
+            sox; enabling here writes the flag, but the feature stays off until
+            sox is installed on the bridge host (no restart needed once it is):
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxInstallHint}}</pre>
         {{else if .Data.UpscaleSoxFLACMissing}}
           <p class="warn-banner">
             <strong>sox lacks FLAC support.</strong> Audio analysis decodes FLAC
-            through sox; the feature will degrade to off at startup until you
-            reinstall sox with FLAC on the bridge host:
+            through sox; the feature stays off until you reinstall sox with FLAC
+            on the bridge host (no restart needed once you have):
           </p>
           <pre class="install-hint">{{.Data.UpscaleSoxFormatHint}}</pre>
         {{end}}
