@@ -22,6 +22,30 @@ func ticketStore(t *testing.T) *Store {
 	return s
 }
 
+// ticketFiles returns every ticket file in s's directory, by name, with its
+// bytes: the files ticketDigestFromName recognises, which are the ones a mint
+// writes and a prune may remove.
+func ticketFiles(t *testing.T, s *Store) map[string][]byte {
+	t.Helper()
+	dir := filepath.Dir(s.path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string][]byte{}
+	for _, e := range entries {
+		if _, ok := s.ticketDigestFromName(e.Name()); !ok {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[e.Name()] = b
+	}
+	return out
+}
+
 func TestLoginTicketRoundTrip(t *testing.T) {
 	s := ticketStore(t)
 	raw, err := s.MintLoginTicket("admin")
@@ -90,11 +114,11 @@ func TestExpiredTicketIsStillConsumed(t *testing.T) {
 	raw, _ := s.MintLoginTicket("admin")
 	now = now.Add(LoginTicketTTL + time.Second)
 	_, _ = s.RedeemLoginTicket(raw)
-	s.mu.Lock()
-	n := len(s.readTicketsLocked())
-	s.mu.Unlock()
-	if n != 0 {
-		t.Errorf("%d tickets still held after redeeming an expired one", n)
+	if _, err := os.Stat(s.ticketFilePath(hashTicket(raw))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the expired ticket's file survived its presentation (stat err=%v)", err)
+	}
+	if n := len(ticketFiles(t, s)); n != 0 {
+		t.Errorf("%d ticket files left after redeeming an expired one", n)
 	}
 }
 
@@ -118,22 +142,34 @@ func TestCannotMintForAnUnknownUser(t *testing.T) {
 	}
 }
 
+// TestLiveTicketsAreBounded pins the ceiling as a REFUSAL: the mint that
+// would pass maxLiveTickets fails, and every ticket already minted still
+// redeems. Evicting the oldest to make room would silently kill a link
+// someone is holding, which is worse than a mint an operator can retry once
+// a link has been used or has expired.
 func TestLiveTicketsAreBounded(t *testing.T) {
 	s := ticketStore(t)
-	var lastErr error
-	for i := 0; i < maxLiveTickets+5; i++ {
-		if _, err := s.MintLoginTicket("admin"); err != nil {
-			lastErr = err
+	var minted []string
+	for i := 0; i < maxLiveTickets; i++ {
+		raw, err := s.MintLoginTicket("admin")
+		if err != nil {
+			t.Fatalf("mint %d of %d, under the ceiling: %v", i+1, maxLiveTickets, err)
+		}
+		minted = append(minted, raw)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.MintLoginTicket("admin"); err == nil {
+			t.Fatal("a mint past the ceiling succeeded; the live-ticket set is unbounded")
 		}
 	}
-	if lastErr == nil {
-		t.Error("minting never refused; the live-ticket set is unbounded")
+	if n := len(ticketFiles(t, s)); n != maxLiveTickets {
+		t.Errorf("%d ticket files after the refused mints, want %d", n, maxLiveTickets)
 	}
-	s.mu.Lock()
-	n := len(s.readTicketsLocked())
-	s.mu.Unlock()
-	if n > maxLiveTickets {
-		t.Errorf("holding %d tickets, want at most %d", n, maxLiveTickets)
+	for i, raw := range minted {
+		if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+			t.Errorf("ticket %d of %d after the refused mints = (%q, %v), want (admin, nil): "+
+				"a refused mint evicted it", i+1, maxLiveTickets, user, err)
+		}
 	}
 }
 
@@ -176,7 +212,8 @@ func TestTicketCrossesProcesses(t *testing.T) {
 	}
 }
 
-// The file must never contain a usable ticket, only its digest.
+// The disk must never hold a usable ticket, only its digest: not in the
+// ticket's file, not in its name, and not in any other file in the directory.
 func TestTicketFileHoldsNoUsableCredential(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "adminauth.json")
@@ -191,14 +228,27 @@ func TestTicketFileHoldsNoUsableCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(s.ticketPath())
+	ticketPath := s.ticketFilePath(hashTicket(raw))
+	if _, err := os.Stat(ticketPath); err != nil {
+		t.Fatalf("the ticket's file is not where ticketFilePath names it: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("reading the ticket file: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(string(body), raw) {
-		t.Fatal("the ticket file contains the ticket itself")
+	for _, e := range entries {
+		if strings.Contains(e.Name(), raw) {
+			t.Errorf("%s names the ticket itself", e.Name())
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		if strings.Contains(string(body), raw) {
+			t.Errorf("%s contains the ticket itself", e.Name())
+		}
 	}
-	info, err := os.Stat(s.ticketPath())
+	info, err := os.Stat(ticketPath)
 	if err != nil {
 		t.Fatal(err)
 	}

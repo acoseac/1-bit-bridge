@@ -426,16 +426,18 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(ticket)
 	if err != nil {
 		if !errors.Is(err, adminauth.ErrTicketInvalid) {
-			// The ticket store could not be written, or the credential store
-			// it checks the ticket's account against could not be read — a
-			// full or read-only disk, a damaged or foreign-owned file, not
-			// anything the holder of this link did. Redemption established
-			// NOTHING about the ticket, and the record is still on disk, so
-			// `link=stale` here would be false twice over: it names a cause
-			// that was never determined, and its advice is to fetch a fresh
-			// link, which will fail in exactly the same way. This branch is
-			// also the only signal an operator would get that the store has
-			// stopped being usable.
+			// The ticket's file could not be read or removed, or the
+			// credential store it checks the ticket's account against could
+			// not be read — a read-only disk, a damaged or foreign-owned
+			// file, a Windows sharing violation, not anything the holder of
+			// this link did. Redemption established NOTHING about the ticket,
+			// and the record is still on disk, so `link=stale` here would be
+			// false twice over: it names a cause that was never determined,
+			// and its advice is to fetch a fresh link, while this one is
+			// unspent and redeems once the fault is fixed (and a fresh one
+			// fails the same way wherever the fault is the directory's or the
+			// credential's). This branch is also the only signal an operator
+			// would get that the store has stopped being usable.
 			logger.Error("admin redeem login ticket", "err", err)
 			writeError(w, http.StatusInternalServerError, "ticket_store_unavailable",
 				"the login-ticket or credential store could not be read or written")

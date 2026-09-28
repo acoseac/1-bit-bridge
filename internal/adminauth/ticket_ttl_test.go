@@ -87,11 +87,8 @@ func TestMintLoginTicketTTL_RefusesMoreThanTheMaximum(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "maximum") {
 		t.Errorf("the refusal should name the ceiling: %v", err)
 	}
-	s.mu.Lock()
-	n := len(s.readTicketsLocked())
-	s.mu.Unlock()
-	if n != 0 {
-		t.Errorf("%d tickets held after a REFUSED mint — nothing should have been written", n)
+	if n := len(ticketFiles(t, s)); n != 0 {
+		t.Errorf("%d ticket files after a REFUSED mint — nothing should have been written", n)
 	}
 	// Control: the maximum itself is allowed, so the bound is not off by one.
 	if _, err := s.MintLoginTicketTTL("admin", MaxLoginTicketTTL); err != nil {
@@ -103,14 +100,15 @@ func TestMintLoginTicketTTL_RefusesMoreThanTheMaximum(t *testing.T) {
 //
 // The two are opposite facts. ErrTicketInvalid says something about the
 // TICKET — unknown, expired, already spent — and every one of those is the
-// holder's problem, recoverable with a fresh link. A failed write says nothing
-// about the ticket at all: the record is still on disk and a fresh link will
-// fail in exactly the same way. Collapsing the two sends an operator around a
-// loop that cannot terminate, and hides the only signal that the store has
-// stopped being writable.
+// holder's problem, recoverable with a fresh link. A failed spend says nothing
+// about the ticket at all: the record is still on disk, and a fresh link
+// would first need a mint into the same directory. Collapsing the two sends
+// an operator around a loop that cannot terminate, and hides the only signal
+// that the store has stopped being writable. The ticket is not spent, so the
+// same link redeems once the directory is writable again.
 func TestRedeemLoginTicketDistinguishesAnUnwritableStore(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("a directory mode does not gate file creation on Windows")
+		t.Skip("a directory mode does not gate file removal on Windows")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory mode this fixture depends on")
@@ -123,20 +121,14 @@ func TestRedeemLoginTicketDistinguishesAnUnwritableStore(t *testing.T) {
 	if err := s.SetInitialPassword("admin", "correct horse battery staple"); err != nil {
 		t.Fatal(err)
 	}
-	// TWO tickets: redeeming one leaves the map non-empty, so the write takes
-	// the stage-and-rename path rather than the remove-the-file shortcut an
-	// empty map takes.
 	raw, err := s.MintLoginTicket("admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MintLoginTicket("admin"); err != nil {
-		t.Fatal(err)
-	}
-	// Readable and traversable, not writable: the record is still legible, so
-	// the ticket is FOUND and it is only the persist that fails. That is the
-	// arm being pinned — a fixture that also broke the read would land on
-	// ErrTicketInvalid and prove nothing.
+	// Readable and traversable, not writable: the ticket's file is still
+	// legible, so the ticket is FOUND and it is only the removal that spends
+	// it that fails. That is the arm being pinned — a fixture that also broke
+	// the read would land elsewhere and prove nothing about the spend.
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -148,5 +140,13 @@ func TestRedeemLoginTicketDistinguishesAnUnwritableStore(t *testing.T) {
 	}
 	if errors.Is(err, ErrTicketInvalid) {
 		t.Errorf("a store failure was reported as an invalid ticket: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+		t.Errorf("the ticket once the directory is writable again = (%q, %v), want (admin, nil): "+
+			"the failed redemption spent it", user, err)
 	}
 }
