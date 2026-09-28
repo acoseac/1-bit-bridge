@@ -5982,7 +5982,17 @@ its twin.** The top list is older, shorter, and read first.
   card's `lastFinishedAt` to pass the instant of its nudge, a sweep the gate
   refuses finished inside the tick, and the wait ran out on the Windows leg
   (2026-09-28; 6 runs of 6 under a simulated 15.625 ms clock). A serve test
-  counts through a `serveOpts` hook instead (`autoOptimizeSwept`).
+  counts through a `serveOpts` hook instead (`autoOptimizeSwept`). **An mtime
+  compare is wrong in BOTH directions** (B52, 2026-09-28): "was it written?"
+  FAILS correct code when both writes land in one tick, and "was it NOT
+  rewritten?" passes with the guard removed. Five tests held the pattern with
+  this rule in front of them (four in internal/auth, the tls reload test).
+  They count writes (`inCommitWindow`), read the file back through a fresh
+  store, and compare identity (`os.SameFile`): every write here stages a new
+  file and renames it, so a rewritten path is another file, which bytes
+  cannot tell for a rewrite of the same bytes. **A FAT disk image reproduces
+  the class on any Mac**: `hdiutil create -fs MS-DOS` keeps 2 s mtimes, and
+  `TMPDIR` on it puts every `t.TempDir()` there.
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so
   `freeLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at
   once** (#1026). Windows hands ephemeral ports out IN SEQUENCE, TCP and UDP
