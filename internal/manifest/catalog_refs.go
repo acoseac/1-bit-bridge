@@ -132,7 +132,23 @@ const catalogRefSelect = `
 // and StreamTrackDupeRefsUnderPrefix carry. librarycat copies what it
 // keeps. Read-only; no s.mu.
 func (s *Store) StreamCatalogRefs(ctx context.Context, fn func(CatalogRef) error) error {
-	rows, err := s.db.QueryContext(ctx, catalogRefSelect)
+	return s.streamCatalogRefs(ctx, catalogRefSelect, fn)
+}
+
+// catalogRefSelectDSD is catalogRefSelect narrowed to DSD sources, for the
+// album-level gain's index (internal/albumgain). Same columns, same served-
+// rows predicate and the same scan below, so a DSD row groups into exactly
+// the album the full catalog would put it in; only the row set is smaller.
+const catalogRefSelectDSD = catalogRefSelect + `
+	   AND CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'), 0) AS INTEGER) != 0`
+
+// StreamDSDCatalogRefs is StreamCatalogRefs over the served DSD rows only.
+func (s *Store) StreamDSDCatalogRefs(ctx context.Context, fn func(CatalogRef) error) error {
+	return s.streamCatalogRefs(ctx, catalogRefSelectDSD, fn)
+}
+
+func (s *Store) streamCatalogRefs(ctx context.Context, query string, fn func(CatalogRef) error) error {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("stream catalog refs: %w", err)
 	}

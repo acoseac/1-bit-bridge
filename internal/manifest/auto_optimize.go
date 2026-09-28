@@ -70,8 +70,11 @@ type AutoOptimizeCandidate struct {
 	// is keyed on (source_path, variant_id) and a family-preserving
 	// target rate is stable for a given source, so the replacement lands
 	// on the same row and the same sidecar path. A SUPERSEDED row (older
-	// schema version, or a pre-re-rip target rate) is left alone here and
-	// reaped by the orphan-sidecar GC, which is its owner.
+	// schema version, or a pre-re-rip target rate) is left alone. This
+	// said the orphan-sidecar GC reaps it; it does not — the GC's known
+	// set is every row, and only a row whose FILE is missing is reaped. The
+	// DSD v1 → v2 move relies on exactly that: a phone that downloaded a v1
+	// rendition finds its id, and its gain, still in the manifest.
 	StaleVariantID string
 }
 
@@ -111,6 +114,16 @@ type AutoOptimizeCandidate struct {
 // double-spending `MaxPerSweep` and over-reporting the backlog — so the
 // stale-id lookup is a single-row correlated subquery instead.
 // Pinned by TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows.
+//
+// **A DSD source is covered only by a fresh row of the CURRENT DSD schema**
+// (`optimized-dsd-<DSDRenditionSchemaVersion>-%`), where a PCM source keeps
+// the version-agnostic rule. A DSD schema bump changes what the rendition
+// sounds like — v2 is the album-level gain — and nothing else would move the
+// compact tier to it: a phone never requests a family it already holds, so
+// counting a fresh v1 row as coverage would leave every rendered album on its
+// per-track boosts forever. The loop the rule above guards against cannot
+// return: the sweeper writes the current id, whose facts then match. Pinned
+// by TestAutoOptimizeCandidatesMoveDSDToTheCurrentSchema.
 //
 // **Freshness compares the variant against the TRACK ROW, not against
 // a fresh stat of the file.** That is deliberate and self-consistent:
@@ -159,7 +172,9 @@ const autoOptimizeCandidateSQL = `
 	   AND (` + optimizeEligibleSQL + ` OR ` + dsdRenderEligibleSQL + `)
 	   AND NOT EXISTS (SELECT 1 FROM track_variants fv
 	                    WHERE fv.source_path     = t.path
-	                      AND fv.variant_id      LIKE 'optimized-%'
+	                      AND fv.variant_id      LIKE CASE WHEN COALESCE(t.is_dsd, 0) = 1
+	                                                       THEN 'optimized-dsd-` + DSDRenditionSchemaVersion + `-%'
+	                                                       ELSE 'optimized-%' END
 	                      AND fv.source_mtime_ns = t.mtime_ns
 	                      AND fv.source_size     = t.size)
 	   -- Sources that have failed repeatedly on THIS version of the file are
@@ -182,10 +197,17 @@ func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int, opts 
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, autoOptimizeCandidateSQL,
+	return s.listRenditionCandidates(ctx, autoOptimizeCandidateSQL, "auto-optimize", limit, opts)
+}
+
+// listRenditionCandidates runs one of the two candidate statements that
+// share autoOptimizeCandidateSQL's columns and its bind order (the two
+// DSD-render binds, the suppression cutoff, the LIMIT) and scans the rows.
+func (s *Store) listRenditionCandidates(ctx context.Context, query, what string, limit int, opts EligibilityOpts) ([]AutoOptimizeCandidate, error) {
+	rows, err := s.db.QueryContext(ctx, query,
 		append(opts.binds(), s.VariantFailureCutoff(), limit)...)
 	if err != nil {
-		return nil, fmt.Errorf("list auto-optimize candidates: %w", err)
+		return nil, fmt.Errorf("list %s candidates: %w", what, err)
 	}
 	defer rows.Close()
 	out := []AutoOptimizeCandidate{}
@@ -198,12 +220,74 @@ func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int, opts 
 			&c.SampleRate, &c.BitsPerSample, &c.Codec,
 			&isDSD, &c.Compression, &c.DurationSec, &c.Channels,
 			&c.StaleVariantID); err != nil {
-			return nil, fmt.Errorf("scan auto-optimize candidate: %w", err)
+			return nil, fmt.Errorf("scan %s candidate: %w", what, err)
 		}
 		c.IsDSD = isDSD != 0
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// supersededPCMRenditionSQL selects the DSD tracks whose FAITHFUL rendition
+// predates the current DSD schema: they hold a `pcm-%` row and no fresh
+// `pcm-<DSDRenditionSchemaVersion>-%` one. The faithful tier is rendered on
+// request only, and a phone that already holds a `pcm-` rendition never asks
+// for another, so the sweeper re-renders exactly these — never a track that
+// had none, which would render a 5 GB-an-hour tier nobody asked for. Same
+// served / local / eligible / suppression rules, columns and bind order as
+// autoOptimizeCandidateSQL, so both scan into AutoOptimizeCandidate.
+const supersededPCMRenditionSQL = `
+	SELECT t.path, t.size, t.mtime_ns,
+	       COALESCE(t.sample_rate, 0), COALESCE(t.bits_per_sample, 0),
+	       COALESCE(t.codec, ''),
+	       COALESCE(t.is_dsd, 0), COALESCE(t.compression, ''),
+	       COALESCE(json_extract(t.tags_json, '$.duration'), 0),
+	       COALESCE(json_extract(t.tags_json, '$.channels'), 0),
+	       COALESCE((SELECT sv.variant_id FROM track_variants sv
+	                  WHERE sv.source_path = t.path
+	                    AND sv.variant_id LIKE 'pcm-%'
+	                  ORDER BY sv.variant_id ASC
+	                  LIMIT 1), '') AS stale_variant_id
+	  FROM tracks t
+	 WHERE t.size > 0
+	   AND COALESCE(t.dupe_suppressed, 0) = 0
+	   AND NOT EXISTS (SELECT 1 FROM upnp_track_routing u
+	                    WHERE u.source_path = t.path)
+	   AND ` + dsdRenderEligibleSQL + `
+	   AND EXISTS (SELECT 1 FROM track_variants sv
+	                WHERE sv.source_path = t.path
+	                  AND sv.variant_id LIKE 'pcm-%')
+	   AND NOT EXISTS (SELECT 1 FROM track_variants fv
+	                    WHERE fv.source_path     = t.path
+	                      AND fv.variant_id      LIKE 'pcm-` + DSDRenditionSchemaVersion + `-%'
+	                      AND fv.source_mtime_ns = t.mtime_ns
+	                      AND fv.source_size     = t.size)
+	   AND NOT ` + variantFailureSuppressedSQL + `
+	 ORDER BY t.indexed_at DESC, t.path ASC
+	 LIMIT ?`
+
+// ListSupersededPCMRenditions returns up to `limit` DSD tracks whose
+// faithful rendition should be rendered again on the current DSD schema,
+// newest-indexed first. See supersededPCMRenditionSQL. A non-positive limit
+// returns nothing, as ListAutoOptimizeCandidates does.
+func (s *Store) ListSupersededPCMRenditions(ctx context.Context, limit int, opts EligibilityOpts) ([]AutoOptimizeCandidate, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	return s.listRenditionCandidates(ctx, supersededPCMRenditionSQL, "superseded pcm rendition", limit, opts)
+}
+
+// supersededPCMRenditionCountSQL is the faithful migration pass's count,
+// built the way autoOptimizeCandidateCountSQL is: one copy of the predicate
+// serves the listing and the sweep card's backlog, with the same four binds.
+const supersededPCMRenditionCountSQL = `SELECT COUNT(*) FROM (` + supersededPCMRenditionSQL + `)`
+
+// CountSupersededPCMRenditions returns how many DSD tracks still hold a
+// faithful rendition from an older DSD schema: the backlog
+// ListSupersededPCMRenditions drains, without the cap. The sweep card adds
+// it to "N remaining", since moving those renditions is the sweeper's work.
+func (s *Store) CountSupersededPCMRenditions(ctx context.Context, opts EligibilityOpts) (int, error) {
+	return s.countRenditionCandidates(ctx, supersededPCMRenditionCountSQL, "superseded pcm rendition", opts)
 }
 
 // autoOptimizeCandidateCountSQL wraps the listing statement so ONE copy
@@ -232,14 +316,24 @@ const autoOptimizeCandidateCountSQL = `SELECT COUNT(*) FROM (` + autoOptimizeCan
 // statements) so the number the card shows and the work the sweeper
 // does cannot drift.
 func (s *Store) CountAutoOptimizeCandidates(ctx context.Context, opts EligibilityOpts) (int, error) {
+	return s.countRenditionCandidates(ctx, autoOptimizeCandidateCountSQL, "auto-optimize", opts)
+}
+
+// countRenditionCandidates runs one of the two count statements that wrap a
+// candidate listing (autoOptimizeCandidateCountSQL,
+// supersededPCMRenditionCountSQL), with the listing's bind order: the two
+// DSD-render binds, the suppression cutoff (its `?` sits in the WHERE), then
+// the LIMIT, where -1 is SQLite's "no limit", which an uncapped count wants.
+// It is listRenditionCandidates' twin. The statement arrives as a parameter,
+// which also keeps SonarCloud's go:S2077 quiet: it follows a named const to
+// its concatenation, and these statements are concatenations of shared
+// predicates by design.
+func (s *Store) countRenditionCandidates(ctx context.Context, query, what string, opts EligibilityOpts) (int, error) {
 	var n int
-	// Same bind order as the listing it wraps: the two DSD-render binds,
-	// the suppression cutoff (its `?` sits in the WHERE) then the LIMIT.
-	// -1 is SQLite's "no limit", which is what an uncapped count wants.
-	err := s.db.QueryRowContext(ctx, autoOptimizeCandidateCountSQL,
+	err := s.db.QueryRowContext(ctx, query,
 		append(opts.binds(), s.VariantFailureCutoff(), -1)...).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count auto-optimize candidates: %w", err)
+		return 0, fmt.Errorf("count %s candidates: %w", what, err)
 	}
 	return n, nil
 }

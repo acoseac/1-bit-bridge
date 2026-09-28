@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -121,7 +122,7 @@ func TestAutoOptimizeSweepIncludesDSDOnlyWhenCapsOn(t *testing.T) {
 		if !job.SourceIsDSD {
 			t.Error("SourceIsDSD = false on the DSF job; VariantID() would land in the PCM family")
 		}
-		if got, want := job.VariantID(), "optimized-dsd-v1-44100-16"; got != want {
+		if got, want := job.VariantID(), "optimized-dsd-v2-44100-16"; got != want {
 			t.Errorf("VariantID = %q, want %q", got, want)
 		}
 		if job.Kind != transcode.JobKindOptimize || job.TargetBits != 16 || job.TargetSampleRate != 44100 {
@@ -329,4 +330,154 @@ func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 			t.Errorf("one lane: DiskFloorReached=%v Enqueued=%d, want false / 2", counts.DiskFloorReached, counts.Enqueued)
 		}
 	})
+}
+
+// seedRendition records a rendition row for rel, fresh against the track
+// row.
+func (f *autoOptimizeFixture) seedRendition(t *testing.T, rel, variantID string, rate, bits int) {
+	t.Helper()
+	st, err := f.store.GetTrackStat(context.Background(), rel)
+	if err != nil || st == nil {
+		t.Fatalf("GetTrackStat(%q) = %v, %v", rel, st, err)
+	}
+	gain := 4.0
+	if err := f.store.UpsertVariant(context.Background(), manifest.VariantRow{
+		SourcePath: rel, VariantID: variantID, SidecarPath: "/variants/" + rel + "." + variantID + ".flac",
+		Format: "flac", SampleRate: rate, BitsPerSample: bits, SizeBytes: 1000,
+		SourceMTimeNS: st.MTimeNS, SourceSize: st.Size, AppliedGainDB: &gain,
+		SoxSettings: `{"rateFlag":"-v"}`, CreatedAt: time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertVariant(%q, %q): %v", rel, variantID, err)
+	}
+}
+
+// TestAutoOptimizeSweepMovesFaithfulRenditionsToTheCurrentSchema: the
+// faithful tier is rendered on request only, and a phone that holds a `pcm-`
+// rendition never asks for another, so after a DSD schema bump the sweeper
+// re-renders exactly the tracks that already have one — a faithful job on
+// the background lane with the same facts an on-request render takes. A
+// track with no faithful rendition never gains one, a sweep whose cap the
+// compact pass spent adds nothing, and the backlog shows in "remaining".
+func TestAutoOptimizeSweepMovesFaithfulRenditionsToTheCurrentSchema(t *testing.T) {
+	caps := func() transcode.DSDRenderCaps { return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: true} }
+	v := transcode.DSDRenditionSchemaVersion
+
+	t.Run("both passes in one sweep", func(t *testing.T) {
+		f := newAutoOptimizeFixture(t)
+		f.sweeper.dsdCaps = caps
+		f.sweeper.tempDir = func() string { return "/scratch/render" }
+		seedSchemaMoveLibrary(t, f)
+		counts := sweepOnceOrFail(t, f)
+		got := sweptJobsByID(f)
+		checkSweptJobIDs(t, f, got, []string{
+			"A/DSD/01.dsf pcm-" + v + "-176400-24",
+			"A/DSD/03.dsf optimized-dsd-" + v + "-48000-16",
+			"A/DSD/03.dsf pcm-" + v + "-192000-24",
+		})
+		if counts.Enqueued != 3 || counts.Regenerated != 3 {
+			t.Errorf("Enqueued/Regenerated = %d/%d, want 3/3 (every one replaces an older rendition)", counts.Enqueued, counts.Regenerated)
+		}
+		checkFaithfulMoveJob(t, f, got["A/DSD/01.dsf pcm-"+v+"-176400-24"], "A/DSD/01.dsf")
+		// Nothing was written (the enqueuer only records), so the whole
+		// backlog is still there: one compact candidate, two faithful.
+		if counts.Remaining != 3 {
+			t.Errorf("Remaining = %d, want 3 (the compact candidate plus the two faithful renditions)", counts.Remaining)
+		}
+	})
+	t.Run("a spent cap leaves the faithful pass nothing", func(t *testing.T) {
+		f := newAutoOptimizeFixture(t)
+		f.sweeper.dsdCaps = caps
+		f.sweeper.maxPerSweep = func() int { return 1 }
+		seedSchemaMoveLibrary(t, f)
+		counts := sweepOnceOrFail(t, f)
+		if counts.Enqueued != 1 {
+			t.Errorf("Enqueued %d, want the one job the cap allows", counts.Enqueued)
+		}
+		checkSweptJobIDs(t, f, sweptJobsByID(f), []string{"A/DSD/03.dsf optimized-dsd-" + v + "-48000-16"})
+	})
+	t.Run("DSD renditions off move nothing", func(t *testing.T) {
+		f := newAutoOptimizeFixture(t)
+		seedSchemaMoveLibrary(t, f)
+		counts := sweepOnceOrFail(t, f)
+		if got := sweptPaths(f); len(got) != 0 || counts.Remaining != 0 {
+			t.Errorf("swept %v, Remaining %d: with the caps off neither tier moves", got, counts.Remaining)
+		}
+	})
+}
+
+// seedSchemaMoveLibrary is the DSD v1 → v2 sweep fixture:
+//   - 01: a current compact rendition and a v1 faithful one, so only the
+//     faithful pass has work;
+//   - 02: a current compact rendition and no faithful one, so nothing;
+//   - 03 (the 48k family): both tiers on v1, so both passes pick it up.
+func seedSchemaMoveLibrary(t *testing.T, f *autoOptimizeFixture) {
+	t.Helper()
+	compactV2 := "optimized-dsd-" + transcode.DSDRenditionSchemaVersion + "-44100-16"
+	f.seedDSDTrack(t, "A/DSD/01.dsf", "DSF", 2822400, 1<<20, "", 300, 2)
+	f.seedRendition(t, "A/DSD/01.dsf", compactV2, 44100, 16)
+	f.seedRendition(t, "A/DSD/01.dsf", "pcm-v1-176400-24", 176400, 24)
+	f.seedDSDTrack(t, "A/DSD/02.dsf", "DSF", 2822400, 1<<20, "", 300, 2)
+	f.seedRendition(t, "A/DSD/02.dsf", compactV2, 44100, 16)
+	f.seedDSDTrack(t, "A/DSD/03.dsf", "DSF", 3072000, 1<<20, "", 200, 2)
+	f.seedRendition(t, "A/DSD/03.dsf", "optimized-dsd-v1-48000-16", 48000, 16)
+	f.seedRendition(t, "A/DSD/03.dsf", "pcm-v1-192000-24", 192000, 24)
+}
+
+// sweepOnceOrFail runs one sweep and fails the test when it reports nothing.
+func sweepOnceOrFail(t *testing.T, f *autoOptimizeFixture) *admin.AutoOptimizeSweepCounts {
+	t.Helper()
+	counts := f.sweeper.sweepOnce(context.Background())
+	if counts == nil {
+		t.Fatal("sweepOnce returned nil")
+	}
+	return counts
+}
+
+// sweptJobsByID keys the recorded jobs by "<path> <variant id>".
+func sweptJobsByID(f *autoOptimizeFixture) map[string]transcode.JobSpec {
+	out := map[string]transcode.JobSpec{}
+	for _, s := range f.submitted.snapshot() {
+		out[s.SourceLibraryRel+" "+s.VariantID()] = s
+	}
+	return out
+}
+
+// checkSweptJobIDs requires exactly the want jobs, in any order.
+func checkSweptJobIDs(t *testing.T, f *autoOptimizeFixture, got map[string]transcode.JobSpec, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("swept %d jobs %v, want %v", len(got), sweptPaths(f), want)
+	}
+	for _, k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing job %q; swept %v", k, sweptPaths(f))
+		}
+	}
+}
+
+// checkFaithfulMoveJob asserts the faithful job the sweep built for rel: the
+// pcm kind at the family's 4x rate and 24 bits, on the background lane with
+// the sweeper's scratch dir, at the on-request quality, with the render facts
+// and source facts of the track row (the latter are what freshness compares).
+func checkFaithfulMoveJob(t *testing.T, f *autoOptimizeFixture, job transcode.JobSpec, rel string) {
+	t.Helper()
+	if job.Kind != transcode.JobKindPCMRender || job.TargetBits != 24 || job.TargetSampleRate != 176400 {
+		t.Errorf("kind/bits/rate = %q/%d/%d, want pcm/24/176400", job.Kind, job.TargetBits, job.TargetSampleRate)
+	}
+	if !job.Background || !job.SourceIsDSD || job.TempDir != "/scratch/render" {
+		t.Errorf("Background/SourceIsDSD/TempDir = %v/%v/%q, want a background DSD render with the sweeper's scratch dir",
+			job.Background, job.SourceIsDSD, job.TempDir)
+	}
+	if job.SourceChannels != 2 || job.SourceDurationSec != 300 || job.SourceSampleRate != 2822400 || job.Quality != transcode.QualityVeryHigh {
+		t.Errorf("channels/duration/rate/quality = %d/%v/%d/%v, want the row's 2/300/2822400 and the on-request quality",
+			job.SourceChannels, job.SourceDurationSec, job.SourceSampleRate, job.Quality)
+	}
+	st, err := f.store.GetTrackStat(context.Background(), rel)
+	if err != nil || st == nil {
+		t.Fatalf("GetTrackStat(%q) = %v, %v", rel, st, err)
+	}
+	if job.SourceMTimeNS != st.MTimeNS || job.SourceSize != st.Size {
+		t.Errorf("source facts %d/%d, want the track row's %d/%d (what freshness compares)",
+			job.SourceMTimeNS, job.SourceSize, st.MTimeNS, st.Size)
+	}
 }

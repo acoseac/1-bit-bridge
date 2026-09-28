@@ -40,6 +40,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
+	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
@@ -1120,7 +1121,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 }
 
 // EnqueuePCMRender is the faithful DSD rendition's per-track entry point
-// (`pcm-v1-<176400|192000>-24`). Same scaffolding, error taxonomy and
+// (`pcm-v2-<176400|192000>-24`). Same scaffolding, error taxonomy and
 // resumability gate as EnqueueOptimize; the only shape differences are
 // the gate (transcode.PCMRenderEligible — a non-DSD source is refused
 // with the typed ineligible error), the target resolver and the bits.
@@ -1134,6 +1135,52 @@ func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) er
 		return err
 	}
 	return a.finalizeAndEnqueue(spec, track.Path, false)
+}
+
+// albumMateSpec is the album-level gain's albumgain.SpecFor: the spec that
+// measures an album-mate's true peak on the rendering job's profile. It is
+// built the way an on-demand request builds one — the same lookup, the same
+// tier gate, so a mate this bridge could not render is not measured either —
+// under the job's own tier, quality and directories.
+//
+// Source facts come from the TRACK ROW, as the sweeper stamps them: a peak
+// is judged fresh against the row (manifest.FreshDSDPeaks), so a live stat
+// would make the measurement of a file the scanner has not caught up with
+// read as stale on every render until it does.
+func (a *upscaleEnqueuerAdapter) albumMateSpec(_ context.Context, path string, like transcode.JobSpec) (transcode.JobSpec, error) {
+	abs, track, err := a.resolveAndLookupTrack(path)
+	if err != nil {
+		return transcode.JobSpec{}, err
+	}
+	var spec transcode.JobSpec
+	if like.Kind == transcode.JobKindPCMRender {
+		spec, err = buildPCMRenderSpec(track, abs, like.OutputDir, like.TempDir, a.caps())
+	} else {
+		spec, err = buildOptimizeSpec(track, abs, like.OutputDir, like.TempDir, a.caps())
+	}
+	if err != nil {
+		return transcode.JobSpec{}, err
+	}
+	spec.Quality = like.Quality
+	spec.SourceMTimeNS = track.ModTime.UnixNano()
+	spec.SourceSize = track.Size
+	return spec, nil
+}
+
+// wireAlbumGain gives the pool the album-level gain: every DSD render it
+// runs — on-demand, batch or swept — shares its boost with its album (the
+// pool injects the resolver when a job runs), and an album-mate without a
+// recorded peak is measured with the spec an on-demand request would build
+// (albumMateSpec). Only a DSD job consults it, so a PCM-only bridge pays
+// nothing. The caller keeps the resolver to invalidate its album index when
+// a scan lands. TestAlbumGainEndToEnd_RealToolchain runs exactly this.
+func wireAlbumGain(pool *transcode.Pool, store *manifest.Store, enqueuer *upscaleEnqueuerAdapter) (*albumgain.Resolver, error) {
+	r, err := albumgain.New(albumgain.Config{Catalog: store, Peaks: store, SpecFor: enqueuer.albumMateSpec})
+	if err != nil {
+		return nil, err
+	}
+	pool.SetAlbumGainer(r)
+	return r, nil
 }
 
 func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
@@ -3804,6 +3851,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
+	// The album-level gain's decider (internal/albumgain), in runServe
+	// scope so THE post-scan hook below can drop its album index when a
+	// scan lands — the moment album membership changes.
+	var albumGainResolver *albumgain.Resolver
 	// Auto-optimize sweeper handles, in runServe scope so the admin Deps
 	// closures wired further down can read them. Both stay nil when the
 	// feature can't run (no upscale pool, or the optimize kind opted out).
@@ -3874,7 +3925,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 		}
-		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
+		enqueuer := &upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
 			resolver:  apiSrv.Resolver(),
@@ -3883,7 +3934,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			soxInfo:   soxCache.snapshot,
 			dsdCaps:   dsdRenderCapsFn,
 			tempDir:   liveRenderTempDir,
-		})
+		}
+		apiSrv.WithUpscaleEnqueuer(enqueuer)
+		albumGainResolver, err = wireAlbumGain(upscalePool, manifestStore, enqueuer)
+		if err != nil {
+			fmt.Fprintf(stderr, "album gain: %v\n", err)
+			return 1
+		}
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
 			store:     manifestStore,
@@ -4064,9 +4121,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// stays cheap enough for the scanner goroutine as its contract
 	// requires — a pending nudge coalesces with the sweep it would have
 	// triggered.
-	if len(postScanNudges) > 0 {
+	if len(postScanNudges) > 0 || albumGainResolver != nil {
 		nudges := postScanNudges // capture; the slice isn't appended to after this
+		albumGains := albumGainResolver
 		scanner.SetPostScanHook(func() {
+			// A scan is when album membership changes: the next DSD render
+			// rebuilds the album-level gain's index. A mutex and a nil
+			// store, so the hook stays as cheap as its contract requires.
+			if albumGains != nil {
+				albumGains.Invalidate()
+			}
 			for _, ch := range nudges {
 				select {
 				case ch <- struct{}{}:

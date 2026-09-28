@@ -45,7 +45,15 @@ const VariantPrefixOptimizedDSD = VariantPrefixOptimized + "-dsd"
 // the decimation filter after the alias measurement must not invalidate
 // every PCM optimize on every bridge, and vice versa. Bump this, not that,
 // when the DSD chain changes what it emits.
-const DSDRenditionSchemaVersion = "v1"
+//
+// v2 (2026-09-27) is the album-level gain: every track of an album shares
+// the boost its hottest track allows (album_gain.go). A NEW id rather than a
+// re-render under v1, because a phone keeps a downloaded rendition's bytes
+// and reads its gain from the manifest by id — re-rendering v1 in place would
+// have it apply the new gain to the old file. v1 rows stay until they are
+// retired deliberately; the manifest lists a track's newest rendition first.
+// manifest.DSDRenditionSchemaVersion mirrors this for its SQL.
+const DSDRenditionSchemaVersion = "v2"
 
 // JobKindPCMRender is the faithful-tier job kind. Wire value "pcm" is what
 // POST /v1/upscale, the batch and delete endpoints and the CLI carry.

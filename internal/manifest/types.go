@@ -379,7 +379,7 @@ type Track struct {
 // `upscaled-v2-176400-24`). The iOS variant resolver keys on the
 // `upscaled-` prefix to slot a variant into the share-level "prefer
 // upscaled" toggle; the other families — `optimized-v2-…`, and the
-// DSD renditions `optimized-dsd-v1-…` / `pcm-v1-…` — get their own
+// DSD renditions `optimized-dsd-v2-…` / `pcm-v2-…` — get their own
 // slots without touching legacy resolution.
 //
 // `AppliedGainDB` is present ONLY on a DSD rendition: the dB of gain
