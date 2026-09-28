@@ -226,7 +226,8 @@ func Test_Server_StopBeforeStartIsSafe(t *testing.T) {
 // directly. The notify context is PRE-CANCELLED by default so any
 // initial-NOTIFY goroutine spawned by a SUBSCRIBE fails fast without real
 // network I/O. Pass `live=true` for the integration test that exercises a
-// real loopback callback.
+// real loopback callback. The client is Start's own (newNotifyClient), so
+// every GENA test sends through the checked client production uses.
 func newGENATestServer(live bool) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	if !live {
@@ -237,7 +238,7 @@ func newGENATestServer(live bool) *Server {
 		cfg:          ServerConfig{ModelNumber: "TestModel"},
 		notifyCtx:    ctx,
 		notifyCancel: cancel,
-		notifyClient: &http.Client{Timeout: time.Second},
+		notifyClient: newNotifyClient(),
 	}
 }
 
@@ -378,10 +379,31 @@ func Test_callbackHostAllowed(t *testing.T) {
 		remoteAddr string
 		want       bool
 	}{
-		{"loopback", "127.0.0.1", "10.0.0.1:5", true},
+		// This machine and the link: the subscriber's own address only
+		// (backlog B39). Each of the first two was admitted before.
+		{"loopback_from_lan_source", "127.0.0.1", "10.0.0.1:5", false},
+		{"link_local_from_public_source", "169.254.1.1", "8.8.8.8:5", false},
+		{"link_local_metadata_from_lan_source", "169.254.169.254", "192.168.1.9:5", false},
+		{"link_local_from_another_link_local", "169.254.169.254", "169.254.10.20:5", false},
+		{"link_local_from_itself", "169.254.10.20", "169.254.10.20:5", true},
+		{"ipv6_link_local_from_its_zoned_source", "fe80::1", "[fe80::1%en0]:5", true},
+		{"ipv6_link_local_zoned_callback", "fe80::1%en0", "[fe80::1%en0]:5", false},
+		{"loopback_from_itself", "127.0.0.1", "127.0.0.1:5", true},
+		{"loopback_from_another_loopback_address", "127.0.0.1", "127.0.0.2:5", false},
+		{"ipv6_loopback_from_itself", "::1", "[::1]:5", true},
+		{"ipv6_loopback_from_ipv4_loopback", "::1", "127.0.0.1:5", false},
+		{"mapped_loopback_from_its_source", "::ffff:127.0.0.1", "127.0.0.1:5", true},
+		{"mapped_loopback_from_lan_source", "::ffff:127.0.0.1", "10.0.0.1:5", false},
+		{"loopback_with_no_source", "127.0.0.1", "", false},
+		{"unspecified", "0.0.0.0", "0.0.0.0:5", false},
+		{"ipv6_unspecified", "::", "[::]:5", false},
+		{"localhost_name", "localhost", "127.0.0.1:5", false},
+		{"numeric_spelling", "127.1", "127.0.0.1:5", false},
+
+		// Unchanged by B39.
 		{"rfc1918_192", "192.168.1.4", "8.8.8.8:5", true},
 		{"rfc1918_10", "10.1.2.3", "8.8.8.8:5", true},
-		{"link_local", "169.254.1.1", "8.8.8.8:5", true},
+		{"ula", "fd00::5", "192.168.1.9:5", true},
 		{"public_rejected", "8.8.8.8", "192.168.0.5:1234", false},
 		{"public_but_matches_source", "8.8.8.8", "8.8.8.8:1234", true},
 		{"public_matches_source_no_port", "8.8.8.8", "8.8.8.8", true}, // bare-host fallback

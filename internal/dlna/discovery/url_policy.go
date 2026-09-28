@@ -356,12 +356,22 @@ type announcementSourceKey struct{}
 // address. Both SSDP clients wrap every fetch a packet causes (the
 // description, and a renderer's GetProtocolInfo) in it.
 func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
-	return context.WithValue(ctx, announcementSourceKey{}, announcerAddr(src))
+	return WithRequestSource(ctx, announcerAddr(src))
+}
+
+// WithRequestSource returns ctx carrying from, the address of the peer a
+// request is made on the say-so of, for NewDeviceFetchClient's dial check.
+// WithAnnouncementSource is its SSDP form; internal/dlna passes the address a
+// GENA SUBSCRIBE came from, since its initial NOTIFY goes to the callback that
+// SUBSCRIBE named. from is compared unmapped and without a zone, and the zero
+// Addr matches no address.
+func WithRequestSource(ctx context.Context, from netip.Addr) context.Context {
+	return context.WithValue(ctx, announcementSourceKey{}, from.Unmap().WithZone(""))
 }
 
 // errUnannouncedHostLocal is the dial check's refusal.
 var errUnannouncedHostLocal = errors.New("refusing to connect to this machine or a link-local address " +
-	"on the say-so of an SSDP packet from another address")
+	"on the say-so of a peer at another address")
 
 // refuseUnannouncedHostLocal is NewDeviceFetchClient's net.Dialer
 // ControlContext. net passes it the address each connect attempt targets,
@@ -369,8 +379,9 @@ var errUnannouncedHostLocal = errors.New("refusing to connect to this machine or
 // judges what a name RESOLVED to, which no check of the URL can: a public DNS
 // name pointed at 127.0.0.1, a rebinding answer, macOS's inet_aton spellings.
 // A loopback or link-local address is allowed only when it is the address
-// the request's context says the SSDP packet came from; the unspecified
-// address and an address that does not parse, never. The resolver's own
+// the request's context says the request came from (an SSDP packet's source,
+// or a GENA SUBSCRIBE's); the unspecified address and an address that does
+// not parse, never. The resolver's own
 // connects to a DNS server do not come through here (net's Resolver dials
 // with a Dialer of its own), so a stub resolver on 127.0.0.53 keeps working.
 func refuseUnannouncedHostLocal(ctx context.Context, _, address string, _ syscall.RawConn) error {
@@ -402,7 +413,10 @@ func refuseUnannouncedHostLocal(ctx context.Context, _, address string, _ syscal
 // that another packet's source allowed; and no TLS dialer of its own, which
 // would connect around the check. A manual upstream is fetched with a client
 // of its own (internal/upnp's ManualPoller): its URL is the operator's
-// choice, and pointing it at this machine is legitimate.
+// choice, and pointing it at this machine is legitimate. internal/dlna sends
+// its GENA initial NOTIFY with this client too (backlog B39): a callback URL
+// is a LAN peer's say-so as a LOCATION is, and that NOTIFY once followed a
+// callback's redirect anywhere, the bridge's own console included.
 func NewDeviceFetchClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{ControlContext: refuseUnannouncedHostLocal}
 	return &http.Client{
