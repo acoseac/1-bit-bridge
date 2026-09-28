@@ -38,14 +38,21 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Four carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Twelve carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
-  `FuzzParseRetryAfter` (the `maxRetryAfter` cap), and `FuzzSACDVirtualPathRoundTrip` (a
+  `FuzzParseRetryAfter` (the `maxRetryAfter` cap), `FuzzSACDVirtualPathRoundTrip` (a
   rendered virtual path must parse back to the same index and container — the renderer and the
   parser disagreeing is a row-reaping bug, since the deletion pass keys on
-  `IsSACDVirtualPath`). **A crash found by the extractor
+  `IsSACDVirtualPath`), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
+  `FuzzPickIsShuffleInvariant`, `FuzzTextCandidateClassification`; their properties are
+  under **Lyrics**), `FuzzMatchRelease` (a claimed match is an entry the listing holds),
+  `FuzzKeyFor` (the dupe key is deterministic and every field reaches `Key.ID`),
+  `FuzzValidateRelPath` (an accepted upload path meets every invariant the commit relies
+  on) and `FuzzAcceptedExt` (an audio extension is always accepted). This said "Four"
+  until 2026-09-28, while eight more were added beside them: **count them by the
+  assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
