@@ -20496,3 +20496,33 @@ found predates v0.2.0, which the v0.2.0 audit had not seen.
   after `ServeTLS` (the sweep alone, which passed that shape before this
   round).
 
+
+## 2026-09-28 — the album survey logs a mate it could not measure by its library path
+
+The album-level gain (#1053) logs one warning for each album-mate whose
+measurement fails: `album gain: an album-mate could not be measured, so it does
+not constrain the album`, with the measurement's error. That error is
+`MeasureDSDPeak`'s. Its ffprobe failure names no path (`ffprobe source: exit
+status 1`, measured on a corrupt DSF), but the render scratch's `mkdir` returns a
+`PathError` naming the scratch under the configured tempDir, and the ffmpeg | sox
+pipe's error carries sox's stderr, which quotes the source's absolute path and the
+scratch. A render's own failure goes through `redactSoxErr` at the pool (#1055);
+the survey's did not, so the v0.2.1 privacy page's list of lines that can name an
+absolute path would have missed one. Found while merging main into #1055.
+
+- `transcode.JobSpec.RedactError(err)` returns an error whose text is
+  `redactSoxErr(err.Error(), j)` and which keeps `err` behind `Unwrap`, so
+  `errors.Is` still sees a cancel. `albumgain.Resolver.measure` returns the
+  `Measure` error through it, by the mate's own spec.
+- The rest was checked: `SpecFor`'s errors name no absolute path (the CLI's name the
+  mate library-relative; serve's are API sentinels and target-rate errors), and the
+  other log lines #1053 and #1054 added log database errors.
+- Tests: `TestAMateThatCannotBeMeasuredIsLoggedLibraryRelative` (a fake measurer
+  fails with the mate's absolute path and the tempDir; the warning names neither
+  and keeps the decoder's reason) and `TestRedactErrorKeepsTheChainAndDropsThePaths`.
+  The survey test failed before the fix on both paths.
+- Negative controls on the committed tree, each failing exactly its predicted test,
+  34 of 35 passing: `measure` returning the raw error, and `redactedError` without
+  `Unwrap`.
+- Gemini did not review it: its GitHub app was out of quota and the API project had
+  reached its monthly spending cap.
