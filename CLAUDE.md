@@ -395,7 +395,30 @@ lost my library."
   One Warn per scan names them (`links whose target could not be read`),
   never one per link: a mount takes every link into it at once. **A link to a
   DIRECTORY is not a track**, whatever its name, and the walk still follows no
-  directory link (loops). **No `ExtractorVersion` bump**: the stored stat of
+  directory link (loops). **Nor is a named pipe, a socket or a device, or a
+  link to one** (`notAFile`): whatever stat the row would carry must describe
+  something that opens as a file, and a regular file whose own stat says
+  otherwise is judged through. A worker opens what the walk hands it, and
+  opening a FIFO waits for a writer with nothing to cancel the wait, so a FIFO
+  named `01.flac` held a worker, and the scan with it, forever (measured still
+  running at 10 s, and at 15 s with its context expired at 5 s; an `.iso`
+  FIFO blocked the next scan too, since no row ever let the skip gate pass
+  it). By reading: `Scan` holds the scanner's mutex for its whole run, so
+  every later scan waits on it, and the stuck `IsScanning` stands down the
+  Atlas lyrics sweep, the booklet GC and the duplicate restamp and makes a
+  compaction answer 409. When a writer did come, the row was replaced by one
+  minted from the path (title "01", 0 bytes), and a link to a device or a
+  socket was indexed that way outright. **The refusal is a list of kinds,
+  never "is a regular file"**: a Windows cloud placeholder is
+  `ModeIrregular` after `os.Stat` and opens, and hydrates, as a file, so a
+  OneDrive library with files on demand would vanish. **A row at such a path
+  is reaped like a deleted file's**, after the usual missing-count grace, a
+  directory link's included: the walk stat'ed the entry and knows what is
+  there. That is the dangling link's answer reversed on purpose: a stat that
+  FAILED is "could not see", a stat that answered is a fact. One Warn per
+  scan names them with the example's kind (`audio-named entries that are not
+  files`), and a row the old walk minted for one is reaped the same way.
+  **No `ExtractorVersion` bump**: the stored stat of
   each linked row no longer matches, so the first scan after the change
   re-extracts exactly those rows, once, on the full upsert leg (one delta row
   to every paired device, and a re-enrichment), and nothing else moves

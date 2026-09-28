@@ -21995,10 +21995,10 @@ rendition's source from the row, and `serveVariant` compares it with
   (`resolveEntryInfo`), never "is a symlink": since Go 1.23 a Windows
   junction is `ModeIrregular` with no `ModeDir`, and a stat through it says
   it names a directory. A reparse point that names nothing (a cloud
-  placeholder) and a FIFO, a socket or a device stat to themselves, so they
-  pay one syscall and change nothing they report. Taken as a function of
-  (type, own, through) so the Windows shapes run on every platform
-  (`TestWalkedFileInfoStatsThroughEverythingButARegularFile`).
+  placeholder) stats to itself and is indexed under that stat; a FIFO, a
+  socket or a device stats to itself and is refused (the next section).
+  Taken as a function of (type, own, through) so the Windows shapes run on
+  every platform (`TestWalkedFileInfoStatsThroughEverythingButARegularFile`).
 - **A link whose target cannot be stat'ed spares its own row, keyed on the
   entry itself, and mints none.** Measured on main: a link whose target
   vanished kept its row only because the skip gate compared the link's
@@ -22015,7 +22015,7 @@ rendition's source from the row, and `serveVariant` compares it with
   it is counted in the spared line.
 - **A link to a directory is not a track**, whatever its name, and the walk
   still follows no directory link. On main such a link was indexed from its
-  path.
+  path. A row at its path is reaped, for the reason the next section gives.
 - **One Warn per scan**, never one per link: a mount that goes away takes
   every link into it at once, on every scan until it returns. The line gives
   the count, one library-relative example, and the error without the
@@ -22052,11 +22052,10 @@ Out of scope, measured with throwaway programs and left for the backlog:
   then logs "suspected clean-empty mount failure" every scan and suggests
   `.bridge-allow-empty`, which `hasAllowEmptySentinel` finds through the
   link, and which would then let the deletion pass reap the root's rows.
-- A FIFO named `01.flac` in the library hangs `Scan`: the worker's open
-  blocks, the scan's context expiring at 5 s changes nothing, and
-  `IsScanning` still read true at 15 s. By reading, a link to a FIFO does the
-  same, before and after this change (the stat through it answers a FIFO,
-  which is indexed as before).
+- A FIFO named `01.flac` in the library hung `Scan`: the worker's open
+  blocked, the scan's context expiring at 5 s changed nothing, and
+  `IsScanning` still read true at 15 s. Folded into this change before its
+  review (the next section).
 
 Stale claim corrected on the way. CLAUDE.md said twice (under Scanner, and
 in `## Local test fixture`) that `UPDATE tracks SET mtime_ns = 0` does not
@@ -22066,6 +22065,92 @@ force a re-extraction, because the skip gate compares the mtime inside
 a throwaway test through the Go store: a scan of an unchanged file left its
 `indexed_at` alone, and after `mtime_ns` was zeroed the next scan
 re-extracted it and advanced `indexed_at`.
+
+### Entries that are not files
+
+Folded in before review, from the FIFO finding above. `walkedFileInfo`
+refuses, after the stat it takes, anything that does not open as a file
+(`notAFile`): a directory, a named pipe, a socket or a device, or a link to
+one. A worker opens what the walk hands it, and opening a named pipe waits
+for a writer, with nothing to cancel the wait.
+
+Measured on this branch before the change (0d8ff285), with the new tests,
+each scan bounded at 10 s and the test then playing the writer so the run
+could finish:
+
+- A FIFO named `01.flac`, and a link to one: the full scan was still running
+  at 10 s. Once a writer came, the row minted was the path's (title "01",
+  0 bytes), and the subtree scan kept it.
+- A FIFO named `01.iso`: the full scan and the subtree scan after it both
+  blocked, since an expansion that finds no album writes no row and the skip
+  gate never passes it.
+- A link to `/dev/null`, and a Unix socket, named `01.flac`: indexed from the
+  path (title "01", 0 bytes) in both walks.
+- A FLAC with a row, replaced by a FIFO (full walk) or by a link to one
+  (subtree walk): each scan blocked, and once a writer came the file's tags
+  were replaced by the path's.
+
+By reading, what a scan that never returns costs: `Scan` holds the scanner's
+mutex for its whole run, so every later `Scan` and `ScanSubtree` waits on it
+and the library stops updating; `IsScanning` stays true, so the Atlas lyrics
+sweep and the booklet GC stand down (`ScanInProgress`), the duplicate
+restamp defers, `/v1/health` reports a scan in progress, and
+`POST /api/database/compact` answers 409 (`ScanInFlight`).
+
+Decisions:
+
+- **A list of kinds refused, never "is a regular file".** On Windows a
+  reparse point that names nothing, a cloud placeholder (OneDrive's files on
+  demand) among them, is `ModeIrregular` after `os.Stat` (the default arm of
+  Go 1.26.6's `fileStat.mode`), and it opens, and hydrates, as a file.
+  Refusing it would empty a library kept in OneDrive and reap its rows. On
+  Windows an AF_UNIX socket reports `ModeSocket` and a pipe or character
+  device handle `ModeNamedPipe` or `ModeDevice|ModeCharDevice`, so the list
+  covers Windows' kinds as well.
+- **Judged on the stat, not the listing.** A regular listing's own stat
+  answers only while it still says regular; an entry replaced since its
+  directory was read is stat'ed through and judged as what it is then: a
+  named pipe is refused, and a symlink is indexed under its target's stat,
+  the rule above. Only POSIX can see this, since on Windows the listing's
+  stat is the one `DirEntry.Info` returns.
+- **A row at such a path is reaped like a deleted file's**, after the usual
+  missing-count grace (`deleteAfterMissingScans`, three by default), and so
+  is a directory link's. Sparing it as a dangling link's row is spared was
+  rejected: the walk stat'ed the entry and knows what is there, while "we
+  could not see this path" answers a stat that failed. A spared row would go
+  on offering the phone a track the bridge cannot serve, whose download
+  blocks in `os.Open` (below). The missing-count debounce still absorbs a
+  type that flickers.
+- **One Warn per scan**, beside the unreadable-links line, with the count, a
+  library-relative example and its kind. The two tallies are one `walkTally`
+  type now. Only an audio-named entry reaches the decision, so the line is
+  about something named like a track.
+- **No `ExtractorVersion` bump for this either.** What the walk admits is not
+  extraction. A row the old walk minted for such an entry (a link to a
+  device, a socket, a FIFO some writer once opened) is no longer seen, so the
+  deletion pass reaps it after the grace, with a tombstone to every paired
+  device, and nothing else moves.
+
+`TestScanner_AnEntryThatIsNotAFileIsNotATrack` (a FIFO, a link to one, an
+`.iso` FIFO, a link to `/dev/null` and a socket, each beside a real file, in
+both walks, with the line) and `TestScanner_AFileReplacedByANamedPipeLosesItsRow`
+make the real entries, so they are `//go:build unix`; a scan still running
+at 10 s fails them, and the helper then writes to each pipe so a failure
+cannot hang the suite. The table test gained a row per kind, a cloud
+placeholder that answers `ModeIrregular`, and two entries replaced after
+the listing; `TestNotAFileNamesEachKindTheWalkRefuses` pins the names.
+Before the change every new case was red, the FIFO ones on the 10 s bound;
+after it each scan takes about 20 ms.
+
+Out of scope, measured with a throwaway program over the real `api.Server`
+and resolver: `/v1/download` and `/v1/read` of a path that is a FIFO block in
+`os.Open`. The client gave up at 2 s, and the handlers were still running
+3 s later, until the program wrote to the pipe (then 500). `/v1/stat` answered
+at once. By reading, the same holds for the web player's audio route, and
+`serveFile` counts the request as a download in flight, so while one is
+pinned the updater's auto-install defers every poll ("active downloads").
+This change keeps such a path out of the manifest, but `/v1/list` still
+lists it and nothing stops a client asking for it.
 
 ### The read-fault fuzz target
 
@@ -22154,3 +22239,16 @@ restored and re-run green before the next:
 | NC-F2: a failed area-TOC read folded into a refusal | fuzz seed 3, its seed-test row, and the #1061 tests of that site |
 | NC-F3: the DST probe's failure dropped | fuzz seed 4, its seed-test row, and the #1061 tests of that site |
 | NC-F4: NC-F3 with its own seed left out, fuzzing | found within half a second of an empty cache, on both harnesses |
+
+Negative controls on the committed not-a-file change (147325c9), each
+restored and the set re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC-S1: the refusal back to a directory alone | six table rows; every case of `…AnEntryThatIsNotAFileIsNotATrack` (the FIFO ones on the 10 s bound); `…AFileReplacedByANamedPipeLosesItsRow` |
+| NC-S2: a regular listing's own stat indexed whatever it says | the two replaced-after-the-listing rows |
+| NC-S3: `ModeIrregular` refused too | the cloud placeholder row, `TestNotAFileNamesEachKindTheWalkRefuses` |
+| NC-S4: the row at such a path spared, in both walks | `…AFileReplacedByANamedPipeLosesItsRow`, both legs: rows kept with their tags |
+| NC-S4b: spared in the subtree walk alone | the same test, its subtree leg only |
+| NC-S5: the full walk does not tally what it refused | the directory-link test (0 lines, want 1), every case of the kinds test (1 line, want 2) |
+| NC-S5b: the subtree walk does not tally | every case of the kinds test |
