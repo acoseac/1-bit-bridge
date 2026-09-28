@@ -2308,7 +2308,9 @@ no failing test — which is the shape to expect in this area.
   writes rule: no shared writer), and does something only when the process
   is root: it gives the file the owner of the ENTRY it replaces (`os.Lstat`,
   so a symlink's own owner, never its target's), or of the directory for a
-  new file. The updater's `update-state.json` takes it too. **Keep, not
+  new file, which every login ticket's file is since the shared tickets file
+  became one file per ticket (2026-09-28, under Auth, pairing, TLS). The
+  updater's `update-state.json` takes it too. **Keep, not
   refuse**: a refusal keyed on who owns the data dir turns away a setup that
   works (a container run as root over a bind mount another uid owns, whose
   files the root service created), while the replaced file's own owner is
@@ -3660,7 +3662,10 @@ its twin.** The top list is older, shorter, and read first.
   restart ended them until 2026-09-27. **`tokens.json` had the same window** (a
   `bridge pair` beside a running bridge) and closes it the same way, #1043,
   under Config, settings and process lifecycle. A new file that more than one
-  process writes needs the re-read before its rename from the start.
+  process writes needs the re-read before its rename from the start, or better,
+  a layout in which no process rewrites a record another wrote: the login
+  tickets had the same window and no re-read, and are one file per ticket since
+  2026-09-28 (two bullets down).
 - **A sign-out reaches the running bridge as a MARKER in `adminauth.json`,
   never as an emptied session set** (2026-09-27). The running bridge holds the
   sessions in memory and writes them back (a login, the 30 s activity flush, a
@@ -3724,22 +3729,52 @@ its twin.** The top list is older, shorter, and read first.
   write keeps the file's owner (the KeepOwner bullet under Config, settings
   and process lifecycle).
 - **A console login ticket is PERSISTED, because the two halves are different
-  PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
-  an in-memory map is invisible to the redeemer and the feature never works — it
-  shipped that way, and every unit test passed because each minted and redeemed
-  inside one process. What is stored is the hex SHA-256 in a 0600 sidecar beside
-  the password hashes, so disk gains no credential it did not already hold, and
-  single-use plus the 60-second window still come from deleting the record on
-  presentation, before judging it. **Stage to a UNIQUE temp name**: `Store.mu`
-  does not reach across processes, so one fixed `.tmp` lets two writers interleave
-  and rename each other's half-written bytes into place, which loses every live
-  ticket. The read-modify-write is still unserialised across processes — losing
-  one of two simultaneous mints is survivable (mint again) in a way a corrupt file
-  is not, and an interprocess lock is declined for `bridge restore`'s reason: a
-  stale lockfile after an unclean exit blocks the login path exactly when it is
-  needed. `SameSite=Strict` is NOT the usual magic-link trap here — the app opens
-  the URL itself, and a navigation with no initiator is same-site (verified in a
-  real browser, not reasoned about).
+  PROCESSES, and each ticket is a FILE OF ITS OWN, because both processes write
+  tickets** (2026-09-28). `bridge admin login-link` mints and the serving bridge
+  redeems, so an in-memory map is invisible to the redeemer and the feature
+  never works — it shipped that way, and every unit test passed because each
+  minted and redeemed inside one process. Until 2026-09-28 every live ticket
+  shared `adminauth-tickets.json`, which each process rewrote whole from its own
+  earlier read, and `Store.mu` reaches neither from the other: a mint whose read
+  predated a redemption renamed the SPENT ticket back into place (redeemable
+  again for up to `MaxLoginTicketTTL`), a redemption whose read predated a mint
+  dropped the new ticket, and of two overlapping mints one was lost (all three
+  red against the old code with the test hooks at the same points:
+  `TestAMintCannotRestoreATicketSpentDuringItsWrite`,
+  `TestARedemptionCannotDropATicketMintedDuringIt`,
+  `TestTwoInterleavedMintsBothLand`). **Not a re-read before the rename**, the
+  cure #1039 and #1043 gave `adminauth.json` and `tokens.json`: it narrows the
+  window and cannot close it, since on Windows the rename itself retries for up
+  to 750 ms. Now each ticket is `adminauth-ticket-<sha256 hex>.json`, 0600,
+  beside the store: a mint creates its own file (staged, `KeepOwner`, synced,
+  renamed) and a redemption removes its own, so NO process rewrites a ticket it
+  did not mint, and each step is atomic alone. The disk still holds only the
+  hash, as the NAME, so it gains no credential it did not already hold, and
+  single use plus the lifetime still come from the removal on presentation,
+  BEFORE judging expiry and account, which also decides between two
+  redemptions: one removal wins. **A redemption touches its own file and
+  nothing else**, in the order read, credential, remove, judge: a miss opens
+  one name that is not there and WRITES NOTHING (the unauthenticated branch,
+  under the mutex every console request takes), and expired or damaged files
+  are pruned by a MINT, an operator's act. **A ticket whose file cannot be
+  read is a 500 (`ticket_store_unavailable`), never the stale-link page**, and
+  stays unspent: the shared-file reader turned every read error into "no
+  tickets", against the handler's own docblock. **`ticketAbsent` is the one
+  "not there" rule** for a read and a removal alike: ENOENT everywhere, and on
+  Windows `ERROR_ACCESS_DENIED` too, which is what every open of a file with a
+  pending delete answers (a prune racing an antivirus scanner's handle, the
+  window `RenameWithRetry` exists for); only a spent or expired ticket is ever
+  removed, so that file was on its way out. The cost: on Windows a genuine ACL
+  fault on one ticket file reads as a stale link, where POSIX answers 500. It
+  takes the GOOS as a parameter so its table runs on every CI leg. A mint at
+  `maxLiveTickets` (32) is REFUSED and evicts nothing (every file is a link
+  somebody may hold), and the first mint removes the old shared file. Cost of
+  the layout change: links minted by the old binary in the ten minutes before
+  an upgrade stop working, and a rollback loses the new binary's the same way.
+  No interprocess lock, and none is needed now: nothing is left that two
+  processes both rewrite. `SameSite=Strict` is NOT the usual magic-link trap
+  here — the app opens the URL itself, and a navigation with no initiator is
+  same-site (verified in a real browser, not reasoned about).
 - **A login link is REDEEMED ON THE POST of its interstitial, never on the GET
   — a link preview is a navigation-shaped GET no header guard can tell from the
   click** (2026-09-12, the hosted uploader link: every link the phone shared
@@ -5300,7 +5335,9 @@ a fix that landed IN THIS WINDOW did not reach a sibling.
   gave no way to ask. Measured 3.93 ms/req against 159 µs idle, and eight
   flooding clients took an authenticated `GET /api/stats` from 278 µs to
   33.1 ms, under the mutex `ValidateSession` takes. It was also an oracle for
-  "a login link is live now".
+  "a login link is live now". (`prunedTickets` is gone since 2026-09-28: each
+  ticket is a file of its own, a miss writes nothing at all, and pruning is a
+  mint's; the ticket bullet under Auth, pairing, TLS.)
 - **`mux.HandleFunc("GET …")` also matches HEAD.** A HEAD burned the
   one-time ticket, because redemption deletes before judging. Anything that
   probes a link before the human clicks — a mail scanner, an unfurler, a

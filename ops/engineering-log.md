@@ -20869,3 +20869,189 @@ absolute path would have missed one. Found while merging main into #1055.
   `Unwrap`.
 - Gemini did not review it: its GitHub app was out of quota and the API project had
   reached its monthly spending cap.
+
+## 2026-09-28 — each console login ticket is its own file, so no write can restore a spent one
+
+Every live console login ticket shared one file, `adminauth-tickets.json`,
+written by two processes: `bridge admin login-link` minted, and the serving
+bridge redeemed (POST /login/ticket) and pruned. `writeTicketsLocked` staged
+and renamed with no re-read, each process rewrote the whole file from its own
+earlier read, and `Store.mu` reaches neither process from the other. Three
+interleavings lost a write:
+
+- **A mint whose read predated a redemption restored the spent ticket.** It
+  staged the set it read, spent ticket included, and renamed it over the
+  redemption's write, so single use was broken for the rest of the ticket's
+  life (up to `MaxLoginTicketTTL`, 10 minutes). The old docblock and the
+  CLAUDE.md bullet never named this one; they owned only the next-but-one.
+- **A redemption whose read predated a mint dropped the new ticket.** It wrote
+  back the set it read minus its own ticket (or removed the file when that was
+  the last), so the link the CLI had just printed never redeemed.
+- **Of two overlapping mints, the first to rename was lost**, the case the
+  docblock called survivable ("mint again").
+
+Separately, and older: `readTicketsLocked` turned ANY read error into an empty
+set, so a ticket file the bridge could not read answered `ErrTicketInvalid`,
+and the handler showed `/login?link=stale`, against its own docblock, which
+says a store failure is a 500 `ticket_store_unavailable` because the stale page
+sends the holder for a fresh link that fails the same way.
+
+### Decisions
+
+- **One file per ticket, named by its hash**: `<base>-ticket-<sha256 hex>.json`
+  beside the store (`adminauth-ticket-….json`), 0600, holding the unchanged
+  `persistedTicket{username, expiresAt}`. A mint creates its own file and a
+  redemption removes its own, so no process rewrites a record another wrote, and
+  each step is one atomic filesystem operation. The name is the hash, so the disk
+  still holds no usable credential.
+- **Not the re-read before the rename** that `adminauth.json` (#1039) and
+  `tokens.json` (#1043) use. It narrows the window to the rename and cannot close
+  it: on Windows `atomicwrite.RenameWithRetry` backs off 0 + 50 + 100 + 200 +
+  400 ms, so the "rename" can last 750 ms, and a redemption landing inside it is
+  still undone. It would also make a mint rebuild and retry on the bridge's
+  writes. With one file per ticket there is nothing to compare.
+- **A redemption keeps the old ORDER**, and each position is load-bearing: read
+  its own file (a miss is one failed open, and reads no credential), then the
+  credential (#1039: an unreadable credential leaves the ticket unspent, and the
+  account is judged against the FILE's), then remove the file (the removal is
+  what spends it, and of two redemptions exactly one removal succeeds), then
+  judge expiry and account (a ticket presented once is used up whatever the
+  verdict).
+- **A miss writes nothing.** The 2026-09-09 gate on the miss branch
+  (`prunedTickets`' bool) went with the function: pruning moved to the mint, an
+  operator's act, and a redemption never lists the directory.
+- **The prune** (`pruneTicketsLocked`, in a mint) removes expired and damaged
+  files, best effort; leaves a file it cannot read and counts it as live, since
+  it may be; and matches names strictly (the prefix, 64 lowercase hex, `.json`),
+  so it removes nothing a mint could not have written. Dot-prefixed staging
+  files never match. Expiry is one predicate, `ticketLive` (`now` before
+  `expiresAt`), for the prune and the redemption.
+- **The ceiling refuses, never evicts**: at 32 live tickets a mint fails, since
+  every file is a link somebody may hold. The count is per mint, so two
+  processes minting at once can each pass it by one; it is a sanity bound.
+- **`ticketAbsent(err, goos)`** is the one "not there" rule, for a read and a
+  removal alike: `fs.ErrNotExist` everywhere, and on Windows `fs.ErrPermission`
+  too. DeleteFile's documentation says a file stays until its last handle
+  closes and that opening it meanwhile fails with `ERROR_ACCESS_DENIED`. A
+  prune racing an antivirus scanner's handle (the window `RenameWithRetry`
+  exists for) leaves exactly that, and only a spent or expired ticket is ever
+  removed, so such a file was on its way out; a 500 for it would call a used-up
+  link a broken store. go1.26.6's `syscall.Open` shares READ|WRITE and not
+  DELETE, so a delete while a handle of this process is open is
+  `ERROR_SHARING_VIOLATION`, not a permission error: a store error, the ticket
+  unspent, Continue again works. The trade-off: on Windows a genuine ACL fault
+  on one ticket file reads as a stale link, where POSIX answers 500; neither
+  authenticates anyone. The GOOS is a parameter so the table runs on every CI
+  leg.
+- **An unreadable ticket file is a store error** (500), and a damaged one is
+  removed and answers `ErrTicketInvalid` (every ticket file is renamed into
+  place complete, so a damaged one was never a mint's).
+- **`KeepOwner` on the staged file**: a ticket's file is always new, so under
+  `sudo bridge admin login-link` it takes the data dir's owner (#1048).
+- **The first mint removes the old shared file**, best effort. **Cost**: links
+  minted by the old binary in the ten minutes before an upgrade stop working
+  (nothing reads that file now), and a rollback loses the new binary's live
+  links the same way. No migration: ten minutes of links does not justify
+  reading a format the next mint deletes.
+- **Two test seams**, nil in production, the `beforeCommitHook` convention:
+  `beforeTicketCommitHook` (a mint, between staging and rename) and
+  `beforeTicketSpendHook` (a redemption, between its read and its removal). The
+  second is what makes the redemption-side window drivable.
+- **The handler is unchanged in code**: `ErrTicketInvalid` → the stale page,
+  anything else → 500 `ticket_store_unavailable`. Its comment now names the new
+  faults (the ticket's file unreadable or not removable, a Windows sharing
+  violation) and no longer says a fresh link always fails the same way: for one
+  unreadable ticket file it would not, and this link redeems once the fault is
+  fixed.
+
+### Tests and controls
+
+- `internal/adminauth/ticket_crossprocess_test.go` (new; two stores on one path
+  stand in for the two processes, and every outcome is checked through a store
+  opened afterwards): `TestAMintCannotRestoreATicketSpentDuringItsWrite` (two
+  rows, beside another live ticket and the only ticket, because the shared file
+  had two branches: a rewrite and a removal),
+  `TestARedemptionCannotDropATicketMintedDuringIt` (the mint lands inside the
+  redemption; its tail mints once more after the spend, from the process that
+  minted the spent ticket), `TestTwoInterleavedMintsBothLand`.
+- `ticket_write_test.go`, reworked for the layout:
+  `TestAFailedRedemptionWritesNothing` (the whole directory byte-identical after
+  a bogus redemption, with live, expired and damaged ticket files in it),
+  `TestAMintRemovesOnlyTicketFilesThatCanNeverRedeem` (expired, expiring-now and
+  damaged removed; a live file byte-identical; three strangers untouched: a
+  non-hex name, an uppercase digest, a staging file),
+  `TestTheFirstMintRemovesTheSharedTicketFile`,
+  `TestAnUnreadableTicketIsAStoreFaultNotAStaleLink` (chmod 000; skipped on
+  Windows and as root), `TestTicketAbsentTakesAWindowsPermissionErrorForGone`.
+  They replace `…FailedRedemptionWithNothingToPruneWritesNothing` and
+  `…FailedRedemptionStillPrunesExpiredRecords`: a miss no longer prunes at all.
+- Adapted: `TestExpiredTicketIsStillConsumed`, `TestLiveTicketsAreBounded` (now
+  the refusal at exactly 32, and every earlier ticket still redeems),
+  `TestTicketFileHoldsNoUsableCredential` (every file in the directory, and the
+  names), `TestMintLoginTicketTTL_RefusesMoreThanTheMaximum`,
+  `TestRedeemLoginTicketDistinguishesAnUnwritableStore` (one ticket, and the
+  link redeems once the directory is writable), `TestARotationLeavesLoginTicketsAlone`,
+  `TestAWriteAsRootKeepsTheAdminStoreOwners`; wording in
+  `TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket`, internal/admin's
+  `TestAnUnwritableTicketStoreIsNotAStaleLink` (its second mint, there for the
+  shared file's rewrite branch, is gone) and cmd/bridge's
+  `TestCLIRunAsRootKeepsTheInstallOwner` (its docblock: the ticket's file, new,
+  takes the data dir's owner, which is what it asserts for every entry). That
+  test needs root and was not run here; CI skips it, and dido's container runs
+  it.
+- **Red on main**, run with `go test -overlay` so the tree was never touched:
+  main's `ticket.go` with the two hooks inserted at the equivalent points
+  (before the rename in `writeTicketsLocked`, before the delete in
+  `RedeemLoginTicket`) and main's other test files, plus the new cross-process
+  file. All three tests red, each with the predicted failure: the spent ticket
+  redeemed again in both rows; the ticket minted inside the redemption did not
+  redeem; the inner of two mints did not redeem. A one-off overlay test chmod
+  000'd main's shared file and presented a live ticket: `ErrTicketInvalid`.
+- Negative controls on the committed tree, each computed in full before the
+  file was written, `-count=1`, restored with `git checkout` and the tree
+  checked clean before the next. Every one turned exactly its predicted tests
+  red and nothing else:
+
+  | | mutation | red |
+  |---|---|---|
+  | NC1 | a mint writes back every ticket file it read before its write | both rows of `TestAMintCannotRestoreATicketSpentDuringItsWrite` |
+  | NC2 | `ticketAbsent` ignores the GOOS (a permission error is absent everywhere) | the table's four linux/darwin permission rows, `TestAnUnreadableTicketIsAStoreFaultNotAStaleLink`, `TestRedeemLoginTicketDistinguishesAnUnwritableStore`, and internal/admin's `TestAnUnwritableTicketStoreIsNotAStaleLink` |
+  | NC3 | a miss prunes | `TestAFailedRedemptionWritesNothing` |
+  | NC4 | a read error answers `ErrTicketInvalid` (main's behaviour) | `TestAnUnreadableTicketIsAStoreFaultNotAStaleLink` |
+  | NC5 | a mint at the ceiling evicts one file | `TestLiveTicketsAreBounded` |
+  | NC6 | no removal of the shared file | `TestTheFirstMintRemovesTheSharedTicketFile` |
+  | NC7 | a redemption removes every ticket file that appeared since its read (the old write-back) | `TestARedemptionCannotDropATicketMintedDuringIt` |
+  | NC8 | the prune rewrites live files | `TestAMintRemovesOnlyTicketFilesThatCanNeverRedeem` |
+  | NC9 | the name match takes any prefix + suffix name | `TestAMintRemovesOnlyTicketFilesThatCanNeverRedeem` (both strangers named) |
+  | NC10 | expiry judged before the removal | `TestExpiredTicketIsStillConsumed` |
+  | NC11 | no `KeepOwner` on the ticket's staged file | `TestAWriteAsRootKeepsTheAdminStoreOwners` |
+  | NC12 | a redemption that cannot read the credential removes the ticket | `TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket` |
+
+  NC2 on a Windows leg: the file-mode tests skip there, and the table still
+  goes red, which is what the GOOS parameter is for.
+- **End to end, the real binary** (CLAUDE.md's public-mode fixture on its own
+  ports, a legacy `adminauth-tickets.json` planted first): `bridge admin
+  login-link`, a separate process, removed the legacy file and wrote one 0600
+  `adminauth-ticket-<hex>.json` (52 bytes); GET rendered the interstitial;
+  the POST answered 302 `/` with the session cookie and the file was gone; the
+  replay answered 302 `/login?link=stale`. A second link with its file chmod
+  000: 500 `ticket_store_unavailable` and one ERROR line naming the file; after
+  chmod 600 the same link answered 302 `/`. A well-shaped bogus ticket: 302
+  stale, and the data dir's listing (names, sizes, mtimes) identical before and
+  after.
+- Checks: `go test -count=1 ./internal/adminauth/` (15.8 s) and `-race`
+  (38.5 s), `./internal/admin/ -run 'Login|Ticket'`, `go vet` (host and
+  `GOOS=windows`), `go build ./...`, and the cmd/bridge citation, docblock and
+  blank-keeper guards.
+
+### Out of scope
+
+- **The 1-bit.app privacy page** (acoseac/1bitapp,
+  `src/pages/bridge/privacy.astro`) lists `adminauth-tickets.json` among the
+  files the bridge stores and names "the login-ticket sidecar" among the files
+  a fault line can name by absolute path. Both want the per-ticket name
+  (`adminauth-ticket-<SHA-256>.json`, one per live ticket) in the release that
+  ships this. The redemption's fault line names the ticket's file, whose name
+  carries the ticket's SHA-256: a digest, not a credential.
+- A crashed mint's dot-prefixed staging file is not swept, as the store's own
+  `.adminauth-*.json` is not; another mint may be about to rename one.
