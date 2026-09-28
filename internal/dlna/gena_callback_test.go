@@ -164,25 +164,33 @@ func TestGENANotifyReachesThisHostWhenTheSubscribeCameFromIt(t *testing.T) {
 	}
 }
 
-// TestGENAInitialNotifyFollowsNoRedirect: the callback's ANSWER was never
-// checked. Go's client follows a redirect by default, re-sending a NOTIFY
-// to a 307/308 Location and turning a 301/302/303 into a GET, which the
-// console's csrfGuard passes. The callback here is the subscriber's own
-// address, which every rule admits.
+// TestGENAInitialNotifyFollowsNoRedirect pins what the callback rule never
+// looked at: the callback's ANSWER. Go's client follows a redirect by
+// default, re-sending a NOTIFY to a 307/308 Location and turning a
+// 301/302/303 into a GET, which the console's csrfGuard passes. The
+// callback here is the subscriber's own address, which every rule admits.
 func TestGENAInitialNotifyFollowsNoRedirect(t *testing.T) {
-	target := newGENASink(t, nil)
 	s := liveGENAServer(t)
 	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
 		http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
-		redirector := newGENASink(t, redirectTo(target.URL+"/api/stats", code))
-		subscribe(t, s, "127.0.0.1:49152", redirector.URL+"/evt")
-		if got := redirector.requests(); len(got) != 1 || got[0] != "NOTIFY /evt" {
-			t.Errorf("%d: the callback saw %q, want one NOTIFY /evt", code, got)
+		if got := redirectedNotify(t, s, code); len(got) != 0 {
+			t.Errorf("%d: the redirect target saw %q: the NOTIFY followed the callback's redirect", code, got)
 		}
 	}
-	if got := target.requests(); len(got) != 0 {
-		t.Errorf("the redirect target saw %q: the NOTIFY followed the callback's redirect", got)
+}
+
+// redirectedNotify subscribes from loopback with a loopback callback that
+// answers code with a Location on another loopback listener, and returns
+// what that listener saw: nothing, unless the NOTIFY followed the redirect.
+func redirectedNotify(t *testing.T, s *Server, code int) []string {
+	t.Helper()
+	target := newGENASink(t, nil)
+	redirector := newGENASink(t, redirectTo(target.URL+"/api/stats", code))
+	subscribe(t, s, "127.0.0.1:49152", redirector.URL+"/evt")
+	if got := redirector.requests(); len(got) != 1 || got[0] != "NOTIFY /evt" {
+		t.Fatalf("%d: the callback saw %q, want one NOTIFY /evt", code, got)
 	}
+	return target.requests()
 }
 
 // TestGENASubscriberCannotRedirectTheNotifyOntoThisHost is the redirect as a
@@ -194,6 +202,11 @@ func TestGENASubscriberCannotRedirectTheNotifyOntoThisHost(t *testing.T) {
 	lan := hostLANIPv4(t)
 	console := newGENASink(t, nil)
 	peer := newGENASinkOn(t, lan, redirectTo(console.URL+"/api/stats", http.StatusFound))
+	if c, err := net.Dial("tcp", peer.Listener.Addr().String()); err != nil {
+		t.Skipf("this host cannot connect to its own address %s: %v", lan, err)
+	} else {
+		_ = c.Close()
+	}
 	s := liveGENAServer(t)
 	subscribe(t, s, net.JoinHostPort(lan, "49152"), peer.URL+"/evt")
 	if got := peer.requests(); len(got) != 1 {
@@ -273,33 +286,12 @@ func hostLANIPv4(t *testing.T) string {
 // a Start that went back to a plain client fails here even though every
 // other GENA test builds its server by hand.
 func TestStartSendsTheNotifyThroughTheCheckedClient(t *testing.T) {
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("occupy port: %v", err)
-	}
-	defer occupied.Close()
-	s, err := NewServer(ServerConfig{
-		Library: newTestLib(), UDN: "uuid:test-notify-client",
-		ListenAddress: occupied.Addr().String(), ServerURL: "http://" + occupied.Addr().String(),
-	})
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	if err := s.Start(context.Background()); err == nil {
-		t.Fatal("Start bound an occupied port")
-	}
+	s := failedStartServer(t, "uuid:test-notify-client")
 	// The failed Start cancelled its notify context; hand the handler a live
 	// one, and keep the client Start built.
 	s.notifyCtx, s.notifyCancel = context.WithCancel(context.Background())
 	t.Cleanup(s.notifyCancel)
-
-	target := newGENASink(t, nil)
-	redirector := newGENASink(t, redirectTo(target.URL+"/api/stats", http.StatusFound))
-	subscribe(t, s, "127.0.0.1:49152", redirector.URL+"/evt")
-	if got := redirector.requests(); len(got) != 1 {
-		t.Fatalf("the callback saw %q, want its one NOTIFY", got)
-	}
-	if got := target.requests(); len(got) != 0 {
+	if got := redirectedNotify(t, s, http.StatusFound); len(got) != 0 {
 		t.Errorf("Start's notify client followed the callback's redirect to %q", got)
 	}
 }

@@ -169,28 +169,7 @@ func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 // cancel that the "no advertiser could bind" (SSDP) error path relies on,
 // without depending on multicast permissions that vary across hosts.
 func Test_Server_Start_CancelsNotifyContextOnFailure(t *testing.T) {
-	// Occupy a loopback port and keep it bound so the server's own
-	// net.Listen on the same address fails with "address already in use".
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("occupy port: %v", err)
-	}
-	defer occupied.Close()
-	addr := occupied.Addr().String()
-
-	s, err := NewServer(ServerConfig{
-		Library:       newTestLib(),
-		UDN:           "uuid:test-notify-leak",
-		ListenAddress: addr,
-		ServerURL:     "http://" + addr,
-	})
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-
-	if err := s.Start(context.Background()); err == nil {
-		t.Fatal("expected Start to fail binding an occupied port, got nil")
-	}
+	s := failedStartServer(t, "uuid:test-notify-leak")
 
 	if s.notifyCtx == nil {
 		t.Fatal("notifyCtx should be set even on a failed Start")
@@ -198,6 +177,35 @@ func Test_Server_Start_CancelsNotifyContextOnFailure(t *testing.T) {
 	if err := s.notifyCtx.Err(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("notifyCtx not cancelled after failed Start (leaked): Err() = %v, want context.Canceled", err)
 	}
+}
+
+// failedStartServer returns a Server whose Start failed deterministically:
+// a loopback port is occupied (and stays bound for the test) so the
+// server's own net.Listen on it fails with "address already in use". Start
+// builds the GENA notify state before that bind, and cancels the notify
+// context on the way out.
+func failedStartServer(t *testing.T, udn string) *Server {
+	t.Helper()
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	t.Cleanup(func() { _ = occupied.Close() })
+	addr := occupied.Addr().String()
+
+	s, err := NewServer(ServerConfig{
+		Library:       newTestLib(),
+		UDN:           udn,
+		ListenAddress: addr,
+		ServerURL:     "http://" + addr,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail binding an occupied port, got nil")
+	}
+	return s
 }
 
 func Test_Server_StopBeforeStartIsSafe(t *testing.T) {
