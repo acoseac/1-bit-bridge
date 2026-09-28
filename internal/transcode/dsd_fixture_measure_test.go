@@ -78,9 +78,11 @@ func renderFixture(t *testing.T, fixture string, kind JobKind, rate, bits int) (
 		TargetSampleRate: rate, TargetBits: bits, Quality: QualityVeryHigh,
 		OutputDir: outDir, TempDir: filepath.Join(root, "tmp"), Kind: kind,
 	}
-	if err := spec.FreshnessFromFile(); err != nil {
+	fi, err := os.Stat(src)
+	if err != nil {
 		t.Fatal(err)
 	}
+	spec.SourceMTimeNS, spec.SourceSize = fi.ModTime().UnixNano(), fi.Size()
 	res, err := Run(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("render %s: %v", fixture, err)
