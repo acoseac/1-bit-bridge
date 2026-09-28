@@ -21922,7 +21922,7 @@ Backlog B28. `filepath.WalkDir` hands each entry a stat of the entry itself,
 an lstat, and `walkRoot` and `ScanSubtree` both took the stat they index a
 file under from `DirEntry.Info()`. `enqueueableAudioFile` checks only the
 extension, so a symlinked audio file was scanned: `ExtractWithContext`
-opens the path, which follows the link, and read the TARGET's tags, while
+opened the path, which follows the link, and read the TARGET's tags, while
 the row recorded the LINK's size (the length of the target path it stores)
 and the link's mtime. `/v1/list` and `/v1/stat` already describe a link by
 its target (PROTOCOL.md, and `resolveEntryInfo` in internal/api), so the
@@ -22033,8 +22033,8 @@ rendition's source from the row, and `serveVariant` compares it with
 - **No `ExtractorVersion` bump.** The stored stat of each linked row no
   longer matches the walk's, so the first scan after the change re-extracts
   exactly those rows, once, through the full upsert: one delta row to every
-  paired device and a re-enrichment, and a sweeper-made rendition of a
-  linked track is rendered once more. No other row moves
+  paired device and a re-enrichment, and (by reading) a sweeper-made
+  rendition of a linked track is rendered once more. No other row moves
   (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows` writes a
   row as main wrote it and counts `indexed_at`).
 - **No PROTOCOL.md change.** It already says a listing row describes the
