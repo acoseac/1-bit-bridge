@@ -51,8 +51,8 @@ const defaultRebindInterval = 60 * time.Second
 //
 // Internally manages a re-advertise goroutine that watches for
 // network-interface changes and rebuilds the underlying mDNS
-// server when the IP set drifts. The goroutine's lifetime is tied
-// to Close().
+// server when what it advertises would change (maybeRebind). The
+// goroutine's lifetime is tied to Close().
 type Advertiser struct {
 	cfg      Config
 	rebindMu sync.Mutex // guards server + running + closed against the rebind goroutine
@@ -138,12 +138,14 @@ type Config struct {
 // an error if the underlying UDP sockets can't be opened (typically a
 // permissions issue on Linux without cap_net_bind).
 //
-// On success, spawns a background goroutine that polls the
-// advertise-eligible interface set every defaultRebindInterval (60 s)
-// and rebuilds the underlying mDNS server when the IP set drifts —
-// hashicorp/mdns snapshots IPs at construction time and never re-
-// binds, so without this loop a Wi-Fi roam / Ethernet plug / docking-
-// station handoff silently kills discovery until process restart.
+// On success, spawns a background goroutine that polls the host's
+// interfaces and the InterfaceSource every defaultRebindInterval (60 s)
+// and rebuilds the underlying mDNS server when the interface picked or
+// the addresses on it change, or any address when none is picked
+// (maybeRebind) — hashicorp/mdns snapshots IPs at
+// construction time and never re-binds, so without this loop a Wi-Fi
+// roam / Ethernet plug / docking-station handoff silently kills
+// discovery until process restart.
 // Goroutine stops on Close().
 func Advertise(cfg Config) (*Advertiser, error) {
 	return advertiseInternal(cfg, ipsForAdvertise, defaultRebindInterval, true /* spawn loop */)
