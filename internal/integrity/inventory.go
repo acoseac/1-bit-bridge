@@ -80,10 +80,16 @@ type SidecarInventory struct {
 	// it could not descend into, and a NON-REGULAR entry it could not
 	// stat (a symlink, a Windows junction — so it cannot know whether
 	// the target is a directory whose only reference this is). Both are
-	// missing from every count above, which can only make the deletion
-	// set SMALLER — the known set comes from the database, not from the
-	// walk — so they are reported rather than refused. A report built
-	// from a partial tree should say so.
+	// missing from every count above. That shrinks the list of files a
+	// sweep could unlink (the known set comes from the database, not
+	// from the walk), and it does NOT make a sweep's verdict safe, which
+	// this docblock claimed until 2026-09-28: MassOrphanRefusal weighs
+	// the whole tree, and a directory the walk could not list may hold
+	// any number of orphans, so a verdict that proceeds over the part
+	// the walk saw can be a refusal over the whole. The background sweep
+	// refuses on it for that reason (OrphanSidecarSweeper.tick); the two
+	// CLI sweeps still report it and go on, which is left open. A report
+	// built from a partial tree should say so.
 	//
 	// It is therefore a count of ENTRIES, not of directories, and the
 	// two CLI sweeps that print it say so: the message named directories
@@ -94,6 +100,35 @@ type SidecarInventory struct {
 	// the tree unseen. A caller that deletes must not truncate; a caller
 	// that reports must scope its claim to what it looked at.
 	Truncated bool
+}
+
+// ErrUnpairedInventory is what CheckPaired returns for an inventory whose
+// listed and walked paths do not pair up one for one.
+var ErrUnpairedInventory = errors.New("integrity: the inventory's listed and walked paths do not pair up")
+
+// CheckPaired returns ErrUnpairedInventory, with the counts, unless every
+// listed path has its walked path beside it: OrphanWalkedPaths as long as
+// OrphanPaths, and ScratchWalkedPaths as long as ScratchPaths.
+// TakeSidecarInventory appends to both halves of a pair together, so an
+// inventory it returned always passes; one built or trimmed by hand may
+// not. Each deleting sweep asks before it unlinks anything and refuses an
+// unpaired inventory whole (Gemini on #1063). Both alternatives are
+// worse: indexing past the shorter list panics, which in `bridge serve` is
+// the background sweep's goroutine taking the process down, and unlinking
+// by the listed spelling where a walked path is missing is the defect the
+// walked paths exist to close. A length is all it can check: two lists of
+// one length in different orders would pass, and nothing builds such a
+// pair.
+func (inv SidecarInventory) CheckPaired() error {
+	if len(inv.OrphanWalkedPaths) != len(inv.OrphanPaths) {
+		return fmt.Errorf("%w: %d orphan path(s), %d walked", ErrUnpairedInventory,
+			len(inv.OrphanPaths), len(inv.OrphanWalkedPaths))
+	}
+	if len(inv.ScratchWalkedPaths) != len(inv.ScratchPaths) {
+		return fmt.Errorf("%w: %d scratch path(s), %d walked", ErrUnpairedInventory,
+			len(inv.ScratchPaths), len(inv.ScratchWalkedPaths))
+	}
+	return nil
 }
 
 // SidecarInventoryOptions configures one inventory pass.

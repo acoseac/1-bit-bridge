@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
@@ -86,12 +87,67 @@ func TestAnalyzeGCUnlinksTheWalkedPaths(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	removed, failed, interrupted := removeAnalysisGCFiles(context.Background(), &stderr, inv)
-	if removed != 2 || failed != 0 || interrupted {
-		t.Fatalf("removed %d, failed %d, interrupted %v, want 2, 0, false\nstderr: %s", removed, failed, interrupted, stderr.String())
+	removed, failed, code := removeAnalysisGCFiles(context.Background(), &stderr, inv)
+	if removed != 2 || failed != 0 || code != 0 {
+		t.Fatalf("removed %d, failed %d, exit %d, want 2, 0, 0\nstderr: %s", removed, failed, code, stderr.String())
 	}
 	requireRemoved(t, walkedOrphan, "the orphan the walk visited")
 	requireRemoved(t, walkedScratch, "the scratch file the walk visited")
 	requireKept(t, listedOrphan, "the orphan's name under the configured spelling")
 	requireKept(t, listedScratch, "the scratch file's name under the configured spelling")
+}
+
+// TestUpscaleGCForwardSweepRefusesAnUnpairedInventory — `upscale --gc`
+// refuses an inventory whose listed and walked paths do not pair up, before
+// removing anything, and exits 1 (Gemini on #1063). Indexing past the
+// walked list would panic, and removing by the listed spelling is what the
+// walked paths exist to prevent. gcTakeInventory cannot return such an
+// inventory; the check is for a later change that builds or trims one.
+func TestUpscaleGCForwardSweepRefusesAnUnpairedInventory(t *testing.T) {
+	base := t.TempDir()
+	a := writeWalkedPathFixture(t, filepath.Join(base, "Artist", "a.flac"))
+	b := writeWalkedPathFixture(t, filepath.Join(base, "Artist", "b.flac"))
+	inv := integrity.SidecarInventory{
+		Files: 2, Orphans: 2,
+		OrphanPaths:       []string{a, b},
+		OrphanWalkedPaths: []string{a},
+	}
+
+	var stdout, stderr bytes.Buffer
+	removed, _, failed, code := runGCForwardSweep(context.Background(), &stdout, &stderr, inv)
+	if removed != 0 || failed != 0 || code != 1 {
+		t.Fatalf("removed %d, failed %d, exit %d, want 0, 0, 1\nstderr: %s", removed, failed, code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to run") || !strings.Contains(stderr.String(), "Nothing was removed") {
+		t.Errorf("the refusal should say so, and that nothing was removed: %s", stderr.String())
+	}
+	requireKept(t, a, "an orphan of a refused inventory")
+	requireKept(t, b, "an orphan of a refused inventory")
+}
+
+// TestAnalyzeGCRefusesAnUnpairedInventory pins the same for `analyze
+// --gc`. It reads only the walked lists, so without the check an unpaired
+// inventory would not panic there: it would remove what the walked lists
+// hold and report the rest as never there. Refused whole, exit 1.
+func TestAnalyzeGCRefusesAnUnpairedInventory(t *testing.T) {
+	base := t.TempDir()
+	name := "orphan" + analyze.WaveformExt
+	a := writeWalkedPathFixture(t, filepath.Join(base, "A", name))
+	b := writeWalkedPathFixture(t, filepath.Join(base, "B", name))
+	inv := integrity.SidecarInventory{
+		Files: 2, Orphans: 2,
+		OrphanPaths:       []string{a, b},
+		OrphanWalkedPaths: []string{a},
+	}
+
+	var stderr bytes.Buffer
+	removed, failed, code := removeAnalysisGCFiles(context.Background(), &stderr, inv)
+	if removed != 0 || failed != 0 || code != 1 {
+		t.Fatalf("removed %d, failed %d, exit %d, want 0, 0, 1\nstderr: %s", removed, failed, code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to run") {
+		t.Errorf("the refusal should say so: %s", stderr.String())
+	}
+	requireKept(t, a, "an orphan of a refused inventory")
+	requireKept(t, b, "an orphan of a refused inventory")
 }

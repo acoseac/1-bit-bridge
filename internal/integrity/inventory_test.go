@@ -241,9 +241,12 @@ func TestTakeSidecarInventoryTreatsAMissingRootAsNothingToDo(t *testing.T) {
 }
 
 // TestTakeSidecarInventoryCountsADirectoryItCannotRead — an unreadable
-// subtree can only make the deletion set SMALLER (the known set comes from
-// the database, not the walk), so it is reported rather than refused. But
-// a report built from part of a tree has to say so.
+// subtree is absent from every count and from the deletion list, and the
+// inventory reports it rather than failing the walk. Whether a sweep may
+// go on over part of a tree is the sweep's decision: the background one
+// refuses (TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree),
+// since a count taken over part of the tree can pass a mass-orphan check
+// the whole would fail. A report built from part of a tree has to say so.
 func TestTakeSidecarInventoryCountsADirectoryItCannotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod 0 does not deny directory reads on Windows")
@@ -769,5 +772,58 @@ func TestClassifyWalkEntryHandlesAWindowsJunction(t *testing.T) {
 		return fakeFileInfo{}, nil
 	}); got != walkEntryClassify || statted {
 		t.Errorf("a regular file: verdict %d, statted %v — want classify with no stat", got, statted)
+	}
+}
+
+// TestCheckPairedRefusesListsThatDoNotPairUp pins the check each deleting
+// sweep makes before it unlinks anything (Gemini on #1063): every listed
+// path has its walked path beside it, orphans and scratch alike, or the
+// inventory is refused with ErrUnpairedInventory. An inventory
+// TakeSidecarInventory returned always passes, capped or not, which the
+// real walks at the end check.
+func TestCheckPairedRefusesListsThatDoNotPairUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		inv  SidecarInventory
+		ok   bool
+	}{
+		{"nothing listed", SidecarInventory{}, true},
+		{"orphans paired", SidecarInventory{OrphanPaths: []string{"a", "b"}, OrphanWalkedPaths: []string{"A", "B"}}, true},
+		{"scratch paired", SidecarInventory{ScratchPaths: []string{"t"}, ScratchWalkedPaths: []string{"T"}}, true},
+		{"an orphan with no walked path", SidecarInventory{OrphanPaths: []string{"a", "b"}, OrphanWalkedPaths: []string{"A"}}, false},
+		{"a walked path with no orphan", SidecarInventory{OrphanPaths: []string{"a"}, OrphanWalkedPaths: []string{"A", "B"}}, false},
+		{"orphans listed and none walked", SidecarInventory{OrphanPaths: []string{"a"}}, false},
+		{"scratch listed and none walked", SidecarInventory{ScratchPaths: []string{"t"}}, false},
+		{"scratch walked and none listed", SidecarInventory{ScratchWalkedPaths: []string{"T"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.inv.CheckPaired()
+			switch {
+			case tc.ok && err != nil:
+				t.Errorf("a paired inventory was refused: %v", err)
+			case !tc.ok && !errors.Is(err, ErrUnpairedInventory):
+				t.Errorf("CheckPaired() = %v, want ErrUnpairedInventory", err)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	seedTree(t, root, "a/x.flac", "a/y.flac", "b/z.flac", "b/half.flac.tmp")
+	isScratch := func(name string) bool { return strings.HasSuffix(name, ".tmp") }
+	for _, max := range []int{0, 1} {
+		inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
+			Scratch:        isScratch,
+			MaxOrphanPaths: max,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inv.OrphanPaths) == 0 || len(inv.ScratchPaths) == 0 {
+			t.Fatalf("MaxOrphanPaths=%d: the fixture listed %d orphan(s) and %d scratch file(s), want some of each",
+				max, len(inv.OrphanPaths), len(inv.ScratchPaths))
+		}
+		if err := inv.CheckPaired(); err != nil {
+			t.Errorf("MaxOrphanPaths=%d: an inventory TakeSidecarInventory returned was refused: %v", max, err)
+		}
 	}
 }

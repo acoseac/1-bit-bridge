@@ -821,7 +821,8 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 
 // runGCForwardSweep unlinks every file the inventory classified as an
 // orphan. Returns `(removed, kept, failed, exitCode)` — `exitCode != 0`
-// signals a SIGINT and runGC bails immediately.
+// signals a SIGINT, or an inventory it refused, and runGC bails
+// immediately.
 //
 // It does NOT walk. The walk happens once, earlier, in
 // gcTakeInventory, because the mass-orphan guard has to see the whole
@@ -834,9 +835,15 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // (OrphanWalkedPaths) and names it by the configured one: through a
 // variants directory that is a symlink, repointed between the walk and
 // the unlinks, the configured spelling reaches a tree the guard never
-// counted.
+// counted. An inventory whose two lists do not pair up is refused before
+// anything is removed (integrity.SidecarInventory.CheckPaired), never
+// indexed past its end nor unlinked by the configured spelling.
 func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int) {
 	var removed, failed int
+	if err := inv.CheckPaired(); err != nil {
+		fmt.Fprintf(stderr, "GC forward sweep: refusing to run — %v. Nothing was removed.\n", err)
+		return 0, inv.Known, 0, 1
+	}
 	for i, path := range inv.OrphanPaths {
 		// Stop the forward sweep promptly on SIGINT. Without the check,
 		// a Ctrl-C mid-sweep would let the GC keep deleting files until

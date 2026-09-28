@@ -376,10 +376,9 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		}
 	}
 
-	removed, failed, interrupted := removeAnalysisGCFiles(ctx, stderr, inv)
-	if interrupted {
-		fmt.Fprintln(stderr, "analyze --gc: interrupted")
-		return 130
+	removed, failed, code := removeAnalysisGCFiles(ctx, stderr, inv)
+	if code != 0 {
+		return code
 	}
 	kept := inv.Known
 	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
@@ -392,8 +391,15 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 }
 
 // removeAnalysisGCFiles unlinks the scratch files and orphans an analyze
-// --gc inventory listed and reports each failure by base name. interrupted
-// is true when ctx ended the loop, with the files before it already gone.
+// --gc inventory listed and reports each failure by base name. code is the
+// exit status to stop with, 0 to go on: 130 when ctx ended the loop, with
+// the files before it already gone, and 1 when it refused an inventory
+// whose listed and walked paths do not pair up
+// (integrity.SidecarInventory.CheckPaired), before removing anything. It
+// reads only the walked paths, so an unpaired inventory would not panic
+// here; it would remove whatever the walked lists hold and report the
+// rest as never there, which is the silent shape the check exists to
+// refuse.
 //
 // The scratch half is unconditional and outside the ratio: a
 // `.waveform.bin.tmp` is this sweep's own half-written litter, never the
@@ -406,11 +412,16 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 // a symlink, repointed between the walk and the unlinks, the configured
 // spelling reaches a tree the guard never counted. A base name is the
 // same under both.
-func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory) (removed, failed int, interrupted bool) {
+func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory) (removed, failed, code int) {
+	if err := inv.CheckPaired(); err != nil {
+		fmt.Fprintf(stderr, "analyze --gc: refusing to run — %v. Nothing was removed.\n", err)
+		return 0, 0, 1
+	}
 	for _, set := range [][]string{inv.ScratchWalkedPaths, inv.OrphanWalkedPaths} {
 		for _, path := range set {
 			if ctx.Err() != nil {
-				return removed, failed, true
+				fmt.Fprintln(stderr, "analyze --gc: interrupted")
+				return removed, failed, 130
 			}
 			if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 				fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
@@ -420,7 +431,7 @@ func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.
 			removed++
 		}
 	}
-	return removed, failed, false
+	return removed, failed, 0
 }
 
 // analysisGCMaxOrphanPercent is the mass-orphan threshold for waveforms.

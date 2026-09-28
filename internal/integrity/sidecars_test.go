@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -578,6 +579,116 @@ func TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing(t *testing.T) {
 	}
 	if got := countFiles(t, dir); got != 1020 {
 		t.Errorf("%d of 1,020 files survive; nothing here was an orphan once the rows came back", got)
+	}
+}
+
+// TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree is
+// CodeRabbit's finding on #1063: a stranded tree whose larger part sits
+// behind a directory the bridge's user cannot list. The walk sees 20 live
+// files and 15 stranded ones, 15 orphans against 20 rows, which the
+// mass-orphan check lets through; on the head it was found on, the tick
+// unlinked those 15, while the 1,000 behind the locked directory make the
+// whole tree refuse. Each tick refuses the partial walk now, under its own
+// WARN, once for the streak. Once the directory is readable the whole tree
+// refuses as a lost index, and that WARN comes at once, because a refusal
+// of the other kind starts a new streak. Nothing is unlinked on any tick.
+func TestOrphanSidecarSweeperRefusesAWalkThatCouldNotReadPartOfTheTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0 does not deny directory reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 directory anyway")
+	}
+	dir := t.TempDir()
+	live := seedTestSidecarTree(t, dir, "live-", 20)
+	seedTestSidecarTree(t, dir, "stranded-", 15)
+	locked := filepath.Join(dir, "locked")
+	seedTestSidecarTree(t, locked, "stranded-", 1000)
+	ageFixtures(t, dir)
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: pathSet(live)}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	rec := loggingtest.Record(t)
+
+	for i := 1; i <= 2; i++ {
+		if n := s.tick(context.Background()); n != 0 {
+			t.Fatalf("tick %d unlinked %d of the files the walk could see, want 0", i, n)
+		}
+	}
+	partial := rec.Failures(msgOrphanPartialWalk)
+	if len(partial) != 1 {
+		t.Fatalf("want one partial-walk WARN over two ticks, got %d:\n%s", len(partial), strings.Join(rec.Failures(), "\n"))
+	}
+	if !strings.Contains(partial[0], "could not read 1 entr(y/ies)") ||
+		!strings.Contains(partial[0], "15 orphan(s) of 35 file(s) against 20 row(s)") {
+		t.Errorf("the refusal should name what the walk could not read and what it counted: %s", partial[0])
+	}
+	if got := rec.Lines(msgOrphanRefusal); len(got) != 0 {
+		t.Errorf("the part the walk saw passes the mass-orphan check, and was reported as failing it:\n%s", strings.Join(got, "\n"))
+	}
+	for _, line := range rec.Lines(msgOrphanTickComplete) {
+		if !strings.Contains(line, " refused=true") || !strings.Contains(line, " unreadable=1") {
+			t.Errorf("a refused partial walk's summary should say so, with the count: %s", line)
+		}
+	}
+
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.tick(context.Background()); n != 0 {
+		t.Fatalf("the whole tree's tick unlinked %d, want 0", n)
+	}
+	if got := rec.Failures(msgOrphanRefusal); len(got) != 1 || !strings.Contains(got[0], "1015 of 1035 file(s)") {
+		t.Errorf("the whole tree should refuse as a lost index at once, naming its count; got %q", got)
+	}
+	if got := rec.Lines(msgOrphanRefusalLifted); len(got) != 0 {
+		t.Errorf("a refusal of the other kind ended the streak as if the check had passed:\n%s", strings.Join(got, "\n"))
+	}
+	if got := countFiles(t, dir); got != 1035 {
+		t.Errorf("%d of 1,035 files survive", got)
+	}
+}
+
+// TestReclaimOrphansRefusesAnUnpairedInventory — the unlink step refuses an
+// inventory whose listed and walked paths do not pair up, unlinking
+// nothing (Gemini on #1063), rather than index past the shorter list or cut
+// it to the chunk, either of which panics in `bridge serve`'s sweep
+// goroutine. The walked lists here are slices of their own, as a list built
+// apart would be. Driven directly: TakeSidecarInventory cannot return such
+// an inventory, which is the premise the check guards.
+func TestReclaimOrphansRefusesAnUnpairedInventory(t *testing.T) {
+	dir := t.TempDir()
+	files := seedTestSidecarTree(t, dir, "orphan-", 3)
+	ageFixtures(t, dir)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{}, staticDir(dir), time.Hour, sweepPercent)
+	s.gracePeriodForTest = time.Nanosecond
+	walkedCopy := func(n int) []string { return append([]string(nil), files[:n]...) }
+
+	for _, tc := range []struct {
+		name  string
+		inv   SidecarInventory
+		chunk int
+	}{
+		{"a walked path missing", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(2)}, 10},
+		{"a walked path missing, cut to a chunk", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(1)}, 2},
+		{"a walked path with no orphan", SidecarInventory{OrphanPaths: files[:2], OrphanWalkedPaths: walkedCopy(3)}, 10},
+		{"the scratch lists unpaired", SidecarInventory{OrphanPaths: files, OrphanWalkedPaths: walkedCopy(3), ScratchPaths: files[:1]}, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tally, err := s.reclaimOrphans(context.Background(), tc.inv, tc.chunk, time.Now())
+			if !errors.Is(err, ErrUnpairedInventory) {
+				t.Errorf("reclaimOrphans() error = %v, want ErrUnpairedInventory", err)
+			}
+			if tally != (orphanTally{}) {
+				t.Errorf("tally = %+v, want nothing done", tally)
+			}
+			if got := countFiles(t, dir); got != 3 {
+				t.Errorf("%d of 3 files survive an inventory that was refused", got)
+			}
+		})
 	}
 }
 
