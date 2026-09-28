@@ -4029,7 +4029,7 @@ async function renderSettingsPrereqs() {
     for (const c of doctor.report.checks) checks.set(c.name, c);
   }
 
-  const paint = (slot, { running, degradedReason, check, offLabel }) => {
+  const paint = (slot, { running, degradedReason, check, justFound, offLabel }) => {
     if (!slot) return;
     slot.hidden = false;
     if (running) {
@@ -4046,7 +4046,7 @@ async function renderSettingsPrereqs() {
       const live = check?.status === "ok";
       slot.dataset.state = "warn";
       slot.textContent = live
-        ? "not running yet — sox was just found; picked up within a minute"
+        ? `not running yet — ${justFound}; picked up within a minute`
         : `not running — ${check ? check.summary : degradedReason}`;
       return;
     }
@@ -4059,6 +4059,7 @@ async function renderSettingsPrereqs() {
     running: !!(jobs?.analysis?.enabled && !jobs.analysis.degradedReason),
     degradedReason: jobs?.analysis?.enabled ? jobs.analysis.degradedReason : "",
     check: audio,
+    justFound: "sox was just found",
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
   // `enabled` here is the RUNTIME verdict, not the persisted config flag:
@@ -4074,13 +4075,21 @@ async function renderSettingsPrereqs() {
     running: !!(upscale?.enabled),
     degradedReason: upscale && !upscale.enabled && upscaleSwitch?.checked ? "sox_missing" : "",
     check: audio,
+    justFound: "sox was just found",
     offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
+  // `active` is the fingerprint gate (the switch AND fpcalc AND a key),
+  // `enabled` the switch alone. The chip read `enabled` as running until
+  // 2026-09-28, so it said "active" beside a switch whose card said
+  // degraded, on a bridge without fpcalc: the upscale chip's defect, one
+  // switch over.
+  const fpJob = jobs?.fingerprint;
   const fp = checks.get("fingerprint-toolchain");
   paint(slots.fingerprint, {
-    running: !!(jobs?.fingerprint?.enabled),
-    degradedReason: "",
+    running: !!(fpJob?.active),
+    degradedReason: fpJob?.enabled && !fpJob.active ? (fpJob.degradedReason || "degraded") : "",
     check: fp,
+    justFound: "fpcalc was just found",
     offLabel: fp?.status === "ok" ? "off" : "off — needs fpcalc and an AcoustID key",
   });
 }
@@ -5254,30 +5263,30 @@ function initJobs() {
   }, "Cleared — will retry");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
-  // gets its own handler instead of wireJobButton — the post-click state
-  // must LATCH (the /api/jobs snapshot keeps reporting the startup flag
-  // until the restart, and a refresh must not reset the button).
+  // gets its own handler instead of wireJobButton. The switch applies live,
+  // so the card is redrawn as soon as the save lands: it reads "active", or
+  // "degraded" with what is missing (fpcalc, the AcoustID key) in its note,
+  // and the button goes. It latched "Enabled — restart to apply" until
+  // 2026-09-28, from when /api/jobs reported the switch as it was at
+  // startup; both halves are live since.
   const fpEnable = document.getElementById("jobs-fp-enable");
   fpEnable?.addEventListener("click", async () => {
     fpEnable.disabled = true;
     try {
       await API.patch("/api/settings", { fingerprintEnabled: true });
-      fpEnable.dataset.latched = "true";
-      fpEnable.textContent = "Enabled — restart to apply";
-      const hint = document.getElementById("job-fp-hint");
-      if (hint) {
-        hint.textContent =
-          "Enabled. Add your AcoustID key (if you haven't yet) and restart " +
-          "the bridge to start fingerprinting. ";
-        const a = document.createElement("a");
-        a.href = "/settings?tab=enrichment";
-        a.textContent = "Fingerprint settings";
-        hint.appendChild(a);
-      }
     } catch (err) {
       fpEnable.disabled = false;
       fpEnable.textContent = "Enable failed — retry";
+      return;
     }
+    fpEnable.disabled = false;
+    fpEnable.textContent = "Enable";
+    // The card's own gear offers the same switch: show it saved there too,
+    // as a tray's own save does for every tray on the page.
+    if (traySettings) traySettings.fingerprintEnabled = true;
+    for (const t of mountedTrays) syncTray(t);
+    // A failed refresh is the 10 s poll's to repeat: the save has landed.
+    await jobsSnapshotRefresh().catch(() => {});
   });
   wireJobButton("jobs-backup-now", () => API.post("/api/backups"), "Snapshot written");
   wireJobButton("jobs-mix-regen", async () => {
@@ -5385,7 +5394,8 @@ function mountJobTrays() {
       {
         field: "fingerprintEnabled", type: "switch", label: "Fingerprint unmatched tracks",
         hint: "Needs fpcalc on the bridge host and a free AcoustID application " +
-          "key — without either it degrades to off at startup.",
+          "key; without either the card says which is missing, and it starts once " +
+          "both are there, with no restart.",
       },
     ],
     link: { href: "/settings?tab=enrichment", text: "Fingerprint settings →" },
@@ -5605,6 +5615,33 @@ const JOB_DEGRADED_LABELS = {
   no_api_key: "no AcoustID API key configured (ACOUSTID_API_KEY)",
 };
 
+// jobDegradedLabel words a card's degraded key, the key itself when the
+// table has no words for it.
+function jobDegradedLabel(key) {
+  return JOB_DEGRADED_LABELS[key] || key || "a prerequisite is missing";
+}
+
+// showJobDegraded says why a card whose switch is on does no work, in the
+// card's degraded note, or hides the note when `why` is "". `trigger`
+// names the card's own sweep button.
+//
+// An element of its own, never the description's text. Every gate these
+// cards report is live (the flag AND the tool, or the key, probed on a 30 s
+// cache), so a card that goes degraded comes back by itself once the tool is
+// installed, and its description has to come back with it. The analysis and
+// fingerprint cards wrote the reason OVER the description until 2026-09-28,
+// with "Restart after fixing.", false since #781 made the gates live, and
+// the reason then stayed beside an "active" badge until a reload.
+function showJobDegraded(id, why, trigger) {
+  const note = document.getElementById(id);
+  if (!note) return;
+  note.hidden = !why;
+  note.textContent = why
+    ? `Enabled but inactive: ${why}. No restart is needed once it is fixed: ` +
+      `the card turns on within a minute, and the next sweep (or ${trigger}) takes up the work.`
+    : "";
+}
+
 function renderJobCards(j) {
   if (!j || !document.getElementById("jobs-page-root")) return;
 
@@ -5632,10 +5669,8 @@ function renderJobCards(j) {
     setBadge("job-analysis-state", "idle", "off");
   }
   if (analyzeBtn) analyzeBtn.hidden = !an.active;
-  const hint = document.getElementById("job-analysis-hint");
-  if (hint && an.enabled && !an.active && an.degradedReason) {
-    hint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[an.degradedReason] || an.degradedReason}. Restart after fixing.`;
-  }
+  showJobDegraded("job-analysis-degraded",
+    an.enabled && !an.active ? jobDegradedLabel(an.degradedReason) : "", "Analyze now");
   renderAnalysisCoverage(an.coverage);
   const sweep = an.sweep;
   if (sweep) {
@@ -5654,30 +5689,17 @@ function renderJobCards(j) {
     else if (fp.enabled) setBadge("job-fp-state", "warn", "degraded");
     else setBadge("job-fp-state", "idle", "off");
     if (fpBtn) fpBtn.hidden = !fp.active;
-    // The Enable button shows only while the STARTUP flag is off. After a
-    // click, the /api/jobs closure keeps reporting the startup value until
-    // the restart, so the click handler latches the button and this
-    // refresh must not un-latch it back to "Enable".
+    // The Enable button shows while the switch is off. The switch is live
+    // (fingerprintEnabled answers `live`, and /api/jobs reads it per
+    // request), so the refresh after a click hides it; it latched
+    // "Enabled — restart to apply" until 2026-09-28, written when this card
+    // reported the switch as it was at startup.
     const fpEnable = document.getElementById("jobs-fp-enable");
-    // NOT `fpEnable?.dataset.latched !== "true"`, which SonarCloud js:S6582
-    // would have you write: with no element that reads `undefined !== "true"`,
-    // i.e. TRUE, and the body then throws on fpEnable.hidden. The `&&` form
-    // guards the element; the optional-chain form guards only the lookup, and
-    // a `!==` downstream inverts the miss.
-    if (fpEnable && fpEnable.dataset.latched !== "true") {
-      fpEnable.hidden = fp.enabled;
-    }
-    const fpHint = document.getElementById("job-fp-hint");
-    if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
-      // textContent wipes the static settings link along with the old
-      // text; re-append it so the fix for a degraded state (missing key)
-      // stays one click away.
-      fpHint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[fp.degradedReason] || fp.degradedReason}. Restart after fixing. `;
-      const fpLink = document.createElement("a");
-      fpLink.href = "/settings?tab=enrichment";
-      fpLink.textContent = "Fingerprint settings";
-      fpHint.appendChild(fpLink);
-    }
+    if (fpEnable) fpEnable.hidden = fp.enabled;
+    // The description beneath keeps its "Fingerprint settings" link, which
+    // is where a missing key is fixed.
+    showJobDegraded("job-fp-degraded",
+      fp.enabled && !fp.active ? jobDegradedLabel(fp.degradedReason) : "", "Sweep now");
     setText("job-fp-last", fp.running ? "sweeping now" : agoOrDash(fp.lastFinishedAt));
     setText("job-fp-next", formatInFuture(fp.nextDueAt));
     setText("job-fp-counts", fp.last
@@ -5697,25 +5719,13 @@ function renderJobCards(j) {
     // missing tool, and it is said, not rendered as "off": every sweep
     // the gate refuses records `disabled`, which formatAutoOptimizeResult
     // alone would call "turned off" beside a switch that is on.
-    const aoDegraded = ao.enabled && !ao.active
-      ? (JOB_DEGRADED_LABELS[ao.degradedReason] || ao.degradedReason || "the toolchain is unusable")
-      : "";
+    const aoDegraded = ao.enabled && !ao.active ? jobDegradedLabel(ao.degradedReason) : "";
     if (ao.active) setBadge("job-ao-state", "running", "on");
     else if (aoDegraded) setBadge("job-ao-state", "warn", "degraded");
     else setBadge("job-ao-state", "idle", "off");
     const aoBtn = document.getElementById("jobs-ao-now");
     if (aoBtn) aoBtn.hidden = !ao.active;
-    // Its own element, not the hint's text: the gate is live, so a card
-    // that goes degraded comes back when sox is installed, and the
-    // description beneath has to come back with it.
-    const aoWhy = document.getElementById("job-ao-degraded");
-    if (aoWhy) {
-      aoWhy.hidden = !aoDegraded;
-      aoWhy.textContent = aoDegraded
-        ? `Enabled but inactive: ${aoDegraded}. No restart is needed once it is fixed: ` +
-          "the card turns on within a minute, and the next sweep (or Sweep now) takes up the work."
-        : "";
-    }
+    showJobDegraded("job-ao-degraded", aoDegraded, "Sweep now");
     const last = ao.last;
     setText("job-ao-remaining", formatAutoOptimizeRemaining(last));
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
