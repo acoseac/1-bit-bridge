@@ -139,6 +139,12 @@ func TestParseDeviceDescription_AHostLocalServiceURLNeedsAHostLocalDescription(t
 		{"http://nas.local:8200/d.xml", "http://127.0.0.1:8200/ctl", false},
 		{"http://127.0.0.1:8200/d.xml", "http://169.254.169.254/latest/meta-data/", false},
 		{"http://169.254.10.20:8200/d.xml", "http://127.0.0.1:7789/ctl", false},
+		// A numeric spelling no device writes is refused from any
+		// description, its own spelling included: macOS reads 127.1 as
+		// 127.0.0.1 and Linux reads it as nothing.
+		{"http://192.168.1.42:8200/d.xml", "http://127.1:7789/ctl", false},
+		{"http://127.0.0.1:8200/d.xml", "http://2130706433:8200/ctl", false},
+		{"http://127.1:8200/d.xml", "/ctl", false},
 		// The kept rows: a description on this host naming a service on this
 		// host by any spelling, a zero-configuration device naming another
 		// link-local address, and #1050's escape hatch, another LAN host.
