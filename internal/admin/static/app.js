@@ -3427,16 +3427,29 @@ function invalidateTraySettings() {
   traySettingsPromise = null;
 }
 
+// traySettingsSnapshot answers the shared settings snapshot, fetching it
+// once per drop. A request answers the cache only while it is still the
+// request the cache is waiting on: invalidateTraySettings says that
+// anything fetched before it is stale, and until 2026-09-28 it left the
+// request running, so its answer still became the snapshot when it landed,
+// over a newer answer or in place of the one the new page waited for, and
+// its failure dropped the newer request (CodeRabbit on #1088).
 function traySettingsSnapshot() {
   if (traySettings) return Promise.resolve(traySettings);
   if (!traySettingsPromise) {
-    traySettingsPromise = API.get("/api/settings")
+    const request = API.get("/api/settings")
       .then((s) => {
-        traySettings = s || {};
-        trayManaged = new Set(Array.isArray(traySettings.managedSettings) ? traySettings.managedSettings : []);
-        return traySettings;
+        const answer = s || {};
+        if (traySettingsPromise !== request) return answer;
+        traySettings = answer;
+        trayManaged = new Set(Array.isArray(answer.managedSettings) ? answer.managedSettings : []);
+        return answer;
       })
-      .catch((err) => { traySettingsPromise = null; throw err; });
+      .catch((err) => {
+        if (traySettingsPromise === request) traySettingsPromise = null;
+        throw err;
+      });
+    traySettingsPromise = request;
   }
   return traySettingsPromise;
 }
