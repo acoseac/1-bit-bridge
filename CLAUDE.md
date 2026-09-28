@@ -14,21 +14,22 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **39** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **40** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
   2026-09-10: the sixth stale claim of the kind, and in the paragraph that
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
-  `FuzzTextCandidateClassification`.) They cover
+  `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
+  `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 39 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 38, because
+  **Count them by file:name pair** to get 40 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 39, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -38,20 +39,24 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twelve carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Thirteen carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
   `FuzzParseRetryAfter` (the `maxRetryAfter` cap), `FuzzSACDVirtualPathRoundTrip` (a
   rendered virtual path must parse back to the same index and container — the renderer and the
   parser disagreeing is a row-reaping bug, since the deletion pass keys on
-  `IsSACDVirtualPath`), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
+  `IsSACDVirtualPath`), `FuzzSACDExpandUnderAReadFault` (an SACD image expanded through
+  one failing read answers what it answers fault-free, or an error: never "not an SACD"
+  where the fault-free read found an album, the answer that retires its rows; the rule
+  is under **Scanner**), the four lyrics targets (`FuzzParseSYLTToLRC`, `FuzzNormalize`,
   `FuzzPickIsShuffleInvariant`, `FuzzTextCandidateClassification`; their properties are
   under **Lyrics**), `FuzzMatchRelease` (a claimed match is an entry the listing holds),
   `FuzzKeyFor` (the dupe key is deterministic and every field reaches `Key.ID`),
   `FuzzValidateRelPath` (an accepted upload path meets every invariant the commit relies
   on) and `FuzzAcceptedExt` (an audio extension is always accepted). This said "Four"
-  until 2026-09-28, while eight more were added beside them: **count them by the
+  until 2026-09-28, while eight more were added beside them, and "Twelve" until the
+  same day's fault target: **count them by the
   assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
@@ -319,14 +324,21 @@ lost my library."
   completed read**, so the scanner also skips, retiring and writing nothing,
   a container that changed during the scan (`expandSACDContainer`): the
   handle's stat before the first read against a stat of the path after it
-  (`os.SameFile`, size, mtime), and the walk's stat against an LSTAT after it
-  (size, mtime). **Never `os.SameFile` against the walk's stat**: on Windows
-  a directory entry carries no file index on FAT or exFAT, so every container
-  there would skip, forever. **Never compare the walk's stat with a stat**:
-  the walk's is an lstat, so every symlinked container would read as moved
-  (`TestScanner_SACDSymlinkedContainer_Expands`). Residual: an in-place
-  overwrite that keeps size and inode inside one coarse mtime tick (FAT's
-  2 s). **No `ExtractorVersion` bump for this**: readable files expand
+  (`os.SameFile`, size, mtime), and the walk's stat against that same STAT
+  (size, mtime), since the walk's stat of a linked container is its TARGET's
+  (the next bullet). **Never `os.SameFile` against the walk's stat**: on
+  Windows a directory entry carries no file index on FAT or exFAT, so every
+  container there would skip, forever. **Never compare the walk's stat with an
+  LSTAT**: for a link the walk's stat is the target's, so every symlinked
+  container would read as moved (`TestScanner_SACDSymlinkedContainer_Expands`).
+  This bullet said the opposite, lstat, until 2026-09-28, when the walk's stat
+  of a link was the link's own; that pairing could not see a write to a
+  symlinked container's target before the open, and the album was retired
+  (`TestScanner_ALinkedSACDContainerWrittenAfterTheWalkKeepsItsRows`).
+  Residual: an in-place overwrite that keeps size and inode inside one coarse
+  mtime tick (FAT's 2 s), and a link repointed after the walk at a file with
+  the first one's size and mtime. **No `ExtractorVersion` bump for this**:
+  readable files expand
   byte-identically, a wrongly retired container has no representative row so
   the gate re-expands it anyway, and a bump re-upserts every virtual row (that
   leg has no diff-guard). `TestScanner_SACDReadFailure_RetiresNothing` (a
@@ -335,6 +347,55 @@ lost my library."
   (`Scanner.openSACD`), and
   `TestScanner_SACDReadWholeAsJunk_StillRetiresWithTombstones` is the positive
   control: a container read whole as junk still retires, with tombstones.
+  **`FuzzSACDExpandUnderAReadFault` puts the rule under the fuzzer** (the other
+  SACD targets' reader never fails): an image expanded through one failing
+  read must answer what it answers fault-free, or an error. It holds only for
+  an image carrying ONE answer, so the harness builds it with identical TOC
+  copies, one stereo area and one geometry; an image whose copies differ can
+  legitimately expand from the second, and a reader that reports the end of
+  the file early is a truncation nobody can tell apart, so only failures that
+  say so are injected. Its seeds fault each of the three reads above, and they
+  are what gives the fuzzer its reach: Go's mutator walks an integer by at
+  most 100, one argument per step, so with the DST probe's failure dropped
+  again it found the violation in 0.46 s from the other seeds, and not in
+  90 s (468,005 inputs) from one seed whose fault touched no read.
+- **A file the walk reaches through a link is indexed under its TARGET's
+  stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
+  symlinked audio file was indexed under the LINK's size (the length of the
+  path it stores: in one test run 123 bytes against a 116-byte FLAC, and 134
+  against a 1,228,800-byte `.iso`) and the link's mtime, while its tags came
+  from the target and every endpoint serves the target's bytes. The skip
+  gate compared the same
+  link stat, so a retagged target was never re-extracted (and a re-authored
+  linked `.iso` never re-expanded); `/v1/lyrics` answered 410 `lyrics_stale`
+  forever for its embedded lyrics (the row's stat against the resolver's
+  `os.Stat`); and the phone, which stores the size as `Track.fileSize`, fails
+  every offline download of the file (`validateDownloadedSize` wants an exact
+  match), re-downloads it forever through the auto-cache, and cannot read a
+  linked SACD container at all (its reads clamp to the container size).
+  `walkedFileInfo` is the one decision, in `walkRoot` and `ScanSubtree` alike:
+  a REGULAR file keeps its own stat and pays no second syscall; anything else
+  is stat'ed through (the listing's "not a regular file" test,
+  `resolveEntryInfo`, because a Windows junction is `ModeIrregular` with no
+  `ModeDir`; a cloud placeholder stats to itself). **A link whose target
+  cannot be stat'ed spares its own row, keyed on the entry itself, and mints
+  none**: "could not see" dominates, so a mount that went away keeps its rows
+  as they were, and the old walk's row minted from the path alone (which the
+  skip gate then kept once the target came back) is gone. Keyed on the entry,
+  not its directory, so a permanently dangling link spares nothing beside it.
+  One Warn per scan names them (`links whose target could not be read`),
+  never one per link: a mount takes every link into it at once. **A link to a
+  DIRECTORY is not a track**, whatever its name, and the walk still follows no
+  directory link (loops). **No `ExtractorVersion` bump**: the stored stat of
+  each linked row no longer matches, so the first scan after the change
+  re-extracts exactly those rows, once, on the full upsert leg (one delta row
+  to every paired device, and a re-enrichment), and nothing else moves
+  (`TestScanner_TheFirstScanAfterTheFixRewritesOnlyTheLinkedRows`). PROTOCOL.md
+  needed no change: it already said a listing row describes the target, and
+  a virtual row carries the container's size. **Still open: a library ROOT
+  that is itself a symlink to a directory is never walked** (`WalkDir` lstats
+  its root, so it visits one non-directory entry and stops: 0 rows, measured),
+  which is not this rule's shape.
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
