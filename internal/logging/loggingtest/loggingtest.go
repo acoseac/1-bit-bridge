@@ -11,11 +11,18 @@
 //
 // The same handler keeps every record it sees, so a test can also ask what
 // else was logged: Record installs a Recorder on its own, and a Park is one.
+//
+// SetDefault is the way both install their handler, and the way any other
+// test that points slog.Default at its own logger should: it puts back the
+// log package's output and flags as well as the previous default, which a
+// bare slog.SetDefault(prev) does not. What it changes is one per process,
+// so it refuses a parallel test, as t.Setenv does.
 package loggingtest
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -117,12 +124,60 @@ func (h recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 // WithGroup returns the same handler, for the reason WithAttrs does.
 func (h recordHandler) WithGroup(string) slog.Handler { return h }
 
-// install points slog.Default at h and restores the previous default when
-// the test ends.
+// install points slog.Default at h until the test ends, through SetDefault.
 func install(t testing.TB, h slog.Handler) {
+	SetDefault(t, slog.New(h))
+}
+
+// SetDefault makes l the default slog logger until the test ends, and then
+// puts back everything slog.SetDefault changed: the previous default, and
+// the log package's output and flags.
+//
+// Putting back the previous default alone does not undo the rest.
+// slog.SetDefault also points the log package's output at l's handler and
+// zeroes its flags, and a default whose handler is slog's own (the one
+// every test binary starts with) is restored without either being undone:
+// that handler writes THROUGH the log package, whose output still points at
+// the handler the finished test installed. Every later line in the binary,
+// a failing test's own diagnostics included, then went into that test's
+// buffer. Measured in internal/dlna/discovery (2026-09-28): of 200 runs of
+// one test, only the first run's lines reached stderr.
+//
+// The output and flags are put back AFTER the previous default, and the
+// order is load-bearing. Putting back a default whose handler is not
+// slog's own points the log package at that handler again and zeroes its
+// flags, so in the other order that call has the last word, and the log
+// package is left on the previous default's handler instead of the writer
+// it had (TestInstallersRestoreTheStandardLogger, over a default the test
+// set).
+//
+// All of that is one per PROCESS, so a test that calls SetDefault (or
+// Record, or ParkOn) cannot run in parallel with another that does. Each
+// saves what it finds and puts that back at its end, so two that overlap
+// put back each other's state: A saves D0 and installs DA, B saves DA and
+// installs DB, A's cleanup puts back D0, then B's puts back DA, and the
+// default is left on A's finished handler for the rest of the binary,
+// which is the defect above, reached another way. It is not a data race
+// (slog keeps its default in an atomic pointer, and the log package guards
+// its output with a mutex and keeps its flags in an atomic), so -race
+// reports nothing. SetDefault refuses it instead, the way the testing
+// package refuses process-wide changes: it calls t.Setenv before it changes
+// anything, which panics in a test that is parallel or has a parallel
+// ancestor, and makes a later t.Parallel in the same test panic too.
+func SetDefault(t testing.TB, l *slog.Logger) {
+	t.Helper()
+	// The panic comes from the testing package and names only t.Setenv:
+	// this call is the reason, and it runs first, so a refused test has
+	// changed nothing. The value names the test that holds the default.
+	t.Setenv("LOGGINGTEST_SETDEFAULT", t.Name())
 	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	out, flags := log.Writer(), log.Flags()
+	slog.SetDefault(l)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	})
 }
 
 // Park holds the first goroutine that logs one message until the test lets
