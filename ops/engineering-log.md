@@ -26992,6 +26992,226 @@ stamp, and the serve path refuses the result; stat and compare again in
 
 It stays backlog B53 item (2), now noting this review.
 
+## 2026-09-28 — a job or database CLI run as root gives every entry it creates the install's owner (backlog B17)
+
+#1048 made a CLI write run as root keep the owner of the file it REPLACES
+(six small files: the config, the token store, the admin store and its
+tickets, the TLS pair, the update marker) and listed the job and database
+CLIs as not covered: `scan`, `upscale` / `optimize` / `render` / `analyze`,
+`artwork`, `backup` / `restore`, `manifest` and an offline `library` change,
+which CREATE directories and sidecars rather than replace one file. The
+runbook's "always as the service user" rule was their only protection, and
+its 2026-08-18 observation (a root-run CLI's `transcoded/` subdirectories
+made the auto-optimize sweeper fail every job with `mkdir … permission
+denied`) was theirs. This entry closes that list, and `variants move`, which
+the list did not name and the measurement found.
+
+### Measured
+
+`TestJobCLIsRunAsRootKeepTheInstallOwner` (cmd/bridge), as root in
+`golang:1.26.6` with sox, `libsox-fmt-all` and ffmpeg added (dido), over a
+loopback install handed to uid 4242: a library of a 44.1 kHz/16 FLAC with a
+600 px `cover.jpg`, a 96 kHz/24 FLAC and a DSD64 DSF; `upscale.enabled`,
+`upscale.dsdRender.enabled` and `analysis.enabled` on; the store created and a
+device paired first, so the store and `tokens.json` are the service's. `TMPDIR`
+points at a root-owned 1777 directory standing in for /tmp, and the move goes
+to a root-owned directory on /dev/shm, another filesystem in the container, so
+the move copies. Each command runs in-process as root, and every entry it
+creates or replaces in the install, the library, the temp dir and the move
+target is recorded with its owner. On main (6c7f8a19), 51 entries came back
+root's:
+
+| command | root's entries on main |
+|---|---|
+| `scan` | `data/artwork/` (0700) and the scanner's cover in it (0600) |
+| `upscale` | `data/transcoded/`, each album directory, each rendition (sox's output) |
+| `optimize` | the DSD album directory, both renditions, and `1-bit-bridge-render/` (0700) in the shared temp dir |
+| `render` | the faithful DSD rendition |
+| `analyze` | `data/waveforms/` and each album directory (0700), each curve (0600) |
+| `upscale` / `render` / `analyze --force` | each replaced rendition or curve, root's again |
+| `backup` | `data/backups/`, the snapshot (0700), and all six files in it (0600) |
+| `restore` | `bridge.yaml`, `bridge.db`, `tokens.json`, `server.crt`, `server.key`, all replaced root's 0600 |
+| `variants move` | the `--to` directory, each album directory, each copied rendition |
+| `library add` / `remove` | `bridge.yaml` (only because `restore` had made it root's; `config.Save` keeps the owner since #1048) |
+| a store root creates | `bridge.db`, and SQLite's `-wal` and `-shm` with it |
+
+`upscale --gc`, `analyze --gc`, `artwork --gc`, `enrichment retry`,
+`duplicates` and `manifest clear-missing` create nothing: they only open the
+store and delete. What each would do to the service: a root 0700 artwork,
+waveform or scratch directory is one the service cannot even list, so it
+serves no cover or curve and adds none, and every DSD render it runs fails to
+create its scratch; a root sidecar cannot be replaced or reaped by the
+service's sweeps; a root snapshot cannot be removed by the service's own
+prune; and after a root `restore` the service cannot read its config, key or
+store and does not start.
+
+**SQLite's own files were never the problem**, which is the premise the task
+asked to test first. modernc's transpiled unix VFS carries SQLite's
+`robustFchown`: opening a `-wal` (or a rollback journal) or a `-shm` as root,
+it gives the file the owner of the database file (`_robustFchown` in
+`modernc.org/sqlite@v1.59.0/lib`, with modernc/libc's `Xgeteuid` and
+`Xfchown`). Measured with the store open as root: `bridge.db-wal` and
+`bridge.db-shm` 4242:4242, the database's owner; `backup`'s read-only
+`VACUUM INTO` connection left both behind, 4242's. The one hole is a database
+root CREATES: SQLite gives the main file no owner, so a store a root CLI makes
+before the service's first start is root's, and its `-wal` and `-shm` follow
+it. So the chown approach holds for SQLite with one change: create the main
+file first.
+
+### Decisions
+
+- **Keep, not refuse**, as #1048 decided and the task asked, and the
+  measurement did not contradict it. The rule for a NEW entry is the one
+  KeepOwner already used for a file with nothing to replace: **the owner of
+  the directory it is created in**.
+- **Directories through `os.Root`** (`fsutil.MkdirAll`, `fsutil.Mkdir`): each
+  level is made with `Root.Mkdir` on its parent, the owner is read from
+  `Root.Stat(".")` (the directory actually holding the new one, by its
+  descriptor) and given with `Root.Lchown`. A path looked up beforehand could
+  be swapped by the owner of a directory on the way, so a directory would be
+  made in one place and given the owner of another; read through the
+  descriptor, a new directory only ever takes the owner of the directory
+  holding it, who could have made it anyway. A directory made and then not
+  given away (root_squash NFS) is removed again, empty, so nothing root's is
+  left; one made by somebody else meanwhile is left as it is. `os.MkdirAll`'s
+  own walk is kept (ENOTDIR, `foo/.`, a directory made meanwhile).
+- **Files the bridge stages** take `fsutil.KeepOwner` on the open file, as in
+  #1048: `atomicwrite.WriteBytes` (the scanner's covers), the waveform
+  (`writeWaveformTmp`, `os.WriteFile`'s shape with the step added),
+  `backup.copyFile` (a snapshot's copies and every restored file) and
+  `writeManifest`.
+- **A file another writer creates is precreated** (`fsutil.Precreate`): made
+  empty with `O_EXCL` (nothing written through a symlink, an entry already
+  there an error), given the owner KeepOwner would give a file staged for its
+  destination, looked up BEFORE the file exists (for the database, its own
+  path), then filled by its writer, which keeps the owner. All three measured:
+  sox opens its output with `O_TRUNC` (every rendition, `--force` included,
+  came back 4242's); SQLite opens an existing empty file as a new database;
+  and `VACUUM INTO` accepts an empty destination and writes into it. A chown
+  after the child exits was the other shape, by path, into a directory the
+  service user can write; precreating keeps the chown on a descriptor this
+  process opened. A no-op unless root, so the non-root path is unchanged.
+- **Two directories sit where the parent's owner is not evidence of who uses
+  them, and take a reference's owner instead.** The render scratch
+  (`1-bit-bridge-render`) defaults to the OS temp dir, root's and shared:
+  the parent rule leaves it root's 0700 and breaks the service, which the
+  measurement shows. `fsutil.MkdirAllShared` gives a directory created in a
+  directory anyone may create entries in (other-writable and -searchable,
+  as /tmp is) the owner of the variants directory the render publishes into
+  (`JobSpec.mkdirScratch`, ref `OutputDir`, or its nearest existing ancestor
+  before the first rendition). Anybody could have made that directory there,
+  so this gives nobody anything; everywhere else the parent rule stands,
+  which is what a configured temp dir the service owns (the NUC's) gets, and
+  a configured temp dir under a root-owned parent stays root's, as the
+  service's own attempt there would fail. Restricting the reference to a
+  shared parent matters because the temp dir comes from `bridge.yaml`, which
+  the service user can write. The second is a `variants move --to`
+  destination under a mount point root owns: its LAST directory takes the
+  owner of the variants directory it replaces (`fsutil.MkdirAllLike`), what
+  `mv` keeps when it moves a directory as root; the directories between keep
+  the parent rule. The command line names that path, never the config. A
+  copy across devices keeps its source's owner (KeepOwner on the source), as
+  a rename would have.
+- **`variants move` is included** though B17's list did not name it: it
+  creates directories and, across devices, files, and a `sudo` move onto a
+  new disk is the ordinary way to run it.
+- **`backup.EnsureFreshDataDirSibling` is removed**: no caller anywhere, and
+  its `os.MkdirTemp` was the one creation the sweep below would otherwise
+  have had to allow.
+- A thumbnail's directory (`EnsureThumb`) is serve-only, and takes
+  `fsutil.MkdirAll` anyway so the package has one way to make a directory.
+
+### Tests and controls
+
+- `internal/fsutil`: `TestDirOwnerForTakesTheParentsOwnerUnlessThePolicyNamesRef`
+  (the three policies over fake FileInfos, the shared test being
+  other-writable AND other-searchable), `TestNearestExistingClimbsToTheFirstAncestorThere`,
+  `TestMkdirAllDecision` and `TestPrecreateDecision` (through the seams, on
+  every POSIX host), and `TestCreatingAsRootKeepsTheOwner` (real chowns as
+  root: a new directory under the service's, a shared directory's child, a
+  root directory's child, a move target's last and middle levels, a new
+  database, a file replacing another).
+- One wiring test per writer through `fsutil.SimulateRootForTest`:
+  `TestWriteBytesAsRootKeepsTheInstallOwner`, `TestOpenStoreAsRootKeepsTheInstallOwner`
+  (also that a precreated file is a working store),
+  `TestAWaveformWriteAsRootKeepsTheOwner`, `TestRunAnalysisAsRootKeepsTheInstallOwner`
+  (sox), `TestRunAsRootKeepsTheInstallOwner` (a stand-in sox that writes
+  through a redirection), `TestRunDSDAsRootKeepsTheInstallOwner` (the DSD
+  toolchain; CI's race legs skip it), `TestSnapshotAndRestoreAsRootKeepTheInstallOwner`
+  (also that `VACUUM INTO` fills a precreated file, on every host),
+  `TestVariantsMoveAsRootKeepsWhatItMovesTheServices`,
+  `TestACrossDeviceCopyAsRootKeepsTheMovedFilesOwner`.
+- `TestJobWritersKeepTheInstallOwner` sweeps the writers
+  (`internal/{atomicwrite,manifest,transcode,analyze,backup}` and
+  `cmd/bridge/variants.go`: 80 files, 22 owner steps) and fails on
+  `os.MkdirAll` / `Mkdir` / `MkdirTemp` / `WriteFile` / `Create` / `Link` /
+  `Symlink`, or on `os.CreateTemp` / `os.OpenFile(O_CREATE)` in a function
+  with no `fsutil.KeepOwner`. It cannot see what a child process creates.
+  `TestJobWriterSweepReportsEveryShape` runs it over synthetic source.
+- `TestJobCLIsRunAsRootKeepTheInstallOwner` (above), root and toolchain
+  only; it also requires every writing command to have written, so a writer
+  that stopped cannot pass by leaving nothing.
+
+Negative controls. Root-level, on dido, each a tree built from the committed
+head with one change:
+
+| control (one change to the committed head) | red | what the root test names |
+|---|---|---|
+| NC-R1: main's writers (6c7f8a19), the new fsutil kept | the root test and `TestJobWritersKeepTheInstallOwner` | the 51 entries in the table above, the move across devices; the sweep, all 20 creation sites in main's writers and "0 owner steps" |
+| NC-R2: the scratch directory through `fsutil.MkdirAll` | the root test | exactly `tmp/1-bit-bridge-render` |
+| NC-R3: `--to` through `fsutil.MkdirAll` | the root test | the `--to` directory and the four album directories below it |
+| NC-R4: no `Precreate` before Stage C | the root test | the two DSD renditions, the `--force` one, and their moved copies |
+| NC-R5: no `Precreate` in `OpenStore` | the root test | a created store's `bridge.db`, `-wal` and `-shm` |
+| NC-R6: no `Precreate` before `VACUUM INTO` | the root test | exactly the snapshot's `bridge.db` |
+| NC-R7: the shared rule off | the root test and `TestCreatingAsRootKeepsTheOwner` | the scratch directory; fsutil's test, the shared directory's two levels |
+
+Local, each on the committed tree and restored with `git checkout --`:
+
+| control | red |
+|---|---|
+| NC1: WriteBytes's directory through `os.MkdirAll` | `TestWriteBytesAsRootKeepsTheInstallOwner`, the sweep |
+| NC2: WriteBytes without `KeepOwner` | the same two |
+| NC3: `OpenStore` without `Precreate` | `TestOpenStoreAsRootKeepsTheInstallOwner` |
+| NC4: `OpenStore`'s directory through `os.MkdirAll` | the same, and the sweep |
+| NC5: `Run` without `Precreate` | `TestRunAsRootKeepsTheInstallOwner` |
+| NC6: `Run`'s album directory through `os.MkdirAll` | the same, and the sweep |
+| NC7: `renderDSD` without `Precreate` | `TestRunDSDAsRootKeepsTheInstallOwner` |
+| NC8: `renderDSD`'s album directory through `os.MkdirAll` | the same, and the sweep |
+| NC9: the scratch directory through `os.MkdirAll` | the same two |
+| NC10: the waveform directory through `os.MkdirAll` | `TestRunAnalysisAsRootKeepsTheInstallOwner`, the sweep |
+| NC11: the curve without `KeepOwner` | both analyze tests, the sweep |
+| NC12: the backups root through `os.MkdirAll` | `TestSnapshotAndRestoreAsRootKeepTheInstallOwner`, the sweep |
+| NC13: the snapshot directory through `os.Mkdir` | the same two |
+| NC14: `VACUUM INTO` without `Precreate` | `TestSnapshotAndRestoreAsRootKeepTheInstallOwner` |
+| NC15: `copyFile` without `KeepOwner` | the same, and the sweep |
+| NC16: `writeManifest` without `KeepOwner` | the same two |
+| NC17: a restore target's directory through `os.MkdirAll` | the sweep only: a restore's targets sit in directories that exist, so no wiring test can see it |
+| NC18: `--to` through `os.MkdirAll` | `TestVariantsMoveAsRootKeepsWhatItMovesTheServices`, the sweep |
+| NC19: a move's album directory through `os.MkdirAll` | the same two |
+| NC20: the cross-device copy without `KeepOwner` | `TestACrossDeviceCopyAsRootKeepsTheMovedFilesOwner`, the sweep |
+| NC21: the shared rule never takes ref's owner | `TestDirOwnerForTakesTheParentsOwnerUnlessThePolicyNamesRef`, its /tmp row |
+| NC22: the like rule never takes ref's owner | `TestDirOwnerForTakesTheParentsOwnerUnlessThePolicyNamesRef`, both like rows that ask ref |
+| NC23: a directory it cannot give away is left behind | `TestMkdirAllDecision`, both removal subtests |
+| NC24: `Precreate` asks the owner after making the file | `TestPrecreateDecision`, "asked first" |
+| NC25: `Precreate` without `O_EXCL` | `TestPrecreateDecision`, "an entry already there" |
+| NC26: every directory on the way counted as the last | `TestMkdirAllDecision`, the parent level's `last` |
+| NC27: the sweep does not know `os.MkdirAll` | `TestJobWriterSweepReportsEveryShape` |
+| NC28: the sweep does not read `O_CREATE` | the same |
+| NC29: the sweep reads no file | `TestJobWritersKeepTheInstallOwner`, its floor |
+
+### Left as they are
+
+- `bridge tsnet auth` run as root: internal/tsnet makes `<dataDir>/tailscale`
+  with `os.MkdirAll`, `assertSecureDir` then requires it to be the running
+  uid's, and the tsnet library writes its state there. So a root run over the
+  service's state refuses at once, and one on a fresh install leaves a state
+  the service's node refuses at start. Giving the directory away would fail
+  the root run's own check, so this is a design question of its own. Read
+  from the code, not measured; in the backlog (B70).
+- A configured `upscale.variantsDir` or `upscale.tempDir` that does not
+  exist, under a parent root owns (not shared): root's CLI makes it root's,
+  as the parent rule says, and the service could not have made it either.
+
 ## 2026-09-28 — the console's tool state and its feature trays: one sox probe, notes that clear, trays that redraw and offer no managed switch (backlog B35, B45)
 
 Two backlog items taken together. B45: the analysis card's "Restart after

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
@@ -161,9 +163,24 @@ const bumpIndexedAtByPathSQL = `
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
 // The file and its parent directory are created if missing.
+//
+// Run as root over an install another user owns (a `sudo bridge scan`
+// before the service's first start), the directory and the database it
+// creates take the install's owner: fsutil.MkdirAll for the directory,
+// and fsutil.Precreate for the database, created empty (a valid empty
+// database) before SQLite opens it, since SQLite gives the main file no
+// owner of its own. The -wal and -shm need nothing here: SQLite's unix VFS
+// gives both the database file's owner whenever it opens them as root
+// (robustFchown, measured through modernc), so a store the service owns
+// never gets root's.
 func OpenStore(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
+	}
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		if err := fsutil.Precreate(path, 0o644, path); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("create the store's file: %w", err)
+		}
 	}
 	// synchronous(NORMAL) is SQLite's documented pairing for WAL: commits
 	// stop fsyncing the WAL (only checkpoints sync), and corruption stays
