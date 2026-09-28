@@ -248,7 +248,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Ten claims in this list have been wrong and been corrected** — the
+**Eleven claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -258,8 +258,9 @@ the re-init that replaces it", which held for config-file and not for the port
 checks, (2026-09-26) "`os.ReadDir("")` reads the process working
 directory", (2026-09-27) "init never prompts for `customEndpoints`, so
 the old value survives the rewrite", (2026-09-27) "`Load` serves a config
-giving a blank name `DefaultLibraryName`", and (2026-09-28) "`analyze --gc`'s
-`Consider` requires `.1bwf`". The first five cost a later session real
+giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
+`Consider` requires `.1bwf`", and (2026-09-28) "`mtime_ns = 0` does not
+force a re-extraction". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -275,7 +276,10 @@ asserted the opposite (`served: "  "`, as written), and `Load` gave the
 default only to an exactly-empty name until #1042. The tenth named an
 extension the bridge has never written (waveforms have been `.waveform.bin`
 since #395), and survived because its conclusion, that a directory symlink
-is no candidate there, holds for either spelling.
+is no candidate there, holds for either spelling. The eleventh outlived the
+code it described: #574 moved the skip gate to `GetTrackStat`, which reads
+the `mtime_ns` column, and the bullet went on describing `GetTrack`, which
+reads the mtime inside `tags_json`.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -361,8 +365,9 @@ lost my library."
   the property reporting both. Its seeds fault each of the three reads above,
   and they are what gives the fuzzer its reach: Go's mutator walks an integer
   by at most 100, one argument per step, so with the DST probe's failure
-  dropped again it found the violation in 0.46 s from the other seeds, and
-  not in 90 s (468,005 inputs) from one seed whose fault touched no read.
+  dropped again it found the violation within half a second from the other
+  seeds (on the first harness and on the final one), and not in 90 s
+  (468,005 inputs) from one seed whose fault touched no read.
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the

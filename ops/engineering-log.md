@@ -21879,14 +21879,25 @@ Out of scope, measured with throwaway programs and left for the backlog:
 
 - A library ROOT that is itself a symlink to a directory is never walked.
   `WalkDir` lstats its root, so it visits one non-directory entry and stops:
-  0 rows, and 1 row with a trailing slash on the root. On an install with
-  rows under that root, the empty-root guard then logs "suspected
-  clean-empty mount failure" every scan and suggests `.bridge-allow-empty`,
-  which would let the deletion pass reap the root's rows.
+  0 rows, and 1 row with a trailing slash on the root. By reading, not
+  measured: on an install with rows under that root, the empty-root guard
+  then logs "suspected clean-empty mount failure" every scan and suggests
+  `.bridge-allow-empty`, which `hasAllowEmptySentinel` finds through the
+  link, and which would then let the deletion pass reap the root's rows.
 - A FIFO named `01.flac` in the library hangs `Scan`: the worker's open
   blocks, the scan's context expiring at 5 s changes nothing, and
-  `IsScanning` still read true at 15 s. A link to a FIFO does the same, before
-  and after this change.
+  `IsScanning` still read true at 15 s. By reading, a link to a FIFO does the
+  same, before and after this change (the stat through it answers a FIFO,
+  which is indexed as before).
+
+Stale claim corrected on the way. CLAUDE.md said twice (under Scanner, and
+in `## Local test fixture`) that `UPDATE tracks SET mtime_ns = 0` does not
+force a re-extraction, because the skip gate compares the mtime inside
+`tags_json`, read through `GetTrack`. #574 moved the gate to
+`GetTrackStat`, which reads the `size` and `mtime_ns` columns. Measured with
+a throwaway test through the Go store: a scan of an unchanged file left its
+`indexed_at` alone, and after `mtime_ns` was zeroed the next scan
+re-extracted it and advanced `indexed_at`.
 
 ### The read-fault fuzz target
 
@@ -21926,17 +21937,19 @@ fault to be reached and the three sites to answer an error. The seeds are
 what gives the fuzzer its reach. Go's mutator changes one argument per step
 and walks an integer by at most 100, so a fault wanders only from where a
 seed put one. With the DST probe's failure dropped again and that probe's
-own seed left out, the fuzzer found the violation from the other seeds in
-0.46 s (an empty cache). From one seed whose fault touched no read it ran
-468,005 inputs in 90 s without finding it. A mapping that started every
-fault at a sector's first byte or its payload found it in 3.2 s from the
-seeds and not in 90 s from the one seed, so the plain byte offset stayed.
+own seed left out, the fuzzer found the violation from the other seeds
+within half a second of an empty cache: the whole `go test` took 0.46 s on
+the first harness, and on the final one the fuzz run failed at 0.09 s. From
+one seed whose fault touched no read it ran 468,005 inputs in 90 s without
+finding it. A mapping that started every fault at a sector's first byte or
+its payload found it in 3.2 s from the seeds and not in 90 s from the one
+seed, so the plain byte offset stayed.
 
 Runs, 4 workers, `-fuzzminimizetime 1s`: the first harness 3 min, 724,412
-inputs, no violation; the final one (cuts between structures) 3 min, 685,566 inputs, no violation;
-and a minute each of `FuzzParseSACDTOC` (935,328 inputs),
-`FuzzParseSACDArea` (1,052,395) and `FuzzSACDVirtualPathRoundTrip`
-(1,452,394), all passing.
+inputs, no violation; the final one (cuts between structures) 3 min,
+685,566 inputs, no violation; and a minute each of `FuzzParseSACDTOC`
+(935,328 inputs), `FuzzParseSACDArea` (1,052,395) and
+`FuzzSACDVirtualPathRoundTrip` (1,452,394), all passing.
 
 ### Tests and negative controls
 
@@ -21972,5 +21985,5 @@ restored and re-run green before the next:
 | NC-F1: the master-signature probe's failure dropped | fuzz seeds 0-2, the seed test's three probe rows, and the #1061 unit tests of that site |
 | NC-F2: a failed area-TOC read folded into a refusal | fuzz seed 3, its seed-test row, and the #1061 tests of that site |
 | NC-F3: the DST probe's failure dropped | fuzz seed 4, its seed-test row, and the #1061 tests of that site |
-| NC-F4: NC-F3 with its own seed left out, fuzzing | found in 0.46 s from an empty cache |
+| NC-F4: NC-F3 with its own seed left out, fuzzing | found within half a second of an empty cache, on both harnesses |
 
