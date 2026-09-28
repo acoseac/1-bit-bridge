@@ -20920,9 +20920,11 @@ will act on, at the time it acts.
 
 1. Resolve the live variants dir; refuse `""` (as before).
 2. `AllVariants`, then `KnownSidecarSet`, then the empty-known-set refusal,
-   unchanged, still a WARN every tick. Kept AHEAD of the mass-orphan refusal
-   because that one does not cover it: with no rows, fewer than ten orphans
-   are under its floor and would all go.
+   unchanged: a WARN every tick while the variants directory holds files,
+   and a quiet return when the directory is empty too (nothing to protect).
+   Kept AHEAD of the mass-orphan refusal because that one does not cover
+   it: with no rows, fewer than ten orphans are under its floor and would
+   all go.
 3. `TakeSidecarInventory(ctx, root, known, {Consider:
    shouldConsiderSidecarFile, MaxOrphanPaths: chunk})`, with NO `MaxEntries`
    (inventory.go: a sweep that deletes on a truncated inventory deletes on a
@@ -21072,3 +21074,64 @@ pinned by something. Every one failed only the tests listed.
   sweeper shared only `KnownSidecarSet` until now and walked with its own
   WalkDir; it is true as of this change, so the doctor's count is the one
   both sweeps act on.
+
+### Review round 1: the unlinks go by the walked path
+
+CodeRabbit (on the free on-demand run, 2026-09-28) found that the sweep
+unlinked the inventory's REPORTED paths. `TakeSidecarInventory` walks a
+symlinked variants directory through its resolved root and lists each file
+under the configured spelling, which the known set needs; unlinked through
+that spelling, a link repointed between the walk and the unlinks (an
+operator moving the alias to another volume while the bridge runs) sends
+them into the other tree, onto files the walk never counted. The
+mass-orphan verdict was taken over the first tree, so the second is reaped
+up to a chunk with no refusal ever computed for it. Accepted, and widened:
+CodeRabbit named the background sweep, and `upscale --gc`'s forward sweep
+and `analyze --gc` unlinked the same spelling, so all three change here
+(the enumeration rule).
+
+- **The inventory keeps the walked path beside each listed one**:
+  `OrphanWalkedPaths` and `ScratchWalkedPaths`, appended in the same
+  statements as `OrphanPaths` and `ScratchPaths`, so the pairing holds by
+  construction. The listed spelling stays what the known set, the refusal's
+  samples and every log line use.
+- **Parallel lists, not a struct per file**: `OrphanPaths` has twenty uses
+  in `inventory_test.go` and one in the doctor, all of them reports, and a
+  type change would churn every one for no reader's benefit. A deleting loop
+  indexes the walked list by the listed one's index, so an inventory built
+  by hand without it panics, which is the intended loud failure: a fallback
+  to the listed spelling is the defect. One existing fixture
+  (`TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved`'s directory case)
+  built one and now names both.
+- **`analyze --gc`'s removal loop moved into `removeAnalysisGCFiles`**, so a
+  test can hand it an inventory whose two spellings name different files.
+  It prints each failure by base name, which is the same under both.
+- **A test hook between the sweeper's walk and its unlinks**
+  (`beforeUnlinksForTest`, a field, nil in production) is what lets
+  `TestAnOrphanSweepUnlinksInTheTreeItWalked` repoint the link in exactly
+  that window, through the real tick. On the old code the tick still
+  unlinked one file, the second tree's: the first tree's orphan survived.
+- **Not addressed**: a directory BELOW the root swapped for a link between
+  the walk and the unlink. Closing that needs a no-follow traversal per
+  component, and anyone who can do it can write inside the variants tree,
+  which is worse; the root-level retarget is the ordinary operation.
+
+Tests: `TestSidecarInventoryPairsEveryListedPathWithTheOneItWalked` (a
+symlinked root: every walked path is the resolved root plus the listed
+path's suffix, for orphans and scratch), `TestAnOrphanSweepUnlinksInTheTreeItWalked`,
+`TestUpscaleGCForwardSweepUnlinksTheWalkedPath` and
+`TestAnalyzeGCUnlinksTheWalkedPaths`. Negative controls on the committed
+tree, each restored before the next:
+
+| mutation | goes red |
+|---|---|
+| the sweeper unlinks `paths[i]` | `TestAnOrphanSweepUnlinksInTheTreeItWalked`, alone |
+| `upscale --gc` removes `inv.OrphanPaths[i]` | `TestUpscaleGCForwardSweepUnlinksTheWalkedPath`, alone |
+| `analyze --gc` loops over the listed lists | `TestAnalyzeGCUnlinksTheWalkedPaths`, alone |
+| the inventory records the listed spelling as walked | the pairing test and the sweeper's retarget test |
+
+A first attempt at the sweeper control (`reclaimOrphan(p, …)`) did not
+compile, the loop index being unused, so it proved nothing and was
+rewritten to keep the index. CodeRabbit's second comment, on this entry's
+wording of the empty-catalog refusal (it WARNs only while the directory
+holds files, and returns quietly over an empty one), is fixed above.

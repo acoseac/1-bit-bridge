@@ -1670,7 +1670,18 @@ no failing test — which is the shape to expect in this area.
   recorded `sidecar_path` and on `CanonicalSidecarPath(variantsDir, …)`
   and neither is symlink-resolved — emitting resolved paths would miss
   every key and classify a healthy tree as orphans, which is worse than
-  the bug. A dangling root is ENOENT and takes the missing-root reading;
+  the bug. **And the UNLINK goes by the WALKED path** (2026-09-28): each
+  listed file keeps the path the walk visited beside it
+  (`OrphanWalkedPaths`, `ScratchWalkedPaths`), and all three deleting
+  sweeps (the background one, `upscale --gc`, `analyze --gc`) remove
+  that. Unlinked through the configured spelling, a link repointed
+  between the walk and the unlinks sent them into a tree the walk never
+  counted, past the mass-orphan refusal, whose verdict was taken over the
+  first tree (CodeRabbit on #1063, which named the background sweep;
+  `TestAnOrphanSweepUnlinksInTheTreeItWalked` repoints the link in that
+  window). A hand-built inventory without the walked list panics in the
+  unlinking loop, deliberately: falling back to the listed spelling is
+  the defect. A dangling root is ENOENT and takes the missing-root reading;
   neither error branch may fall back to the unresolved path, which IS the
   defect. A symlinked SUBDIRECTORY is skipped rather than classified
   (unlinking it takes a subtree's only reference), and a symlink that
@@ -1678,7 +1689,7 @@ no failing test — which is the shape to expect in this area.
   there" and "could not find out" are different questions and only the
   first is junk. `analyze --gc` was never exposed: its `Consider` requires
   `analyze.WaveformExt`, `.waveform.bin` (this bullet said `.1bwf`, an
-  extension nothing writes, until 2026-09-28). (#959)
+  extension nothing writes, until 2026-09-28). (#959, #1063)
 - **A sweep that would reap more than `integrity.variantSweepMaxDeletePercent`
   (default 20, floor 10 rows) of the catalog while the tree still holds
   sidecar-shaped files is REFUSED, and every tick that saw rows logs one
