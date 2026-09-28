@@ -3768,7 +3768,9 @@ its twin.** The top list is older, shorter, and read first.
   fault on one ticket file reads as a stale link, where POSIX answers 500. It
   takes the GOOS as a parameter so its table runs on every CI leg. A mint at
   `maxLiveTickets` (32) is REFUSED and evicts nothing (every file is a link
-  somebody may hold), and the first mint removes the old shared file. Cost of
+  somebody may hold), counts only REGULAR files (a directory named like a
+  ticket failed its read, counted as possibly live, and 32 of them refused
+  every mint), and the first mint removes the old shared file. Cost of
   the layout change: links minted by the old binary in the ten minutes before
   an upgrade stop working, and a rollback loses the new binary's the same way.
   No interprocess lock, and none is needed now: nothing is left that two

@@ -20925,7 +20925,14 @@ sends the holder for a fresh link that fails the same way.
   it may be; and matches names strictly (the prefix, 64 lowercase hex, `.json`),
   so it removes nothing a mint could not have written. Dot-prefixed staging
   files never match. Expiry is one predicate, `ticketLive` (`now` before
-  `expiresAt`), for the prune and the redemption.
+  `expiresAt`), for the prune and the redemption. **It reads only entries the
+  listing reports as regular files** (Gemini on #1062, round 1): a directory,
+  or a link to one, named like a ticket failed its read with an error that is
+  not absence, landed in the "may be live" arm, and 32 of them refused every
+  mint. Every ticket is a regular file a mint renamed into place, so anything
+  else is skipped, neither counted nor removed; the type is the listing's
+  (an lstat where the filesystem reports none), so a symlink is skipped
+  whatever it points to.
 - **The ceiling refuses, never evicts**: at 32 live tickets a mint fails, since
   every file is a link somebody may hold. The count is per mint, so two
   processes minting at once can each pass it by one; it is a sanity bound.
@@ -21026,6 +21033,7 @@ sends the holder for a fresh link that fails the same way.
   | NC10 | expiry judged before the removal | `TestExpiredTicketIsStillConsumed` |
   | NC11 | no `KeepOwner` on the ticket's staged file | `TestAWriteAsRootKeepsTheAdminStoreOwners` |
   | NC12 | a redemption that cannot read the credential removes the ticket | `TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket` |
+  | NC13 | the prune reads every entry whatever its type (round 1) | both subtests of `TestAnEntryThatIsNotAFileIsNeverALiveTicket` |
 
   NC2 on a Windows leg: the file-mode tests skip there, and the table still
   goes red, which is what the GOOS parameter is for.
