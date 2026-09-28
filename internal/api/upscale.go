@@ -59,7 +59,7 @@ type UpscaleEnqueuer interface {
 	EnqueueOptimize(libraryRelativePath string) error
 
 	// EnqueuePCMRender is the faithful DSD → PCM rendition
-	// (`pcm-v1-<176400|192000>-24`): a DSD source decimated once on
+	// (`pcm-v2-<176400|192000>-24`): a DSD source decimated once on
 	// the bridge for a wired DAC that cannot take the file's DSD rate.
 	// Same error taxonomy; a non-DSD source is ErrUpscaleIneligible.
 	// Always-present on the interface for the same routing reason as

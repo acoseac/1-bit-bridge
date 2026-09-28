@@ -206,6 +206,15 @@ type Pool struct {
 	// rendition's measured gain reaches the variant row.
 	runner func(ctx context.Context, spec JobSpec) (RunResult, error)
 
+	// albumGainer decides the album-level boost of every DSD render this
+	// pool runs (album_gain.go). processJob injects it into the spec when
+	// the job STARTS, not at any enqueue site, so no path that builds a DSD
+	// spec can leave it out, and widens the job's deadline by the album
+	// survey it reports. Nil keeps the per-track guard. Guarded by its own
+	// mutex, like the callbacks above: wired once after construction.
+	albumGainerMu sync.RWMutex
+	albumGainer   AlbumGainer
+
 	// jobTimeout is the BASE per-job deadline; processJob widens it per
 	// spec through jobTimeoutFor (a long DSD source needs more than the
 	// fixed default) and applies the result via context.WithTimeout.
@@ -552,6 +561,32 @@ func jobTimeoutFor(base time.Duration, spec JobSpec) time.Duration {
 		return base
 	}
 	return want
+}
+
+// SetAlbumGainer wires (or, with nil, removes) the decider of the
+// album-level boost for the DSD renders this pool runs. Race-safe; in
+// practice set once during cmd/bridge wiring.
+func (p *Pool) SetAlbumGainer(g AlbumGainer) {
+	p.albumGainerMu.Lock()
+	p.albumGainer = g
+	p.albumGainerMu.Unlock()
+}
+
+func (p *Pool) currentAlbumGainer() AlbumGainer {
+	p.albumGainerMu.RLock()
+	defer p.albumGainerMu.RUnlock()
+	return p.albumGainer
+}
+
+// albumSurveyTimeout widens a job's deadline by the album survey its render
+// will run, capped at twice maxJobTimeout: the survey decodes album-mates on
+// top of the job's own file, and each of those decodes is still bounded by
+// the budget it adds, so a hung mount is still caught.
+func albumSurveyTimeout(timeout, survey time.Duration) time.Duration {
+	if survey <= 0 {
+		return timeout
+	}
+	return min(timeout+survey, 2*maxJobTimeout)
 }
 
 // notifyStateChangeFn returns the current onStateChange callback
@@ -1217,7 +1252,16 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		StartedAtUnixMs:  startedAt.UnixMilli(),
 	})
 
-	timeout := jobTimeoutFor(p.jobTimeout, job.spec)
+	// The album-level gain rides the RUN, not the enqueue: whichever path
+	// built this DSD spec, the render decides its boost with the album.
+	spec := job.spec
+	if spec.SourceIsDSD && spec.AlbumGain == nil {
+		spec.AlbumGain = p.currentAlbumGainer()
+	}
+	timeout := jobTimeoutFor(p.jobTimeout, spec)
+	if spec.SourceIsDSD && spec.AlbumGain != nil {
+		timeout = albumSurveyTimeout(timeout, spec.AlbumGain.SurveyBudget(p.stopCtx, spec))
+	}
 	jobCtx, cancel := context.WithTimeout(p.stopCtx, timeout)
 	defer cancel()
 
@@ -1226,7 +1270,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// pipe), which a second `SoxArgs()` call cannot know. Same reason
 	// SoxArgs hands back its temp path instead of letting callers re-derive
 	// one that can drift.
-	res, err := p.runner(jobCtx, job.spec)
+	res, err := p.runner(jobCtx, spec)
 	size, settings := res.SizeBytes, res.Settings
 	if err != nil {
 		// Drop cancellation noise — Stop() during graceful shutdown
@@ -1344,7 +1388,10 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// carries the same numbers, so the two can never disagree.
 		AppliedGainDB: res.AppliedGainDB,
 		TruePeakDBTP:  res.TruePeakDBTP,
-		CreatedAt:     completedAt.UnixNano(),
+		// ...and the peak's profile, which records it for the album-level
+		// gain in the same transaction (manifest dsd_peaks).
+		PeakProfile: res.PeakProfile,
+		CreatedAt:   completedAt.UnixNano(),
 	}
 	// Use jobCtx, NOT p.stopCtx — the per-job timeout
 	// (defaultJobTimeout = 10 min) bounds the DB write the
