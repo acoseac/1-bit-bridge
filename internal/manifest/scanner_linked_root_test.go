@@ -24,7 +24,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -43,6 +45,38 @@ const msgRootUnreachable = "root unreachable"
 // linkedRootTracks are the library-relative paths seedLinkedRootLibrary
 // writes, sorted.
 var linkedRootTracks = []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
+
+// linkDirOrSkip makes link a link to the directory target: a symbolic link,
+// and on Windows a directory junction (`mklink /J`), the ordinary way to
+// point a folder at another volume there, which needs no privilege and which
+// os.Lstat reports ModeIrregular. Skips on a host that cannot make either.
+func linkDirOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Skipf("this host cannot create a junction: %v: %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+}
+
+// linksToIn is the directory a log line says a root links to: the value of
+// its links_to attribute, which the attribute named next ends.
+func linksToIn(t *testing.T, line, next string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(line, " links_to=")
+	if !ok {
+		t.Fatalf("the line does not say what the root links to: %s", line)
+	}
+	value, _, ok := strings.Cut(rest, " "+next+"=")
+	if !ok {
+		t.Fatalf("the line has no %s after links_to: %s", next, line)
+	}
+	return value
+}
 
 // seedLinkedRootLibrary writes linkedRootTracks under dir.
 func seedLinkedRootLibrary(t *testing.T, dir string) {
@@ -91,7 +125,7 @@ func (f indexedRoot) moveBehindLink(t *testing.T) string {
 	if err := os.Rename(f.root, moved); err != nil {
 		t.Fatal(err)
 	}
-	linkOrSkip(t, moved, f.root)
+	linkDirOrSkip(t, moved, f.root)
 	return moved
 }
 
@@ -101,7 +135,7 @@ func (f indexedRoot) requireRowsKept(t *testing.T, label string) {
 	t.Helper()
 	for rel, was := range f.indexed {
 		if st, err := f.store.GetTrackStat(context.Background(), rel); err != nil || st == nil {
-			t.Fatalf("%s: the row of %s was deleted while its file is on disk (err %v)", label, rel, err)
+			t.Fatalf("%s: the row of %s is gone (err %v)", label, rel, err)
 		}
 		if got := indexedAt(t, f.store, rel); got != was {
 			t.Errorf("%s: the row of %s was rewritten (indexed_at %d, was %d)", label, rel, got, was)
@@ -166,9 +200,9 @@ func TestScanner_ALinkedRootIsWalkedThrough(t *testing.T) {
 	seedLinkedRootLibrary(t, target)
 	base := t.TempDir()
 	link := filepath.Join(base, "music")
-	linkOrSkip(t, target, link)
+	linkDirOrSkip(t, target, link)
 	chain := filepath.Join(base, "chained")
-	linkOrSkip(t, link, chain)
+	linkDirOrSkip(t, link, chain)
 
 	for _, c := range []struct {
 		name, root string
@@ -201,7 +235,7 @@ func TestScanner_ALinkedRootInMultiRootModeKeepsItsConfiguredName(t *testing.T) 
 	target := filepath.Join(base, "nas", "library")
 	seedLinkedRootLibrary(t, target)
 	link := filepath.Join(base, "music")
-	linkOrSkip(t, target, link)
+	linkDirOrSkip(t, target, link)
 	other := filepath.Join(base, "other")
 	if err := os.MkdirAll(other, 0o755); err != nil {
 		t.Fatal(err)
@@ -285,13 +319,15 @@ func TestScanner_ADanglingRootLinkIsNotAnEmptyLibrary(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("%d %q lines over three scans, want 3:\n%s", len(lines), msgRootUnreachable, strings.Join(lines, "\n"))
 	}
+	// The link's own destination is all there is to name: it resolves to
+	// nothing.
 	dest, err := os.Readlink(f.root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range lines {
-		if !strings.Contains(line, " links_to="+dest+" ") {
-			t.Errorf("the line does not name where the root links (%s): %s", dest, line)
+		if got := linksToIn(t, line, "err"); got != dest {
+			t.Errorf("the line says the root links to %q, want its destination %q: %s", got, dest, line)
 		}
 	}
 	if lines := rec.Lines(msgCleanEmpty); len(lines) > 0 {
@@ -354,13 +390,17 @@ func requireCleanEmptyLines(t *testing.T, lines []string, want int, linked bool,
 	if !linked {
 		return
 	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// By identity: a symlink resolves through filepath.EvalSymlinks and a
+	// junction through os.Readlink, and the two spell one directory
+	// differently.
+	emptied := statOf(t, dir)
 	for _, line := range lines {
-		if !strings.Contains(line, " links_to="+resolved+" ") || !strings.Contains(line, "directory it links to is empty") {
-			t.Errorf("the line does not name the empty directory the root links to (%s): %s", resolved, line)
+		named := linksToIn(t, line, "rows_in_db")
+		if got, err := os.Stat(named); err != nil || !os.SameFile(got, emptied) {
+			t.Errorf("the line names %s, not the empty directory the root links to (%s): %s", named, dir, line)
+		}
+		if !strings.Contains(line, "directory it links to is empty") {
+			t.Errorf("the hint does not say the directory the root links to is the empty one: %s", line)
 		}
 	}
 }
@@ -378,7 +418,7 @@ func TestWatcherWatchesALinkedLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(t.TempDir(), "music")
-	linkOrSkip(t, target, link)
+	linkDirOrSkip(t, target, link)
 	store, sc := newScanFixture(t, link)
 	w, err := NewWatcher(sc, 50*time.Millisecond)
 	if err != nil {
