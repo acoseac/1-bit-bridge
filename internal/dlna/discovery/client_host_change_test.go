@@ -204,11 +204,11 @@ func TestHandlePacket_HostChangeTransientFailureDropsDeadControlURL(t *testing.T
 }
 
 func TestHandlePacket_HostChangeStructuralFailureUsesFreshSentinel(t *testing.T) {
-	// A re-fetch that fails STRUCTURALLY at the new address earns the
-	// year-2999 sentinel for THAT attempt — carrying the old entry's
-	// LastSeenAt across would be wrong in both directions (a healthy old
-	// timestamp would age the new stub out into a retry storm; a stale
-	// sentinel would suppress retries the new address never earned).
+	// A re-fetch that fails STRUCTURALLY at the new address earns a
+	// structural hold of its own, from THAT attempt — carrying the old
+	// entry's LastSeenAt across would be wrong in both directions (a healthy
+	// old timestamp would age the new stub out into a retry storm; an old
+	// hold would suppress retries the new address never earned).
 	disp := &countingDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // 4xx → structural
 	}}
@@ -229,8 +229,9 @@ func TestHandlePacket_HostChangeStructuralFailureUsesFreshSentinel(t *testing.T)
 	if !ok {
 		t.Fatal("a failed re-fetch must still leave a stub")
 	}
-	if !info.LastSeenAt.Equal(structuralStubLastSeen) {
-		t.Errorf("LastSeenAt = %v, want the far-future sentinel %v", info.LastSeenAt, structuralStubLastSeen)
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC) // newTestClient's fixed clock
+	if want := structuralStubLastSeen(now, c.cfg.RendererTTL); !info.LastSeenAt.Equal(want) {
+		t.Errorf("LastSeenAt = %v, want %v, a hold from this failure", info.LastSeenAt, want)
 	}
 	if info.ControlURL != "" {
 		t.Errorf("ControlURL = %q, want empty", info.ControlURL)
@@ -240,10 +241,10 @@ func TestHandlePacket_HostChangeStructuralFailureUsesFreshSentinel(t *testing.T)
 func TestHandlePacket_StructuralStubRecoversAfterHostChange(t *testing.T) {
 	// The case that makes lastLocations load-bearing rather than a nicety: a
 	// renderer that failed STRUCTURALLY at address A holds a stub with NO
-	// ControlURL and the never-ages-out sentinel. When it reappears at
-	// address B, the cached entry offers nothing to compare hosts against —
-	// only the recorded Location does. Without it the stub is immortal and
-	// the renderer never comes back.
+	// ControlURL for structuralStubHold. When it reappears at address B, the
+	// cached entry offers nothing to compare hosts against — only the
+	// recorded Location does. Without it the renderer stays gone until the
+	// hold ends (until 2026-09-28, when the stub never aged out, for good).
 	var serveGood atomic.Bool
 	disp := &countingDispatcher{handler: func(w http.ResponseWriter, r *http.Request) {
 		if !serveGood.Load() {
@@ -257,7 +258,8 @@ func TestHandlePacket_StructuralStubRecoversAfterHostChange(t *testing.T) {
 	// Discovery at address A fails structurally.
 	c.handlePacket(context.Background(), alivePacket(movedUDN, "http://192.0.2.7:8080/description.xml"), nil)
 	stub := waitForStub(t, c, movedUDN, 2*time.Second)
-	if !stub.LastSeenAt.Equal(structuralStubLastSeen) {
+	held := structuralStubLastSeen(time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC), c.cfg.RendererTTL)
+	if !stub.LastSeenAt.Equal(held) {
 		t.Fatalf("precondition: want a structural stub, got LastSeenAt=%v", stub.LastSeenAt)
 	}
 
@@ -269,8 +271,8 @@ func TestHandlePacket_StructuralStubRecoversAfterHostChange(t *testing.T) {
 	if info.ControlURL != "http://192.0.2.99:8080/avtransport/control" {
 		t.Errorf("ControlURL = %q, want the new host", info.ControlURL)
 	}
-	if info.LastSeenAt.Equal(structuralStubLastSeen) {
-		t.Error("recovered entry still carries the structural sentinel")
+	if info.LastSeenAt.Equal(held) {
+		t.Error("recovered entry still carries the structural hold")
 	}
 }
 

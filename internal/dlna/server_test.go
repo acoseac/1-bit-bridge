@@ -97,9 +97,9 @@ func findFreePort(t *testing.T) string {
 //   - HTTP handlers respond (device description XML accessible)
 //   - Stop drains gracefully without leaking goroutines
 //
-// Doesn't exercise SSDP runtime (binding to the multicast group
-// requires root on Linux + can conflict with other UPnP services on
-// the test host); SSDP packet builders are tested in ssdp_packet_test.go.
+// Its one SSDP advertiser is bound to the loopback interface
+// (loopbackInterface), so the Start and Stop bursts it sends never leave
+// this host; SSDP packet builders are tested in ssdp_packet_test.go.
 func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 	addr := findFreePort(t)
 	lib := newTestLib(testTrack("t1", "Test Track"))
@@ -109,6 +109,10 @@ func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 		FriendlyName:  "Test Bridge",
 		ListenAddress: addr,
 		ServerURL:     "http://" + addr,
+		AdvertiseEndpoints: []AdvertiseEndpoint{{
+			Interface: loopbackInterface(t),
+			ServerURL: "http://" + addr,
+		}},
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -117,11 +121,9 @@ func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// SSDP startup typically requires multicast permissions that the
-	// test host may not have — Start() will likely error here. The
-	// HTTP listener should be cleanly torn down on SSDP failure.
-	// Re-bind the HTTP server WITHOUT SSDP for the rest of the test
-	// by mounting handlers directly via a manual http.Server.
+	// SSDP startup needs a multicast join on the loopback interface,
+	// which a sandboxed test host may refuse: Start then fails (and tears
+	// the HTTP listener back down) and the test skips.
 	//
 	// What we're actually testing: NewServer accepts valid config +
 	// the HTTP handler tree is constructed correctly. SSDP runtime

@@ -25,15 +25,45 @@ import (
 //  3. `Clear()` — called from `SSDPDiscoveryClient.Stop` for clean
 //     teardown. Optional in production (process exit drops everything
 //     anyway) but useful for tests.
+//  4. makeRoomLocked — a new UDN arriving at MaxCachedDevices evicts the
+//     stub that would expire first.
 //
 // The cache is the SINGLE source of truth for `/v1/renderers`. The
 // HTTP handler calls `Snapshot()` once per request + serializes the
 // slice; the read is cheap (RLock + copy of a typically <10-entry
 // map).
+//
+// It holds at most MaxCachedDevices entries (see there): a new UDN evicts
+// the stub that expires first when the cache is full, and is refused when
+// no stub is left to evict.
 type RendererCache struct {
 	mu      sync.RWMutex
 	entries map[string]RendererInfo // keyed on UDN
 }
+
+// MaxCachedDevices is how many devices one discovery cache holds: this
+// package's RendererCache, and internal/upnp's ServerCache for the servers
+// it finds through SSDP.
+//
+// A LAN peer can announce as many distinct UDNs as it likes, and both
+// caches kept one entry per UDN for as long as that UDN was refreshed. A
+// renderer whose LOCATION answered 4xx was worse: its stub carried a
+// year-2999 LastSeenAt that no eviction pass reached, so a flood of such
+// UDNs grew the cache and the client's location records for the life of
+// the process (measured on 2026-09-28: 5,000 stubs and 5,000 records
+// survived an eviction pass an hour later, about 490 bytes a UDN, and
+// 100,000 fake MediaServers with a valid description held 45 MB for their
+// ServerTTL; backlog B47).
+//
+// 256 is far above any real LAN, so a full cache means a flood, and a full
+// cache never makes room by dropping a device it serves: the renderer
+// cache evicts only stubs (the residue of a failed fetch, which Snapshot
+// hides anyway), soonest to expire first, and refuses a new UDN once none
+// is left, and the server cache refuses a new server that the operator did
+// not configure. A device already cached therefore stays for as long as it
+// keeps announcing, whatever a flood does, and a new device waits until the
+// flood's entries expire.
+const MaxCachedDevices = 256
 
 // NewRendererCache constructs an empty cache.
 func NewRendererCache() *RendererCache {
@@ -58,18 +88,54 @@ func NewRendererCache() *RendererCache {
 // Callers wanting a strict replace (e.g. post-`fetchDeviceDescription`
 // rebuild) pass a fully-populated `info` — the merge happens to
 // produce the same result.
-func (c *RendererCache) Upsert(info RendererInfo) {
+//
+// A NEW UDN is admitted as makeRoomLocked allows; the result reports
+// whether info is stored.
+func (c *RendererCache) Upsert(info RendererInfo) bool {
 	if info.UDN == "" {
-		return // defensive — every legitimate entry has a UDN
+		return false // defensive — every legitimate entry has a UDN
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	existing, ok := c.entries[info.UDN]
 	if !ok {
+		if !c.makeRoomLocked() {
+			return false
+		}
 		c.entries[info.UDN] = info
-		return
+		return true
 	}
 	c.entries[info.UDN] = mergeRendererInfo(existing, info)
+	return true
+}
+
+// makeRoomLocked reports whether the cache can take one more UDN. Below
+// MaxCachedDevices it can; at the bound it evicts the stub (an entry with no
+// ControlURL) whose LastSeenAt is earliest, the one EvictStale would drop
+// first, and without a stub to evict it cannot. Caller holds c.mu.
+//
+// A renderer with a ControlURL is never evicted to make room: it is what
+// /v1/renderers serves and what a phone may be driving, and the new UDN is
+// one any LAN peer can announce.
+func (c *RendererCache) makeRoomLocked() bool {
+	if len(c.entries) < MaxCachedDevices {
+		return true
+	}
+	victim := ""
+	var soonest time.Time
+	for udn, info := range c.entries {
+		if info.ControlURL != "" {
+			continue
+		}
+		if victim == "" || info.LastSeenAt.Before(soonest) {
+			victim, soonest = udn, info.LastSeenAt
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(c.entries, victim)
+	return true
 }
 
 // mergeRendererInfo combines a cached entry with a fresh one. Fresh
@@ -124,13 +190,20 @@ func mergeRendererInfo(cached, fresh RendererInfo) RendererInfo {
 //
 // Callers holding only a PARTIAL observation — the LastSeenAt refresh on an
 // ssdp:alive, which carries no service URLs — MUST use Upsert.
-func (c *RendererCache) Replace(info RendererInfo) {
+//
+// A NEW UDN is admitted as makeRoomLocked allows; the result reports whether
+// info is stored. Replacing a UDN already cached is never refused.
+func (c *RendererCache) Replace(info RendererInfo) bool {
 	if info.UDN == "" {
-		return // defensive — every legitimate entry has a UDN
+		return false // defensive — every legitimate entry has a UDN
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, ok := c.entries[info.UDN]; !ok && !c.makeRoomLocked() {
+		return false
+	}
 	c.entries[info.UDN] = info
+	return true
 }
 
 // Remove drops the entry for the given UDN. Idempotent — removing

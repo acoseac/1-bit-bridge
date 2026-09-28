@@ -140,6 +140,12 @@ func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
 
 // newTestClient constructs a client with stub dispatcher + fixed
 // clock for deterministic testing of handlePacket dispatch.
+//
+// Its M-SEARCH sends go nowhere (discardMSearch). The interface it names is
+// the zero one, which pins a real send to the OS default, the LAN, so a test
+// that starts this client multicast a search every device there answered,
+// once per run, until 2026-09-28 (backlog B38). A test that wants a send's
+// result sets writeMSearch itself.
 func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient {
 	t.Helper()
 	cfg := DefaultDiscoveryConfig()
@@ -152,8 +158,13 @@ func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
+	c.writeMSearch = discardMSearch
 	return c
 }
+
+// discardMSearch is a writeMSearch that puts nothing on the wire and reports
+// the send as gone out.
+func discardMSearch(_ *net.UDPConn, b []byte, _ *net.UDPAddr) (int, error) { return len(b), nil }
 
 func TestHandlePacket_NotifyByeByeRemovesEntry(t *testing.T) {
 	c := newTestClient(t, &stubDispatcher{})
@@ -382,14 +393,17 @@ func TestHandlePacket_TransientFailureStubAgesOut(t *testing.T) {
 
 func TestHandlePacket_StructuralFailureStubPersistsAndIsHidden(t *testing.T) {
 	// A structural failure (HTTP 404 — no description at that URL) caches a
-	// stub with the far-future sentinel LastSeenAt, so EvictStale never
-	// ages it out → it never retries (no storm) — and it stays hidden from
-	// /v1/renderers. (bridge-12.)
+	// stub that outlasts RendererTTL, so the renderer's announcements fetch
+	// nothing for structuralStubHold (no storm), and it stays hidden from
+	// /v1/renderers. (bridge-12.) It goes when the hold ends: until
+	// 2026-09-28 it carried a year-2999 LastSeenAt and never went at all
+	// (backlog B47).
 	disp := &stubDispatcher{handler: func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}}
 	c := newTestClient(t, disp)
 	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	ttl := c.cfg.RendererTTL
 	pkt := []byte("HTTP/1.1 200 OK\r\n" +
 		"LOCATION: http://broken/desc.xml\r\n" +
 		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
@@ -397,14 +411,17 @@ func TestHandlePacket_StructuralFailureStubPersistsAndIsHidden(t *testing.T) {
 		"\r\n")
 	c.handlePacket(context.Background(), pkt, nil)
 	info := waitForStub(t, c, "uuid:structural", 1*time.Second)
-	if !info.LastSeenAt.Equal(structuralStubLastSeen) {
-		t.Errorf("structural stub LastSeenAt = %v, want far-future sentinel %v", info.LastSeenAt, structuralStubLastSeen)
+	if want := structuralStubLastSeen(now, ttl); !info.LastSeenAt.Equal(want) {
+		t.Errorf("structural stub LastSeenAt = %v, want %v, the hold past the failure", info.LastSeenAt, want)
 	}
-	if evicted := c.cache.EvictStale(now.Add(10*time.Minute), 60*time.Second); evicted != 0 {
-		t.Errorf("structural stub must NOT age out; evicted=%d want 0", evicted)
+	if evicted := c.cache.EvictStale(now.Add(structuralStubHold-time.Second), ttl); evicted != 0 {
+		t.Errorf("structural stub aged out a second before its hold ended; evicted=%d want 0", evicted)
 	}
 	if n := len(c.cache.Snapshot()); n != 0 {
 		t.Errorf("structural stub must be hidden from Snapshot; got %d", n)
+	}
+	if evicted := c.cache.EvictStale(now.Add(structuralStubHold+time.Second), ttl); evicted != 1 {
+		t.Errorf("structural stub outlived its hold; evicted=%d want 1", evicted)
 	}
 }
 
