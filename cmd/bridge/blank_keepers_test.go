@@ -243,7 +243,7 @@ func findBlankKeepers(root string) (keepers []blankKeeper, nonTest, test int, er
 			return err
 		}
 		if d.IsDir() {
-			return keeperWalkDir(root, path, d.Name())
+			return moduleDirRule(root, path, d.Name())
 		}
 		if name := d.Name(); !strings.HasSuffix(name, ".go") || goToolIgnores(name) {
 			return nil
@@ -260,12 +260,13 @@ func findBlankKeepers(root string) (keepers []blankKeeper, nonTest, test int, er
 	return keepers, nonTest, test, err
 }
 
-// keeperWalkDir is findBlankKeepers' answer for a directory: nil to descend,
-// SkipDir for one no build of this module compiles, which is vendor,
-// testdata and node_modules, a nested module, and a name the go tool ignores
-// (goToolIgnores), or for another checkout (sweeptest.IsOtherCheckout),
-// decided before anything under it is opened.
-func keeperWalkDir(root, path, name string) error {
+// moduleDirRule is the answer about a directory for a walk of the Go files
+// this module's build reads (findBlankKeepers, findDefaultLoggerSetters):
+// nil to descend, SkipDir for one no build of this module compiles, which is
+// vendor, testdata and node_modules, a nested module, and a name the go tool
+// ignores (goToolIgnores), or for another checkout
+// (sweeptest.IsOtherCheckout), decided before anything under it is opened.
+func moduleDirRule(root, path, name string) error {
 	if path == root {
 		return nil
 	}
@@ -917,7 +918,7 @@ func TestBlankKeeperScanOnFixtures(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			// A checkout's path may hold glob metacharacters.
 			root := filepath.Join(t.TempDir(), "clone[1]")
-			writeKeeperTree(t, root, keeperFixtureTree, c.changes, c.crlf)
+			writeFixtureTree(t, root, keeperFixtureTree, c.changes, c.crlf)
 			rec := &docScanRecorder{t: t}
 			verdicts := scanBlankKeepers(rec, root, allowedKeepers, false)
 			checkKeeperVerdicts(t, rec, verdicts, append(append([]string(nil), keeperFixtureVerdicts...), tsnetKeeper+c.tsnet))
@@ -1184,9 +1185,10 @@ var keeperFixtureVerdicts = []string{
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 }
 
-// writeKeeperTree writes tree under root with changes applied (an empty
-// change deletes the file), with CRLF line endings when crlf is set.
-func writeKeeperTree(t *testing.T, root string, tree, changes map[string]string, crlf bool) {
+// writeFixtureTree writes tree, slash path -> source, under root with
+// changes applied (an empty change deletes the file), with CRLF line endings
+// when crlf is set.
+func writeFixtureTree(t *testing.T, root string, tree, changes map[string]string, crlf bool) {
 	t.Helper()
 	files := map[string]string{}
 	for rel, src := range tree {

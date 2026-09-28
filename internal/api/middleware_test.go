@@ -11,26 +11,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // withTestSlog routes slog.Default to a buffer for the duration of the
 // test so we can assert against the structured log records the middleware
-// emits. Restores the previous default on cleanup.
-//
-// **Must NOT be used with t.Parallel()** — slog.SetDefault mutates a
-// process-global; two parallel tests calling this would race on the
-// default-logger swap and read each other's buffers. The tests below
-// run sequentially today; if a future change adds t.Parallel() to any
-// of them, this helper needs to grow a sync.Mutex (or move to per-test
-// loggers via slog.New + slog.NewLogLogger to avoid the global).
+// emits. loggingtest.SetDefault puts back the previous default and the log
+// package's output and flags on cleanup, and refuses a parallel test: the
+// default is one per process, so two captures that overlap put back each
+// other's state.
 func withTestSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
-	prev := slog.Default()
 	buf := &bytes.Buffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{
+	loggingtest.SetDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
 	return buf
 }
 
