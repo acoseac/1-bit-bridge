@@ -2072,8 +2072,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		if !enqueueableAudioFile(abs, d.Name()) {
 			return nil
 		}
-		// The same decision walkRoot makes (walkedFileInfo), with the
-		// same three outcomes.
+		// The same decision walkRoot makes (walkedFileInfo), and the same
+		// answer to each verdict.
 		rel := relPath(owningRoot, abs, multiRoot)
 		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
 		switch verdict {
@@ -2810,10 +2810,10 @@ const (
 // os.Stat, and /v1/list reports a link by its target (PROTOCOL.md). The walk's
 // own stat of a symlink is the LINK's, the length of the path it stores and
 // the link's mtime, and until 2026-09-28 a symlinked file was indexed under
-// it: the phone stored a size of a few dozen bytes for it, the skip gate never
-// saw a change to the target, and every check that compares a row with a stat
-// of the file (the /v1/lyrics drift check answered 410 for its embedded
-// lyrics) disagreed with the row. That stat is also the identity of a
+// it: the phone stored the length of the link's path as the file's size, the
+// skip gate never saw a change to the target, and every check that compares a
+// row with a stat of the file (the /v1/lyrics drift check answered 410 for its
+// embedded lyrics) disagreed with the row. That stat is also the identity of a
 // symlinked SACD container, its rows' and the in-motion guard's
 // (expandSACDContainer).
 //
