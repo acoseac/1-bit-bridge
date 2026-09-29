@@ -85,9 +85,9 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   by unexpected signal; no crash will be recorded". **Size the limit from the measured
   reservation, not from RAM**: RLIMIT_AS counts reserved address space, and a
   `FuzzExtractFLAC` process reserves most of its size before it allocates (go1.26.6 on
-  Linux: 2.2 to 2.4 GB for a worker, 3.8 to 4.3 GB for the coordinator, which maps each
-  worker's shared memory), so 5 GiB leaves a worker about 3 GB of heap and the coordinator
-  about 1 GB; a coordinator that reaches the limit fails its leg with its own out-of-memory,
+  Linux, in decimal units: 2.2 to 2.6 GB for a worker, up to 4.3 GB for the coordinator,
+  which maps each worker's shared memory), so 5 GiB (5.37 GB) leaves a worker at least
+  2.8 GB of heap and the coordinator about 1.1 GB; a coordinator that reaches the limit fails its leg with its own out-of-memory,
   which is visible, and raising the limit gives each of the four workers that much more of
   the runner's 16 GB. The
   limit is the backstop; the allocation property is what names a bomb the limit would let
