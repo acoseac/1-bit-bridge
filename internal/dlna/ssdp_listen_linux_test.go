@@ -3,8 +3,11 @@
 package dlna
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -54,5 +57,44 @@ func TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface(t *testing.T) {
 	if got := multicastAll(t, listener); got != 0 {
 		t.Errorf("the advertiser's listener has IP_MULTICAST_ALL = %d: it hears the group's datagrams "+
 			"from every interface any socket on the host joined, and answers their M-SEARCHes", got)
+	}
+}
+
+// TestAListenerTheKernelWillNotConfineStillListensAndSaysSo pins the soft
+// failure of listenSSDP: a kernel (or a sandbox emulating the socket API)
+// that refuses IP_MULTICAST_ALL gets the listener every Linux bridge had
+// before, joined and bound, with one Warn naming the interface, never a
+// refusal that would take DLNA down. The positive control is the same
+// listener with the option accepted: confined, and no Warn.
+func TestAListenerTheKernelWillNotConfineStillListensAndSaysSo(t *testing.T) {
+	lo := loopbackInterface(t)
+	group := testMulticastGroup(t)
+	for _, tc := range []struct {
+		name     string
+		confine  func(fd uintptr) error
+		wantAll  int
+		wantWarn int
+	}{
+		{"the kernel refuses the option", func(uintptr) error { return unix.ENOPROTOOPT }, 1, 1},
+		{"the kernel takes the option", multicastAllOff, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, nil))
+			l, err := listenSSDPConfined(context.Background(), lo, group, log, tc.confine)
+			if err != nil {
+				t.Fatalf("listenSSDPConfined: %v", err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			if got := multicastAll(t, l); got != tc.wantAll {
+				t.Errorf("IP_MULTICAST_ALL = %d, want %d", got, tc.wantAll)
+			}
+			if got := strings.Count(buf.String(), "SSDP listener cannot be limited to its own interface"); got != tc.wantWarn {
+				t.Errorf("logged %d Warns about the listener, want %d:\n%s", got, tc.wantWarn, buf.String())
+			}
+			if tc.wantWarn > 0 && !strings.Contains(buf.String(), "interface="+lo.Name) {
+				t.Errorf("the Warn does not name the interface %s:\n%s", lo.Name, buf.String())
+			}
+		})
 	}
 }

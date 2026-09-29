@@ -11,47 +11,44 @@ import (
 )
 
 // notifyAliveFailures runs one NOTIFY ssdp:alive burst for an advertiser at
-// location through sender, and returns how many "NOTIFY alive send failed"
-// lines it wrote at Debug, the level it logs them at.
-func notifyAliveFailures(t *testing.T, location string, sender *net.UDPConn) int {
+// location through sender, written to "to" in place of the SSDP group, and
+// returns how many "NOTIFY alive send failed" lines it wrote at Debug, the
+// level it logs them at.
+func notifyAliveFailures(t *testing.T, location string, sender *net.UDPConn, to *net.UDPAddr) int {
 	t.Helper()
 	var buf bytes.Buffer
 	a := NewSSDPAdvertiser(SSDPConfig{UDN: "uuid:test", Location: location, ServerToken: "test"})
+	a.notifyTo = to
 	a.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	a.sendAliveAll(sender)
 	return strings.Count(buf.String(), "NOTIFY alive send failed")
 }
 
-// dialLoopbackSender is a sender like Start's, dialled at loopback's discard
-// port rather than the SSDP group, so the test needs no multicast.
-func dialLoopbackSender(t *testing.T) *net.UDPConn {
+// loopbackSender is a sender like Start's (openNotifySender), and loopback's
+// discard port for it to write to in place of the SSDP group, so the test
+// needs no multicast.
+func loopbackSender(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 	t.Helper()
-	sender, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+	sender, err := openNotifySender()
 	if err != nil {
-		t.Skipf("cannot dial a loopback UDP socket in this environment: %v", err)
+		t.Skipf("cannot open a UDP socket in this environment: %v", err)
 	}
 	t.Cleanup(func() { _ = sender.Close() })
-	return sender
+	return sender, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}
 }
 
-// dialLoopbackSink is a sender like Start's, dialled at a UDP socket the test
-// holds open on loopback. A write that fits goes out: from dialLoopbackSender
-// it can fail, since nothing listens on the discard port and the ICMP
-// port-unreachable an earlier write drew fails a later one with
-// "connection refused" (one run in a few under -race).
-func dialLoopbackSink(t *testing.T) *net.UDPConn {
+// loopbackSink is a sender like Start's, and the address of a UDP socket the
+// test holds open on loopback for it to write to. A write that fits goes out
+// there, whatever the host does with a datagram to a port nothing listens on.
+func loopbackSink(t *testing.T) (*net.UDPConn, *net.UDPAddr) {
 	t.Helper()
 	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Skipf("cannot bind a loopback UDP socket in this environment: %v", err)
 	}
 	t.Cleanup(func() { _ = sink.Close() })
-	sender, err := net.DialUDP("udp4", nil, sink.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial the loopback sink: %v", err)
-	}
-	t.Cleanup(func() { _ = sender.Close() })
-	return sender
+	sender, _ := loopbackSender(t)
+	return sender, sink.LocalAddr().(*net.UDPAddr)
 }
 
 // Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause pins
@@ -63,14 +60,15 @@ func dialLoopbackSink(t *testing.T) *net.UDPConn {
 // reported, one line per target, as before.
 func Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause(t *testing.T) {
 	const location = "http://127.0.0.1:7790/dlna/description.xml"
-	closed := dialLoopbackSender(t)
+	closed, to := loopbackSender(t)
 	_ = closed.Close() // Stop's close, landed before the burst's writes
-	if got := notifyAliveFailures(t, location, closed); got != 0 {
+	if got := notifyAliveFailures(t, location, closed, to); got != 0 {
 		t.Errorf("a burst Stop's close cut short logged %d NOTIFY send failures, want 0", got)
 	}
 
 	oversized := location + "?" + strings.Repeat("x", 70_000)
-	if got, want := notifyAliveFailures(t, oversized, dialLoopbackSender(t)), len(NotifyTargetsFor("uuid:test")); got != want {
+	sender, to := loopbackSender(t)
+	if got, want := notifyAliveFailures(t, oversized, sender, to), len(NotifyTargetsFor("uuid:test")); got != want {
 		t.Errorf("a burst whose every write fails logged %d NOTIFY send failures, want one per target, %d", got, want)
 	}
 }
@@ -109,7 +107,10 @@ func Test_SSDPAdvertiser_FailedBurstsReachTheDefaultLevelOncePerStreak(t *testin
 		t.Fatalf("the streak escalated inside its first burst, which counted writes, not bursts:\n%s", buf.String())
 	}
 
-	sender := dialLoopbackSink(t)
+	// Stop joined the goroutines that read notifyTo, so the test may point
+	// the stopped advertiser's bursts at a socket of its own.
+	sender, sink := loopbackSink(t)
+	a.notifyTo = sink
 	a.announceAlive(sender)
 	const escalation = "NOTIFY send failing persistently; DLNA advertising is degraded"
 	if got := strings.Count(buf.String(), escalation); got != 1 {
