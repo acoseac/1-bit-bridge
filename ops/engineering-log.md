@@ -30815,8 +30815,8 @@ not change.
   That is the documented overwrite, "the ports, which #970 GRADES rather than
   keeps", and the warning above now names the move where a kept endpoint
   shows it. Whether a rewrite should keep the install's ports where the run
-  names none, as it keeps the name, is a product decision, filed in the
-  backlog.
+  names none, as it keeps the name, is a product decision, filed as
+  backlog B125.
 - `--start-now` is Windows-only and ignored elsewhere without a word, as
   `--force` is without `--yes` (the prompt still asks). Neither changes what
   a run writes; not touched.
