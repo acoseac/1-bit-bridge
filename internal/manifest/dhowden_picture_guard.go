@@ -95,10 +95,16 @@ type pictureWalk struct {
 
 // pictureRefusal names the picture that took dhowden past its budget.
 type pictureRefusal struct {
-	What     string // "a PICTURE block" or "a METADATA_BLOCK_PICTURE comment"
+	What     string // pictureInABlock or pictureInAComment
 	Declared int64  // the buffer it asked for
 	Budget   int64  // pictureBudget of the file
 }
+
+// The two ways dhowden reaches readPictureBlock, as a refusal names them.
+const (
+	pictureInABlock   = "a PICTURE block"
+	pictureInAComment = "a METADATA_BLOCK_PICTURE comment"
+)
 
 // spend records a buffer of n bytes dhowden would allocate for what, and
 // reports whether the walk is still within its budget.
@@ -168,9 +174,8 @@ func dhowdenPicturesWithinBudget(rs io.ReadSeeker) (bool, pictureRefusal) {
 }
 
 // flac mirrors tag.ReadFLACTags: after "fLaC", blocks of a 1-byte header
-// (last flag, type) and a 3-byte length, where a VORBIS_COMMENT or PICTURE
-// block is read by its contents and every other block is skipped by its
-// length.
+// (last flag, type) and a 3-byte length, until the block flagged last or the
+// first read dhowden fails.
 func (w *pictureWalk) flac(src byteSource) {
 	pos := int64(4)
 	var mbp pictureValue // dhowden's comment map outlives the block
@@ -179,31 +184,30 @@ func (w *pictureWalk) flac(src byteSource) {
 		if !readFullAt(src, pos, hdr[:]) {
 			return
 		}
-		pos += int64(len(hdr))
-		last := hdr[0]&0x80 != 0
-		length := int64(hdr[1])<<16 | int64(hdr[2])<<8 | int64(hdr[3])
-		switch hdr[0] &^ 0x80 {
-		case 4: // VORBIS_COMMENT
-			end, ok := w.vorbisComments(src, pos, &mbp)
-			if !ok {
-				return
-			}
-			if mbp.set && !w.decodedPicture(mbp) {
-				return
-			}
-			pos = end
-		case 6: // PICTURE
-			end, ok := w.filePicture(src, pos)
-			if !ok {
-				return
-			}
-			pos = end
-		default:
-			pos += length
-		}
-		if last {
+		next, ok := w.flacBlock(src, hdr, pos+int64(len(hdr)), &mbp)
+		if !ok || hdr[0]&0x80 != 0 {
 			return
 		}
+		pos = next
+	}
+}
+
+// flacBlock mirrors readFLACMetadataBlock for the block whose header is hdr
+// and whose body starts at pos: a VORBIS_COMMENT or PICTURE block is read by
+// its contents, and every other block is skipped by its declared length. It
+// returns where the next header is, and false where dhowden stops.
+func (w *pictureWalk) flacBlock(src byteSource, hdr [4]byte, pos int64, mbp *pictureValue) (int64, bool) {
+	switch hdr[0] &^ 0x80 {
+	case 4: // VORBIS_COMMENT
+		end, ok := w.vorbisComments(src, pos, mbp)
+		if !ok || (mbp.set && !w.decodedPicture(*mbp)) {
+			return end, false
+		}
+		return end, true
+	case 6: // PICTURE
+		return w.filePicture(src, pos)
+	default:
+		return pos + (int64(hdr[1])<<16 | int64(hdr[2])<<8 | int64(hdr[3])), true
 	}
 }
 
@@ -295,7 +299,7 @@ func (w *pictureWalk) filePicture(src byteSource, pos int64) (int64, bool) {
 			return pos, false
 		}
 		pos += 4
-		if !w.spend(readStringCost(int64(l), size-pos), "a PICTURE block") {
+		if !w.spend(readStringCost(int64(l), size-pos), pictureInABlock) {
 			return pos, false
 		}
 		if int64(l) > size-pos {
@@ -312,7 +316,7 @@ func (w *pictureWalk) filePicture(src byteSource, pos int64) (int64, bool) {
 		return pos, false
 	}
 	pos += 4
-	if !w.spend(int64(dataLen), "a PICTURE block") {
+	if !w.spend(int64(dataLen), pictureInABlock) {
 		return pos, false
 	}
 	if int64(dataLen) > size-pos {
@@ -337,7 +341,7 @@ func (w *pictureWalk) filePicture(src byteSource, pos int64) (int64, bool) {
 // 2.9 MB MIME type, decoded 23 times, allocated 68 MB.
 func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 	decodedMax := int64(base64.StdEncoding.DecodedLen(int(v.n)))
-	if !w.spend(decodedMax, "a METADATA_BLOCK_PICTURE comment") {
+	if !w.spend(decodedMax, pictureInAComment) {
 		return false
 	}
 	dec := base64.NewDecoder(base64.StdEncoding, io.NewSectionReader(v.src, v.off, v.n))
@@ -370,7 +374,7 @@ func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 			return readsOn(err)
 		}
 		avail := decodedMax - consumed
-		if !w.spend(readStringCost(int64(l), avail), "a METADATA_BLOCK_PICTURE comment") {
+		if !w.spend(readStringCost(int64(l), avail), pictureInAComment) {
 			return false
 		}
 		if int64(l) > avail {
@@ -391,7 +395,7 @@ func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 	if err != nil {
 		return readsOn(err)
 	}
-	return w.spend(int64(dataLen), "a METADATA_BLOCK_PICTURE comment")
+	return w.spend(int64(dataLen), pictureInAComment)
 }
 
 // ogg mirrors tag.ReadOGGTags: Ogg pages read in order and their segments

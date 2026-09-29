@@ -116,56 +116,77 @@ func oggCRC(page []byte) uint32 {
 }
 
 // oggStream lays packets out as Ogg pages of one stream, splitting each
-// packet into pages of at most pageData bytes (a multiple of 255 keeps a
-// page's segments whole), with valid CRCs, so dhowden reads it.
+// packet into pages of at most pageData bytes, with valid CRCs, so dhowden
+// reads it. pageData is rounded down to whole 255-byte segments and to at
+// most 254 of them, which leaves a page that ends its packet room for the
+// terminating segment within the 255 a page can hold.
 func oggStream(pageData int, packets ...[]byte) []byte {
-	pageData = max(255, pageData/255*255)
+	pageData = min(max(255, pageData/255*255), 254*255)
 	var out []byte
 	seq := uint32(0)
 	for _, pkt := range packets {
-		rest := pkt
-		continued := false
-		for {
-			chunk := rest[:min(len(rest), pageData)]
-			rest = rest[len(chunk):]
-			var segs []byte
-			for n := len(chunk); ; n -= 255 {
-				if n < 255 {
-					if len(rest) == 0 { // the packet ends on this page
-						segs = append(segs, byte(n))
-					} else if n > 0 {
-						panic("oggStream: chunk not a multiple of 255")
-					}
-					break
-				}
-				segs = append(segs, 255)
-			}
-			var flags byte
-			if continued {
-				flags |= 0x1
-			}
-			if seq == 0 {
-				flags |= 0x2
-			}
-			h := []byte("OggS")
-			h = append(h, 0, flags)
-			h = append(h, make([]byte, 8)...)
-			h = binary.LittleEndian.AppendUint32(h, 0x1b99) // serial
-			h = binary.LittleEndian.AppendUint32(h, seq)
-			h = append(h, 0, 0, 0, 0) // CRC, filled below
-			h = append(h, byte(len(segs)))
-			h = append(h, segs...)
-			page := append(h, chunk...)
-			binary.LittleEndian.PutUint32(page[22:26], oggCRC(page))
-			out = append(out, page...)
+		for off := 0; off == 0 || off < len(pkt); off += pageData {
+			chunk := pkt[off:min(len(pkt), off+pageData)]
+			out = append(out, oggPage(seq, off > 0, chunk, off+len(chunk) == len(pkt))...)
 			seq++
-			continued = true
-			if len(rest) == 0 {
-				break
-			}
 		}
 	}
 	return out
+}
+
+// oggPage is page seq of stream 0x1b99, holding chunk: the part of a packet
+// that falls on this page, continued from the previous page when it is not
+// the packet's first. It is laced as whole 255-byte segments, and when the
+// packet ends on this page, the shorter segment (possibly empty) that ends
+// it.
+func oggPage(seq uint32, continued bool, chunk []byte, ends bool) []byte {
+	segs := bytes.Repeat([]byte{255}, len(chunk)/255)
+	switch {
+	case ends:
+		segs = append(segs, byte(len(chunk)%255))
+	case len(chunk)%255 != 0:
+		panic("oggPage: a page that does not end its packet must hold whole segments")
+	}
+	var flags byte
+	if continued {
+		flags |= 0x1
+	}
+	if seq == 0 {
+		flags |= 0x2
+	}
+	h := []byte("OggS")
+	h = append(h, 0, flags)
+	h = append(h, make([]byte, 8)...)
+	h = binary.LittleEndian.AppendUint32(h, 0x1b99) // serial
+	h = binary.LittleEndian.AppendUint32(h, seq)
+	h = append(h, 0, 0, 0, 0) // CRC, filled below
+	h = append(h, byte(len(segs)))
+	h = append(h, segs...)
+	page := append(h, chunk...)
+	binary.LittleEndian.PutUint32(page[22:26], oggCRC(page))
+	return page
+}
+
+// TestOggStreamFramesAPacketOfAnyLength pins the harness FuzzExtractOGG
+// feeds, through dhowden's own demuxer: the comment packet reads back
+// whatever its length and the page size. A page holds at most 255 segments,
+// so a packet that fills 255 whole segments needs its terminating empty
+// segment on a page of its own; the first version of oggStream put it on
+// the same page as a 256th, and dhowden read garbage from there on.
+func TestOggStreamFramesAPacketOfAnyLength(t *testing.T) {
+	base := len(vorbisCommentPacket("TITLE=t", "COMMENT="))
+	for _, pageData := range []int{0, 255, 510, 254 * 255, 255 * 255, 65535} {
+		for _, total := range []int{base, 255, 254 * 255, 255 * 255, 255*255 + 1, 2 * 255 * 255} {
+			if total < base {
+				continue
+			}
+			comment := vorbisCommentPacket("TITLE=t", "COMMENT="+strings.Repeat("x", total-base))
+			m, err := tag.ReadFrom(bytes.NewReader(oggStream(pageData, vorbisIdent(), comment)))
+			if err != nil || m.Title() != "t" {
+				t.Errorf("a %d-byte comment packet in pages of %d: ReadFrom = %v, %v", len(comment), pageData, m, err)
+			}
+		}
+	}
 }
 
 // vorbisIdent is a Vorbis identification header packet (its fields do not
