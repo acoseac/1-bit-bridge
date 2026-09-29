@@ -27,6 +27,13 @@ func (s stubAnalysisStore) LookupAnalysis(ctx context.Context, sourcePath string
 // AnalysisStore that points at both.
 func waveformFixture(t *testing.T) (*httptest.Server, string, string) {
 	t.Helper()
+	return waveformFixtureGated(t, true)
+}
+
+// waveformFixtureGated is waveformFixture with the analysis gate set to
+// analysisOn. Production wires the analysis store whatever the gate says.
+func waveformFixtureGated(t *testing.T, analysisOn bool) (*httptest.Server, string, string) {
+	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
 	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
@@ -52,7 +59,7 @@ func waveformFixture(t *testing.T) (*httptest.Server, string, string) {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("wf")
 
-	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return true }, stubAnalysisStore{rec: &AnalysisRecord{
+	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return analysisOn }, stubAnalysisStore{rec: &AnalysisRecord{
 		SourcePath:    srcRel,
 		WaveformPath:  sidecar,
 		WaveformTag:   hex.EncodeToString(sum[:])[:8],
