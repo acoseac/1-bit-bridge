@@ -7,8 +7,12 @@ import (
 	"strings"
 )
 
-// EvalSymlinksOrClean returns filepath.EvalSymlinks(p) when it succeeds.
-// When the leaf doesn't exist yet (typical for a brand-new install where
+// EvalSymlinksOrClean returns ResolveLinks(p) when it succeeds: what
+// filepath.EvalSymlinks answers, and on Windows also through a directory
+// junction or a mounted folder, which EvalSymlinks has not followed since Go
+// 1.23 (so a variants directory spelled by its real path under a junction'd
+// root's target read as not nested; see ResolveLinks). When the leaf doesn't
+// exist yet (typical for a brand-new install where
 // variants_dir is created on first upscale, a library root the operator
 // typed into bridge.yaml but hasn't mounted, or a `bridge variants move`
 // --to that hasn't been created yet), it resolves symlinks in the NEAREST
@@ -27,7 +31,7 @@ import (
 // admin.assertNotUnderLibraryRoots, and the `bridge variants move` CLI —
 // stay in lockstep. Previously duplicated byte-for-byte in config + admin.
 func EvalSymlinksOrClean(p string) string {
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+	if resolved, err := ResolveLinks(p); err == nil {
 		return resolved
 	}
 	p = filepath.Clean(p)
@@ -40,7 +44,7 @@ func EvalSymlinksOrClean(p string) string {
 			return p
 		}
 		missing = filepath.Join(filepath.Base(cur), missing)
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		if resolved, err := ResolveLinks(parent); err == nil {
 			return filepath.Join(resolved, missing)
 		}
 		cur = parent
@@ -48,8 +52,8 @@ func EvalSymlinksOrClean(p string) string {
 }
 
 // IsUnderAny reports whether candidate resolves AT or UNDER any of roots,
-// resolving symlinks on BOTH sides via EvalSymlinksOrClean before the
-// filepath.Rel comparison. Returns the resolved (cleaned) root it matched, or
+// resolving links (symlinks, and on Windows junctions and mounted folders)
+// on BOTH sides via EvalSymlinksOrClean before the filepath.Rel comparison. Returns the resolved (cleaned) root it matched, or
 // "" when candidate is safely outside every root. Empty root entries and
 // cross-volume Rel errors (different Windows volumes) are skipped.
 //

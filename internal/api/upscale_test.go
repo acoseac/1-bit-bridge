@@ -256,6 +256,75 @@ func TestUpscaleFolderRequestForALinkedRootWalksThroughIt(t *testing.T) {
 	}
 }
 
+// TestUpscaleFolderRequestSkipsWhatTheScannerSkips: a folder request walks
+// past the directories the scanner never indexes (manifest.ShouldSkipDir: a
+// recycle bin, a NAS snapshot, a Synology @eaDir, a dot-directory), below the
+// folder it names, at any depth. It descended them, so a request for the
+// root offered every file in a `#snapshot` (which can hold the library many
+// times over) and every `@eaDir` entry to the enqueuer as candidates
+// (measured: 9 candidates for the 3 tracks here).
+func TestUpscaleFolderRequestSkipsWhatTheScannerSkips(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "Music")
+	seedUpscaleTree(t, root)
+	for _, rel := range []string{
+		"#recycle/Artist/Deleted.flac",
+		"#snapshot/GMT+02_2026-09-28/Artist/Album/01.flac",
+		"@eaDir/Single.flac/SYNOINDEX_MEDIA_INFO",
+		"Artist/Album/@eaDir/01.flac/SYNOINDEX_MEDIA_INFO",
+		".Trashes/501/Old.flac",
+		"lost+found/#12345.flac",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hs, tok, stub := upscaleServer(t, tmp, root, true, true)
+	for _, c := range []struct {
+		folder string
+		want   []string
+	}{
+		{".", upscaleTreeFiles},
+		{"Artist", upscaleTreeFiles},
+	} {
+		stub.calls = nil
+		resp := postJSON(t, hs, "/v1/upscale", tok, UpscaleRequest{Path: c.folder})
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: status %d, want 202", c.folder, resp.StatusCode)
+		}
+		sort.Strings(stub.calls)
+		if strings.Join(stub.calls, " ") != strings.Join(c.want, " ") {
+			t.Errorf("a request for %q enqueued %v, want only the library's tracks %v", c.folder, stub.calls, c.want)
+		}
+	}
+}
+
+// TestUpscaleFolderRequestWalksADotNamedRoot: the folder a request names is
+// walked whatever its name, which matters for a library root whose basename
+// starts with a dot (`/mnt/storage/.music`, the watcher's
+// TestWatcherWatchesDotNamedLibraryRoot case): pruned by the rule above, a
+// request for the whole library would enqueue nothing.
+func TestUpscaleFolderRequestWalksADotNamedRoot(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, ".music")
+	seedUpscaleTree(t, root)
+	hs, tok, stub := upscaleServer(t, tmp, root, true, true)
+	resp := postJSON(t, hs, "/v1/upscale", tok, UpscaleRequest{Path: "."})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status %d, want 202", resp.StatusCode)
+	}
+	sort.Strings(stub.calls)
+	if strings.Join(stub.calls, " ") != strings.Join(upscaleTreeFiles, " ") {
+		t.Errorf("a request for a dot-named root enqueued %v, want %v", stub.calls, upscaleTreeFiles)
+	}
+}
+
 // TestUpscaleQueueFullPartial — some candidates accepted, some
 // rejected with ErrUpscaleQueueFull. Response keeps 202 + reports
 // queueFull: true so iOS can toast.

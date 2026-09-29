@@ -235,9 +235,10 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 // containment check, INCLUDING its symlink resolution — a lexical-only
 // check here would let the admin accept a symlinked path that
 // `config.Load`'s validation rejects on the next boot (bridge fails to
-// start over a value the UI said was fine). The symlink resolution is the
-// shared `fsutil.EvalSymlinksOrClean` (single canonical copy, also used by
-// config + the `bridge variants move` CLI) so all three stay in lockstep;
+// start over a value the UI said was fine). The link resolution (a symlink,
+// and on Windows a junction) is the shared `fsutil.EvalSymlinksOrClean`
+// (single canonical copy, also used by config + the `bridge variants move`
+// CLI) so all three stay in lockstep;
 // only the admin-specific error formatting lives here. A test in
 // `internal/admin` pins the contract via a sibling-path acceptance +
 // under-root rejection pair plus a symlink-resolution case.

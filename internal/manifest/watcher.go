@@ -78,6 +78,20 @@ type Watcher struct {
 	// Run starts (goroutine creation orders the write); nil in production,
 	// one nil check per debounced directory change.
 	afterDispatchHookForTests func()
+
+	// aliases are the configured roots that are links, each watched at the
+	// directory it resolves to (watchWalkStart), paired with the root as
+	// configured so an event is named back under it (configuredName).
+	// Written by Run's initial walk and read by handleEvent, both on Run's
+	// goroutine, so no lock.
+	aliases []rootAlias
+}
+
+// rootAlias pairs the directory a linked configured root resolves to with
+// the root as configured.
+type rootAlias struct {
+	resolved   string
+	configured string
 }
 
 // NewWatcher constructs a Watcher against the scanner's currently
@@ -194,26 +208,33 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // at least knows.
 //
 // A configured root that is itself a link to a directory (or on Windows a
-// junction) is walked THROUGH, as the scanner walks it
-// (fsutil.WalkableRoot): walked as the link, the root was one entry that
-// is not a directory, so not a single watch was registered and addTree
-// still returned nil — the library had no instant updates and nothing said
-// so. Every watch is registered under the configured spelling, so an event
-// names a directory ScanSubtree finds under its configured root; the root's
-// own watch is added as the configured path, which inotify and
-// ReadDirectoryChangesW resolve through any chain of links. fsnotify's kqueue
-// backend resolves one level, so on macOS a root that is a link to a link
-// sees files dropped directly into it only at the periodic scan (its
-// subdirectories are watched as usual). Only a configured root is followed:
-// a directory that appears at runtime is walked as the scanner walks it, and
-// the scanner walks no link below a root.
+// junction) is walked THROUGH, as the scanner walks it: walked as the link,
+// the root was one entry that is not a directory, so not a single watch was
+// registered and addTree still returned nil — the library had no instant
+// updates and nothing said so. Where the link resolves to a directory
+// (filepath.EvalSymlinks), the tree is watched THERE, and every event under
+// it is named back under the configured root (configuredName), so the scan
+// it asks for is one ScanSubtree finds under its configured root. That is
+// what makes a link to a link work on macOS: fsnotify's kqueue backend
+// follows ONE level of a link it is asked to watch, so a root that is a
+// chain had its own watch registered as a watch on a FILE, saw no Create
+// event, and named each change after the root itself, which the watcher
+// took for a change in the root's parent (see watchWalkStart). A Windows
+// junction, which EvalSymlinks leaves as it is, is walked through its
+// configured spelling (fsutil.WalkableRoot) and watched as the configured
+// path, which ReadDirectoryChangesW follows. Only a configured root is
+// followed: a directory that appears at runtime is walked as the scanner
+// walks it, and the scanner walks no link below a root.
 func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
-	walkFrom, err := watchWalkStart(root, isConfiguredRoot)
+	walkFrom, rootWatch, err := watchWalkStart(root, isConfiguredRoot)
 	if err != nil {
 		// The root cannot be seen through: the caller logs it as a
 		// failed initial watch, which is the "root-level walk failure
 		// surfaces" rule above.
 		return err
+	}
+	if rootWatch != root {
+		wt.aliases = append(wt.aliases, rootAlias{resolved: rootWatch, configured: root})
 	}
 	limitHit := false
 	return filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
@@ -249,7 +270,7 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 		}
 		watchPath := path
 		if path == walkFrom {
-			watchPath = root
+			watchPath = rootWatch
 		}
 		if limitHit {
 			// Every subsequent Add would fail the same way, so there
@@ -265,14 +286,66 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	})
 }
 
-// watchWalkStart is where addTree's walk starts: a configured root is walked
-// through (fsutil.WalkableRoot), a directory that appeared at runtime as it
-// is.
-func watchWalkStart(root string, isConfiguredRoot bool) (string, error) {
+// watchWalkStart is where addTree's walk starts, and the path the root's own
+// watch is registered as. A directory that appeared at runtime, and a
+// configured root that is a directory, are both as they are. A configured
+// root that is a link to a directory is watched at the directory the link
+// resolves to, when filepath.EvalSymlinks answers one: registered as the
+// link itself, fsnotify's kqueue backend (macOS, the BSDs) follows one level
+// of it, so a link to a link got a watch that sees the root as a file. What
+// EvalSymlinks does not resolve to a plain directory (a Windows junction,
+// which it leaves as it is since Go 1.23) is walked through its configured
+// spelling (fsutil.WalkableRoot) and watched as the configured path, as
+// before, which inotify and ReadDirectoryChangesW follow at every level.
+func watchWalkStart(root string, isConfiguredRoot bool) (walkFrom, rootWatch string, err error) {
 	if !isConfiguredRoot {
-		return root, nil
+		return root, root, nil
 	}
-	return fsutil.WalkableRoot(root)
+	walkFrom, err = fsutil.WalkableRoot(root)
+	if err != nil {
+		return "", "", err
+	}
+	if walkFrom == root {
+		return root, root, nil
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(root); evalErr == nil && resolved != root {
+		if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.IsDir() {
+			return resolved, resolved, nil
+		}
+	}
+	return walkFrom, root, nil
+}
+
+// configuredName is an event's path in the spelling of the configured root it
+// is under: a path under a linked root's resolved directory is renamed onto
+// the root as configured (the longest resolved directory that holds it, should
+// two nest), and every other path is returned as it is.
+func (wt *Watcher) configuredName(name string) string {
+	var match *rootAlias
+	for i := range wt.aliases {
+		a := &wt.aliases[i]
+		if !pathAtOrUnder(name, a.resolved) {
+			continue
+		}
+		if match == nil || len(a.resolved) > len(match.resolved) {
+			match = a
+		}
+	}
+	if match == nil {
+		return name
+	}
+	return filepath.Join(match.configured, strings.TrimPrefix(name[len(match.resolved):], string(filepath.Separator)))
+}
+
+// pathAtOrUnder reports whether p is dir or a path below it, by string.
+func pathAtOrUnder(p, dir string) bool {
+	if p == dir {
+		return true
+	}
+	if !strings.HasSuffix(dir, string(filepath.Separator)) {
+		dir += string(filepath.Separator)
+	}
+	return strings.HasPrefix(p, dir)
 }
 
 // addWatch registers one directory's watch, and reports whether the attempt
@@ -321,11 +394,16 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 			// isConfiguredRoot=false: this directory just appeared, so
 			// it gets no dot-name carve-out — a `.Trashes` that shows
 			// up at runtime must be pruned exactly like one discovered
-			// by the startup walk.
+			// by the startup walk. Watched as fsnotify named it, which
+			// under a linked root is the resolved spelling its parent's
+			// watch uses (kqueue already holds an entry watch under
+			// that name, and another spelling would be a second one).
 			_ = wt.addTree(ev.Name, false)
 		}
 	}
-	dir := filepath.Dir(ev.Name)
+	// The scan is asked for in the configured spelling, which is the one
+	// ScanSubtree finds under a configured root.
+	dir := filepath.Dir(wt.configuredName(ev.Name))
 	wt.scheduleScan(ctx, dir)
 }
 

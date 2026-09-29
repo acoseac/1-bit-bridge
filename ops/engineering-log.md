@@ -27875,3 +27875,218 @@ request's promise, so a caller meanwhile started a third fetch.
 - **Controls**, on the committed fix: NC19, caching every answer, turns
   the two "old answer" steps red; NC20, clearing the promise on any
   failure, turns the failure steps red (three fetches, no snapshot).
+
+## 2026-09-29 — the clean-empty guard counts no routed row, a linked root is watched where it resolves, a Windows junction resolves like a symlink, and the upscale walk skips what the scanner skips (backlog B51)
+
+Backlog B51: the three follow-ups #1076's session (B41) left in its "Out of
+scope" list, and the two its B50 round added to the entry's Status line.
+Every measurement below was taken on this branch's base, main at 73b14da6,
+with the new tests before the change they pin (the red run).
+
+### What was measured
+
+- **Routed rows in the guard.** `CountTracksUnderRoot` answered
+  `CountTracks` (the whole table) in single-root mode. With an empty root
+  and three UPnP-routed rows (an upstream with an empty path prefix, so its
+  paths share the filesystem's namespace), three full scans logged three
+  `suspected clean-empty mount failure` lines with `rows_in_db=3`, and so
+  did three subtree scans of the root. Every subtree scan below that root
+  of a directory that was not there failed with `audit owning root …: no
+  library content on disk but 3 tracks in DB`. With two filesystem rows and
+  three routed rows under the same prefix, the guard line said
+  `rows_in_db=5`, in single-root mode and in multi-root mode with a routed
+  prefix spelled like the root's basename. No routed row was ever at stake:
+  neither deletion pass reaps one (`routedPathSet`).
+- **A root that is a link to a link, on macOS.** fsnotify v1.10.1's kqueue
+  `addWatch` Lstats the path it is given, Readlinks it once when it is a
+  link, and Lstats what that names; for a chain that is a link again, so the
+  watch is registered with `isDir` false (the descriptor, opened without
+  O_NOFOLLOW, is the directory). On the dev Mac (macOS 27, APFS), with
+  `TestWatcherWatchesARootThatIsALinkToALink`: a file dropped into the root
+  did not reach the manifest within 3 s, a file dropped into a folder made
+  in the root after the watcher started did not either (the folder got no
+  watch: a file watch has no directory diff, so no Create event), and each
+  change to the root logged `ERROR subtree scan dir=<the root's parent>
+  err=dir "<the root's parent>" is not under any configured library root`
+  (two lines: the drop and the mkdir; the second drop raised no event).
+- **Windows junctions.** Test binaries built with Go 1.26.6 from this branch
+  before the resolver was wired in, run on Windows 11 (build 26200) under
+  `%TEMP%`: `EvalSymlinksOrClean` answered the junction itself for a
+  junction and for a junction to a junction, and a path under the junction
+  for a path through one (4 cases of 4 wrong). `IsUnderAny` read all four
+  nested cases as outside, the first being B51's own shape: the target's
+  own path `real\variants` against a root `lib` that is a junction to
+  `real`. `TakeSidecarInventory` of a junction'd variants directory holding
+  two sidecars answered Files/Known/Orphans 0/0/0, and
+  `TreeHoldsVariantSidecars` answered false. The dangling-junction case
+  answered the same before and after (kept as a pin).
+- **The upscale folder walk.** `POST /v1/upscale` for the root of a library
+  holding 3 tracks beside `#recycle`, `#snapshot`, `@eaDir`, `.Trashes` and
+  `lost+found` entries offered 9 candidates to the enqueuer; for `Artist`,
+  4 (an `@eaDir` entry below the album).
+- **A root holding only links to directories.** With a throwaway test, a
+  root whose `Artist` directory was indexed and then moved aside and
+  replaced by a symlink: three scans logged the guard line with its hint to
+  place `.bridge-allow-empty`, and kept both rows; with the sentinel placed,
+  the next three scans deleted both rows while the files were still
+  reachable through the link. Not changed here (backlog B74, with the
+  non-empty case, where such rows go with no line at all).
+
+### Decisions
+
+- **The guard counts the root's own rows, in both modes.** Both statements
+  of `CountTracksUnderRoot` anti-join `upnp_track_routing`, each one string
+  literal (SonarCloud's S2077 follows a concatenated const). The byte range
+  and the empty-base fail-safe are `CountTracksByPrefix`'s, which is left as
+  it was: the admin's per-root rollup reads it and is operator truth.
+- **A linked root is watched at the directory it resolves to, and every
+  event under it is renamed onto the configured root.** #1076 left this
+  shape as it was on the ground that "no spelling of the root's watch both
+  reaches the directory and names a path under the configured root"; that
+  holds only without renaming. `watchWalkStart` answers
+  `filepath.EvalSymlinks(root)` when the root is a link and that is a plain
+  directory (Lstat), the walk registers every watch in that spelling, and
+  `configuredName` renames an event's path (the longest resolved directory
+  that holds it, bounded by a separator) before `filepath.Dir` picks the
+  directory to scan. The Create branch watches a new directory by the name
+  fsnotify gave it: kqueue already holds an entry watch under the resolved
+  name, and the configured spelling would open a second descriptor for the
+  same directory. Rejected: scanning the root on an event that names the
+  root (new top-level folders would still get no watch, since a file watch
+  raises no Create event); gating on kqueue platforms (inotify and
+  ReadDirectoryChangesW named events under the chain already, so renaming
+  theirs changes nothing, and one rule lets the Linux and Windows legs run
+  the renaming). The Lstat condition keeps a Windows junction root on the
+  old path: `EvalSymlinks` leaves a junction as it is, and on a runner whose
+  temp directory has 8.3 names it answers the junction respelled, which a
+  walk would take for one entry again. Cost: `WatchList()` and the watch
+  lines name a linked root's tree by its resolved spelling.
+- **`fsutil.ResolveLinks` resolves a junction.** On Windows an absolute path
+  is opened with no access asked for, `FILE_FLAG_BACKUP_SEMANTICS` and no
+  `FILE_FLAG_OPEN_REPARSE_POINT` (what `os.Stat` opens with), and named by
+  `GetFinalPathNameByHandle(VOLUME_NAME_DOS)` with `\\?\` taken off
+  (`\\?\UNC\` becomes `\\`). A path that is not there is an error
+  `errors.Is` reads as `fs.ErrNotExist`, so `EvalSymlinksOrClean` goes on
+  resolving its nearest ancestor; one that is there but cannot be named
+  that way gets `filepath.EvalSymlinks`'s answer, the old one; a relative
+  path is always `EvalSymlinks`'s; elsewhere it IS `EvalSymlinks`.
+  `EvalSymlinksOrClean` (both calls) and `integrity.resolveSidecarRoot` use
+  it, so `IsUnderAny` and every nesting check built on it (config's
+  `validateVariantsDir`, the admin variants-dir handler, `bridge variants
+  move`) see through a junction, and a sidecar walk starts at the junction's
+  target, so the paths a sweep unlinks are in the tree it walked (#1063's
+  rule). Rejected: an `os.Readlink` walk over the components (a fork of the
+  stdlib's link walk, and with Go's default `winreadlinkvolume=1` it answers
+  `\\?\Volume{GUID}\` for every mounted folder, one with a drive letter
+  included, where the drive letter is the spelling everything else uses);
+  `WalkableRoot`'s trailing separator for the sidecar walk (the walked
+  paths would go through the junction, so a sweep would unlink through a
+  link that can be repointed mid-sweep). Precedent for the primitive:
+  Python's `ntpath.realpath` and Rust's `fs::canonicalize` resolve with it.
+  A Gemini consultation on the edge cases (a folder-mounted volume with no
+  drive letter, SUBST and mapped drives, access 0) was attempted and
+  refused by the API's monthly spending cap; the fallback answers the
+  unmeasured cases with the old behaviour.
+- **What the resolver changes beyond the defect.** A SUBST drive now
+  resolves to the path it stands for (measured on Windows 11 with a
+  throwaway probe in the SSH session: `Q:\sub` answered the directory's
+  `C:\Users\…\sreal\sub`, where `EvalSymlinks` kept `Q:\sub`), and a mapped
+  network drive does by the same call (not measured); both sides of every
+  comparison go through the one function, so they agree. A junction loop
+  (two junctions pointing at each other) is there but cannot be opened
+  through: the probe answered `EvalSymlinks`'s spelling of it, with no
+  error, which is the fallback. And the write
+  paths that require containment (an upload, a trash move, a restore, the
+  enricher's artwork write) now refuse a path through a junction below a
+  root whose target is outside it, as they already refused a symlinked
+  directory on POSIX; the scanner indexes nothing below such a junction.
+- **The upscale folder walk skips `manifest.ShouldSkipDir`** below the
+  folder the request names, and walks that folder whatever its name: a
+  library root named `.music` would otherwise enqueue nothing.
+
+### Tests and negative controls
+
+New: `internal/manifest/scanner_root_routed_test.go`
+(`TestScanner_AnEmptyRootBesideRoutedRowsIsNotAMountDrop`, full scan and
+subtree scan of the root; `…ASubtreeScanBelowAnEmptyRootBesideRoutedRowsProceeds`;
+`…TheCleanEmptyGuardCountsOnlyTheRootsOwnRows`, single- and multi-root),
+`internal/manifest/watcher_link_chain_test.go`
+(`TestWatcherWatchesARootThatIsALinkToALink`,
+`TestConfiguredNameRenamesOnlyWhatIsUnderAResolvedRoot`),
+`internal/fsutil/symlink_windows_test.go`
+(`TestEvalSymlinksOrCleanFollowsAJunction`,
+`TestEvalSymlinksOrCleanKeepsADanglingJunction`,
+`TestIsUnderAnySeesThroughAJunction`,
+`TestResolveLinksFallsBackOnAJunctionLoop`), `resolve_windows_test.go`
+(`TestStripVerbatimPrefixGivesAnOrdinaryPath`), `resolve_test.go`
+(`TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`,
+`TestResolveLinksSaysAMissingPathIsNotThere`, every platform),
+`internal/integrity/junction_windows_test.go`
+(`TestSidecarInventoryResolvesAJunctionedRoot`,
+`TestTreeHoldsVariantSidecarsThroughAJunction`), and in internal/api
+`TestUpscaleFolderRequestSkipsWhatTheScannerSkips` and
+`TestUpscaleFolderRequestWalksADotNamedRoot`. The Windows tests make real
+junctions with `mklink /J`, which needs no privilege, so CI's windows leg
+runs them; they were also run on Windows 11 with cross-compiled binaries.
+
+Red on the base, as measured above: the three routed tests, the chain
+watcher test (macOS; it passes on Linux and Windows, whose watchers follow a
+chain), the two junction tests in fsutil that are not the dangling pin,
+both integrity junction tests (Windows), and the upscale skip test.
+
+Negative controls on the committed change, each restored and re-run green
+(the Windows ones as mutated binaries built from the committed tree):
+
+| mutation | goes red |
+|---|---|
+| NC1: the single-root count keeps routed rows | both `…AnEmptyRootBesideRoutedRows…` cases, `…ASubtreeScanBelow…`, the single-root leg of `…CountsOnlyTheRootsOwnRows` |
+| NC2: the multi-root count keeps routed rows | the multi-root leg of `…CountsOnlyTheRootsOwnRows` only |
+| NC3: events are not renamed (`filepath.Dir(ev.Name)`) | `TestWatcherWatchesARootThatIsALinkToALink`, `TestWatcherWatchesALinkedLibraryRoot` |
+| NC4: the root's watch is not resolved | `TestWatcherWatchesARootThatIsALinkToALink` (macOS) |
+| NC5: `pathAtOrUnder` without the separator bound | the sibling case of `TestConfiguredNameRenamesOnlyWhatIsUnderAResolvedRoot` |
+| NC6: the first matching alias instead of the longest | the nested case of the same test |
+| NC7 (Windows): `EvalSymlinksOrClean`'s first call back on `filepath.EvalSymlinks` | `TestEvalSymlinksOrCleanFollowsAJunction`, `TestIsUnderAnySeesThroughAJunction` |
+| NC8 (Windows): `resolveSidecarRoot` back on `filepath.EvalSymlinks` | both integrity junction tests |
+| NC9 (Windows): `resolveLinks` ignores the final path | the two fsutil junction tests; both integrity junction tests (a second binary) |
+| NC10: the upscale walk skips a skip-named walk start too | `TestUpscaleFolderRequestWalksADotNamedRoot` |
+| NC11 (Windows): the fallback for a path that is there refuses instead | `TestResolveLinksFallsBackOnAJunctionLoop` |
+
+### Review round 1 (CodeRabbit on #1090)
+
+CodeRabbit's one finding, Major: for a volume mounted only in a folder,
+`GetFinalPathNameByHandle(VOLUME_NAME_DOS)` can fail (the volume has no
+drive letter) while `os.Stat` succeeds, and the fallback then answered
+`EvalSymlinks`'s spelling, the mount point itself, as resolved: a sidecar
+walk would see one entry and `TreeHoldsVariantSidecars` would read a
+populated tree as holding none. Taken, in both of the forms it proposed:
+
+- **A path the call cannot name by a drive letter is named by its volume
+  GUID path** (`nameFromHandle`: VOLUME_NAME_DOS, then VOLUME_NAME_GUID,
+  kept as `\\?\Volume{…}\…`). Whether VOLUME_NAME_DOS fails for a
+  letterless mount was not measured (mounting a volume takes an
+  administrator, and the only Windows host available runs a production
+  bridge). What was measured is that the GUID form is usable as it is:
+  `TestAVolumeGUIDPathIsWalkable` opens a temp directory the way
+  `finalPathName` does, asks for its GUID path, walks it with
+  `filepath.WalkDir` to the file below, and `IsUnderAny` reads a
+  GUID-spelled child of the drive-letter-spelled directory as nested.
+- **An answer that still ends at a link to a directory is an error**
+  (`resolveWith`, `errLinkNotResolved`): Lstat not a directory, Stat a
+  directory. `EvalSymlinksOrClean` then resolves an ancestor, which gives the
+  lexical answer it gave before; the sidecar walks fail closed (the
+  inventory returns the error, `TreeHoldsVariantSidecars` too, and both
+  sweeps and the reverse guard refuse). A link that leads nowhere it can stat
+  (the junction loop) keeps `EvalSymlinks`'s answer, as before, since a walk
+  of it counts one unreadable entry, which the sweeps already refuse on.
+
+The decision is `resolveWith(p, resolveOps)`, the stats passed in, so the
+shapes the host cannot make run in a table
+(`TestResolveWithRefusesALinkItCouldNotResolve`), and the DOS-then-GUID
+retry is `nameFromHandle(get)` (`TestNameFromHandleFallsBackToTheVolumeGUIDPath`).
+
+| mutation | goes red |
+|---|---|
+| NC12 (Windows): no GUID retry | the no-drive-letter case of `TestNameFromHandleFallsBackToTheVolumeGUIDPath` only |
+| NC13 (Windows): no refusal of an unresolved link | the link case of `TestResolveWithRefusesALinkItCouldNotResolve` only |
+
+Gemini's `/gemini review` on the head answered with its daily quota notice.
