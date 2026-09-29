@@ -1,6 +1,9 @@
 # deploy/ — operator deploy scripts (source of truth)
 
-These scripts deploy the bridge to the two production hosts. **This directory
+These scripts deploy the bridge to home-pc (Windows) and to the Linux VPS,
+which since 2026-09-22 runs only the public demo. The operator bridge, on a
+home NUC since then, is deployed by the runbook's manual form, not by these
+scripts (the `linux/` section says why). **This directory
 is the canonical source of truth** — the copies on the hosts (`home-pc`
 Desktop, `/tmp` on the workstation) must be synced FROM here, never edited in
 place. The cert-re-mint bug fixed 2026-06-01 existed precisely because the
