@@ -28417,3 +28417,29 @@ four medium findings:
 
 `main` moved under the branch (#1092 appended its own entry here); it was
 merged in, not rebased, keeping both entries.
+
+### Review round 2
+
+- CodeRabbit (outside the diff, Minor): the download path's debounce recorded
+  a directory's minute before asking the rescanner, so a request the
+  rescanner dropped with its queue full (1,024 directories waiting) still
+  suppressed the next minute's GETs. Correct, and taken:
+  `sourceRescanner.queue` reports whether the directory will be scanned
+  (queued now or already waiting; `request` is the void form the other hooks
+  keep), and `staleRenditionRescan.observe` forgets the minute when it will
+  not. The debounce test gained a full-queue step, and the rescanner test a
+  check that a dropped directory is not reported as queued. NC14 (the minute
+  always spent): the debounce test went red ("again while it is still
+  full: asked for []"). NC15 (`queue` always true): the rescanner test went
+  red. Each alone.
+- Gemini: stop draining the rescanner's queue once its context is cancelled.
+  Declined: the drain loop is `for ctx.Err() == nil { dir, ok := r.next();
+  ...; scan(ctx, dir.abs) }`, which checks the context before every
+  directory, and `ScanSubtree` returns at once on a cancelled one.
+- CodeQL flagged the two Info lines in `Coordinator.logWalkSkips` as
+  `go/log-injection` (alerts 140 and 141): a structured `batchPath`
+  attribute, the batch label the console sends. The first is the
+  "filtered tracks with resolver failures" line the three walks already
+  logged, moved into the helper; main's three copies (`batch.go:515`, 1228,
+  1277) were dismissed as false positives. The second is its sibling with the
+  same attribute. Not dismissed here; left for triage.

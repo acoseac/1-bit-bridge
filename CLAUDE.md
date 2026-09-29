@@ -2181,7 +2181,10 @@ no failing test — which is the shape to expect in this area.
   `variant_stale` tells `api.StaleRenditionFunc`, and `staleRenditionRescan`
   asks only while the ROW is behind the file (once a scan read the change a
   rescan changes nothing) and once per directory per minute, bounded at 1,024
-  directories: every play, device and range request makes that GET. A rescan
+  directories: every play, device and range request makes that GET. The
+  minute is spent only on a rescan the rescanner queued or already had
+  waiting (`sourceRescanner.queue`); one its full queue dropped leaves the
+  next GET free to ask (review round 2). A rescan
   that wrote rows nudges the auto-optimize sweep, whose tick otherwise follows
   the periodic scan. **A rescan request names the file by its ROW's path, and
   the rescanner resolves the directory itself**: the scanner makes each row's
