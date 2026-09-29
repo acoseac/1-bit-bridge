@@ -67,7 +67,10 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &atlasPremiumFetcher{cred: cred, userAgent: userAgent, http: httpClient, cacheDir: cacheDir}
+	// A copy that never carries the bearer token, or the Basic header a stored
+	// base with user information gets, from an https request onto a hop that
+	// is not https (guardRedirects).
+	return &atlasPremiumFetcher{cred: cred, userAgent: userAgent, http: guardRedirects(httpClient), cacheDir: cacheDir}
 }
 
 // TryCache fetches the premium cover for (mbid, size) and streams it to path.

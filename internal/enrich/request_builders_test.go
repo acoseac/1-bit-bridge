@@ -117,3 +117,108 @@ func buildsARequest(call *ast.CallExpr) bool {
 	}
 	return false
 }
+
+// credentialSenders lists every function in this package that calls
+// baseEndpoint.newRequest, and so sends a credential an operator wrote to the
+// host it names, beside the constructor that builds that client's http.Client
+// over guardRedirects. net/http would carry the credential from an https
+// request onto a plain-http hop on the same host, and the guard is what
+// withholds it there.
+var credentialSenders = map[string]string{
+	"(*MusicBrainzClient).get":              "NewMusicBrainzClient",
+	"(*CoverArtClient).fetchStream":         "NewCoverArtClient",
+	"(*atlasPremiumFetcher).authedCoverGet": "NewAtlasPremiumFetcher",
+}
+
+// TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard pins the
+// population behind TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop,
+// which drives the three clients that exist. A fourth client that builds its
+// requests through newRequest sends a credential too, and builds no request
+// through http.NewRequest, so the list above is where it is found: the set of
+// functions that call newRequest must equal credentialSenders, in both
+// directions, and each listed constructor must call guardRedirects.
+func TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	senders := map[string]bool{}
+	constructors := map[string]*ast.FuncDecl{}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
+			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			if fd.Recv == nil {
+				constructors[fd.Name.Name] = fd
+			}
+			if callsNamed(fd, func(call *ast.CallExpr) bool {
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				return ok && sel.Sel.Name == "newRequest"
+			}) {
+				senders[funcKey(fd)] = true
+			}
+		}
+	}
+
+	var unlisted, stale []string
+	for key := range senders {
+		if _, ok := credentialSenders[key]; !ok {
+			unlisted = append(unlisted, key)
+		}
+	}
+	for key := range credentialSenders {
+		if !senders[key] {
+			stale = append(stale, key)
+		}
+	}
+	sort.Strings(unlisted)
+	sort.Strings(stale)
+	if len(unlisted) > 0 {
+		t.Errorf("%v call baseEndpoint.newRequest and are not in credentialSenders. They send a credential an "+
+			"operator wrote, so their client must be built over guardRedirects, which withholds it from a hop "+
+			"that leaves https: list the sender with its constructor.", unlisted)
+	}
+	if len(stale) > 0 {
+		t.Errorf("credentialSenders lists %v, which call no newRequest: remove the entry (or the guard reads nothing)", stale)
+	}
+
+	for sender, ctor := range credentialSenders {
+		fd, ok := constructors[ctor]
+		if !ok {
+			t.Errorf("credentialSenders names %s as the constructor for %s, and no such function exists", ctor, sender)
+			continue
+		}
+		if !callsNamed(fd, func(call *ast.CallExpr) bool {
+			id, ok := call.Fun.(*ast.Ident)
+			return ok && id.Name == "guardRedirects"
+		}) {
+			t.Errorf("%s builds the client for %s and does not call guardRedirects: net/http would send its "+
+				"credential to a plain-http hop on the same host", ctor, sender)
+		}
+	}
+}
+
+// callsNamed reports whether the function declaration fd holds a call that
+// match accepts.
+func callsNamed(fd *ast.FuncDecl, match func(*ast.CallExpr) bool) bool {
+	found := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && match(call) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}

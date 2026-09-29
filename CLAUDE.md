@@ -1613,11 +1613,33 @@ no failing test — which is the shape to expect in this area.
   was not, and requested `/ws/2//release/…`,
   `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath`). **The header
   follows a redirect by net/http's rule for an explicit Authorization
-  header**: to the same host and its subdomains, never to another domain
+  header, and only while the scheme stays https**: to the same host and its
+  subdomains, never to another domain
   (`TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader`),
-  where the URL form followed a relative Location only. The Atlas premium
+  where the URL form followed a relative Location only. That rule compares
+  host names and not the scheme, so it also carried the header from an https
+  request onto a plain-http hop on the same host, in cleartext, where the URL
+  form's absolute Location carried none. `guardRedirects` (baseauth.go) is the
+  `CheckRedirect` of every client that sends a credential: it strips the
+  header from a hop that is not https when the request began on https, judged
+  per hop, because net/http copies the header from the FIRST request onto
+  every hop and a cleartext hop's own redirect would have it back. **Strip,
+  never refuse**: a request with no credential follows a downgrade as it
+  always has, and a mirror that insists on the credential at the plain hop
+  answers with the 401 it always did, where a refusal is an error
+  `IsTransient` does not know, stamped persistent all the same. The guard
+  keeps a caller's own policy and net/http's limit of ten
+  (a client that sets a policy loses that default), and copies the caller's
+  client (`TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop`,
+  `TestARequestWithNoCredentialStillFollowsARedirectToPlainHTTP` and
+  `TestTheCredentialGuardKeepsACallersRedirectPolicy`, each over all three
+  clients). A constructor of a client that calls `newRequest` builds it over
+  the guard, and
+  `TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard` lists them.
+  The Atlas premium
   cover fetch builds its request the same way and sends the bearer token
-  alone: its stored base cannot carry user information
+  alone, which the guard withholds from a hop that leaves https as well: its
+  stored base cannot carry user information
   (`config.CanonicalHTTPSBase` refuses it when it is provisioned), and a
   hand-edited state file can. iTunes and Deezer take no operator URL.
   `TestNoRequestErrorNamesABaseURLsCredential` drives every request either

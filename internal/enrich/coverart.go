@@ -55,10 +55,12 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: sharedHTTPTransport}
 	}
 	ep := parseBaseEndpoint(base)
+	// The client is a copy that never carries the credential from an https
+	// request onto a hop that is not https (guardRedirects).
 	return &CoverArtClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        httpClient,
+		http:        guardRedirects(httpClient),
 		minInterval: minIntervalForBase(ep.root, PublicCAAMinInterval, publicCAAHosts),
 	}
 }

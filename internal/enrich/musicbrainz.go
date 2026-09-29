@@ -72,10 +72,12 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
 	ep := parseBaseEndpoint(base)
+	// The client is a copy that never carries the credential from an https
+	// request onto a hop that is not https (guardRedirects).
 	return &MusicBrainzClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        httpClient,
+		http:        guardRedirects(httpClient),
 		minInterval: minIntervalForBase(ep.root, PublicMBMinInterval, publicMBHosts),
 	}
 }

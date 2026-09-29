@@ -28310,19 +28310,21 @@ main at 6dfba62c, go1.27.1 on macOS.
   parses with the user name as its scheme and no host, so it is refused here
   rather than built into a request URL that names it.
 - **The header follows a redirect by net/http's rule for an explicit
-  Authorization header**: to the same host and its subdomains, never to
-  another domain (`shouldCopyHeaderOnRedirect`, which compares host names and
-  ignores scheme and port). The URL form sent user information only where a
-  redirect's Location was relative, because `url.ResolveReference` keeps the
-  base's user information there and an absolute Location has none. So a mirror
-  that redirects to an absolute URL on its own host now authenticates on the
+  Authorization header, and only while the scheme stays https**: to the same
+  host and its subdomains, never to another domain
+  (`shouldCopyHeaderOnRedirect`, which compares host names and ignores scheme
+  and port). The URL form sent user information only where a redirect's
+  Location was relative, because `url.ResolveReference` keeps the base's user
+  information there and an absolute Location has none. So a mirror that
+  redirects to an absolute URL on its own host now authenticates on the
   second hop where it did not, and Cover Art Archive's redirect to Internet
   Archive still carries no credential. Two tests pin both cases; the
   cross-domain one uses `localhost` against `127.0.0.1`, which net/http reads
-  as two domains. A same-host redirect from https to http would also carry the
-  header; it is net/http's rule, the mirror already holds the credential, and
-  a mirror that sends its own clients to cleartext is not an attacker this
-  changes anything about, so it is left.
+  as two domains. **This bullet first said a same-host redirect from https to
+  http would carry the header too and "so it is left", which was wrong**
+  (review round 2, below): net/http's rule ignores the scheme, so the header
+  went to the plain hop in cleartext, where the URL form had sent nothing
+  there. `guardRedirects` strips it.
 - **The premium fetch is built the same way** and sends the bearer token
   alone, so a state file edited by hand to hold user information no longer
   puts it in the request URL. Its request URL and errors carry none
@@ -28447,3 +28449,139 @@ the config's), so this is robustness rather than a live defect.
 | mutation | goes red |
 |---|---|
 | NC10: the parser stops trimming trailing slashes | `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath`, the parser table, and the existing `TestAtlasPremiumFetcher_TryCache/trailing_slash_on_base_URL_is_handled` |
+
+### Review round 2 (CodeRabbit on #1091)
+
+CodeRabbit's second pass left one Major, on the redirect bullet above: an https
+mirror that answers with a redirect to http on its own host has net/http send the
+Basic header on to the plain hop, in cleartext. **The finding is right, and that
+bullet's reason for leaving it was wrong.** "The mirror already holds the
+credential" says nothing about the wire between the client and the plain hop,
+where whoever can read the network gets a credential that is good for the
+mirror, and the reader is not the mirror. And the redirect sent NO credential
+before this change (an absolute Location carries no user information, and a
+relative one keeps the scheme it came from), so moving the credential into a
+header had turned a non-leak into a leak.
+
+**Read in the toolchain before it was taken** (go1.26.6 `net/http`).
+`Client.do` builds each hop's headers with `makeHeadersCopier`, which copies
+from the FIRST request every time and leaves out the sensitive ones
+(`Authorization`, `Cookie`, their proxy forms) only when
+`shouldCopyHeaderOnRedirect` says the destination is neither the initial host
+nor a subdomain of it. That function compares `url.Hostname()`, so neither the
+scheme nor the port is in it, and it is not asked at all when the two
+`URL.Host` strings are equal. `refererForURL` is the one scheme-aware rule (no
+Referer from https to http), and it covers no credential.
+
+**Measured on the head, before any fix** (0c529bd7, the new tests written
+beside no production change; go1.27.1 on macOS). A TLS server on 127.0.0.1
+answering every request with a 302 to a plain-http server on 127.0.0.1 (another
+port), each of the three clients built through its constructor over that TLS
+server's own client. The plain server saw `Authorization: Basic dG9rOg==` (the
+user name `tok`, no password) from the MusicBrainz client and from the Cover
+Art client, and `Bearer tok123` from the premium fetch. A plain server that
+then redirected once more, to a relative path of its own (`/moved/…`), saw the
+header on that hop too. That second hop is the half a fix at the
+https-to-http transition alone would miss: the header is copied from the first
+request onto every hop, so it comes back on the next cleartext one. Where the
+caller's client carried a `CheckRedirect`, it was asked with the header on both
+hops. **The premium fetch's bearer token was on the same path on main** (an
+explicit `Authorization` header on a client with no `CheckRedirect`), so the
+guard covers it too, though B69 did not move it.
+
+**What was decided: strip the header, and judge every hop against the first
+request.** `guardRedirects` (baseauth.go) returns a shallow copy of a client
+whose `CheckRedirect` first drops the header
+(`dropAuthorizationLeavingHTTPS`: a hop that is not https loses `Authorization`
+when `via[0]`, the request the chain began with, went to https) and then asks
+the caller's policy, or applies net/http's limit of ten where there is none.
+The MusicBrainz client, the Cover Art client and the premium fetch are built
+over it in their constructors.
+
+- **Strip, not refuse.** Both were offered. A refusal would change what a
+  request with NO credential does: the public MusicBrainz and Cover Art hosts,
+  and any mirror written without user information, have nothing to protect and
+  follow a downgrade today
+  (`TestARequestWithNoCredentialStillFollowsARedirectToPlainHTTP`), and a
+  mirror that serves the plain hop without the credential would stop working.
+  Stripping changes nothing for those, and for a request that carries a
+  credential it is what the same redirect did before B69: the plain hop got
+  none. A mirror that insists on it there answers with its own status, which
+  the enricher already classifies (a 401 is a persistent HTTP error); a
+  refusal would be an error `IsTransient` does not recognise, stamped
+  persistent all the same (`markSkipped`, and the negative cache for the album
+  or artist), with less to say than the 401.
+- **Per hop, against the first request, not at the transition.** Against the
+  previous hop the header comes back on a cleartext hop's own redirect (NC13
+  below, and the second case of the main test). A request that BEGAN on plain
+  http is left alone: its operator wrote a cleartext base and the first
+  request carried the credential already, so nothing a later hop does exposes
+  more (the existing relative-redirect subtest, on a plain server, still
+  requires both hops to carry it).
+- **The default limit is restated.** `Client.checkRedirect` falls back to
+  net/http's stop after ten consecutive requests only when `CheckRedirect` is
+  nil, so a client that sets one and does not restate it follows a redirect
+  loop until its timeout (NC14: the three loop subtests ran to the 10 s and 30 s
+  client timeouts, 86 s for the package against 16 s). The error text is
+  net/http's own, so no log line changes.
+- **A caller's own policy is kept, asked after the header is dropped, and the
+  caller's client is copied, never written to** (`NewDeezerClient`'s and
+  `acoustid.NewClient`'s pattern: a guard on a shared `*http.Client`,
+  `http.DefaultClient` for one, would apply to every redirect in the process).
+  None of the three clients set a `CheckRedirect` of its own; only a client a
+  caller hands in can carry one, and production hands in nil.
+- **No log line.** A Warn per stripped hop is one line per request against a
+  mirror that always redirects to http, the M-SEARCH flood, and a latch is a
+  second streak policy for a condition no report has met. The mirror's own
+  status at the plain hop is the report, as it was before B69.
+- **A list of the senders**
+  (`TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard`): the
+  functions that call `newRequest` must equal `credentialSenders`, in both
+  directions, and each listed constructor must call `guardRedirects`.
+  `newRequest` is not `http.NewRequest`, so
+  `TestEveryRequestThisPackageBuildsComesFromAListedBuilder` does not see a
+  fourth client that sends a credential; this does.
+
+New, in `internal/enrich` (credential_redirect_test.go and
+request_builders_test.go):
+
+- `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop`: the three
+  clients, each against four redirects from a TLS server: to plain http on the
+  same host (followed, the plain hop sees no Authorization, the TLS server saw
+  the credential), from that hop on to a redirect of its own (no header on
+  either cleartext hop), to https on the same host (kept) and to a path on its
+  own https origin (kept). 12 leaves.
+- `TestARequestWithNoCredentialStillFollowsARedirectToPlainHTTP`: MusicBrainz
+  and Cover Art with no user information. 2 leaves.
+- `TestTheCredentialGuardKeepsACallersRedirectPolicy`: per client, a caller's
+  policy is asked with the header already dropped and its refusal ends the
+  request, a redirect loop ends at net/http's limit with the request count a
+  plain client makes, and the caller's client is not written to. 9 leaves.
+- `TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard`.
+
+**Red on the old code first** (0c529bd7, the tests beside no production
+change): 9 of the 23 leaves of the first three tests failed, the plain-hop and
+further-hop leaves of each client (6) and the caller's-policy leaf that
+requires the header dropped (3), with `the plain http hop saw [{/ws/2/release/
+Basic dG9rOg==}]` and the second hop's `/moved/…` carrying it. The other 14
+passed on the old code, as they should: they pin what must not change (https
+and relative-https redirects keep the credential, a request with no credential
+follows a downgrade, the limit of ten, the caller's client untouched). The
+population test came after that run, and is red under NC17.
+
+Each mutation applied to the committed fix, the whole package run with
+`-count=1`, the file restored and the tree checked clean after each. None of
+the twelve failed to build.
+
+| mutation | goes red |
+|---|---|
+| NC11: the strip is removed (`req.Header.Del` deleted, the wrapper kept) | the 6 plain-hop and further-hop leaves of `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop`, and the 3 "asked with the header already dropped" leaves of `TestTheCredentialGuardKeepsACallersRedirectPolicy`; nothing else in the package |
+| NC12: the guard strips on every hop, whatever the scheme | the 6 keep-it leaves of the main test, and the existing relative-redirect subtest of `TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader` (both hops on a plain server must carry it) |
+| NC13: the guard judges against the previous hop, not the first request | the 3 further-hop leaves of the main test and the 3 caller's-policy leaves that require both hops stripped |
+| NC14: net/http's limit of ten is not restated | the 3 loop leaves of `TestTheCredentialGuardKeepsACallersRedirectPolicy` only |
+| NC15: a caller's own `CheckRedirect` is not asked | the 3 "still decides" leaves only |
+| NC16: the guard is installed on the caller's client itself | the 3 "left as it was" leaves only |
+| NC17a, NC17b, NC17c: the MusicBrainz, the Cover Art or the premium constructor builds its client without the guard | that client's two plain-hop leaves and its "still decides" leaf, and the population test |
+| NC18: a stray function calls `newRequest` | the population test only |
+| NC19: `credentialSenders` lists a sender nothing implements | the population test only |
+| NC20: `credentialSenders` names a constructor that does not exist | the population test only |
