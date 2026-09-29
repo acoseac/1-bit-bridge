@@ -33,7 +33,11 @@
 // address space, and the four workers re-zeroing it took the nightly runner's
 // memory until the runner itself was killed, with nothing saved. Measured
 // here, the same input is an ordinary crasher, written to testdata/fuzz with
-// the size it asked for.
+// the size it asked for. It sees work that grows faster than the file too,
+// where the work allocates: dhowden renames each repeat of an ID3v2 frame id by
+// counting up from id_0, building a string per lookup, and a 60 KB tag of 5,000
+// copies of one frame allocated 199 MB (backlog B101; the ID3v2 guard, whose
+// seeds are below).
 package manifest
 
 import (
@@ -72,7 +76,7 @@ func fuzzExtractOnce(t *testing.T, dir, ext string, b []byte) {
 	before := heapAllocated()
 	_ = ExtractWithContext(p, &tr, &ExtractContext{})
 	if got, limit := heapAllocated()-before, extractionAllocLimit(len(b)); got > limit {
-		t.Fatalf("extracting a %d-byte %s file allocated %d bytes (limit %d): a length read from the file sized a buffer the file cannot back",
+		t.Fatalf("extracting a %d-byte %s file allocated %d bytes (limit %d): more than a file of that size accounts for (a length read from it sized a buffer it cannot back, or a parse did work that grows faster than the file)",
 			len(b), ext, got, limit)
 	}
 }

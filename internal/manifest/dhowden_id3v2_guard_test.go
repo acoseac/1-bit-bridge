@@ -462,12 +462,12 @@ func TestTheID3v2GuardHoldsAtItsBounds(t *testing.T) {
 		body []byte
 		want id3v2Refusal // zero: passed
 	}{
-		{"2,896 copies of one frame", repeatedTIT2(2896), id3v2Refusal{}},
-		{"2,897 copies of one frame", repeatedTIT2(2897),
-			id3v2Refusal{What: id3v2RepeatsPastBound, Frame: "TIT2", Copies: 2897, Frames: 2897, Lookups: 2897 * 2896 / 2}},
-		{"2,048 copies of each of two frames", twoIDs(2048), id3v2Refusal{}},
-		{"2,049 copies of each of two frames", twoIDs(2049),
-			id3v2Refusal{What: id3v2RepeatsPastBound, Frame: "TPE1", Copies: 2049, Frames: 2 * 2049, Lookups: 2049 * 2048}},
+		{"2,048 copies of one frame", repeatedTIT2(2048), id3v2Refusal{}},
+		{"2,049 copies of one frame", repeatedTIT2(2049),
+			id3v2Refusal{What: id3v2RepeatsPastBound, Frame: "TIT2", Copies: 2049, Frames: 2049, Lookups: 2049 * 2048 / 2}},
+		{"1,448 copies of each of two frames", twoIDs(1448), id3v2Refusal{}},
+		{"1,449 copies of each of two frames", twoIDs(1449),
+			id3v2Refusal{What: id3v2RepeatsPastBound, Frame: "TPE1", Copies: 1449, Frames: 2 * 1449, Lookups: 1449 * 1448}},
 		{"65,536 distinct frames", distinctFrames(65536), id3v2Refusal{}},
 		{"65,537 distinct frames", distinctFrames(65537),
 			id3v2Refusal{What: id3v2FramesPastBound, Frame: distinctFrameID(65536), Copies: 1, Frames: 65537}},
@@ -489,21 +489,35 @@ func TestTheID3v2GuardHoldsAtItsBounds(t *testing.T) {
 // reports as a crasher a tag the guard lets dhowden read. dhowden's renaming
 // builds a string per lookup, and at 2^23 lookups (the first draft's bound) a
 // 49 KB file allocated 127 MB against a limit of 70 MB.
+//
+// The allocation is asserted without -race only: the race detector turns off
+// the runtime's tiny allocator, so each of the renaming's small strings takes a
+// slot of its own and the same extraction allocates about twice as much. The
+// property is the nightly fuzz job's, which runs without -race, as the macOS
+// and Windows legs of the ordinary suite do.
 func TestATagTheID3v2GuardPassesMeetsTheAllocationProperty(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"one frame at the renaming bound": repeatedTIT2(2896),
-		"two frames at the renaming bound": append(bytes.Repeat(textFrameBytes(4, "TIT2", "x"), 2048),
-			bytes.Repeat(textFrameBytes(4, "TPE1", "x"), 2048)...),
+		"one frame at the renaming bound": repeatedTIT2(2048),
+		"two frames at the renaming bound": append(bytes.Repeat(textFrameBytes(4, "TIT2", "x"), 1448),
+			bytes.Repeat(textFrameBytes(4, "TPE1", "x"), 1448)...),
 		"frames at the frames bound": distinctFrames(65536),
 		// Both at once: one id at the renaming bound among the most frames.
-		"both bounds": append(repeatedTIT2(2896), distinctFrames(65536-2896)...),
+		"both bounds": append(repeatedTIT2(2048), distinctFrames(65536-2048)...),
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := append(id3v2TagBytes(4, 0, body), mp3Audio()...)
 			if ok, refusal := id3v2TagWithinBudget(bytes.NewReader(data)); !ok {
 				t.Fatalf("refused a tag within both bounds: %+v", refusal)
 			}
-			requireBoundedExtraction(t, "x.mp3", data, &ExtractContext{})
+			if raceBuild {
+				return
+			}
+			_, got := extractMeasured(t, "x.mp3", data, &ExtractContext{})
+			if limit := extractionAllocLimit(len(data)); got > limit {
+				t.Fatalf("extracting a %d-byte tag within both bounds allocated %d bytes, over the %d the fuzz targets allow",
+					len(data), got, limit)
+			}
+			t.Logf("%d bytes allocated, limit %d", got, extractionAllocLimit(len(data)))
 		})
 	}
 }
@@ -543,8 +557,8 @@ func TestNoRepeatedID3v2FrameMakesAnExtractionUnbounded(t *testing.T) {
 				t.Errorf("Title = %q: dhowden read the tag", tr.Title)
 			}
 			lines := rec.Failures(id3v2RefusedMessage)
-			if len(lines) != 1 || !strings.Contains(lines[0], "frame=TIT2") || !strings.Contains(lines[0], "copies=2897") {
-				t.Errorf("want one refusal naming TIT2 at its 2,897th copy, got %q", lines)
+			if len(lines) != 1 || !strings.Contains(lines[0], "frame=TIT2") || !strings.Contains(lines[0], "copies=2049") {
+				t.Errorf("want one refusal naming TIT2 at its 2,049th copy, got %q", lines)
 			}
 		})
 	}

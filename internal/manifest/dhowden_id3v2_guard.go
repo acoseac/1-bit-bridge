@@ -39,16 +39,17 @@ import (
 // fallback, no tags.
 
 // maxID3v2RenameLookups bounds the lookups dhowden makes renaming repeated
-// frames, summed over every id: one id repeated 2,896 times (2,896·2,895/2
-// lookups fit, 2,897 copies do not), about 0.2 s of renaming on the dev Mac.
+// frames, summed over every id: one id repeated 2,048 times (2,048·2,047/2
+// lookups fit, 2,049 copies do not), under 0.1 s of renaming on the dev Mac.
 // A bound per id would not do: n ids each repeated up to it cost n times as
 // much. Taggers repeat an id a handful of times (COMM, TXXX, APIC, PRIV,
 // GEOB), and chapters (CHAP) are the most repeated real frame, hundreds in a
-// long audiobook. The strings the renaming builds are what hold it to 2^22:
-// about 15 bytes a lookup, so at the bound 64 MB, within the 64 MiB the
-// extractor fuzz targets' allocation property allows an extraction whatever
-// the file (extractionAllocLimit), which a tag the guard passes has to meet.
-const maxID3v2RenameLookups = 1 << 22
+// long audiobook. The strings the renaming builds are what hold it to 2^21:
+// about 15 bytes a lookup, so 32 MB at the bound, half the 64 MiB the
+// extractor fuzz targets' allocation property allows any extraction
+// (extractionAllocLimit), which a tag the guard passes has to meet (2^22 met
+// it by 5 MB, and 2^23 did not).
+const maxID3v2RenameLookups = 1 << 21
 
 // maxID3v2Frames bounds the frames dhowden stores from one tag. A real tag
 // holds tens of frames, and a chaptered audiobook a few hundred more.
