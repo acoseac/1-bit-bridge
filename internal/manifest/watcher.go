@@ -308,8 +308,8 @@ func watchWalkStart(root string, isConfiguredRoot bool) (walkFrom, rootWatch str
 	if walkFrom == root {
 		return root, root, nil
 	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
-		if info, err := os.Lstat(resolved); err == nil && info.IsDir() {
+	if resolved, evalErr := filepath.EvalSymlinks(root); evalErr == nil && resolved != root {
+		if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.IsDir() {
 			return resolved, resolved, nil
 		}
 	}
