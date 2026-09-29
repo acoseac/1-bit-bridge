@@ -29390,3 +29390,195 @@ holds its job until the test ends, which makes it structural.
   this entry (the design summary still described the first `wrote` behaviour,
   and a line began with `#1077`, which markdown reads as a heading; both
   taken).
+
+## 2026-09-29 — a cancelled snapshot stops where SQLite reads the cancel, and serve tests wait on events until the test's deadline (backlog B63)
+
+B63 was filed from one red Windows leg and grew to three, all passing on
+re-run, all on runners that ran every package about three times slower
+than usual:
+
+- gate run 36456513415 (attempt 1, #1077): `TestServeStillReportsATailnetHTTP3BindThatFails`
+  passed every assertion and failed its TempDir cleanup, `unlinkat
+  …\data\backups\2026-09-28T17-22-33Z\bridge.db: The process cannot access
+  the file`: the startup snapshot's `VACUUM INTO` still held its output
+  after `runServe` returned (cmd/bridge 400 s);
+- gate run 36527314254 (attempt 1, #1090): `TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace`,
+  "runServe did not return" 15 s after the cancel, the give-up line printed
+  (cmd/bridge 421 s against 145 s on attempt 2);
+- gate run 36524079308 (main at 9795f687): `TestAServeStoppedInItsUpscaleSeedExitsCleanly`,
+  "sqlitetest: no statement compared a key within 10s" (the test took 69 s).
+
+### The harness
+
+nomos, Windows 11, Go 1.26.6, test binaries built with `go test -c` and no
+`-race` (what the Windows leg runs), started pinned to CPUs 0 to 3
+(`start /affinity F`) beside 16 CPU hogs and 24 writers each looping 64 KB
+writes and syncs to the same disk, all pinned to the same CPUs (two small Go
+programs in the session's scratch directory, launched detached through
+`Invoke-CimMethod Win32_Process Create`, so a dropped SSH session could not
+end a run). A build instrumented to record, in memory, when each of serve's
+teardown steps started and ended, printed once `runServe` returned, showed
+where the time went: after the 5 s grace the store's close took 5.8 to
+16.4 s and the auth store's flush up to 3.1 s, and boots ran past 30 s.
+Nothing outlived its cancel except in the snapshot below; everything else
+was disk writes a test's bound had not allowed for.
+
+### The snapshot: three ways VACUUM INTO went on past its cancel
+
+modernc stops a running statement with `sqlite3_interrupt` (its
+`interruptOnDone`), which SQLite reads only between the steps of a statement
+that is running. Measured on the dev Mac (a probe of 4,000 cancels timed at
+random across a snapshot, and a second of 3,818 that landed while the
+statement ran) and on nomos:
+
+- **The commit reads no interrupt.** `sqlite3RunVacuum` gives VACUUM INTO's
+  output the source connection's `cache_size` (2 MB by default), spill size
+  and safety level, and the pages still cached at the end are written by
+  `pager_write_pagelist` in the commit, which checks nothing. A database under
+  2 MB was copied whole there: 2,053 of the 3,818 finished the copy anyway (an
+  820 KB database), and on nomos the commit spent 2.3 s writing a 316 KB copy
+  after its cancel; the driver then answered `context.Canceled` (its
+  interrupt had fired) and the snapshot removed the finished copy. This is
+  the CI failure: that test cancels right after the tailnet listen, late in
+  boot, while the startup snapshot of a fresh ~300 KB database runs.
+- **A busy handler sleeps through it.** `_sqliteDefaultBusyCallback` never
+  reads the flag, so `busy_timeout(5000)` answered a cancel 300 ms into a
+  lock wait with `database is locked` after 5.14 s.
+- **A cancel before the statement starts is cleared by it.** The driver
+  checks the context, then arms the interrupt, and `sqlite3Step` resets
+  `isInterrupted` when no other statement is active: 2 of the 4,000, each a
+  whole copy.
+
+Changes (internal/backup/vacuum.go; `vacuumInto` moved there from
+backup.go):
+
+- `snapshotSourceQuery` opens the source with `cache_size(-64)`, so the copy
+  writes as it goes and the commit is left 64 KB: 220 of 3,722 cancels
+  finished anyway. A 118 MB snapshot took 326 to 698 ms whatever the cache,
+  from -16 to the default -2000.
+- `busy_timeout(100)`, and `retryWhileBusy` retries an `SQLITE_BUSY` answer
+  (extended codes included) with a pause from 10 ms doubling to 250 ms, on
+  the context, for `snapshotBusyPatience` (5 s, what the old timeout gave) in
+  all, and answers the last busy error when that runs out, as before. The
+  `Ping` is gone: it waited on the lock as a statement of its own, and the
+  first attempt is the probe.
+- The INTO target is `backup_vacuum_target(?, ?)`, a Go scalar function
+  (`vacuumTarget`) registered in `init` (modernc reads its function list
+  without a lock). SQLite evaluates it once the statement runs and before
+  `OP_Vacuum` copies anything, and it refuses a snapshot whose context is
+  done; the snapshot then answers "stopped as its VACUUM started" around
+  `context.Canceled` (one `%w`, so `ctxerr` reads it as a stop). A context
+  cannot be a SQL argument, so the call is found by an id in a
+  mutex-guarded map, and an id no snapshot holds is an error.
+
+What remains is a cancel in the commit's last 64 KB.
+
+Tests (internal/backup/snapshot_stop_test.go), each red on the old code:
+`TestASnapshotCancelledAsItsVacuumStartsCopiesNothing` (the snapshot
+completed), `TestASnapshotWaitingOnALockedSourceStopsForItsCancel`
+("database is locked" after 5.14 s; now `context.Canceled` in 0.11 s) with
+its control `TestASnapshotStillWaitsOutABriefLock` (a lock held 300 ms is
+waited out; green on both), and `TestASnapshotWritesItsCopyWhileItCopies`
+(parked mid-copy after a 256 KB filler table, the output held 0 bytes; now
+at least half the filler, and the finished copy passes `integrity_check`).
+The first two cancel through a context whose `Done` is nil and whose `Err`
+answers `context.Canceled` (`cancelTheDriverCannotSee`): database/sql and the
+driver watch `Done`, so no interrupt is armed, which is the cancel SQLite
+has lost in the busy handler and before the statement.
+`TestTheVacuumStatementCallsItsTargetFunction` pins that the statement names
+the function. Controls on the committed fix, each turning one test red
+alone: the default cache (the commit test, 0 bytes mid-copy),
+`busy_timeout(5000)` (the locked-source test, 5.18 s), a retry loop that
+ignores the context ("database is locked" after 5.06 s), and a target that
+checks nothing (the start test, the snapshot completed).
+
+### The serve tests: a fixed bound on serve's disk writes
+
+The other two failures were the tests' bounds, not the code. So the waits on
+serve wait for their EVENT and give up at the test binary's deadline less a
+reserve (cmd/bridge/serve_wait_test.go): `serveGiveUp` at 30 s before it for
+a wait, `serveDrainGiveUp` at 10 s before it for a drain, and `serveStacks`,
+the goroutines in `runServe` or started by it, printed by any wait that
+gives up. With no `-timeout` there is no deadline and the waits wait, as the
+binary would.
+
+Converted: `waitForListening` (5 s once, then 30 s), `waitForAdminReady`
+(30 s), tsnet_shutdown's `waitForServe` (30 s) and `waitServeExit` (the grace
+plus 10 s), `waitBoundedServeExit` (the same), `stopLiveServe` (the grace
+plus 5 s), both tailscale shutdown tests' waits and `waitForCLIPid` (30 s),
+the orphan GC test's poll (20 s), the sox gate's `waitForAutoOptimizeSweep`
+and `waitForTracksIndexed` (30 s), and both drains (the grace plus 5 s, and
+5 s). The seed test's park: `sqlitetest.ArmUntil(t, at)` gives every wait
+the one instant (`Arm` keeps 10 s per wait, for a statement the test itself
+starts), and `WaitUnless(t, stopped)` answers false when the work ends
+first, so the test reports serve's exit code. Its `ReleaseUntil`'s 10 s
+between comparisons had bounded serve's whole teardown after the cancel.
+
+Three orderings the conversion needed:
+
+- A drain now waits on serve until the deadline, so a hold the test takes on
+  serve must be released by a cleanup registered AFTER the drain (it runs
+  first). Audited at every drain, serve's and the loops': all were, except
+  the seed test's Park, whose own `Disarm` (registered by `Arm`, before the
+  drain) ran after it; it now registers another after the drain.
+- The wedge test's cleanup waited for its start BEFORE the drain, on a start
+  that returns only once the drain's cancel reaches it, so every failed boot
+  also reported "the released start did not return" (5 of 8 in the base's
+  run below). It now releases the tail after the drain and waits for the
+  start before it, only for a start that was entered.
+- With one give-up for waits and drains, a drain after a wait that gave up
+  had passed its own give-up and reported a second failure about a serve on
+  its way out (control A below); the drain's give-up is later.
+
+`TestServeWaitsForItsTsnetStartBeforeClosingTheNode` asserted "no give-up
+line" on the premise that its start, released 1 s after the cancel, unwound
+inside the 5 s grace; a start whose state-dir write a starved disk holds past
+that is one serve rightly gives up on. The fake now records when it finished
+unwinding, and the line is asserted absent only when that was a second or
+more inside the grace (it logs otherwise); the join checks beside it are
+unconditional.
+
+Controls, each on a committed tree:
+
+- A, the tsnet join made unbounded (`<-f.done` for `closedWithin`): the wedge
+  test failed at 60 s under `-timeout 90s`, "runServe did not return before
+  the test's deadline", its stacks naming `(*tsnetFront).stop` at the
+  mutated line. With one give-up for both, the drain added a second failure
+  there; with the later drain give-up, one.
+- The give-up line printed unconditionally: the join test failed, "the start
+  returned 1.002446583s after the cancel, inside the 5s grace, yet shutdown
+  reported giving up on it".
+- A 12 s sleep before the seed (a slow boot): green under `ArmUntil`, and
+  under `Arm` red with CI's own message, "sqlitetest: no statement compared a
+  key within 10s". A 12 s sleep after the seed's cancel (a slow teardown):
+  green under `ArmUntil`, red under `Arm`, "the statement neither compared
+  again nor finished within 10s".
+- sqlitetest: `ArmUntil` falling back to the per-wait bound turned
+  `TestArmUntilGivesUpAtItsInstant` red, and a `WaitUnless` that ignores the
+  work's end turned `TestWaitUnlessAnswersTheWorksEnd` red.
+
+### Before and after under the harness
+
+The three tests CI had failed, 8 runs each, the base (6bc4605a) then the
+branch, under the same load: the base failed 12 of 24 in 878 s (the seed
+test 4 of 8, "no statement compared a key within 10s"; the wedge test 6 of
+8, five "serve never reached the tsnet start within 30s" and one "runServe
+did not return"; the bind test 2 of 8, "serve never reached the tailnet
+listen within 30s"; and two TempDir cleanup failures on `data\bridge.db`,
+where a drain had given up). The branch failed none of 24, in 952 s: the
+seed test took 6.8 to 73.8 s, the wedge test 20.9 to 56.3 s, the bind test
+26.6 to 58.9 s. Two earlier instrumented runs of the old code, 16 each of
+the wedge and bind tests, had failed 8 and 6.
+
+### Surveyed and left
+
+A fixed bound was left where it bounds something other than serve's disk
+writes, and is derived from it: the drains-together test's order check (a
+grace), the 1 s checks that serve has NOT returned yet, the tsnet front's
+unit tests' `10*grace`, the held print's 30 s valve, a fake's return after
+its release (5 s), and the clients' per-request timeouts. The in-process
+tests' waits (the rescanner's `awaitRowAt` and queue tests, `awaitOnePass`,
+`waitClosed`, the album-gain render's 3 min, sqlitetest's `Arm` in
+internal/backup and internal/manifest, loggingtest's 3 s `Park.Wait`) wait
+on the same kind of disk writes without a serve around them; none has
+failed on CI yet, and whether one does under this harness is backlog B106.

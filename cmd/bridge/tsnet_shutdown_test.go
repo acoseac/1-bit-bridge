@@ -202,7 +202,7 @@ func TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace(t *testing.T) {
 	// cancelled it and the tail is open, so this wait cannot come before the
 	// drain: there it waited on a start only the drain's cancel reaches, and
 	// every run that failed before its cancel also reported "the released
-	// start did not return" (5 of 16 starved runs, B63). A start never
+	// start did not return" (5 of 8 starved runs, B63). A start never
 	// entered has nothing to wait for.
 	t.Cleanup(func() {
 		select {

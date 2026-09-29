@@ -16,13 +16,13 @@ import (
 // nor its teardown has a bound of its own that a starved host keeps to: the
 // boot migrates and writes the store, and the teardown's store close
 // checkpoints and syncs it. On a Windows host with 24 writers syncing to its
-// disk (B63, 2026-09-29) the store close alone took 16.4 s, the boot more
-// than 30 s, and the old bounds failed 2 of 8 runs of
-// TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace ("runServe did not
-// return", 15 s after the cancel) and their waits for boot milestones and
-// drains beside it, as they did on CI's Windows runner. A bound that stays
-// is derived from the thing it bounds: a grace (the drains-together order
-// check), the busy wait a snapshot replaces, never a guess at a disk.
+// disk (B63, 2026-09-29) the store close took up to 16.4 s and a boot more
+// than 30 s, and the old bounds failed 12 of 24 runs of the three tests CI
+// had failed: "no statement compared a key within 10s", "serve never
+// reached the tsnet start within 30s", "runServe did not return". These
+// waits failed none of 24. A bound that stays is derived from the thing it
+// bounds: a grace (the drains-together order check), never a guess at a
+// disk.
 //
 // A wait that reaches the deadline means serve never got there, which a
 // hang, the thing these waits exist to catch, does. To make one fail

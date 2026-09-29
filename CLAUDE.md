@@ -6909,6 +6909,48 @@ its twin.** The top list is older, shorter, and read first.
   landed at whatever moment the goroutine was scheduled, which can be AFTER the
   drain and so invert the very ordering the drain establishes. Neither is
   visible to an AST shape check, so the guard does not claim them.
+- **A serve test waits for an EVENT until the test binary's deadline, never
+  for a fixed time after a boot or a cancel** (2026-09-29, backlog B63).
+  Serve's boot migrates and writes the store and its teardown checkpoints
+  and closes it: disk writes with no bound a starved host keeps to. On
+  nomos (Windows 11) with 24 writers syncing to its disk and 16 CPU hogs on
+  the test's four CPUs, the store close took up to 16.4 s after the grace
+  and a boot more than 30 s, and main's bounds failed 12 of 24 runs of the
+  three tests CI had failed ("no statement compared a key within 10s" 4 of
+  8, "serve never reached the tsnet start within 30s" and "runServe did not
+  return" 6 of 8, "serve never reached the tailnet listen within 30s" 2 of
+  8). The branch failed none of 24, the seed test taking up to 74 s.
+  `serveGiveUp` (serve_wait_test.go) fires at the test's deadline less
+  `serveWaitReserve` (30 s), and every wait on serve in a serve test uses
+  it: the boot milestones (`waitForListening`, `waitForAdminReady`,
+  `waitForServe`, the tailscale fakes' starts), the exits (`waitServeExit`,
+  `waitBoundedServeExit`, `stopLiveServe`) and serve's work (the orphan
+  sweep's refusal, the sox gate's sweep and scan). A wait that gives up
+  prints serve's goroutines (`serveStacks`), and one on a serve that exits
+  first reports its exit code. **The drains give up LATER**
+  (`serveDrainGiveUp`, the deadline less 10 s): a drain after a wait that
+  gave up still sees serve out once the cleanups after it let go, and with
+  one give-up for both it reported a second failure about a serve on its
+  way out. **So a hold the test takes on serve is released in a cleanup
+  registered AFTER the drain**, or the drain waits on it to the deadline:
+  a gate, a held print, a held mint, a sqlitetest Park (its own `Disarm`
+  runs after the drain). **And nothing waits BEFORE the drain on what
+  only the drain's cancel ends**: the wedge test's cleanup waited for its
+  start there, on a start the drain's cancel releases, and every failed
+  boot also reported "the released start did not return" (5 of 8). **A
+  hang is still caught, at the deadline**: with the tsnet join unbounded,
+  the wedge test failed at 60 s under `-timeout 90s`, its report naming
+  `tsnetFront.stop`; debug a hang with a shorter `-timeout`. What a test
+  pins about serve's pace stays on what serve does before its teardown's
+  disk writes, from what it bounds: the drains-together test's order (a
+  grace), a give-up's lower bound, and the tsnet join test's "no give-up
+  line", asserted only when its start finished unwinding a second or more
+  inside the grace (it measures when, and a 1 s start still fails the
+  control). **Not converted** (backlog B106): the in-process tests' waits
+  (the rescanner, the sweep passes, the album-gain render, sqlitetest's
+  `Arm` in internal/backup and internal/manifest), loggingtest's 3 s
+  `Park.Wait`, the tsnet front's unit tests, and clients' per-request
+  timeouts.
 - **Put a test seam on the instance it serves; where a package-level seam
   must remain, its restore runs after every goroutine that read it has
   FINISHED, and cleanups run last-registered-first** (2026-09-28). The
