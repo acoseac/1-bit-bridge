@@ -4726,11 +4726,11 @@ func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, miss
 	return pending, matched, missing, lastEnrichedAt, nil
 }
 
-// CountTracksUnderRoot returns the number of track rows belonging to
-// the given library root. Used by the scanner's FUSE drop-mode guards
-// to distinguish "operator legitimately wiped the root" from "the
-// FUSE mount has dropped and the WalkDir came back empty for a root
-// the DB carries history for."
+// CountTracksUnderRoot returns the number of track rows the given library
+// root's walk owns. Used by the scanner's FUSE drop-mode guards to
+// distinguish "operator legitimately wiped the root" from "the FUSE mount
+// has dropped and the WalkDir came back empty for a root the DB carries
+// history for."
 //
 // Track paths in the DB use two distinct layouts depending on whether
 // the bridge is in single-root or multi-root mode (see CLAUDE.md
@@ -4746,11 +4746,33 @@ func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, miss
 // match the storage form. Callers pass `multiRoot = len(roots) > 1`
 // — the same boolean the scanner threads through walkRoot and
 // fillFromPath.
+//
+// UPnP-routed rows are left out, in both modes: no walk of a root ever
+// sees one and neither deletion pass reaps one (routedPathSet), so a
+// routed row is no evidence that a root which came back empty used to
+// hold something. Counted (as they were until 2026-09-29), a single-root
+// bridge whose root is empty and which relays an upstream logged the
+// guard line on every scan and refused every subtree scan below the
+// root, and a routed path prefix spelled like a root's basename inflated
+// that root's count in multi-root mode. The byte range and the
+// empty-base fail-safe are CountTracksByPrefix's.
 func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multiRoot bool) (int, error) {
-	if !multiRoot {
-		return s.CountTracks(ctx)
+	base := ""
+	if multiRoot {
+		base = strings.TrimRight(filepath.Base(rootBase), "/")
 	}
-	return s.CountTracksByPrefix(ctx, filepath.Base(rootBase)+"/")
+	var n int
+	if base == "" {
+		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks t
+			WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`).Scan(&n)
+		return n, err
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks t
+		WHERE t.path >= ? || '/' AND t.path < ? || '0'
+		  AND NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
+		base, base,
+	).Scan(&n)
+	return n, err
 }
 
 // CountTracksByPrefix returns the number of track rows under the folder
