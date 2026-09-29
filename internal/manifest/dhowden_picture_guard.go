@@ -126,12 +126,13 @@ func (w *pictureWalk) spend(n int64, what string) bool {
 // tags on a flaky mount; dhowden reading the same bytes into a bomb a moment
 // later needs the same bytes to have read differently twice.
 //
-// Where dhowden would stop with an error the walk may read on (a comment
-// with no '=' after the bytes it scans, invalid base64 after the header it
-// decodes, an Ogg page whose CRC it does not check). That only ever adds
-// pictures to the sum, and a stream dhowden fails on yields no tags whether
-// or not it is refused. What the walk must never do is stop where dhowden
-// reads on, and every stop above is one of dhowden's.
+// Where dhowden stops with an error, the walk may read on: past a comment
+// with no '=' beyond the bytes it scans for the key, past invalid base64
+// beyond the header it decodes, and past an Ogg page whose CRC is wrong,
+// which it does not check. That only ever adds pictures to the sum, and a
+// stream dhowden fails on yields no tags whether or not it is refused. What
+// the walk must never do is stop where dhowden reads on, and every stop
+// above is one of dhowden's.
 //
 // rs is left at the offset it came in at.
 func dhowdenPicturesWithinBudget(rs io.ReadSeeker) (bool, pictureRefusal) {
@@ -401,61 +402,84 @@ func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 // lets the walk read page headers and segment tables, never segment data it
 // does not need.
 func (w *pictureWalk) ogg(src byteSource) {
-	size := src.Size()
-	pos := int64(0)
-	open := map[uint32]*packetSource{}
+	d := &oggDemux{src: src, open: map[uint32]*packetSource{}}
 	for {
-		var h [27]byte
-		if !readFullAt(src, pos, h[:]) || string(h[:4]) != "OggS" {
+		done, ok := d.page()
+		if !ok {
 			return
 		}
-		pos += int64(len(h))
-		continued := h[5]&0x1 != 0
-		serial := binary.LittleEndian.Uint32(h[14:18])
-		segs := make([]byte, h[26])
-		if !readFullAt(src, pos, segs) {
-			return
-		}
-		pos += int64(len(segs))
-		var total int64
-		for _, s := range segs {
-			total += int64(s)
-		}
-		if total > size-pos {
-			return // dhowden's read of the segment data fails
-		}
-		cur := &packetSource{ra: src}
-		if continued {
-			if cur = open[serial]; cur == nil {
-				return // "could not find continued packet"
-			}
-		}
-		var done []*packetSource
-		at := pos
-		for _, s := range segs {
-			cur.add(at, int64(s))
-			at += int64(s)
-			if s < 255 {
-				done = append(done, cur)
-				cur = &packetSource{ra: src}
-			}
-		}
-		open[serial] = cur
-		pos += total
 		for _, p := range done {
-			for _, prefix := range []string{"\x03vorbis", "OpusTags"} {
-				if !p.hasPrefix(prefix) {
-					continue
-				}
-				body := io.NewSectionReader(p, int64(len(prefix)), p.Size()-int64(len(prefix)))
-				var mbp pictureValue
-				if _, ok := w.vorbisComments(body, 0, &mbp); ok && mbp.set {
-					w.decodedPicture(mbp)
-				}
-				return // ReadOGGTags returns after the first comment packet
+			body, ok := oggCommentBody(p)
+			if !ok {
+				continue
 			}
+			var mbp pictureValue
+			if _, ok := w.vorbisComments(body, 0, &mbp); ok && mbp.set {
+				w.decodedPicture(mbp)
+			}
+			return // ReadOGGTags returns after the first comment packet
 		}
 	}
+}
+
+// oggDemux mirrors dhowden's oggDemuxer: the packet each stream serial has in
+// progress, and where the next page starts.
+type oggDemux struct {
+	src  byteSource
+	pos  int64
+	open map[uint32]*packetSource
+}
+
+// page reads the page at d.pos and returns the packets it completes, in
+// order; false where dhowden's read of the page fails.
+func (d *oggDemux) page() ([]*packetSource, bool) {
+	var h [27]byte
+	if !readFullAt(d.src, d.pos, h[:]) || string(h[:4]) != "OggS" {
+		return nil, false
+	}
+	pos := d.pos + int64(len(h))
+	serial := binary.LittleEndian.Uint32(h[14:18])
+	segs := make([]byte, h[26])
+	if !readFullAt(d.src, pos, segs) {
+		return nil, false
+	}
+	pos += int64(len(segs))
+	var total int64
+	for _, s := range segs {
+		total += int64(s)
+	}
+	if total > d.src.Size()-pos {
+		return nil, false // dhowden's read of the segment data fails
+	}
+	cur := &packetSource{ra: d.src}
+	if h[5]&0x1 != 0 { // continued: the page carries on its serial's packet
+		if cur = d.open[serial]; cur == nil {
+			return nil, false // "could not find continued packet"
+		}
+	}
+	var done []*packetSource
+	for _, s := range segs {
+		cur.add(pos, int64(s))
+		pos += int64(s)
+		if s < 255 {
+			done = append(done, cur)
+			cur = &packetSource{ra: d.src}
+		}
+	}
+	d.open[serial] = cur
+	d.pos = pos
+	return done, true
+}
+
+// oggCommentBody returns the comments of a Vorbis or Opus comment packet,
+// after its prefix, and false for any other packet.
+func oggCommentBody(p *packetSource) (byteSource, bool) {
+	for _, prefix := range []string{"\x03vorbis", "OpusTags"} {
+		if p.hasPrefix(prefix) {
+			return io.NewSectionReader(p, int64(len(prefix)), p.Size()-int64(len(prefix))), true
+		}
+	}
+	return nil, false
 }
 
 // packetSource is one Ogg packet: pieces of the file, one per page it spans.
