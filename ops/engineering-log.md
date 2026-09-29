@@ -30298,3 +30298,242 @@ coordinates file's own assessment of the v0.1.8 scrub.
 Not built: a guard. A test that fails on these values has to carry them, or
 hashes of them, in the public tree, and the leaks came from pasting real
 output, which the rule in CLAUDE.md's "Production deployments" now names.
+
+## 2026-09-29 — an ID3v2 tag dhowden reads is walked as dhowden reads it, and refused past a bound on its renaming and on its frames (backlog B101)
+
+Backlog B101, found by the B99 session while it mirrored dhowden's readers
+for the picture guard: dhowden/tag's `readID3v2Frames` (id3v2.go, at the
+version go.mod pins) gives a frame whose id is already in its result map a
+new key by counting up from `id_0` until one is free. The k-th copy of an
+id costs k-1 lookups, each of a string built for it (`name + "_" +
+strconv.Itoa(i)`), so n copies cost n(n-1)/2.
+
+### Reproduced
+
+A throwaway program in a `_probe` directory (never committed), main at
+a9c20d9e, the dev Mac (Apple M-series, go1.27.1), an ID3v2.4 tag of n
+identical 12-byte TIT2 frames (`\x03x`):
+
+| n | tag | `tag.ReadFrom` | allocated |
+|---|---|---|---|
+| 1,000 | 12 KB | 26 ms | 7 MB |
+| 2,000 | 24 KB | 81 ms | 29 MB |
+| 4,000 | 48 KB | 337 ms | 119 MB |
+| 8,000 | 96 KB | 1.43 s | 483 MB |
+| 16,000 | 192 KB | 6.03 s | 1,944 MB |
+
+Through `ExtractWithContext` (an `.mp3`): 22 ms, 352 ms and 6.13 s at
+1,000, 4,000 and 16,000. Quadratic: four times the time per doubling, and
+about 15 bytes of allocation per lookup (the strings; the live heap stayed
+under 10 MB). The size field is read by `get7BitChunkedInt`, which does not
+mask the synchsafe high bits, so a tag declares up to 0x1FFFFFFF bytes (about
+512 MiB). At 47 ns a lookup (6.03 s for the 16,000-copy run's 128 million),
+a 5 MB tag of one repeated frame is an hour of one scan worker, a 32 MiB AIFF
+ID3 chunk two days, while `Scan` holds the scanner's mutex and every later
+scan waits on it.
+
+Every way dhowden reads an ID3v2 tag reaches it: `tag.ReadFrom` on a file
+whose first bytes are `ID3` (any extension: dhowden picks its parser by the
+bytes) and on a `DSD ` stream (`ReadDSFTags`, which seeks to the metadata
+pointer from the start of the stream), and `tag.ReadID3v2Tags` from the DSF
+extractor and from the AIFF and WAV walkers' ID3 chunk (capped at 32 MiB).
+
+### The number of frames costs too
+
+Distinct ids cost dhowden no renaming, and still cost the extraction:
+`ExtractWithContext` on 16,000, 100,000 and 1,000,000 distinct 12-byte
+frames took 48 ms, 300 ms and 3.72 s (dhowden's own read 3 ms, 15 ms and
+260 ms), with 160 MB of live heap at a million. Most of it is
+`populateFromTagMetadata`: `stringOf` and `hasAnyRawKey` walk the whole raw
+map once per alias, normalising every key, some fifty walks per extraction.
+Linear, but at the 512 MiB the size field admits, gigabytes and minutes.
+
+### Design
+
+- `dhowden_id3v2_guard.go`: `dhowdenID3v2WithinBudget` at the one
+  `tag.ReadFrom` call, beside B99's picture guard, and `id3v2TagWithinBudget`
+  at the two `tag.ReadID3v2Tags` calls. ReadFrom's dispatch is now one
+  function, `dhowdenReaderFor` (its cases in its order: an `ID3` stream whose
+  bytes 4 to 8 read `ftyp` is MP4), which both guards read; the stream
+  measuring and restoring B99's guard did inline is `openDhowdenStream`.
+- The walk mirrors `readID3v2Header` and `readID3v2Frames`: the header's
+  flags and unmasked size, the extended header (version 3 counts the bytes
+  after its length and adds only those to its offset; version 4 counts the
+  length's own 4, so a length under 4 wraps and `readBytes` reads nothing),
+  then frame headers (3-byte ids and sizes in version 2.2, big-endian sizes
+  in 2.3, unmasked synchsafe in 2.4), the flag fields (2.3 compression reads
+  4 bytes and takes 4 from the size; 2.4 compression without a data length
+  indicator is an error; the indicator replaces the size; encryption reads 1
+  byte and takes 1), then the payload as `readBytes` consumes it (for a
+  length past 10 MB that is negative as an int64, nothing, and no error:
+  `io.CopyN` of a negative count). The loop runs on dhowden's `offset` (the
+  header's 10 bytes plus declared sizes, against a size field that does not
+  count the header), and the next header is read from where the payload
+  ended.
+- Unsynchronisation: dhowden wraps the reader after the header in a filter
+  that drops a zero byte following an emitted 0xFF, its state running across
+  frames. Without it the walk reads headers and skips payloads by length (no
+  payload read, as B99's guard). With it, where a frame ends depends on every
+  FF 00 before it, so the frames are read through the same filter, over a
+  bufio reader.
+- Two bounds, counted as dhowden stores each frame: the renaming lookups
+  summed over every id (`maxID3v2RenameLookups`, 2^21, one id 2,048 times),
+  and the frames (`maxID3v2Frames`, 65,536). A per-id bound would let n ids
+  each repeat up to it: 2,048 copies of each of the 21,800 ids a 512 MiB tag
+  of 12-byte frames holds is 4.6 × 10^10 lookups, some 36 minutes.
+- A refusal is B99's: a Warn (`ID3v2 tag has more frames than dhowden reads
+  in bounded time; skipping tag read`, with the bound, the frame id and the
+  counts), the folder-art fallback, no tags.
+- Where the walk may differ from dhowden: dhowden stops at a frame whose id it
+  does not know once its offset passes the size (`validID3Frame`); that is the
+  last frame either way, and the walk counts it (one frame's lookups at most),
+  so no table of dhowden's is copied. The walk does not parse payloads, so it
+  reads on past a frame dhowden fails to parse (dhowden has done that frame's
+  renaming by then, and then fails: no tags either way).
+
+### The bound was set by the allocation property
+
+The first draft allowed 2^23 lookups (4,096 copies of one id, 0.35 s here).
+`TestATagTheID3v2GuardPassesMeetsTheAllocationProperty` showed a tag at that
+bound allocating 127 MB from a 49 KB file, against the 70 MB
+`extractionAllocLimit` allows: the fuzz targets would have reported as a
+crasher a tag the guard lets through. At 2^22 it met the limit by 5 MB. At
+2^21 a tag at the bound allocates 33.3 MB (limit 68.7 MB), two ids at it
+32.9 MB, 65,536 distinct frames 29.6 MB (limit 113 MB), and both bounds at
+once 62.0 MB (limit 113 MB). Under -race the same extractions allocate about
+twice as much: the race runtime turns the tiny allocator off
+(runtime/malloc.go), so each short string takes a slot of its own (131.9 MB
+at 2^22). The test checks the allocation without -race only, which is what
+the nightly fuzz job runs.
+
+What real tags carry, since the bound refuses a file. No music library was
+available to count: the dev Mac and dido hold fixtures, demo tracks and
+downloads. A census of every MP3, DSF, AIFF and WAV on the dev Mac (a
+throwaway program: dhowden's raw map per file) found 90 ID3v2 tags, from the
+demo library, the 1-bit.app site's media, sound-effect downloads and dhowden's
+own samples, carrying at most 10 frames and at most 3 copies of one id (TXXX).
+Taggers repeat an id a handful of times (foobar2000 writes duplicate COMM
+frames, three in mutagen#172's report; Picard writes tens of TXXX; Windows
+Media Player a dozen PRIV; Serato about eight GEOB; a scanned booklet tens of
+APIC), and the most repeated real frame is the chapter (CHAP, one per
+chapter), a few hundred in a long audiobook. The bound is an order of
+magnitude past those, and `TestAHeavilyTaggedFileStillReads` reads a tag
+holding all of them at once (1,000 chapters).
+
+The app's own reader (`ID3v2Parser.swift`) walks a tag's frames once and keys
+each field by id, last wins, with no renaming: no twin of this, and no
+Mirror-PR.
+
+### Tests
+
+- `TestNoRepeatedID3v2FrameMakesAnExtractionUnbounded`: 5,000 copies of one
+  frame through all six routes (an MP3, an ID3v2 file named `.ogg`, a
+  DSF-shaped file named `.mp3`, a DSF, an AIFF ID3 chunk, a WAV id3 chunk),
+  each under the allocation property, with no tags and one refusal naming
+  TIT2 at its 2,049th copy.
+- `TestTheID3v2GuardHoldsAtItsBounds`: 2,048 copies pass and 2,049 are
+  refused; two ids at 1,448 each pass and at 1,449 are refused (the sum);
+  65,536 distinct frames pass and 65,537 are refused; each refusal's fields.
+- `TestTheID3v2WalkCountsWhatDhowdenStores` over `id3v2Shapes` (17 shapes,
+  each read by dhowden without error);
+  `TestTheID3v2GuardFindsRepeatsWhereDhowdenReadsThem` (5,000 copies hidden
+  where the declared layout says there are none, in 5 of them);
+  `TestTheID3v2GuardPassesRepeatsDhowdenNeverReads` (5,000 copies after the
+  size, after padding, inside a payload, after a frame whose declared size
+  ends the tag; an `ID3` stream read as MP4, and a version dhowden refuses).
+- `TestAHeavilyTaggedFileStillReads`: 60 TXXX, 6 COMM, 30 APIC, 12 PRIV,
+  8 GEOB and 1,000 CHAP frames read their tags.
+- `TestATagTheID3v2GuardPassesMeetsTheAllocationProperty`,
+  `TestTheID3v2GuardDoesNotReadAFramePayload` (a 4 MiB cover: under 1 KiB
+  read), `TestTheID3v2GuardLeavesTheReaderWhereItFoundIt`.
+- `TestEveryDhowdenReadIsGuarded`: an AST sweep of the package's production
+  files; every `tag.Read*` call must sit in a function that calls the guards
+  for what it reads, and a reader with no guard is refused.
+- Premise: `TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime`
+  (2,000 copies allocate at least 10 MB; measured 29 MB).
+- `FuzzID3v2WalkAgreesWithDhowden`, seeded with every shape: wherever
+  dhowden reads a tag, the unbounded walk's count per id equals what
+  dhowden stored, save one frame more in all.
+- Seeds: the 5,000-copy tag in FuzzExtractMP3, FuzzExtractDSF,
+  FuzzExtractAIFF and FuzzExtractWAV.
+
+### Negative controls
+
+Each run after the round was committed, and restored with `git checkout`:
+
+- The ReadFrom-site guard disabled (`&& false`): the MP3, `.ogg` and
+  DSF-shaped routes red (199,341,912 bytes against a limit of 70,958,720),
+  the FuzzExtractMP3 seed red; the sweep green (the call was still there).
+  The call deleted: the same, and the sweep red naming
+  `extractViaDhowdenFromReader`.
+- The DSF and AIFF/WAV guards deleted: those three routes red, their three
+  fuzz seeds red, the sweep red naming `extractDSFWithContext` and
+  `applyEmbeddedID3`.
+- Walk mutations, each red where expected: the data length indicator ignored
+  (the shorter-indicator shape, in the count test, the hidden-repeats test
+  and the fuzz seeds); version 3 compression ignored (the wrapping shape);
+  unsynchronisation ignored, and the filter's state reset per read (the
+  unsynchronisation shape); the synchsafe bytes masked (the high-bit size
+  shape); the bound per id (the two-id case); no frames bound (65,537);
+  version 4's extended header read as version 3's (both extended-header
+  shapes); the offset advanced by the payload read rather than the declared
+  size (the frame-ends-the-tag case, in the pass test); padding read past
+  rather than stopped at (the after-padding case). The encryption byte
+  ignored first stayed green: the method byte and the one-shorter payload
+  add up to the same length everywhere but a zero data length indicator,
+  which wraps, so that shape was added and turned it red.
+
+### Fuzzed
+
+dido (16 cores), golang:1.26.6, one container per target with 4 CPUs and an
+8 GB cgroup, under the nightly job's 5 GiB address-space limit
+(`-exec "prlimit --as=5368709120 --"`), `-fuzzminimizetime 1s`, from the
+committed seeds: FuzzID3v2WalkAgreesWithDhowden, 10 minutes, 7,670,745 execs;
+FuzzExtractMP3, 10 minutes, 3,695,603; FuzzExtractDSF, 5 minutes, 1,201,296;
+FuzzExtractAIFF and FuzzExtractWAV, 5 minutes each, 1,745,375 and 1,608,581.
+All passed, nothing saved. The extractor targets' mutations of the 5,000-copy
+seed spent their time just under the renaming bound (the next section), so the
+allocation property held there over hundreds of executions at the guard's own
+worst case.
+
+### A time budget in the fuzz targets
+
+Considered, measured, and not added. A per-execution timer in the harness
+(measurement only, never committed) recorded each worker's slowest execution
+and how many passed 1 ms, 10 ms, 100 ms and 1 s, over the runs above:
+
+| target | execs timed | slowest | its input | > 100 ms | > 1 s |
+|---|---|---|---|---|---|
+| FuzzID3v2WalkAgreesWithDhowden | 7.5 M | 20.9 ms | 42 B | 0 | 0 |
+| FuzzExtractMP3 | 3.3 M | 253 ms | 60 KB | 730 | 0 |
+| FuzzExtractDSF | 0.86 M | 253 ms | 60 KB | 472 | 0 |
+| FuzzExtractAIFF | 1.27 M | 220 ms | 60 KB | 145 | 0 |
+| FuzzExtractWAV | 1.28 M | 234 ms | 60 KB | 302 | 0 |
+
+(A worker writes its record every 20,000 executions and at each new maximum,
+so the counts lag the runs' totals.) The executions past 100 ms were the
+fuzzer's mutations of the seed that stay inside both bounds: several ids
+repeated until the summed lookups near 2^21, which dhowden renames in about
+0.1 s on the dev Mac and 0.25 s on a loaded dido. So a budget has to sit above
+what the guard lets dhowden do, a second or more on a slower runner, and above
+that it would catch only work that grows faster than its input WITHOUT
+allocating: the allocation property already catches work that allocates, which
+is how B101's renaming shows (a string per lookup; the seed fails it on the old
+code), and no parser here is known to do the other kind. Nor would a budget
+have seen B101 from the old seeds: inputs of a few KB hold a few hundred frames,
+milliseconds of renaming. Go's fuzz engine bounds no execution itself
+(`internal/fuzz`: `workerTimeoutDuration` applies only while stopping a worker),
+so a runaway input reads as a falling exec rate and, at the deadline, a worker
+that does not stop; that is B103's question (legs ending "context deadline
+exceeded" at exactly the fuzz time), and a budget belongs to its answer if the
+cause turns out to be such an input.
+
+### Left open
+
+- B116: ID3v2 TXXX frames never reach the manifest. dhowden keys them `TXXX`,
+  `TXXX_0`, …, holding a `*tag.Comm`, and `stringOf` matches keys, so the
+  MusicBrainz ids, ReplayGain and every other TXXX field of an MP3, DSF, AIFF
+  or WAV are lost (measured: TXXX "MusicBrainz Album Id" extracts to "").
+- B117: dhowden's unsynchroniser reads one byte per Read call, a syscall per
+  byte on a file: a 10 MB unsynchronised tag took 3.71 s to extract. Linear,
+  and not what this guard bounds.

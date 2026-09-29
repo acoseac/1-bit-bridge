@@ -16,7 +16,7 @@ import (
 //
 // Layout: "FORM" + BE32 form-size + "AIFF" + sub-chunks (where each
 // sub-chunk is FOURCC + BE32 size + payload + pad-if-odd).
-func buildAIFFWithID3(t *testing.T, id3 []byte, extraChunks ...[]byte) []byte {
+func buildAIFFWithID3(t testing.TB, id3 []byte, extraChunks ...[]byte) []byte {
 	t.Helper()
 	body := []byte("AIFF")
 
@@ -61,7 +61,7 @@ func writeTempAIFF(t *testing.T, contents []byte) string {
 // embedded "id3 " (lowercase, per ID3v2-in-RIFF spec) sub-chunk.
 // Layout: "RIFF" + LE32 form-size + "WAVE" + sub-chunks (where each
 // sub-chunk is FOURCC + LE32 size + payload + pad-if-odd).
-func buildWAVWithID3(t *testing.T, id3 []byte, extraChunks ...[]byte) []byte {
+func buildWAVWithID3(t testing.TB, id3 []byte, extraChunks ...[]byte) []byte {
 	t.Helper()
 	body := []byte("WAVE")
 	for _, c := range extraChunks {

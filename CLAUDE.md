@@ -14,7 +14,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **41** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **42** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
@@ -23,14 +23,15 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
   `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
   `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`; 40 until
-  2026-09-29, when it gained `FuzzExtractOGG`.) They cover
+  2026-09-29, when it gained `FuzzExtractOGG`, and 41 until later that day,
+  when it gained `FuzzID3v2WalkAgreesWithDhowden`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 41 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 40, because
+  **Count them by file:name pair** to get 42 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 41, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -40,7 +41,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twenty-two carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Twenty-three carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -59,12 +60,14 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `FuzzParseDeviceDescription` (every service URL the parser keeps, re-parsed, is http(s)
   with a host, stays on the description's host when discovered, names this machine or a
   link-local address only from a description URL that does too, and never names a cloud
-  metadata address; it fuzzes the base URL as well as the XML), and the eight whole-file
+  metadata address; it fuzzes the base URL as well as the XML), the eight whole-file
   extractor targets (`FuzzExtract{AIFF,WAV,DFF,DSF,FLAC,OGG,M4A,MP3}`, through
   `fuzzExtractOnce`: one extraction allocates no more than `extractionAllocLimit`, 64 MiB
-  plus 64 bytes per input byte; the rule is under **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
-  them, then "Twelve" and "Thirteen" that same day, as two more joined, and "Fourteen" until
-  2026-09-29: **count them
+  plus 64 bytes per input byte; the rule is under **Scanner**), and
+  `FuzzID3v2WalkAgreesWithDhowden` (wherever dhowden reads an ID3v2 tag, the ID3v2 guard's
+  walk counts what dhowden stores, per frame id; the rule is under **Scanner** too). This said "Four" until 2026-09-28, while eight more were added beside
+  them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
+  2026-09-29, and "Twenty-two" until later that day: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of
@@ -91,7 +94,13 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   which is visible, and raising the limit gives each of the four workers that much more of
   the runner's 16 GB. The
   limit is the backstop; the allocation property is what names a bomb the limit would let
-  through.
+  through. **The extractor targets carry no per-execution time budget, on measurement**
+  (2026-09-29, backlog B101): a tag at the ID3v2 guard's bounds runs about 0.25 s on a
+  loaded dido (the slowest of 3.3 M FuzzExtractMP3 executions, 253 ms, none past 1 s), so a
+  budget under a second would flake, and one above it catches only superlinear work that does
+  not allocate, while work that allocates (B101's renaming) already fails the allocation
+  property. Go's engine bounds no execution itself; whether a budget belongs to B103's answer
+  is B103's question.
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.
 - **On a host whose Go is newer than `go.mod`'s, `make fmt` rewrites files CI calls clean.** CI's gofmt check runs `go.mod`'s toolchain (`go-version-file: go.mod`, 1.26.6 as of 2026-09-25), and gofmt 1.27 indents a composite literal in a multi-value `return` differently: on a 1.27.1 host `make fmt` re-indents `internal/manifest/favorites_test.go` and `internal/atlasharvest/lyrics_test.go`, and 1.26.6's `gofmt -l` reports both rewrites. Never commit such a rewrite. Restore those files, and check your own with the pinned gofmt: `$(GOTOOLCHAIN=go1.26.6 go env GOROOT)/bin/gofmt -l <files>`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
@@ -1046,6 +1055,54 @@ lost my library."
   whole-file extractor fuzz target carries the allocation property**
   (`fuzzExtractOnce`), so a length that sizes a buffer the file cannot back is a
   crasher, on any platform, with the size in its message.
+- **…and an ID3v2 tag dhowden reads is walked the same way, against two bounds**
+  (2026-09-29, backlog B101). dhowden gives every repeat of a frame id a key of its
+  own by counting up from `id_0` (`readID3v2Frames`), so n copies of one id cost
+  n(n-1)/2 map lookups, each building a string: through `tag.ReadFrom`, 4,000
+  copies of a 12-byte TIT2 took 337 ms, and 16,000 (192 KB) 6.0 s and 1.9 GB of
+  allocation. A 5 MB tag of one repeated frame is an hour of one scan worker, and
+  the size field (whose synchsafe bytes dhowden does not mask) admits about
+  512 MiB, while `Scan` holds the scanner's mutex.
+  `dhowdenID3v2WithinBudget` (at the one `tag.ReadFrom` call, through
+  `dhowdenReaderFor`, ReadFrom's dispatch in its order, the "DSD " pointer
+  included) and `id3v2TagWithinBudget` (the two `tag.ReadID3v2Tags` calls: the
+  DSF extractor and `applyEmbeddedID3`) walk the tag as `ReadID3v2Tags` reads it
+  and refuse one past either bound. **The renaming lookups, SUMMED over every id**
+  (`maxID3v2RenameLookups`, 2^21: one id 2,048 times): a bound per id lets n ids
+  each repeat up to it. **And the frames stored** (`maxID3v2Frames`, 65,536):
+  linear, but 1,000,000 distinct 12-byte frames took 3.7 s to extract and held
+  160 MB, most of it `populateFromTagMetadata`'s lookups walking the raw map.
+  **The renaming bound is held to the allocation property**: the renaming builds
+  about 15 bytes a lookup, so at the bound 32 MB, half the 64 MiB
+  `extractionAllocLimit` allows any extraction, and a tag the guard passes meets the
+  property the fuzz targets assert (the first draft's 2^23 allocated 127 MB against
+  a limit of 70 MB; `TestATagTheID3v2GuardPassesMeetsTheAllocationProperty`, which
+  skips its allocation check under -race: the race runtime turns the tiny allocator
+  off and doubles it). **Walk the reads, never the declared sizes**: dhowden reads
+  the next header from where the payload it read ends, and version 3 compression
+  takes 4 from the size (a frame declaring under 4 wraps, and `readBytes` then reads
+  nothing: `io.CopyN` of a negative count), a version 4 data length indicator
+  replaces it, encryption takes 1 (a zero indicator wraps), a version 4 extended
+  header counts its own 4 length bytes (a length under 4 wraps), and under
+  unsynchronisation every FF 00 is a byte the sizes do not count (the filter's state
+  runs across frames). Each is a shape in `id3v2Shapes`, and
+  `FuzzID3v2WalkAgreesWithDhowden` fuzzes the walk against dhowden itself: wherever
+  dhowden reads a tag, the walk counts what it stores, per id. The loop ends on
+  dhowden's `offset` (the header's 10 bytes, the extended header, every DECLARED
+  size) against the size field, never on the stream; the one place the walk reads
+  on where dhowden may not is the last frame, dropped by dhowden for an id it does
+  not know (`validID3Frame`), one frame at most. **It reads no payload without
+  unsynchronisation**; with it, where a frame ends depends on every FF 00 before
+  it, so it reads through the filter (dhowden reads such a tag one byte per Read
+  call). A refused tag is one dhowden could not read: a Warn naming the bound, the
+  frame id and the counts, the folder-art fallback, no tags. **No
+  `ExtractorVersion` bump**, for B99's reason: no real tag comes near either bound
+  (taggers repeat an id a handful of times, chapters a few hundred), and a stored
+  row keeps its tags until its file changes. `TestEveryDhowdenReadIsGuarded`
+  requires every call of a dhowden reader in the package to sit in a function that
+  asks the guards for what it reads, and refuses any other reader;
+  `TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime` fails the day dhowden
+  stops counting up, and the renaming bound can go then.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to

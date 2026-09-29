@@ -33,7 +33,11 @@
 // address space, and the four workers re-zeroing it took the nightly runner's
 // memory until the runner itself was killed, with nothing saved. Measured
 // here, the same input is an ordinary crasher, written to testdata/fuzz with
-// the size it asked for.
+// the size it asked for. It sees work that grows faster than the file too,
+// where the work allocates: dhowden renames each repeat of an ID3v2 frame id by
+// counting up from id_0, building a string per lookup, and a 60 KB tag of 5,000
+// copies of one frame allocated 199 MB (backlog B101; the ID3v2 guard, whose
+// seeds are below).
 package manifest
 
 import (
@@ -72,7 +76,7 @@ func fuzzExtractOnce(t *testing.T, dir, ext string, b []byte) {
 	before := heapAllocated()
 	_ = ExtractWithContext(p, &tr, &ExtractContext{})
 	if got, limit := heapAllocated()-before, extractionAllocLimit(len(b)); got > limit {
-		t.Fatalf("extracting a %d-byte %s file allocated %d bytes (limit %d): a length read from the file sized a buffer the file cannot back",
+		t.Fatalf("extracting a %d-byte %s file allocated %d bytes (limit %d): more than a file of that size accounts for (a length read from it sized a buffer it cannot back, or a parse did work that grows faster than the file)",
 			len(b), ext, got, limit)
 	}
 }
@@ -85,6 +89,8 @@ func FuzzExtractAIFF(f *testing.F) {
 		// bytes) — the duration walk's fit check (v11) has a payload to check.
 		[]byte("FORM\x00\x00\x00\x26AIFFCOMM\x00\x00\x00\x12\x00\x02\x00\x00\x10\x00\x00\x18\x40\x0E\xAC\x44\x00\x00\x00\x00\x00\x00SSND\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
 		[]byte("FORM\x00\x00\x00\x04AIFC"),
+		// An ID3 chunk repeating one frame past the renaming bound (B101).
+		buildAIFFWithID3(f, repeatedFramesTag()),
 	})
 }
 
@@ -94,6 +100,7 @@ func FuzzExtractWAV(f *testing.F) {
 		// Four bytes of audio in the data chunk — a non-zero duration path.
 		[]byte("RIFF\x28\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00\x44\xAC\x00\x00\x10\xB1\x02\x00\x04\x00\x10\x00data\x04\x00\x00\x00\x00\x00\x00\x00"),
 		[]byte("RIFF\x04\x00\x00\x00WAVE"),
+		buildWAVWithID3(f, repeatedFramesTag()),
 	})
 }
 
@@ -107,6 +114,9 @@ func FuzzExtractDFF(f *testing.F) {
 func FuzzExtractDSF(f *testing.F) {
 	fuzzExtract(f, ".dsf", [][]byte{
 		[]byte("DSD \x1c\x00\x00\x00\x00\x00\x00\x00"),
+		// Its ID3v2 tag repeating one frame past the renaming bound (backlog
+		// B101): the ordinary suite runs it through the allocation property.
+		dsfWithID3(repeatedFramesTag()),
 	})
 }
 
@@ -165,5 +175,9 @@ func FuzzExtractMP3(f *testing.F) {
 		// header (32 bytes of side info, flags=frames, 100 frames) — the
 		// duration ladder's first rung (v11).
 		append(append([]byte("\xFF\xFB\x90\x00"), make([]byte, 32)...), []byte("Xing\x00\x00\x00\x01\x00\x00\x00\x64")...),
+		// A tag repeating one frame past the renaming bound (backlog B101),
+		// which dhowden renamed in quadratic time and space: on the old code
+		// this seed failed the allocation property (about 190 MB).
+		append(repeatedFramesTag(), mp3Audio()...),
 	})
 }

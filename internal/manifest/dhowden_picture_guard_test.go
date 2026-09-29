@@ -56,7 +56,7 @@ func requireBoundedExtraction(t testing.TB, name string, data []byte, ec *Extrac
 	t.Helper()
 	tr, got := extractMeasured(t, name, data, ec)
 	if limit := extractionAllocLimit(len(data)); got > limit {
-		t.Fatalf("extracting a %d-byte %s allocated %d bytes (limit %d): a length read from the file sized a buffer the file cannot back",
+		t.Fatalf("extracting a %d-byte %s allocated %d bytes (limit %d): more than a file of that size accounts for (a length read from it sized a buffer it cannot back, or a parse did work that grows faster than the file)",
 			len(data), name, got, limit)
 	}
 	return tr
