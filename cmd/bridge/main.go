@@ -1812,8 +1812,14 @@ const fingerprintToolchainTTL = 30 * time.Second
 // ready reports whether acoustic fingerprinting can actually run, and the
 // bounded degraded-reason key when it cannot.
 //
-// Reasons are the same bounded set fingerprintFeatureReady used, so the
-// admin card's rendering is unchanged.
+// The reason is one of a closed set of keys ("fpcalc_missing" or
+// "no_api_key", "" when ready) that the admin Jobs card renders its
+// remediation copy from, the same bounded-key discipline as the enricher's
+// skip reasons. Both prerequisites are checked here rather than at
+// config-validation time: Validate() is a pure predicate, and a host with
+// BRIDGE_FINGERPRINT_ENABLED set but no key still has to boot. The verdict
+// is always "inactive", never "disabling": every consumer reads it live, so
+// fixing the prerequisite starts the feature with no restart.
 func (c *fingerprintToolchainCache) ready(hasKey bool) (bool, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

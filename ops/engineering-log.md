@@ -28419,6 +28419,277 @@ a junction on Windows.
 | NC11a: the console files an alias request's thumbnail under the alias | `TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey` only |
 | NC11b: the console files a portrait's thumbnail under another key | the same test only |
 
+## 2026-09-29 — the console's managed controls, its focus, and the variant panel's redraw (backlog B68)
+
+B35/B45 (#1088) left five console leftovers, recorded as B68: two controls
+beside the trays that offer a field the control plane can own, the variant
+panel's whole-route redraw after a tray save, a tray blurb that counts
+switches the reader cannot see, a helper nothing calls, and every control
+that disables itself around a request losing keyboard focus. All five were
+reproduced on the unchanged build first, in a real browser.
+
+### Measured on the unchanged code
+
+Chrome 152.0.7977.130, three throwaway bridges built from main
+(`6dfba62c`): a loopback one, a public-mode one whose
+`deployment.managedSettings` listed `fingerprintEnabled` and
+`duplicatesFilter`, and a hosted-style one listing those two and
+`upscaleEnabled` and `optimizeEnabled`; six synthesized 96 kHz / 24-bit FLACs
+in three albums, so the variant panel had something to be eligible for.
+
+1. **The Enable button (Jobs, public-mode bridge).** Visible; a click ended
+   in "Enable failed — retry", the PATCH having refused `fingerprintEnabled`
+   whole.
+2. **The policy radios (Duplicates, the same bridge).** Shown; choosing
+   "Same format only" raised an alert, "Saving the policy failed: these
+   settings are managed by the control plane on this bridge and cannot be
+   changed here: duplicatesFilter", and the radios snapped back.
+3. **The CarPlay blurb (Jobs, hosted-style bridge).** Two rows showed,
+   `autoOptimizeEnabled` and `dsdRenderEnabled`, under "All three switches
+   have to be on for anything to run."
+4. **`fingerprintFeatureReady`.** `grep -rn` found the declaration in
+   `cmd/bridge/upscale.go`, one past-tense comment in `main.go`, and the
+   B35/B45 log entry. No caller, no test.
+5. **Focus after a job button (loopback).** "Scan now" focused, then
+   clicked: `document.activeElement` was the body while the handler had it
+   disabled, and still the body 4.5 s later with the button enabled again.
+   36 sites disabled a control by a literal (`.disabled = true`: 29 in
+   app.js, 6 in views.js, 1 in variants.js).
+6. **The variant panel (album Variants tab, loopback).** PCM upscaling
+   turned on from the panel's gear, the switch focused: afterwards
+   `document.activeElement` was `#player-title`, the panel had no gear left,
+   the tray's "Saved." was gone and the switch was a different node.
+
+### What was decided, and what was not
+
+- **Managed controls read the trays' snapshot, not a new server flag.** The
+  alternatives were a per-field flag in the page data (the templates already
+  read `.Managed.<control>` for `managedControls`) and a `managed` bit in
+  `/api/jobs`. Both are new server surface for a decision the console already
+  makes from one place, and four callers of `PATCH /api/settings` exist (the
+  Settings form, the trays, and these two), the PATCH being the only handler
+  that reads the managed set. The cost is an unknown window on a fresh load:
+  23 ms for `/api/settings` on loopback (DOMContentLoaded 124 ms, response
+  147 ms), the Settings page's own window.
+- **The Enable button waits for the set; the radios do not.** The button only
+  offers a change, and on a managed bridge it must never flash, so it stays
+  hidden until a snapshot names the set (`trayManagedKnown`), and `initJobs`
+  runs the check again the moment one lands rather than at the 10 s poll. The
+  radios also show the policy in force, so they stay until the set says
+  otherwise, from the set an earlier page left where there is one. Greyed
+  radios were refused (the house rule: a greyed switch on a hosted bridge
+  reads as something to earn), as was hiding the whole panel (it holds
+  "Re-evaluate now" and the stamp line). A line names the policy in force in
+  their place, quoting the radio's own name.
+- **The blurb says how many are set for the bridge.** Dropping the sentence
+  loses "all three have to be on" for a reader who can see one; naming the
+  hidden switches by label leaks names they cannot find; "the switches shown
+  here all have to be on" would count the DSD row, which is not one of the
+  three. `spec.blurb` may now be a function of the shown fields.
+- **`setDisabled(control, disabled)` with the note on the control.** A
+  `holdFocus` returning a restore closure has no state, but the enabling call
+  is a `finally`, a 4 s timer or another handler, and a guard cannot see a
+  forgotten restore. A module-level `WeakSet` cannot be lifted into the node
+  harnesses (`extractJSConst` takes object literals). `dataset.refocus` on
+  the control can, and the sweep can refuse every other route. The player
+  reaches it through `window.BridgeControls` with `ui.js`'s wrapper (plain
+  assignment as the fallback), not a second copy.
+- **The panel redraws by refetching the album or artist detail.** A new
+  variants-only endpoint is more server surface than a rare settings toggle
+  earns, and a local optimistic flip cannot know `optimizeActive` (the gate,
+  sox and the switch), which only the server computes. Rebuilding the panel
+  and transplanting the trays was refused: detaching a node takes focus out
+  of its subtree, which is the defect. Hence nodes built once and `reconcile`.
+- **`fingerprintFeatureReady` is deleted**, and the two facts its docblock
+  held (the bounded reason keys, the two prerequisites checked at run time)
+  moved to `fingerprintToolchainCache.ready`, the live gate that superseded it.
+
+### Changes
+
+- `internal/admin/static/app.js`: `setDisabled` and `window.BridgeControls`;
+  all 36 literal disables (and the enables that ended them) go through it, and
+  `saveTrayField` drops its private copy; `trayManagedKnown`,
+  `syncFingerprintEnable`, `enableFingerprint`; `applyDupesPolicyManaged`,
+  `saveDupesPolicy`, `dupesPolicyName`; `spec.blurb` as a function,
+  written by `applyTrayManaged`; `carPlayBlurb`.
+- `internal/admin/templates/duplicates.html`: `dupes-policy-hint`, the hidden
+  `dupes-policy-managed` line.
+- `internal/admin/static/player/variants.js`: the panel is a set of nodes
+  built once and painted (`paint`, `reconcile`, `switchNote`, `kindRow`), takes
+  `refresh` and `alive`, and redraws through `redraw` (newest answer wins,
+  refused once the route has moved on, `onChanged` on a failed fetch or with no
+  `refresh`). `ui.js`: the forwarding `setDisabled`. `views.js`: the album and
+  artist views hand the panel its fetch and route check; six sites through the
+  helper.
+- `cmd/bridge/upscale.go`, `main.go`: the dead helper, its import, and the
+  comment.
+
+### Tests
+
+- `TestNoConsoleControlDisablesItselfOutsideSetDisabled` (the sweep, app.js and
+  every player module, comments stripped, literals and the attribute forms),
+  `TestSetDisabledGivesFocusBackToAControlThatHadIt` (seven cases on the shipped
+  helper with the focus fixup rule in the DOM),
+  `TestAJobButtonGivesFocusBackAfterItsRequest` (the shipped `wireJobButton`),
+  `TestThePlayerReachesSetDisabledThroughTheWindowHandshake` (app.js's own
+  publication against ui.js's wrapper, and the no-app.js fallback).
+- `TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch`,
+  `TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt`,
+  `TestTheDuplicatesTemplateCarriesWhatTheManagedPolicyLineNeeds`,
+  `TestTheCarPlayTrayBlurbCountsOnlySwitchesTheReaderCanSee` (the shipped
+  `mountJobTrays`).
+- `TestAVariantTraySaveRedrawsThePanelInPlace` (the shipped panel on a DOM that
+  models focus: removing or moving a node takes focus out of its subtree) and
+  `TestTheAlbumAndArtistViewsLetTheirVariantPanelRedrawInPlace` (the shipped
+  album and artist views on a server that answers their detail). The existing
+  panel, tray and jobs harnesses took `setDisabled`, `insertBefore`, and a base
+  script the new test extends.
+- Red first: the panel test run against main's `variants.js` reports 13
+  assertion failures (a whole-route callback instead of a fetch, the panel
+  unchanged, a failed Delete not giving focus back, and so on). The tests on
+  the managed controls and the helper stop at "no function …" against main's
+  app.js, since `setDisabled`, `enableFingerprint`, `syncFingerprintEnable`
+  and the rest do not exist there, so what they pin is shown by the
+  mutations below.
+
+### Negative controls
+
+Each mutation on the committed tree, the named tests run with `-count=1`, then
+`git checkout --` and a clean status.
+
+| mutation | goes red |
+|---|---|
+| `setDisabled` without the focus rule (plain assignments) | the focused cases of the helper, job-button and tray tests |
+| `setDisabled` restores without checking it had focus | `never focused` in all three (the helper's `owed once` too) |
+| `setDisabled` restores over another focus | `focus taken meanwhile` in all three |
+| `wireJobButton` disables by literal | the sweep (naming `wireJobButton()`), and the job-button test |
+| an attribute form (`setAttribute("disabled")`) | the sweep |
+| a literal in `regenerateAllControls` (player) | the sweep, naming `regenerateAllControls()` |
+| app.js does not publish `window.BridgeControls` | the handshake test |
+| `ui.js` reads the wrong global | the handshake test |
+| `syncFingerprintEnable` ignores the managed set | `switch off, managed`, `unknown, then managed` |
+| it does not wait for the snapshot | both `unknown` cases (hidden after render) |
+| `enableFingerprint` sends for a managed field | both managed click cases |
+| the radios' prose is not hidden / the inputs are not disabled / `saveDupesPolicy` sends / the policy line never shows | one assertion each, on the cases that own it |
+| `carPlayBlurb` ignores what is shown / the spec keeps the static text / the blurb is written once at build / the DSD row counted among the three | the managed cases; the last one only `only the DSD row` |
+| `reconcile` rebuilds its children | the three focus lines of the panel test and nothing else |
+| no newest-redraw guard / no route-moved-on guard | `overtaken`, `movedOn` |
+| the panel's tray redraws for the CarPlay switch while generation is off / for upscaling alone | `gatedField` / the second fetch and the live CarPlay row |
+| a failed fetch hands nothing over / an abort counts as failure / no `refresh` falls back to nothing | `fails` / `aborted` / `noRefresh` |
+| the panel's tray leaves once its note goes | the focus and gear lines of the panel test, for both trays |
+| `run()` assigns `.disabled` itself | the failed-Delete focus line |
+| the album view is not handed `refresh` / the artist view not `alive` / a `refresh` that returns the wrong block | the wiring test, per view |
+
+A first `syncFingerprintEnable` control failed with a `ReferenceError`, not the
+property: removing the managed test removed the only call that made the harness
+extract `trayFieldManaged`. The test lists what the click reaches itself now
+(`withFunctions`), and the control was re-run.
+
+### Verified in a browser (Chrome 152, the same three bridges on the new build)
+
+- **Focus.** "Scan now" focused and clicked: the button was disabled with the
+  body focused while the request was out (as it must be), and
+  `document.activeElement` was `jobs-scan-now` once the 4 s timer had enabled
+  it. A real Enter key on the focused button ended the same way.
+- **Enable.** On the loopback bridge it shows, and a click enabled the switch
+  live (badge "degraded", the note naming the missing AcoustID key, the button
+  gone). On the managed bridges it never shows.
+- **Duplicates.** On the managed bridge no radios and no prose about saving,
+  and "The serving policy is set for this bridge: Highest quality." with
+  "Re-evaluate now" beside the heading; at 375 px `scrollWidth` equals
+  `clientWidth` (375).
+- **The blurb.** On the hosted-style bridge: "…anything to run; the two not
+  shown here are set for this bridge." over the two rows that are left.
+- **The panel.** The switch focused and toggled with a real Space key:
+  `document.activeElement` stayed the same `upscaleEnabled` switch, the tray
+  read "Saved.", the block note was lifted, hi-res Generate enabled, and the
+  CarPlay row showed its own note and gear with Generate disabled. Then the
+  CarPlay switch from the panel's tray (still there): focus kept, "Saved.", the
+  note gone, Generate CarPlay enabled, both trays' switches agreeing. The
+  artist page did the same. On the hosted-style bridge the panel keeps its
+  note and its (hidden) gear.
+
+### Left open
+
+- **B88.** The panel's live refresh (`onVariantChange`, every 8 s while a batch
+  runs) still re-runs the whole route: with focus on the panel's open gear and
+  a two-track batch queued, one `player:rerender` in 20 s put focus on
+  `#player-title`, replaced the gear and closed the tray.
+- **B89.** A control that vanishes or stays disabled when its request
+  succeeds leaves focus on the body: the Enable button, measured with a real
+  Enter key (hidden by the card refresh, activeElement the body), Generate,
+  Delete, "Sign out other sessions", the buttons whose disabled state is
+  computed.
+- The node tests skip on the Windows test host, which has no node; the sweep
+  (pure Go) ran there. The windows-latest leg has node and runs them.
+
+### Stale claims corrected in CLAUDE.md
+
+Four: the tray onSaved bullet said the panel's redraw "takes the tray and its
+Saved. away"; the mixes bullet called the panel's whole-route redraw a
+follow-up; the focus bullet called every other control's lost focus open; the
+managed bullet called the two controls a follow-up.
+
+### Review round 1 (SonarCloud on #1094)
+
+The quality gate passed and listed seven issues on the head, all taken:
+
+- `go:S3776` on three tests (cognitive complexity 16, 22 and 38 against 15):
+  `TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch`,
+  `TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt` and
+  `TestAVariantTraySaveRedrawsThePanelInPlace`. Each is a short driver now, with
+  the expectations in named `check…` helpers and the harness types at package
+  level; the assertions and their messages are unchanged, and the controls
+  were re-run on the split tests (`reconcile` rebuilding, the newest-redraw
+  guard, the CarPlay field gate, the Enable and policy handlers): each still
+  red where it was.
+- `javascript:S7747` and `S7762` on `reconcile`: the loop over `[...children]`
+  with `parent.removeChild(child)`. The suggestion to iterate the collection
+  directly would skip a node after each one removed (`children` is live), so
+  the copy stays, taken as a `filter` of the strangers, removed with
+  `child.remove()`; the two DOM stubs gained `remove()`.
+- `javascript:S3358`, a nested ternary for the stale-copy note: `staleNote`.
+- `javascript:S6582`, `!btn || !btn.dataset.switchOn`: an optional chain.
+
+Fixing the panel's own code showed a gap in what pins it: no test, before or
+after the change, covered the stale-copy note or the numbers a redraw moves.
+`TestAVariantTraySaveRedrawsThePanelInPlace` now redraws a panel through three
+summaries and reads the ratio, the bar's value and the note back, on the same
+nodes.
+
+| mutation | goes red |
+|---|---|
+| the count of one is always plural | `as drawn` |
+| the bar's value is not updated | all three steps |
+| the ratio is not updated | all three steps |
+| the stale note stays in the document at zero | `two saves later` only |
+
+### Review round 2 (CodeRabbit and Gemini on #1094)
+
+Two findings on `variants.js`, both on `redraw`, both taken.
+
+- **CodeRabbit (Minor): a failure the newer redraw overtook.** The success path
+  discarded an answer a newer redraw had overtaken, and the failure path did
+  not: with two saves out and the older fetch failing, `onChanged` re-rendered
+  the route under the newer redraw, which is the loss of tray and focus this
+  change removes. Verified by a scenario the harness lacked (the older of two
+  fetches rejecting after the newer answered): one whole-route callback on the
+  unfixed code, none after. The failure path now compares `seq` too.
+- **Gemini (medium): `panel.alive !== null`.** Its premise was wrong (an
+  `alive: undefined` takes the destructuring default, `null`, so it never
+  reached the call), but a non-function `alive` did throw `TypeError: panel.alive
+  is not a function` after the fetch had answered, an unhandled rejection in a
+  callback nobody awaits. Taken as `typeof panel.alive === "function"`, with a
+  case that passes `alive: true`.
+
+| mutation | goes red |
+|---|---|
+| the failure path does not compare `seq` | `overtakenFailure` (one whole-route callback) |
+| `alive` tested against `null` again | the non-function case (`TypeError: panel.alive is not a function`) |
+
+`checkAliveThatIsNotAFunction` and the new scenarios are in
+`TestAVariantTraySaveRedrawsThePanelInPlace`.
+
 ## 2026-09-29 — a render refuses a source newer than its row at every step, and a stale download asks for the rescan (backlog B53)
 
 Backlog B53: the three rendition-freshness leftovers #1077 recorded, plus a

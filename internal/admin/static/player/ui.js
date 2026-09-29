@@ -25,6 +25,29 @@ export function clear(node) {
 }
 
 /**
+ * Disable or enable a control around a request, giving focus back.
+ *
+ * The implementation is app.js's setDisabled, reached through
+ * window.BridgeControls because app.js is a classic script and this module
+ * cannot import it, the same one-way handshake BridgeFeatureTray is. It is
+ * the ONE implementation: a browser moves focus off a focused control that
+ * becomes disabled and does not give it back when it is enabled again, so a
+ * control that disabled itself around a request left a keyboard user on the
+ * body, and setDisabled is what gives it back (see it for the rule).
+ *
+ * The fallback is a plain assignment: a page without app.js still disables
+ * its controls and only loses the focus, the way the gear (BridgeFeatureTray)
+ * costs a tray and not the grid. Every player control that disables itself
+ * calls this and never sets `.disabled` to a literal
+ * (TestNoConsoleControlDisablesItselfOutsideSetDisabled).
+ */
+export function setDisabled(control, disabled) {
+  const shared = window.BridgeControls?.setDisabled;
+  if (shared) shared(control, disabled);
+  else control.disabled = disabled;
+}
+
+/**
  * An <svg><use> pointing at one of layout.html's transport sprite symbols.
  *
  * createElement cannot make SVG, so this goes through createElementNS and

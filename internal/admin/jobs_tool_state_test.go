@@ -61,6 +61,9 @@ globalThis.document = {
 };
 let apiAnswers = {};
 const API = { get: async (url) => apiAnswers[url] ?? null };
+// The managed set a settings snapshot named, or null before one has (app.js's
+// own binding, which the extracted functions read).
+let trayManaged = null;
 `
 
 // jobsToolStateRun drives both functions over the cases and prints what
@@ -103,6 +106,13 @@ console.log(JSON.stringify({ cards, chips }));
 // function the two entry points reach, extracted from the shipped app.js.
 func jobsToolStateScript(t *testing.T) string {
 	t.Helper()
+	return jobsToolStateBase(t) + jobsToolStateRun
+}
+
+// jobsToolStateBase is the harness without its run: what a test that drives
+// the same shipped functions its own way appends its own script to.
+func jobsToolStateBase(t *testing.T) string {
+	t.Helper()
 	src := readFile(t, "static/app.js")
 	var script strings.Builder
 	script.WriteString(jobsToolStatePreamble)
@@ -134,7 +144,6 @@ func jobsToolStateScript(t *testing.T) string {
 			t.Fatalf("the harness did not reach %s, so it no longer runs the shipped cards", need)
 		}
 	}
-	script.WriteString(jobsToolStateRun)
 	return script.String()
 }
 
