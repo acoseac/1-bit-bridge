@@ -83,6 +83,15 @@ func TestASnapshotWaitingOnALockedSourceStopsForItsCancel(t *testing.T) {
 		t.Fatalf("a snapshot cancelled while it waited on a locked source: err = %v after %v, dst = %q; "+
 			"want context.Canceled (it waited the lock out instead of stopping)", err, took, dst)
 	}
+	// A wait in SQLite's busy handler also ends in the cancellation once
+	// it times out, so the error alone cannot tell the two apart. The bound
+	// can, and is the wait's own: that handler sleeps the whole patience in
+	// real time, so a snapshot that answers sooner did not wait the lock
+	// out. One that stops as it should answers after one 100 ms wait.
+	if took >= backup.SnapshotBusyPatience {
+		t.Errorf("a snapshot cancelled while it waited on a locked source answered after %v, "+
+			"the whole busy wait (%v): the cancel did not end the wait", took, backup.SnapshotBusyPatience)
+	}
 	assertEmptyDir(t, filepath.Join(dataDir, backup.BackupsDirName))
 }
 
