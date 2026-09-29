@@ -266,6 +266,17 @@ func (w *pictureWalk) vorbisComments(src byteSource, pos int64, mbp *pictureValu
 	return pos, true
 }
 
+// readStringCost is what dhowden's readString allocates for a declared
+// length l with avail bytes left to read: all of l up front when l is within
+// readBytesMaxUpfront, whether or not the bytes are there, and otherwise what
+// io.CopyN buffers of the bytes that are.
+func readStringCost(l, avail int64) int64 {
+	if l <= dhowdenUpfrontBytes {
+		return l
+	}
+	return min(l, max(avail, 0))
+}
+
 // filePicture mirrors readPictureBlock reading a FLAC PICTURE block from the
 // file at pos: type, MIME, description, four dimensions, then the data length
 // it allocates before reading. It returns where the block's data ends, and
@@ -283,6 +294,9 @@ func (w *pictureWalk) filePicture(src byteSource, pos int64) (int64, bool) {
 			return pos, false
 		}
 		pos += 4
+		if !w.spend(readStringCost(int64(l), size-pos), "a PICTURE block") {
+			return pos, false
+		}
 		if int64(l) > size-pos {
 			return pos, false
 		}
@@ -311,6 +325,15 @@ func (w *pictureWalk) filePicture(src byteSource, pos int64) (int64, bool) {
 // bytes, whose error dhowden ignores. It reports whether dhowden reads on.
 // Only the header is decoded, through base64's streaming decoder, which
 // skips '\r' and '\n' as DecodeString does.
+//
+// Everything this decode makes dhowden allocate is counted, the MIME and
+// description reads included, because the decode repeats: dhowden's map
+// outlives the block, so the value is decoded again at every later
+// VORBIS_COMMENT block, and a readString whose length is past the decoded
+// bytes still allocates up to 10 MB before it fails (an ignored failure).
+// Measured on the first version of this guard, which counted only the
+// decoded bytes and the picture: a 787-byte file whose value declared a
+// 2.9 MB MIME type, decoded 23 times, allocated 68 MB.
 func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 	decodedMax := int64(base64.StdEncoding.DecodedLen(int(v.n)))
 	if !w.spend(decodedMax, "a METADATA_BLOCK_PICTURE comment") {
@@ -345,7 +368,11 @@ func (w *pictureWalk) decodedPicture(v pictureValue) bool {
 		if err != nil {
 			return readsOn(err)
 		}
-		if int64(l) > decodedMax-consumed {
+		avail := decodedMax - consumed
+		if !w.spend(readStringCost(int64(l), avail), "a METADATA_BLOCK_PICTURE comment") {
+			return false
+		}
+		if int64(l) > avail {
 			return true // more than the value can decode to: readPictureBlock fails
 		}
 		n, err := io.CopyN(io.Discard, dec, int64(l))

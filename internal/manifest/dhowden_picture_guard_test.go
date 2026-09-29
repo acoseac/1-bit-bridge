@@ -260,6 +260,22 @@ func pictureBombShapes() []struct {
 			}(),
 		},
 		{
+			// The same loop through a MIME length past the decoded bytes:
+			// readString allocates it up front, fails, and dhowden ignores
+			// the failure, 41 times. (The fuzzer found this one against the
+			// first version of the guard, which counted only the picture.)
+			"a METADATA_BLOCK_PICTURE whose MIME length is past its bytes, decoded again at each later VORBIS_COMMENT block", "x.flac",
+			func() []byte {
+				header := binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint32(nil, 3), 9<<20)
+				body := flacVorbisCommentBody("TITLE=t", "METADATA_BLOCK_PICTURE="+base64.StdEncoding.EncodeToString(header))
+				blocks := [][]byte{streamInfo(), flacBlock(false, 4, len(body), body)}
+				for i := range 40 {
+					blocks = append(blocks, flacBlock(i == 39, 4, len(emptyComments), emptyComments))
+				}
+				return flacStream(blocks...)
+			}(),
+		},
+		{
 			"a METADATA_BLOCK_PICTURE in an Ogg Vorbis comment packet", "x.ogg",
 			oggStream(65025, vorbisIdent(), vorbisCommentPacket("TITLE=t", mbpComment("METADATA_BLOCK_PICTURE", pictureDataLen, nil))),
 		},
