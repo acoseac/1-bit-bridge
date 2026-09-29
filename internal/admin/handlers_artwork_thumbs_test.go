@@ -240,3 +240,56 @@ func TestArtistImageSizeIsOptional(t *testing.T) {
 		t.Errorf("?size=0 status = %d, want 400", rw.Code)
 	}
 }
+
+// TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey pins the premise
+// `bridge artwork --gc` builds its keep set on: the console resolves a
+// 16-hex artworkVersion alias to the artwork key it stands for BEFORE it
+// derives anything, so the thumbnail a request for the alias makes is filed
+// under the artwork key, which the GC keeps, and never under the alias,
+// which it removes (artworkKeysInUse in cmd/bridge). A console that filed
+// thumbnails under the alias would need the GC to keep the alias set too.
+// It pins the artist form beside it: a sized portrait is filed under
+// manifest.ArtistThumbKey, the key the GC keeps for an artist a track row
+// names.
+func TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey(t *testing.T) {
+	srv, dir, _ := artworkThumbFixture(t)
+	const alias = "0123456789abcdef"
+	ctx := t.Context()
+	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
+		Path: "A/01.flac", Size: 100, ModTime: time.Now(), ArtworkMBID: metaLocalSha,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := srv.deps.Manifest.SetArtworkVersionAndBumpIndex(ctx, metaLocalSha, alias); err != nil || n != 1 {
+		t.Fatalf("stamp the alias: %d rows, %v", n, err)
+	}
+
+	rw := fetchArtwork(t, srv, "/api/library/artwork/"+alias+"?size=250")
+	if rw.Code != http.StatusOK {
+		t.Fatalf("alias at 250: status %d", rw.Code)
+	}
+	if px := longestSide(t, rw.Body.Bytes()); px != 250 {
+		t.Fatalf("alias at 250 served a %d px cover, so no thumbnail was derived", px)
+	}
+	thumbs := filepath.Join(dir, manifest.ThumbsDirName)
+	if _, err := os.Stat(filepath.Join(thumbs, metaLocalSha+"-250.jpg")); err != nil {
+		t.Errorf("the thumbnail is not filed under the resolved artwork key: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(thumbs, alias+"-250.jpg")); !os.IsNotExist(err) {
+		t.Errorf("a thumbnail is filed under the alias (%v); the GC removes those as orphans", err)
+	}
+
+	portrait := filepath.Join(dir, "artist-"+metaUUIDArtist+".jpg")
+	if err := os.WriteFile(portrait, encodeSquareJPEG(t, 900), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.deps.ArtistImagePath = func(mbid string) string {
+		return filepath.Join(dir, "artist-"+mbid+".jpg")
+	}
+	if rw := fetchArtwork(t, srv, "/api/library/artist-image/"+metaUUIDArtist+"?size=250"); rw.Code != http.StatusOK {
+		t.Fatalf("sized portrait: status %d", rw.Code)
+	}
+	if _, err := os.Stat(filepath.Join(thumbs, manifest.ArtistThumbKey(metaUUIDArtist)+"-250.jpg")); err != nil {
+		t.Errorf("the portrait's thumbnail is not filed under manifest.ArtistThumbKey: %v", err)
+	}
+}

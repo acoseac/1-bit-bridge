@@ -299,7 +299,7 @@ func TestSweepArtworkCacheNoOpUnderCap(t *testing.T) {
 	a := writeArtFile(t, dir, "00000000-0000-4000-8000-000000000000-500.jpg", 30, base)
 	b := writeArtFile(t, dir, "local-deadbeef-500.jpg", 30, base.Add(time.Hour))
 
-	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 1000)
+	evicted, freed, err := sweepCapCounts(context.Background(), dir, 1000)
 	if err != nil {
 		t.Fatalf("sweep err: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestSweepArtworkCacheEvictsOldestFirst(t *testing.T) {
 	f4 := writeArtFile(t, dir, "44444444-4444-4444-8444-444444444444-500.jpg", 30, base.Add(3*time.Hour))
 	f5 := writeArtFile(t, dir, "local-newest-500.jpg", 30, base.Add(4*time.Hour))
 
-	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	evicted, freed, err := sweepCapCounts(context.Background(), dir, 100)
 	if err != nil {
 		t.Fatalf("sweep err: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestSweepArtworkCacheUnboundedCapNoOp(t *testing.T) {
 	for _, capBytes := range []int64{0, -1} {
 		dir := t.TempDir()
 		f := writeArtFile(t, dir, "local-keep-500.jpg", 5_000_000, time.Now().Add(-time.Hour))
-		evicted, freed, err := sweepArtworkCache(context.Background(), dir, capBytes)
+		evicted, freed, err := sweepCapCounts(context.Background(), dir, capBytes)
 		if err != nil {
 			t.Fatalf("cap=%d sweep err: %v", capBytes, err)
 		}
@@ -380,7 +380,7 @@ func TestSweepArtworkCacheSkipsTmpAndNonJpg(t *testing.T) {
 	tmp := writeArtFile(t, dir, ".caa-12345.jpg.tmp", 10_000, base.Add(-time.Hour))
 	stray := writeArtFile(t, dir, "README.txt", 10_000, base.Add(-time.Hour))
 
-	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	evicted, freed, err := sweepCapCounts(context.Background(), dir, 100)
 	if err != nil {
 		t.Fatalf("sweep err: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestSweepArtworkCacheSkipsTmpAndNonJpg(t *testing.T) {
 // cache dir; the sweep treats that as empty, not an error.
 func TestSweepArtworkCacheMissingDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artwork-not-yet")
-	evicted, freed, err := sweepArtworkCache(context.Background(), dir, 100)
+	evicted, freed, err := sweepCapCounts(context.Background(), dir, 100)
 	if err != nil {
 		t.Errorf("missing dir should not error, got %v", err)
 	}

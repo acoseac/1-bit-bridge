@@ -44,9 +44,9 @@ var otherTreeWalks = map[string]string{
 	"internal/trash/trash.go (*Manager).List":               "one stamp directory of a root's trash, below the root",
 	"internal/integrity/locate.go TreeHoldsVariantSidecars": "the variants directory, which resolveSidecarRoot resolves",
 	"internal/integrity/inventory.go TakeSidecarInventory":  "the variants directory, which resolveSidecarRoot resolves",
-	"cmd/bridge/artwork.go artworkCacheHasFiles":            "the artwork cache",
-	"cmd/bridge/artwork.go runArtworkGC":                    "the artwork cache",
-	"cmd/bridge/artwork.go sweepArtworkCache":               "the artwork cache",
+	"cmd/bridge/artwork.go artworkCacheHasOrphans":          "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go runArtworkGC":                    "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go sweepArtworkCache":               "the artwork cache, which artworkWalkRoot resolves",
 }
 
 // TestEveryWalkOfALibraryRootStartsFromWalkableRoot sweeps the bridge's
