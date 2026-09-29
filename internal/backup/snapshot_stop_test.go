@@ -75,13 +75,21 @@ func TestASnapshotWaitingOnALockedSourceStopsForItsCancel(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)
 	holdExclusiveLock(t, src.ManifestDB)
+	refused := 0
+	ctx := backup.WithBusyObserver(driverBlindCancel(), func() { refused++ })
 
 	start := time.Now()
-	dst, err := backup.Snapshot(driverBlindCancel(), src)
+	dst, err := backup.Snapshot(ctx, src)
 	took := time.Since(start)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a snapshot cancelled while it waited on a locked source: err = %v after %v, dst = %q; "+
 			"want context.Canceled (it waited the lock out instead of stopping)", err, took, dst)
+	}
+	// The lock is met when the statement is prepared (reading the schema
+	// needs it), before the start check can run. A snapshot that stopped
+	// without meeting it would pass here without the wait this test is about.
+	if refused == 0 {
+		t.Fatal("the snapshot stopped without meeting the lock, so this tested no lock wait")
 	}
 	// A wait in SQLite's busy handler also ends in the cancellation once
 	// it times out, so the error alone cannot tell the two apart. The bound
@@ -96,20 +104,27 @@ func TestASnapshotWaitingOnALockedSourceStopsForItsCancel(t *testing.T) {
 }
 
 // TestASnapshotStillWaitsOutABriefLock is the control: the wait that a
-// cancel now ends is still a wait. A source locked for a moment is snapshotted
-// once the lock goes, as busy_timeout(5000) had it.
+// cancel now ends is still a wait. A source that is locked when the snapshot
+// first tries it is snapshotted once the lock goes, as busy_timeout(5000) had
+// it. The lock goes on the snapshot's first refusal, never after a delay: a
+// snapshot that reached the source only after the delay would pass without
+// meeting the lock at all (CodeRabbit on #1099).
 func TestASnapshotStillWaitsOutABriefLock(t *testing.T) {
 	dataDir := t.TempDir()
 	src := primeLiveState(t, dataDir)
 	release := holdExclusiveLock(t, src.ManifestDB)
-	go func() {
-		time.Sleep(300 * time.Millisecond)
+	refused := 0
+	ctx := backup.WithBusyObserver(context.Background(), func() {
+		refused++
 		release()
-	}()
+	})
 
-	dst, err := backup.Snapshot(context.Background(), src)
+	dst, err := backup.Snapshot(ctx, src)
 	if err != nil {
-		t.Fatalf("a snapshot of a source locked for 300ms: %v", err)
+		t.Fatalf("a snapshot of a source locked until its first attempt: %v", err)
+	}
+	if refused == 0 {
+		t.Fatal("the snapshot never met the lock, so this control tested no wait")
 	}
 	if !backup.LooksLikeSnapshotDir(dst) {
 		t.Errorf("Snapshot wrote %s, which is not a complete snapshot", dst)

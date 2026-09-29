@@ -189,6 +189,12 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	return nil
 }
 
+// busyObserverKey carries, in a test's context, a func() that retryWhileBusy
+// calls each time an attempt is refused a lock (export_test.go's
+// WithBusyObserver): a test that holds a lock can release it on the refusal
+// itself, rather than after a delay the snapshot may not have reached.
+type busyObserverKey struct{}
+
 // retryWhileBusy runs attempt until it answers something other than
 // SQLITE_BUSY, waiting between tries for up to snapshotBusyPatience in all,
 // and gives up at once when ctx is done: the wait SQLite's busy handler
@@ -201,6 +207,9 @@ func retryWhileBusy(ctx context.Context, attempt func() error) error {
 		err := attempt()
 		if !isBusy(err) {
 			return err
+		}
+		if observe, ok := ctx.Value(busyObserverKey{}).(func()); ok {
+			observe()
 		}
 		// The attempt was refused a lock, not stopped: a snapshot the
 		// shutdown cancelled meanwhile ends here rather than trying again.

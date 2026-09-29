@@ -100,10 +100,11 @@ func TestArmUntilGivesUpAtItsInstant(t *testing.T) {
 	at := time.Now().Add(200 * time.Millisecond)
 	p := ArmUntil(rec, at)
 	defer p.Disarm()
-	began := time.Now()
 	ended := make(chan struct{})
+	var gaveUp time.Time
 	go func() {
 		defer close(ended)
+		defer func() { gaveUp = time.Now() }() // runs as rec's Fatalf ends the goroutine
 		p.Wait(rec)
 	}()
 	select {
@@ -111,8 +112,11 @@ func TestArmUntilGivesUpAtItsInstant(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a Park armed to give up in 200ms was still waiting 5s later")
 	}
-	if took := time.Since(began); took < 150*time.Millisecond {
-		t.Errorf("the wait gave up after %v, before the instant it was given", took)
+	// Against the instant, never against a clock read after it was set: a
+	// pause between the two would let a wait that gave up on time read as
+	// early (CodeRabbit on #1099).
+	if gaveUp.Before(at) {
+		t.Errorf("the wait gave up %v before the instant it was given", at.Sub(gaveUp))
 	}
 	if want := "sqlitetest: no statement compared a key by " + at.Format("15:04:05.000"); rec.fatal != want {
 		t.Errorf("the wait failed with %q, want %q", rec.fatal, want)

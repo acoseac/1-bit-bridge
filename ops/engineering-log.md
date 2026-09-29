@@ -29582,3 +29582,24 @@ tests' waits (the rescanner's `awaitRowAt` and queue tests, `awaitOnePass`,
 internal/backup and internal/manifest, loggingtest's 3 s `Park.Wait`) wait
 on the same kind of disk writes without a serve around them; none has
 failed on CI yet, and whether one does under this harness is backlog B107.
+
+### Review round 1 (CodeRabbit on #1099; Gemini was over its daily quota)
+
+- `TestASnapshotStillWaitsOutABriefLock` released its lock 300 ms after it
+  started the snapshot, so a snapshot that reached the source only after the
+  delay passed without meeting the lock. Taken: the context carries an
+  observer (`WithBusyObserver`, a context value `retryWhileBusy` calls on each
+  refusal, so the seam is on the call it serves), the lock goes on the first
+  refusal, and the control fails unless a refusal was observed. The same
+  observer now makes `TestASnapshotWaitingOnALockedSourceStopsForItsCancel`
+  fail unless its snapshot met the lock: it is met when the statement is
+  prepared, since reading the schema needs it, before the start check could
+  answer the same `context.Canceled`. Controls: the lock released before
+  the snapshot turned the brief-lock control red ("never met the lock"); an
+  observer never told turned both red.
+- `TestArmUntilGivesUpAtItsInstant` required 150 ms to pass from a clock read
+  taken after the instant was set, so a pause between the two could fail a
+  wait that gave up on time. Taken: the wait's goroutine records when it gave
+  up, and the test requires that not to be before the instant. Control: a
+  give-up 100 ms early turned it red ("gave up 98.885208ms before the
+  instant").
