@@ -30606,7 +30606,9 @@ twin to fix, and no Mirror-PR: no wire field changes.
   only bound on what the walk holds: with no count and no last flag a stream
   would hold a packetSource per packet for as long as it went on.
   `TestOggFLACHeaderPacketsStopAtTheMappingsOwnMaximum` reads 65,635 header
-  packets to exactly 65,535 within the allocation property.
+  packets to exactly 65,535 within the allocation property: that extraction
+  of a 335 KB stream allocated 14.8 MB (18.8 MB under -race), against the
+  88.6 MB `extractionAllocLimit` allows.
 - The join ends with an empty PADDING block flagged last (`oggFLACTerminator`).
   In a .flac file whose last metadata block is not flagged, dhowden reads the
   first audio frame's 0xFF as a block header flagged last and stops there; the
