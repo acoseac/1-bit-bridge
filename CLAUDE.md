@@ -2018,8 +2018,10 @@ no failing test — which is the shape to expect in this area.
   happened), and #988's ordered tail is unchanged; the exit is a row in both
   terminal-order tables. **The default is the opposite of the analysis
   pool's**, which strikes only on a classified verdict: this debounce predates
-  classification, so everything not classified as the host's still strikes,
-  a tool that ran and refused the file included, which is what it is for. **The
+  classification, so everything not classified as the host's (or, since
+  B53, as a source newer than its row, `ErrSourceChanged`: the B53 bullet
+  below) still strikes, a tool that ran and refused the file included,
+  which is what it is for. **The
   outage is reported per TOOL, once**: one Warn when it starts, the jobs after
   it at Debug under the same message, one Info when a job whose chain ran the
   tool succeeds (read from the settings' `decoder`, the route the run took),
@@ -2079,7 +2081,8 @@ no failing test — which is the shape to expect in this area.
   never asks again for a family it has listed (PlayerService tier 0,
   `shouldAutoGenerateVariant`, `BridgeRenditionRequestGate`), so one of its
   requests cost 3 renders and up to a scan interval of 410; the CLI, a folder
-  POST or a script repeat it. `sourceIsAtRow` is the one check, the scanner's
+  POST or a script repeat it. `transcode.SourceIsAtRow` is the one check
+  (`sourceIsAtRow` in cmd/bridge until B53), the scanner's
   EXACT skip-gate comparison, never serve's 2 s tolerance: the on-demand path
   refuses (`errSourceAheadOfRow`, counted `rejected`, no wire change) and
   queues a rescan of the file's directory (`sourceRescanner`, bgWriters-joined),
@@ -2099,16 +2102,55 @@ no failing test — which is the shape to expect in this area.
   the serve path refuses, and with auto-optimize off (the default) nothing
   renders it again and the phone never asks. The album survey still MEASURES a
   changed mate (a peak describes the bytes on disk; `cliAlbumMateSpec` ignores
-  needsRun). The batch coordinator stamps the row but does not check, so a
-  render it makes of a changed file stays refused until something renders it
-  again after the scan. **The check is made when a render is queued, not when
-  the pool starts it**: a file that changes while its job waits, or while it
-  renders, is rendered from new bytes under the row's older stamp, and the
-  serve path refuses the result (main's live stamp, taken at enqueue, had the
-  same window; backlog B53). `TestAChangedFileIsNotRenderedUntilItsRowIsReRead`
+  needsRun). Until B53 (the next bullet) this bullet also said the batch
+  coordinator does not check and that nothing checks when the pool starts a
+  job; both were true then and are not now. `TestAChangedFileIsNotRenderedUntilItsRowIsReRead`
   drives the loop through the real handler, sweeper and download path, with
   `committingQueue` committing each job as `Pool.processJob` does (the adapter
   takes its pool through `renditionQueue` for that).
+- **…and the batch walks check too, `transcode.Run` checks again when it
+  starts and before it publishes, and a stale download asks for the rescan**
+  (backlog B53). Measured on main at 6dfba62c: a batch over a changed file
+  rendered the new bytes under the row's stamp (410 `variant_stale`), and a
+  batch after the scan counted the track covered (a projection's `HasVariant`
+  is ANY rendition of the family) and rendered nothing, so it stayed 410; a
+  job whose file changed while it waited in the queue, or while it rendered,
+  succeeded with a rendition the serve path refused; and five downloads of a
+  pre-generated rendition after a retag answered 410 while nothing rescanned
+  and the sweep passed the file over (`changedSinceScan`) until the periodic
+  scan. Now the walks compare the resolver's stat (`ResolverFunc` returns
+  `ResolveChecked`'s triple, the stat production already took) with each
+  projection, pass a changed file over into the row's skipped count and ask
+  for its rescan. `Run` answers `ErrSourceChanged` FIRST (before a decoder
+  probe, a scratch file or an album-gain claim) and again in
+  `JobSpec.publishSidecar`, the one publish helper both chains call, so bytes
+  the stamp does not describe are never renamed into place. The pool
+  classifies it BY TYPE: counted and announced like any failure (a batch must
+  hear it to drain; #988's tail is unchanged, and the exit is a row in both
+  terminal-order tables), it **strikes nothing** (a newer version is not a bad
+  file; three strikes would suppress a good one for 30 days), and it asks for
+  the rescan inside the claim. The CLI worker renders through `Run`, so a file
+  retagged during a long `bridge render` fails with the change named. A 410
+  `variant_stale` tells `api.StaleRenditionFunc`, and `staleRenditionRescan`
+  asks only while the ROW is behind the file (once a scan read the change a
+  rescan changes nothing) and once per directory per minute, bounded at 1,024
+  directories: every play, device and range request makes that GET. A rescan
+  that wrote rows nudges the auto-optimize sweep, whose tick otherwise follows
+  the periodic scan. **A rescan request names the file by its ROW's path, and
+  the rescanner resolves the directory itself**: the scanner makes each row's
+  path from the spelling of the directory it is handed, and on main a request
+  naming a changed file in lower case, on a filesystem that opens it, left the
+  rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: with
+  auto-optimize off, a stale rendition whose row has caught up is rendered
+  again by nothing (backlog B82), and a watcher-driven subtree scan does not
+  nudge the sweep (B83). Tests: `TestABatchPassesOverAFileThatChangedSinceItsScan`,
+  `TestRunRendersNothingFromASourceThatChangedSinceItsStamp`,
+  `TestPublishingRefusesASourceThatChangedWhileItRendered`,
+  `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (the real pool and
+  `Run` over a stand-in sox), `TestTheCLIRendersNothingFromAFileThatChangedDuringItsRun`,
+  `TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`,
+  `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
+  `TestARescanIndexesNoSecondSpellingOfTheDirectory`.
 - **`maxPerSweep` is not just a queue guard**: `UpsertVariant` strict-advances
   `indexed_at`, so an uncapped first sweep pushes one delta row per variant to
   every paired device at once. The disk floor is a RUNNING budget and the probe

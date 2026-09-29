@@ -76,6 +76,9 @@ type parkedExit struct {
 	timeout time.Duration
 	// landed checks the exit's bookkeeping once its failure is counted.
 	landed func(t *testing.T, store *manifest.Store, spec JobSpec)
+	// rescans is whether the exit asks for a rescan of its source's
+	// directory, which is bookkeeping too: asked for before the count.
+	rescans bool
 }
 
 // TestACountedTranscodeFailureHasAlreadyReleasedItsPath pins what a failure
@@ -140,6 +143,17 @@ func TestACountedTranscodeFailureHasAlreadyReleasedItsPath(t *testing.T) {
 			fsync:  noopFsync,
 			landed: requireSidecarGone,
 		},
+		{
+			// Run found the source changed since its row: no strike, and a
+			// rescan of its directory asked for before the count.
+			name:    "source changed",
+			logMsg:  "pool: source changed on disk since its scan",
+			seed:    true,
+			runner:  failRunner(sourceChangedFailure()),
+			fsync:   noopFsync,
+			landed:  requireStrikes(0),
+			rescans: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) { runParkedExit(t, tc) })
 	}
@@ -157,6 +171,13 @@ func runParkedExit(t *testing.T, tc parkedExit) {
 	// it, on every way out of the test, a failed assertion included.
 	defer p.Stop()
 	defer park.Release()
+	var rescanMu sync.Mutex
+	var rescans []string
+	p.SetSourceRescan(func(rel string) {
+		rescanMu.Lock()
+		defer rescanMu.Unlock()
+		rescans = append(rescans, rel)
+	})
 
 	spec := terminalOrderSpec(t)
 	if err := p.Enqueue(spec); err != nil {
@@ -168,6 +189,15 @@ func runParkedExit(t *testing.T, tc parkedExit) {
 
 	settleTerminal(t, p, func(st PoolStats) bool { return st.Failed == 1 })
 	tc.landed(t, store, spec)
+	rescanMu.Lock()
+	asked := append([]string(nil), rescans...)
+	rescanMu.Unlock()
+	if tc.rescans && (len(asked) != 1 || asked[0] != spec.SourceLibraryRel) {
+		t.Fatalf("rescans asked for %v once the failure is counted, want [%s]", asked, spec.SourceLibraryRel)
+	}
+	if !tc.rescans && len(asked) != 0 {
+		t.Fatalf("rescans asked for %v by an exit that reached a verdict on its source, want none", asked)
+	}
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatalf("a retry sent on Failed == 1 returned %v, want it accepted: "+
 			"the job had already been counted, so its path must already be free", err)
@@ -280,6 +310,7 @@ func TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath(t *testing.T) {
 		{name: "tool unavailable", seed: true, finish: failRunner(soxLookupFailure()), fsync: noopFsync},
 		{name: "fsync failed", seed: true, finish: writeSidecarRunner, fsync: failingFsync},
 		{name: "store failed", finish: writeSidecarRunner, fsync: noopFsync},
+		{name: "source changed", seed: true, finish: failRunner(sourceChangedFailure()), fsync: noopFsync},
 		{name: "panic", seed: true, fsync: noopFsync, finish: func(context.Context, JobSpec) (RunResult, error) {
 			panic("synthetic worker panic")
 		}},

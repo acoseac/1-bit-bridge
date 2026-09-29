@@ -22,7 +22,7 @@ func specsFromBatch(t *testing.T, s *manifest.Store, want int) map[string]JobSpe
 		<-ctx.Done()
 		return RunResult{SizeBytes: spec.SourceSize}, nil
 	}
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatal(err)
 	}

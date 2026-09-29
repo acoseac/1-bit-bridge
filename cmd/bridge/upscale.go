@@ -519,7 +519,7 @@ func classifyUpscaleTrack(
 	// that needs no run, so the dry run lists it, and so the album gain,
 	// which measures an album-mate through this function, still measures
 	// it (cliAlbumMateSpec takes the spec whatever needsRun says).
-	if !sourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
+	if !transcode.SourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
 		counters.changedSinceScan++
 		return &upscaleCandidate{spec: spec, skipNote: "changed on disk since the last scan"}, 0
 	}

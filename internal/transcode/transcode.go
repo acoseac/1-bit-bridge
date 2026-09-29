@@ -953,6 +953,15 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 // DSD rendition's measured gain travels with its size and settings. RunSox
 // stays as the (size, settings, error) view for the pool's runner seam.
 func Run(ctx context.Context, j JobSpec) (RunResult, error) {
+	// A source that changed after its row was written is not rendered: its
+	// bytes are not the version the stamp records, so the serve path would
+	// refuse the result (source_version.go). First, before a decoder probe,
+	// a scratch file or an album-gain claim: a job can wait in a queue for
+	// hours behind a library-wide batch, and every enqueuer's own check is
+	// as old as the job.
+	if err := j.sourceChanged("not rendered"); err != nil {
+		return RunResult{}, err
+	}
 	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —
 	// no re-hash here, and the rename target below is exactly the path sox
 	// wrote. tmpPath carries a per-job token, so it MUST be the value from
@@ -1083,8 +1092,9 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		}
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
-	// rename(2), not a copy.
-	size, err := publishSidecar(ctx, tmpPath, finalPath)
+	// rename(2), not a copy. Refused for a source that changed while it
+	// rendered (source_version.go).
+	size, err := j.publishSidecar(ctx, tmpPath, finalPath)
 	if err != nil {
 		return RunResult{}, err
 	}

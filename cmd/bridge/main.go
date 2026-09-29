@@ -887,10 +887,10 @@ type upscaleEnqueuerAdapter struct {
 	// the OS temp dir). Nil-safe.
 	tempDir func() string
 	// rescan asks for the directory of a file whose row is behind it to
-	// be read again (sourceRescanner.request, with the file's absolute
-	// and library-relative paths). Nil-safe: unwired, a refused file
-	// waits for the periodic scan.
-	rescan func(abs, rel string)
+	// be read again (sourceRescanner.request, with the path the file's row
+	// records). Nil-safe: unwired, a refused file waits for the periodic
+	// scan.
+	rescan func(rel string)
 }
 
 // renditionQueue is the one transcode.Pool method the adapter calls. It is
@@ -1009,9 +1009,9 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 		return api.ErrUpscaleSourceMissing
 	}
 	spec.SourceMTimeNS, spec.SourceSize = track.ModTime.UnixNano(), track.Size
-	if !sourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
+	if !transcode.SourceIsAtRow(info, spec.SourceMTimeNS, spec.SourceSize) {
 		if a.rescan != nil {
-			a.rescan(spec.SourceAbsPath, track.Path)
+			a.rescan(track.Path)
 		}
 		return errSourceAheadOfRow
 	}
@@ -3925,9 +3925,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// api.Server resolver. Without this the Coordinator enqueues
 		// JobSpecs with empty SourceAbsPath and every sox run fails
 		// (CodeRabbit critical on PR #201).
-		batchResolver := func(libraryRel string) (string, error) {
-			abs, _, err := apiSrv.Resolver().ResolveChecked(libraryRel)
-			return abs, err
+		// Its stat is what the batch walks compare with each track's row,
+		// so a file that changed after its last scan is passed over.
+		batchResolver := func(libraryRel string) (string, os.FileInfo, error) {
+			return apiSrv.Resolver().ResolveChecked(libraryRel)
 		}
 
 		upscaleCoordinator, err = transcode.NewCoordinator(upscalePool, manifestStore, cfg.DataDir, nil, batchResolver)
@@ -3967,15 +3968,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 		// A request for a rendition of a file that changed after its last
 		// scan is refused, and queues a rescan of the file's directory so
-		// the next request finds the row current (rendition_stamp.go).
-		// bgWriters-joined: the scan writes the store, and it runs on
-		// scanCtx, which the shutdown cancels.
-		rescanner := newSourceRescanner()
-		bgWriters.Add(1)
-		go func() {
-			defer bgWriters.Done()
-			rescanner.run(scanCtx, scanner.ScanSubtree)
-		}()
+		// the next request finds the row current (rendition_stamp.go). So
+		// does a job that finds its source changed when it starts or
+		// before it publishes, a batch walk that passes over such a file,
+		// and a download that finds a rendition stale because its source
+		// changed. The directory is resolved from the path the row records,
+		// through the live resolver. The loop starts below, once the
+		// auto-optimize nudge it signals exists.
+		rescanner := newSourceRescanner(func(rel string) (string, error) {
+			return apiSrv.Resolver().Resolve(rel)
+		})
+		upscalePool.SetSourceRescan(rescanner.request)
+		apiSrv.WithStaleRendition(newStaleRenditionRescan(manifestStore.LookupTrack, rescanner.request).observe)
 		enqueuer := &upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
@@ -4098,6 +4102,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 					autoOptimizeNudge, autoOptimizeRearm, autoOptimizeSweepState)
 			}()
 		}
+
+		// The rescanner's loop. A rescan that wrote rows nudges the
+		// auto-optimize sweep, which renders again what the rows it read
+		// made stale; its tick otherwise follows the periodic scan.
+		// bgWriters-joined: the scan writes the store, and it runs on
+		// scanCtx, which the shutdown cancels.
+		rescanNudge := autoOptimizeNudge
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			rescanner.run(scanCtx, scanner.ScanSubtree, func() {
+				select {
+				case rescanNudge <- struct{}{}:
+				default:
+				}
+			})
+		}()
 
 		// Periodic integrity sweep: walks `track_variants` on the
 		// configured cadence (default 1 h, opt-out via

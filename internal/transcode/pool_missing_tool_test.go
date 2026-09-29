@@ -69,13 +69,19 @@ func newToolFreePool(t *testing.T, pathDir string, rels ...string) *announcingPo
 	return newAnnouncingPool(t, rels...)
 }
 
-// sourceFile writes a stand-in source (no tool here reads its bytes) and
-// returns a spec for it at the version the track row records.
+// sourceFile writes a stand-in source (no tool here reads its bytes) at the
+// version the track row records, as a scan leaves it, and returns a spec for
+// it at that version: Run renders a file only while it is still the version
+// its row records.
 func sourceFile(t *testing.T, rel string) JobSpec {
 	t.Helper()
 	abs := filepath.Join(t.TempDir(), filepath.Base(rel))
-	if err := os.WriteFile(abs, []byte("not audio"), 0o644); err != nil {
+	if err := os.WriteFile(abs, make([]byte, missingToolSourceSize), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
+	}
+	at := time.Unix(0, missingToolSourceMTime)
+	if err := os.Chtimes(abs, at, at); err != nil {
+		t.Fatalf("stamp source: %v", err)
 	}
 	return JobSpec{
 		SourceAbsPath:    abs,

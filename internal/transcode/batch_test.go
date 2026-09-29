@@ -3,6 +3,9 @@ package transcode
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,6 +30,56 @@ func openTempStoreForBatch(t *testing.T) *manifest.Store {
 	}
 	return s
 }
+
+// scannedResolver stands in for the production resolver
+// (fs.Resolver.ResolveChecked) over a library that matches its rows, as one
+// does right after a scan: it resolves every path under /tmp/abs and answers
+// the size and mtime the track's row records, so the batch walks' check of a
+// file against its row passes. A test about a file that changed after its
+// scan resolves real files instead (batch_source_changed_test.go).
+func scannedResolver(s *manifest.Store) ResolverFunc {
+	return func(rel string) (string, os.FileInfo, error) {
+		st, err := s.GetTrackStat(context.Background(), rel)
+		if err != nil {
+			return "", nil, err
+		}
+		if st == nil {
+			return "", nil, fmt.Errorf("no track row for %s", rel)
+		}
+		return "/tmp/abs/" + rel, rowFileInfo{name: path.Base(rel), size: st.Size, mtimeNS: st.MTimeNS}, nil
+	}
+}
+
+// projectionResolver is scannedResolver for a walk over hand-made
+// projections that have no rows in the store: each path answers the size
+// and mtime its projection records.
+func projectionResolver(ps []manifest.TrackProjection) ResolverFunc {
+	byPath := make(map[string]manifest.TrackProjection, len(ps))
+	for _, p := range ps {
+		byPath[p.Path] = p
+	}
+	return func(rel string) (string, os.FileInfo, error) {
+		p, ok := byPath[rel]
+		if !ok {
+			return "", nil, fmt.Errorf("no projection for %s", rel)
+		}
+		return "/tmp/abs/" + rel, rowFileInfo{name: path.Base(rel), size: p.Size, mtimeNS: p.MTimeNS}, nil
+	}
+}
+
+// rowFileInfo is the os.FileInfo scannedResolver answers: a regular file of
+// the row's size and mtime.
+type rowFileInfo struct {
+	name          string
+	size, mtimeNS int64
+}
+
+func (f rowFileInfo) Name() string       { return f.name }
+func (f rowFileInfo) Size() int64        { return f.size }
+func (f rowFileInfo) Mode() os.FileMode  { return 0o644 }
+func (f rowFileInfo) ModTime() time.Time { return time.Unix(0, f.mtimeNS) }
+func (f rowFileInfo) IsDir() bool        { return false }
+func (f rowFileInfo) Sys() any           { return nil }
 
 // seedBatchFixture plants a small library with mixed-format tracks:
 // one already-covered (has variant), two uncovered, one ineligible
@@ -111,7 +164,7 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 		return RunResult{SizeBytes: spec.SourceSize * 2}, nil // arbitrary non-zero size
 	}
 	dataDir := t.TempDir()
-	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, dataDir, nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -203,7 +256,7 @@ func TestSubmit_RefusesOnInsufficientDiskSpace(t *testing.T) {
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -228,7 +281,7 @@ func TestSubmitOptimize_DiskCheckTargetsOutputDir(t *testing.T) {
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -254,7 +307,7 @@ func TestSubmit_DiskCheckFallsBackToDataDir(t *testing.T) {
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
 	dataDir := t.TempDir()
-	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, dataDir, nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -359,7 +412,7 @@ func TestRecoverInterruptedBatches_RunsAtNewCoordinator(t *testing.T) {
 	}
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
@@ -385,7 +438,7 @@ func TestThroughput_ReturnsZeroBeforeMinSamples(t *testing.T) {
 
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +706,7 @@ func newALACGateFixture(t *testing.T) *Coordinator {
 	p := NewPool(s, 1, 4)
 	t.Cleanup(p.Stop)
 	c, err := NewCoordinator(p, s, t.TempDir(), nil,
-		func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
+		scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}

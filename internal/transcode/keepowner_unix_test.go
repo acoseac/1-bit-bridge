@@ -46,14 +46,14 @@ func TestRunAsRootKeepsTheInstallOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "transcoded")
-	spec := JobSpec{
+	spec := stampedAsScanned(JobSpec{
 		SourceAbsPath:    src,
 		SourceLibraryRel: "Artist/Album/01.flac",
 		TargetSampleRate: 192000,
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
 		OutputDir:        out,
-	}
+	})
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
 	if _, _, err := RunSox(context.Background(), spec); err != nil {
@@ -97,12 +97,12 @@ func TestRunDSDAsRootKeepsTheInstallOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, tmp := filepath.Join(root, "variants"), filepath.Join(root, "tmp")
-	spec := JobSpec{
+	spec := stampedAsScanned(JobSpec{
 		SourceAbsPath: src, SourceLibraryRel: "Album/tone.dsf",
 		SourceSampleRate: 2822400, SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: 1,
 		TargetSampleRate: 44100, TargetBits: 16, Quality: QualityMedium,
 		OutputDir: out, TempDir: tmp, Kind: JobKindOptimize,
-	}
+	})
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
 	if _, err := Run(context.Background(), spec); err != nil {

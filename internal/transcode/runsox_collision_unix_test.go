@@ -99,14 +99,14 @@ func TestRunSoxConcurrentSameSpecDoesNotStealTmp(t *testing.T) {
 	if err := os.WriteFile(src, []byte("source"), 0o644); err != nil {
 		t.Fatalf("seed source: %v", err)
 	}
-	spec := JobSpec{
+	spec := stampedAsScanned(JobSpec{
 		SourceAbsPath:    src,
 		SourceLibraryRel: "Music/Album/01.flac",
 		TargetSampleRate: 192000,
 		TargetBits:       24,
 		Quality:          QualityVeryHigh,
 		OutputDir:        t.TempDir(),
-	}
+	})
 	finalPath := spec.SidecarPath()
 
 	// Both goroutines run the identical spec; the script decides who is A.

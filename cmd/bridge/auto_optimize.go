@@ -306,7 +306,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, k
 		// "mark this permanently un-optimizable" bug during a mount outage.
 		return transcode.JobSpec{}, projected, planUnresolvable
 	}
-	if !sourceIsAtRow(info, c.MTimeNS, c.Size) {
+	if !transcode.SourceIsAtRow(info, c.MTimeNS, c.Size) {
 		return transcode.JobSpec{}, projected, planChangedSinceScan
 	}
 
@@ -459,7 +459,7 @@ func (sw *autoOptimizeSweeper) planPCMRender(c manifest.AutoOptimizeCandidate, o
 	if rerr != nil || info.IsDir() {
 		return transcode.JobSpec{}, projected, planUnresolvable
 	}
-	if !sourceIsAtRow(info, c.MTimeNS, c.Size) {
+	if !transcode.SourceIsAtRow(info, c.MTimeNS, c.Size) {
 		return transcode.JobSpec{}, projected, planChangedSinceScan
 	}
 	return transcode.JobSpec{
