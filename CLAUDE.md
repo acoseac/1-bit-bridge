@@ -2301,6 +2301,10 @@ no failing test — which is the shape to expect in this area.
   `variant_stale` once a scan read the change and nothing rendered them
   again: the stale downloads rendered nothing, and a batch counts a track
   with ANY rendition of the family covered (`TrackProjection.HasVariant`).
+  On a real `bridge serve` with sox, after a retag and a scan the batch
+  answered `enqueuedCount: 0, alreadyCovered: 1` and 15 downloads over 30 s
+  all answered 410; with the fix the second download was served (the render
+  took under 2 s), and so it was after a second retag with no scan.
   What the app does after a 410 (read in the iOS source, 2026-09-29): on a
   PLAYBACK 410 it drops the id from its local row, in memory and persisted,
   and retries; the retry asks for the family again only under CarPlay or
@@ -2329,11 +2333,19 @@ no failing test — which is the shape to expect in this area.
   request for the family would: the family's CURRENT id, stamped from the row
   (a DSD `v1` rendition is rendered as the `v2` one, which the app, taking the
   newest of a family, plays; the `v1` row stays, and its later downloads
-  render nothing). At most once per rendition per minute, since a failed
-  render writes no row; the minute is not spent when nothing was tried (the
-  pool's queue full, the kind off), and a file that changed again before the
-  enqueue (`errSourceAheadOfRow`) waits for the rescan that enqueue asked
-  for. At most 1,024 renders wait, those older than an hour forgotten first.
+  render nothing). **At most once per rendition AND VERSION of the file per
+  minute**: the minute bounds the tries of a render that fails (a failure
+  writes no row), and a file retagged again is a render not yet tried.
+  Keyed without the version, on a real bridge a second retag 30 s after the
+  first answered 410 on 15 downloads over 30 s: the render its rescan queued
+  was refused as asked for within the minute. The minute is not spent when
+  nothing was tried (the pool's queue full, the kind off), and a file that
+  changed again before the enqueue (`errSourceAheadOfRow`) waits for the
+  rescan that enqueue asked for. **A rescan that brought every waiting file
+  level frees its directory's rescan minute** (B53's), so the next change
+  asks at once; one that left a file behind keeps it, which is the minute's
+  job (a file still being written, a directory the scan cannot read). At
+  most 1,024 renders wait, those older than an hour forgotten first.
   **No loop**: the render is stamped with the row, fresh to the serve path,
   the sweep and the album gain alike (#1077's one clock), and a served
   rendition calls no hook. **A batch and the Inspector's coverage bars were
@@ -2350,6 +2362,7 @@ no failing test — which is the shape to expect in this area.
   already did. Tests: `TestAStaleRenditionIsRenderedAgainWhenADownloadFindsItsRowCurrent`,
   `TestAStaleDownloadWhoseRowIsBehindRendersAgainAfterItsRescan`,
   `TestAStaleDownloadRescansItsSourceAndRendersItAgain`,
+  `TestAStaleDownloadRendersEveryNewVersionOfItsFileAgain`,
   `TestAStaleDownloadRendersNothingForAKindThatIsSwitchedOff`,
   `TestAStaleDownloadRendersNothingForAFileWhoseRendersKeepFailing`,
   `TestAStaleRenditionOfAnOlderSchemaIsRenderedAsTheCurrentOne`,

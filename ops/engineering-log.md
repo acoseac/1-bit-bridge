@@ -29391,3 +29391,202 @@ holds its job until the test ends, which makes it structural.
   this entry (the design summary still described the first `wrote` behaviour,
   and a line began with `#1077`, which markdown reads as a heading; both
   taken).
+
+## 2026-09-29 — a download that finds a rendition stale has it rendered again; a batch and the coverage bars still count a stale rendition as covered (backlog B82)
+
+Backlog B82, left open on purpose by B53 (#1093). With auto-optimize off, the
+default, a rendition made before a retag answered 410 `variant_stale` for
+ever once a scan had read the change: nothing rendered it again. B53 made a
+stale download ask for a rescan, which heals only where the sweep runs.
+
+### Measured on main at 6bc4605a
+
+- The stampBridge harness (#1077's, `rendition_stamp_test.go`): a client's
+  requests rendered the PCM file's CarPlay tier and the DSD file's faithful
+  tier, both files were retagged, and a scan read them. The downloads then
+  answered 410 and rendered nothing (`the stale downloads rendered []`). With
+  the row still behind at the download, B53's rescan ran and nothing rendered
+  the rendition in the 10 s after it.
+- A real `bridge serve` built from 6bc4605a, sox 14.4.2 on the dev Mac,
+  upscale on and auto-optimize off (the default), over one 96 kHz / 24-bit
+  FLAC of 20 s. POST /v1/upscale `optimize` rendered `optimized-v2-48000-16`
+  (GET 200). Scenario A, a retag (`metaflac --dont-use-padding`, mtime a
+  minute ahead) that a scan read (POST /api/scan): POST /v1/upscale/batch
+  `optimize` over the album answered `enqueuedCount: 0, alreadyCovered: 1`,
+  and 15 GETs over 30 s all answered 410. Scenario B, a second retag with no
+  scan: 15 GETs over 30 s, all 410. Renders done: 1, the request's.
+- The same probe against the fix's first build (c2ae96fd): scenario A
+  answered `[410, 200, 200, …]` (the render took under 2 s), but scenario B,
+  30 s later, answered 410 on all 15 GETs. Its stale download's rescan read the
+  retag, and the render the rescan then asked for was refused as asked for
+  within the minute: the per-rendition debounce was keyed by path and id,
+  without the file's version. Fixed in aef7cf4c (below); against that build
+  scenario B answered `[410, 200, 200, …]` as well, renders done 3 (the
+  request's and one per retag).
+
+### What the app does after a 410 (read in the iOS source, 2026-09-29)
+
+B82 (and CLAUDE.md's #1077 bullet, rendition_stamp.go, the
+`api.StaleRenditionFunc` and `serveVariant` comments) said the phone never
+asks again for a family the manifest lists. It holds only while the app
+still lists the id:
+
+- On a PLAYBACK 410 (or 404) for a variant, `PlayerService`'s catch
+  (`isUpscaleVariantStaleError`, then `dropStaleVariantAndRetry`) drops the id
+  from every queue copy of the track and from its SwiftData row
+  (`staleVariantHandler`), and re-enters `startCurrent`.
+- The retry asks for the family again only in two routes: Tier 0's lazy
+  `requestOptimize` POST, under CarPlay or opted-in cellular routing of a PCM
+  source with no `optimized-` id listed; and, for a DSD source whose route
+  wants a rendition, `BridgeRenditionRequestGate.shouldRequest` with the
+  family missing. `resolveVariantID`'s Tier 1 (a picked id) and Tier 2 (the
+  upscaled toggle) never request.
+- An offline download (`DownloadCoordinator`) resolves
+  `nextVariantToDownload` from the job's projection; `shouldAutoGenerateVariant`
+  asks only when the family is missing, and a 410 fails the job without
+  dropping the id.
+- The manifest lists every `track_variants` row (`variantsAggSQL` has no
+  freshness term), so every delta for the track lists the stale id again.
+
+### Design
+
+- `api.StaleRenditionFunc` also takes the rendition's id: the row's, as the
+  reap in `serveVariant` uses it (`LookupVariant` matches the id exactly today,
+  so this is the spelling the hook keys on, not a case fix).
+- B53's hook is renamed `staleRenditionHeal`. Row current: it asks for the
+  render at once. Row behind: it keeps the render (`await`) and asks for the
+  rescan as before; `sourceRescanner.run`'s `after` step now takes the
+  library-relative directory the rescan read, and `afterRescan` drops the
+  album-gain index, then asks for the waiting renders whose rows the rescan
+  brought level (`rescanned`; one still behind is dropped), then nudges the
+  sweep. That order keeps a DSD render off a stale album index and puts the
+  job on the foreground lane ahead of the sweep's background one.
+- `staleRerender.rerender`: the kind read off the id's prefix
+  (`renditionKindOf`, where `optimized-` covers the DSD compact tier), the
+  kind's LIVE gate (`renditionGates`: the very closures the /v1 server gets,
+  `dsdRenderActiveFn` hoisted out of the WithDSDRender literal for it), never
+  on a demo bridge (its POST /v1/upscale answers 403), never for a file whose
+  renders keep failing (`Store.VariantFailureSuppressed`, the one-row form of
+  `variantFailureSuppressedSQL`, run through `countTracksWhere` so SonarCloud's
+  go:S2077 sees a parameter), then `upscaleEnqueuerAdapter.enqueueKind`, the
+  entry point a client's request for the kind reaches. That renders the
+  family's CURRENT id, stamped from the row, under the adapter's own refusals
+  (a file ahead of its row, a family already fresh, the DSD caps).
+- Debounce: at most once per rendition and version of the file per minute (a
+  failed render writes no row, so the rendition stays stale). Not spent when
+  nothing was tried: the pool's queue full, or the kind switched off. A file
+  that changed again between the check and the enqueue (`errSourceAheadOfRow`)
+  waits for the rescan the enqueue asked for. At most 1,024 renders wait,
+  those older than an hour forgotten first.
+- B53's per-directory rescan minute: a rescan that brought every waiting file
+  level frees it, so the next change asks at once; one that left a file
+  behind keeps it, which is what the minute is for (a file still being
+  written, a directory the scan cannot read).
+
+### Decided: a batch and the coverage bars keep counting a stale rendition
+
+The backlog entry's other shape was a freshness-aware `HasVariant` (and the
+coverage bars that mirror it). Alone it heals nothing on a default bridge,
+where nobody submits a batch. Whether a batch and the bars should count a
+stale rendition at all is a product choice, sent to the coordinator with the
+options and measured costs, and agreed as (a) for this PR: they keep counting
+it covered, and a download renders it again. The choice is backlog B100.
+Measured on the dev Mac (sibling agents sharing the CPU) over a throwaway
+store of 50,000 FLAC tracks with 45,000 renditions (50% fresh CarPlay, 10%
+stale CarPlay, 30% upscaled), medians of seven:
+
+| query | any rendition (today) | a fresh rendition |
+|---|---|---|
+| whole-library projection (`trackProjectionSelect`) | 421 ms | 476 ms |
+| `AllEligibleKinds`' SQL | 122 ms | 133 ms |
+| root child-folder rollup, optimized count | 94 ms | 128 ms (a JOIN to `tracks` for the stamp) |
+
+Option (b) changes `trackProjectionSelect` alone (the batch and its
+projection); option (c) also the bars' numerators and covered-or-eligible
+denominators, about six SQL sites plus `catalog_refs.go`. The recommendation
+recorded in B100 is (c), in a PR of its own.
+
+### Rejected
+
+- Rendering from a download whose row is behind: the render would record a
+  version the serve path refuses (#1077).
+- Rendering the stale id itself: not possible for an id minted under an older
+  schema (a DSD `v1` rendition) or another upscale target. The family's current
+  id is what a request for the family renders, and the app plays the newest of
+  a family. The old row stays (nothing reaps a rendition whose file exists),
+  and its later downloads render nothing: the family is fresh.
+- A goroutine per stale GET: declined in B53's round 5 (unbounded, outlives
+  the request); the debounce bounds the work instead.
+- A disk floor: the backlog entry named "the disk budgets" of the on-demand
+  path, which has none (the sweep and the batch pre-flight have them; POST
+  /v1/upscale does not). A render of the same id replaces a rendition of the
+  same size.
+- A rescan minute keyed by the file's version: a file still being written is
+  a new version on every download, so that would ask for a rescan per GET,
+  the storm B53's minute exists for. Freeing the minute only after a rescan
+  that brought every waiting file level keeps that guard.
+- Editing PROTOCOL.md's 410 `variant_stale` line ("the operator's recovery is
+  `bridge upscale --force <track>`"): still true, and a change there is a
+  Mirror-PR in the app's repo for a sentence no client acts on.
+
+Residual: a render of the same id replaces the rendition in place, so an
+offline copy of the old bytes on a phone takes the new `appliedGainDB` by id,
+as the auto-optimize sweep's in-place re-render already did.
+
+### Tests
+
+- `TestAStaleRenditionIsRenderedAgainWhenADownloadFindsItsRowCurrent` (both
+  kinds through the real handler; nothing more renders once served).
+- `TestAStaleDownloadWhoseRowIsBehindRendersAgainAfterItsRescan` (a real
+  scanner and the rescanner's loop; the rendition records the rescan's
+  version).
+- `TestAStaleDownloadRescansItsSourceAndRendersItAgain` (B53's
+  `…AStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`, renamed: the render
+  is the download's own now, and the sweep after it renders nothing).
+- `TestAStaleDownloadRendersEveryNewVersionOfItsFileAgain` (two retags within
+  the minute, each healed at its rescan).
+- `TestAStaleDownloadRendersNothingForAKindThatIsSwitchedOff`,
+  `TestAStaleDownloadRendersNothingForAFileWhoseRendersKeepFailing`,
+  `TestAStaleRenditionOfAnOlderSchemaIsRenderedAsTheCurrentOne`.
+- `TestRenditionKindOfNamesTheKindThatRendersEachFamily`,
+  `TestAStaleRerenderGoesThroughTheKindsGateAndTheSuppression`,
+  `TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan` (a fake
+  clock), `TestAtMostACapOfRendersWaitForARescan`.
+- `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep` (the waiting renders
+  between the two), `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`
+  (the directory handed to the step).
+- `TestAStaleDownloadRendersUnderTheV1KindGates` (AST: the renditionGates
+  literal names the closures the /v1 server's chain gets).
+- `TestVariantFailureSuppressedAnswersForTheOneRowAtAPath`; the suite's
+  `suppressed` helper now asks `VariantFailureSuppressed`, so every
+  suppression test there pins it.
+
+### Negative controls
+
+Each on the committed fix, `-count=1`, the file's bytes restored before the
+next (a script, never git).
+
+| mutation | red |
+|---|---|
+| NC1 row current: render nothing | the row-current test, the switched-off test, the older-schema test, the unit test |
+| NC2 row behind: keep no render | the row-behind test, the renamed B53 test, the unit test |
+| NC3 rescanned: render a row still behind | the unit test |
+| NC4 afterRescan: no waiting renders | the order test, the row-behind test, the renamed B53 test |
+| NC5 the nudge before the waiting renders | the order test |
+| NC6 the waiting renders before the index drop | the order test |
+| NC7 no kind gate | the switched-off test, the rerender test |
+| NC8 no suppression | the suppressed-file test, the rerender test |
+| NC9 no demo refusal | the rerender test |
+| NC10 no per-minute debounce | the unit test |
+| NC11 a full pool queue spends the minute | the unit test |
+| NC12 a closed gate spends the minute | the unit test, the switched-off test |
+| NC13 a file ahead at the enqueue keeps no render | the unit test |
+| NC14 the pcm gate a copy in runServe | the gate-wiring test |
+| NC15 the hook not told the id | the five harness tests |
+| NC16 the suppression not asked of the one row | the one-row test |
+| NC17 `after` told the absolute directory | the row-behind test, the renamed B53 test, the after-step test |
+| NC18 no cap on waiting renders | the cap test |
+| NC19 an old waiting render never forgotten | the cap test |
+| NC20 the minute per rendition, not per version | the new-version test, the unit test |
+| NC21 a level rescan keeps the directory's minute | the new-version test, the unit test |
+| NC22 a rescan that left a file behind frees it too | the unit test |
