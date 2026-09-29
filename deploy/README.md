@@ -1,6 +1,10 @@
 # deploy/ — operator deploy scripts (source of truth)
 
-These scripts deploy the bridge to the two production hosts. **This directory
+The Windows script deploys the bridge to home-pc. The Linux script was written
+for the VPS, which since 2026-09-22 runs only the public demo, deployed from
+the release artifact by the runbook's procedure; the operator bridge, on a
+home NUC since then, takes the runbook's manual form. Neither is a job for the
+Linux script any more (the `linux/` section says why). **This directory
 is the canonical source of truth** — the copies on the hosts (`home-pc`
 Desktop, `/tmp` on the workstation) must be synced FROM here, never edited in
 place. The cert-re-mint bug fixed 2026-06-01 existed precisely because the
@@ -43,11 +47,33 @@ when a config exists, and `update` never runs `init`. Never run `bridge init
 -force` against a live install — it changes the fingerprint and breaks every
 pairing.
 
-## linux/ — bridge.ars.md (Linux VPS, public mode, systemd)
+## linux/ — the Linux VPS, bridge.ars.md (public mode, systemd)
+
+Since 2026-09-22 this host runs only the public demo (`bridge.1-bit.app`, a
+unit and binary of its own); the operator bridge moved to a home NUC. Do not
+point this script at the NUC: its health poll runs `curl` without `-k`, and
+the NUC serves a self-signed certificate, so the poll never reads
+`serverVersion` and the script exits 1 with its rollback advice after a swap
+that may well have succeeded (it rolls nothing back). A deploy there follows
+the runbook's manual form and checks health with `curl -k`.
+
+The demo must be deployed from the release artifact. Do not run this script
+for it: the script always builds current `main`, and a `git describe` version
+makes the demo advertise an update forever. Follow the runbook's "Demo bridge"
+procedure (download and verify the release artifact, upload `/tmp/rel/bridge`,
+then the detached swap) with the demo's overrides, `SVC=1-bit-bridge-demo`,
+`REMOTE_BIN=/usr/local/bin/bridge-demo` and
+`HEALTH_URL=https://bridge.1-bit.app/v1/health`: the script's defaults
+(`SVC=1-bit-bridge`, `REMOTE_BIN=/usr/local/bin/bridge`) name the operator
+bridge's old unit and binary on this host.
+
+So no production bridge takes this script as it stands; it is kept as the
+reference for the manual form's steps. Its usage, for a Linux host that takes
+a `main` build and serves a certificate `curl` verifies:
 
 ```sh
 cp deploy/linux/.env.example deploy/linux/.env   # first run only; fill it in
-./deploy/linux/deploy-bridge-vps.sh
+./deploy/linux/deploy-bridge-vps.sh              # ENV_FILE=… picks another env file
 ```
 
 Cross-compiles linux/amd64, uploads as `.new`, **SHA-256-gates before swap**,
@@ -77,5 +103,5 @@ transits the relay.
 
 Per [`../ops/deployment-runbook.md`](../ops/deployment-runbook.md): after any
 merged **runtime-behavior** PR, update the local fixture, then home-pc, then
-bridge.ars.md. Skip for docs-only / test-only merges (no shipped binary
-changes behavior).
+the operator bridge (on the NUC since 2026-09-22; bridge.ars.md before). Skip
+for docs-only / test-only merges (no shipped binary changes behavior).

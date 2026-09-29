@@ -66,6 +66,13 @@ package discovery
 // cloud provider's metadata address (cloudMetadataAddrs), not even a packet's
 // own: an SSDP source is not authenticated, and a peer on the link can send
 // one from 169.254.169.254 (CodeRabbit on #1074).
+//
+// The app has the host-kind rules too since iOS #1998 (2026-09-29), in
+// UPnPURLPolicy: hostKind(of:) and hostKindAllowed bound its
+// resolveServiceURL for every source, location(_:announcedFrom:) is
+// LocationFromSource rule for rule, and cloudMetadataAddresses holds the
+// same 19 addresses as cloudMetadataAddrs. It has no twin of the dial check:
+// URLSession offers no hook between resolving a name and connecting.
 
 import (
 	"context"
@@ -182,7 +189,10 @@ const (
 // Exact addresses, never a range: a direct-cable renderer self-assigns an
 // address anywhere in 169.254/16 or fe80::/10, and a /24 around
 // 169.254.169.254 would refuse one such device in 254. The one list both
-// the string check and the dial check read, through addrKind.
+// the string check and the dial check read, through addrKind. Its twin is
+// the iOS app's UPnPURLPolicy.cloudMetadataAddresses (iOS #1998), address
+// for address: an address added to or dropped from one list belongs in the
+// other's change too.
 var cloudMetadataAddrs = func() map[netip.Addr]struct{} {
 	m := make(map[netip.Addr]struct{})
 	for _, s := range []string{
@@ -274,7 +284,8 @@ func endsInANumber(label string) bool {
 // reference host (the description URL's, for a service URL) is of kind ref:
 // always for a host elsewhere, never for a numeric spelling or a cloud
 // metadata address, and for this machine or a link-local address only from a
-// reference of the same kind.
+// reference of the same kind. Mirrors UPnPURLPolicy.hostKindAllowed in the
+// iOS app (iOS #1998).
 func hostKindAllowed(k, ref hostKind) bool {
 	switch k {
 	case hostElsewhere:
@@ -359,8 +370,11 @@ func fetchableLocation(raw string) string {
 // through it, so the mandatory control URL and the optional ones cannot
 // drift apart. The caller decides what a refusal costs: the service for a
 // control URL, the URL alone for an eventSubURL. Mirrors
-// DeviceDescriptionParser.resolveServiceURL in the iOS app, apart from the
-// host-kind rule, which the app does not have.
+// DeviceDescriptionParser.resolveServiceURL in the iOS app, host-kind rule
+// included since iOS #1998 (UPnPURLPolicy.hostKindAllowed, for every
+// source). This docblock said the app had no host-kind rule until
+// 2026-09-29: a claim about the other repo goes stale the day that repo
+// merges the change (backlog B78).
 func resolveServiceURL(base *url.URL, raw string, source DescriptionSource) (string, error) {
 	ref := strings.TrimSpace(raw)
 	if ref == "" {
@@ -419,6 +433,9 @@ func announcerAddr(src *net.UDPAddr) netip.Addr {
 // console directly; one from a metadata address was spoofed, since the
 // metadata service sends no SSDP. A name the string cannot place is kept:
 // the default client's dial check judges the address it resolves to.
+//
+// Mirrors UPnPURLPolicy.location(_:announcedFrom:) in the iOS app (iOS
+// #1998), which has no dial check behind it.
 func LocationFromSource(location string, src *net.UDPAddr) string {
 	if location == "" {
 		return ""

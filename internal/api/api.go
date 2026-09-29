@@ -126,7 +126,7 @@ type Server struct {
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
-	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
+	variantStore           VariantStore                 // nil unless WithUpscale wired one; production wires it whatever the gate says
 	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
 	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
 	upnpProxy              *upnpproxy.Proxy             // cached after both halves are wired; nil otherwise. See refreshUPnPProxy.
@@ -141,7 +141,7 @@ type Server struct {
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
-	analysisStore          AnalysisStore                // nil unless WithAnalysis(true, as) called — /v1/waveform lookup
+	analysisStore          AnalysisStore                // nil unless WithAnalysis wired one — /v1/waveform lookup; production wires it whatever the gate says
 	lyricsStore            LyricsStore                  // nil unless WithLyrics wired — /v1/lyrics lookup + the "lyrics" health flag
 	analysisEnabled        func() bool                  // LIVE; mirrors cfg.Analysis.Enabled AND the sox probe — gates the "waveform" health feature flag
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
@@ -675,20 +675,23 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 }
 
 // WithUpscale wires the v1.2 PCM-upscaling feature into the
-// server. `enabled` mirrors `cfg.Upscale.Enabled` AND the result
-// of the cmd/bridge sox-on-PATH startup probe (a true config
-// setting whose probe failed lands here as false — graceful
-// degradation, the rest of the server keeps running). `vs` may
-// be nil when enabled=false; when enabled=true it MUST be the
-// VariantStore implementation that knows where the sidecars
-// live.
+// server. `enabled` is the live gate, read per request: in
+// production cmd/bridge's upscaleActiveFn, `cfg.Upscale.Enabled`
+// AND a usable sox from the shared, 30 s-cached probe, so a true
+// flag with no usable sox answers false (graceful degradation, the
+// rest of the server keeps running) and installing sox answers true
+// with no restart. `vs` is the VariantStore implementation that
+// knows where the sidecars live; it may be nil only where no
+// variant is ever served.
 //
 // Effect on the wire:
 //   - /v1/health reports `upscaleEnabled` matching `enabled`.
 //   - /v1/manifest emits per-Track `variants` slices iff
 //     `enabled` (cleared in the manifest provider otherwise).
-//   - /v1/download honors `?variant=<id>` iff `enabled` AND
-//     `vs != nil`; 404 `variant_not_found` otherwise.
+//   - /v1/download honors `?variant=<id>` whenever `vs != nil`,
+//     `enabled` or not (serveVariant reads the store alone), and
+//     answers 404 `variant_not_found` without one. PROTOCOL.md's
+//     flag-off bullet says 404; that disagreement is backlog B108.
 //
 // Takes a PREDICATE, read per request, so the toggle hot-applies. The
 // STORE is wired unconditionally: gating it on the boot value is what
@@ -707,14 +710,17 @@ func (s *Server) upscaleActive() bool {
 }
 
 // WithAnalysis wires the offline audio-analysis feature. `enabled`
-// mirrors `cfg.Analysis.Enabled` AND the sox-on-PATH probe outcome
-// (a true config whose probe failed lands here as false — graceful
-// degradation). `as` may be nil when enabled=false; when enabled=true
-// it MUST be the AnalysisStore the /v1/waveform handler reads.
+// is the live gate, read per request: in production cmd/bridge's
+// analysisActiveFn, `cfg.Analysis.Enabled` AND a usable sox from the
+// shared probe, so a true flag with no usable sox answers false
+// (graceful degradation). `as` is the AnalysisStore the /v1/waveform
+// handler reads; it may be nil only where no curve is ever served.
 //
 // Effect on the wire:
 //   - /v1/health advertises the `waveform` feature flag iff `enabled`.
-//   - /v1/waveform serves sidecars iff `as != nil`; 404 otherwise.
+//   - /v1/waveform serves sidecars iff `as != nil`, `enabled` or not;
+//     404 otherwise. PROTOCOL.md's flag-off bullet says 404 (backlog
+//     B108).
 //
 // Predicate + unconditional store, for the same reason as WithUpscale.
 func (s *Server) WithAnalysis(enabled func() bool, as AnalysisStore) *Server {

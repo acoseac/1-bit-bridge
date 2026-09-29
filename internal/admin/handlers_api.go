@@ -3294,8 +3294,11 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 // serve-side sweeper goroutine (buffered-1 channel, coalescing), so
 // there is nothing to track or cancel here: 202 means "queued" — a
 // nudge sent during the sweeper's startup settle window is honored
-// once the settle elapses. 503 when the analysis feature is inactive
-// (disabled, or sox missing at startup).
+// once the settle elapses. 503 only when no trigger is wired, which
+// serve never leaves unset: it runs the sweeper on every bridge since
+// #781, so a nudge while analysis is inactive (the flag off, or no
+// usable sox) is accepted and wakes a pass that stands down, recording
+// nothing. The console offers the button only while the job is active.
 func (s *Server) apiAnalysisSweep(w http.ResponseWriter, _ *http.Request) {
 	trigger := s.deps.TriggerAnalysisSweep
 	if trigger == nil {
