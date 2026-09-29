@@ -10,11 +10,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// AnalysisStore is the optional interface GET /v1/waveform uses to look
-// up a track's waveform sidecar metadata. Nil-safe — when
-// `s.analysisStore` is nil (analysis feature off / not wired) the
-// handler returns 404, which iOS treats identically to a pre-feature
-// bridge that doesn't register the route at all.
+// AnalysisStore is the optional interface GET /v1/waveform (and
+// /v1/spectrum) uses to look up a track's analysis row. Nil-safe — when
+// `s.analysisStore` is nil (not wired) the handler returns 404, which
+// iOS treats identically to a pre-feature bridge that doesn't register
+// the route at all. The analysis switch does not make it nil: serve
+// wires the store on every bridge, and a cached curve is served with
+// the feature off too (WithAnalysis, backlog B108).
 //
 // **Freshness happens in the api**, not here — same rationale as
 // VariantStore: the api owns the canonical `bridgefs.Resolver` stat and
@@ -75,9 +77,11 @@ type AnalysisRecord struct {
 const analysisSourceMTimeToleranceNS int64 = 2_000_000_000
 
 // lookupAnalysisForRequest performs the request handling /v1/waveform and
-// /v1/spectrum share: feature gate, `?path=` presence, the traversal-guarded
+// /v1/spectrum share: the store check, `?path=` presence, the traversal-guarded
 // resolve whose canonical `os.FileInfo` the freshness check needs, and the row
-// lookup.
+// lookup. The store check is the only refusal before the lookup, never the
+// analysis gate: a curve measured while analysis was on is served with it off
+// (backlog B108, PROTOCOL.md's flag-off bullet).
 //
 // Shared rather than copied because the two endpoints describe the SAME source
 // file — they must agree on which row a path resolves to and on what "the

@@ -639,7 +639,7 @@ Deletes cached variant sidecars and their rows. Gate on the **`deleteVariants`**
 
 **Response** (`200 OK`): `{"deletedCount": 12, "freedBytes": 1610612736, "deletedPaths": ["…"]}`.
 
-**Response** (`404 variant_not_found`): this bridge has no variant store wired, i.e. the `deleteVariants` capability is absent. Clients should gate on that flag rather than probing.
+**Response** (`404 variant_not_found`): the `deleteVariants` capability is absent (upscaling is not active, or this bridge has no variant deleter wired). Clients should gate on that flag rather than probing.
 
 **Partial deletes are not rolled back.** Each (unlink, row-delete) pair is idempotent, and the `bridge upscale --gc` sweep plus the integrity watcher reap anything left behind — so a `500 internal` mid-way means "some were deleted", not "none were".
 
