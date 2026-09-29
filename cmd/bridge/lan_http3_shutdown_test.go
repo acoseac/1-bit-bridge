@@ -254,17 +254,18 @@ func mustBeFreeOnUDP(t *testing.T, addr string) {
 }
 
 // waitBoundedServeExit waits for runServe to return, and gives its exit
-// code. The bound is the grace, the allowance quic-go's force-close gets
-// past it, and the rest of the teardown, with room to spare; a drain that
-// waits for a held handler never gets there.
+// code, with a handler still held: a drain that waited for it would never
+// return. The wait is waitServeExit's, for the return until serve's waits
+// give up, and not a bound after the grace, which the teardown's disk
+// writes outlast on a starved host (B63).
 func waitBoundedServeExit(t *testing.T, exited <-chan struct{}, done <-chan int, stderr *safeBuffer) int {
 	t.Helper()
-	bound := shutdownGrace + 10*time.Second
 	select {
 	case <-exited:
-	case <-time.After(bound):
-		t.Fatalf("runServe was still draining %v later, on an HTTP/3 handler that ignores its "+
-			"context: the drain is not bounded; stderr=%s", bound, stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("runServe was still draining at the test's deadline, on an HTTP/3 handler that "+
+			"ignores its context: the drain is not bounded; stderr=%s\nserve's goroutines:\n%s",
+			stderr.String(), serveStacks())
 	}
 	return <-done
 }

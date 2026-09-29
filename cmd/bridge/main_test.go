@@ -143,13 +143,11 @@ func TestServeStartsAndServesHealth(t *testing.T) {
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
 
-	// 30s, not 5s: startup mints a TLS keypair, runs the migration
-	// ladder, and kicks a scan before the banner prints, and on a loaded
-	// Windows runner that overran 5s ("timed out waiting for startup
-	// banner"). The wait returns as soon as the banner appears, so the
-	// larger budget costs nothing when things are quick — it only stops a
-	// slow machine being reported as a broken one.
-	addr, fingerprint := waitForListening(t, stdout, 30*time.Second)
+	// Startup mints a TLS keypair, runs the migration ladder, and kicks a
+	// scan before the banner prints, which a loaded Windows runner took
+	// more than 5 s over, and a Windows host under disk contention more
+	// than 30 s: the wait is for the banner, until serve's waits give up.
+	addr, fingerprint := waitForListening(t, stdout, exited, done, stderr)
 
 	// Hit /v1/health over TLS, pinning the server fingerprint.
 	var peerFP string
@@ -190,11 +188,16 @@ func TestServeStartsAndServesHealth(t *testing.T) {
 
 // waitForListening polls the serve goroutine's stdout for the startup banner
 // and extracts both the bound host:port and the TLS fingerprint the server
-// prints. Returns within deadline or fails the test.
-func waitForListening(t *testing.T, out *safeBuffer, deadline time.Duration) (addr, fingerprint string) {
+// prints. A serve that exits first is reported with its exit code; one that
+// never prints the banner fails the test when serve's waits give up
+// (serveGiveUp). The wait was 5 s, then 30 s once a loaded Windows runner
+// overran 5 s, and a Windows host under disk contention overran 30 s too
+// (B63): the banner comes after the migrations and the startup scan, disk
+// writes with no bound a starved host keeps to.
+func waitForListening(t *testing.T, out *safeBuffer, exited <-chan struct{}, done <-chan int, stderr *safeBuffer) (addr, fingerprint string) {
 	t.Helper()
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
+	giveUp := serveGiveUpTime(t)
+	for giveUp.IsZero() || time.Now().Before(giveUp) {
 		s := out.String()
 		// Example banner:
 		//   1-bit-bridge v0.0.1 (protocol v1) — listening on https://127.0.0.1:52431
@@ -216,9 +219,15 @@ func waitForListening(t *testing.T, out *safeBuffer, deadline time.Duration) (ad
 				}
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-exited:
+			t.Fatalf("serve exited with code %d before it printed its startup banner; stdout so far:\n%s\nstderr=%s",
+				<-done, out.String(), stderr.String())
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	t.Fatalf("timed out waiting for startup banner; stdout so far:\n%s", out.String())
+	t.Fatalf("no startup banner before the test's deadline; stdout so far:\n%s\nstderr=%s\nserve's goroutines:\n%s",
+		out.String(), stderr.String(), serveStacks())
 	return
 }
 
@@ -263,7 +272,7 @@ func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io
 		exitCode <- start(ctx, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	addr, _ := waitForListening(t, stdout, exited, exitCode, stderr)
 	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode}
 }
 

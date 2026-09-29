@@ -92,8 +92,9 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 	cancel()
 	select {
 	case <-exited:
-	case <-time.After(shutdownGrace + 5*time.Second):
-		t.Fatalf("runServe did not return after the cancel; stderr=%s", stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("runServe did not return after the cancel, before the test's deadline; stderr=%s\n"+
+			"serve's goroutines:\n%s", stderr.String(), serveStacks())
 	}
 
 	// Serve has returned. The `tailscale cert` it started must have
@@ -123,10 +124,11 @@ func TestServeLeavesNoTailscaleCLIRunning(t *testing.T) {
 
 // waitForCLIPid waits for the fake `tailscale cert` to record its pid. A
 // serve that exits first is reported with its exit code, not as a
-// timeout.
+// timeout, and one whose auto-pilot never gets there fails the test when
+// serve's waits give up (serveGiveUp).
 func waitForCLIPid(t *testing.T, pidFile string, done <-chan int, stderr *safeBuffer) int {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := serveGiveUpTime(t)
 	for {
 		if b, err := os.ReadFile(pidFile); err == nil {
 			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
@@ -135,8 +137,9 @@ func waitForCLIPid(t *testing.T, pidFile string, done <-chan int, stderr *safeBu
 			}
 			return pid
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the auto-pilot never started `tailscale cert` within 30s; stderr=%s", stderr.String())
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			t.Fatalf("the auto-pilot never started `tailscale cert` before the test's deadline; stderr=%s\n"+
+				"serve's goroutines:\n%s", stderr.String(), serveStacks())
 		}
 		select {
 		case code := <-done:

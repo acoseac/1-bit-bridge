@@ -62,21 +62,54 @@ func compare(a, b string) int {
 func Armed() bool { return armed.Load() != nil }
 
 // Park holds every key comparison under the collation until the test lets
-// it go, one comparison at a time. Arm arms it; Wait and ReleaseUntil drive
-// it.
+// it go, one comparison at a time. Arm or ArmUntil arms it; Wait,
+// WaitUnless and ReleaseUntil drive it.
 type Park struct {
 	arrived chan struct{} // a comparison is waiting to be let go
 	next    chan struct{} // lets the waiting comparison go
 	off     chan struct{} // closed on Disarm: nothing waits any more
 	offOnce sync.Once
+
+	// giveUp fires when a wait on the statement gives up, and bound says
+	// when that is, for the failure.
+	giveUp func() <-chan time.Time
+	bound  string
 }
 
-// Arm arms a Park, and disarms it when the test ends. One at a time: the
-// collation is process-wide, so a second Park would share the first's
-// comparisons.
+// perWaitBound is how long a Park armed by Arm waits for each thing it waits
+// for: a statement the test itself started, in its own process, reaching its
+// first comparison or its next one.
+const perWaitBound = 10 * time.Second
+
+// Arm arms a Park whose waits each give up perWaitBound after they begin, and
+// disarms it when the test ends. One at a time: the collation is
+// process-wide, so a second Park would share the first's comparisons.
 func Arm(t testing.TB) *Park {
 	t.Helper()
-	p := &Park{arrived: make(chan struct{}), next: make(chan struct{}), off: make(chan struct{})}
+	return arm(t, func() <-chan time.Time { return time.After(perWaitBound) }, "within 10s")
+}
+
+// ArmUntil is Arm for a statement that runs inside work the test does not
+// pace, such as a whole `bridge serve` booting and then tearing down: every
+// wait gives up at the instant at, and never when at is zero. A bound per
+// wait there is a guess at how long that work's disk writes take, which a
+// starved host exceeds (backlog B63: a serve's boot and teardown each took
+// longer than 10 s on a Windows host whose disk 24 writers kept busy).
+func ArmUntil(t testing.TB, at time.Time) *Park {
+	t.Helper()
+	if at.IsZero() {
+		return arm(t, func() <-chan time.Time { return nil }, "(no deadline)")
+	}
+	return arm(t, func() <-chan time.Time { return time.After(time.Until(at)) },
+		"by "+at.Format("15:04:05.000"))
+}
+
+func arm(t testing.TB, giveUp func() <-chan time.Time, bound string) *Park {
+	t.Helper()
+	p := &Park{
+		arrived: make(chan struct{}), next: make(chan struct{}), off: make(chan struct{}),
+		giveUp: giveUp, bound: bound,
+	}
 	if !armed.CompareAndSwap(nil, p) {
 		t.Fatal("sqlitetest: a Park is already armed")
 	}
@@ -113,19 +146,37 @@ func (p *Park) stop() {
 
 // Wait blocks until a comparison is parked: a statement that maintains an
 // index under the collation is then stopped part-way. It fails the test if
-// none arrives, so a statement that never ran reads as a failure and not as
-// a hung test binary.
+// none arrives before the Park's waits give up, so a statement that never ran
+// reads as a failure and not as a hung test binary.
 func (p *Park) Wait(t testing.TB) {
+	t.Helper()
+	p.WaitUnless(t, nil)
+}
+
+// WaitUnless is Wait for a statement another goroutine's work runs: it
+// answers true once a comparison is parked, and false, without failing, if
+// stopped is closed first. So a test that parks a statement inside a serve
+// reports the serve's own end, an exit code and what it printed, where Wait
+// would report only that nothing arrived. A nil stopped never closes.
+func (p *Park) WaitUnless(t testing.TB, stopped <-chan struct{}) bool {
 	t.Helper()
 	select {
 	case <-p.arrived:
-	case <-time.After(10 * time.Second):
-		t.Fatal("sqlitetest: no statement compared a key within 10s")
+		return true
+	case <-stopped:
+		return false
+	case <-p.giveUp():
+		t.Fatalf("sqlitetest: no statement compared a key %s", p.bound)
+		return false
 	}
 }
 
 // ReleaseUntil lets go the comparison Wait saw, then each one after it, one
-// at a time, until done is closed, and reports how many it let go.
+// at a time, until done is closed, and reports how many it let go. It fails
+// the test if the statement neither compares again nor lets done close
+// before the Park's waits give up; with done a serve's exit, that covers the
+// whole teardown after the cancel, which is why a serve test arms its Park
+// with ArmUntil.
 //
 // One at a time, and after a yield, because a cancel reaches a running
 // statement through a goroutine of the driver's own: modernc's
@@ -159,8 +210,8 @@ func (p *Park) ReleaseUntil(t testing.TB, done <-chan struct{}) int {
 		case <-p.arrived:
 		case <-done:
 			return released
-		case <-time.After(10 * time.Second):
-			t.Fatal("sqlitetest: the statement neither compared again nor finished within 10s")
+		case <-p.giveUp():
+			t.Fatalf("sqlitetest: the statement neither compared again nor finished %s", p.bound)
 		}
 	}
 }

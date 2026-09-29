@@ -52,7 +52,7 @@ func TestServeRedeemsThePairingLinksCode(t *testing.T) {
 			"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	addr, _ := waitForListening(t, stdout, exited, done, stderr)
 	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
 
 	mint := pairViaAdmin(t, ctx, &http.Client{Timeout: 10 * time.Second},

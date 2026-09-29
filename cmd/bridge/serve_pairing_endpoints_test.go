@@ -69,7 +69,7 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 	// that shape was first written; it reads the shared one now so the
 	// three boot tests cannot drift apart again.
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	addr, _ := waitForListening(t, stdout, exited, done, stderr)
 	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
 
 	// What the phone sees.

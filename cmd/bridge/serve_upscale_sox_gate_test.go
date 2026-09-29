@@ -248,11 +248,12 @@ func nudgeAutoOptimize(t *testing.T, client *http.Client, adminBase string) {
 // holds, and the wait ran out on test (windows-latest) (2026-09-28).
 func waitForAutoOptimizeSweep(t *testing.T, b *consoleBridge, before int64) autoOptimizeCardView {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := serveGiveUpTime(t)
 	for b.autoOptimizeSweeps.Load() <= before {
-		if time.Now().After(deadline) {
-			t.Fatalf("no pre-generation sweep finished within 30 s of the nudge (%d finished before it, %d now); stderr=%s",
-				before, b.autoOptimizeSweeps.Load(), b.stderr.String())
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			t.Fatalf("no pre-generation sweep finished after the nudge, before the test's deadline "+
+				"(%d finished before it, %d now); stderr=%s\nserve's goroutines:\n%s",
+				before, b.autoOptimizeSweeps.Load(), b.stderr.String(), serveStacks())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -267,10 +268,11 @@ func waitForAutoOptimizeSweep(t *testing.T, b *consoleBridge, before int64) auto
 }
 
 // waitForTracksIndexed polls the console's stats until the library holds
-// n tracks and no scan is running.
+// n tracks and no scan is running, or until serve's waits give up
+// (serveGiveUp).
 func waitForTracksIndexed(t *testing.T, client *http.Client, adminBase string, n int, stderr *safeBuffer) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := serveGiveUpTime(t)
 	for {
 		var stats struct {
 			TracksIndexed int  `json:"tracksIndexed"`
@@ -280,9 +282,9 @@ func waitForTracksIndexed(t *testing.T, client *http.Client, adminBase string, n
 		if stats.TracksIndexed >= n && !stats.IsScanning {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the library holds %d tracks after 30 s, want %d; stderr=%s",
-				stats.TracksIndexed, n, stderr.String())
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			t.Fatalf("the library holds %d tracks at the test's deadline, want %d; stderr=%s\nserve's goroutines:\n%s",
+				stats.TracksIndexed, n, stderr.String(), serveStacks())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
