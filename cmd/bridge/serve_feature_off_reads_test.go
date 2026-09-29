@@ -89,18 +89,18 @@ type madeWhileOn struct {
 // measured, from each of the manifest's three analysis splices
 // (waveformTagSQL, replayGainSQL, analysisScalarsSQL).
 type manifestTrackFields struct {
-	Path              string            `json:"path"`
-	Variants          []json.RawMessage `json:"variants"`
-	WaveformTag       string            `json:"waveformTag"`
-	ReplayGainTrackDB *float64          `json:"replayGainTrackDB"`
-	KeyRoot           *int              `json:"keyRoot"`
-	KeyMode           string            `json:"keyMode"`
-	BPM               *int              `json:"bpm"`
-	BPMEstimated      bool              `json:"bpmEstimated"`
-	TruePeakDB        *float64          `json:"truePeakDB"`
-	DRScore           *int              `json:"drScore"`
-	AudioMD5State     string            `json:"audioMD5State"`
-	BandwidthHz       *int              `json:"bandwidthHz"`
+	Path              string          `json:"path"`
+	Variants          json.RawMessage `json:"variants"` // nil only when the field is left out; null decodes as "null"
+	WaveformTag       string          `json:"waveformTag"`
+	ReplayGainTrackDB *float64        `json:"replayGainTrackDB"`
+	KeyRoot           *int            `json:"keyRoot"`
+	KeyMode           string          `json:"keyMode"`
+	BPM               *int            `json:"bpm"`
+	BPMEstimated      bool            `json:"bpmEstimated"`
+	TruePeakDB        *float64        `json:"truePeakDB"`
+	DRScore           *int            `json:"drScore"`
+	AudioMD5State     string          `json:"audioMD5State"`
+	BandwidthHz       *int            `json:"bandwidthHz"`
 }
 
 // presentOrAbsent renders a manifest field a test compares: the value, or
@@ -204,7 +204,7 @@ func requireTheManifestKeepsWhatAnalysisMeasured(t *testing.T, b *consoleBridge,
 	}
 	tr := m.Tracks[i]
 	if tr.Variants != nil {
-		t.Errorf("the manifest carries variants (%d) with upscaling off, want the field left out", len(tr.Variants))
+		t.Errorf("the manifest carries variants %s with upscaling off, want the field left out", tr.Variants)
 	}
 	for _, c := range []struct{ field, got, want string }{
 		{"waveformTag", tr.WaveformTag, made.tag},
