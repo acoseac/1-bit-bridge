@@ -572,6 +572,10 @@ func TestTheBaseParserCutsUserInformationOutOfEveryUsableBase(t *testing.T) {
 		{"https://tok@mirror.example/ws/2?x=1#frag", "https://mirror.example/ws/2?x=1#frag", true, "tok"},
 		{"https://s3cret%40Pw:p%3Ass@mirror.example/a%20b", "https://mirror.example/a%20b", true, "s3cret@Pw"},
 		{"https://@mirror.example", "https://mirror.example", true, ""},
+		{"https://mirror.example/ws/2/", "https://mirror.example/ws/2", false, ""},
+		{" https://mirror.example/ws/2/// ", "https://mirror.example/ws/2", false, ""},
+		{"https://tok@mirror.example/ws/2/", "https://mirror.example/ws/2", true, "tok"},
+		{"https://mirror.example/", "https://mirror.example", false, ""},
 	}
 	for _, tc := range usable {
 		ep := parseBaseEndpoint(tc.raw)
@@ -605,6 +609,51 @@ func TestTheBaseParserCutsUserInformationOutOfEveryUsableBase(t *testing.T) {
 		}
 		if _, err := ep.newRequest(context.Background(), "/x"); err == nil || leakedSecret(err.Error(), []string{"s3cret", "mirror"}) != "" {
 			t.Errorf("a request from the unusable base %q answered %v, want an error naming none of it", raw, err)
+		}
+	}
+}
+
+// TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath pins the root's
+// trailing slashes being trimmed for a base handed straight to a constructor,
+// with user information or without: newRequest joins a path that begins with
+// a slash, so a slash left on the root requested `/ws/2//release/…`, which a
+// strict mirror answers 404. (Config trims it, and a live value is trimmed by
+// the client; nothing trimmed a constructed base until the parser did.)
+func TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"releases":[],"artists":[]}`)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+
+	requests := 0
+	for _, base := range []string{srv.URL, withUserinfo(t, srv.URL, "tok")} {
+		for _, slashes := range []string{"", "/", "//"} {
+			if _, err := NewMusicBrainzClient(base+"/ws/2"+slashes, "t", nil).SearchRelease(ctx, "Artist", "Album"); err != nil {
+				t.Fatal(err)
+			}
+			body, err := NewCoverArtClient(base+slashes, "t", nil).FetchReleaseFrontStream(ctx, cancelReleaseMBID, 500)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = body.Close()
+			requests += 2
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != requests {
+		t.Fatalf("the mirror saw %d requests, want %d", len(paths), requests)
+	}
+	for _, p := range paths {
+		if strings.Contains(p, "//") {
+			t.Errorf("a request path holds a double slash: %q", p)
 		}
 	}
 }

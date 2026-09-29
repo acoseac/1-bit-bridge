@@ -41,12 +41,17 @@ type baseEndpoint struct {
 	err  error
 }
 
-// parseBaseEndpoint cuts raw into its root and its user information. A base
-// with none keeps its own bytes as the root. One with some is rebuilt without
-// it (url.URL.String), which changes nothing else in it but the scheme's
-// case.
+// parseBaseEndpoint cuts raw into its root and its user information. The root
+// ends in no slash, because newRequest joins a path that begins with one: a
+// base written `https://mirror/ws/2/` would otherwise request
+// `…/ws/2//release/…`, which a strict mirror answers 404. Config trims it
+// already, and a live value is trimmed by the client that reads it; the
+// constructed base and the premium fetch's stored one reach this without.
+// A base with no user information keeps its own bytes as the root, less
+// that. One with some is rebuilt without it (url.URL.String), which changes
+// nothing else in it but the scheme's case.
 func parseBaseEndpoint(raw string) baseEndpoint {
-	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
 	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return baseEndpoint{err: errBaseNotUsable}

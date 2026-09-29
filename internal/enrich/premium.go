@@ -137,7 +137,7 @@ func (f *atlasPremiumFetcher) authedCoverGet(ctx context.Context, mbid string, s
 	// The bearer token below is the only credential this request sends, and
 	// Header.Set replaces the Basic header newRequest gives a base with user
 	// information.
-	req, err := parseBaseEndpoint(strings.TrimRight(baseURL, "/")).
+	req, err := parseBaseEndpoint(baseURL).
 		newRequest(ctx, fmt.Sprintf("/release/%s/front-%d", mbid, size))
 	if err != nil {
 		return nil, err
