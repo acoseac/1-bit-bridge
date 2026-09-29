@@ -43,7 +43,10 @@ const DefaultMusicBrainzBase = "https://musicbrainz.org/ws/2"
 // resolve an album MBID from (artist, album) and an artist MBID from
 // (artist).
 type MusicBrainzClient struct {
-	base      string
+	// base is the constructed base, cut once at construction into the root
+	// every request URL is built from and the credential that may only travel
+	// as a header (baseEndpoint). liveBase, below, is cut per use.
+	base      baseEndpoint
 	userAgent string
 	http      *http.Client
 
@@ -68,11 +71,14 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 		// API hosts — see transport.go for the rationale.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
+	ep := parseBaseEndpoint(base)
+	// The client is a copy that never carries the credential from an https
+	// request onto a hop that is not https (guardRedirects).
 	return &MusicBrainzClient{
-		base:        base,
+		base:        ep,
 		userAgent:   userAgent,
-		http:        httpClient,
-		minInterval: minIntervalForBase(base, PublicMBMinInterval, publicMBHosts),
+		http:        guardRedirects(httpClient),
+		minInterval: minIntervalForBase(ep.root, PublicMBMinInterval, publicMBHosts),
 	}
 }
 
@@ -81,7 +87,7 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 // operator's own mirror. See pacing.go.
 func (c *MusicBrainzClient) MinInterval() time.Duration {
 	if c.liveBase != nil {
-		return minIntervalForBase(c.resolveBase(), PublicMBMinInterval, publicMBHosts)
+		return minIntervalForBase(c.resolveBase().root, PublicMBMinInterval, publicMBHosts)
 	}
 	return c.minInterval
 }
@@ -128,10 +134,10 @@ func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album str
 	}
 
 	q := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escapeLucene(album), escapeLucene(artist))
-	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=%d", c.resolveBase(), url.QueryEscape(q), releaseSearchLimit)
+	path := fmt.Sprintf("/release/?query=%s&fmt=json&limit=%d", url.QueryEscape(q), releaseSearchLimit)
 
 	var body releaseSearchResponse
-	if err := c.get(ctx, u, &body); err != nil {
+	if err := c.get(ctx, c.resolveBase(), path, &body); err != nil {
 		return nil, err
 	}
 	best := pickBestRelease(body.Releases, album, artist)
@@ -158,9 +164,9 @@ func (c *MusicBrainzClient) ReleaseGroupMBID(ctx context.Context, releaseMBID st
 	if releaseMBID == "" {
 		return "", fmt.Errorf("musicbrainz: empty release mbid")
 	}
-	u := fmt.Sprintf("%s/release/%s?fmt=json&inc=release-groups", c.resolveBase(), url.PathEscape(releaseMBID))
+	path := fmt.Sprintf("/release/%s?fmt=json&inc=release-groups", url.PathEscape(releaseMBID))
 	var body releaseLookupResponse
-	if err := c.get(ctx, u, &body); err != nil {
+	if err := c.get(ctx, c.resolveBase(), path, &body); err != nil {
 		return "", err
 	}
 	if body.ReleaseGroup == nil {
@@ -181,10 +187,10 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 	// equality passes, the candidate WINDOW became the binding constraint: a
 	// correct low-scoring match (Zdob și Zdub at 57) can sit below several
 	// higher-scoring wrong ones and fall outside a 5-row window entirely.
-	u := fmt.Sprintf("%s/artist/?query=%s&fmt=json&limit=%d", c.resolveBase(), url.QueryEscape(q), artistSearchLimit)
+	path := fmt.Sprintf("/artist/?query=%s&fmt=json&limit=%d", url.QueryEscape(q), artistSearchLimit)
 
 	var body artistSearchResponse
-	if err := c.get(ctx, u, &body); err != nil {
+	if err := c.get(ctx, c.resolveBase(), path, &body); err != nil {
 		return nil, err
 	}
 	best := pickBestArtist(body.Artists, artist)
@@ -194,8 +200,12 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 	return &SearchResult{MBID: best.ID, Score: best.Score, Title: best.Name}, nil
 }
 
-func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+// get sends the GET for path (what follows the base's root) to the base ep,
+// which the caller resolved once for the whole request: ep carries the
+// credential written on THAT base, so a live base changing between two reads
+// can never pair one mirror's credential with another's host.
+func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path string, out any) error {
+	req, err := ep.newRequest(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -810,11 +820,15 @@ func (c *MusicBrainzClient) WithLiveBase(f func() string) *MusicBrainzClient {
 	return c
 }
 
-// resolveBase returns the base URL to use right now.
-func (c *MusicBrainzClient) resolveBase() string {
+// resolveBase returns the base to use right now, cut into its root and its
+// credential (baseEndpoint). A caller resolves once per request and passes
+// the result on, never the root alone: the credential belongs to the base it
+// was written on. A live value that is not a usable base is an error for the
+// request, not a fallback to the constructed one.
+func (c *MusicBrainzClient) resolveBase() baseEndpoint {
 	if c.liveBase != nil {
 		if v := strings.TrimRight(strings.TrimSpace(c.liveBase()), "/"); v != "" {
-			return v
+			return parseBaseEndpoint(v)
 		}
 	}
 	return c.base

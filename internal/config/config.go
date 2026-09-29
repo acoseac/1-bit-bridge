@@ -361,6 +361,12 @@ func (u UPnPUpstreamConfig) Validate() error {
 // /release/{mbid}/front-{250,500,1200} cover endpoints the enricher uses,
 // so no other change is needed. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
 // BRIDGE_COVERART_BASE_URL.
+//
+// A base URL may carry a mirror's credential, `https://user:password@host/ws/2`
+// or a token written as the user name (`https://TOKEN@host/ws/2`). The enricher
+// sends it as HTTP Basic authentication and builds no request URL from it, so
+// no log line, error or skip detail names it (backlog B69). Only the settings
+// console shows it, as the value it edits.
 type EnrichConfig struct {
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
 	// Default (empty): https://musicbrainz.org/ws/2.

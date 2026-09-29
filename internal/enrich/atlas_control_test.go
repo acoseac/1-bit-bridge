@@ -101,9 +101,9 @@ func (cc *controlClient) search(ctx context.Context, artist, album string) []rel
 		return v
 	}
 	q := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escapeLucene(album), escapeLucene(artist))
-	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=%d", cc.base, url.QueryEscape(q), releaseSearchLimit)
+	path := fmt.Sprintf("/release/?query=%s&fmt=json&limit=%d", url.QueryEscape(q), releaseSearchLimit)
 	var body releaseSearchResponse
-	if err := cc.mb.get(ctx, u, &body); err != nil {
+	if err := cc.mb.get(ctx, parseBaseEndpoint(cc.base), path, &body); err != nil {
 		body.Releases = nil
 	}
 	cc.cache[key] = body.Releases
