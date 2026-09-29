@@ -28,7 +28,7 @@ import (
 // flag. The DLNA server runs one advertiser per LAN interface, each
 // announcing its own interface's LOCATION, so on Linux every advertiser also
 // answered the M-SEARCHes that arrived on the others. Measured with the real
-// binary in two network namespaces on 2026-09-29: every M-SEARCH from either
+// binary in three network namespaces on 2026-09-29: every M-SEARCH from either
 // subnet got two answers, one naming the other subnet, in either order.
 // IP_MULTICAST_ALL = 0 confines the socket to
 // the memberships it holds itself, (group, interface) pairs, which is what

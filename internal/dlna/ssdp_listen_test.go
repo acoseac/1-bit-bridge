@@ -17,7 +17,7 @@ import (
 // IP_MULTICAST_ALL = 1 then hands it the group's datagrams from every
 // interface where any socket on the host joined the group. So on a
 // multi-homed Linux bridge every advertiser also answered the M-SEARCHes of
-// the others, with its own LOCATION: measured with the real binary in two
+// the others, with its own LOCATION: measured with the real binary in three
 // network namespaces, every M-SEARCH from either subnet got two answers, one
 // naming the other subnet.
 //

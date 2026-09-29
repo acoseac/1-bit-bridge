@@ -584,7 +584,7 @@ func pinMulticastInterface(conn *net.UDPConn, iface *net.Interface) error {
 // the socket's route and source address at that moment, along the group's
 // route (backlog B71, measured 2026-09-29). On Linux and macOS the pin still
 // steered each datagram out of its own interface, with the source address
-// the connect had fixed: in two network namespaces the NOTIFYs pinned to the
+// the connect had fixed: in three network namespaces the NOTIFYs pinned to the
 // second interface came from the FIRST interface's address, and a renderer
 // with no route back to that subnet dropped every one; on macOS an
 // advertiser pinned to lo0 announced from en0's address. On Windows the pin

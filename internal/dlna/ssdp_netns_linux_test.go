@@ -27,13 +27,16 @@ import (
 // its own.
 const netnsChildEnv = "DLNA_SSDP_NETNS_CHILD"
 
-// The two interfaces the namespace test gives the bridge, each the near end
-// of a veth pair whose far end sits unused beside it (a veth has carrier only
-// while its peer is up).
-var netnsSides = []struct {
+// netnsSide is one of the interfaces the namespace test gives the bridge:
+// the near end of a veth pair whose far end sits unused beside it (a veth
+// has carrier only while its peer is up), and its address.
+type netnsSide struct {
 	name, peer string
 	ip         net.IP
-}{
+}
+
+// netnsSides are the bridge's two interfaces in the namespace test.
+var netnsSides = []netnsSide{
 	{"b71a0", "b71a1", net.IPv4(10, 71, 1, 1)},
 	{"b71b0", "b71b1", net.IPv4(10, 71, 2, 1)},
 }
@@ -124,25 +127,41 @@ func runAdvertisersInANamespaceOfTheirOwn(t *testing.T) {
 // checkAdvertisersKeepToTheirInterfaces starts a DLNA server with one
 // advertise endpoint per side and checks what it sends and answers.
 func checkAdvertisersKeepToTheirInterfaces(t *testing.T) {
+	notifies := listenOnEverySide(t)
+	endpoints := startServerOnEverySide(t)
+	checkNotifySources(t, notifies, endpoints)
+	checkSearchesAnsweredPerSide(t, endpoints)
+}
+
+// listenOnEverySide opens a listener of the test's own on the SSDP group,
+// joined on every side, before the server starts, so it hears every NOTIFY
+// the start burst sends (the kernel loops a copy back as one that arrived
+// on the interface it was sent from). ListenMulticastUDP sets SO_REUSEADDR,
+// which the advertisers' listeners need on the port too.
+func listenOnEverySide(t *testing.T) *net.UDPConn {
+	t.Helper()
 	group, err := net.ResolveUDPAddr("udp4", SSDPMulticastAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A listener of the test's own, joined on both sides, hears every
-	// NOTIFY the start burst sends (the kernel loops a copy back as one that
-	// arrived on the interface it was sent from). ListenMulticastUDP sets
-	// SO_REUSEADDR, which the advertisers' listeners need on the port too.
-	notifies, err := net.ListenMulticastUDP("udp4", interfaceNamed(t, netnsSides[0].name), group)
+	l, err := net.ListenMulticastUDP("udp4", interfaceNamed(t, netnsSides[0].name), group)
 	if err != nil {
 		t.Fatalf("listen for NOTIFYs: %v", err)
 	}
-	t.Cleanup(func() { _ = notifies.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 	for _, side := range netnsSides[1:] {
-		if err := ipv4.NewPacketConn(notifies).JoinGroup(interfaceNamed(t, side.name), group); err != nil {
+		if err := ipv4.NewPacketConn(l).JoinGroup(interfaceNamed(t, side.name), group); err != nil {
 			t.Fatalf("join the group on %s: %v", side.name, err)
 		}
 	}
+	return l
+}
 
+// startServerOnEverySide starts a DLNA server with one advertise endpoint
+// per side, as the wiring gives a multi-homed host, stopped at the test's
+// end, and returns the endpoints.
+func startServerOnEverySide(t *testing.T) []AdvertiseEndpoint {
+	t.Helper()
 	endpoints := make([]AdvertiseEndpoint, len(netnsSides))
 	for i, side := range netnsSides {
 		endpoints[i] = AdvertiseEndpoint{Interface: interfaceNamed(t, side.name), ServerURL: "http://" + side.ip.String() + ":7790"}
@@ -165,43 +184,67 @@ func checkAdvertisersKeepToTheirInterfaces(t *testing.T) {
 	if got := len(s.ssdps); got != len(netnsSides) {
 		t.Fatalf("%d advertisers started, want one per interface, %d", got, len(netnsSides))
 	}
+	return endpoints
+}
 
-	// Every NOTIFY names one side's LOCATION and must come from that side's
-	// address.
+// checkNotifySources reads the start burst's NOTIFYs from l: each names one
+// side's LOCATION and must come from that side's address, and every side
+// must be heard.
+func checkNotifySources(t *testing.T, l *net.UDPConn, endpoints []AdvertiseEndpoint) {
+	t.Helper()
 	heard := map[string]int{}
-	buf := make([]byte, 4096)
-	want := len(netnsSides) * len(NotifyTargetsFor("uuid:x"))
-	for n := 0; n < want; {
-		_ = notifies.SetReadDeadline(time.Now().Add(2 * time.Second))
-		k, src, err := notifies.ReadFromUDP(buf)
-		if err != nil {
+	for range len(netnsSides) * len(NotifyTargetsFor("uuid:x")) {
+		location, src, ok := readNotify(l)
+		if !ok {
 			break
 		}
-		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buf[:k])))
-		if err != nil || req.Method != "NOTIFY" {
-			continue
+		if side, named := sideNamedIn(location); named && !src.Equal(side.ip) {
+			t.Errorf("a NOTIFY for %s (LOCATION %s) came from %s, not from %s's own address", side.name, location, src, side.name)
 		}
-		n++
-		loc := req.Header.Get("LOCATION")
-		for _, side := range netnsSides {
-			if strings.Contains(loc, "//"+side.ip.String()+":") && !src.IP.Equal(side.ip) {
-				t.Errorf("a NOTIFY for %s (LOCATION %s) came from %s, not from %s's own address", side.name, loc, src.IP, side.name)
-			}
-		}
-		heard[loc]++
+		heard[location]++
 	}
 	for _, e := range endpoints {
 		if heard[e.ServerURL+"/dlna/description.xml"] == 0 {
 			t.Errorf("heard no NOTIFY naming %s; heard %v", e.ServerURL, heard)
 		}
 	}
+}
 
-	// An M-SEARCH arriving on one side must be answered with that side's
-	// LOCATION alone.
+// readNotify reads l until a NOTIFY arrives and returns its LOCATION and
+// source address; ok is false once nothing has arrived for two seconds.
+func readNotify(l *net.UDPConn) (location string, src net.IP, ok bool) {
+	buf := make([]byte, 4096)
+	for {
+		_ = l.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, from, err := l.ReadFromUDP(buf)
+		if err != nil {
+			return "", nil, false
+		}
+		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buf[:n])))
+		if err == nil && req.Method == "NOTIFY" {
+			return req.Header.Get("LOCATION"), from.IP, true
+		}
+	}
+}
+
+// sideNamedIn returns the side whose address a LOCATION names.
+func sideNamedIn(location string) (netnsSide, bool) {
+	for _, side := range netnsSides {
+		if strings.Contains(location, "//"+side.ip.String()+":") {
+			return side, true
+		}
+	}
+	return netnsSide{}, false
+}
+
+// checkSearchesAnsweredPerSide sends an M-SEARCH out of each side: it must be
+// answered with that side's LOCATION alone.
+func checkSearchesAnsweredPerSide(t *testing.T, endpoints []AdvertiseEndpoint) {
+	t.Helper()
 	for i, side := range netnsSides {
 		got := searchOutOf(t, interfaceNamed(t, side.name))
 		want := endpoints[i].ServerURL + "/dlna/description.xml"
-		if len(got) == 0 || slices.IndexFunc(got, func(l string) bool { return l != want }) >= 0 {
+		if len(got) == 0 || slices.ContainsFunc(got, func(l string) bool { return l != want }) {
 			t.Errorf("an M-SEARCH arriving on %s was answered with %q, want %q alone", side.name, got, want)
 		}
 	}

@@ -3524,7 +3524,7 @@ no failing test — which is the shape to expect in this area.
   default `IP_MULTICAST_ALL = 1` delivers the group's datagrams to it from
   every interface where any socket on the host joined, so every advertiser
   answered every interface's M-SEARCHes with its own LOCATION. Measured with
-  the real binary in two network namespaces: each M-SEARCH from either
+  the real binary in three network namespaces: each M-SEARCH from either
   subnet (6 of 6) got two answers, one naming the other subnet, the wrong
   one first in 3. macOS and Windows deliver per joined interface
   (measured). `listenSSDP` (ssdp_listen_linux.go) sets `IP_MULTICAST_ALL =
