@@ -415,14 +415,19 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		mtimeDelta = -mtimeDelta
 	}
 	if mtimeDelta > mtimeToleranceNS || rec.SourceSize != sourceInfo.Size() {
-		// Told before the answer: the phone never asks again for a
-		// family the manifest lists, so this download is the one moment
-		// the bridge hears that the rendition went stale. The hook asks
-		// for a rescan when the source changed since its row was written
-		// (cmd/bridge), after which the auto-optimize sweep renders it
-		// again.
+		// Told before the answer: this download may be the one moment
+		// the bridge hears that the rendition went stale, since a client
+		// that keeps the rendition listed asks for no new one. The hook
+		// (cmd/bridge) renders it again once the source's row is
+		// current, asking for a rescan first when the source changed
+		// since its row was written. The id is the row's, taken the way
+		// the reap below takes it.
 		if s.staleRendition != nil {
-			s.staleRendition(r.Context(), sourcePath, sourceInfo)
+			staleID := rec.VariantID
+			if staleID == "" {
+				staleID = variantID
+			}
+			s.staleRendition(r.Context(), sourcePath, staleID, sourceInfo)
 		}
 		writeError(w, http.StatusGone, "variant_stale", "variant is out of date relative to source; falling back to original is recommended")
 		return
