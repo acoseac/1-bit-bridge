@@ -1174,10 +1174,10 @@ lost my library."
   gate dhowden's accessors, which read frames (a TXXX "TRACKNUMBER" would make a nil
   track number Some(0)). The two readers still differ where the app is wrong or
   narrower (backlog B126), and neither reads Picard's TXXX:WORK (B127). **v19 changes
-  only files whose tag carries such a frame**:
-  they take the full-upsert leg (the tag's release id replaces one the enricher found
-  by searching, since the re-extract wins `mergePostScanFields`; the enricher's cover
-  stays until it runs again), their enrichment is re-queued once, and with a release
+  only files whose tag carries such a frame**: they take the full-upsert leg (the tag's
+  release id replaces one the enricher found by searching, since the re-extract wins
+  `mergePostScanFields`; the enricher's cover stays until it runs again), their
+  enrichment is re-queued once, and with a release
   id in hand the enricher does not search MusicBrainz for the release but fetches its
   cover (unless the file has local art) and resolves the artist. A tag ReplayGain now
   outranks the analysis loudness spliced in for a file with none, which PROTOCOL.md
