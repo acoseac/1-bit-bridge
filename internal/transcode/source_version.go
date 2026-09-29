@@ -25,6 +25,7 @@ package transcode
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 )
 
@@ -50,14 +51,18 @@ func SourceIsAtRow(info os.FileInfo, rowMTimeNS, rowSize int64) bool {
 var ErrSourceChanged = errors.New("the file changed on disk after its last scan")
 
 // sourceChanged stats the source and answers ErrSourceChanged, wrapped with
-// `what` happened to the render, when the file is not the version the spec
-// records, a file that is no longer there included. Gone is a change of
-// version like any other: rendered on, the tool fails on the missing input
-// and the pool strikes the source, which is how a NAS mount that dropped
-// under a queued batch struck every file behind it (Gemini on #1093). A rescan
-// of a directory it cannot see touches no row. Any other stat failure (a
-// permission, an I/O error) is not this check's question: it answers nil and
-// leaves the render's tools to report it, as before.
+// `what` happened to the render, unless the file verifiably is the version
+// the spec records. A file that is no longer there is a change of version
+// like any other, and a file whose stat fails (a stale NFS handle, a FUSE
+// mount answering ENOTCONN, an I/O error, a permission lost) cannot be
+// checked, so it is not rendered either. Rendered on, the tool failed on the
+// input and the pool struck the source: a mount that dropped under a queued
+// batch struck every file behind it, and three strikes suppress a file for
+// 30 days (Gemini on #1093). Every enqueuer stats the file before it queues
+// the job, so a stat that fails here is one that went bad while the job
+// waited, and a file that stays unreadable is refused at its next enqueue,
+// not re-offered here. A rescan of a directory the scanner cannot see
+// touches no row.
 //
 // os.Stat, following a link, as the scanner's and every enqueuer's stat do:
 // a linked file compares its target with its target.
@@ -67,7 +72,15 @@ func (j JobSpec) sourceChanged(what string) error {
 		return fmt.Errorf("%w: it is no longer there, %s", ErrSourceChanged, what)
 	}
 	if err != nil {
-		return nil
+		// The cause without the *fs.PathError's absolute path: this message
+		// reaches the batch row and the log, which name library files
+		// library-relative (#1055).
+		cause := err
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			cause = pe.Err
+		}
+		return fmt.Errorf("%w: it could not be checked (%v), %s", ErrSourceChanged, cause, what)
 	}
 	if SourceIsAtRow(info, j.SourceMTimeNS, j.SourceSize) {
 		return nil

@@ -29146,9 +29146,12 @@ Throwaway probes in a worktree of main (macOS; the pool probe ran the real
   (the adapter's `track.Path`, the pool's `SourceLibraryRel`, the walks'
   projection, the hook's lookup), so the request's spelling never reaches the
   scanner.
-- A rescan that committed rows calls `run`'s `wrote`, which runServe wires to
-  a non-blocking send on the auto-optimize nudge. Without it the re-render
-  waited for the sweep's tick, which by default follows the periodic scan
+- After every rescan the shutdown did not interrupt, including one that
+  committed no row, `run` calls its `after` step, `afterRescan`: it drops the
+  album-gain index, then sends a non-blocking nudge to the auto-optimize
+  sweep. (The first version called it only after a rescan that committed
+  rows; review rounds 3 and 4 below.) Without the nudge the re-render waited
+  for the sweep's tick, which by default follows the periodic scan
   (`autoOptimize.intervalSec: 0` inherits `scanIntervalSec`), so the download
   hook alone would have healed almost nothing sooner. The rescanner's loop now
   starts after the auto-optimize block, where the nudge exists.
@@ -29206,8 +29209,8 @@ source, and the operator can rescan from the same console.
   `TestARescanIndexesNoSecondSpellingOfTheDirectory` (skips on a
   case-sensitive filesystem; runs on macOS and Windows).
 
-#1077's harness now wires the rescanner and the download hook as runServe
-does (the loop runs only when a test starts it). The fixtures of the other
+The harness from `#1077` now wires the rescanner and the download hook as
+runServe does (the loop runs only when a test starts it). The fixtures of the other
 transcode batch tests resolve through `scannedResolver`, which answers the
 row's own stat.
 
@@ -29363,3 +29366,27 @@ it at once, and a single worker that fast kept the queue under its cap (on
 unix the path is ENOTDIR and still reaches the tool). Its docblock called
 the pigeonhole structural; it depended on a slow failure. The worker now
 holds its job until the test ends, which makes it structural.
+
+### Review round 6
+
+- Gemini (high): a stat that fails with anything but "not found" (a stale
+  NFS handle, a FUSE mount answering ENOTCONN, EIO) sent the job to the tool,
+  which failed and struck the file. Checked: true, and the same class as
+  round 5's deletion. Every enqueuer stats the file before it queues the job
+  (the adapter's `os.Stat`, the sweeper's and the walks' `ResolveChecked`, the
+  CLI's `os.Stat`), so a stat that fails in `Run` set in while the job
+  waited, and a file that stays unreadable is refused at its next enqueue,
+  so no retry loop follows. `sourceChanged` now answers `ErrSourceChanged` for
+  any stat failure ("it could not be checked (<cause>)", the cause without the
+  `*fs.PathError`'s absolute path). At publish time this discards a finished
+  render whose source cannot be checked; the next request renders it again.
+  `TestRunRendersNothingFromASourceItCannotCheck` stats a path through a
+  regular file (ENOTDIR on unix, not found on Windows). NC21 (only ENOENT
+  refused, as in round 5): that test went red.
+- Gemini (critical): `*resolveErrors++` said to parse as `*(resolveErrors++)`
+  and not compile. Declined: in Go `++` is a statement applied to the operand
+  expression, so it increments the pointee; CI builds and tests it.
+- CodeRabbit: a `defer stop()` for a test context (taken), and two lines in
+  this entry (the design summary still described the first `wrote` behaviour,
+  and a line began with `#1077`, which markdown reads as a heading; both
+  taken).

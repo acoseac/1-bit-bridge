@@ -218,6 +218,7 @@ func TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote(t *testing.T) {
 	}
 
 	stopped, stop := context.WithCancel(context.Background())
+	defer stop()
 	r2 := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
 	r2.request("Album/01.dsf")
 	var ran int

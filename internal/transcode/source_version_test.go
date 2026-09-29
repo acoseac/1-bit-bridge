@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +123,36 @@ func TestRunRendersNothingFromASourceThatChangedSinceItsStamp(t *testing.T) {
 				t.Fatalf("Run over a source that is no longer there = %v, want ErrSourceChanged", err)
 			}
 		})
+	}
+}
+
+// TestRunRendersNothingFromASourceItCannotCheck: a stat that fails with
+// anything but "not found" (a stale NFS handle, a FUSE mount answering
+// ENOTCONN, an I/O error) cannot confirm the version either. Rendered on,
+// the tool failed on the input and the pool struck the file; every enqueuer
+// stats the file before it queues, so such a failure is one that set in
+// while the job waited (Gemini on #1093). A path through a regular file
+// makes stat fail with ENOTDIR on unix (on Windows, not found), with no root
+// and no broken mount. The message gives the cause without the absolute
+// path, which the batch row and the log must not carry (#1055).
+func TestRunRendersNothingFromASourceItCannotCheck(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	resetFFmpegSnapshotForTest()
+	t.Cleanup(resetFFmpegSnapshotForTest)
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "a-file")
+	writeSource(t, notADir, 16)
+	spec := JobSpec{SourceAbsPath: filepath.Join(notADir, "01.flac"), SourceLibraryRel: "Album/01.flac",
+		SourceMTimeNS: 1, SourceSize: 4096, SourceSampleRate: 96000, SourceBits: 24,
+		TargetSampleRate: 48000, TargetBits: 16, Kind: JobKindOptimize,
+		Quality: QualityVeryHigh, OutputDir: filepath.Join(dir, "variants")}
+
+	_, err := Run(context.Background(), spec)
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("Run over a source whose stat fails = %v, want ErrSourceChanged: rendered on, the tool fails and the pool strikes the file", err)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("the refusal %q names the absolute path", err)
 	}
 }
 

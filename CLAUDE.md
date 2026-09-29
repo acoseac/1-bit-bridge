@@ -2247,9 +2247,12 @@ no failing test — which is the shape to expect in this area.
   probe, a scratch file or an album-gain claim) and again in
   `JobSpec.publishSidecar`, the one publish helper both chains call, so bytes
   the stamp does not describe are never renamed into place. A source that
-  is no longer there answers it too (review round 5): rendered on, the tool
-  failed on the missing input and the pool struck the file, which a NAS
-  mount dropping under a queued batch did to every file behind it. The pool
+  is no longer there, or whose stat fails at all (a stale NFS handle, a FUSE
+  mount's ENOTCONN, EIO), answers it too (review rounds 5 and 6): rendered
+  on, the tool failed on the input and the pool struck the file, which a
+  mount dropping under a queued batch did to every file behind it. Every
+  enqueuer stats before it queues, so a file that stays unreadable is refused
+  at its next enqueue rather than re-offered to `Run`. The pool
   classifies it BY TYPE: counted and announced like any failure (a batch must
   hear it to drain; #988's tail is unchanged, and the exit is a row in both
   terminal-order tables), it **strikes nothing** (a newer version is not a bad
