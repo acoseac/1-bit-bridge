@@ -2185,16 +2185,21 @@ no failing test — which is the shape to expect in this area.
   minute is spent only on a rescan the rescanner queued or already had
   waiting (`sourceRescanner.queue`); one its full queue dropped leaves the
   next GET free to ask (review round 2). A rescan
-  that wrote rows nudges the auto-optimize sweep, whose tick otherwise follows
-  the periodic scan. **A rescan request names the file by its ROW's path, and
+  that wrote rows drops the album-gain index and THEN nudges the
+  auto-optimize sweep, whose tick otherwise follows the periodic scan
+  (`afterRescanWrote`): only a full scan dropped that index, so a DSD render
+  the nudge starts could take a retagged track's old album-mates for its gain
+  (review round 3). **A rescan request names the file by its ROW's path, and
   the rescanner resolves the directory itself**: the scanner makes each row's
   path from the spelling of the directory it is handed, and on main a request
   naming a changed file in lower case, on a filesystem that opens it, left the
   rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: with
   auto-optimize off, a stale rendition whose row has caught up is rendered
   again by nothing (backlog B82), and a watcher-driven subtree scan nudges
-  neither the sweep nor the player's catalog (B83; `player_wiring.go` said it
-  nudged the catalog until B53). Tests: `TestABatchPassesOverAFileThatChangedSinceItsScan`,
+  neither the sweep nor the player's catalog, nor drops the album-gain index
+  (B83; `player_wiring.go` said it nudged the catalog until B53). Tests:
+  `TestABatchPassesOverAFileThatChangedSinceItsScan`,
+  `TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep`,
   `TestRunRendersNothingFromASourceThatChangedSinceItsStamp`,
   `TestPublishingRefusesASourceThatChangedWhileItRendered`,
   `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (the real pool and

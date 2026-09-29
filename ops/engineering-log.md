@@ -28443,3 +28443,22 @@ merged in, not rebased, keeping both entries.
   logged, moved into the helper; main's three copies (`batch.go:515`, 1228,
   1277) were dismissed as false positives. The second is its sibling with the
   same attribute. Not dismissed here; left for triage.
+
+### Review round 3
+
+CodeRabbit (outside the diff, Major): drop the album-gain index before the
+nudge. Checked against `internal/albumgain`: the index is dropped by
+`Resolver.Invalidate`, which only the post-scan hook calls, and the hook
+fires after a FULL scan alone; otherwise the index lives out
+`defaultIndexTTL` (two minutes, documented as bounding "a missed hook"). A
+rescan that read a retag moving a DSD track to another album is such a
+missed hook, and round 1's nudge makes a render inside that window likely:
+the render would record the gain of the track's old album-mates, and a
+rendition stamped fresh against its row is never rendered again for a gain
+change. Taken: `afterRescanWrote` (the `wrote` callback runServe passes)
+calls the resolver's `Invalidate`, when an album gain is wired, and then
+sends the non-blocking nudge. `TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep`
+checks the order, the unwired case and that a pending nudge does not block.
+NC16 (nudge first): red ("invalidated after the nudge"). NC17 (no
+invalidation): red. A watcher-driven subtree scan misses the index drop the
+same way; that joins B83.
