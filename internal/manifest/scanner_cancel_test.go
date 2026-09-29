@@ -483,13 +483,13 @@ func TestAnEmptyRootAuditStoppedByShutdownReportsNothing(t *testing.T) {
 	cancel()
 
 	rec := loggingtest.Record(t)
-	if !sc.emptyRootMustBeSpared(ctx, root, false) {
+	if !sc.emptyRootMustBeSpared(ctx, root, false, nil) {
 		t.Error("a root whose audit was stopped was not spared")
 	}
 	mustNotReport(t, rec, msgEmptyRootCount)
 
 	_ = s.Close()
-	if !sc.emptyRootMustBeSpared(context.Background(), root, false) {
+	if !sc.emptyRootMustBeSpared(context.Background(), root, false, nil) {
 		t.Error("a root whose audit failed was not spared")
 	}
 	mustReportOnce(t, rec, msgEmptyRootCount)

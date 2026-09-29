@@ -398,7 +398,8 @@ lost my library."
   One Warn per scan names them (`links whose target could not be read`),
   never one per link: a mount takes every link into it at once. **A link to a
   DIRECTORY is not a track**, whatever its name, and the walk still follows no
-  directory link (loops). **Nor is a named pipe, a socket or a device, or a
+  directory link (loops; what it says about one is the B74 bullet below).
+  **Nor is a named pipe, a socket or a device, or a
   link to one** (`fsutil.NotAFile`, the list every byte route refuses by too:
   the next bullet): whatever stat the row would carry must describe
   something that opens as a file, and a regular file whose own stat says
@@ -508,7 +509,8 @@ lost my library."
   never the unresolved root: Scan logs `root unreachable` and spares it,
   ScanSubtree of the root returns before its deletion pass, the watcher and
   the doctor report it. **Only the root is followed**: a link to a directory
-  BELOW a root is still not walked by any of them, and the upscale folder
+  BELOW a root is still not walked by any of them (and the scanner says so:
+  the B74 bullet below), and the upscale folder
   walk follows a folder only when it IS a root, so it enqueues nothing the
   manifest does not hold. `TestEveryWalkOfALibraryRootStartsFromWalkableRoot`
   requires every production function that calls `filepath.WalkDir`,
@@ -592,6 +594,51 @@ lost my library."
   per-root rollups still read unfiltered
   (`TestScanner_AnEmptyRootBesideRoutedRowsIsNotAMountDrop`,
   `TestScanner_TheCleanEmptyGuardCountsOnlyTheRootsOwnRows`).
+- **A link to a directory BELOW a root is still not followed, and the
+  scanner SAYS so** (2026-09-29, backlog B74). Moving an album folder to
+  another volume and leaving a link (on Windows a junction, `mklink /J`)
+  took it off every paired device, measured on main 6dfba62c (macOS
+  symlinks, Windows 11 junctions; full scans, subtree scans of the root and
+  of the folder holding the link, multi-root). (a) A root whose only
+  content was such links read as a suspected clean-empty mount: an ERROR
+  every scan, rows kept, and the hint to place `.bridge-allow-empty`, which
+  then deleted both rows, a tombstone each, while the files stat'ed through
+  the link. (b) A root holding one beside real content lost the rows under
+  it at the threshold, a tombstone each, with only an Info count naming
+  nothing. Both walks now record every entry `dirLinkEntry` calls a link to
+  a directory: listing type neither regular nor a directory, and a stat
+  THROUGH it a directory. **Never the `ModeSymlink` bit**: a junction or a
+  volume mounted in a folder is `ModeIrregular` since Go 1.23, and a
+  symlink-only test turned every behavioural test red on Windows with real
+  junctions while macOS stayed green. (a) The guard's line for a root
+  holding only such links is its own, `library root holds no content but
+  links to directories…; its rows are kept`, not the mount-failure one (a
+  link stat'ed through to a directory says the volume is there), with the
+  count, an example, `rows_under_links` (`CountOwnTracksUnderPrefix`, the
+  one statement `CountTracksUnderRoot` now runs too), and a hint that the
+  sentinel deletes those rows and that the way to index a linked directory
+  is to make it a library root. The owning-root audit's refusal says the
+  same. (b) The deletion pass Warns `rows under links to directories are
+  counted missing…` **once per ROW's streak**: `TracksNotYetCountedMissing`
+  asks, BEFORE the increment, which of the rows under a link are still at
+  `missing_count` 0, so a restart mid-streak says nothing more and a row
+  that came back and went again says it again; a pass whose increment
+  failed says nothing. **A link to a directory is never library content,
+  whatever its name**: counted by its name (`Live.flac -> dir`), a root
+  holding nothing else passed the guard and its rows went with no line, (a)
+  turned into (b). `isLibraryEntry` stays the NAME rule and is never asked
+  about one: both walks and `holdsLibraryContent` ask `dirLinkEntry` first
+  (a track-named one is still in the "entries that are not files" line). A
+  line names a link library-relative (#1055), never the absolute path it
+  leads to, and a scan's guard line names only ITS root's links. Whether the
+  scanner should follow such links is a product decision this rule does
+  not make: backlog B80 (loops, #1070)
+  (`TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`,
+  `TestScanner_RowsUnderALinkBesideContentAreAnnouncedOncePerStreak`,
+  `TestScanner_ALinkStreakIsSaidOnceAcrossARestartAndAgainWhenItRestarts`,
+  `TestScanner_ALinkToADirectoryNamedLikeATrackIsNotContent`,
+  `TestScanner_ASubtreeMissBesideOnlyLinksNamesThem`,
+  `TestDirLinkEntryTellsALinkToADirectoryByTheStatThroughIt`).
 - **A configured root that is a link is WATCHED at the directory it
   resolves to, and every event under it is named back under the configured
   root** (2026-09-29, backlog B51). fsnotify's kqueue backend (macOS, the
