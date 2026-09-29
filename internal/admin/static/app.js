@@ -5673,7 +5673,7 @@ function mountJobTrays() {
 // own state is on the button (data-switch-on), written by renderJobCards.
 function syncFingerprintEnable() {
   const btn = document.getElementById("jobs-fp-enable");
-  if (!btn || !btn.dataset.switchOn) return;
+  if (!btn?.dataset.switchOn) return;
   btn.hidden = btn.dataset.switchOn === "1" || !trayManagedKnown() || trayFieldManaged("fingerprintEnabled");
 }
 

@@ -160,9 +160,10 @@ function paint(panel, summary) {
  */
 function reconcile(parent, desired) {
   const wanted = new Set(desired);
-  for (const child of [...parent.children]) {
-    if (!wanted.has(child)) parent.removeChild(child);
-  }
+  // A copy, because `children` is live and removing while walking it skips
+  // the node after each one removed.
+  const strangers = [...parent.children].filter((child) => !wanted.has(child));
+  for (const child of strangers) child.remove();
   desired.forEach((node, i) => {
     const at = parent.children[i];
     if (at !== node) parent.insertBefore(node, at || null);
@@ -383,11 +384,7 @@ function kindRow(kind, panel) {
     // the batch skips any track that already has a variant of the kind.
     // So it needs saying out loud, WITH the remedy: Delete then Generate
     // is the only route back to a current copy.
-    stale.textContent = c.stale === 0 ? "" : c.stale === 1
-      ? "1 copy is out of date — its source changed after it was made. " +
-        "Delete, then generate again."
-      : `${c.stale} copies are out of date — their sources changed after they ` +
-        "were made. Delete, then generate again.";
+    stale.textContent = staleNote(c.stale);
 
     reconcile(row.node, [
       head, bar,
@@ -398,6 +395,17 @@ function kindRow(kind, panel) {
     ]);
   };
   return row;
+}
+
+/** What a kind says about copies whose source changed after they were made, or "". */
+function staleNote(count) {
+  if (count === 0) return "";
+  if (count === 1) {
+    return "1 copy is out of date — its source changed after it was made. " +
+      "Delete, then generate again.";
+  }
+  return `${count} copies are out of date — their sources changed after they ` +
+    "were made. Delete, then generate again.";
 }
 
 /**

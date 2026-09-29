@@ -116,17 +116,6 @@ func TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch(t 
 	on := jobsSnapshotResponse{Fingerprint: &FingerprintJobState{Enabled: true, Active: true}}
 	none := []string{}
 	managed := []string{"fingerprintEnabled", "duplicatesFilter"}
-	type enableCase struct {
-		Name          string               `json:"name"`
-		Snapshot      jobsSnapshotResponse `json:"snapshot"`
-		KnownAtRender *[]string            `json:"knownAtRender"`
-		LandsAfter    []string             `json:"landsAfter,omitempty"`
-		Click         bool                 `json:"click"` // a click of the button, hidden or not
-
-		hiddenAfterRender   bool
-		hiddenAfterSnapshot bool // only read where LandsAfter is set
-		wantSent            int
-	}
 	cases := []enableCase{
 		{Name: "switch off, operator's", Snapshot: off, KnownAtRender: &none, Click: true,
 			hiddenAfterRender: false, wantSent: 1},
@@ -148,12 +137,7 @@ func TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch(t 
 	script := withFunctions(t, jobsToolStateBase(t), src, "enableFingerprint", "setDisabled", "trayFieldManaged") +
 		fingerprintEnableRun
 	raw := runScriptUnderNode(t, node, script, map[string]any{"cases": cases})
-	var results []struct {
-		Name          string           `json:"name"`
-		AfterRender   bool             `json:"afterRender"`
-		AfterSnapshot *bool            `json:"afterSnapshot"`
-		Sent          []map[string]any `json:"sent"`
-	}
+	var results []enableResult
 	if err := json.Unmarshal(raw, &results); err != nil {
 		t.Fatalf("the harness printed %q: %v", raw, err)
 	}
@@ -161,26 +145,67 @@ func TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch(t 
 		t.Fatalf("the harness ran %d cases for %d", len(results), len(cases))
 	}
 	for i, r := range results {
-		c := cases[i]
-		if r.AfterRender != c.hiddenAfterRender {
-			t.Errorf("%s: after the card rendered the Enable button is hidden=%v, want %v",
-				c.Name, r.AfterRender, c.hiddenAfterRender)
+		checkEnableCase(t, cases[i], r)
+	}
+}
+
+// enableCase is one card render and click the Enable harness makes: the jobs
+// snapshot that lands, the managed set known when it does (nil is unknown),
+// the set a settings snapshot names after it, and whether the button is
+// clicked. The unexported fields are the expectation, which the harness never
+// sees.
+type enableCase struct {
+	Name          string               `json:"name"`
+	Snapshot      jobsSnapshotResponse `json:"snapshot"`
+	KnownAtRender *[]string            `json:"knownAtRender"`
+	LandsAfter    []string             `json:"landsAfter,omitempty"`
+	Click         bool                 `json:"click"` // a click of the button, hidden or not
+
+	hiddenAfterRender   bool
+	hiddenAfterSnapshot bool // only read where LandsAfter is set
+	wantSent            int
+}
+
+// enableResult is what the harness read back for one case.
+type enableResult struct {
+	Name          string           `json:"name"`
+	AfterRender   bool             `json:"afterRender"`
+	AfterSnapshot *bool            `json:"afterSnapshot"`
+	Sent          []map[string]any `json:"sent"`
+}
+
+// checkEnableCase compares one case's outcome with what it expects.
+func checkEnableCase(t *testing.T, c enableCase, r enableResult) {
+	t.Helper()
+	if r.AfterRender != c.hiddenAfterRender {
+		t.Errorf("%s: after the card rendered the Enable button is hidden=%v, want %v",
+			c.Name, r.AfterRender, c.hiddenAfterRender)
+	}
+	if c.LandsAfter != nil {
+		checkEnableAfterSnapshot(t, c, r)
+	}
+	// A click of a button the reader could not see is a script's: the managed
+	// field goes unsent, the operator's is sent as always.
+	if len(r.Sent) != c.wantSent {
+		t.Errorf("%s: a click sent %v, want %d PATCHes", c.Name, r.Sent, c.wantSent)
+	}
+	for _, sent := range r.Sent {
+		if len(sent) != 1 || sent["fingerprintEnabled"] != true {
+			t.Errorf("%s: the click sent %v, want fingerprintEnabled alone", c.Name, sent)
 		}
-		if c.LandsAfter != nil && (r.AfterSnapshot == nil || *r.AfterSnapshot != c.hiddenAfterSnapshot) {
-			t.Errorf("%s: after the settings snapshot landed the button is hidden=%v, want %v",
-				c.Name, r.AfterSnapshot, c.hiddenAfterSnapshot)
-		}
-		// A click of a button the reader could not see is a script's: the
-		// managed field goes unsent, the operator's is sent as always.
-		wantSent := c.wantSent
-		if len(r.Sent) != wantSent {
-			t.Errorf("%s: a click sent %v, want %d PATCHes", c.Name, r.Sent, wantSent)
-		}
-		for _, sent := range r.Sent {
-			if len(sent) != 1 || sent["fingerprintEnabled"] != true {
-				t.Errorf("%s: the click sent %v, want fingerprintEnabled alone", c.Name, sent)
-			}
-		}
+	}
+}
+
+// checkEnableAfterSnapshot compares the button once the settings snapshot has
+// landed with what the case expects.
+func checkEnableAfterSnapshot(t *testing.T, c enableCase, r enableResult) {
+	t.Helper()
+	switch {
+	case r.AfterSnapshot == nil:
+		t.Errorf("%s: the harness read no state once the settings snapshot had landed", c.Name)
+	case *r.AfterSnapshot != c.hiddenAfterSnapshot:
+		t.Errorf("%s: after the settings snapshot landed the button is hidden=%v, want %v",
+			c.Name, *r.AfterSnapshot, c.hiddenAfterSnapshot)
 	}
 }
 
@@ -252,12 +277,6 @@ func TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; this test executes the shipped console source")
 	}
-	type policyCase struct {
-		Name       string    `json:"name"`
-		Known      *[]string `json:"known"`
-		LandsAfter []string  `json:"landsAfter,omitempty"`
-		managed    bool      // whether the control plane owns the policy once known
-	}
 	none := []string{"backupKeep"}
 	owned := []string{"duplicatesFilter"}
 	cases := []policyCase{
@@ -273,63 +292,91 @@ func TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt(t *testing.T) {
 		extractJSFunction(t, src, "setDisabled"),
 	}, "\n") + "\n" + dupesPolicyRun
 	raw := runScriptUnderNode(t, node, script, map[string]any{"cases": cases})
-	type state struct {
-		FieldsetHidden bool   `json:"fieldsetHidden"`
-		HintHidden     bool   `json:"hintHidden"`
-		ReadoutHidden  bool   `json:"readoutHidden"`
-		InputsDisabled []bool `json:"inputsDisabled"`
-	}
-	var results []struct {
-		Name      string           `json:"name"`
-		First     state            `json:"first"`
-		Landed    *state           `json:"landed"`
-		Sent      []map[string]any `json:"sent"`
-		Refreshes int              `json:"refreshes"`
-		Named     string           `json:"named"`
-		Bare      string           `json:"bare"`
-		None      string           `json:"none"`
-	}
+	var results []policyResult
 	if err := json.Unmarshal(raw, &results); err != nil {
 		t.Fatalf("the harness printed %q: %v", raw, err)
 	}
 	if len(results) != len(cases) {
 		t.Fatalf("the harness ran %d cases for %d", len(results), len(cases))
 	}
-	check := func(name, when string, s state, managed bool) {
-		t.Helper()
-		if s.FieldsetHidden != managed || s.HintHidden != managed || s.ReadoutHidden == managed {
-			t.Errorf("%s, %s: radios hidden=%v, saving prose hidden=%v, policy line hidden=%v; want the radios "+
-				"and the prose hidden=%v and the line hidden=%v", name, when, s.FieldsetHidden, s.HintHidden,
-				s.ReadoutHidden, managed, !managed)
-		}
-		for i, d := range s.InputsDisabled {
-			if d != managed {
-				t.Errorf("%s, %s: radio %d is disabled=%v, want %v: nothing may send a managed field",
-					name, when, i, d, managed)
-			}
+	for i, r := range results {
+		checkPolicyCase(t, cases[i], r)
+	}
+}
+
+// policyCase is one Duplicates page the harness builds: the managed set known
+// at the first paint (nil is unknown), the set a settings snapshot names after
+// it, and, as the expectation, whether the control plane owns the policy once
+// it is known.
+type policyCase struct {
+	Name       string    `json:"name"`
+	Known      *[]string `json:"known"`
+	LandsAfter []string  `json:"landsAfter,omitempty"`
+	managed    bool
+}
+
+// policyState is what the page showed at one moment.
+type policyState struct {
+	FieldsetHidden bool   `json:"fieldsetHidden"`
+	HintHidden     bool   `json:"hintHidden"`
+	ReadoutHidden  bool   `json:"readoutHidden"`
+	InputsDisabled []bool `json:"inputsDisabled"`
+}
+
+// policyResult is what the harness read back for one case.
+type policyResult struct {
+	Name      string           `json:"name"`
+	First     policyState      `json:"first"`
+	Landed    *policyState     `json:"landed"`
+	Sent      []map[string]any `json:"sent"`
+	Refreshes int              `json:"refreshes"`
+	Named     string           `json:"named"`
+	Bare      string           `json:"bare"`
+	None      string           `json:"none"`
+}
+
+// checkPolicyState compares the page at one moment with whether the policy is
+// managed: the radios and the prose about saving are hidden and the line
+// naming the policy shown, or the reverse, and no radio can send a managed
+// field.
+func checkPolicyState(t *testing.T, name, when string, s policyState, managed bool) {
+	t.Helper()
+	if s.FieldsetHidden != managed || s.HintHidden != managed || s.ReadoutHidden == managed {
+		t.Errorf("%s, %s: radios hidden=%v, saving prose hidden=%v, policy line hidden=%v; want the radios "+
+			"and the prose hidden=%v and the line hidden=%v", name, when, s.FieldsetHidden, s.HintHidden,
+			s.ReadoutHidden, managed, !managed)
+	}
+	for i, d := range s.InputsDisabled {
+		if d != managed {
+			t.Errorf("%s, %s: radio %d is disabled=%v, want %v: nothing may send a managed field",
+				name, when, i, d, managed)
 		}
 	}
-	for i, r := range results {
-		c := cases[i]
-		if c.LandsAfter == nil {
-			check(c.Name, "at the first paint", r.First, c.managed)
-		} else {
-			// Unknown reads as not managed: the radios show, they carry the policy in force.
-			check(c.Name, "before the snapshot", r.First, false)
-			check(c.Name, "after the snapshot", *r.Landed, c.managed)
-		}
-		switch {
-		case c.managed && len(r.Sent) != 0:
-			t.Errorf("%s: a change of the policy sent %v; the PATCH refuses a managed field whole", c.Name, r.Sent)
-		case c.managed && r.Refreshes == 0:
-			t.Errorf("%s: a refused change did not snap the radios back to what the bridge holds", c.Name)
-		case !c.managed && (len(r.Sent) != 1 || r.Sent[0]["duplicatesFilter"] != "same-format"):
-			t.Errorf("%s: a change of the policy sent %v, want duplicatesFilter alone", c.Name, r.Sent)
-		}
-		if r.Named != "Highest quality" || r.Bare != "highest-quality" || r.None != "—" {
-			t.Errorf("%s: the policy is named %q by its radio, %q with no radio and %q with no policy; want "+
-				"the radio's own name, else the raw value, else a dash", c.Name, r.Named, r.Bare, r.None)
-		}
+}
+
+// checkPolicyCase compares one case's outcome with what it expects: what the
+// page showed at each moment, what a change of the policy sent, and how the
+// policy is named.
+func checkPolicyCase(t *testing.T, c policyCase, r policyResult) {
+	t.Helper()
+	if c.LandsAfter == nil {
+		checkPolicyState(t, c.Name, "at the first paint", r.First, c.managed)
+	} else {
+		// Unknown reads as not managed: the radios show, they carry the policy in force.
+		checkPolicyState(t, c.Name, "before the snapshot", r.First, false)
+		checkPolicyState(t, c.Name, "after the snapshot", *r.Landed, c.managed)
+	}
+	switch {
+	case c.managed && len(r.Sent) != 0:
+		t.Errorf("%s: a change of the policy sent %v; the PATCH refuses a managed field whole", c.Name, r.Sent)
+	case c.managed && r.Refreshes == 0:
+		t.Errorf("%s: a refused change did not snap the radios back to what the bridge holds", c.Name)
+	case !c.managed && (len(r.Sent) != 1 || r.Sent[0]["duplicatesFilter"] != "same-format"):
+		t.Errorf("%s: a change of the policy sent %v, want duplicatesFilter alone", c.Name, r.Sent)
+	}
+	if r.Named != "Highest quality" || r.Bare != "highest-quality" || r.None != "—" {
+		t.Errorf("%s: the policy is named %q by its radio, %q with no radio and %q with no policy; want "+
+			"the radio's own name, else the raw value, else a dash", c.Name, r.Named, r.Bare, r.None)
 	}
 }
 

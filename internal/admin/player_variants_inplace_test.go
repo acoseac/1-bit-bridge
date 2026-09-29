@@ -59,6 +59,7 @@ class Node {
     this.children = this.children.filter((x) => x !== c); c.parentNode = null; return c;
   }
   appendChild(c) { return this.insertBefore(c, null); }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
   insertBefore(c, ref) {
     if (c.parentNode) c.parentNode.removeChild(c);
     const i = ref ? this.children.indexOf(ref) : -1;
@@ -309,6 +310,57 @@ func (v inPlaceView) row(t *testing.T, title string) inPlaceRow {
 // fails the panel hands over to the route's re-render (an abort is not a
 // failure). Without a fetch it does as it always did.
 func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
+	out := runVariantsInPlaceHarness(t)
+	checkPanelTraySave(t, out)
+	checkGatedField(t, out)
+	checkKindTraySave(t, out)
+	checkRedrawsThatPaintNothing(t, out)
+	checkFailedDelete(t, out)
+}
+
+// inPlaceOutcome is what the harness printed: the panel at each step of each
+// scenario it ran.
+type inPlaceOutcome struct {
+	PanelTray struct {
+		Blocked      inPlaceView `json:"blocked"`
+		AfterUpscale inPlaceView `json:"afterUpscale"`
+		AfterCarPlay inPlaceView `json:"afterCarPlay"`
+	} `json:"panelTray"`
+	GatedField inPlaceView `json:"gatedField"`
+	KindTray   struct {
+		Before inPlaceView `json:"before"`
+		After  inPlaceView `json:"after"`
+	} `json:"kindTray"`
+	MovedOn    inPlaceView `json:"movedOn"`
+	Overtaken  inPlaceView `json:"overtaken"`
+	Fails      inPlaceView `json:"fails"`
+	Aborted    inPlaceView `json:"aborted"`
+	Empty      inPlaceView `json:"empty"`
+	NoRefresh  inPlaceView `json:"noRefresh"`
+	DeleteFail struct {
+		StartedFocused bool `json:"startedFocused"`
+		Disabled       bool `json:"disabled"`
+		FocusOnDelete  bool `json:"focusOnDelete"`
+		Changed        int  `json:"changed"`
+	} `json:"deleteFails"`
+	DeleteFailNoApp struct {
+		Disabled      bool `json:"disabled"`
+		FocusOnDelete bool `json:"focusOnDelete"`
+	} `json:"deleteFailsWithoutApp"`
+}
+
+// The two switches the harness's tray stand-ins put focus in, as observe
+// names them.
+const (
+	inPlacePanelSwitch = "switch of Variant generation"
+	inPlaceKindSwitch  = "switch of CarPlay-optimized variants"
+)
+
+// runVariantsInPlaceHarness runs variantsInPlaceHarness against the shipped
+// variants.js, with app.js's own setDisabled, and returns what it printed. It
+// skips the test where node is not installed.
+func runVariantsInPlaceHarness(t *testing.T) inPlaceOutcome {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; this test executes the shipped panel")
@@ -327,49 +379,36 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
-	var out struct {
-		PanelTray struct {
-			Blocked      inPlaceView `json:"blocked"`
-			AfterUpscale inPlaceView `json:"afterUpscale"`
-			AfterCarPlay inPlaceView `json:"afterCarPlay"`
-		} `json:"panelTray"`
-		GatedField inPlaceView `json:"gatedField"`
-		KindTray   struct {
-			Before inPlaceView `json:"before"`
-			After  inPlaceView `json:"after"`
-		} `json:"kindTray"`
-		MovedOn    inPlaceView `json:"movedOn"`
-		Overtaken  inPlaceView `json:"overtaken"`
-		Fails      inPlaceView `json:"fails"`
-		Aborted    inPlaceView `json:"aborted"`
-		Empty      inPlaceView `json:"empty"`
-		NoRefresh  inPlaceView `json:"noRefresh"`
-		DeleteFail struct {
-			StartedFocused bool `json:"startedFocused"`
-			Disabled       bool `json:"disabled"`
-			FocusOnDelete  bool `json:"focusOnDelete"`
-			Changed        int  `json:"changed"`
-		} `json:"deleteFails"`
-		DeleteFailNoApp struct {
-			Disabled      bool `json:"disabled"`
-			FocusOnDelete bool `json:"focusOnDelete"`
-		} `json:"deleteFailsWithoutApp"`
-	}
+	var out inPlaceOutcome
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("the harness printed %q: %v", raw, err)
 	}
+	return out
+}
 
-	const panelSwitch, kindSwitch = "switch of Variant generation", "switch of CarPlay-optimized variants"
-	// Generation off, the reader toggles PCM upscaling from the panel's gear.
-	if b := out.PanelTray.Blocked; len(b.Notes) != 1 || len(b.Trays) != 1 || !b.row(t, "Hi-res upscale").GenerateDisabled {
+// checkPanelTraySave checks the panel's own tray: generation off, the reader
+// turns PCM upscaling on from its gear, and then the CarPlay switch.
+func checkPanelTraySave(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
+	b := out.PanelTray.Blocked
+	if len(b.Notes) != 1 || len(b.Trays) != 1 || !b.row(t, "Hi-res upscale").GenerateDisabled {
 		t.Fatalf("blocked: notes %q, trays %+v, want one note, one tray and a disabled Generate", b.Notes, b.Trays)
 	}
-	up := out.PanelTray.AfterUpscale
+	checkAfterUpscalingFromThePanel(t, out.PanelTray.AfterUpscale)
+	checkAfterCarPlayFromThePanel(t, out.PanelTray.AfterCarPlay)
+}
+
+// checkAfterUpscalingFromThePanel checks the panel once PCM upscaling has
+// been saved from its gear: one fetch, no whole-route callback, focus and the
+// gear kept, the block lifted, and the CarPlay row saying for itself that its
+// switch is off, with a tray of its own.
+func checkAfterUpscalingFromThePanel(t *testing.T, up inPlaceView) {
+	t.Helper()
 	if up.Refreshes != 1 || up.Changed != 0 {
 		t.Errorf("upscaling on: %d fetches and %d whole-route callbacks, want one fetch and none", up.Refreshes, up.Changed)
 	}
-	if up.Focus != panelSwitch {
-		t.Errorf("upscaling on: focus is %q, want it kept on the switch the reader toggled (%q)", up.Focus, panelSwitch)
+	if up.Focus != inPlacePanelSwitch {
+		t.Errorf("upscaling on: focus is %q, want it kept on the switch the reader toggled (%q)", up.Focus, inPlacePanelSwitch)
 	}
 	if len(up.Trays) != 2 || !up.Trays[0].GearIn || !up.Trays[0].TrayIn || up.Trays[0].Status != "Saved." {
 		t.Errorf("upscaling on: trays %+v, want the panel's gear and tray still in the document with their Saved.", up.Trays)
@@ -385,32 +424,48 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 		t.Errorf("upscaling on: the CarPlay row has Generate disabled=%v, notes %q and trays %+v, want its own note "+
 			"and gear", carPlay.GenerateDisabled, carPlay.Notes, up.Trays)
 	}
-	// The panel's tray stays and answers for the CarPlay switch once generation is on.
-	cp := out.PanelTray.AfterCarPlay
-	if cp.Refreshes != 2 || cp.Changed != 0 || cp.Focus != panelSwitch {
+}
+
+// checkAfterCarPlayFromThePanel checks the panel once the CarPlay switch has
+// been saved from the panel's own tray, which stays and answers for it once
+// generation is on.
+func checkAfterCarPlayFromThePanel(t *testing.T, cp inPlaceView) {
+	t.Helper()
+	if cp.Refreshes != 2 || cp.Changed != 0 || cp.Focus != inPlacePanelSwitch {
 		t.Errorf("CarPlay on from the panel's tray: %d fetches, %d whole-route callbacks, focus %q; want a second "+
 			"fetch, none, and focus kept", cp.Refreshes, cp.Changed, cp.Focus)
 	}
 	if carPlay := cp.row(t, "CarPlay-optimized"); carPlay.GenerateDisabled || len(carPlay.Notes) != 0 {
 		t.Errorf("CarPlay on: Generate disabled=%v and notes %q, want a live row", carPlay.GenerateDisabled, carPlay.Notes)
 	}
-	if !cp.Trays[0].GearIn || !cp.Trays[0].TrayIn {
-		t.Errorf("CarPlay on: the panel's tray left the document: %+v", cp.Trays[0])
+	if len(cp.Trays) == 0 || !cp.Trays[0].GearIn || !cp.Trays[0].TrayIn {
+		t.Errorf("CarPlay on: the panel's tray left the document: %+v", cp.Trays)
 	}
+}
 
-	// While generation is off the CarPlay switch decides nothing the panel draws.
+// checkGatedField checks that the CarPlay switch saved from the panel's tray
+// while generation is off decides nothing the panel draws, so nothing is
+// fetched.
+func checkGatedField(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
 	if g := out.GatedField; g.Refreshes != 0 || g.Changed != 0 {
 		t.Errorf("the CarPlay switch saved while generation is off: %d fetches, %d whole-route callbacks, want none",
 			g.Refreshes, g.Changed)
 	}
+}
 
-	// The CarPlay kind's own tray.
-	if k := out.KindTray.Before; len(k.Trays) != 1 || len(k.row(t, "CarPlay-optimized").Notes) != 1 {
+// checkKindTraySave checks the CarPlay kind's own tray: built for a row whose
+// switch is off, and staying, with its focus and its Saved., once the row is
+// live.
+func checkKindTraySave(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
+	before := out.KindTray.Before
+	if len(before.Trays) != 1 || len(before.row(t, "CarPlay-optimized").Notes) != 1 {
 		t.Fatalf("carplay off: trays %+v and notes %q, want the kind's tray and its note",
-			k.Trays, k.row(t, "CarPlay-optimized").Notes)
+			before.Trays, before.row(t, "CarPlay-optimized").Notes)
 	}
 	k := out.KindTray.After
-	if k.Focus != kindSwitch || k.Changed != 0 || len(k.Trays) != 1 || !k.Trays[0].GearIn || !k.Trays[0].TrayIn ||
+	if k.Focus != inPlaceKindSwitch || k.Changed != 0 || len(k.Trays) != 1 || !k.Trays[0].GearIn || !k.Trays[0].TrayIn ||
 		k.Trays[0].Status != "Saved." {
 		t.Errorf("the CarPlay kind's tray saved: focus %q, %d whole-route callbacks, trays %+v; want focus kept, "+
 			"none, and the gear and tray still there with their Saved.", k.Focus, k.Changed, k.Trays)
@@ -419,8 +474,14 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 		t.Errorf("the CarPlay kind's tray saved: Generate disabled=%v and notes %q, want a live row",
 			carPlay.GenerateDisabled, carPlay.Notes)
 	}
+}
 
-	// Refused, overtaken, failed, aborted, empty and unfetchable redraws.
+// checkRedrawsThatPaintNothing checks the redraws that leave the panel as it
+// was or hand over to the route: refused once the route has moved on,
+// overtaken by a newer one, failed, aborted, answering nothing, and made by a
+// panel with no fetch to redraw from.
+func checkRedrawsThatPaintNothing(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
 	if m := out.MovedOn; m.Changed != 0 || len(m.row(t, "CarPlay-optimized").Notes) != 1 {
 		t.Errorf("an answer after the route moved on: %d whole-route callbacks and CarPlay notes %q, want none "+
 			"and the panel untouched", m.Changed, m.row(t, "CarPlay-optimized").Notes)
@@ -442,8 +503,12 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 	if n := out.NoRefresh; n.Changed != 1 {
 		t.Errorf("a save with no fetch to redraw from ran the whole-route callback %d times, want once", n.Changed)
 	}
+}
 
-	// A failed Delete gives focus back through the shipped helper, and only there.
+// checkFailedDelete checks that a failed Delete gives focus back through the
+// shipped helper, and only there.
+func checkFailedDelete(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
 	d := out.DeleteFail
 	if !d.StartedFocused || d.Disabled || !d.FocusOnDelete || d.Changed != 0 {
 		t.Errorf("a failed Delete: focused before=%v, disabled after=%v, focus back=%v, whole-route callbacks %d; "+
