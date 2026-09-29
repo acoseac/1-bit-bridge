@@ -23,9 +23,10 @@ import (
 // distinction matters because the client renders this as evidence about a
 // file's provenance, and "no data" must never render as "no bandwidth".
 func (s *Server) spectrum(w http.ResponseWriter, r *http.Request) {
-	// Feature gate, path validation and the row lookup are shared with
+	// The store check, path validation and the row lookup are shared with
 	// /v1/waveform — the two describe the same source file, so they must
 	// agree on which row a path resolves to and on what "drifted" means.
+	// Neither reads the analysis gate (backlog B108).
 	rec, info, ok := s.lookupAnalysisForRequest(w, r, "spectrum")
 	if !ok {
 		return

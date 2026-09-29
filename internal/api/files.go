@@ -369,6 +369,10 @@ func writeNotAFile(w http.ResponseWriter, r *http.Request, clientPath, kind stri
 // in serveFile — that's how the path-traversal guard composes
 // with the variant lookup. Don't call this with a user-supplied
 // FileInfo from somewhere else.
+//
+// It reads the store and never the upscale gate: switching upscaling
+// off stops new renditions and withdraws none (WithUpscale, backlog
+// B108).
 func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath string, sourceInfo os.FileInfo, variantID string) {
 	if s.variantStore == nil {
 		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)

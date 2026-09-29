@@ -30537,3 +30537,103 @@ cause turns out to be such an input.
 - B117: dhowden's unsynchroniser reads one byte per Read call, a syscall per
   byte on a file: a 10 MB unsynchronised tag took 3.71 s to extract. Linear,
   and not what this guard bounds.
+
+## 2026-09-29 — a feature switched off stops new work and withdraws nothing it made: PROTOCOL.md now says the reads go on answering (backlog B108)
+
+Spec, comments and tests only: no behaviour change and no wire change. The
+PROTOCOL.md half is a Mirror-PR pair with the app's `docs/BridgeProtocol.md`.
+
+### The disagreement, and the decision
+
+PROTOCOL.md's "Feature gate semantics" said `upscale.enabled: false` makes
+`/v1/download?variant=` answer `404 variant_not_found`, and
+`analysis.enabled: false` makes `/v1/waveform` answer `404` and the manifest
+carry no analysis field. Since #781 the handlers refuse only on a missing
+STORE (`serveVariant`, `lookupAnalysisForRequest`), and serve wires both
+stores on every bridge; the manifest splices the analysis fields from
+`track_analysis` with no gate. The owner decided to change the spec to what
+the code does, not the code: a switch stops new work and withdraws nothing
+made. A client drops a rendition it
+gets a 404 for (iOS's stale-variant handler removes the id from the track
+row), switching the flag bumps no track's `indexed_at`, so a delta sync
+never carries the stripped `variants` and a phone that listed a rendition
+keeps asking for it, and an operator stopping generation has not asked for
+the renditions and curves already on disk to stop being served.
+
+### What else said the same thing
+
+A sweep for the contract, not only the two bullets the backlog named, found
+five more places in PROTOCOL.md: the download route's own `404
+variant_not_found` bullet ("OR the upscale feature is disabled"), the
+`/v1/waveform` and `/v1/spectrum` 404 bullets ("analysis disabled"), the
+`waveformTag` section ("when the feature is enabled", "absent when … the
+feature is off"), and the batch surface. `GET /v1/upscale/batches` refuses
+only when no coordinator is wired, so it answers with upscaling off and on a
+demo bridge, where #1100 had written that "all three endpoints" answer 503
+and 403; the two mutations do refuse, and the list is now documented as the
+read it is. Two adjacent sentences were corrected on the way: the stats
+section's "disabled bridge returns the zero-value response" (the cache
+totals count the `track_variants` rows and the sizes they record whatever
+the gate, and a row whose sidecar has gone until something reaps it, as
+CodeRabbit put it on the app's mirror, 1-bit#2011; its heading, "Empty or
+disabled bridge: `enabled` is `false`", also said an enabled bridge with no
+rows reports the feature off, CodeRabbit on #1102), and the variant delete's
+404, which answers for an inactive feature as well as for a missing deleter.
+The analysis bullets now name all five analysis flags; they named three
+since `trackQuality` and `spectrum` joined.
+
+### Measured, then pinned
+
+Every claim was measured over the real `api.Server`
+(`internal/api/feature_off_reads_test.go`): with the gate closed, and
+`/v1/health` confirming it is, a variant download answered 200 with the
+sidecar's bytes (and 404 / 410 for a missing row / a stale one, as with the
+gate open), `/v1/waveform` 200 and a revalidation 304, `/v1/spectrum` 200
+with the curve verbatim, and the batch list 200 with upscaling off and on a
+demo bridge, where the cancel beside it answered 503 and 403. The manifest
+half, which the backlog entry had read from the code, was measured through a
+real serve (`TestServeWithItsFeaturesOffServesWhatItMadeBefore`): a
+rendition and an analysis row seeded into serve's store, both features at
+their default (off), a paired token; the manifest carried `waveformTag` and
+`keyRoot`/`keyMode` and no `variants`, and the rendition and the curve were
+served through the production adapters. A review round (CodeRabbit on
+#1102) widened what the two tests read rather than only that the routes
+answer: the served test seeds and checks every field analysis measured
+(`replayGainTrackDB`, `bpm` with `bpmEstimated`, `truePeakDB`, `drScore`,
+`audioMD5State`, `bandwidthHz`, beside the tag and the key), so each of the
+manifest's three analysis splices (`waveformTagSQL`, `replayGainSQL`,
+`analysisScalarsSQL`) is under a check, and it requires `variants` to be
+left out, not merely empty; the api test's batch list carries a past batch
+and must list it.
+
+Negative controls, each committed first and restored with `git checkout`:
+gating `serveVariant`, `lookupAnalysisForRequest` and the list handler on
+the live predicate (and the list on the demo refusal) turned all four api
+tests red (five assertions); gating the two handlers turned the serve test's
+two reads red; stripping `waveformTag` and `keyRoot` in the manifest writer
+with upscaling off turned its manifest assertions red; not stripping
+`variants` turned its variant assertion red. For the widened checks, NULL
+in `replayGainSQL` and in the scalar bundle's `bpm`, `tp`, `dr`, `md5` and
+`bw` turned each of those seven assertions red, and a list handler that
+drops its rows with the gate closed or on a demo bridge turned both list
+cases red. Opening each gate in the api
+tests trips their precondition, so none can pass on an open gate.
+The test once named `…DownloadVariantWhenFeatureDisabledReturns404` is
+`TestDownloadVariantWithNoStoreReturns404` now: its name and docblock called
+the gate while its body wired no store at all, which is the one case that
+does answer 404.
+
+### Comments
+
+`WithUpscale` and `WithAnalysis` named this entry as an open disagreement;
+they now state the contract and say not to gate the reads. The
+`AnalysisStore` docblock said a nil store meant "analysis feature off", and
+`lookupAnalysisForRequest` and `/v1/spectrum` called the store check a
+"feature gate"; the batch file's header and its error pair said every
+endpoint refuses with the feature off. All now say what they do.
+
+Filed, not fixed (no code change was the decision): the admin console's
+analysis pool counters are shown with the feature off, and the health
+handler's gating comment, the `AnalysisStats` and `UpscaleStats` docblocks
+and `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock
+still describe a pool that is absent with the feature off, which #781 ended.

@@ -63,6 +63,14 @@ func (s *stubVariantStore) LookupVariant(ctx context.Context, sourcePath, varian
 // resolver behaviour.
 func fileVariantFixture(t *testing.T) (*httptest.Server, string, string, *stubVariantStore, string) {
 	t.Helper()
+	return fileVariantFixtureGated(t, true)
+}
+
+// fileVariantFixtureGated is fileVariantFixture with the upscale gate set
+// to upscaleOn. Production wires the variant store whatever the gate says,
+// so a test of how far the gate reaches needs the store AND a closed gate.
+func fileVariantFixtureGated(t *testing.T, upscaleOn bool) (*httptest.Server, string, string, *stubVariantStore, string) {
+	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
 	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
@@ -92,7 +100,7 @@ func fileVariantFixture(t *testing.T) (*httptest.Server, string, string, *stubVa
 	raw, _, _ := store.Mint("test")
 
 	vs := newStubVariantStore()
-	srv := New(cfg, store, nil, "fp").WithUpscale(func() bool { return true }, vs)
+	srv := New(cfg, store, nil, "fp").WithUpscale(func() bool { return upscaleOn }, vs)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, root, vs, sidecarPath
@@ -237,10 +245,15 @@ func TestDownloadVariantMissingOnDiskReturns410(t *testing.T) {
 	assertWireErrorCode(t, resp, "variant_missing_on_disk")
 }
 
-// TestDownloadVariantWhenFeatureDisabledReturns404 — `WithUpscale(func() bool { return false }, nil)`
-// must keep `?variant=` in 404-land. iOS sees an unfamiliar bridge as
-// "no variants supported" without surprises.
-func TestDownloadVariantWhenFeatureDisabledReturns404(t *testing.T) {
+// TestDownloadVariantWithNoStoreReturns404 — a server with no variant
+// store (no WithUpscale call: a bridge that keeps no renditions) answers
+// `?variant=` with 404 `variant_not_found`, which iOS reads as "no such
+// rendition". The STORE decides this, never the upscale gate: production
+// wires the store on every bridge, and with the gate closed a rendition on
+// disk is still served (TestARenditionOnDiskIsServedWithUpscalingOff,
+// backlog B108). This test was named for a disabled feature, with a
+// docblock calling the gate, while its body wired no store at all.
+func TestDownloadVariantWithNoStoreReturns404(t *testing.T) {
 	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
@@ -266,8 +279,9 @@ func TestDownloadVariantWhenFeatureDisabledReturns404(t *testing.T) {
 	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", raw)
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
-		t.Errorf("status: got %d, want 404 (variant feature off)", resp.StatusCode)
+		t.Errorf("status: got %d, want 404 (no variant store)", resp.StatusCode)
 	}
+	assertWireErrorCode(t, resp, "variant_not_found")
 }
 
 // TestDownloadVariantNormalizesPathRedundantSeparators — request paths

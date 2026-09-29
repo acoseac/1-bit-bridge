@@ -26,6 +26,9 @@ type consoleBridge struct {
 	// phone skips certificate verification: the bridge presents the
 	// self-signed pair it minted at boot, which this test has no pin for.
 	phone *http.Client
+	// lib is the library root and dataDir the data directory the config
+	// names, so a test can put files where serve reads them.
+	lib, dataDir string
 	// autoOptimizeSweeps counts the pre-generation sweeps that have
 	// finished and been recorded on the Jobs card, through
 	// serveOpts.autoOptimizeSwept: a count a test can wait on where a
@@ -57,13 +60,16 @@ func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string)) *c
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
 	consoleAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
 	configPath := filepath.Join(root, "bridge.yaml")
-	yamlText := "libraryRoots:\n  - " + lib + "\ndataDir: " + filepath.Join(root, "data") +
+	dataDir := filepath.Join(root, "data")
+	yamlText := "libraryRoots:\n  - " + lib + "\ndataDir: " + dataDir +
 		"\nadminAddress: " + consoleAddr + "\n" + yamlTail
 	if err := os.WriteFile(configPath, []byte(yamlText), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	b := &consoleBridge{
+		lib:       lib,
+		dataDir:   dataDir,
 		adminBase: "http://" + consoleAddr,
 		console:   &http.Client{Timeout: 30 * time.Second},
 		phone: &http.Client{

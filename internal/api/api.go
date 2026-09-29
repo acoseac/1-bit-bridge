@@ -690,14 +690,20 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 //     `enabled` (cleared in the manifest provider otherwise).
 //   - /v1/download honors `?variant=<id>` whenever `vs != nil`,
 //     `enabled` or not (serveVariant reads the store alone), and
-//     answers 404 `variant_not_found` without one. PROTOCOL.md's
-//     flag-off bullet says 404; that disagreement is backlog B108.
+//     answers 404 `variant_not_found` without one. That is the
+//     contract, not an oversight: the gate stops new work and withdraws
+//     nothing made (PROTOCOL.md's flag-off bullet, backlog B108), since
+//     a client drops a rendition it gets a 404 for, and a client
+//     holding a manifest from before the switch-off still lists it.
+//     TestARenditionOnDiskIsServedWithUpscalingOff pins it. Don't gate
+//     this read on `enabled`.
 //
 // Takes a PREDICATE, read per request, so the toggle hot-applies. The
 // STORE is wired unconditionally: gating it on the boot value is what
 // made the flag restart-bound, since a nil store cannot be filled in
-// later. `enabled` decides whether the feature answers; the store decides
-// whether it CAN. Nil predicate reads as off.
+// later. `enabled` decides whether the feature does NEW work; the
+// store decides whether what exists can be served. Nil predicate reads
+// as off.
 func (s *Server) WithUpscale(enabled func() bool, vs VariantStore) *Server {
 	s.upscaleEnabled = enabled
 	s.variantStore = vs
@@ -714,13 +720,19 @@ func (s *Server) upscaleActive() bool {
 // analysisActiveFn, `cfg.Analysis.Enabled` AND a usable sox from the
 // shared probe, so a true flag with no usable sox answers false
 // (graceful degradation). `as` is the AnalysisStore the /v1/waveform
-// handler reads; it may be nil only where no curve is ever served.
+// and /v1/spectrum handlers read; it may be nil only where no curve is
+// ever served.
 //
 // Effect on the wire:
-//   - /v1/health advertises the `waveform` feature flag iff `enabled`.
-//   - /v1/waveform serves sidecars iff `as != nil`, `enabled` or not;
-//     404 otherwise. PROTOCOL.md's flag-off bullet says 404 (backlog
-//     B108).
+//   - /v1/health advertises the analysis feature flags (`waveform`,
+//     `loudness`, `keyTempo`, `trackQuality`, `spectrum`) iff `enabled`.
+//   - /v1/waveform and /v1/spectrum serve the cached curves iff
+//     `as != nil`, `enabled` or not; 404 otherwise. That is the
+//     contract: the gate stops new analysis and withdraws nothing
+//     measured (PROTOCOL.md's flag-off bullet, backlog B108), and the
+//     manifest's analysis fields have no gate at all.
+//     TestACachedWaveformIsServedWithAnalysisOff pins it. Don't gate
+//     these reads on `enabled`.
 //
 // Predicate + unconditional store, for the same reason as WithUpscale.
 func (s *Server) WithAnalysis(enabled func() bool, as AnalysisStore) *Server {
