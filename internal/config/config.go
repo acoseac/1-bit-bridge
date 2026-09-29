@@ -3427,10 +3427,11 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	if !filepath.IsAbs(variantsDir) {
 		return errors.New("must be an absolute path")
 	}
-	// Containment check with symlink resolution on both sides (CodeRabbit
+	// Containment check with link resolution on both sides (CodeRabbit
 	// Major on PR D1): a lexical-only check could be bypassed by a symlink in
 	// either the variantsDir OR a library root that resolves into the other
-	// tree. fsutil.IsUnderAny is the single canonical form, shared with the
+	// tree, and on Windows by a junction, which fsutil resolves too since
+	// filepath.EvalSymlinks stopped following one (Go 1.23). fsutil.IsUnderAny is the single canonical form, shared with the
 	// admin handler + the `bridge variants move` CLI so all three stay in
 	// lockstep.
 	if matched := fsutil.IsUnderAny(variantsDir, libraryRoots); matched != "" {

@@ -42,12 +42,14 @@ var ErrRootNotEntered = errors.New("links to a directory the walk cannot enter")
 // the root entry, so a caller that tells the root apart by string identity
 // compares against the returned path, not against root.
 //
-// filepath.EvalSymlinks is not the answer, though the sidecar walks use it
-// (integrity.resolveSidecarRoot): since Go 1.23 it resolves no Windows
-// junction and no mounted folder, which are not ModeSymlink, so on Windows
-// the "resolved" root is the junction again and the walk still ends at its
-// first entry. It also rewrites the spelling of every path the walk reports,
-// which each caller would then have to map back.
+// filepath.EvalSymlinks is not the answer: since Go 1.23 it resolves no
+// Windows junction and no mounted folder, which are not ModeSymlink, so on
+// Windows the "resolved" root is the junction again and the walk still ends
+// at its first entry. Nor is resolving the root through them (ResolveLinks,
+// which the sidecar walks use through integrity.resolveSidecarRoot, because
+// they unlink and must do it in the tree they walked): that rewrites the
+// spelling of every path the walk reports, which each caller would then have
+// to map back.
 //
 // An ordinary directory, and anything that is not a directory even through a
 // link, is returned unchanged, so those walks are exactly what they were.

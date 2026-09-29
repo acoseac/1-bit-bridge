@@ -497,12 +497,14 @@ lost my library."
   row from the file the scanner read. **Compare the root entry against the
   WALKED string, never the root**: WalkDir hands its callback the string it
   was given, separator included, so `abs != root` counts the root as an
-  entry and can prune it. **Not `filepath.EvalSymlinks`**, which the sidecar
-  walks use (`resolveSidecarRoot`): since Go 1.23 it resolves no Windows
-  junction or mounted folder, which are not `ModeSymlink`, so the "resolved"
-  root is the junction again; and it respells every path, which each caller
-  would have to map back. A root that cannot be stat'ed through (missing, a
-  dangling link, a link into a mount that went away) is an error and "",
+  entry and can prune it. **Not `filepath.EvalSymlinks`**: since Go 1.23 it
+  resolves no Windows junction or mounted folder, which are not
+  `ModeSymlink`, so the "resolved" root is the junction again. Nor the root
+  resolved through them (`fsutil.ResolveLinks`, which the sidecar walks use
+  because they unlink in the tree they walked): that respells every path,
+  which each caller would have to map back. A root that cannot be stat'ed
+  through (missing, a dangling link, a link into a mount that went away)
+  is an error and "",
   never the unresolved root: Scan logs `root unreachable` and spares it,
   ScanSubtree of the root returns before its deletion pass, the watcher and
   the doctor report it. **Only the root is followed**: a link to a directory
@@ -565,10 +567,91 @@ lost my library."
   old walk indexed six of the test's fixtures on macOS), and their rows now
   go after the usual missing-count grace. It is exported so the doctor's
   inotify count skips by it: that count kept a copy of the old list, which
-  would have gone on counting what the watcher now skips.
+  would have gone on counting what the watcher now skips. So does the
+  upscale folder walk (`POST /v1/upscale` of a folder, 2026-09-29), which
+  descended them and offered every file in a snapshot to the enqueuer as a
+  candidate; it walks the folder the request names whatever its name, as
+  the watcher walks a dot-named root
+  (`TestUpscaleFolderRequestSkipsWhatTheScannerSkips`,
+  `TestUpscaleFolderRequestWalksADotNamedRoot`).
   `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
   `TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused`,
   `TestScanner_OSAndNASDetritusIsNotLibraryContent`.
+- **…and the rows it counts are the ROOT'S OWN: never a UPnP-routed row**
+  (2026-09-29, backlog B51). `CountTracksUnderRoot` answered the whole
+  table in single-root mode, so a bridge whose root is empty and which
+  relays an upstream logged `suspected clean-empty mount failure` on every
+  scan (measured: three lines in three scans, `rows_in_db=3`, all of them
+  routed), and the owning-root audit refused every subtree scan below the
+  root ("no library content on disk but 3 tracks in DB"). A routed row is
+  no evidence a root held anything: no walk sees one and neither deletion
+  pass reaps one (`routedPathSet`). In multi-root mode a routed path prefix
+  spelled like a root's basename inflated that root's count the same way.
+  Both statements anti-join `upnp_track_routing`; the byte range and the
+  empty-base fail-safe are `CountTracksByPrefix`'s, which the admin's
+  per-root rollups still read unfiltered
+  (`TestScanner_AnEmptyRootBesideRoutedRowsIsNotAMountDrop`,
+  `TestScanner_TheCleanEmptyGuardCountsOnlyTheRootsOwnRows`).
+- **A configured root that is a link is WATCHED at the directory it
+  resolves to, and every event under it is named back under the configured
+  root** (2026-09-29, backlog B51). fsnotify's kqueue backend (macOS, the
+  BSDs) follows ONE level of a link it is asked to watch (it `Readlink`s
+  and `Lstat`s once), so a root that is a link to a link had its own watch
+  registered as a watch on a FILE: no Create event for anything added to
+  it, and each change named after the root itself, which the watcher took
+  for a change in the root's PARENT. Measured on macOS: a file dropped into
+  the root, and one dropped into a folder made in it after the watcher
+  started, never reached the manifest through the watcher, and each change
+  logged `ERROR subtree scan … is not under any configured library root`.
+  `watchWalkStart` answers the directory `filepath.EvalSymlinks` resolves a
+  linked root to when that is a plain directory, the walk registers every
+  watch in that spelling, and `configuredName` renames an event's path
+  (longest resolved prefix, separator-bounded) before the scan is asked
+  for. **The Create branch watches a new directory as fsnotify named it**,
+  the resolved spelling, because kqueue already holds an entry watch under
+  that name and a configured spelling would be a second descriptor. This is
+  on every platform, not only kqueue: inotify and ReadDirectoryChangesW
+  followed the chain already, and renaming their events back changes
+  nothing they did. A Windows junction, which `EvalSymlinks` leaves as it
+  is, is walked through `WalkableRoot` and watched as the configured path,
+  as before (ReadDirectoryChangesW follows it). A plain directory root with
+  a linked ANCESTOR (`/var` on macOS) is not a linked root and is
+  untouched. Cost: `WatchList()` and the watch lines name a linked root's
+  tree by its resolved spelling
+  (`TestWatcherWatchesARootThatIsALinkToALink`,
+  `TestConfiguredNameRenamesOnlyWhatIsUnderAResolvedRoot`).
+- **Every containment check and sidecar walk resolves a Windows junction
+  as it resolves a symlink** (`fsutil.ResolveLinks`, 2026-09-29, backlog
+  B51). Since Go 1.23 `filepath.EvalSymlinks` leaves a junction (and a
+  mounted folder, both `ModeIrregular`) as it is at the end of a path and
+  fails with ENOTDIR through one, so `fsutil.EvalSymlinksOrClean` and
+  `IsUnderAny` compared a junction'd path by its own spelling: measured on
+  Windows 11, a variants directory spelled by the target's path under a
+  junction'd library root (`D:\real\variants` against
+  `C:\lib -> D:\real`) read as NOT nested, which `validateVariantsDir`,
+  the admin variants-dir handler
+  and `bridge variants move` exist to refuse, and so did every other nested
+  case through a junction or a chain of them. And `resolveSidecarRoot`
+  walked a junction'd variants directory AT the junction, as one entry:
+  the inventory found 0 files of 2, and `TreeHoldsVariantSidecars` read a
+  tree full of sidecars as holding none, which is the reading that lets a
+  mass reap through. On Windows `ResolveLinks` opens an absolute path
+  following every reparse point and names it by the handle
+  (`GetFinalPathNameByHandle`, `\\?\` taken off); a path that is not
+  there is `fs.ErrNotExist`, and one that is there but cannot be named that
+  way (an unsupported filesystem, a volume with no drive letter) gets
+  `EvalSymlinks`'s answer, as before; elsewhere it IS `EvalSymlinks`. **Not
+  `os.Readlink` component by component**: that is a fork of the stdlib's
+  link walk, and it answers `\\?\Volume{…}\` for a mounted folder. The
+  sidecar walk now starts at the junction's TARGET, so the paths a sweep
+  unlinks are in the tree it walked (#1063's rule, for junctions). A SUBST
+  or mapped drive resolves to what it stands for; both sides of every
+  comparison go through the same function, so they agree
+  (`TestIsUnderAnySeesThroughAJunction`,
+  `TestSidecarInventoryResolvesAJunctionedRoot`,
+  `TestTreeHoldsVariantSidecarsThroughAJunction`, Windows only, with real
+  `mklink /J` junctions; `TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`
+  on every platform).
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs
@@ -2124,6 +2207,8 @@ no failing test — which is the shape to expect in this area.
   as reclaimable and named `--gc` in the hint. `TreeHoldsVariantSidecars`
   has resolved its root since #937; #940's shared walker — **the one that
   DELETES** — did not, so `resolveSidecarRoot` is now one body for both.
+  It resolves a Windows junction too since 2026-09-29
+  (`fsutil.ResolveLinks`; the junction bullet under **Scanner**).
   **Both halves are load-bearing**: walk the RESOLVED root so it descends,
   REPORT under the configured one, because `KnownSidecarSet` keys on the
   recorded `sidecar_path` and on `CanonicalSidecarPath(variantsDir, …)`
