@@ -45,13 +45,13 @@ func TestNameFromHandleFallsBackToTheVolumeGUIDPath(t *testing.T) {
 	const guid = `\\?\Volume{0b2cd1a1-0000-0000-0000-100000000000}\music`
 	errNoDOS := errors.New("no drive letter")
 	for _, c := range []struct {
-		name     string
-		dos      string
-		dosErr   error
-		guid     string
-		guidErr  error
-		want     string
-		wantErr  error
+		name    string
+		dos     string
+		dosErr  error
+		guid    string
+		guidErr error
+		want    string
+		wantErr error
 	}{
 		{name: "a drive letter", dos: `\\?\D:\music`, guid: guid, want: `D:\music`},
 		{name: "no drive letter", dosErr: errNoDOS, guid: guid, want: guid},
