@@ -25633,8 +25633,9 @@ or name a config with --config". Summaries and severities are unchanged.
   and as the admin port: the other-role shape),
   `TestInitForceRewriteGradesThePortItMovesTo` (a stranger on the old port
   and the new one: the second pass refuses the new one, and nothing names
-  the old), `TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt`
-  (the control that pins the residual), and `TestPortsARewriteAbandons`
+  the old), `…InteractiveRunGradesTheInstallsPortsBeforeItsPrompt`
+  (the control that pinned the residual, until backlog B61 closed it on
+  2026-09-29 and replaced it), and `TestPortsARewriteAbandons`
   (nine shapes, the swaps included; no row abandons a port the run writes).
 - `cmd/bridge/doctor_operator_hints_test.go`: `TestPrintedHintsSpeakToTheOperator`
   drives `doctorCmd` and `initCmd` into 3a to 3d and a loopback init naming
@@ -30637,3 +30638,185 @@ analysis pool counters are shown with the feature off, and the health
 handler's gating comment, the `AnalysisStats` and `UpscaleStats` docblocks
 and `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock
 still describe a pool that is absent with the feature off, which #781 ended.
+
+## 2026-09-29 — bridge init warns about or refuses a posture flag it would not write, asks "Overwrite?" before its preflight, and names a kept endpoint on a moved port; doctor grades init's data dir before init (backlog B61)
+
+The four leftovers #1081's entry recorded under Out of scope. Every run
+below is the real binary on the dev Mac, stdin `/dev/null` unless it says
+otherwise: "main" is a build of 01af4b2c, "after" a build of this branch.
+
+### What was measured
+
+| | run | main | after |
+|---|---|---|---|
+| 1a | loopback first install given `--domain`, `--email` and `--admin-tls-proxy`, no `--public` | exit 0, stderr empty, the saved config names none of the three | exit 0, the same config, and `warning: --domain, --email and --admin-tls-proxy apply only with --public, so this run ignores them and sets up a loopback install; add --public for a public install.` |
+| 1b | `--yes --force` rewrite of a PUBLIC install (domain, proxy, `customEndpoints: [https://bridge.example.test:X]`) given `--domain` and `--admin-tls-proxy` but not `--public` | exit 0, stderr empty, a loopback config: no deployment, no autocert, no `customEndpoints` | exit 2, the config byte-identical, and four lines naming the two flags, saying the install there is a public one whose endpoint every paired device dials, and "the config was NOT changed." |
+| 2a | `bridge doctor` with no config anywhere (fresh HOME, empty working directory) | `[warn] tls-cert no data dir set`, `16 ok, 1 warn, 0 fail` | `[ok] tls-cert absent (init will mint)`, `17 ok, 0 warn, 0 fail` |
+| 2b | the same with a cert and no key left in `<platform config dir>/data` | `[warn] tls-cert no data dir set`, "all clear.", exit 0; `bridge init --yes --library L` there then exited 1 on `[FAIL] tls-cert partial state` | `[FAIL] tls-cert partial state`, exit 1, and init refuses the same |
+| 2c | `bridge doctor --config` naming a config this user cannot read | `[warn] config-file …`, `[warn] tls-cert no data dir set`, `15 ok, 2 warn` | `[ok] tls-cert not checked: the config that sets its path is not readable by this user`, `16 ok, 1 warn` |
+| 3 | loopback install on 127.0.0.1:X with `customEndpoints: [https://nas.example.test:X, https://music.example.test]`, `--yes --force` rewrite onto 127.0.0.1:Z, then `bridge serve` | exit 0, the kept list shows both endpoints, nothing else; `/v1/health`'s `endpoints` held the host's own `…:Z` addresses and `https://nas.example.test:X` | the same config, and a warning naming `https://nas.example.test:X`, the port it names and the one the API moved to |
+| 4 | an install on 127.0.0.1:X / :Y, its bridge stopped, a python listener on X; an interactive rewrite with `--library` and flags moving both ports | exit 1 on `[FAIL] port-api :X in use` before "Overwrite?" was asked; the same flags with `--yes --force` exited 0 | answered y, then a name: exit 0, the new ports saved |
+
+The health endpoints in row 3 carried the dev Mac's own LAN, MagicDNS and
+tailnet addresses beside the stale alternate; they are left out here.
+
+### Decisions
+
+- **A first install warns; a rewrite refuses; a run that keeps the config
+  says nothing more** (`warnIgnoredPostureFlags`). The backlog's constraint
+  was never to stop a first run for a posture flag: a first install writes a
+  working loopback install and has nothing to lose, and the flag changes
+  nothing it writes. A rewrite is the run where the missing `--public` costs
+  something (1b: the endpoint every paired device dials), and a refusal
+  there leaves the install as it was. Refusing every re-run was rejected: an
+  idempotent `bridge init --yes` re-run (the keep path, the automation shape
+  `--yes` exists for) passing the three would have worked on its first run
+  and failed on its second. The keep path adds no warning either: every flag
+  goes unused there, which "keeping it" already says, and "sets up a
+  loopback install" would be false over a public config it keeps. Exit 2, a
+  usage refusal, as `--public requires --domain` and #1081's address flags.
+- **Warnings name the flags, never their values.** A `--domain` can carry a
+  user name and password, which `--public` refuses without echoing (B54):
+  `TestInitWarnsWithoutEchoingTheDomain`.
+- **`--email` with `--public --admin-tls-proxy` warns too.** The same class,
+  found while here: init writes no autocert with the proxy, so the address is
+  dropped. It never refuses (the config loses nothing). The flag's help said
+  "required with --public"; it says "unless --admin-tls-proxy" now.
+- **"Overwrite?" moved ahead of the preflight, after the library prompt.**
+  #1081 rejected this ("It reorders the interactive flow for every re-init
+  and still leaves a no-answer grading the install"). The first half is one
+  question moved ahead of the report; the second is the right answer, since a
+  no keeps the install whose ports it grades. With the answer known, an
+  interactive yes is the certain rewrite `--yes --force` is
+  (`rewriting := installPorts && replace`), and a no skips the name prompt,
+  which asked for a name the keep then discarded. **After the library prompt,
+  not before**: on a closed stdin that prompt ends a loopback run ("input
+  closed; aborting."), while `confirm` takes its default, a no, which keeps
+  the config and installs the service; asked first, it would install a
+  service on a closed stdin where the run exits 2 today. The decision is made
+  once (`replace`, `keep`) and read by the posture check, the preflight, the
+  name prompt and the keep branch.
+- **A kept endpoint on the moved port is kept and named, never dropped or
+  rewritten** (`warnKeptEndpointsOnAMovedPort`). The endpoint is the
+  operator's word for what reaches the bridge; its port may be a router's or
+  a proxy's, and a forward from it is right again once pointed at the new
+  port. Dropping it loses a working route in that case, and rewriting its
+  port invents one. An endpoint names a port by its own or by its scheme's
+  (443, 80). The install's port comes from the file (`priorInstallFile`
+  gained `listenAddress`, defaulted as Load defaults it), never through
+  Load, #1040's rule. The warning goes to stderr after the kept list.
+- **tls-cert grades init's data dir where doctor finds no config, and says
+  "not checked" where a config could not be graded.** The backlog suggested
+  the "not checked" answer for the pre-init warn. That is #1022's rule for a
+  config that was named or found and not graded, and tls-cert follows it
+  there. For the pre-init report #1022's other half applies: a lookup that
+  found nothing grades the defaults ("the defaults are then the ports init
+  will write, so they are graded"), and the cert's default is the pair init
+  keeps or mints in `<config dir>/data` (`initDataDirFor`, now init's one
+  definition of it). "Not checked" there would have kept 2b as it was, an
+  "all clear." before an init that refuses, the shape #1023 fixed for
+  config-dir on the launcher's row. The row takes the default whatever its
+  lookup found, unreadable included, since Setup's preflight grades init's
+  data dir over a config it cannot read (readPriorInstall fails, and init
+  falls back to its own). With no config dir either (no HOME), and with no
+  lookup, it says why it was not checked.
+- **What it changes in the counts.** A pre-init report on a fresh host goes
+  from one warn to none (`absent (init will mint)`); one over a config this
+  user cannot read, that does not load, or that is named and not there loses
+  tls-cert's warn (config-file still reports the config); a pre-init host
+  with a pair in the default data dir now grades it, a broken one a FAIL and
+  exit 1. `bridge init`'s preflight and the console always hand a data dir,
+  and their reports are unchanged. No consumer reads tls-cert's status for
+  this state (the console's `/api/doctor` has a data dir).
+- The `Deps` docblock said an empty ConfigDir or DataDir was "use the per-OS
+  default", which nothing in the package did; it says what happens now.
+  `docs/docker.md` named the reverse-proxy variant `--public --proxy`, a flag
+  init does not have (`flag provided but not defined`); it is
+  `--admin-tls-proxy`.
+
+### Tests
+
+- `cmd/bridge/init_posture_flags_test.go`:
+  `TestInitFirstInstallWarnsAboutAPublicOnlyFlagWithoutPublic` (all three,
+  and each alone: exit 0, a warning naming exactly the flags given, a
+  loopback config), `TestInitWarnsWithoutEchoingTheDomain`,
+  `TestInitRewriteRefusesAPublicOnlyFlagWithoutPublic` (over a loopback and
+  a public install: exit 2, the bytes unchanged, the public line exactly
+  over the public one), `TestInitRewriteWithPublicIsNotRefused`,
+  `TestInitRunThatKeepsTheConfigIsNotRefused` (exit 0, "keeping it", no
+  warning), `TestInitInteractiveRewriteRefusesAPublicOnlyFlagWithoutPublic`
+  (y refused, n kept), `TestInitWarnsAboutAnEmailTheProxyDoesNotUse` (and its
+  control, the bridge's own ACME).
+- `cmd/bridge/init_force_rewrite_ports_test.go`: the residual's control,
+  `…InteractiveRunGradesTheInstallsPortsBeforeItsPrompt`, is replaced by
+  `TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff`,
+  `TestInitInteractiveRewriteStillRefusesAPortItKeeps`,
+  `TestInitInteractiveKeepGradesTheInstallsPorts` and
+  `TestInitInteractiveKeepAsksForNoName`. Two tests feeding an interactive
+  rewrite's answers give "Overwrite?" before the name now
+  (`TestInitInteractiveRewriteOffersTheInstallsName`,
+  `TestInitKeepsTheNameAnInstallIsServedUnder`).
+- `cmd/bridge/init_kept_endpoints_test.go`:
+  `TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff` (onto the port
+  `--listen-address` names, and onto the default), its control
+  `TestInitRewriteKeepingThePortSaysNothingOfItsEndpoints`, and
+  `TestEndpointsNamingAMovedPort` (scheme ports, IPv6, a path, port 0, an
+  address that does not parse).
+- `cmd/bridge/doctor_pre_init_cert_test.go`:
+  `TestDoctorBeforeInitGradesThePairInitWouldKeep` (nothing, a pair, half a
+  pair; `bridge doctor` and the launcher's row, and init over the same dir);
+  `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead` compares the
+  two tls-cert lines too.
+- `internal/doctor/tls_cert_not_checked_test.go`:
+  `TestTLSCertIsNotCheckedWhereNothingSaysWhereTheCertificateIs`.
+  `TestHintsWithNothingToGradeSpeakToTheOperator` and
+  `TestPrintedHintsSpeakToTheOperator` lost their tls-cert rows, which
+  required the warn.
+- **Red first, on the unchanged tree** (the test files alone, over
+  01af4b2c): every new test above but the controls, and the two reordered
+  answer tests; the controls passed.
+
+### Negative controls
+
+Each on the committed tree (fef8aee6), one mutation at a time, matched
+once, restored with `git checkout --` and the tree confirmed clean after
+each; `-count=1` over the init, doctor and menu tests of both packages.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | no posture warning or refusal at all | every first-install row, the no-echo test, every rewrite-refusal row, the interactive yes, the proxy email |
+| NC2 | a rewrite warns instead of refusing | the four rewrite-refusal rows and the interactive yes |
+| NC3 | a first install is refused | the first-install rows and the no-echo test |
+| NC4 | a run that keeps the config warns too | `TestInitRunThatKeepsTheConfigIsNotRefused`, alone |
+| NC5 | no public-install line | the two public rows |
+| NC6 | the public-install line always | the two loopback rows |
+| NC7 | only `--yes --force` is a certain rewrite, as before | `TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff`, `TestInitInteractiveRewriteStillRefusesAPortItKeeps` |
+| NC8 | a no still asks for a name | `TestInitInteractiveKeepAsksForNoName`, alone |
+| NC9 | an interactive no does not keep | the same, alone |
+| NC10 | no kept-endpoint warning | both rows of the kept-endpoint test |
+| NC11 | no scheme ports | the 443 and 80 rows |
+| NC12 | no same-port guard | the "keeping the port" row and the keeping control |
+| NC13 | no port-0 guard | the port-0 row, alone |
+| NC14 | doctor sets no data dir before init | the three pre-init rows and the launcher-row comparison |
+| NC15 | no pre-setup arm | the launcher-row comparison, alone |
+| NC16 | tls-cert warns again | all five "not checked" rows |
+| NC17 | the reason ignores the config problem | the three config-problem rows |
+
+NC9's single red is worth a note: `TestInitInteractiveSkipOnExistingConfig`
+and the interactive-no posture row stay green under it, because the rewrite
+a no then runs writes a config byte-identical to the first init's (the same
+library, name and default ports), and both assert only that the config did
+not change.
+
+### Out of scope
+
+- **A loopback rewrite that names no `--listen-address` moves an install off
+  its own port to :7788** (the kept-endpoint test's second row measures it).
+  That is the documented overwrite, "the ports, which #970 GRADES rather than
+  keeps", and the warning above now names the move where a kept endpoint
+  shows it. Whether a rewrite should keep the install's ports where the run
+  names none, as it keeps the name, is a product decision, filed in the
+  backlog.
+- `--start-now` is Windows-only and ignored elsewhere without a word, as
+  `--force` is without `--yes` (the prompt still asks). Neither changes what
+  a run writes; not touched.
