@@ -251,7 +251,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Eleven claims in this list have been wrong and been corrected** — the
+**Twelve claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -262,8 +262,9 @@ checks, (2026-09-26) "`os.ReadDir("")` reads the process working
 directory", (2026-09-27) "init never prompts for `customEndpoints`, so
 the old value survives the rewrite", (2026-09-27) "`Load` serves a config
 giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
-`Consider` requires `.1bwf`", and (2026-09-28) "`mtime_ns = 0` does not
-force a re-extraction". The first five cost a later session real
+`Consider` requires `.1bwf`", (2026-09-28) "`mtime_ns = 0` does not
+force a re-extraction", and (2026-09-29) "the app's SSDP path has no
+LOCATION-versus-source check". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -282,7 +283,10 @@ since #395), and survived because its conclusion, that a directory symlink
 is no candidate there, holds for either spelling. The eleventh outlived the
 code it described: #574 moved the skip gate to `GetTrackStat`, which reads
 the `mtime_ns` column, and the bullet went on describing `GetTrack`, which
-reads the mtime inside `tags_json`.
+reads the mtime inside `tags_json`. The twelfth was about the OTHER repo, and
+true for a day: the iOS app merged the check (acoseac/1-bit#1998), which
+nothing in this repo sees, so it was corrected only because that session filed
+the bridge's doc change as a backlog entry (B78).
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -2966,7 +2970,12 @@ no failing test — which is the shape to expect in this area.
   bound, not authentication**: a spoofer can still aim a
   server's fetches at the host that served the description, its own; the rule
   removes a THIRD host. It mirrors the app's `UPnPURLPolicy` /
-  `DeviceDescriptionParser.resolveServiceURL` (iOS #1911); the app's check on
+  `DeviceDescriptionParser.resolveServiceURL` (iOS #1911), and since iOS
+  #1998 (2026-09-29) the host-kind rule of the next bullet too:
+  `UPnPURLPolicy.hostKind(of:)` and `hostKindAllowed` bound the app's
+  `resolveServiceURL` for every source, over `cloudMetadataAddresses`, the
+  same 19 addresses as `cloudMetadataAddrs` (a change to one list is a change
+  to both). The app's check on
   relayed renderers (#1977) can compare only against the control URL, since
   `/v1/renderers` carries no description URL, so refusing a device that points
   EVERY service at one other host is the bridge's job. No description fetch
@@ -3018,9 +3027,17 @@ no failing test — which is the shape to expect in this area.
   would also bound names and tailnet addresses): multi-homed hosts and some
   NAS firmware are reported to break it, and a renderer has no escape hatch,
   so **measure before tightening further**. **Not covered**: a LOCATION on a
-  tailnet or public address is still fetched, and the app's SSDP path has no
-  LOCATION-versus-source check either. (This bullet also said the later dials
-  of a HOSTNAME control URL were not covered; the next bullet covers them.)
+  tailnet or public address is still fetched, by the app as by the bridge.
+  **The app makes this check too since iOS #1998** (2026-09-29):
+  `UPnPURLPolicy.location(_:announcedFrom:)` is `LocationFromSource` rule for
+  rule, with no dial check behind it (`URLSession` offers no hook between
+  resolving a name and connecting). This bullet said the app had no such
+  check until that day, and `resolveServiceURL`'s docblock that the app had
+  no host-kind rule: a claim about the other repo goes stale the day that
+  repo merges, so a session that changes one side also updates, or files,
+  what the other side says about it (here, backlog B78). (This bullet also
+  said the later dials of a HOSTNAME control URL were not covered; the next
+  bullet covers them.)
 - **…and every LATER request to a device dials under the approval its URL
   came with, because a NAME in it resolves again at each dial** (backlog B36,
   2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, then on
@@ -4823,6 +4840,11 @@ mentions across the four `ops/audit-*.md` files.
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
   operator who switched upscaling off can still reclaim the disk, where
   `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
+  **Two READ routes still refuse on the store alone**, so they serve with the
+  feature off: `/v1/download?variant=` and `/v1/waveform` answered 200 with the
+  gate closed (measured 2026-09-29, the real `api.Server`), where PROTOCOL.md's
+  flag-off bullets say 404. Undecided, since a phone may hold a manifest that
+  lists a variant from before the switch-off (backlog B108).
 - **…and a value runServe DECIDES from the config while it builds Deps is a
   boot snapshot, however live its reader is** (2026-09-28).
   `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals

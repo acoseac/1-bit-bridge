@@ -29860,3 +29860,99 @@ failed on CI yet, and whether one does under this harness is backlog B107.
   up, and the test requires that not to be before the instant. Control: a
   give-up 100 ms early turned it red ("gave up 98.885208ms before the
   instant").
+
+## 2026-09-29 — pre-v0.2.1 docs: the sox gate is live in PROTOCOL.md, the bridge judges a pairing code's shape, the app's host-kind twins, and where the operator bridge runs (backlog B44, B77, B78 part A)
+
+Docs and comments only: no behaviour change and no wire change. The
+PROTOCOL.md half is a Mirror-PR pair with the app's `docs/BridgeProtocol.md`.
+
+### B44: a missing sox has not been a startup verdict since #781
+
+PROTOCOL.md said a missing sox "demoted the feature at startup" in the
+`/v1/upscale/stats` `enabled` row, and made the same claim in four more
+places: `POST /v1/upscale`'s 503 list ("the sox-on-PATH probe failed at
+startup"), the batch surface ("the sox pre-check failed at boot"), and both
+"Feature gate semantics" lists ("bridge logs `.error` at startup, in-memory
+disables the feature"). Read in the code on ee6dfdd5: `upscaleActiveFn` and
+`analysisActiveFn` (cmd/bridge/main.go) are the flag AND `soxOK`, which asks
+the shared `soxToolchainCache` (a 30 s TTL) and `soxUsable` (sox runnable,
+and FLAC when `sox --help` can be read); nothing writes `Enabled = false`
+anywhere, and the one startup line (`soxFeatureReady`) only prints. The five
+places now describe the live gate, with the same words for upscale and
+analysis. The same claim sat in code comments, corrected too: the two gate
+comments in `runServe` (the analysis one also said serve-side analysis is
+CLI-driven, false since the auto-analysis sweeper), `UpscaleConfig` and
+`AnalysisConfig`, `WithUpscale` and `WithAnalysis` and their two store
+fields, the batch file's header and error pair, the analysis card's
+`DegradedReason`, and `FingerprintJobState` ("at startup" for a gate read
+live).
+
+The sweep triggers' comments made the neighbouring claim that the admin
+trigger is nil while the feature is inactive, so the endpoint answers 503.
+Since #781 both sweepers run on every bridge and both nudges are made
+unconditionally, so `POST /api/analysis/sweep` and `/api/fingerprint/sweep`
+answer 202 while the feature is inactive and the pass they wake stands down
+(`runAnalysisSweeper`, `runFingerprintSweeper`). The comments now say that.
+Left as it is: the console hides both buttons unless the job is active, and
+a hand-sent POST costs one no-op pass.
+
+Found beside it and filed, not fixed (backlog B108): the flag-off bullets
+say `/v1/download?variant=` and `/v1/waveform` answer 404 and the manifest
+carries no analysis fields, while `serveVariant` and
+`lookupAnalysisForRequest` refuse only on a nil store, which #781 wires on
+every bridge. Measured with two throwaway tests over the real `api.Server`
+(the `files_variants_test.go` and `waveform_cache_test.go` fixtures): with
+the gate closure answering false, a variant download answered 200 with the
+sidecar's 512 bytes and `/v1/waveform` 200 with the curve's 4 bytes, as with
+it answering true. `WithUpscale`'s docblock claimed the gate reached the
+variant download; it now says what the code does and names B108.
+
+### B77: the bridge judges a pairing code's shape
+
+The redeem section's 400 said a code "is not 43 characters of base64url",
+and its request placeholder called the code "the 43-char base64url code".
+`pairingcode.ValidShape` requires the unpadded base64url encoding of exactly
+32 bytes (`base64.RawURLEncoding.Strict()` plus the length check). Measured
+with a probe calling it on 42 `A`s and each of the 64 alphabet characters:
+16 last characters pass (`AEIMQUYcgkosw048`, the ones whose two low bits are
+zero), 42 and 44 characters are refused, a `=`-padded 44 is refused, and a
+standard-alphabet `+` is refused. The section now says what a client may
+rely on and that the bridge, not the client, judges it; the placeholder asks
+for the code as the link carries it, and the `code` row of the pairing URL
+table says the same in brief. The app deliberately does not validate the
+shape (acoseac/1-bit#1996 maps the 400 to a damaged link).
+
+### B78 part A: the app's host-kind twins
+
+`resolveServiceURL`'s docblock ended "apart from the host-kind rule, which
+the app does not have", and CLAUDE.md's LOCATION bullet said "the app's SSDP
+path has no LOCATION-versus-source check either". Both went stale on
+2026-09-29 when acoseac/1-bit#1998 merged (9d0761c6). Verified in the app at
+that commit, read-only (`com.acoseac.dsdplayer/SSDPResponseParser.swift`,
+`DeviceDescriptionParser.swift`): `UPnPURLPolicy.hostKind(of:)` (for a host
+string and for a URL), `UPnPURLPolicy.hostKindAllowed(_:reference:)`, which
+the app's `resolveServiceURL` applies for every source,
+`UPnPURLPolicy.location(_:announcedFrom:)`, whose docblock names
+`LocationFromSource` as its twin, and `cloudMetadataAddresses`, the same 19
+addresses as `cloudMetadataAddrs` (both lists parsed with Python's
+`ipaddress` and compared as sets: equal). The app has no connect-time check
+(its docblock: `URLSession` offers no hook between resolving a name and
+connecting). The file header, `resolveServiceURL`, `LocationFromSource`,
+`hostKindAllowed`, the metadata list's doc and both CLAUDE.md bullets now
+name the twins; the CLAUDE.md tally of corrected claims goes to twelve.
+
+### AGENTS.md: the operator bridge is on the NUC
+
+AGENTS.md's deployment paragraph still called `bridge.ars.md` (Linux VPS,
+public mode) one of the two production bridges and the third deploy step.
+The operator bridge moved to a home NUC reached over Tailscale on
+2026-09-22 (`<OPERATOR-SSH>`), and the VPS hosts only the public demo;
+CLAUDE.md was corrected on main the same morning (cd274f89), and AGENTS.md
+now matches its wording. A grep for the host name found two more places that
+named it as the operator bridge's deploy step: deploy/README.md (its Linux
+heading and "When to deploy") and docs/LoupeReviewCycle.md (the deploy
+targets). Both now name the operator bridge; the deploy README also says the
+script cannot verify the NUC and that a demo deploy carries `SVC` and
+`REMOTE_BIN`. The runbook already carries the move in its banner, and the
+host's other mentions in code comments are dated field cases, true as
+written.

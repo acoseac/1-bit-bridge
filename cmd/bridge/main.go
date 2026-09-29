@@ -3325,18 +3325,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	})
 	defer pairingStore.Close()
 
-	// Upscale feature gate: config flag + sox-on-PATH startup probe.
-	// `cfg.Upscale.Enabled == true` AND a working sox in PATH are
-	// the joint precondition for the feature. A missing sox with
-	// the flag on logs an error and degrades to "feature off"
-	// in-memory — the rest of the server keeps running unaffected.
-	// iOS sees `upscaleEnabled: false` on /v1/health in either
-	// disabled case.
-	// ONE TTL-cached sox probe shared by every consumer: the live feature
-	// gates below, the upscale enqueuer's per-source decodability check,
-	// and the admin tiles (so the Settings page does at most one
-	// fork-exec per 30 s window regardless of tile count). Declared here
-	// rather than beside the admin wiring because the gates need it first.
 	// Reclaim DSD-render scratch a crash left behind (SIGKILL / power loss
 	// skip the render's deferred remove). Bridge-owned subdirectory only,
 	// files older than the purge age; a fresh scratch another instance is
@@ -3346,6 +3334,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	} else if n > 0 {
 		fmt.Fprintf(stderr, "render scratch purge: removed %d stale file(s)\n", n)
 	}
+	// ONE TTL-cached sox probe shared by every consumer: the live feature
+	// gates below, the upscale enqueuer's per-source decodability check,
+	// and the admin tiles (so the Settings page does at most one
+	// fork-exec per 30 s window regardless of tile count). Declared here
+	// rather than beside the admin wiring because the gates need it first.
 	soxCache := &soxToolchainCache{}
 	// soxOK is the LIVE toolchain verdict. Lazy + cached rather than a
 	// boot snapshot: the probe is a fork-exec, and an operator who
@@ -3364,6 +3357,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// makes the toggles hot without any runtime teardown: the dangerous
 	// half of a pool lifecycle is stopping one, and nothing stops these
 	// until shutdown.
+	//
+	// Each is the config flag AND a usable sox (soxOK). A missing sox
+	// with the flag on keeps the feature off, as the flag off does, and
+	// iOS sees `upscaleEnabled: false` (or no analysis flags) on
+	// /v1/health either way; installing sox opens the gate within the
+	// probe's 30 s cache, with no restart. Nothing here is decided at
+	// startup; this function's comments, and PROTOCOL.md in five places,
+	// described a startup probe that demoted the feature in memory until
+	// 2026-09-29 (backlog B44).
 	upscaleActiveFn := func() bool { return liveCfg().Upscale.Enabled && soxOK("upscale") }
 	analysisActiveFn := func() bool { return liveCfg().Analysis.Enabled && soxOK("analysis") }
 	// carPlayOptimizeActiveFn is the LIVE gate for the CarPlay-optimize
@@ -3413,11 +3415,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// past.
 	provider.SetUpscaleEnabledSource(upscaleActiveFn)
 
-	// Analysis feature gate: same shape as upscale — config flag AND a
-	// working sox in PATH (analysis decodes through sox). A missing sox
-	// with the flag on degrades to "feature off" in-memory. Serve-side
-	// generation is CLI-driven (`bridge analyze`); serve only advertises
-	// the `waveform` flag + serves /v1/waveform from cached sidecars.
+	// Analysis feature gate: analysisActiveFn above, the same shape as
+	// upscale (the flag AND a usable sox, read live; analysis decodes
+	// through sox). Serve generates as well as serves: the auto-analysis
+	// sweeper below enqueues the tracks missing a fresh waveform, beside
+	// the `bridge analyze` CLI, and /v1/waveform serves the sidecars.
 
 	// Smart playlists read precomputed analysis + history (no decode), so
 	// there's no sox precheck — and no boot snapshot of the flag either:
@@ -4782,8 +4784,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,
 		// Fingerprint job card: always wired so a feature-off bridge still
-		// explains WHY (config flag + degraded reason); the trigger stays
-		// nil unless the sweeper is actually running.
+		// explains WHY (config flag + degraded reason). The trigger is wired
+		// on every bridge too, since the sweeper runs on every bridge (its
+		// gate is live); a nudge while the feature is inactive wakes a pass
+		// that stands down, as the analysis trigger's does.
 		FingerprintState: fingerprintStateClosure(
 			func() bool { return liveCfg().Fingerprint.Enabled },
 			fingerprintReady, fingerprintDegradedReason, fingerprintSweepState),

@@ -305,11 +305,17 @@ Release hygiene: keep `Dockerfile`'s `ARG GO_VERSION` in step with `go.mod`
 `docs/release-process.md` (README status bump + cross-repo logging/privacy
 audit; user-facing copy changes go to the `1bitapp` repo).
 
-Deployment: two production bridges exist — **home-pc** (Windows) and
-**bridge.ars.md** (Linux VPS, public mode). Full runbook:
+Deployment: two production bridges exist — **the operator bridge**, which
+since 2026-09-22 runs on a home NUC reached over Tailscale (`<OPERATOR-SSH>`
+in the runbook; every `<PLACEHOLDER>` resolves in the gitignored
+`ops/coordinates.local.md`), and **home-pc** (Windows). The **public demo**
+`bridge.1-bit.app` is a unit of its own on the Azure VPS **bridge.ars.md**,
+which ran the operator bridge (public mode) until 2026-09-22 and hosts only
+the demo now. Full runbook:
 [`ops/deployment-runbook.md`](ops/deployment-runbook.md) (3-step flow: local
-`/tmp/bridge-live/` fixture → home-pc → VPS). Deploy scripts in `deploy/` are
-the canonical copies — sync hosts FROM the repo, never edit in place.
+`/tmp/bridge-live/` fixture → home-pc → the operator bridge). Deploy scripts
+in `deploy/` are the canonical copies — sync hosts FROM the repo, never edit
+in place.
 
 ## Development workflow
 

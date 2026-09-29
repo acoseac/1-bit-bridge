@@ -1727,10 +1727,12 @@ func (d DLNAConfig) EffectiveDLNATelemetryEnabled() bool {
 //     responses even if `track_variants` rows exist on disk.
 //   - `/v1/health` reports `upscaleEnabled: false`.
 //
-// When enabled, additional safety: `bridge serve` runs an
-// `exec.LookPath("sox")` probe at startup. Missing `sox` logs an
-// error and overrides Enabled to false in-memory — feature
-// gracefully degrades, the rest of the server keeps running.
+// When enabled, the feature also needs a usable `sox` (on PATH,
+// with FLAC support), which `bridge serve` checks LIVE through a
+// probe it caches for 30 s: without one the feature stays off, as
+// it does with the flag off, and the rest of the server keeps
+// running. Enabled itself is never rewritten, so installing sox
+// turns the feature on with no restart.
 //
 // `track_variants` table is created unconditionally (additive
 // schema, no harm in empty); only the read/write paths are gated.
@@ -2060,8 +2062,9 @@ func (u UpscaleConfig) EffectiveVariantsDir(dataDir string) string {
 // (`bridge analyze`) — Phase 1 computes a peak waveform sidecar per
 // track for the iOS scrubber. Disabled by default; opt in here AND
 // install sox (the same dependency upscaling uses — analysis decodes
-// through it). A `true` config with sox missing degrades to feature-off
-// in-memory at startup, like upscaling.
+// through it). A `true` config without a usable sox keeps the feature
+// off, judged live as for upscaling, so installing sox turns it on with
+// no restart.
 type AnalysisConfig struct {
 	// Enabled is the master toggle. Default false.
 	Enabled bool `yaml:"enabled,omitempty"`

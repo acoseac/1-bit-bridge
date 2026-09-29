@@ -559,7 +559,7 @@ An unknown `kind` is `400 bad_request`. A kind whose gate is off answers `503 up
 ```
 Returned when:
 - `cfg.Upscale.Enabled == false` in `bridge.yaml`, OR
-- the sox-on-PATH probe failed at startup (graceful degradation — same wire code, operator privacy).
+- the bridge has no usable `sox` right now (graceful degradation — same wire code, operator privacy). This is the live gate `/v1/health.upscaleEnabled` reports, never a verdict taken at startup: see "Feature gate semantics" under "Upscaling (offline PCM variants)".
 
 **Response** — every candidate bounced queue-full (`503 Service Unavailable`, JSON):
 ```json
@@ -577,7 +577,7 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 ### Batched upscaling (additive; `operatorDrivenUpscale`)
 
-Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. All three endpoints answer `503 upscale_disabled` when the feature is off or the sox pre-check failed at boot, and `403 demo_read_only` on a demo bridge.
+Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. All three endpoints answer `503 upscale_disabled` when upscaling is not active (the flag off, or no usable `sox` right now: the same live gate as `POST /v1/upscale`), and `403 demo_read_only` on a demo bridge.
 
 Gate on the **`operatorDrivenUpscale`** feature flag: it is present only when upscaling is active **and** a batch coordinator is wired, which is exactly the condition under which these three routes do anything. A bridge without the flag either lacks the routes entirely or would answer `503`.
 
@@ -780,9 +780,9 @@ Snapshot of the upscale feature's runtime + on-disk state: how many jobs are que
 
 | Field | Meaning |
 |---|---|
-| `enabled` | Live runtime state. False when `cfg.Upscale.Enabled` is false OR the sox-precheck demoted the feature at startup OR the operator just PATCHed the feature off (the long-lived Pool may still be alive, but the contract is "feature is off live", matching `/v1/health.upscaleEnabled`). |
+| `enabled` | Live runtime state, the same gate as `/v1/health.upscaleEnabled`: true while `cfg.Upscale.Enabled` is on AND the bridge has a usable `sox` (on PATH, with FLAC support when the build's format list can be read). The bridge re-checks `sox` at most every 30 s while it runs, so installing it, or PATCHing the feature on or off, moves this field without a restart. The long-lived pool may still be alive while it is false; the contract is "feature is off live". |
 | `soxAvailable` | The current `sox(1)`-on-PATH probe result. Omitted when the test harness didn't wire a precheck closure. Operators can install sox without restarting the bridge — within ~30 s the field flips to `true`. |
-| `pool` | Live worker-pool snapshot. **Omitted when `enabled` is false** (no pool to query). `queueCap` is operator-tunable via `cfg.Upscale.QueueCap` (default 5000). `enqueued`/`done`/`failed` are lifetime counters since the bridge process started — they reset on restart; `cachedVariants` survives. |
+| `pool` | Live worker-pool snapshot. **Omitted when `enabled` is false**, although the pool itself lives for the whole run. `queueCap` is operator-tunable via `cfg.Upscale.QueueCap` (default 5000). `enqueued`/`done`/`failed` are lifetime counters since the bridge process started — they reset on restart; `cachedVariants` survives. |
 | `cachedVariants` | Row count from `track_variants`. Survives across restarts and reflects historical conversion work — non-zero even when `enabled == false` if the operator disabled the feature without `--gc`. |
 | `cachedBytes` | Total size of all sidecar files, summed from `track_variants.size_bytes`. Helps the operator gauge disk usage before deciding to re-enable or `--gc`. |
 
@@ -900,8 +900,8 @@ The schema version bumps only when the on-disk sidecar layout or the sox command
 #### Feature gate semantics
 
 - `upscale.enabled: false` (default): manifest emits no `variants` even if `track_variants` rows exist on disk (predictable round-trip — operator can re-enable to expose the cached sidecars without re-conversion). `/v1/health` reports `upscaleEnabled: false`. `/v1/download?variant=…` returns `404 variant_not_found`.
-- `upscale.enabled: true` AND `sox` on PATH: full feature operates as documented.
-- `upscale.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, advertises `upscaleEnabled: false`. The rest of the server keeps running.
+- `upscale.enabled: true` AND a usable `sox` on PATH: full feature operates as documented.
+- `upscale.enabled: true` AND no usable `sox` (none on PATH, or a build that lacks FLAC support): the feature is off, as with the flag off, and `/v1/health` advertises `upscaleEnabled: false`. The rest of the server keeps running. The gate is live, never a verdict taken at startup: the bridge re-checks `sox` at most every 30 s while it runs, so installing it turns the feature on within about 30 s, with no restart. A bridge that starts in this state prints one line saying the feature stays off until a usable `sox` is installed.
 - `upscale.dsdRender.enabled: true` (default `false`) AND `ffmpeg` on PATH with the `dsd_*` decoders: `/v1/health.features` advertises `dsdRender`; `kind: "optimize"` admits DSD sources and `kind: "pcm"` is accepted; the pre-generation sweep (`autoOptimize`) renders the compact tier of every DSD track alongside the CarPlay ones. Flipping the flag hot-applies (settings PATCH `dsdRenderEnabled`, no restart). Without the decoders the flag is written but nothing renders, `dsdRender` stays absent, and `bridge doctor` names the install line; DST-compressed DSDIFF additionally needs the `dst` decoder (every stock ffmpeg package ships both).
 
 ### Waveform (offline audio analysis, additive since v1.8)
@@ -1047,8 +1047,8 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 #### Feature gate semantics
 
 - `analysis.enabled: false` (default): `/v1/health.features` omits `waveform`, `loudness`, and `keyTempo`; manifest emits no `waveformTag`, no analysis-derived `replayGainTrackDB`, and no `keyRoot`/`keyMode`/estimated `bpm`; `/v1/waveform` returns `404`.
-- `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
-- `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running.
+- `analysis.enabled: true` AND a usable `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
+- `analysis.enabled: true` AND no usable `sox` (none on PATH, or a build that lacks FLAC support): the feature is off, as with the flag off, and `/v1/health.features` omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running. As for upscaling, the gate is live, never a verdict taken at startup: `sox` is re-checked at most every 30 s while the bridge runs, so installing it turns the feature on with no restart.
 
 ### Lyrics (additive — Mirror-PR B1, v2.0)
 
@@ -1459,8 +1459,10 @@ Trades the one-time `code` a pairing link carries (see "Pairing URL scheme") for
 
 **Request body**:
 ```json
-{ "code": "<the 43-char base64url code from the link>" }
+{ "code": "<the link's code, as the link carries it>" }
 ```
+
+A code the bridge issues is the unpadded base64url encoding of 32 random bytes: exactly 43 characters, and since those carry 258 bits for 256, the last character's two low bits are zero (it is one of `AEIMQUYcgkosw048`). That is all a client may rely on about its shape, and the bridge, not the client, judges it: a client sends the code as the link carries it and reads the `400` below as a damaged link.
 
 **Response** (`200 OK`):
 ```json
@@ -1470,7 +1472,7 @@ Trades the one-time `code` a pairing link carries (see "Pairing URL scheme") for
 `token` is a fresh secret for the SAME token record the link's `token` belongs to (its name, ID, last-used history and any expiry are kept, as for a rotation in the admin console), and the link's `token` stops validating in the same step. The client stores `token`, never the link's. A code is single-use and valid for 10 minutes from when the console made the QR. The console keeps one code per token, so rotating a token, which makes a fresh QR, ends the previous QR's code as well. Codes are held in memory, so a bridge restart ends every code, and the operator makes a fresh QR.
 
 **Errors**:
-- **`400 bad_request`** — the body is not `{"code": "..."}`, or the code is not 43 characters of base64url.
+- **`400 bad_request`** — the body is not `{"code": "..."}`, or the code is not shaped like one the bridge issues: exactly 43 unpadded base64url characters that decode to 32 bytes. A 43-character string whose last character carries stray low bits is refused too.
 - **`410 pairing_code_invalid`** — the code is unknown, already redeemed or expired, or its token has since been revoked or has expired. One answer for all of them, so the endpoint reveals nothing about which codes exist. The client shows it (the fix is a new QR) and does NOT fall back to the link's `token`: if a copy of the link was redeemed first, that token no longer works, and a device that paired with it anyway would hold the weaker secret this exchange exists to replace.
 - **`404 pairing_code_not_supported`** — a bridge that issues no codes. Such a bridge never puts `code` in a link.
 - **`429 rate_limited`** with `Retry-After` — the per-IP pairing limiter `POST /v1/pairing/requests` uses.
@@ -1580,7 +1582,7 @@ bridge://pair?url=<https bridge URL>&token=<base64url bearer>&code=<base64url on
 |---------------|-----------------------------------------------------------------------|
 | `url`         | The HTTPS URL iOS should dial, including `https://` scheme and port.  |
 | `token`       | Raw bearer token (the same 43-char base64url string `bridge pair` prints). |
-| `code`        | Optional (additive). A one-time code, 43 characters of base64url, that redeems once, within 10 minutes, for the device's token (`POST /v1/pairing/redeem`). Present in the links the admin console makes on a bridge that issues codes. |
+| `code`        | Optional (additive). A one-time code (the unpadded base64url encoding of 32 bytes: 43 characters, whose shape the bridge judges) that redeems once, within 10 minutes, for the device's token (`POST /v1/pairing/redeem`). Present in the links the admin console makes on a bridge that issues codes. |
 | `fingerprint` | Server TLS cert SHA-256 in colon-delimited uppercase hex. Used for pinning. |
 | `name`        | Human-readable library name (shown in the iOS UI). |
 

@@ -79,7 +79,7 @@ type jobsAnalysisCoverage struct {
 
 // jobsAnalysis — the audio-analysis card. Sweep/Coverage omitted when
 // the feature machinery is off; DegradedReason explains an
-// enabled-but-inactive state (sox missing at startup).
+// enabled-but-inactive state (no usable sox, judged live).
 type jobsAnalysis struct {
 	Enabled        bool                  `json:"enabled"`
 	Active         bool                  `json:"active"`
@@ -528,7 +528,10 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 
 // apiFingerprintSweep: POST /api/fingerprint/sweep — the fingerprint
 // twin of apiAnalysisSweep. 202 = queued (nudge coalesces; honored
-// after the sweeper's settle window), 503 = feature inactive.
+// after the sweeper's settle window), 503 = no trigger wired, which
+// serve never leaves unset: a nudge while the feature is inactive is
+// accepted and wakes a pass that stands down, as apiAnalysisSweep's
+// does.
 func (s *Server) apiFingerprintSweep(w http.ResponseWriter, _ *http.Request) {
 	trigger := s.deps.TriggerFingerprintSweep
 	if trigger == nil {

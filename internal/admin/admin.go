@@ -473,8 +473,10 @@ type Deps struct {
 	// nudging the sweeper's buffered-1 channel (non-blocking send,
 	// coalescing — the "Analyze now" button). It only signals the
 	// already-bgWriters-joined sweeper goroutine, so no goroutine or
-	// WaitGroup concerns live on the admin side. Nil when analysis is
-	// inactive; the endpoint then 503s.
+	// WaitGroup concerns live on the admin side. Serve wires it on every
+	// bridge (the sweeper runs whatever the live gate says, and a pass
+	// the gate refuses stands down); nil, in a harness, makes the
+	// endpoint 503.
 	TriggerAnalysisSweep func() bool
 
 	// AnalysisSchemaVersion is analyze.WaveformSchemaVersion, passed by
@@ -493,8 +495,8 @@ type Deps struct {
 	FingerprintState func() *FingerprintJobState
 
 	// TriggerFingerprintSweep — the fingerprint twin of
-	// TriggerAnalysisSweep (the "Sweep now" button). Nil when the
-	// feature is inactive; the endpoint then 503s.
+	// TriggerAnalysisSweep (the "Sweep now" button), wired on every
+	// bridge the same way; nil makes the endpoint 503.
 	TriggerFingerprintSweep func() bool
 
 	// AutoOptimizeState returns the auto-optimize sweeper's admin
@@ -1142,7 +1144,7 @@ type AutoOptimizeSweepCounts struct {
 
 // FingerprintJobState is the acoustic-fingerprint card's snapshot on
 // /api/jobs. Enabled is the config flag; Active the runtime verdict
-// (flag AND fpcalc AND AcoustID key at startup); DegradedReason the
+// (flag AND fpcalc AND AcoustID key, read live); DegradedReason the
 // bounded key explaining an Enabled-but-inactive state
 // ("fpcalc_missing" / "no_api_key"). Lifecycle fields follow
 // AnalysisSweepState's shape and rules (pointer timestamps, no ticking

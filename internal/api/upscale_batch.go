@@ -7,7 +7,8 @@
 //
 // Auth: minted-token bearer, same as /v1/upscale. The endpoints
 // surface a 503 `upscale_disabled` when no BatchCoordinator is
-// wired (feature off OR sox precheck failed at boot).
+// wired or the live upscale gate is closed (the flag off, or no
+// usable sox right now; see WithUpscale).
 
 package api
 
@@ -25,11 +26,11 @@ import (
 )
 
 // Shared upscale-disabled error pair surfaced by every /v1/upscale*
-// handler when the feature is off (cfg.Upscale.Enabled == false or
-// no BatchCoordinator wired). Same payload shape as the admin
-// package's pair, but the code uses an underscore (`upscale_disabled`)
-// matching the public wire convention; admin uses kebab-case for the
-// admin JSON channel.
+// handler when the feature is off (the live gate closed: the flag
+// off, or no usable sox) or no BatchCoordinator is wired. Same
+// payload shape as the admin package's pair, but the code uses an
+// underscore (`upscale_disabled`) matching the public wire
+// convention; admin uses kebab-case for the admin JSON channel.
 const (
 	errCodeUpscaleDisabled    = "upscale_disabled"
 	errMsgUpscalingNotEnabled = "upscaling is not enabled on this bridge"

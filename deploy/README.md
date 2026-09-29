@@ -43,7 +43,14 @@ when a config exists, and `update` never runs `init`. Never run `bridge init
 -force` against a live install — it changes the fingerprint and breaks every
 pairing.
 
-## linux/ — bridge.ars.md (Linux VPS, public mode, systemd)
+## linux/ — the Linux VPS, bridge.ars.md (public mode, systemd)
+
+Since 2026-09-22 this host runs only the public demo (`bridge.1-bit.app`, its
+own unit and binary); the operator bridge moved to a home NUC, which this
+script cannot verify (a self-signed certificate), so a deploy there follows the
+runbook's manual form. A demo deploy carries `SVC` and `REMOTE_BIN` (the
+runbook's `.env.demo`): the defaults name the operator bridge's old unit and
+binary on this host.
 
 ```sh
 cp deploy/linux/.env.example deploy/linux/.env   # first run only; fill it in
@@ -77,5 +84,5 @@ transits the relay.
 
 Per [`../ops/deployment-runbook.md`](../ops/deployment-runbook.md): after any
 merged **runtime-behavior** PR, update the local fixture, then home-pc, then
-bridge.ars.md. Skip for docs-only / test-only merges (no shipped binary
-changes behavior).
+the operator bridge (on the NUC since 2026-09-22; bridge.ars.md before). Skip
+for docs-only / test-only merges (no shipped binary changes behavior).
