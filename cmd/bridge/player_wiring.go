@@ -82,9 +82,11 @@ func playerSessionAdapter(t *updater.Tracker) func() func() {
 // Invalidation is deliberately LAZY — it bumps an epoch and the next
 // reader rebuilds — so this goroutine does no work beyond the wakeup.
 // That laziness is also the debounce: postScanNudges fires after every
-// successful scan INCLUDING watcher-driven ScanSubtree, so a bulk
-// import or a noisy inotify burst coalesces into one rebuild, and into
-// none at all if nobody has the player open.
+// successful FULL scan, so a bulk import coalesces into one rebuild, and
+// into none at all if nobody has the player open. A watcher-driven
+// ScanSubtree does not fire it (the scanner's post-scan hook is
+// full-scan-only), so its changes reach the catalog at the next full scan;
+// this comment said otherwise until 2026-09-29 (backlog B83).
 //
 // Not joined to bgWriters: it writes nothing, so it has no ordering
 // relationship with Store.Close. scanCtx cancellation is its whole

@@ -2142,8 +2142,9 @@ no failing test — which is the shape to expect in this area.
   naming a changed file in lower case, on a filesystem that opens it, left the
   rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: with
   auto-optimize off, a stale rendition whose row has caught up is rendered
-  again by nothing (backlog B82), and a watcher-driven subtree scan does not
-  nudge the sweep (B83). Tests: `TestABatchPassesOverAFileThatChangedSinceItsScan`,
+  again by nothing (backlog B82), and a watcher-driven subtree scan nudges
+  neither the sweep nor the player's catalog (B83; `player_wiring.go` said it
+  nudged the catalog until B53). Tests: `TestABatchPassesOverAFileThatChangedSinceItsScan`,
   `TestRunRendersNothingFromASourceThatChangedSinceItsStamp`,
   `TestPublishingRefusesASourceThatChangedWhileItRendered`,
   `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (the real pool and

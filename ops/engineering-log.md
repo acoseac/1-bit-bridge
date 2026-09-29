@@ -28090,3 +28090,165 @@ retry is `nameFromHandle(get)` (`TestNameFromHandleFallsBackToTheVolumeGUIDPath`
 | NC13 (Windows): no refusal of an unresolved link | the link case of `TestResolveWithRefusesALinkItCouldNotResolve` only |
 
 Gemini's `/gemini review` on the head answered with its daily quota notice.
+
+## 2026-09-29 — a render refuses a source newer than its row at every step, and a stale download asks for the rescan (backlog B53)
+
+Backlog B53: the three rendition-freshness leftovers #1077 recorded, plus a
+defect in #1077's rescanner found while measuring them. #1077 made every
+rendition writer stamp the track row and made three entry points (the
+on-demand path, the sweeper, the CLI) queue a render only while the file
+still matches its row. Three places still rendered or served around that.
+
+### Measured on main at 6dfba62c
+
+Throwaway probes in a worktree of main (macOS; the pool probe ran the real
+`transcode.Run` with a stand-in sox on PATH that renders anything):
+
+- The batch coordinator. `SubmitOptimize` over `Album/{01,02}.flac`, with 01
+  changed on disk after its scan: both enqueued; 01's rendition was stamped
+  with the row, so the serve path's check answered 410 `variant_stale`, 02
+  200. After a scan read 01, a second `SubmitOptimize` enqueued 0 and counted
+  both "already covered" (a projection's `HasVariant` is any rendition of the
+  family, fresh or not), so 01 stayed 410. With auto-optimize off (the
+  default) nothing renders it again.
+- The pool. A job whose source changed while it waited in the queue: done=1
+  failed=0, and the rendition answered 410. A job whose source changed while
+  the stand-in sox ran: the same.
+- The download path. The sweep rendered a DSF's compact tier (GET 200); the
+  file was retagged (mtime +1 min); five GETs answered 410 each; three
+  seconds later the row still recorded the old mtime, since nothing rescans
+  on a download; a sweep then rendered 0 (the file had changed since its
+  scan, `changedSinceScan`) and the GET stayed 410 until the periodic scan.
+- #1077's rescanner scanned the directory in the spelling a request arrived
+  with. A POST /v1/upscale naming a changed file in lower case
+  (`fixture/dsd/01.dsf`), on a case-insensitive filesystem, was refused as
+  designed and queued a rescan of `.../fixture/dsd`; `ScanSubtree` makes each
+  row's path lexically from the directory it is handed (`filepath.Rel`), so
+  the library then held `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`: the
+  album twice, in every paired device's manifest. Reproduced on macOS and on
+  the Windows test host. Today's app sends `sourceFetchPath`, the manifest's
+  own spelling, so it is latent there; any client that case-folds a path
+  (the adapter's own comment says an older app did) reaches it.
+
+### Design
+
+- `transcode.SourceIsAtRow` is the one check, moved from cmd/bridge's
+  `sourceIsAtRow`: exact size and mtime, the scanner's skip-gate comparison.
+- The batch walks (upscale, optimize, pcm) compare each candidate's file with
+  its projection. `ResolverFunc` now returns the stat with the path: the
+  production resolver was already `ResolveChecked` and threw the stat away,
+  so the check costs no syscall. A changed file is passed over (it lands in
+  the batch row's skipped count, as every other `continue` arm does), its
+  directory is asked for a rescan through the pool's hook, and one Info line
+  per submit gives the count. A resolver answering a nil stat is a resolver
+  failure.
+- `transcode.Run` checks first, before a decoder probe, a scratch file or an
+  album-gain claim, and answers `ErrSourceChanged`. It checks again in
+  `JobSpec.publishSidecar`, now a method and the only publish helper both
+  chains call, so a render whose source changed while it ran never renames
+  its output into place; the chain's deferred cleanup removes the temp. A
+  source it cannot stat is not the check's question: the tools report it as
+  before.
+- The pool classifies `ErrSourceChanged` by type, beside the missing-tool
+  exit. The job is counted and announced like any failure (a batch must hear
+  it to drain), #988's ordered tail is unchanged, it strikes nothing (a newer
+  version is not a bad file), and it asks for a rescan inside the claim. Info
+  per job: for an on-demand job the log is the only record, and the lines
+  are distinct per path and bounded by the queue.
+- The CLI worker renders through `Run`, so `bridge render` over a file
+  retagged mid-run prints `FAIL <path>: the file changed on disk after its
+  last scan: ...` and records nothing.
+- A 410 `variant_stale` tells `api.StaleRenditionFunc` (`WithStaleRendition`).
+  cmd/bridge's `staleRenditionRescan` looks the track up and asks for a rescan
+  only while the row is behind the file, and at most once per directory per
+  minute (`staleRenditionRescanEvery`), remembering at most 1,024 directories.
+  GETs drive it: every play of a stale rendition, on every device, in range
+  requests.
+- A rescan request names the file by its row's path, and the rescanner
+  resolves the directory through the live resolver. Every caller has the row
+  (the adapter's `track.Path`, the pool's `SourceLibraryRel`, the walks'
+  projection, the hook's lookup), so the request's spelling never reaches the
+  scanner.
+- A rescan that committed rows calls `run`'s `wrote`, which runServe wires to
+  a non-blocking send on the auto-optimize nudge. Without it the re-render
+  waited for the sweep's tick, which by default follows the periodic scan
+  (`autoOptimize.intervalSec: 0` inherits `scanIntervalSec`), so the download
+  hook alone would have healed almost nothing sooner. The rescanner's loop now
+  starts after the auto-optimize block, where the nudge exists.
+
+Rejected:
+
+- A check in `processJob` before `p.runner`, as the review of #1077 proposed.
+  It leaves the CLI worker, which calls `Run` directly, and the during-render
+  window, which a pool-level check can close only by removing a sidecar `Run`
+  has already published. In `Run` both windows close for every caller, and
+  the pool's stub runners keep their tests free of the stat.
+- A zero stamp as "unstamped, skip the check". Every production writer
+  stamps the row; a fixture that rendered a real file with no stamp was
+  describing a library no scan leaves, and seven were fixed to stamp the
+  file's version (`stampedAsScanned`, and `pool_missing_tool_test.go`'s
+  stand-in source now has the row's size and mtime).
+- Counting a refused job as a new outcome (neither done nor failed): it would
+  change `PoolStats`, the SSE frames and the Coordinator's callbacks for a
+  case the failure message already names.
+- A time debounce alone on the download path: a stale rendition whose row has
+  caught up would still rescan once a minute per directory for nothing. The
+  row check makes that case ask for nothing; the time debounce covers a row a
+  rescan does not bring level.
+
+Left open: with auto-optimize off, a stale rendition whose row has caught up
+is rendered again by nothing, since the phone never re-asks a listed family
+and a batch counts it covered (backlog B82); and a watcher-driven subtree
+scan does not nudge the sweep, so with the watcher on a retag leaves
+pre-generated renditions stale until the sweep's tick (B83). The player's
+catalog invalidator hangs off the same full-scan-only hook, and
+`cmd/bridge/player_wiring.go` claimed a watcher-driven `ScanSubtree` fired it;
+`ScanSubtree` never loads the hook and the watcher calls nothing else, so the
+comment is corrected here and the gap is in B83. The console
+player's own 410 `variant_stale` (`internal/admin/player_audio.go`) does not
+ask for a rescan: its picker already skips a stale rendition and plays the
+source, and the operator can rescan from the same console.
+
+### Tests
+
+- `TestABatchPassesOverAFileThatChangedSinceItsScan` (upscale, optimize,
+  pcm; real files through `fs.Resolver.ResolveChecked`).
+- `TestRunRendersNothingFromASourceThatChangedSinceItsStamp` (FLAC and DSF,
+  PATH empty; the positive control is the missing-tool failure).
+- `TestPublishingRefusesASourceThatChangedWhileItRendered`.
+- `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (unix: the real
+  pool and `Run` over a stand-in sox; changed while it waited, while it
+  rendered, and unchanged).
+- A "source changed" row in both #988 tables
+  (`TestACountedTranscodeFailureHasAlreadyReleasedItsPath` checks that only
+  this exit asks for a rescan, before its count;
+  `TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath`).
+- `TestTheCLIRendersNothingFromAFileThatChangedDuringItsRun` (unix).
+- `TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`,
+  `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
+  `TestARescanIndexesNoSecondSpellingOfTheDirectory` (skips on a
+  case-sensitive filesystem; runs on macOS and Windows).
+
+#1077's harness now wires the rescanner and the download hook as runServe
+does (the loop runs only when a test starts it). The fixtures of the other
+transcode batch tests resolve through `scannedResolver`, which answers the
+row's own stat.
+
+### Negative controls
+
+Each on the committed fix, run with `-count=1`, restored before the next.
+
+| mutation | red | green |
+|---|---|---|
+| NC1 walks: no check | the batch test (all three walks) | the other ten |
+| NC2 walks: check without the rescan | the batch test (rescans) | the other ten |
+| NC3 `Run`: no start check | the Run test (flac, dsf), the pool test's "waited" (the tool ran; the publish check caught it) | the rest |
+| NC4 `Run`: no publish check | the publish test, the pool test's "rendered" | the rest |
+| NC5 `Run`: neither check | the Run and publish tests, both pool cases, the CLI test | the rest |
+| NC6 pool: no classification | the pool test (a strike, no rescan), the parked table's "source changed" | the rest |
+| NC7 pool: classified, no rescan | the pool test, the parked table's "source changed" | the rest |
+| NC8 hook: no row check | the debounce test | the rest |
+| NC9 hook: no time debounce | the debounce test | the rest |
+| NC10 api: hook not called | the download heal test (row never caught up) | the rest |
+| NC11 rescanner: `wrote` never called | the download heal test, the case test | the rest |
+| NC12 adapter hands the rescanner a case variant, as main's did for a case-folded request | the case test (`[Fixture/DSD/01.dsf fixture/dsd/01.dsf]`, also on the Windows host), the refused-request test | the rest |
