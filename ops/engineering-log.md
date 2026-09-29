@@ -28663,3 +28663,29 @@ nodes.
 | the bar's value is not updated | all three steps |
 | the ratio is not updated | all three steps |
 | the stale note stays in the document at zero | `two saves later` only |
+
+### Review round 2 (CodeRabbit and Gemini on #1094)
+
+Two findings on `variants.js`, both on `redraw`, both taken.
+
+- **CodeRabbit (Minor): a failure the newer redraw overtook.** The success path
+  discarded an answer a newer redraw had overtaken, and the failure path did
+  not: with two saves out and the older fetch failing, `onChanged` re-rendered
+  the route under the newer redraw, which is the loss of tray and focus this
+  change removes. Verified by a scenario the harness lacked (the older of two
+  fetches rejecting after the newer answered): one whole-route callback on the
+  unfixed code, none after. The failure path now compares `seq` too.
+- **Gemini (medium): `panel.alive !== null`.** Its premise was wrong (an
+  `alive: undefined` takes the destructuring default, `null`, so it never
+  reached the call), but a non-function `alive` did throw `TypeError: panel.alive
+  is not a function` after the fetch had answered, an unhandled rejection in a
+  callback nobody awaits. Taken as `typeof panel.alive === "function"`, with a
+  case that passes `alive: true`.
+
+| mutation | goes red |
+|---|---|
+| the failure path does not compare `seq` | `overtakenFailure` (one whole-route callback) |
+| `alive` tested against `null` again | the non-function case (`TypeError: panel.alive is not a function`) |
+
+`checkAliveThatIsNotAFunction` and the new scenarios are in
+`TestAVariantTraySaveRedrawsThePanelInPlace`.

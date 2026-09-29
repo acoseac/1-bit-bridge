@@ -5961,11 +5961,14 @@ its twin.** The top list is older, shorter, and read first.
   the gear outlives it), so the panel's tray answers for the CarPlay switch
   too once generation is on, and a redraw for that field is skipped while
   generation is off. Concurrent redraws end on the newest one's answer
-  (`seq`); an answer after the route moved on, an aborted fetch, and an
-  answer with no summary paint nothing; a failed fetch hands over to
-  `onChanged`, whose re-render fetches again and shows its own error state;
-  a panel given no `refresh` (the folder view has no trays) calls
-  `onChanged` as it always did. **Not redrawn in place, still whole-route:
+  (`seq`), and a FAILURE a newer redraw has overtaken is left to it, since
+  handing over to the route there would re-render it away under the newer
+  redraw (CodeRabbit on #1094); an answer after the route moved on, an
+  aborted fetch, and an answer with no summary paint nothing; the newest
+  redraw's failed fetch hands over to `onChanged`, whose re-render fetches
+  again and shows its own error state; a panel given no `refresh` (the
+  folder view has no trays) calls `onChanged` as it always did, and an
+  `alive` that is not a function reads as no route check. **Not redrawn in place, still whole-route:
   Delete (the numbers are true when it answers, and the track marks beside
   the panel change with them) and the live refresh
   (`onVariantChange`, every 8 s while a batch runs).**
