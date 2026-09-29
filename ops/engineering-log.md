@@ -30244,8 +30244,9 @@ PROTOCOL.md's "Feature gate semantics" said `upscale.enabled: false` makes
 carry no analysis field. Since #781 the handlers refuse only on a missing
 STORE (`serveVariant`, `lookupAnalysisForRequest`), and serve wires both
 stores on every bridge; the manifest splices the analysis fields from
-`track_analysis` with no gate. The owner decided for the code: a switch
-stops new work and withdraws nothing made. A client drops a rendition it
+`track_analysis` with no gate. The owner decided to change the spec to what
+the code does, not the code: a switch stops new work and withdraws nothing
+made. A client drops a rendition it
 gets a 404 for (iOS's stale-variant handler removes the id from the track
 row), switching the flag bumps no track's `indexed_at`, so a delta sync
 never carries the stripped `variants` and a phone that listed a rendition

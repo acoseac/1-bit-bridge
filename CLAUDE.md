@@ -4929,8 +4929,8 @@ mentions across the four `ops/audit-*.md` files.
   withdraws nothing made: a client drops a rendition or a curve it gets a 404
   for, and a delta sync never carries the stripped `variants` (the switch
   bumps no `indexed_at`), so a phone that listed a rendition keeps asking for
-  it. PROTOCOL.md said 404 (and 503 for the list) until then; the owner chose
-  the spec over the code. **Don't gate these reads on the live predicate**:
+  it. PROTOCOL.md said 404 (and 503 for the list) until then, and the owner
+  changed the spec to match the code. **Don't gate these reads on the live predicate**:
   `internal/api/feature_off_reads_test.go` pins each route over stubs and
   `TestServeWithItsFeaturesOffServesWhatItMadeBefore` the wiring, through a
   real serve.
