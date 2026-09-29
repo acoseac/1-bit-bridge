@@ -11,6 +11,7 @@ import (
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // UpscaleEnqueuer is the interface POST /v1/upscale uses to hand
@@ -335,6 +336,16 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 				return walkErr
 			}
 			if d.IsDir() {
+				// Walk past what the scanner never indexes
+				// (manifest.ShouldSkipDir: a recycle bin, a NAS
+				// snapshot, a Synology @eaDir, a dot-directory):
+				// nothing there is a track, and a snapshot directory
+				// can hold the library many times over, each copy a
+				// candidate the enqueuer then turns away. The folder
+				// the request named is walked whatever its name.
+				if p != walkFrom && manifest.ShouldSkipDir(d.Name()) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			// Compute the file's library-relative form by
