@@ -123,6 +123,7 @@ class Node {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.attributes = {};
     this.className = ""; this.own = ""; this.style = {}; this.disabled = false;
+    this.parentNode = null;
   }
   get textContent() {
     return this.children.length ? this.children.map((c) => c.textContent).join("") : this.own;
@@ -130,10 +131,19 @@ class Node {
   set textContent(v) { this.children = []; this.own = String(v); }
   setAttribute(k, v) { this.attributes[k] = String(v); }
   getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; }
-  appendChild(c) { this.children.push(c); return c; }
+  appendChild(c) { return this.insertBefore(c, null); }
+  removeAttribute(k) { delete this.attributes[k]; }
   addEventListener() {}
   get firstChild() { return this.children[0] || null; }
-  removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parentNode = null; return c; }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  insertBefore(c, ref) {
+    if (c.parentNode) c.parentNode.removeChild(c);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+    c.parentNode = this;
+    return c;
+  }
 }
 globalThis.document = {
   createElement: (tag) => new Node(tag),

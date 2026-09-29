@@ -9,16 +9,12 @@ import (
 	"testing"
 )
 
-// mixesViewHarness imports the shipped views.js under node, on a DOM that
-// keeps children, text, attributes and order, and drives renderMixes
-// through the steps a reader takes: the page at load, its gear's save of
-// the Smart mixes switch (the tray's onSaved, as saveTrayField calls it
-// after a live save), a save of the other switch, a save after the reader
-// has left the page. window.BridgeFeatureTray is a stand-in that records
-// the spec, since app.js is a classic script this harness does not load;
-// fetch answers /api/player/mixes from the step's server state and counts
-// the calls.
-const mixesViewHarness = `
+// playerViewStub is the browser a player view runs in, for a harness that
+// imports the shipped views.js under node: a DOM that keeps children, text,
+// attributes and order, and the globals the player's modules touch when they
+// load or render. What a harness adds is its own fetch and its own
+// window.BridgeFeatureTray, since app.js is a classic script no harness loads.
+const playerViewStub = `
 class Node {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.attributes = {}; this.className = "";
@@ -81,7 +77,15 @@ globalThis.Audio = function () { return new Node("audio"); };
 globalThis.EventSource = function () { return new Node("es"); };
 globalThis.IntersectionObserver = class { observe() {} disconnect() {} };
 globalThis.requestAnimationFrame = (f) => setTimeout(f, 0);
+`
 
+// mixesViewHarness drives renderMixes through the steps a reader takes: the
+// page at load, its gear's save of the Smart mixes switch (the tray's
+// onSaved, as saveTrayField calls it after a live save), a save of the other
+// switch, a save after the reader has left the page. window.BridgeFeatureTray
+// is a stand-in that records the spec; fetch answers /api/player/mixes from
+// the step's server state and counts the calls.
+const mixesViewHarness = playerViewStub + `
 let server = {};
 let mixesFetches = 0;
 globalThis.fetch = async (url) => {
