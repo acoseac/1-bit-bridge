@@ -176,6 +176,10 @@ func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 		after()
 		afterRescan(nil, nudge)()
 	}()
+	// The goroutine takes no context: the cancel is a formality the drain
+	// asks for, and the drain waits for it to return.
+	_, cancel := context.WithCancel(context.Background())
+	drainLoopOnCleanup(t, cancel, done, "the after steps sent to a full nudge")
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
