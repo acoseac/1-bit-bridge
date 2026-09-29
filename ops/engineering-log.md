@@ -28147,9 +28147,9 @@ main at 6dfba62c, go1.27.1 on macOS.
   (`user:` for a user name alone, `:pw` for a password alone, `Og==` for a
   bare `@`), and `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth` takes
   that reference from net/http on every run for six shapes rather than
-  restating it. A base with none keeps its own bytes as the root, so the
-  public default and every credential-free mirror build the URL they always
-  did.
+  restating it. A base with none keeps its own bytes as the root, less its
+  trailing slashes (review round 1), so the public default and every
+  credential-free mirror build the URL they always did.
 - **"Once, at construction" is once per resolution.** The clients read a live
   base per use (`WithLiveBase`), so the constructed base is cut in the
   constructor and a live value each time `resolveBase` reads it:
@@ -28260,3 +28260,39 @@ Each mutation applied to the committed tree, the named tests run with
 | NC9a: a builder is missing from the list | the builder list only |
 | NC9b: the list names a builder that does not exist | the builder list only |
 | NC9c: a stray non-test file calls `http.Get` | the builder list only |
+
+### Review round 1 (Gemini on #1091)
+
+CodeRabbit covered the first head with no actionable comments. Gemini's two
+passes left five comments on one theme, the trailing slash: `newRequest`
+joins a path that begins with `/` onto the root, so a root that keeps a
+trailing slash requests `…/ws/2//release/…`. Verified before it was taken:
+`resolveBase` trimmed a live value and the premium fetch trimmed its stored
+base, config's `normalizeBaseURL` trims, and a base handed straight to
+`NewMusicBrainzClient` or `NewCoverArtClient` was not trimmed by anything, so
+`base + "/"` with or without user information requested a double-slash path.
+Nothing in production hands a constructor an untrimmed base (main.go passes
+the config's), so this is robustness rather than a live defect.
+
+- **The parser trims the root** (`strings.TrimRight(raw, "/")` before it
+  parses), which makes "the root ends in no slash" the invariant of
+  `baseEndpoint`. Gemini's other form, trimming `u.Path` and returning
+  `u.String()` for every base, was not taken: it rewrites the bytes of a base
+  that carries no user information (the scheme's case, an escape) to gain
+  nothing the raw trim does not. The premium fetch's own `TrimRight` is
+  dropped, since the parser does it (the existing trailing-slash case of
+  `TestAtlasPremiumFetcher_TryCache` guards that).
+- **The clients keep their `TrimRight` in `resolveBase`**, against the three
+  comments that ask for it to go: it runs before the blank check, so a live
+  value of only slashes is blank and falls back to the constructed base, as it
+  did, where without it that value would reach the parser and be refused.
+  Config turns such a value into an empty one before it is stored, so it is
+  unreachable today, and the cost of keeping the line is nothing.
+- New: `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath` (both clients,
+  with and without user information, none, one and two trailing slashes; the
+  mirror records every path and none may hold `//`), and four cases in the
+  parser table.
+
+| mutation | goes red |
+|---|---|
+| NC10: the parser stops trimming trailing slashes | `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath`, the parser table, and the existing `TestAtlasPremiumFetcher_TryCache/trailing_slash_on_base_URL_is_handled` |

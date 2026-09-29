@@ -1544,7 +1544,7 @@ no failing test — which is the shape to expect in this area.
   is built from and the user information, which `newRequest` sends with
   `SetBasicAuth` (the user alone as `user:`), byte for byte the header
   net/http built from the URL: `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth`
-  takes its reference from net/http on every run. Four rules keep it whole.
+  takes its reference from net/http on every run. Five rules keep it whole.
   **Every request built from a configured base goes through `newRequest`**,
   and `TestEveryRequestThisPackageBuildsComesFromAListedBuilder` lists every
   function in the package that calls `http.NewRequest*` (or the package-level
@@ -1559,9 +1559,14 @@ no failing test — which is the shape to expect in this area.
   not an absolute http(s) URL with a host is an error naming none of it**,
   never a fallback and never net/url's own `parse "…"` error, which quotes the
   value with no mask at all; config refuses such a value
-  (`normalizeBaseURL`), so this is a backstop. **The header follows a
-  redirect by net/http's rule for an explicit Authorization header**: to the
-  same host and its subdomains, never to another domain
+  (`normalizeBaseURL`), so this is a backstop. **The root ends in no
+  slash**: `newRequest` joins a path that begins with one, so the parser trims
+  a base's trailing slashes (config, a live value and the premium fetch's
+  stored base were trimmed already; a base handed straight to a constructor
+  was not, and requested `/ws/2//release/…`,
+  `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath`). **The header
+  follows a redirect by net/http's rule for an explicit Authorization
+  header**: to the same host and its subdomains, never to another domain
   (`TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader`),
   where the URL form followed a relative Location only. The Atlas premium
   cover fetch builds its request the same way and sends the bearer token
