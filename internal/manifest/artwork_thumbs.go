@@ -58,6 +58,16 @@ import (
 // thumb paths without duplicating the literal.
 const ThumbsDirName = "thumbs"
 
+// ArtistThumbKey is the cache key an artist portrait's derived tiers are
+// filed under in ThumbsDirName (`<key>-<size>.jpg`), for the artist MBID
+// the portrait `artist-<mbid>.jpg` is keyed by. The console derives them
+// under it, and `bridge artwork --gc` keeps a thumbnail under it while a
+// track row carries that artist MBID; one function, so the two cannot
+// spell the key differently.
+func ArtistThumbKey(artistMBID string) string {
+	return "artist-" + artistMBID
+}
+
 // ArtworkLongestSide returns the longest side of the JPEG at path,
 // reading only the header (a few KB), and whether it could be read.
 //
