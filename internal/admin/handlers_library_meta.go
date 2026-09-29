@@ -1111,7 +1111,7 @@ func (s *Server) apiLibraryArtistImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if statOK(src) {
-			if derived, ok := s.deriveThumb("artist-"+mbid, n, src); ok {
+			if derived, ok := s.deriveThumb(manifest.ArtistThumbKey(mbid), n, src); ok {
 				path = derived
 			}
 		}
