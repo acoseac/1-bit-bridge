@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -206,8 +207,18 @@ var errFoundSidecar = errors.New("integrity: sidecar found")
 // anything" for an inventory — so the classification stays with the
 // caller. What neither may do is fall back to the unresolved path: that
 // walks the symlink raw and is the defect.
+//
+// fsutil.ResolveLinks, not filepath.EvalSymlinks: since Go 1.23
+// EvalSymlinks leaves a Windows junction as it is (os.Lstat reports it
+// ModeIrregular, not ModeSymlink), so a junction'd variants directory, the
+// ordinary way to put one on another volume there, was walked AT the
+// junction, as one entry: the inventory found nothing, and
+// TreeHoldsVariantSidecars read a tree full of sidecars as holding none. The
+// walk starts at the junction's target, so the paths it visits, the ones the
+// deleting sweeps unlink, are under the target, as they are under a
+// symlink's.
 func resolveSidecarRoot(dir string) (string, error) {
-	return filepath.EvalSymlinks(dir)
+	return fsutil.ResolveLinks(dir)
 }
 
 // TreeHoldsVariantSidecars reports whether at least one file under dir
