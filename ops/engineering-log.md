@@ -27986,9 +27986,15 @@ with the new tests before the change they pin (the red run).
   drive letter, SUBST and mapped drives, access 0) was attempted and
   refused by the API's monthly spending cap; the fallback answers the
   unmeasured cases with the old behaviour.
-- **What the resolver changes beyond the defect.** A SUBST drive or a mapped
-  network drive now resolves to the path it stands for; both sides of every
-  comparison go through the one function, so they agree. And the write
+- **What the resolver changes beyond the defect.** A SUBST drive now
+  resolves to the path it stands for (measured on Windows 11 with a
+  throwaway probe in the SSH session: `Q:\sub` answered the directory's
+  `C:\Users\…\sreal\sub`, where `EvalSymlinks` kept `Q:\sub`), and a mapped
+  network drive does by the same call (not measured); both sides of every
+  comparison go through the one function, so they agree. A junction loop
+  (two junctions pointing at each other) is there but cannot be opened
+  through: the probe answered `EvalSymlinks`'s spelling of it, with no
+  error, which is the fallback. And the write
   paths that require containment (an upload, a trash move, a restore, the
   enricher's artwork write) now refuse a path through a junction below a
   root whose target is outside it, as they already refused a symlinked
@@ -28009,7 +28015,8 @@ subtree scan of the root; `…ASubtreeScanBelowAnEmptyRootBesideRoutedRowsProcee
 `internal/fsutil/symlink_windows_test.go`
 (`TestEvalSymlinksOrCleanFollowsAJunction`,
 `TestEvalSymlinksOrCleanKeepsADanglingJunction`,
-`TestIsUnderAnySeesThroughAJunction`), `resolve_windows_test.go`
+`TestIsUnderAnySeesThroughAJunction`,
+`TestResolveLinksFallsBackOnAJunctionLoop`), `resolve_windows_test.go`
 (`TestStripVerbatimPrefixGivesAnOrdinaryPath`), `resolve_test.go`
 (`TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`,
 `TestResolveLinksSaysAMissingPathIsNotThere`, every platform),
@@ -28041,7 +28048,4 @@ Negative controls on the committed change, each restored and re-run green
 | NC8 (Windows): `resolveSidecarRoot` back on `filepath.EvalSymlinks` | both integrity junction tests |
 | NC9 (Windows): `resolveLinks` ignores the final path | the two fsutil junction tests; both integrity junction tests (a second binary) |
 | NC10: the upscale walk skips a skip-named walk start too | `TestUpscaleFolderRequestWalksADotNamedRoot` |
-
-No control covers `resolveLinks`'s fallback for a path that exists and
-cannot be named by its handle: no filesystem on the test hosts rejects the
-call, and the fallback is the previous behaviour.
+| NC11 (Windows): the fallback for a path that is there refuses instead | `TestResolveLinksFallsBackOnAJunctionLoop` |

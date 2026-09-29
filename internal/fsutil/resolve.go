@@ -20,17 +20,19 @@ package fsutil
 // makes), with the `\\?\` prefix taken off so the answer is an ordinary
 // drive-letter or UNC path. A p that is not there is an error that
 // errors.Is reads as fs.ErrNotExist, as EvalSymlinks's is. A p that is there
-// but cannot be named that way (a filesystem that does not support the call,
-// say; none on the hosts this was tested on does) gets EvalSymlinks's answer,
-// which is what every caller had before. A relative p is always
-// EvalSymlinks's, so it stays relative. Elsewhere this IS
-// filepath.EvalSymlinks.
+// but cannot be named that way (two junctions pointing at each other, whose
+// open fails with ERROR_CANT_RESOLVE_FILENAME; a filesystem that does not
+// support the call) gets EvalSymlinks's answer, which is what every caller
+// had before. A relative p is always EvalSymlinks's, so it stays relative.
+// Elsewhere this IS filepath.EvalSymlinks.
 //
 // The answer can spell the same directory differently from EvalSymlinks on
-// Windows: a drive made with SUBST, or a mapped network drive, resolves to
-// the path it stands for. Both sides of a comparison go through the same
-// function, so they agree; a caller that needs the configured spelling back
-// maps it itself, as the sidecar walks do.
+// Windows: a drive made with SUBST resolves to the path it stands for
+// (measured: `Q:\sub` answers the directory's `C:\…` path, where
+// EvalSymlinks keeps `Q:\sub`), and so, by the same call, does a mapped
+// network drive. Both sides of a comparison go through the same function,
+// so they agree; a caller that needs the configured spelling back maps it
+// itself, as the sidecar walks do.
 func ResolveLinks(p string) (string, error) {
 	return resolveLinks(p)
 }

@@ -639,19 +639,21 @@ lost my library."
   following every reparse point and names it by the handle
   (`GetFinalPathNameByHandle`, `\\?\` taken off); a path that is not
   there is `fs.ErrNotExist`, and one that is there but cannot be named that
-  way gets `EvalSymlinks`'s answer, as before (not measured: no filesystem
-  on the test hosts refuses the call); elsewhere it IS `EvalSymlinks`. **Not
+  way (two junctions pointing at each other, measured) gets `EvalSymlinks`'s
+  answer, as before; elsewhere it IS `EvalSymlinks`. **Not
   `os.Readlink` component by component**: that is a fork of the stdlib's
   link walk, and it answers `\\?\Volume{…}\` for a mounted folder. The
   sidecar walk now starts at the junction's TARGET, so the paths a sweep
   unlinks are in the tree it walked (#1063's rule, for junctions). A SUBST
-  or mapped drive resolves to what it stands for; both sides of every
-  comparison go through the same function, so they agree
+  drive resolves to what it stands for (measured), a mapped drive by the
+  same call; both sides of every comparison go through the same function,
+  so they agree
   (`TestIsUnderAnySeesThroughAJunction`,
   `TestSidecarInventoryResolvesAJunctionedRoot`,
   `TestTreeHoldsVariantSidecarsThroughAJunction`, Windows only, with real
-  `mklink /J` junctions; `TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`
-  on every platform).
+  `mklink /J` junctions, and `TestResolveLinksFallsBackOnAJunctionLoop`;
+  `TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink` on every
+  platform).
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from
   ONE routed set computed at the reconciliation head**, fail-closed (a fetch
   error skips all five) — never a per-pass `routedExclusionSet` call. Four of them didn't, and since `walkFieldsEqual` diffs

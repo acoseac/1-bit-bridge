@@ -93,6 +93,26 @@ func TestEvalSymlinksOrCleanKeepsADanglingJunction(t *testing.T) {
 	}
 }
 
+// TestResolveLinksFallsBackOnAJunctionLoop: a path that is there but that no
+// handle can be opened through (two junctions pointing at each other; the
+// open fails with ERROR_CANT_RESOLVE_FILENAME, not a not-exist error) gets
+// filepath.EvalSymlinks's answer, the junction as it is, with no error: what
+// every caller had before, where refusing would fail a nesting check or a
+// sidecar walk outright.
+func TestResolveLinksFallsBackOnAJunctionLoop(t *testing.T) {
+	base := t.TempDir()
+	a, b := filepath.Join(base, "loop-a"), filepath.Join(base, "loop-b")
+	makeJunction(t, b, a)
+	makeJunction(t, a, b)
+	want, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		t.Fatalf("premise: EvalSymlinks of a junction loop: %v", err)
+	}
+	if got, err := ResolveLinks(a); err != nil || got != want {
+		t.Errorf("ResolveLinks(a junction loop) = %q, %v; want EvalSymlinks's %q", got, err, want)
+	}
+}
+
 // TestIsUnderAnySeesThroughAJunction is the containment every nesting check
 // makes (config.validateVariantsDir, the admin variants-dir handler,
 // `bridge variants move`, and the write paths that must stay inside a
