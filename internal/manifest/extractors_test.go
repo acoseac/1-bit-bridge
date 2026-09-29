@@ -819,7 +819,7 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 // case-sensitive map subscripts and silently missed the spaced form. Per
 // Gemini A6 / iOS bug review #6d.
 //
-// This test was TestStringOfMatchesVorbisAndID3v2Spellings until
+// This test was …StringOfMatchesVorbisAndID3v2Spellings until
 // 2026-09-29, and its second case called the spaced key an ID3v2 TXXX
 // description. It never was one: dhowden keys a TXXX frame "TXXX",
 // "TXXX_0", … and holds the description inside a *tag.Comm, so the test

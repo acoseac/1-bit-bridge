@@ -14,8 +14,8 @@ other two MP3s are its "write ID3v2.3" and UTF-8 options, and the DSF, AIFF and
 WAV carry the default tag in the places Picard puts it (mutagen's DSF metadata
 pointer, the AIFF "ID3 " chunk, the WAV "id3 " chunk). ffmpeg_v23.mp3 is a second
 writer: ffmpeg's id3v2 muxer names a TXXX frame by the metadata key it was given,
-in ISO-8859-1, and these keys are the lower-case ReplayGain names foobar2000 and
-the ReplayGain 2.0 examples use.
+in ISO-8859-1, and these keys spell the ReplayGain names in lower case, as writers
+other than Picard do.
 
 WHY REAL FILES. The defect these pin lives in the gap between what a tagger
 writes and what a reader expects: every writer here ends each TXXX value with a

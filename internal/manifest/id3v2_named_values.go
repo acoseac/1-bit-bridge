@@ -14,11 +14,11 @@ import (
 // under, which stringOf matches. Two kinds of frame file a value under a NAME:
 // a user text frame (TXXX, and TXX in version 2.2) names its value by its
 // description, and a unique file identifier (UFID, UFI) by its owner. That is
-// where the MusicBrainz ids MusicBrainz Picard writes, and ReplayGain, live in
-// an ID3v2 tag: TXXX "MusicBrainz Album Id" for the release, TXXX
-// "REPLAYGAIN_TRACK_GAIN" and "REPLAYGAIN_ALBUM_GAIN" (in upper case from
-// Picard, in lower case from foobar2000 and ffmpeg), and the recording id as the
-// UFID owned by http://musicbrainz.org.
+// where the MusicBrainz ids Picard writes, and ReplayGain, live in an ID3v2
+// tag: TXXX "MusicBrainz Album Id" for the release, TXXX
+// "REPLAYGAIN_TRACK_GAIN" and "REPLAYGAIN_ALBUM_GAIN" (upper case from Picard,
+// lower case from other writers, so matched without regard to case), and the
+// recording id as the UFID owned by http://musicbrainz.org.
 //
 // dhowden stores a TXXX frame as a *tag.Comm under the key TXXX, the next one
 // under TXXX_0, then TXXX_1 and so on (its renaming of a repeated frame id,

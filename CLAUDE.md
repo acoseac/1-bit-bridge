@@ -1149,9 +1149,9 @@ lost my library."
   the recording id (the UFID owned by http://musicbrainz.org) or TXXX
   "REPLAYGAIN_TRACK_GAIN" / "…_ALBUM_GAIN": the enricher searched by text for releases
   the file names exactly. The call site's comment and `stringOf`'s docblock said
-  otherwise, and `TestStringOfMatchesVorbisAndID3v2Spellings` passed because it keyed
-  a synthetic map by the description, which is MP4's freeform shape (renamed
-  `…VorbisAndMP4Spellings`). `id3v2NamedValues` and `namedValueOf`
+  otherwise, and the lookup's test (`…StringOfMatchesVorbisAndID3v2Spellings`, now
+  `TestStringOfMatchesVorbisAndMP4Spellings`) passed because it keyed a synthetic map
+  by the description, which is MP4's freeform shape. `id3v2NamedValues` and `namedValueOf`
   (id3v2_named_values.go) read them under the aliases a Vorbis comment and an MP4
   freeform atom answer, normalised the same way, with the same precedence: per alias
   in order, the raw map, then the named values. **Their order is never the map's**:
