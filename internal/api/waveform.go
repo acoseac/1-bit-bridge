@@ -79,9 +79,8 @@ const analysisSourceMTimeToleranceNS int64 = 2_000_000_000
 // lookupAnalysisForRequest performs the request handling /v1/waveform and
 // /v1/spectrum share: the store check, `?path=` presence, the traversal-guarded
 // resolve whose canonical `os.FileInfo` the freshness check needs, and the row
-// lookup. The store check is the only refusal before the lookup, never the
-// analysis gate: a curve measured while analysis was on is served with it off
-// (backlog B108, PROTOCOL.md's flag-off bullet).
+// lookup. It never reads the analysis gate: a curve measured while analysis
+// was on is served with it off (backlog B108, PROTOCOL.md's flag-off bullet).
 //
 // Shared rather than copied because the two endpoints describe the SAME source
 // file — they must agree on which row a path resolves to and on what "the
