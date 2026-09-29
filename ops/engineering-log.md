@@ -28457,7 +28457,7 @@ the render would record the gain of the track's old album-mates, and a
 rendition stamped fresh against its row is never rendered again for a gain
 change. Taken: `afterRescanWrote` (the `wrote` callback runServe passes)
 calls the resolver's `Invalidate`, when an album gain is wired, and then
-sends the non-blocking nudge. `TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep`
+sends the non-blocking nudge. `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep` (so named since round 4)
 checks the order, the unwired case and that a pending nudge does not block.
 NC16 (nudge first): red ("invalidated after the nudge"). NC17 (no
 invalidation): red. A watcher-driven subtree scan misses the index drop the
