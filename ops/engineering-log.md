@@ -30334,7 +30334,9 @@ demo bridge, where #1100 had written that "all three endpoints" answer 503
 and 403; the two mutations do refuse, and the list is now documented as the
 read it is. Two adjacent sentences were corrected on the way: the stats
 section's "disabled bridge returns the zero-value response" (the cache
-totals count what is on disk whatever the gate), and the variant delete's
+totals count the `track_variants` rows and the sizes they record whatever
+the gate, and a row whose sidecar has gone until something reaps it, as
+CodeRabbit put it on the app's mirror, 1-bit#2011), and the variant delete's
 404, which answers for an inactive feature as well as for a missing deleter.
 The analysis bullets now name all five analysis flags; they named three
 since `trackQuality` and `spectrum` joined.
