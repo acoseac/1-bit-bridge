@@ -29593,18 +29593,43 @@ next (a script, never git).
 
 ### Review round 1
 
-- CodeRabbit (Minor): run the whole stale-rendition callback asynchronously,
-  on a detached, timeout-bound context threaded into the enqueue path.
-  Declined, measured: the hook's synchronous shape is the one B53's round 5
-  kept (a goroutine per stale GET is unbounded and outlives the request), and
-  what this adds to the request is one suppression read and the on-demand
-  enqueue (a resolve, two indexed reads, a stat, the cached sox probe, the
-  pool's non-blocking `Enqueue`), at most once per rendition and file version
-  per minute; every other stale GET returns after B53's one lookup. All are
-  WAL reads. On a real `bridge serve` over loopback TLS (a new connection per
+CodeRabbit covered e02bab2b with one inline finding, and its security
+architecture review (in the walkthrough) raised two more.
+
+- Inline (Minor): run the whole stale-rendition callback asynchronously, on
+  a detached, timeout-bound context threaded into the enqueue path. Declined,
+  measured: the hook's synchronous shape is the one B53's round 5 kept (a
+  goroutine per stale GET is unbounded and outlives the request), and what
+  this adds to the request is one suppression read and the on-demand enqueue
+  (a resolve, two indexed reads, a stat, the cached sox probe, the pool's
+  non-blocking `Enqueue`), at most once per rendition and file version per
+  minute; every other stale GET returns after B53's one lookup. All are WAL
+  reads. On a real `bridge serve` over loopback TLS (a new connection per
   request), the first stale GET after each of 12 retags and scans took a
   median of 3.71 ms (2.72–9.02) on the branch, where it also queues the
   render, against 3.09 ms (1.78–24.88) on main.
+- Architecture (Medium): a download-triggered render passes no per-token
+  write bucket, so a token holder's GETs compete for the shared render
+  capacity. Taken in part: the renders now take the BACKGROUND lane
+  (`enqueueKind` sets `JobSpec.Background` for the optimize and pcm kinds; an
+  upscale was there already), since nobody waits on them, and on the
+  foreground lane a library retagged at once would have queued its renditions
+  ahead of a CarPlay plug-in's request. A write bucket was not added: the GETs
+  can queue at most one render per stale rendition and file version (the set
+  a retag made), and the background lane puts all of them behind the work a
+  client waits on. The phone's own POST after a playback 410 (Tier 0, or a
+  DSD rendition) then finds the job in flight and joins it on that lane.
+- Architecture (Medium): a render can be stranded when a rescan fails, leaves
+  its row behind, or when the enqueue's source-ahead refusal records the wait
+  after a quick rescan already ran. Taken: on `errSourceAheadOfRow` the heal
+  records the wait and THEN asks for the rescan itself, which the rescanner
+  folds into the one the enqueue asked for (the enqueue's request comes
+  first, so the step of a rescan that ran in between found no wait); and a
+  rescan that leaves a waiting file behind (the scan failed, could not read
+  it, or the file changed again) keeps the wait, with its first time, for a
+  later rescan of the directory, up to `staleRenditionWaitMax`. A full scan
+  still flushes no waits: the next download renders at once, its row being
+  current.
 - Gemini: over its daily quota on both requests, so no review.
 - CI: the macOS leg of the first run failed in
   `TestWatcherWatchesARootThatIsALinkToALink` (B51's, internal/manifest: "a
@@ -29612,3 +29637,13 @@ next (a script, never git).
   through the watcher", at its 3 s deadline), which this change does not
   touch; the rerun passed, and main's gate runs that day were green. Recorded
   as a flake in the backlog (B104).
+
+Controls on c40ef183, as before:
+
+| mutation | red |
+|---|---|
+| NC23 `enqueueKind` on the foreground lane | the row-current test (the lanes) |
+| NC24 the rescan asked for before the wait is recorded | the unit test |
+| NC25 the heal asks for no rescan after `errSourceAheadOfRow` | the unit test |
+| NC26 a file a rescan left behind is dropped | the unit test |
+| NC27 a kept wait with no age bound | the unit test |

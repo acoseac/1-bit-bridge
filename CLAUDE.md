@@ -2319,9 +2319,10 @@ no failing test — which is the shape to expect in this area.
   file is ahead of its row it keeps the render until the rescan it asks for:
   the rescanner's `after` step takes the directory it read, and `afterRescan`
   drops the album-gain index, queues the waiting renders whose rows the
-  rescan brought level (`rescanned`; one still behind is dropped), and THEN
-  nudges the sweep, so a DSD render never takes a stale album index and the
-  job is on the foreground lane ahead of the sweep's. `staleRerender.rerender`
+  rescan brought level (`rescanned`; one still behind keeps waiting for a
+  later rescan, at most an hour from the first ask, and one whose row is
+  gone is dropped), and THEN nudges the sweep, so a DSD render never takes a
+  stale album index. `staleRerender.rerender`
   reads the kind off the id's prefix (`renditionKindOf`; `optimized-` covers
   the DSD compact tier), and refuses unless the kind's LIVE gate is open
   (`renditionGates`: the very closures `/v1` reads, `dsdRenderActiveFn` among
@@ -2333,15 +2334,25 @@ no failing test — which is the shape to expect in this area.
   request for the family would: the family's CURRENT id, stamped from the row
   (a DSD `v1` rendition is rendered as the `v2` one, which the app, taking the
   newest of a family, plays; the `v1` row stays, and its later downloads
-  render nothing). **At most once per rendition AND VERSION of the file per
+  render nothing). **On the BACKGROUND lane** (`JobSpec.Background`), the
+  sweep's: nobody waits on it, since the download that asked has already
+  played the source, and on the foreground lane a library retagged at once
+  would queue its renditions ahead of a request a client does wait on (a
+  CarPlay plug-in). That is also what bounds a token holder's GETs, which
+  pass no write bucket: they can queue at most one render per stale
+  rendition and file version, all behind the waiting work (CodeRabbit's
+  review of #1097). **At most once per rendition AND VERSION of the file per
   minute**: the minute bounds the tries of a render that fails (a failure
   writes no row), and a file retagged again is a render not yet tried.
   Keyed without the version, on a real bridge a second retag 30 s after the
   first answered 410 on 15 downloads over 30 s: the render its rescan queued
   was refused as asked for within the minute. The minute is not spent when
   nothing was tried (the pool's queue full, the kind off), and a file that
-  changed again before the enqueue (`errSourceAheadOfRow`) waits for the
-  rescan that enqueue asked for. **A rescan that brought every waiting file
+  changed again before the enqueue (`errSourceAheadOfRow`) waits for a
+  rescan: the wait is recorded, THEN the heal asks for the rescan (folded
+  into the one the enqueue asked for), since the enqueue's request comes
+  first and a quick rescan could otherwise go by before the wait exists.
+  **A rescan that brought every waiting file
   level frees its directory's rescan minute** (B53's), so the next change
   asks at once; one that left a file behind keeps it, which is the minute's
   job (a file still being written, a directory the scan cannot read). At
