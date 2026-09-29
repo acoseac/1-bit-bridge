@@ -29056,3 +29056,14 @@ the twelve failed to build.
 | NC18: a stray function calls `newRequest` | the population test only |
 | NC19: `credentialSenders` lists a sender nothing implements | the population test only |
 | NC20: `credentialSenders` names a constructor that does not exist | the population test only |
+
+**Gemini on the round-2 heads.** No comment on a1ed4cd3. One medium comment on
+927ee31c, asking `buildsARequest` (the builder list's detector) to flag `Get`,
+`Head`, `Post` and `PostForm` called on any receiver too, since a method on an
+`http.Client` builds its request from a URL string as well. The gap is real (no
+code in the package calls one today: its one client method is `Do`), and the
+suggested change is wrong as written: applied to the tree it turns
+`TestEveryRequestThisPackageBuildsComesFromAListedBuilder` red and names six
+functions, which call the LRU caches' `Get(key)` and `Header.Get` (eight such
+calls, none on a client). Declined on that evidence and filed as backlog B98,
+with the ways to type the receiver.
