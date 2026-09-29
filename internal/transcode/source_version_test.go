@@ -112,6 +112,15 @@ func TestRunRendersNothingFromASourceThatChangedSinceItsStamp(t *testing.T) {
 			if _, statErr := os.Stat(spec.SidecarPath()); !os.IsNotExist(statErr) {
 				t.Errorf("stat rendition = %v, want none published", statErr)
 			}
+
+			// Gone is a change of version too: rendered on, the tool fails
+			// on the missing input and the pool strikes the source.
+			if err := os.Remove(src); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = Run(context.Background(), spec); !errors.Is(err, ErrSourceChanged) {
+				t.Fatalf("Run over a source that is no longer there = %v, want ErrSourceChanged", err)
+			}
 		})
 	}
 }

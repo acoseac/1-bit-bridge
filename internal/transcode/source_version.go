@@ -51,14 +51,21 @@ var ErrSourceChanged = errors.New("the file changed on disk after its last scan"
 
 // sourceChanged stats the source and answers ErrSourceChanged, wrapped with
 // `what` happened to the render, when the file is not the version the spec
-// records. A source it cannot stat is not its question: a missing or
-// unreadable file is one the render's tools report, as they did before this
-// check existed, so it answers nil and leaves them to.
+// records, a file that is no longer there included. Gone is a change of
+// version like any other: rendered on, the tool fails on the missing input
+// and the pool strikes the source, which is how a NAS mount that dropped
+// under a queued batch struck every file behind it (Gemini on #1093). A rescan
+// of a directory it cannot see touches no row. Any other stat failure (a
+// permission, an I/O error) is not this check's question: it answers nil and
+// leaves the render's tools to report it, as before.
 //
 // os.Stat, following a link, as the scanner's and every enqueuer's stat do:
 // a linked file compares its target with its target.
 func (j JobSpec) sourceChanged(what string) error {
 	info, err := os.Stat(j.SourceAbsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: it is no longer there, %s", ErrSourceChanged, what)
+	}
 	if err != nil {
 		return nil
 	}

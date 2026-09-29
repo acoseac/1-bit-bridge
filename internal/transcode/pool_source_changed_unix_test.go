@@ -38,7 +38,9 @@ exit 0
 // A file that changes while its job waits in the queue, or while it
 // renders, was rendered from the new bytes under the row's older stamp:
 // measured on main, the job succeeded (done=1 failed=0) and the serve path
-// answered 410 variant_stale for the rendition from then on. Now the job
+// answered 410 variant_stale for the rendition from then on. A file deleted
+// while its job waited went to the tool too, which with a real sox fails on
+// the missing input and strikes the source. Now the job
 // fails with ErrSourceChanged: nothing is published or recorded, no temp is
 // left, the source takes no strike (three would suppress a good file for
 // 30 days), and the pool asks for a rescan of the file's directory, naming
@@ -57,6 +59,10 @@ func TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing(t *testing.T) {
 	}{
 		{name: "changed while it waited", change: "queued"},
 		{name: "changed while it rendered", change: "rendering", wantToolRan: true},
+		// Gone is a change too: on the tool, a missing input is a strike.
+		// A NAS mount that drops under a queued batch looks like this to
+		// every job behind it.
+		{name: "deleted while it waited", change: "deleted"},
 		{name: "unchanged", wantToolRan: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,6 +87,10 @@ func TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing(t *testing.T) {
 				retag(t, src)
 			case "rendering":
 				t.Setenv("FAKE_SOX_CHANGE", src)
+			case "deleted":
+				if err := os.Remove(src); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			p := NewPool(store, 1, 4)
