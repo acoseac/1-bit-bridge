@@ -28689,3 +28689,381 @@ Two findings on `variants.js`, both on `redraw`, both taken.
 
 `checkAliveThatIsNotAFunction` and the new scenarios are in
 `TestAVariantTraySaveRedrawsThePanelInPlace`.
+
+## 2026-09-29 — an enrich base URL's user information travels as a Basic header, so no request URL, error, log line or skip detail names it (backlog B69)
+
+B54 (2026-09-28) kept a configured URL's credential out of the config's
+refusals and warnings, `/v1/health` and the pairing link, and left the
+enricher's own request errors for B69 (its "Out of scope" section). This is
+that one. `enrich.musicbrainzBaseURL` and `coverArtBaseURL` may carry a
+mirror's credential, `https://user:password@mirror/ws/2` or a token written as
+the user name, and net/http both sends a URL's user information as Basic auth
+and names the request URL in every error it returns, through a
+`stripPassword` that masks a password and nothing else.
+
+### What was measured on the old code
+
+main at 6dfba62c, go1.27.1 on macOS.
+
+- A ten-line program over `http.Get` against a refused port: the password
+  form prints `Get "http://user:***@127.0.0.1:1/ws/2/release?query=x": dial
+  tcp 127.0.0.1:1: connect: connection refused`, and a token written as the
+  user name prints `Get "http://s3cret-Pw@127.0.0.1:1/ws/2/release?query=x":
+  …` whole. B69's entry had this.
+- The real clients returned exactly those errors: `SearchRelease` and
+  `FetchReleaseFrontStream` over both bases named `s3cret-Pw` (and, over the
+  password form, the user name) in the `*url.Error`, and `IsTransient` was
+  true for the refused connect.
+- The real Enricher, over a mirror whose certificate this process does not
+  trust (a persistent failure, so the track reaches `markSkipped`), with the
+  token written into the base, logged four lines carrying it for two tracks:
+  `ERROR MB search`, `INFO enrichment skipped … detail=Get
+  "https://s3cret-Pw@127.0.0.1:58350/ws/2/release/?query=…": tls: failed to
+  verify certificate: x509: certificate signed by unknown authority`,
+  `ERROR release-group lookup` and `ERROR MB artist search`; with the token
+  in the Cover Art base, `ERROR artwork`. A base with user information in the
+  Atlas credential's state file (which `CanonicalHTTPSBase` keeps out of a
+  provisioned one, and a hand edit does not) put it in `WARN atlas premium
+  cover fetch` and in `RefetchPremium`'s error the same way.
+- **The backlog entry said the skip reason was stored, and it is not.**
+  `markSkipped` counts one of the fixed `skipReason*` keys (`mb_error` here,
+  `map[mb_error:1]` after the run) and hands the error to the `enrichment
+  skipped` line as its `detail`. So the credential reached the journal and
+  never a column.
+- Which clients build a request from a configured URL: `MusicBrainzClient`
+  and `CoverArtClient`, both built in `cmd/bridge/main.go` from
+  `cfg.Enrich.*` and `WithLiveBase(liveCfg…)`, and the Atlas premium cover
+  fetch, from the credential store's base. iTunes and Deezer are built with
+  their defaults (`""`), AcoustID likewise, and the harvest base refuses user
+  information (`CanonicalHTTPSBase`).
+
+### What was decided
+
+- **The user information is cut out of the base and sent with
+  `SetBasicAuth`.** `baseEndpoint` (baseauth.go): `root`, which every request
+  URL is built from and which carries none, and `user`, sent by
+  `newRequest`. It is the header net/http built from the URL, byte for byte
+  (`user:` for a user name alone, `:pw` for a password alone, `Og==` for a
+  bare `@`), and `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth` takes
+  that reference from net/http on every run for six shapes rather than
+  restating it. A base with none keeps its own bytes as the root, less its
+  trailing slashes (review round 1), so the public default and every
+  credential-free mirror build the URL they always did.
+- **"Once, at construction" is once per resolution.** The clients read a live
+  base per use (`WithLiveBase`), so the constructed base is cut in the
+  constructor and a live value each time `resolveBase` reads it:
+  `BenchmarkParseBaseEndpoint` measured 280 ns and one allocation for a base
+  with no user information and 526 ns and three for one with, against a
+  150 ms to 1.1 s pacing gap per request. **A request resolves once and the
+  credential travels with the root** (`resolveBase` returns the
+  `baseEndpoint`, and `get` and `fetchStream` take it): a credential read
+  apart from the URL, when the provider changes between the two reads, sends
+  one mirror's credential to another's host.
+  `TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost`
+  has a provider that answers a different mirror on every call.
+- **An unusable base is an error naming none of it** (`errBaseNotUsable`: not
+  absolute, not http(s), or no host), not a fallback to the constructed base
+  (that would send an operator's metadata queries to a host they did not just
+  configure) and not net/url's own error, whose `parse "…"` form quotes the
+  value with no mask at all. `normalizeBaseURL` refuses such a value before
+  any client sees it, so this is a backstop, and the parser's check is the
+  same three conditions. A base written without a scheme (`user:pw@mirror`)
+  parses with the user name as its scheme and no host, so it is refused here
+  rather than built into a request URL that names it.
+- **The header follows a redirect by net/http's rule for an explicit
+  Authorization header, and only while the scheme stays https**: to the same
+  host and its subdomains, never to another domain
+  (`shouldCopyHeaderOnRedirect`, which compares host names and ignores scheme
+  and port). The URL form sent user information only where a redirect's
+  Location was relative, because `url.ResolveReference` keeps the base's user
+  information there and an absolute Location has none. So a mirror that
+  redirects to an absolute URL on its own host now authenticates on the
+  second hop where it did not, and Cover Art Archive's redirect to Internet
+  Archive still carries no credential. Two tests pin both cases; the
+  cross-domain one uses `localhost` against `127.0.0.1`, which net/http reads
+  as two domains. **This bullet first said a same-host redirect from https to
+  http would carry the header too and "so it is left", which was wrong**
+  (review round 2, below): net/http's rule ignores the scheme, so the header
+  went to the plain hop in cleartext, where the URL form had sent nothing
+  there. `guardRedirects` strips it.
+- **The premium fetch is built the same way** and sends the bearer token
+  alone, so a state file edited by hand to hold user information no longer
+  puts it in the request URL. Its request URL and errors carry none
+  (`TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL`).
+- **A list of every request builder in the package**
+  (`TestEveryRequestThisPackageBuildsComesFromAListedBuilder`): the functions
+  that call `http.NewRequest`, `NewRequestWithContext` or the package-level
+  `Get`, `Head`, `Post` and `PostForm` must equal a map naming each with its
+  reason, in both directions, so a new client cannot build a request from an
+  operator's URL without going through `newRequest`, and an entry nothing
+  builds from is reported. It is the population guard the enumeration
+  failures in this file ask for: the clients built from a configured URL were
+  three, not two, and the next is where the class comes back.
+- **Rejected: a RoundTripper** (the client builds the error from the
+  request's own URL, as B69's entry said), **redacting at the log sites**
+  (four sites today, every future consumer of `err.Error()` after them, and
+  the text of a `*url.Error` is not an interface), and **refusing user
+  information in these two fields** (a mirror behind an auth proxy is what
+  the fields are for; the harvest base refuses it because its credential is a
+  bearer token).
+- **Left as it is:** the settings console shows the operator's own value, in
+  `GET /api/settings` (`enrichMusicBrainzBaseURL`, `enrichCoverArtBaseURL`)
+  and on the settings page it renders (the derived Atlas URL is one of its
+  template-only values), which is the form they edit and the file they wrote,
+  behind the loopback rule or a session; the config field's comment says so.
+
+### Tests
+
+New, in `internal/enrich`: `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth`
+(six shapes, MusicBrainz, a live base and both Cover Art fetches),
+`TestNoRequestErrorNamesABaseURLsCredential` (nine calls across both clients,
+live bases included, × three ways to fail (a refused connection, a
+certificate this process does not trust, a server that hangs up) × the five
+shapes that carry something to leak: 135 combinations, each also required to
+name the mirror, so it is the request's own error),
+`TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` (the real Enricher
+through `enrichOne`, both bases, every line at every level, each of `MB
+search`, `enrichment skipped`, `release-group lookup`, `MB artist search` and
+`artwork` required to have been logged so the run reached the site),
+`TestALiveBasesCredentialFollowsTheBaseItWasWrittenOn`,
+`TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost`,
+`TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader`,
+`TestTheBaseParserCutsUserInformationOutOfEveryUsableBase` (ten usable
+shapes, fourteen unusable ones, each of whose errors names none of the
+input), `TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL`
+and `TestEveryRequestThisPackageBuildsComesFromAListedBuilder`. The secret is
+searched without regard to case (B54: `url.Parse` lowercases a scheme).
+
+**Red on the old code first** (the tests written beside no production
+change): `TestNoRequestErrorNamesABaseURLsCredential` failed 108 of its 135
+combinations (the 27 that passed are the password-only shape, `:s3cret-Pw`,
+which net/http masks), both halves of
+`TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` failed with the five
+lines above, and the premium test's error half failed on the error and on the
+Warn line. The Basic-header parity, both live-base and both redirect tests
+passed on the old code, as they should: they pin what must not change.
+
+### Negative controls
+
+Each mutation applied to the committed tree, the named tests run with
+`-count=1`, the file restored and the tree checked clean after each.
+
+| mutation | goes red |
+|---|---|
+| NC1: `parseBaseEndpoint` keeps the user information in the root | `TestNoRequestErrorNamesABaseURLsCredential`, both halves of `TestNoLogLineOrSkipDetailCarriesABaseURLsCredential`, the premium test's error half and the parser table; the header parity test stays green, since net/http builds the same header from the URL |
+| NC2: `newRequest` sends no credential | the parity test (all six shapes), both live-base tests, both redirect subtests and both halves of the log test (each asserts the mirror it reached saw its credential) |
+| NC3: the password is dropped | the parity test's three password shapes and nothing else |
+| NC4a, NC4b: the MusicBrainz or the Cover Art client resolves the base twice for one request | `TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost` only |
+| NC5: the Cover Art client's `CheckRedirect` forwards the Authorization header | the cross-domain redirect subtest only |
+| NC6: `parseBaseEndpoint` accepts any base that parses | the parser table only |
+| NC7: an unusable base's error appends the base | the parser table only |
+| NC8: the premium fetch builds its URL from the stored base again | the premium test's error half, and the builder list (an unlisted `(*atlasPremiumFetcher).authedCoverGet`) |
+| NC9a: a builder is missing from the list | the builder list only |
+| NC9b: the list names a builder that does not exist | the builder list only |
+| NC9c: a stray non-test file calls `http.Get` | the builder list only |
+
+### Review round 1 (Gemini on #1091)
+
+CodeRabbit covered the first head with no actionable comments. Gemini's two
+passes left five comments on one theme, the trailing slash: `newRequest`
+joins a path that begins with `/` onto the root, so a root that keeps a
+trailing slash requests `…/ws/2//release/…`. Verified before it was taken:
+`resolveBase` trimmed a live value and the premium fetch trimmed its stored
+base, config's `normalizeBaseURL` trims, and a base handed straight to
+`NewMusicBrainzClient` or `NewCoverArtClient` was not trimmed by anything, so
+`base + "/"` with or without user information requested a double-slash path.
+Nothing in production hands a constructor an untrimmed base (main.go passes
+the config's), so this is robustness rather than a live defect.
+
+- **The parser trims the root** (`strings.TrimRight(raw, "/")` before it
+  parses), which makes "the root ends in no slash" the invariant of
+  `baseEndpoint`. Gemini's other form, trimming `u.Path` and returning
+  `u.String()` for every base, was not taken: it rewrites the bytes of a base
+  that carries no user information (the scheme's case, an escape) to gain
+  nothing the raw trim does not. The premium fetch's own `TrimRight` is
+  dropped, since the parser does it (the existing trailing-slash case of
+  `TestAtlasPremiumFetcher_TryCache` guards that).
+- **The clients keep their `TrimRight` in `resolveBase`**, against the three
+  comments that ask for it to go: it runs before the blank check, so a live
+  value of only slashes is blank and falls back to the constructed base, as it
+  did, where without it that value would reach the parser and be refused.
+  Config turns such a value into an empty one before it is stored, so it is
+  unreachable today, and the cost of keeping the line is nothing.
+- New: `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath` (both clients,
+  with and without user information, none, one and two trailing slashes; the
+  mirror records every path and none may hold `//`), and four cases in the
+  parser table.
+- **Left: a base that carries a query or a fragment** (CodeRabbit's second
+  pass, Major, on the sentence above). `normalizeBaseURL` accepts one, and
+  `newRequest` appends the path after the root, so
+  `https://mirror/ws/2/?tenant=x` requests `…/ws/2/?tenant=x/release/…`: on
+  main too, where `resolveBase() + "/release/…"` was the same concatenation.
+  A trim of slashes was never going to help it, and this change does not claim
+  to. Refusing one belongs in `normalizeBaseURL` as well as in the parser (the
+  parser alone would contradict "the same three conditions as config"), and a
+  stored value that Load refused would stop `bridge serve` after an update, the
+  trade-off #1042 and B54 settled as "refuse what the operator types, repair
+  what is stored"; supporting one means holding the path and the query apart.
+  A token written as that query reaches every transport error as the user-name
+  token did. Backlog B96, with the options.
+
+| mutation | goes red |
+|---|---|
+| NC10: the parser stops trimming trailing slashes | `TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath`, the parser table, and the existing `TestAtlasPremiumFetcher_TryCache/trailing_slash_on_base_URL_is_handled` |
+
+### Review round 2 (CodeRabbit on #1091)
+
+CodeRabbit's second pass left one Major, on the redirect bullet above: an https
+mirror that answers with a redirect to http on its own host has net/http send the
+Basic header on to the plain hop, in cleartext. **The finding is right, and that
+bullet's reason for leaving it was wrong.** "The mirror already holds the
+credential" says nothing about the wire between the client and the plain hop,
+where whoever can read the network gets a credential that is good for the
+mirror, and the reader is not the mirror. And the redirect sent NO credential
+before this change (an absolute Location carries no user information, and a
+relative one keeps the scheme it came from), so moving the credential into a
+header had turned a non-leak into a leak.
+
+**Read in the toolchain before it was taken** (go1.26.6 `net/http`).
+`Client.do` builds each hop's headers with `makeHeadersCopier`, which copies
+from the FIRST request every time and leaves out the sensitive ones
+(`Authorization`, `Cookie`, their proxy forms) only when
+`shouldCopyHeaderOnRedirect` says the destination is neither the initial host
+nor a subdomain of it. That function compares `url.Hostname()`, so neither the
+scheme nor the port is in it, and it is not asked at all when the two
+`URL.Host` strings are equal. `refererForURL` is the one scheme-aware rule (no
+Referer from https to http), and it covers no credential.
+
+**Measured on the head, before any fix** (0c529bd7, the new tests written
+beside no production change; go1.27.1 on macOS). A TLS server on 127.0.0.1
+answering every request with a 302 to a plain-http server on 127.0.0.1 (another
+port), each of the three clients built through its constructor over that TLS
+server's own client. The plain server saw `Authorization: Basic dG9rOg==` (the
+user name `tok`, no password) from the MusicBrainz client and from the Cover
+Art client, and `Bearer tok123` from the premium fetch. A plain server that
+then redirected once more, to a relative path of its own (`/moved/…`), saw the
+header on that hop too. That second hop is the half a fix at the
+https-to-http transition alone would miss: the header is copied from the first
+request onto every hop, so it comes back on the next cleartext one. Where the
+caller's client carried a `CheckRedirect`, it was asked with the header on both
+hops. **The premium fetch's bearer token was on the same path on main** (an
+explicit `Authorization` header on a client with no `CheckRedirect`), so the
+guard covers it too, though B69 did not move it.
+
+**What was decided: strip the header, and judge every hop against the first
+request.** `guardRedirects` (baseauth.go) returns a shallow copy of a client
+whose `CheckRedirect` first drops the header
+(`dropAuthorizationLeavingHTTPS`: a hop that is not https loses `Authorization`
+when `via[0]`, the request the chain began with, went to https) and then asks
+the caller's policy, or applies net/http's limit of ten where there is none.
+The MusicBrainz client, the Cover Art client and the premium fetch are built
+over it in their constructors.
+
+- **Strip, not refuse.** Both were offered. A refusal would change what a
+  request with NO credential does: the public MusicBrainz and Cover Art hosts,
+  and any mirror written without user information, have nothing to protect and
+  follow a downgrade today
+  (`TestARequestWithNoCredentialStillFollowsARedirectToPlainHTTP`), and a
+  mirror that serves the plain hop without the credential would stop working.
+  Stripping changes nothing for those, and for a request that carries a
+  credential it is what the same redirect did before B69: the plain hop got
+  none. A mirror that insists on it there answers with its own status, which
+  the enricher already classifies (a 401 is a persistent HTTP error); a
+  refusal would be an error `IsTransient` does not recognise, stamped
+  persistent all the same (`markSkipped`, and the negative cache for the album
+  or artist), with less to say than the 401.
+- **Per hop, against the first request, not at the transition.** Against the
+  previous hop the header comes back on a cleartext hop's own redirect (NC13
+  below, and the second case of the main test). A request that BEGAN on plain
+  http is left alone: its operator wrote a cleartext base and the first
+  request carried the credential already, so nothing a later hop does exposes
+  more (the existing relative-redirect subtest, on a plain server, still
+  requires both hops to carry it).
+- **The default limit is restated.** `Client.checkRedirect` falls back to
+  net/http's stop after ten consecutive requests only when `CheckRedirect` is
+  nil, so a client that sets one and does not restate it follows a redirect
+  loop until its timeout (NC14: the three loop subtests ran to the 10 s and 30 s
+  client timeouts, 86 s for the package against 16 s). The error text is
+  net/http's own, so no log line changes.
+- **A caller's own policy is kept, asked after the header is dropped, and the
+  caller's client is copied, never written to** (`NewDeezerClient`'s and
+  `acoustid.NewClient`'s pattern: a guard on a shared `*http.Client`,
+  `http.DefaultClient` for one, would apply to every redirect in the process).
+  None of the three clients set a `CheckRedirect` of its own; only a client a
+  caller hands in can carry one, and production hands in nil.
+- **No log line.** A Warn per stripped hop is one line per request against a
+  mirror that always redirects to http, the M-SEARCH flood, and a latch is a
+  second streak policy for a condition no report has met. The mirror's own
+  status at the plain hop is the report, as it was before B69.
+- **A list of the senders**
+  (`TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard`): the
+  functions that call `newRequest` must equal `credentialSenders`, in both
+  directions, and each listed constructor must call `guardRedirects`.
+  `newRequest` is not `http.NewRequest`, so
+  `TestEveryRequestThisPackageBuildsComesFromAListedBuilder` does not see a
+  fourth client that sends a credential; this does.
+- **SonarCloud failed the new head's gate on one line of the new test.** The
+  redirect-loop server did `http.Redirect(w, r, r.URL.Path, …)`, which is
+  `gosecurity:S5146` (an open redirect, BLOCKER) and took the Security Rating
+  on New Code to E; nothing in the guard was flagged, and the nine code smells
+  reported beside it (cognitive complexity on test functions, the earlier
+  heads' included) do not touch the gate. In the same file a path appended to
+  a prefix (`target+r.URL.Path`, `"/moved"+r.URL.Path`) was not flagged. The
+  loop server now redirects to a fixed `/loop`: the reference request and the
+  clients' still make the same ten requests. Recorded as a rule in CLAUDE.md
+  beside the S2077 one.
+
+New, in `internal/enrich` (credential_redirect_test.go and
+request_builders_test.go):
+
+- `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop`: the three
+  clients, each against four redirects from a TLS server: to plain http on the
+  same host (followed, the plain hop sees no Authorization, the TLS server saw
+  the credential), from that hop on to a redirect of its own (no header on
+  either cleartext hop), to https on the same host (kept) and to a path on its
+  own https origin (kept). 12 leaves.
+- `TestARequestWithNoCredentialStillFollowsARedirectToPlainHTTP`: MusicBrainz
+  and Cover Art with no user information. 2 leaves.
+- `TestTheCredentialGuardKeepsACallersRedirectPolicy`: per client, a caller's
+  policy is asked with the header already dropped and its refusal ends the
+  request, a redirect loop ends at net/http's limit with the request count a
+  plain client makes, and the caller's client is not written to. 9 leaves.
+- `TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard`.
+
+**Red on the old code first** (0c529bd7, the tests beside no production
+change): 9 of the 23 leaves of the first three tests failed, the plain-hop and
+further-hop leaves of each client (6) and the caller's-policy leaf that
+requires the header dropped (3), with `the plain http hop saw [{/ws/2/release/
+Basic dG9rOg==}]` and the second hop's `/moved/…` carrying it. The other 14
+passed on the old code, as they should: they pin what must not change (https
+and relative-https redirects keep the credential, a request with no credential
+follows a downgrade, the limit of ten, the caller's client untouched). The
+population test came after that run, and is red under NC17.
+
+Each mutation applied to the committed fix, the whole package run with
+`-count=1`, the file restored and the tree checked clean after each. None of
+the twelve failed to build.
+
+| mutation | goes red |
+|---|---|
+| NC11: the strip is removed (`req.Header.Del` deleted, the wrapper kept) | the 6 plain-hop and further-hop leaves of `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop`, and the 3 "asked with the header already dropped" leaves of `TestTheCredentialGuardKeepsACallersRedirectPolicy`; nothing else in the package |
+| NC12: the guard strips on every hop, whatever the scheme | the 6 keep-it leaves of the main test, and the existing relative-redirect subtest of `TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader` (both hops on a plain server must carry it) |
+| NC13: the guard judges against the previous hop, not the first request | the 3 further-hop leaves of the main test and the 3 caller's-policy leaves that require both hops stripped |
+| NC14: net/http's limit of ten is not restated | the 3 loop leaves of `TestTheCredentialGuardKeepsACallersRedirectPolicy` only |
+| NC15: a caller's own `CheckRedirect` is not asked | the 3 "still decides" leaves only |
+| NC16: the guard is installed on the caller's client itself | the 3 "left as it was" leaves only |
+| NC17a, NC17b, NC17c: the MusicBrainz, the Cover Art or the premium constructor builds its client without the guard | that client's two plain-hop leaves and its "still decides" leaf, and the population test |
+| NC18: a stray function calls `newRequest` | the population test only |
+| NC19: `credentialSenders` lists a sender nothing implements | the population test only |
+| NC20: `credentialSenders` names a constructor that does not exist | the population test only |
+
+**Gemini on the round-2 heads.** No comment on a1ed4cd3. One medium comment on
+927ee31c, asking `buildsARequest` (the builder list's detector) to flag `Get`,
+`Head`, `Post` and `PostForm` called on any receiver too, since a method on an
+`http.Client` builds its request from a URL string as well. The gap is real (no
+code in the package calls one today: its one client method is `Do`), and the
+suggested change is wrong as written: applied to the tree it turns
+`TestEveryRequestThisPackageBuildsComesFromAListedBuilder` red and names six
+functions, which call the LRU caches' `Get(key)` and `Header.Get` (eight such
+calls, none on a client). Declined on that evidence and filed as backlog B98,
+with the ways to type the receiver.

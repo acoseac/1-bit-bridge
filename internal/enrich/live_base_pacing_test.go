@@ -63,7 +63,7 @@ func TestPacingFollowsTheLiveBase(t *testing.T) {
 func TestLiveBaseFallsBackToTheConstructedValue(t *testing.T) {
 	live := ""
 	c := NewMusicBrainzClient("", "ua", nil).WithLiveBase(func() string { return live })
-	if got := c.resolveBase(); got != DefaultMusicBrainzBase {
+	if got := c.resolveBase().root; got != DefaultMusicBrainzBase {
 		t.Errorf("empty live base resolved to %q, want the constructed default %q",
 			got, DefaultMusicBrainzBase)
 	}
@@ -71,14 +71,14 @@ func TestLiveBaseFallsBackToTheConstructedValue(t *testing.T) {
 		t.Errorf("empty live base: interval = %v, want the public %v", got, PublicMBMinInterval)
 	}
 	live = "   "
-	if got := c.resolveBase(); got != DefaultMusicBrainzBase {
+	if got := c.resolveBase().root; got != DefaultMusicBrainzBase {
 		t.Errorf("whitespace live base resolved to %q, want the default", got)
 	}
 	// A trailing slash must not survive into the URL builder — the config
 	// layer trims, but this is the one place that would silently emit
 	// `https://host//release/…` if it did not.
 	live = "https://mirror.example.test/ws/2/"
-	if got := c.resolveBase(); got != "https://mirror.example.test/ws/2" {
+	if got := c.resolveBase().root; got != "https://mirror.example.test/ws/2" {
 		t.Errorf("resolveBase = %q, want the trailing slash trimmed", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestNilLiveBaseKeepsConstructedPacing(t *testing.T) {
 	if got := public.MinInterval(); got != PublicMBMinInterval {
 		t.Errorf("public: %v, want %v", got, PublicMBMinInterval)
 	}
-	if got := public.resolveBase(); got != DefaultMusicBrainzBase {
+	if got := public.resolveBase().root; got != DefaultMusicBrainzBase {
 		t.Errorf("resolveBase = %q, want %q", got, DefaultMusicBrainzBase)
 	}
 }
