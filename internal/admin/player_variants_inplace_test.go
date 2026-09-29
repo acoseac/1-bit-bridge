@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -119,9 +120,12 @@ function observe(root) {
       walk(child, (n) => { if (has(n, "variants-blocked") && n.textContent) notes.push(n.textContent); });
       continue;
     }
-    const row = { title: "", generateDisabled: null, notes: [] };
+    const row = { title: "", generateDisabled: null, notes: [], ratio: "", barNow: "", stale: "", staleIn: false };
     walk(child, (m) => {
       if (has(m, "variant-kind-title")) row.title = m.textContent;
+      if (has(m, "variant-kind-ratio")) row.ratio = m.textContent;
+      if (has(m, "variant-bar")) row.barNow = m.getAttribute("aria-valuenow");
+      if (has(m, "variant-kind-stale")) { row.stale = m.textContent; row.staleIn = true; }
       if (m.tagName === "button" && m.textContent.startsWith("Generate")) row.generateDisabled = m.disabled;
       if (has(m, "variants-blocked") && m.textContent) row.notes.push(m.textContent);
     });
@@ -180,6 +184,19 @@ const out = {};
   const before = observe(root);
   await save(builds[0], "optimizeEnabled");
   out.kindTray = { before, after: observe(root) };
+}
+
+// Coverage, the bar and the note about stale copies follow the summary, on
+// the nodes that are there.
+{
+  const st = (stale, covered) => ({ ...S.carplayOff, upscale: { covered, eligible: 2, exempt: 0, stale } });
+  const answers = [st(2, 2), st(0, 1)];
+  const root = make(st(1, 2), { refresh: async () => answers.shift() });
+  const first = observe(root);
+  await save(builds[0], "optimizeEnabled");
+  const second = observe(root);
+  await save(builds[0], "optimizeEnabled");
+  out.coverage = { first, second, third: observe(root) };
 }
 
 // The route moves on while the answer is out.
@@ -269,6 +286,10 @@ type inPlaceRow struct {
 	Title            string   `json:"title"`
 	GenerateDisabled bool     `json:"generateDisabled"`
 	Notes            []string `json:"notes"`
+	Ratio            string   `json:"ratio"`
+	BarNow           string   `json:"barNow"`
+	Stale            string   `json:"stale"`
+	StaleIn          bool     `json:"staleIn"` // whether the note is in the document at all
 }
 
 // inPlaceView is the panel at one step: what a reader sees, the trays and
@@ -313,6 +334,7 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 	out := runVariantsInPlaceHarness(t)
 	checkPanelTraySave(t, out)
 	checkGatedField(t, out)
+	checkCoverageFollowsTheSummary(t, out)
 	checkKindTraySave(t, out)
 	checkRedrawsThatPaintNothing(t, out)
 	checkFailedDelete(t, out)
@@ -327,7 +349,12 @@ type inPlaceOutcome struct {
 		AfterCarPlay inPlaceView `json:"afterCarPlay"`
 	} `json:"panelTray"`
 	GatedField inPlaceView `json:"gatedField"`
-	KindTray   struct {
+	Coverage   struct {
+		First  inPlaceView `json:"first"`
+		Second inPlaceView `json:"second"`
+		Third  inPlaceView `json:"third"`
+	} `json:"coverage"`
+	KindTray struct {
 		Before inPlaceView `json:"before"`
 		After  inPlaceView `json:"after"`
 	} `json:"kindTray"`
@@ -451,6 +478,36 @@ func checkGatedField(t *testing.T, out inPlaceOutcome) {
 	if g := out.GatedField; g.Refreshes != 0 || g.Changed != 0 {
 		t.Errorf("the CarPlay switch saved while generation is off: %d fetches, %d whole-route callbacks, want none",
 			g.Refreshes, g.Changed)
+	}
+}
+
+// checkCoverageFollowsTheSummary checks what a redraw does to a kind's numbers:
+// the ratio, the bar's value and the note about copies whose source changed
+// follow the summary, the note appearing, changing its count and going as the
+// stale count does.
+func checkCoverageFollowsTheSummary(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
+	steps := []struct {
+		name  string
+		view  inPlaceView
+		ratio string
+		bar   string
+		stale string
+	}{
+		{"as drawn", out.Coverage.First, "2 / 2", "2", "1 copy is out of date"},
+		{"one save later", out.Coverage.Second, "2 / 2", "2", "2 copies are out of date"},
+		{"two saves later", out.Coverage.Third, "1 / 2", "1", ""},
+	}
+	for _, st := range steps {
+		row := st.view.row(t, "Hi-res upscale")
+		if row.Ratio != st.ratio || row.BarNow != st.bar {
+			t.Errorf("%s: the hi-res row reads %q with the bar at %q, want %q and %q",
+				st.name, row.Ratio, row.BarNow, st.ratio, st.bar)
+		}
+		if !strings.HasPrefix(row.Stale, st.stale) || row.StaleIn != (st.stale != "") {
+			t.Errorf("%s: the stale-copy note reads %q (in the document: %v), want it to start %q and to be in the "+
+				"document only when that is not empty", st.name, row.Stale, row.StaleIn, st.stale)
+		}
 	}
 }
 
