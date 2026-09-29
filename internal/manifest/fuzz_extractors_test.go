@@ -146,6 +146,17 @@ func FuzzExtractOGG(f *testing.F) {
 	f.Add(vorbisIdent(), vorbisCommentPacket("TITLE=t"), uint16(65025))
 	f.Add(vorbisIdent(), vorbisCommentPacket("TITLE=t", mbpComment("METADATA_BLOCK_PICTURE", uint32(len(cover)), cover)), uint16(255))
 	f.Add(append([]byte("OpusHead"), make([]byte, 11)...), opusCommentPacket(mbpComment("metadata_block_picture", pictureDataLen, nil)), uint16(510))
+	// FLAC in Ogg (backlog B102): the mapping packet, then one header packet,
+	// which the reader joins into a .flac file's metadata for dhowden's FLAC
+	// reader. As a declared count, a last flag and neither; a packet holding
+	// two blocks (dhowden reads the join field by field, so the second is
+	// read); and both picture bombs, which the guards meet in the join.
+	picture := flacPictureBody("image/jpeg", "", uint32(len(cover)), cover)
+	f.Add(oggFLACMappingPacket(1), commentBlock(true, "TITLE=t"), uint16(255))
+	f.Add(oggFLACMappingPacket(0), commentBlock(false, "TITLE=t", "ARTIST=a", "ARTIST=b"), uint16(255))
+	f.Add(oggFLACMappingPacket(0), append(commentBlock(false, "TITLE=t"), flacBlock(true, 6, len(picture), picture)...), uint16(255))
+	f.Add(oggFLACMappingPacket(1), commentBlock(true, "TITLE=t", mbpComment("METADATA_BLOCK_PICTURE", pictureDataLen, nil)), uint16(510))
+	f.Add(oggFLACMappingPacket(1), flacBlock(true, 6, 42, flacPictureBody("image/jpeg", "", pictureDataLen, nil)), uint16(255))
 	dir := f.TempDir()
 	f.Fuzz(func(t *testing.T, ident, comment []byte, pageData uint16) {
 		// Bound what one execution writes: the property is about what a

@@ -499,7 +499,18 @@ type oggDemux struct {
 	src  byteSource
 	pos  int64
 	open map[uint32]*packetSource
+	// serial and flags are the header fields of the page page() read last
+	// (the Ogg FLAC reader tells the streams apart by them, ogg_flac.go).
+	serial uint32
+	flags  byte
 }
+
+// The page header flags the Ogg framing defines.
+const (
+	oggContinued = 0x01 // the page's first segment carries on a packet begun before it
+	oggBOS       = 0x02 // the first page of a logical stream
+	oggEOS       = 0x04 // the last page of a logical stream
+)
 
 // page reads the page at d.pos and returns the packets it completes, in
 // order; false where dhowden's read of the page fails.
@@ -523,7 +534,7 @@ func (d *oggDemux) page() ([]*packetSource, bool) {
 		return nil, false // dhowden's read of the segment data fails
 	}
 	cur := &packetSource{ra: d.src}
-	if h[5]&0x1 != 0 { // continued: the page carries on its serial's packet
+	if h[5]&oggContinued != 0 { // the page carries on its serial's packet
 		if cur = d.open[serial]; cur == nil {
 			return nil, false // "could not find continued packet"
 		}
@@ -539,6 +550,7 @@ func (d *oggDemux) page() ([]*packetSource, bool) {
 	}
 	d.open[serial] = cur
 	d.pos = pos
+	d.serial, d.flags = serial, h[5]
 	return done, true
 }
 

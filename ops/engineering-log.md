@@ -30637,3 +30637,143 @@ analysis pool counters are shown with the feature off, and the health
 handler's gating comment, the `AnalysisStats` and `UpscaleStats` docblocks
 and `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock
 still describe a pool that is absent with the feature off, which #781 ended.
+
+## 2026-09-29 — an Ogg FLAC file's tags are read from its own header packets, as a .flac file's, and no audio page is read (backlog B102)
+
+Backlog B102, found by the B99 session while it mirrored dhowden's Ogg reader
+for the picture guard. dhowden's `ReadOGGTags` (ogg.go, at the version go.mod
+pins) reads the pages in order, CRC-checking each and joining its segments into
+packets, and returns at the first packet that opens with `\x03vorbis` or
+`OpusTags`. A FLAC stream in Ogg has neither: the Ogg FLAC mapping
+(xiph.org/flac/ogg_mapping.html) keeps a .flac file's metadata as it is, the
+stream's first packet being 0x7F "FLAC", a major and a minor version, a
+big-endian count of the header packets that follow (0 when not declared), then
+"fLaC" and the STREAMINFO block, and each header packet after it one metadata
+block, its header included, the first a VORBIS_COMMENT, the last flagged last.
+
+### Reproduced
+
+Two real muxers, now the fixtures in `internal/manifest/testdata/ogg`
+(`testdata/gen/ogg_flac_fixtures.sh`): ffmpeg 9.0.2's (`-c:a flac` into an
+`.oga`: a count of 1 and a VORBIS_COMMENT flagged last, in 20 ms pages here so
+that audio pages follow) and flac 1.5.0's `--ogg` (a count of 3: the
+VORBIS_COMMENT with two ARTIST values, a PICTURE block holding a 16x16 JPEG,
+and a PADDING block flagged last). On main (7a4f66a9) both extracted with no
+tag at all, and `tag.ReadFrom` answered `EOF`. A reader recording the furthest
+byte any read reached saw `extractViaDhowdenFromReader` read 2,117 of 2,117 and
+1,441 of 1,441 bytes. On a three-minute ffmpeg Ogg FLAC of pink noise
+(19,948,763 bytes), counting what reached the `*os.File` on the dev Mac: main
+read 20,159,427 bytes in 17,197 calls, median 82.7 ms per extraction, for no
+tags (dhowden reads every page's segment data to check its CRC, and the picture
+guard had walked every page's header ahead of it). On a NAS mount that is the
+whole file over the network, on every scan that extracts it.
+
+What the app does with such a file (read-only, the iOS repo at 11c7ddd8): its
+own SMB and on-device scans list no `.ogg` or `.oga`
+(`MetadataNormalizer.audioExtensions`), and a bridge row's tags arrive as
+strings on the existing wire fields. It classes the extension `oga` and the
+codec `OGG` as lossy (`Track.isLossyAudioExtension`, `Track.isLossyCodec`). No
+twin to fix, and no Mirror-PR: no wire field changes.
+
+### Design
+
+- Not a fork of dhowden, and not a second tag reader: `oggFLACMetadata`
+  (ogg_flac.go) joins the mapping packet, from its "fLaC" on, with the header
+  packets after it. That join is the metadata of a .flac file, and it is read in
+  place: a `concatSource` over the packets' pieces of the file (B99's
+  `packetSource`), under an `io.SectionReader`. `extractViaDhowdenFromReader`
+  asks for it first, for every extension (dhowden picks its reader by the first
+  bytes, and an Ogg FLAC stream named `.flac` or `.ogg` was read whole the same
+  way), and hands it to `readDhowdenTags` (the two guards and `tag.ReadFrom`,
+  split out of the old function unchanged) and then to
+  `applyFLACMultiValueArtists`, as the `.flac` branch does. So everything a
+  .flac file's tags go through, an Ogg FLAC file's do: the picture guard walks
+  the join as FLAC, the multi-value pass joins two ARTIST values, the lyrics
+  candidates and the embedded PICTURE (stored as local art) come out the same.
+- The page walk is B99's `oggDemux`, which now records the serial and flags of
+  the page it read last. The streams' first pages come first in an Ogg file
+  (flagged BOS), each opening with its stream's first packet: the walk takes
+  the first whose packet is the mapping's, and passes over another stream's
+  pages (a Skeleton stream's first page ahead of it, say).
+- It declines a stream beside a Vorbis or Opus one: dhowden reads those,
+  returning the first comment packet it meets, so no file dhowden could read
+  changes (`TestAnOggStreamDhowdenReadsKeepsItsTags`: a FLAC stream beside a
+  Vorbis one still reads the Vorbis tags).
+- The header packets end at the first of: the declared count, the block flagged
+  last, an empty packet or one opening 0xFF (a FLAC frame's sync code; no block
+  type is 127), the FLAC stream's EOS page, and 65,535 packets
+  (`maxOggFLACHeaderPackets`, the most the count can declare). The last is the
+  only bound on what the walk holds: with no count and no last flag a stream
+  would hold a packetSource per packet for as long as it went on.
+  `TestOggFLACHeaderPacketsStopAtTheMappingsOwnMaximum` reads 65,635 header
+  packets to exactly 65,535 within the allocation property: that extraction
+  of a 335 KB stream allocated 14.8 MB (18.8 MB under -race), against the
+  88.6 MB `extractionAllocLimit` allows.
+- The join ends with an empty PADDING block flagged last (`oggFLACTerminator`).
+  In a .flac file whose last metadata block is not flagged, dhowden reads the
+  first audio frame's 0xFF as a block header flagged last and stops there; the
+  join has no frame, and without the terminator such a stream read no tags.
+- The mapping's major version must be 1. Measured: the ffmpeg fixture with that
+  byte set to 2 (and its page CRC recomputed) is refused by both `flac -t`
+  ("ERROR while decoding metadata") and ffprobe ("Header processing failed"),
+  and with it set to 1 again both accept it.
+- No CRC is checked, as the picture guard checks none: the walk reads page
+  headers, segment tables and the first bytes of each packet, and a header page
+  whose CRC is wrong still gives its tags.
+
+### Measured after
+
+The fixtures: 360 of 2,117 bytes read (nothing of an audio page) and 610 of
+1,441. The three-minute file: 369 bytes in 45 calls, median 24 µs, with its
+title. What the change costs the files it does not take, the same counting
+reader, main against the branch: a native FLAC 181 bytes and 26 calls against
+192 and 27, an MP3 118 and 15 against 129 and 16 (the 11-byte head read that
+declines), an ffmpeg Ogg Vorbis file 3,612 and 22 against 3,658 and 26 (the
+first page, declined at "\x01vorbis"); the times were within noise.
+
+### Tests and controls
+
+`TestAnOggFLACFileGetsItsTags` (the fixtures, through `ExtractWithContext`),
+`TestAnOggFLACFileIsReadNoFurtherThanItsHeaderPackets`,
+`TestEveryOggFLACShapeGetsItsTags` (13 shapes: count undeclared, last block not
+flagged, a comment packet across pages or of whole 255-byte segments, header
+packets sharing a page, a PICTURE and a SEEKTABLE ahead of the comment, a
+METADATA_BLOCK_PICTURE comment, no audio, named `.flac` and `.ogg`, another
+stream's first page ahead), `TestAnOggFLACStreamIsReadNoFurtherThanItsHeaderPackets`,
+`TestAnOggStreamDhowdenReadsKeepsItsTags`, the cap test,
+`TestScanner_V18_OggFLACRowJoinsTheDelta_OtherRowsOnlyStamp` (a v17 row set
+re-extracted: the Ogg FLAC row gains its tags and advances `indexed_at`; an Ogg
+Vorbis, a FLAC and an MP3 row are only stamped, so the diff-guard's merge set
+needed no change: no new post-scan writer), and the fuzz target
+`FuzzOggFLACReadsBackTheMetadataItCarries`, which lays three blocks out in
+pages of 1 to 255 lacing values, count declared or not, last flagged or not,
+and requires the join back byte for byte. `FuzzExtractOGG` gained five Ogg FLAC
+seeds, both picture bombs among them. Fuzzed on dido (golang:1.26.6, 4 CPUs a
+container, the nightly job's 5 GiB `prlimit`, `-fuzzminimizetime 1s`):
+`FuzzOggFLACReadsBackTheMetadataItCarries` 10 minutes, 6,297,429 executions,
+and `FuzzExtractOGG` 10 minutes, 5,035,041, both passing.
+
+The behavioural tests were red on main before the fix. Negative controls, each
+on the committed fix, each red: the Ogg FLAC branch disabled (every tag and
+read test, the v18 scan test); the multi-value pass dropped (the libFLAC
+fixture's Artist reads "Second Artist"); the terminator dropped (the two
+unflagged shapes, the read tests' tags, the cap test's size, all three fuzz
+seeds); the Vorbis and Opus decline dropped ("FLAC beside Vorbis" reads Flac);
+each end rule dropped in turn (the declared count, the last flag, the audio
+frame, the EOS page: each fails only its own read-distance case, and the audio
+rule the fuzz seed too; dropping the declared count first failed to BUILD, an
+unused variable, and was rewritten to keep it used); the cap dropped (the cap
+test's size); only the first BOS page considered and the serial filter dropped
+(the Skeleton shape); a read across the join's parts stopped at the first part
+(the fuzz seeds: the tag tests stay green because `io.ReadFull` resumes a short
+read); the join taken from the mapping packet's start rather than its "fLaC"
+(every tag test); and the join read by `tag.ReadFrom` without the guards (the
+two picture-bomb seeds allocate 1 GiB against a 67 MB limit, and
+`TestEveryDhowdenReadIsGuarded` names the function).
+
+### Left open
+
+- B118: an Ogg row carries no sample rate, bit depth or duration (Vorbis, Opus
+  and FLAC in Ogg alike), and an Ogg FLAC row keeps the codec "OGG", which the
+  app classes as lossy. The STREAMINFO is the join's first block, so the facts
+  are in hand; the codec is a decision to make with the app.
