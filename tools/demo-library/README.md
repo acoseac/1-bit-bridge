@@ -36,7 +36,9 @@ Then ship it:
 # The demo runs ON the bridge.ars.md host since 2026-09-16, as the service user
 # `onebit-demo` (runbook § "Demo bridge") — the remote rsync runs as that user,
 # so every file lands with the right owner and no chown pass is needed.
-rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" ~/demo-bridge-library/library/ arsenie@bridge.ars.md:/srv/onebit-demo/library/
+# <VPS-SSH> is the runbook's placeholder for that host's SSH target; its value
+# is in the gitignored ops/coordinates.local.md (this repo is public).
+rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" ~/demo-bridge-library/library/ <VPS-SSH>:/srv/onebit-demo/library/
 # then trigger a Full rescan on the bridge (admin console via SSH tunnel to
 # 127.0.0.1:7791, or `sudo systemctl restart 1-bit-bridge-demo` — startup
 # scans; remember delta scans never delete, so removals need the full rescan).

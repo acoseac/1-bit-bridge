@@ -111,7 +111,7 @@ func (s *Server) pairingCodeFor(tokenID string) string {
 // Before it was threaded through, this function called
 // `advertise.Endpoints` directly — which stopped emitting anything
 // Tailscale-classed in PR #269 — so a loopback bridge whose health
-// advertised `nuc.sable-eagle.ts.net` + `100.x` + `fd7a:…` handed the
+// advertised `nuc.tailnet.ts.net` + `100.x` + `fd7a:…` handed the
 // phone a QR carrying only the `.local` name and the LAN IP: no
 // Tailscale fallback recorded, roaming needed a re-pair, and the
 // promise in buildPairURL's docblock was false for four months. It
