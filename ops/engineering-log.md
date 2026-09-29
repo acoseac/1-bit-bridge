@@ -30788,7 +30788,7 @@ either. The branch's runs: 0 on the LAN, 5 of 5 on loopback from 127.0.0.1.
 
 | test | runs on | main | branch |
 |---|---|---|---|
-| `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` | Linux, macOS | red on Linux (each listener heard both), green on macOS | green |
+| `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` | Linux, macOS (skips where the host refuses its send) | red on Linux (each listener heard both), green on macOS | green |
 | `TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface` | Linux | red (`IP_MULTICAST_ALL = 1`) | green |
 | `TestAListenerTheKernelWillNotConfineStillListensAndSaysSo` | Linux | (new code) | green |
 | `TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket` | all | red on Linux, macOS, Windows | green |
@@ -30812,6 +30812,14 @@ arrival device), so one namespace serves.
 
 On Windows the red commit is NC2's shape (main's sender with the new tests):
 the sender test red, the loopback source test red with none heard.
+
+The PR's first macOS CI leg failed the listener test at its own send:
+GitHub's macOS runner answers a TTL-0 multicast out of en0 with `sendto: no
+route to host`, where the dev Mac sends it. The send is how the test delivers
+a datagram, not what it measures, so a refused send skips the test (4b426b12).
+The same commit split the namespace test's check into helpers (SonarCloud's
+cognitive complexity), and NC1 and NC2 were run again on it, as root and as a
+user on dido: the same tests red and green as in the table above.
 
 ### What the discovery clients are exposed to
 

@@ -3553,7 +3553,9 @@ no failing test — which is the shape to expect in this area.
   the upstream client's MediaServer search is answered by the bridge's own
   advertisers, with both LOCATIONs before and one now (a looped-back
   search, measured), and only a configured server is ever walked. Pinned
-  by `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` (Linux, macOS),
+  by `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` (Linux, and macOS
+  where the host sends its datagram: GitHub's macOS runner answers `no
+  route to host` for en0, and the test skips there),
   `TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface` and
   `TestAListenerTheKernelWillNotConfineStillListensAndSaysSo` (Linux),
   `TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket` (all),
