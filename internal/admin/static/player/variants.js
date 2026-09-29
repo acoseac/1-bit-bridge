@@ -175,9 +175,9 @@ function reconcile(parent, desired) {
  *
  * In place from a fresh summary when the panel was given a way to fetch one,
  * and through onChanged (the route's own re-render) when it was not, or when
- * the fetch fails: the route fetches again and says what went wrong in its
- * own error state. A redraw is refused once the route has moved on, and an
- * answer that a newer redraw has overtaken paints nothing.
+ * the newest fetch fails: the route fetches again and says what went wrong in
+ * its own error state. A redraw is refused once the route has moved on, and an
+ * answer or a failure that a newer redraw has overtaken does nothing.
  */
 async function redraw(panel) {
   if (!panel.refresh) {
@@ -185,12 +185,15 @@ async function redraw(panel) {
     return;
   }
   const seq = ++panel.seq;
-  const gone = () => panel.alive !== null && !panel.alive();
+  const gone = () => typeof panel.alive === "function" && !panel.alive();
   let next;
   try {
     next = await panel.refresh();
   } catch (e) {
-    if (isAborted(e) || gone()) return;
+    // A failure that a newer redraw has overtaken is that redraw's to answer:
+    // handing over to the route here would re-render it away under the
+    // newer one, and take the tray and the focus with it.
+    if (isAborted(e) || gone() || seq !== panel.seq) return;
     if (panel.onChanged) panel.onChanged();
     return;
   }

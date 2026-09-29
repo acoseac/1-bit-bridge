@@ -228,6 +228,29 @@ const out = {};
   out.overtaken = observe(root);
 }
 
+// Two saves, and the OLDER one's fetch fails after the newer one has answered:
+// the failure is the newer redraw's to answer, not the route's.
+{
+  const settles = [];
+  const root = make(S.carplayOff, { refresh: () => new Promise((resolve, reject) => { settles.push({ resolve, reject }); }) });
+  builds[0].sw.focus();
+  builds[0].spec.onSaved("optimizeEnabled");
+  builds[0].spec.onSaved("optimizeEnabled");
+  settles[1]?.resolve(S.on);
+  await settle();
+  settles[0]?.reject(new Error("boom"));
+  await settle();
+  out.overtakenFailure = observe(root);
+}
+
+// A route check that is not a function is no route check (a caller's mistake
+// must not crash a redraw after its fetch has answered).
+{
+  const root = make(S.carplayOff, { refresh: async () => S.on, alive: true });
+  await save(builds[0], "optimizeEnabled");
+  out.aliveNotAFunction = observe(root);
+}
+
 // The fetch fails, or is aborted, or answers nothing.
 {
   let root = make(S.carplayOff, { refresh: async () => { throw new Error("boom"); } });
@@ -337,6 +360,7 @@ func TestAVariantTraySaveRedrawsThePanelInPlace(t *testing.T) {
 	checkCoverageFollowsTheSummary(t, out)
 	checkKindTraySave(t, out)
 	checkRedrawsThatPaintNothing(t, out)
+	checkAliveThatIsNotAFunction(t, out)
 	checkFailedDelete(t, out)
 }
 
@@ -358,13 +382,17 @@ type inPlaceOutcome struct {
 		Before inPlaceView `json:"before"`
 		After  inPlaceView `json:"after"`
 	} `json:"kindTray"`
-	MovedOn    inPlaceView `json:"movedOn"`
-	Overtaken  inPlaceView `json:"overtaken"`
-	Fails      inPlaceView `json:"fails"`
-	Aborted    inPlaceView `json:"aborted"`
-	Empty      inPlaceView `json:"empty"`
-	NoRefresh  inPlaceView `json:"noRefresh"`
-	DeleteFail struct {
+	MovedOn   inPlaceView `json:"movedOn"`
+	Overtaken inPlaceView `json:"overtaken"`
+	// OvertakenFailure is the panel after the older of two saves fails once
+	// the newer has answered.
+	OvertakenFailure  inPlaceView `json:"overtakenFailure"`
+	AliveNotAFunction inPlaceView `json:"aliveNotAFunction"`
+	Fails             inPlaceView `json:"fails"`
+	Aborted           inPlaceView `json:"aborted"`
+	Empty             inPlaceView `json:"empty"`
+	NoRefresh         inPlaceView `json:"noRefresh"`
+	DeleteFail        struct {
 		StartedFocused bool `json:"startedFocused"`
 		Disabled       bool `json:"disabled"`
 		FocusOnDelete  bool `json:"focusOnDelete"`
@@ -547,6 +575,11 @@ func checkRedrawsThatPaintNothing(t *testing.T, out inPlaceOutcome) {
 		t.Errorf("the older answer landed last: CarPlay notes %q, %d whole-route callbacks; want the newer answer's "+
 			"state and none", o.row(t, "CarPlay-optimized").Notes, o.Changed)
 	}
+	if o := out.OvertakenFailure; o.Changed != 0 || len(o.row(t, "CarPlay-optimized").Notes) != 0 || o.Focus != inPlaceKindSwitch {
+		t.Errorf("the older save's fetch failed after the newer one answered: %d whole-route callbacks, CarPlay notes "+
+			"%q, focus %q; want none, the newer answer's state, and focus kept", o.Changed,
+			o.row(t, "CarPlay-optimized").Notes, o.Focus)
+	}
 	if f := out.Fails; f.Changed != 1 {
 		t.Errorf("a failed fetch ran the whole-route callback %d times, want once", f.Changed)
 	}
@@ -559,6 +592,16 @@ func checkRedrawsThatPaintNothing(t *testing.T, out inPlaceOutcome) {
 	}
 	if n := out.NoRefresh; n.Changed != 1 {
 		t.Errorf("a save with no fetch to redraw from ran the whole-route callback %d times, want once", n.Changed)
+	}
+}
+
+// checkAliveThatIsNotAFunction checks that a route check which is not a
+// function reads as none, so the redraw paints instead of throwing.
+func checkAliveThatIsNotAFunction(t *testing.T, out inPlaceOutcome) {
+	t.Helper()
+	if a := out.AliveNotAFunction; len(a.row(t, "CarPlay-optimized").Notes) != 0 || a.Changed != 0 {
+		t.Errorf("a route check that is not a function: CarPlay notes %q, %d whole-route callbacks; want the "+
+			"redraw painted and none", a.row(t, "CarPlay-optimized").Notes, a.Changed)
 	}
 }
 
