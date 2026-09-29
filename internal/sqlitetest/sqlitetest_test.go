@@ -136,15 +136,22 @@ func TestArmUntilWithNoDeadlineNeverGivesUp(t *testing.T) {
 func TestWaitUnlessAnswersTheWorksEnd(t *testing.T) {
 	t.Run("the work ended first", func(t *testing.T) {
 		rec := &fatalRecorder{TB: t}
-		p := ArmUntil(rec, time.Now().Add(5*time.Second))
+		p := ArmUntil(rec, time.Now().Add(2*time.Second))
 		defer p.Disarm()
 		stopped := make(chan struct{})
 		close(stopped)
-		if p.WaitUnless(rec, stopped) {
-			t.Error("WaitUnless answered true with no statement parked")
-		}
+		parked := true
+		ended := make(chan struct{})
+		go func() { // rec's Fatalf ends the goroutine calling it
+			defer close(ended)
+			parked = p.WaitUnless(rec, stopped)
+		}()
+		<-ended
 		if rec.fatal != "" {
-			t.Errorf("WaitUnless failed the test when the work ended first: %s", rec.fatal)
+			t.Fatalf("WaitUnless failed the test when the work ended first: %s", rec.fatal)
+		}
+		if parked {
+			t.Error("WaitUnless answered true with no statement parked")
 		}
 	})
 	t.Run("a statement parked", func(t *testing.T) {
