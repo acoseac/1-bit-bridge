@@ -2263,6 +2263,50 @@ no failing test — which is the shape to expect in this area.
   express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
   `--gc` command offers it — which is how `artwork --gc` was found to have
   carried an un-escapable refusal since it was written.
+- **Every walk of the artwork cache starts where the cache directory
+  resolves, the size cap goes on over what it cannot list, and the GC keeps
+  the thumbnails of an artist a track row names** (2026-09-29, backlog
+  B64). The three walks (`artwork --gc`, its empty-store guard, the serve
+  cap `sweepArtworkCache`) share `artworkWalkRoot`: `fsutil.ResolveLinks`,
+  as `resolveSidecarRoot` resolves, removing by the WALKED path and
+  reporting under the configured one (`artworkReportPath`). A cache
+  directory that is a symlink or a Windows junction was one entry to all
+  three: the GC removed nothing ("1 skipped") and the cap never evicted.
+  **The guard and the GC resolve together, or not at all**: a guard that
+  reads the link as one entry beside a GC that walks its target waves an
+  empty store through over the whole cache
+  (`TestArtworkGCEmptyStoreGuardResolvesALinkedCache`). A root that
+  resolves to a file is refused (resolved, the GC would judge the target by
+  its own name, and removed it in the control), and "" before anything
+  resolves it. **The cap steps over a directory it cannot list, and a cache
+  file it cannot stat**: it returned the first such error before evicting
+  anything, so on a cache that is an ext4 volume's mount root it was never
+  enforced and WARNed every 15 minutes. The filesystem's `lost+found` goes
+  without a word (`IsFilesystemLostFound`); anything else is logged once
+  when a streak begins, at most daily while it lasts, and once at Info when
+  it ends. **Going on is sound only because the cap evicts oldest-first**:
+  a pass that cannot see some files evicts a subset of what a pass over the
+  whole cache would, never a file that pass would keep, and never evicts
+  what it sees to make up for what it cannot
+  (`TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould`), so its one
+  error is staying over the cap, which it reports. That is the cap's
+  argument, not a sweep's: a sidecar sweep decides from a ratio over the
+  tree, which an unseen part can flip (`PartialWalkRefusal`). **The GC's
+  keep set holds `manifest.ArtistThumbKey` of every `$.artistMBID`**
+  (`artworkKeysInUse`), the key the enricher fetched the portrait under and
+  the console files its thumbnails under; it held artwork keys alone and
+  removed every artist thumbnail in `thumbs/`. From the store, never from
+  the file name: keeping whatever is named like an artist's thumbnail keeps
+  one whose artist no row names for ever. The empty-set refusal stays keyed
+  on the ARTWORK keys (the covers are what it protects) and asks whether
+  the walk would remove a file. A thumbnail under a 16-hex artworkVersion
+  alias stays an orphan: the console resolves an alias before it derives
+  anything (`TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey`), so no
+  build files or reads one. **A cover the cap evicts does not come back**:
+  its tracks are enriched, so `/v1/artwork` answers the terminal 404
+  `no_image` and nothing fetches it again, a `local-` cover included (the
+  cap's docblock said a 202 and a re-enrichment until 2026-09-29; backlog
+  B84).
 - **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
   its own volume, `.Trashes/<uid>/` and `.Trash-1000/` sit under the walk root,
   so any `.flac` inside one is missing from the catalog and older than the grace

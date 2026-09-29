@@ -28229,6 +28229,196 @@ upload or a delete committed there asks for) walks it and keeps or mints
 its rows, which the next full scans count missing and delete; measured, the
 rows came back with the next subtree scan below the link.
 
+## 2026-09-29 — the artwork cache's walks: the size cap goes on over what it cannot list, the GC keeps the thumbnails of a named artist, and every walk starts where a linked cache resolves (backlog B64)
+
+The three leftovers #1084 recorded under "Out of scope", in one PR. Each was
+measured on main (6dfba62c) before any code changed, with a throwaway test in
+`cmd/bridge` (package main, not committed) calling the functions the CLI and
+`bridge serve` call, a directory locked with `chmod 000` standing in for an
+ext4 volume's root-owned `lost+found` as in #1084 (`IsFilesystemLostFound`
+reads only the name, the parent and the permission error).
+
+### 1: the size cap stopped at a directory it could not list
+
+`sweepArtworkCache`, the serve-time cap behind `artwork.cacheMaxBytes`,
+returned the first walk error. Six covers of 30 bytes, a cap of 100:
+
+- a locked `lost+found` at the top: `evicted=0 freed=0 err=open
+  …/lost+found: permission denied`, all six left;
+- a locked `thumbs/`: the same, `open …/thumbs: permission denied`;
+- nothing locked: `evicted=3 freed=90`, three left.
+
+The loop logged the error at WARN on every pass (every 15 minutes, after a
+90 s settle), so a cache that is a volume's mount root was never capped and
+said so 96 times a day. A cache file whose `DirEntry.Info()` failed with
+anything but ENOENT ended the pass the same way (a directory its user may
+list and not search).
+
+**Decided: step over and go on, and say so once per streak.** The
+filesystem's `lost+found` is stepped over without a word, as the GC and the
+sidecar inventory step over it. Any other directory the cap cannot list, and
+any cache file it cannot stat, is stepped over, counted (`Unlisted`,
+`Unstatted`) and logged: one WARN when a streak of such passes begins, at
+most one a day while it lasts (the M-SEARCH rule; `artworkCapUnseenRepeat`),
+and one Info line on the first pass that sees the whole cache again. A pass
+that decided nothing (a cancelled one) leaves the streak alone.
+
+**Why going on is sound here, and why it would not be for a sweep.** The cap
+evicts oldest first down to a low-water mark. When the partial pass takes a
+file, what it still sees is over the mark; a pass over the whole cache,
+arriving at the same file, has taken the same visible files and some unseen
+older ones, so what it still holds is what the partial pass sees plus the
+unseen files it has not taken, which is over the mark too, and it takes that
+file as well. So a partial pass evicts a subset of what a whole-cache pass
+would, never a file that pass keeps, fewer bytes, and never evicts what it
+sees to make up for what it cannot (it stops once what it sees is under the
+mark, and starts again only once that is over the cap). Its one error is
+under-enforcement, which the WARN reports. A refusal would leave the disk to
+fill on every host whose cache holds such a directory, which is the defect.
+A sidecar sweep decides from a ratio over the tree, which an unseen part can
+flip, and refuses a partial walk (`PartialWalkRefusal`); the cap has no such
+verdict. `TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould` builds
+each cache twice, locks `thumbs/` in one, and requires the partial pass's
+evictions to be a non-empty subset of the whole pass's, with the unseen files
+the oldest in the cache, the newest, and the oldest under a tighter cap. The
+subset argument holds with the concurrent-removal branch too (a file already
+gone is subtracted from the total and not counted, the same in both passes).
+
+- Rejected: a refusal, for the reason above. Rejected: estimating the unseen
+  bytes (a directory the bridge cannot list has no size it can read).
+- A Gemini consult on the argument was attempted and answered HTTP 429: the
+  API project had reached its monthly spending cap.
+
+### 2: `artwork --gc` removed every artist thumbnail
+
+A store with one track (`artworkMBID` X, `artistMBID` A, `artwork_version`
+V) and a cache holding `X-500.jpg`, `artist-A.jpg`, `artist-name-<sha>.jpg`,
+`thumbs/X-250.jpg`, `thumbs/artist-A-250.jpg`, `thumbs/artist-A-500.jpg` and
+`thumbs/V-250.jpg`. The dry run on main: "would remove" the two artist
+thumbnails and the alias one, "3 orphan(s) would be removed, 2 kept, 2
+skipped (non-cache file)".
+
+Two claims in the backlog entry were not what the code does, and are
+corrected here rather than built on:
+
+- **The portraits were never removed.** `artist-<mbid>.jpg` and
+  `artist-name-<sha>.jpg` carry no size suffix, so the GC skipped them (the
+  "2 skipped"); only their derived tiers in `thumbs/` went. And those do not
+  come back "only by re-fetching under rate limits": the console re-derives a
+  missing one from `artist-<mbid>.jpg` at the next `?size=` request, one local
+  decode under the cap-1 decode semaphore and no network
+  (`TestArtistImageSizeIsOptional` derives from a portrait with no thumbnail
+  on disk). So the cost was a slow first paint of the artists grid after
+  every GC, not upstream traffic. Still a defect: the GC's contract is files
+  no track row references, and these are referenced.
+- **No build files a thumbnail under an artworkVersion alias.** The console
+  resolves a 16-hex alias to the artwork key it stands for before it derives
+  anything, and did so from the commit that introduced thumbnails (#743,
+  a1f72e8c: the alias is resolved at the top of `apiLibraryArtwork`,
+  `resolveArtworkTier` gets the resolved key). So a `thumbs/<16hex>-*.jpg` is
+  one nothing wrote and nothing reads, an orphan, and the GC is right to
+  remove it. `TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey` pins that
+  premise through the real handler.
+
+**Decided: the keep set is read from the store, and holds
+`manifest.ArtistThumbKey` of every `$.artistMBID`** (`artworkKeysInUse`,
+`DistinctArtistMBIDs`). That field is what the enricher stamps on the track
+and fetches the portrait under (`ensureArtistImageCached(ctx, artistMBID,
+…)`), and what the console's catalog asks for (`catalog_refs.go`), so a
+thumbnail filed under it is in use exactly while a row names the artist.
+`manifest.ArtistThumbKey` is the one spelling, used by the console's
+derivation and the GC.
+
+- Rejected: keeping every file named `artist-*` (a guess from the name,
+  which keeps the thumbnail of an artist no row names for ever). Rejected:
+  `artist_atlas` as the source: it holds bios and no image path, and a row
+  there does not make a portrait reachable from the console.
+- The empty-set refusal stays keyed on the ARTWORK keys: the covers are what
+  it protects (a scanner-extracted `local-` cover does not come back), so a
+  store naming artists and no artwork still refuses over a cover. It now asks
+  whether the walk would remove a file (`artworkCacheHasOrphans`), so a cache
+  holding only thumbnails of a named artist is not refused over, the
+  2026-09-28 reading of "empty".
+
+### 3: neither artwork walk resolved a linked cache root
+
+`filepath.WalkDir` Lstats its root and follows no link. With
+`<dataDir>/artwork` a symlink to a directory holding a known cover and an
+orphan, on main: `artwork --gc` said "removed 0 orphan(s), kept 0 known
+cache file(s), 1 skipped" and left the orphan; the cap over 170 bytes against
+a cap of 100 evicted nothing; the empty-store guard, over an empty store,
+waved it through (and the GC then did nothing either, so the two agreed by
+accident).
+
+**Decided: one resolver for all three walks** (`artworkWalkRoot`):
+`fsutil.ResolveLinks` (#1090, which also resolves a Windows junction), the
+walk started at the target and removing the path it visited (#1063's rule),
+reporting under the configured directory (`artworkReportPath`). The guard and
+the GC must resolve together: a guard that read the link as one entry beside
+a GC that walks its target waves an empty store through over the whole cache,
+which is the guard's whole reason to exist. Two refusals come with it: a root
+that resolves to something other than a directory (resolved, the GC judges
+the target by its own name, and in the control it removed a linked
+`<uuid>-500.jpg`), and "" before anything resolves it
+(`filepath.EvalSymlinks("")` is `.`; in the control the GC removed a
+cache-shaped file planted in the working directory).
+
+Verified on the Windows 11 host with real `mklink /J` junctions: the three
+linked-cache tests pass there, and with the resolution removed (NC1) the same
+three fail there as on macOS.
+
+### Found on the way
+
+`runArtworkCacheSweeper`'s docblock said an evicted cover answers 202 until a
+later re-enrichment re-caches it. Nothing re-caches it: the enricher takes
+only rows at `enriched_at = 0`, so `/v1/artwork` answers the terminal 404
+`no_image` (`classifyArtworkMiss`, nothing pending), and a scanner-extracted
+`local-` cover never comes back (the mtime skip gate). The comment now says
+so; the behaviour is backlog B84.
+
+### Tests
+
+New in `cmd/bridge/artwork_cache_walks_test.go`:
+`TestSweepArtworkCacheStepsOverTheFilesystemsLostFound`,
+`TestSweepArtworkCacheGoesOnOverADirectoryItCannotList`,
+`TestSweepArtworkCacheEvictsOnlyWhatAWholeCachePassWould` (three cases),
+`TestSweepArtworkCacheCountsAFileItCannotStat`,
+`TestArtworkCapSweeperReportsWhatItCannotSeeOncePerStreak`,
+`TestArtworkCapSweeperSaysNothingAboutTheFilesystemsLostFound`,
+`TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames`,
+`TestArtworkGCEmptyStoreGuardIsAboutTheCovers` (three cases),
+`TestArtworkGCWalksALinkedCacheWhereItResolves`,
+`TestArtworkGCEmptyStoreGuardResolvesALinkedCache`,
+`TestSweepArtworkCacheWalksALinkedCache`,
+`TestArtworkWalksRefuseACacheThatLinksToAFile` and
+`TestArtworkWalksRefuseAnEmptyCacheDirectory`; in `internal/admin`,
+`TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey`. The five older cap tests
+read the pass's counts through `sweepCapCounts`. The mode-bit tests skip on
+Windows and as root, like #1084's; the linked-cache ones run everywhere, with
+a junction on Windows.
+
+### Negative controls, each on a committed tree and restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| NC1: the root is not resolved | the three linked-cache tests, on macOS and on Windows (junctions) |
+| NC2: the guard reads the configured root, the GC the resolved one | `TestArtworkGCEmptyStoreGuardResolvesALinkedCache` only |
+| NC3: no refusal of a root that resolves to a file | `TestArtworkWalksRefuseACacheThatLinksToAFile` only (the linked file was removed) |
+| NC4: no refusal of "" | `TestArtworkWalksRefuseAnEmptyCacheDirectory` only (the planted file was removed) |
+| NC5A: the cap stops at any unlisted directory (main) | the five cap tests that lock a directory |
+| NC5B: the cap reports the filesystem's lost+found | the two lost+found cap tests |
+| NC5C: a file it cannot stat ends the pass (main) | `TestSweepArtworkCacheCountsAFileItCannotStat` only |
+| NC5D: the WARN on every pass | the streak test only |
+| NC5E: no Info line when the streak ends | the streak test only |
+| NC5F: the streak not reset when it ends | the streak test only (two Info lines, no WARN for the new streak) |
+| NC6: the keep set without artist keys (main) | `TestArtworkGCKeepsTheThumbnailsOfAnArtistATrackNames`, the guard test's named-artist case |
+| NC7: the guard keyed on the whole keep set | the guard test's cover case and unnamed-artist case (the cover was removed) |
+| NC8: the guard counts any cache file | the guard test's named-artist case only |
+| NC9: the dry run names the walked path | `TestArtworkGCWalksALinkedCacheWhereItResolves` only |
+| NC9b: the cap names an unlisted directory by its walked path | the unlisted-directory cap test and the streak test (macOS, where `/var` is a link) |
+| NC11a: the console files an alias request's thumbnail under the alias | `TestAnArtworkAliasFilesItsThumbUnderTheResolvedKey` only |
+| NC11b: the console files a portrait's thumbnail under another key | the same test only |
+
 ## 2026-09-29 — an enrich base URL's user information travels as a Basic header, so no request URL, error, log line or skip detail names it (backlog B69)
 
 B54 (2026-09-28) kept a configured URL's credential out of the config's
