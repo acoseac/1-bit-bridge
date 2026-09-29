@@ -28479,3 +28479,40 @@ callback and helper are renamed (`after`, `afterRescan`) since they no longer
 depend on rows written. `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`
 drives `run` with a scan that commits nothing, and an interrupted one. NC18
 (only a writing rescan): red. NC19 (the step run during shutdown too): red.
+
+The round-3 helper test launched its non-blocking check in a goroutine
+with no drain on cleanup, and `TestEveryBackgroundGoroutineDrainsOnCleanup`
+failed CI on 759209e1 (macOS, Windows and the race `rest` shard). Only the
+doc sweeps had been run locally that round, not the whole `cmd/bridge`
+package, which holds that guard too. The test now registers
+`drainLoopOnCleanup`.
+
+### Review round 5
+
+Gemini raised three findings on 759209e1:
+
+- (high) A source that is no longer there: `sourceChanged` answered nil for
+  any stat error, so the job went to the tool, which failed on the missing
+  input and struck the file. Taken, for `os.ErrNotExist` only: gone is a
+  change of version, and it is also what a NAS mount that drops under a
+  queued batch looks like to every job behind it, each of which struck its
+  file on the old code. A rescan of a directory that cannot be seen touches
+  no row (#1076's owning-root audit). Other stat failures (permission, I/O)
+  still go to the tools. The Run test deletes the file after its retag step,
+  and the pool test gained "deleted while it waited" (on the prior code the
+  stand-in sox rendered a deleted file). `TestRun_DSDJobRefusesANonDSDRoute`
+  ran `Run` on sources that did not exist; it now renders stamped files
+  (`sourceAt`). NC20 (ENOENT answering nil again): the Run test (both
+  cases) and the pool test's deletion case went red.
+- (high) The batch walk's resolver failure for a deleted file, to be counted
+  as a change and rescanned. Declined: its premise, that the resolver's error
+  wraps `os.ErrNotExist`, is false for the production resolver.
+  `fs.Resolver.ResolveChecked` maps ENOENT to `fs.ErrNotFound`, which is
+  `errors.New("path not found")`, so the suggested branch could never fire. The
+  walk already passes a missing file over without queueing or striking it,
+  and the transcode package does not import `internal/fs`.
+- (medium) Run the stale-download hook in a goroutine with a detached
+  context. Declined: its lookup is one indexed read under WAL, the same kind
+  the handler has just made (`LookupVariant`) on the same request, and a
+  goroutine per stale GET would be unbounded and outlive the request, when
+  GETs are what the hook's debounce exists for.
