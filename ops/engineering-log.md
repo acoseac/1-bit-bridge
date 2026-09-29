@@ -29569,9 +29569,15 @@ dido, golang:1.26.6, 4 CPUs and an 8 GB cgroup per run,
   and 2,988,674 execs), and FuzzExtractDFF, FuzzExtractDSF and
   FuzzExtractMP3, 5 minutes each (2,022,052, 2,091,002 and 1,655,039),
   passed.
-- The final code, after the Ogg walk was split into a demuxer and a
-  comment-body reader without changing what it reads: FuzzExtractOGG,
-  10 minutes under the 5 GiB limit, 6,813,261 execs, passed.
+- After the Ogg walk was split into a demuxer and a comment-body reader
+  without changing what it reads: FuzzExtractOGG, 10 minutes under the
+  5 GiB limit, 6,813,261 execs, passed. Every FuzzExtractOGG run above went
+  through the first version of the test harness, which mis-framed some
+  packets of 65,025 bytes or more on pages of 65,025 bytes or more (the
+  Tests section), so those inputs reached dhowden as a page it rejects.
+- fuzz.yml dispatched on the branch at the nightly 5 minutes a target
+  (run 36581175281): all 41 targets passed under the limit, FuzzExtractFLAC
+  with 1,551,423 execs.
 - One extraction of each bomb shape with the guard allocates at most 139 KB
   (the one named `.mp3`; every other at most 17 KB over two runs), where main
   allocated 1.07 GB or 387 MB. The small figures are coarse:
@@ -29600,6 +29606,13 @@ dido, golang:1.26.6, 4 CPUs and an 8 GB cgroup per run,
 - `TestExtractHostilePictureFLACStillIndexes` now measures what it allocated.
 - Seeds: the two fuzzer inputs in testdata/fuzz/FuzzExtractFLAC, every shape
   as a FuzzExtractFLAC seed, and an Opus bomb as a FuzzExtractOGG seed.
+- `TestOggStreamFramesAPacketOfAnyLength` pins the Ogg harness through
+  dhowden's own demuxer: 36 packet and page sizes read back. A page holds at
+  most 255 segments, and the first harness could put 256 on one (the count
+  byte wrapped to 0): the terminating empty segment of a packet that ends
+  after 255 whole segments, and every full page once pageData rounded to
+  65,280. Red on it for 5 of the 36, each "expected crc". `oggPage` caps a
+  page at 254 whole segments.
 
 ### Negative controls
 
