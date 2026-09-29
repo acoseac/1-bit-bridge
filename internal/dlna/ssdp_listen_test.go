@@ -11,11 +11,12 @@ import (
 // TestAnSSDPListenerHearsOnlyTheInterfaceItJoined pins backlog B71 at the
 // listener. The DLNA server runs one advertiser per LAN interface, each
 // announcing its own interface's LOCATION, so each advertiser must hear only
-// the M-SEARCHes that arrive on its own interface. net.ListenMulticastUDP
-// binds the listener to the WILDCARD address (net's listenDatagram rewrites
-// the group to 0.0.0.0 before the bind), and Linux's default
-// IP_MULTICAST_ALL = 1 then hands it the group's datagrams from every
-// interface where any socket on the host joined the group. So on a
+// the multicast M-SEARCHes that arrive on its own interface (a unicast one
+// reaches one advertiser's socket whatever its address: backlog B119).
+// net.ListenMulticastUDP binds the listener to the WILDCARD address (net's
+// listenDatagram rewrites the group to 0.0.0.0 before the bind), and Linux's
+// default IP_MULTICAST_ALL = 1 then hands it the group's datagrams from
+// every interface where any socket on the host joined the group. So on a
 // multi-homed Linux bridge every advertiser also answered the M-SEARCHes of
 // the others, with its own LOCATION: measured with the real binary in three
 // network namespaces, every M-SEARCH from either subnet got two answers, one

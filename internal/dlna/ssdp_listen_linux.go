@@ -84,7 +84,7 @@ func listenSSDPConfined(ctx context.Context, iface *net.Interface, group *net.UD
 	}
 	if confineErr != nil {
 		log.Warn("SSDP listener cannot be limited to its own interface: on a host with more than one "+
-			"advertiser it also answers the M-SEARCHes that arrive on the others, with this interface's LOCATION",
+			"advertiser it also answers the multicast M-SEARCHes that arrive on the others, with this interface's LOCATION",
 			slog.String("interface", interfaceName(iface)),
 			slog.String("err", confineErr.Error()))
 	}

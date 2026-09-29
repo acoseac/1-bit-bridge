@@ -3513,8 +3513,8 @@ no failing test — which is the shape to expect in this area.
   the same LAN): nothing reached the LAN, because the advertiser's
   connected NOTIFY sender took the Tailscale route, which its pin did not
   move. The sender is unconnected since.
-- **Each SSDP advertiser hears only the M-SEARCHes that arrive on its own
-  interface, and announces from that interface's address** (2026-09-29,
+- **Each SSDP advertiser hears only the multicast M-SEARCHes that arrive on
+  its own interface, and announces from that interface's address** (2026-09-29,
   backlog B71). The DLNA server runs one advertiser per LAN interface, each
   with that interface's LOCATION (#328), and by the eligibility rule a Linux
   host running Docker is such a host: `docker0` and every user bridge carry

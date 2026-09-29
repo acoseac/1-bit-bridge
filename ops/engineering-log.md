@@ -30638,7 +30638,7 @@ handler's gating comment, the `AnalysisStats` and `UpscaleStats` docblocks
 and `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock
 still describe a pool that is absent with the feature off, which #781 ended.
 
-## 2026-09-29 — each SSDP advertiser answers only its own interface's M-SEARCHes, and announces from its own interface's address (backlog B71)
+## 2026-09-29 — each SSDP advertiser answers only its own interface's multicast M-SEARCHes, and announces from its own interface's address (backlog B71)
 
 Backlog B71, from the B38/B47 session, which had measured the mechanism in one
 network namespace and reasoned the consequence. This session measured the
