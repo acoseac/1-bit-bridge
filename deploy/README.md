@@ -46,9 +46,12 @@ pairing.
 ## linux/ — the Linux VPS, bridge.ars.md (public mode, systemd)
 
 Since 2026-09-22 this host runs only the public demo (`bridge.1-bit.app`, a
-unit and binary of its own); the operator bridge moved to a home NUC, which
-this script cannot verify (a self-signed certificate), so a deploy there
-follows the runbook's manual form. The demo is not deployed from this script's
+unit and binary of its own); the operator bridge moved to a home NUC. Do not
+point this script at the NUC: its health poll runs `curl` without `-k`, and
+the NUC serves a self-signed certificate, so the poll never reads
+`serverVersion` and the script exits 1 with its rollback advice after a swap
+that may well have succeeded (it rolls nothing back). A deploy there follows
+the runbook's manual form and checks health with `curl -k`. The demo is not deployed from this script's
 `main` build either: it ships the release artifact, because a `git describe`
 version makes it advertise an update forever (the runbook's "Demo bridge"
 section has the procedure). Any run against this host must carry the demo's

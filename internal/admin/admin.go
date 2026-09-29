@@ -427,8 +427,9 @@ type Deps struct {
 	// AnalysisActive reports the LIVE runtime state of the audio-
 	// analysis feature: cmd/bridge's analysisActiveFn, the config flag
 	// AND a usable sox, read per call, NOT the persisted flag alone. The
-	// two differ only while sox is unusable; a PATCH of the flag moves
-	// both at once, since the toggle is live (#781). Wiring this lets
+	// two differ only while sox is unusable: then the verdict stays false
+	// whatever the flag says, and otherwise a PATCH of the flag moves it
+	// at once, since the toggle is live (#781). Wiring this lets
 	// /api/analysis/stats.enabled agree with /v1/health's `waveform`
 	// flag, which reads the same closure. Nil-safe: when absent the
 	// handler falls back to the persisted config + sox derivation (test
