@@ -777,15 +777,24 @@ func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) 
 //
 // Per Gemini A8 / iOS bug review #7.
 //
-// It is the one call of tag.ReadFrom, so the picture allocation guard is
-// here, for every extension (dhowden_picture_guard.go): a file whose pictures
-// would make dhowden allocate beyond what the file holds is not handed to it,
-// and ends as a file whose tags dhowden could not read.
+// It is the one call of tag.ReadFrom, so both dhowden guards are here, for
+// every extension: a file whose pictures would make dhowden allocate beyond
+// what the file holds (dhowden_picture_guard.go), or whose ID3v2 tag would
+// make it rename repeated frames, or store frames, past what it does in
+// bounded time (dhowden_id3v2_guard.go), is not handed to it, and ends as a
+// file whose tags dhowden could not read.
 func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	if ok, refusal := dhowdenPicturesWithinBudget(f); !ok {
 		scanLogger.Warn("embedded picture declares more than the file could hold; skipping tag read",
 			"path", trackLogPath(absPath, t), "picture", refusal.What,
 			"declaredBytes", refusal.Declared, "budgetBytes", refusal.Budget)
+		if ec != nil && ec.ArtworkCacheDir != "" {
+			extractLocalArtwork(absPath, t, nil, ec)
+		}
+		return nil
+	}
+	if ok, refusal := dhowdenID3v2WithinBudget(f); !ok {
+		warnID3v2Refused(absPath, t, refusal)
 		if ec != nil && ec.ArtworkCacheDir != "" {
 			extractLocalArtwork(absPath, t, nil, ec)
 		}
@@ -2024,8 +2033,11 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			}
 			return nil
 		}
-		m, err := tag.ReadID3v2Tags(f)
-		if err == nil && m != nil {
+		// The ID3v2 guard (dhowden_id3v2_guard.go) walks the tag from here,
+		// where ReadID3v2Tags will read it.
+		if ok, refusal := id3v2TagWithinBudget(f); !ok {
+			warnID3v2Refused(absPath, t, refusal)
+		} else if m, err := tag.ReadID3v2Tags(f); err == nil && m != nil {
 			populateFromTagMetadata(m, t)
 			applyEmbeddedLyricsFromTag(m, t)
 			dsfMeta = m
