@@ -176,13 +176,16 @@ func (f postureFlags) publicOnly() []string {
 // not --public saved a loopback config, the endpoint every paired device dials
 // dropped.
 //
-//   - A first install warns and goes on. It writes a working loopback install
-//     and has nothing to lose, so it is not stopped over a flag that changes
-//     nothing it writes.
-//   - A rewrite is refused, exit 2, before anything is graded or written: the
-//     flag says the operator meant a public install, and the rewrite would
-//     write a loopback one over the install that is there, a public one
-//     included.
+//   - A rewrite of a PUBLIC install is refused, exit 2, before anything is
+//     graded or written. It is the run where the missing --public costs
+//     something: the flags say the operator meant a public install, and the
+//     rewrite would make this one loopback, dropping that endpoint.
+//   - A first install, and a rewrite of a loopback install, warn and go on.
+//     Each writes a working loopback install and loses nothing, so neither is
+//     stopped over a flag that changes nothing it writes. A refusal of the
+//     loopback rewrite was the first draft, and it would fail a script that
+//     rewrites its config on every run with --yes --force, passing these
+//     flags, on its second run, the first having only warned.
 //   - A run that keeps the config says nothing more. Every flag it was given
 //     goes unused, which its "keeping it" line says, and an idempotent `bridge
 //     init --yes` re-run passing these flags must go on working as its first
@@ -210,17 +213,14 @@ func warnIgnoredPostureFlags(stderr io.Writer, f postureFlags, exists, replace b
 		return 0
 	}
 	names, verb, them := sentenceOfFlags(given)
-	if !replace {
+	if !replace || prior == nil || !prior.public() {
 		fmt.Fprintf(stderr, "warning: %s %s only with --public, so this run ignores %s and sets up a loopback install; "+
 			"add --public for a public install.\n", names, verb, them)
 		return 0
 	}
-	fmt.Fprintf(stderr, "%s %s only with --public, and this run would rewrite the config at %s as a loopback install, "+
-		"which ignores %s.\n", names, verb, cfgPath, them)
-	if prior != nil && prior.public() {
-		fmt.Fprintln(stderr, "the install there is a public one, and a loopback rewrite would drop the endpoint every paired device dials.")
-	}
-	fmt.Fprintf(stderr, "add --public to rewrite it as a public install, or leave %s out to rewrite it as a loopback one.\n", them)
+	fmt.Fprintf(stderr, "%s %s only with --public, and this run would rewrite the public install at %s as a loopback "+
+		"one, which ignores %s and drops the endpoint every paired device dials.\n", names, verb, cfgPath, them)
+	fmt.Fprintf(stderr, "add --public to rewrite it as a public install, or leave %s out to make it a loopback one.\n", them)
 	fmt.Fprintln(stderr, "the config was NOT changed.")
 	return 2
 }
@@ -505,8 +505,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	keep := exists && !replace
 
 	// A posture flag the run would not write (warnIgnoredPostureFlags). A
-	// rewrite given one is refused here, before anything is graded or
-	// written.
+	// rewrite of a public install given one is refused here, before anything
+	// is graded or written.
 	if code := warnIgnoredPostureFlags(stderr, postureFlags{
 		public: *publicMode, domain: *publicDomain, email: *publicEmail, proxy: *publicProxy,
 	}, exists, replace, cfgPath, prior); code != 0 {

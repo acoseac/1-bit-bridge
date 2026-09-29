@@ -4970,15 +4970,18 @@ what it claimed**, and none of it had a failing test.
   rewrite of a PUBLIC install given `--domain` and `--admin-tls-proxy` but
   not `--public` exited 0 with a loopback config, the endpoint every paired
   device dials dropped. `warnIgnoredPostureFlags` decides, after the
-  overwrite decision and before the preflight: **a first install warns and
-  goes on** (it writes a working loopback install and has nothing to lose);
-  **a rewrite is refused, exit 2, the config untouched** (the flag says the
-  operator meant public, and the rewrite would write loopback over the
-  install that is there, and says so when that install is public); **a run
-  that keeps the config says nothing more** (every flag goes unused, which
-  "keeping it" says, and an idempotent `bridge init --yes` re-run passing
-  these flags must not start failing on its second run). **Don't refuse a
-  first install over one**, and don't turn a keep into a refusal.
+  overwrite decision and before the preflight: **a rewrite of a PUBLIC
+  install is refused, exit 2, the config untouched** (the flag says the
+  operator meant public, and the rewrite would make that install loopback,
+  dropping the endpoint); **a first install, and a rewrite of a loopback
+  install, warn and go on** (each writes a working loopback install and
+  loses nothing; refusing the loopback rewrite, the first draft, would fail
+  a script that rewrites with `--yes --force` on every run, passing these
+  flags, on its second run, where its first only warned); **a run that
+  keeps the config says nothing more** (every flag goes unused, which
+  "keeping it" says, and an idempotent `bridge init --yes` re-run must go
+  on working). **Don't refuse a run over one that loses nothing by it**:
+  a refusal is for the rewrite that would cost the devices their route.
   `--email` with `--public --admin-tls-proxy` is unused too (the bridge
   then runs no ACME client) and warns. Every line names the flags, never
   their values: a `--domain` can carry a password, which `--public`
@@ -5566,9 +5569,9 @@ mentions across the four `ops/audit-*.md` files.
   without its key there read "all clear.", exit 0, and init then refused
   on `[FAIL] tls-cert partial state` (measured with the real binary);
   now doctor FAILs it too, and a fresh host reads `absent (init will
-  mint)`, `17 ok, 0 warn`. The launcher's row does the same whatever its
-  lookup found at the platform path, as Setup's preflight grades that dir
-  over a config it cannot read (#1023's rule for the row;
+  mint)`, `17 ok, 0 warn`. The launcher's row does the same over a config
+  it finds and cannot read, as Setup's preflight grades that dir over one
+  (#1023's rule for the row;
   `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead` compares
   the two lines). **A config that was named or found and not graded
   leaves no data dir**: tls-cert answers ok "not checked" and why (not
