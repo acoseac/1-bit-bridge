@@ -725,10 +725,10 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		// The picture allocation guard runs inside
-		// extractViaDhowdenFromReader, for every extension: dhowden picks
-		// its parser by the file's first bytes, so a FLAC-shaped .mp3 is
-		// read as FLAC too (dhowden_picture_guard.go).
+		// The picture allocation guard runs behind
+		// extractViaDhowdenFromReader (in readDhowdenTags), for every
+		// extension: dhowden picks its parser by the file's first bytes, so
+		// a FLAC-shaped .mp3 is read as FLAC too (dhowden_picture_guard.go).
 		if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
 			return err
 		}
