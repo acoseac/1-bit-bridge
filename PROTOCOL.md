@@ -247,7 +247,7 @@ Replaces `SMBConnectionPool.download` and `SMBConnectionPool.downloadStreaming`.
 `variant` (additive since v1.2, optional): selects an alternate rendering of the source instead of the original. Value is one of the IDs the bridge advertised on the source's `Track.variants` array in `/v1/manifest`. Today's only producer is `bridge upscale`, which mints `upscaled-<schemaVersion>-<targetRate>-<targetBits>` IDs (e.g. `upscaled-v1-176400-24`). Path validation runs on `path` first — a malformed `path` is rejected with the standard 400 family before any variant lookup.
 
 **Variant-specific responses:**
-- `404 variant_not_found`: no row exists for that `(path, variant)` pair, OR the upscale feature is disabled on this bridge. iOS treats this as "fall back to the original on the next playback".
+- `404 variant_not_found`: no row exists for that `(path, variant)` pair. iOS treats this as "fall back to the original on the next playback". Switching upscaling off does not produce it: a rendition whose row exists is served with the feature off too, with the same answers as with it on (see "Feature gate semantics" under "Upscaling (offline PCM variants)").
 - `410 Gone variant_stale`: a row exists but the source file's mtime/size has drifted since the sidecar was minted. iOS handles this the same way as a 404 (fall back to playing the original); the only difference is the error message surfaced in diagnostics ("variant expired" vs "variant not found"). The sidecar stays on disk; the operator's recovery is `bridge upscale --force <track>`.
 - `410 Gone variant_missing_on_disk`: the row points at a sidecar file that's been removed under the bridge's feet (manual cleanup). iOS falls back to the original; `bridge upscale --gc` reconciles.
 
@@ -577,9 +577,9 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 ### Batched upscaling (additive; `operatorDrivenUpscale`)
 
-Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. All three endpoints answer `503 upscale_disabled` when upscaling is not active (the flag off, or no usable `sox` right now: the same live gate as `POST /v1/upscale`), and `403 demo_read_only` on a demo bridge.
+Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. The two endpoints that change a batch (`POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`) answer `503 upscale_disabled` when upscaling is not active (the flag off, or no usable `sox` right now: the same live gate as `POST /v1/upscale`), and `403 demo_read_only` on a demo bridge. The list (`GET /v1/upscale/batches`) is a read of work already done, so it answers either way, as `/v1/download?variant=` does (see "Feature gate semantics" under "Upscaling (offline PCM variants)").
 
-Gate on the **`operatorDrivenUpscale`** feature flag: it is present only when upscaling is active **and** a batch coordinator is wired, which is exactly the condition under which these three routes do anything. A bridge without the flag either lacks the routes entirely or would answer `503`.
+Gate on the **`operatorDrivenUpscale`** feature flag: it is present only when upscaling is active **and** a batch coordinator is wired, which is exactly the condition under which the two that change a batch do anything. A bridge without the flag either lacks the routes entirely or would answer those two with `503`.
 
 **`POST /v1/upscale/batch`** — enrol a path.
 
@@ -786,7 +786,7 @@ Snapshot of the upscale feature's runtime + on-disk state: how many jobs are que
 | `cachedVariants` | Row count from `track_variants`. Survives across restarts and reflects historical conversion work — non-zero even when `enabled == false` if the operator disabled the feature without `--gc`. |
 | `cachedBytes` | Total size of all sidecar files, summed from `track_variants.size_bytes`. Helps the operator gauge disk usage before deciding to re-enable or `--gc`. |
 
-**Empty / disabled bridge**: returns the zero-value response `{"enabled": false, "cachedVariants": 0, "cachedBytes": 0}`. iOS treats this identically to a 404 from a pre-v1.2 bridge — render "feature off" without distinguishing a missing endpoint from a disabled feature.
+**Empty or disabled bridge**: `enabled` is `false`. The cache totals go on counting the renditions on disk, so a bridge that switched the feature off still reports them (the `cachedVariants` row), and only an empty one returns the zero-value response `{"enabled": false, "cachedVariants": 0, "cachedBytes": 0}`. iOS treats `enabled: false` identically to a 404 from a pre-v1.2 bridge — render "feature off" without distinguishing a missing endpoint from a disabled feature.
 
 **Polling cadence**: there is no iOS poller of this endpoint (the iOS management surface that polled it at 5 s was removed with operator-driven upscaling). The handler is cheap regardless — single SQL `COUNT` + a mutex-protected pool snapshot + a `sox` precheck — so third-party tooling polling at a few-second cadence is fine on Pi-class hosts; the server additionally bounds a wedged query with a 2 s handler timeout.
 
@@ -899,7 +899,7 @@ The schema version bumps only when the on-disk sidecar layout or the sox command
 
 #### Feature gate semantics
 
-- `upscale.enabled: false` (default): manifest emits no `variants` even if `track_variants` rows exist on disk (predictable round-trip — operator can re-enable to expose the cached sidecars without re-conversion). `/v1/health` reports `upscaleEnabled: false`. `/v1/download?variant=…` returns `404 variant_not_found`.
+- `upscale.enabled: false` (default): the bridge makes no new renditions, and withdraws none it has made. The manifest emits no `variants` even if `track_variants` rows exist on disk (predictable round-trip — operator can re-enable to expose the cached sidecars without re-conversion). `/v1/health` reports `upscaleEnabled: false` and omits the upscale flags (`carPlayOptimize`, `deleteVariants`, `dsdRender`, `operatorDrivenUpscale`, `upscaleCompleteEvents`), and the routes that change renditions or batches refuse: `POST /v1/upscale` and the two batch mutations with `503 upscale_disabled`, `DELETE /v1/upscale/variants` with `404 variant_not_found`. The reads go on answering as with the feature on: `/v1/download?variant=…` serves a rendition whose row exists (`404 variant_not_found` for a pair with no row, `410` for one gone stale or missing on disk), and `GET /v1/upscale/batches` lists past batches. Switching the flag advances no track's `indexed_at`, so a delta sync does not carry the stripped `variants`, and a client that listed a rendition before the switch-off may still ask for it: a `404` would read as a rendition that is gone, when the operator only stopped new work.
 - `upscale.enabled: true` AND a usable `sox` on PATH: full feature operates as documented.
 - `upscale.enabled: true` AND no usable `sox` (none on PATH, or a build that lacks FLAC support): the feature is off, as with the flag off, and `/v1/health` advertises `upscaleEnabled: false`. The rest of the server keeps running. The gate is live, never a verdict taken at startup: the bridge re-checks `sox` at most every 30 s while it runs, so installing it turns the feature on within about 30 s, with no restart. A bridge that starts in this state prints one line saying the feature stays off until a usable `sox` is installed.
 - `upscale.dsdRender.enabled: true` (default `false`) AND `ffmpeg` on PATH with the `dsd_*` decoders: `/v1/health.features` advertises `dsdRender`; `kind: "optimize"` admits DSD sources and `kind: "pcm"` is accepted; the pre-generation sweep (`autoOptimize`) renders the compact tier of every DSD track alongside the CarPlay ones. Flipping the flag hot-applies (settings PATCH `dsdRenderEnabled`, no restart). Without the decoders the flag is written but nothing renders, `dsdRender` stays absent, and `bridge doctor` names the install line; DST-compressed DSDIFF additionally needs the `dst` decoder (every stock ffmpeg package ships both).
@@ -912,13 +912,13 @@ Advertised via the `waveform` flag in `/v1/health.features` (plus `loudness` whe
 
 #### `Track.waveformTag` (manifest)
 
-When the feature is enabled AND the bridge has a cached waveform for a track, that track's `Track` entry in `/v1/manifest` carries an additional string field:
+When the bridge has a cached waveform for a track, that track's `Track` entry in `/v1/manifest` carries an additional string field, with the feature switched off too (see "Feature gate semantics" below):
 
 ```json
 { "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "waveformTag": "3b42801f" }
 ```
 
-`waveformTag` is `omitempty` (absent when no waveform is cached, or the feature is off). Its value is a short **content tag** — the first 8 lowercase hex of the sidecar bytes' SHA‑256. iOS uses it as the cache key when fetching `/v1/waveform`: a regenerated waveform (the source file was edited) yields a new tag, so a client caching by tag re-fetches automatically. Writing a waveform bumps the parent track's `indexed_at`, so the new `waveformTag` surfaces on the next `/v1/manifest?since=` delta sync (only when the value actually changed — an identical recompute is a no-op).
+`waveformTag` is `omitempty` (absent when no waveform is cached). Its value is a short **content tag** — the first 8 lowercase hex of the sidecar bytes' SHA‑256. iOS uses it as the cache key when fetching `/v1/waveform`: a regenerated waveform (the source file was edited) yields a new tag, so a client caching by tag re-fetches automatically. Writing a waveform bumps the parent track's `indexed_at`, so the new `waveformTag` surfaces on the next `/v1/manifest?since=` delta sync (only when the value actually changed — an identical recompute is a no-op).
 
 #### `GET /v1/waveform?path=<rel>` (bearer-authenticated)
 
@@ -926,7 +926,7 @@ Returns the binary waveform sidecar for the track at `path` (the same library-re
 
 - `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<waveformTag>"`, `Cache-Control: private, no-cache`. The request carries **no content tag** — `path` is its only key — so re-analysis rewrites the body under a stable URL. `no-cache` means "store it, but revalidate", so a client that already holds this sidecar pays one conditional request (`If-None-Match: "<waveformTag>"`) and gets a `304 Not Modified`. Corrected 2026-08-06: this previously advertised `max-age=31536000, immutable`, which instructs a conforming client never to revalidate — pinning a stale waveform and making the `ETag` unusable.
 - `400 bad_request` — missing/invalid `path`.
-- `404 waveform_not_found` — analysis disabled, or no waveform cached for this track yet.
+- `404 waveform_not_found` — no waveform cached for this track yet. Switching analysis off does not produce it: a cached waveform is served with the feature off too.
 - `410 waveform_stale` — the source file drifted (mtime beyond a 2 s tolerance, or size changed) since the waveform was computed; the client falls through to on-device analysis until re-analysis catches up. `410 waveform_missing_on_disk` — the row exists but the sidecar file is gone (manual wipe / partial GC); same client handling.
 
 ##### Sidecar binary format (`1BWF`)
@@ -1001,7 +1001,7 @@ This bounds what the field can be used for, and the bound is deliberate: it is s
 Returns the binary spectrum curve for the track at `path` (the same library-relative form `/v1/download` accepts; iOS-shaped lowercase/leading-slash paths resolve case-insensitively).
 
 - `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<8 hex>"`, `Cache-Control: no-cache`. The ETag is over the curve's own bytes. As with `/v1/waveform`, `path` is the URL's only key, so re-analysis rewrites the body under a stable URL — `no-cache` means "store it, but revalidate", and a client holding the curve pays one conditional request for a `304`.
-- `404 spectrum_not_found` — analysis disabled, or no spectrum for this track yet.
+- `404 spectrum_not_found` — no spectrum for this track yet. Switching analysis off does not produce it: a cached curve is served with the feature off too, as for `/v1/waveform`.
 - `410 spectrum_stale` — the source drifted (mtime beyond a 2 s tolerance, or size changed) since the spectrum was computed.
 
 **Body format — `1BSP`, 84 bytes**, little-endian:
@@ -1046,9 +1046,9 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 
 #### Feature gate semantics
 
-- `analysis.enabled: false` (default): `/v1/health.features` omits `waveform`, `loudness`, and `keyTempo`; manifest emits no `waveformTag`, no analysis-derived `replayGainTrackDB`, and no `keyRoot`/`keyMode`/estimated `bpm`; `/v1/waveform` returns `404`.
-- `analysis.enabled: true` AND a usable `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
-- `analysis.enabled: true` AND no usable `sox` (none on PATH, or a build that lacks FLAC support): the feature is off, as with the flag off, and `/v1/health.features` omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running. As for upscaling, the gate is live, never a verdict taken at startup: `sox` is re-checked at most every 30 s while the bridge runs, so installing it turns the feature on with no restart.
+- `analysis.enabled: false` (default): the bridge analyses nothing new, and withdraws nothing it has measured. `/v1/health.features` omits the analysis flags (`waveform`, `loudness`, `keyTempo`, `trackQuality`, `spectrum`), so a client that gates on them asks for no curve. The manifest goes on carrying what was measured while the feature was on (`waveformTag`, an analysis-derived `replayGainTrackDB`, `keyRoot`/`keyMode`, an estimated `bpm` with `bpmEstimated`, `truePeakDB`, `drScore`, `audioMD5State`, `bandwidthHz`), and `/v1/waveform` and `/v1/spectrum` go on serving the cached curves, with the answers they give with the feature on (`404` for a track with none, `410` when the source changed since). A bridge that never ran analysis has none of them to send. Switching the flag advances no track's `indexed_at`, and a client holding a curve, or a manifest row naming one, keeps a working answer: the operator stopped new work, not the use of what exists.
+- `analysis.enabled: true` AND a usable `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo` + `trackQuality` + `spectrum`).
+- `analysis.enabled: true` AND no usable `sox` (none on PATH, or a build that lacks FLAC support): the feature is off, as with the flag off, and `/v1/health.features` omits the analysis flags. The rest of the server keeps running. As for upscaling, the gate is live, never a verdict taken at startup: `sox` is re-checked at most every 30 s while the bridge runs, so installing it turns the feature on with no restart.
 
 ### Lyrics (additive — Mirror-PR B1, v2.0)
 
