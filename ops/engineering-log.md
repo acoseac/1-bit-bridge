@@ -28439,3 +28439,37 @@ Four: the tray onSaved bullet said the panel's redraw "takes the tray and its
 Saved. away"; the mixes bullet called the panel's whole-route redraw a
 follow-up; the focus bullet called every other control's lost focus open; the
 managed bullet called the two controls a follow-up.
+
+### Review round 1 (SonarCloud on #1094)
+
+The quality gate passed and listed seven issues on the head, all taken:
+
+- `go:S3776` on three tests (cognitive complexity 16, 22 and 38 against 15):
+  `TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch`,
+  `TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt` and
+  `TestAVariantTraySaveRedrawsThePanelInPlace`. Each is a short driver now, with
+  the expectations in named `check…` helpers and the harness types at package
+  level; the assertions and their messages are unchanged, and the controls
+  were re-run on the split tests (`reconcile` rebuilding, the newest-redraw
+  guard, the CarPlay field gate, the Enable and policy handlers): each still
+  red where it was.
+- `javascript:S7747` and `S7762` on `reconcile`: the loop over `[...children]`
+  with `parent.removeChild(child)`. The suggestion to iterate the collection
+  directly would skip a node after each one removed (`children` is live), so
+  the copy stays, taken as a `filter` of the strangers, removed with
+  `child.remove()`; the two DOM stubs gained `remove()`.
+- `javascript:S3358`, a nested ternary for the stale-copy note: `staleNote`.
+- `javascript:S6582`, `!btn || !btn.dataset.switchOn`: an optional chain.
+
+Fixing the panel's own code showed a gap in what pins it: no test, before or
+after the change, covered the stale-copy note or the numbers a redraw moves.
+`TestAVariantTraySaveRedrawsThePanelInPlace` now redraws a panel through three
+summaries and reads the ratio, the bar's value and the note back, on the same
+nodes.
+
+| mutation | goes red |
+|---|---|
+| the count of one is always plural | `as drawn` |
+| the bar's value is not updated | all three steps |
+| the ratio is not updated | all three steps |
+| the stale note stays in the document at zero | `two saves later` only |
