@@ -29204,7 +29204,8 @@ source, and the operator can rescan from the same console.
   this exit asks for a rescan, before its count;
   `TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath`).
 - `TestTheCLIRendersNothingFromAFileThatChangedDuringItsRun` (unix).
-- `TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`,
+- `…AStaleDownloadRescansItsSourceSoTheSweepRendersItAgain` (renamed
+  `TestAStaleDownloadRescansItsSourceAndRendersItAgain` by B82, below),
   `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
   `TestARescanIndexesNoSecondSpellingOfTheDirectory` (skips on a
   case-sensitive filesystem; runs on macOS and Windows).

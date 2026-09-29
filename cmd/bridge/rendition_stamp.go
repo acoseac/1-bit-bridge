@@ -32,13 +32,15 @@ package main
 //     renders, is not rendered under the row's older stamp either: the job
 //     fails with transcode.ErrSourceChanged, strikes nothing, and the pool
 //     asks for the same rescan (backlog B53).
-//   - A download that finds a rendition stale because its source changed
-//     after its row was written asks for the rescan as well
-//     (staleRenditionRescan), and every rescan drops the album-gain index
-//     and nudges the auto-optimize sweep, so a pre-generated rendition of a
-//     retagged file
-//     is rendered again without waiting for the next scan: the phone never
-//     asks again for a family the manifest lists.
+//   - A download that finds a rendition stale renders it again
+//     (staleRenditionHeal, backlog B82): at once when the source's row is
+//     current, through the on-demand path under the live gate of the
+//     rendition's kind (staleRerender), and, when the source changed after
+//     its row was written, once the rescan it asks for has read the change.
+//     Every rescan drops the album-gain index and nudges the auto-optimize
+//     sweep too. With the sweep off, the default, nothing else renders a
+//     stale rendition: a batch counts it covered, and a client asks for a
+//     new one only once it stops listing the old one.
 //
 // Before this, the on-demand path and the CLI stamped a live stat while the
 // rest stamped the row, and each writer undid the other: measured on a real
@@ -49,6 +51,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -91,7 +94,7 @@ type sourceRescan struct {
 // it: when an on-demand request for a rendition of that file is refused,
 // when a render job or a batch walk finds the file changed since its row
 // (transcode.Pool.SetSourceRescan), and when a download finds a rendition
-// of it stale (staleRenditionRescan). It makes the refusal cost the client
+// of it stale (staleRenditionHeal). It makes the refusal cost the client
 // one play of the source rather than every play until the periodic scan
 // (six hours by default): the scan it runs writes the row the next request
 // stamps from.
@@ -195,16 +198,18 @@ func (r *sourceRescanner) next() (sourceRescan, bool) {
 // run scans every queued directory until ctx ends. One wake can stand for
 // many requests, since its slot holds one, so each wake drains the queue.
 //
-// after, when set, is called after each rescan, unless the context ended
-// during it. runServe passes afterRescan: a rescan that read a changed file
-// has made that file's renditions stale against its row, and the sweep it
-// nudges renders them again from the version the scan read; without it they
-// wait for the sweep's next tick, which by default is the next periodic
-// scan. Every rescan, not only one that committed rows: ScanSubtree counts
-// the rows it wrote, and a rescan whose file was deleted before it ran
-// deletes a row and counts none, which changes an album's membership all the
-// same (review round 4). It must not block.
-func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error), after func()) {
+// after, when set, is called after each rescan with the library-relative
+// directory it read, unless the context ended during it. runServe passes
+// afterRescan: a rescan that read a changed file has made that file's
+// renditions stale against its row, so the renders downloads asked for while
+// the row was behind are queued there, and the sweep it nudges renders the
+// rest from the version the scan read; without it they wait for the sweep's
+// next tick, which by default is the next periodic scan. Every rescan, not
+// only one that committed rows: ScanSubtree counts the rows it wrote, and a
+// rescan whose file was deleted before it ran deletes a row and counts none,
+// which changes an album's membership all the same (review round 4). It must
+// not block for long: the next directory waits for it.
+func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error), after func(ctx context.Context, relDir string)) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -223,25 +228,30 @@ func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context
 				}
 			}
 			if after != nil && ctx.Err() == nil {
-				after()
+				after(ctx, dir.rel)
 			}
 		}
 	}
 }
 
 // afterRescan is what runServe runs after each rescan (sourceRescanner.run's
-// `after`). It drops the album-gain index first (invalidate, nil when the
-// album gain is not wired): the rescan may have read a retag that moved a
-// DSD track to another album, or deleted one, and the index is otherwise
-// dropped only when a FULL scan lands, so it can be up to its two-minute TTL
-// old. Then it nudges the auto-optimize sweep, whose renders would otherwise
-// take that index's album-mates for the gain they record. The nudge never
-// blocks: its channel holds one, and a pending nudge already covers this
-// one.
-func afterRescan(invalidate func(), nudge chan<- struct{}) func() {
-	return func() {
+// `after`), in this order. It drops the album-gain index first (invalidate,
+// nil when the album gain is not wired): the rescan may have read a retag
+// that moved a DSD track to another album, or deleted one, and the index is
+// otherwise dropped only when a FULL scan lands, so it can be up to its
+// two-minute TTL old, and every render queued after this step takes its
+// album-mates from it. Then it queues the renders downloads asked for while
+// the directory's rows were behind (rescanned, staleRenditionHeal's, nil when
+// no hook is wired), on the foreground lane, ahead of the sweep. Then it
+// nudges the auto-optimize sweep. The nudge never blocks: its channel holds
+// one, and a pending nudge already covers this one.
+func afterRescan(invalidate func(), rescanned func(ctx context.Context, relDir string), nudge chan<- struct{}) func(ctx context.Context, relDir string) {
+	return func(ctx context.Context, relDir string) {
 		if invalidate != nil {
 			invalidate()
+		}
+		if rescanned != nil {
+			rescanned(ctx, relDir)
 		}
 		select {
 		case nudge <- struct{}{}:
@@ -251,95 +261,335 @@ func afterRescan(invalidate func(), nudge chan<- struct{}) func() {
 }
 
 // staleRenditionRescanEvery is how often downloads may ask for a rescan of
-// one directory. A stale rendition is asked for on every play of its track,
-// by every paired device, and in range requests, so without it a file whose
-// rescan does not bring its row level with it (one still being written, a
-// directory the scan cannot read) would keep the rescanner busy with that
-// directory for as long as GETs arrive: each rescan that reads a changed
-// file also runs the whole-library duplicate restamp (1.1 s over 50,012 rows
-// on the dev Mac).
+// one directory, and for a render of one rendition. A stale rendition is
+// asked for on every play of its track, by every paired device, and in range
+// requests, so without it a file whose rescan does not bring its row level
+// with it (one still being written, a directory the scan cannot read) would
+// keep the rescanner busy with that directory for as long as GETs arrive:
+// each rescan that reads a changed file also runs the whole-library
+// duplicate restamp (1.1 s over 50,012 rows on the dev Mac). And a render
+// that fails would be tried again on every GET: a failure writes no row, so
+// the rendition stays stale.
 const staleRenditionRescanEvery = time.Minute
 
-// staleRenditionRescan is the download path's side of the rescans
-// (api.StaleRenditionFunc): told of every rendition a GET found stale, it
-// asks for a rescan of the source's directory when the file has changed
-// since its row was written, so its row catches up and the auto-optimize
-// sweep renders the rendition again. Nothing else would: the phone never
-// asks again for a family the manifest lists, and a batch counts a track
-// with any rendition of the family as covered.
+// staleRenditionWaitMax is how long a render a download asked for may wait
+// for the rescan of its directory before a full table forgets it: longer
+// than a full rescan queue (about nineteen minutes of work at its cap, see
+// sourceRescanQueueCap) behind a full scan holding the scanner's lock.
+const staleRenditionWaitMax = time.Hour
+
+// staleRenditionHeal is the download path's side of a stale rendition
+// (api.StaleRenditionFunc): told of every rendition a GET found stale, it has
+// it rendered again (backlog B82). Until then a phone plays the source, and
+// nothing else renders it on a bridge whose auto-optimize sweep is off, the
+// default: a batch counts a track with any rendition of the family as
+// covered, and the app asks for a new one only once it stops listing the
+// old one, which it does after a 410 on some of its playback routes and never
+// for an offline download.
 //
-// It asks only while the row is behind the file. Once a scan has read the
-// change, the rendition is stale against the row too, and a rescan would
-// change nothing; the sweep (with auto-optimize on) renders it on its next
-// pass. And at most once per directory per staleRenditionRescanEvery, a
-// minute spent only on a request the rescanner queued or already had
-// waiting: one it dropped (its queue full) leaves the next GET free to ask.
-type staleRenditionRescan struct {
+//   - While the file's row is behind it (the file changed since the scan
+//     that wrote the row), it asks for a rescan of the file's directory
+//     (backlog B53), and the render waits for that rescan (rescanned): a
+//     render now would record a version the serve path refuses. At most once
+//     per directory per staleRenditionRescanEvery, a minute spent only on a
+//     request the rescanner queued or already had waiting: one it dropped
+//     (its queue full) leaves the next GET free to ask.
+//   - Once the row is current it asks for the render (rerender) at once, at
+//     most once per rendition per staleRenditionRescanEvery, a minute not
+//     spent when nothing was tried (the pool's queue full, the kind switched
+//     off). The render is stamped with the row, so the rendition it writes
+//     is fresh to the serve path, the sweep and the album gain alike, and no
+//     later download finds it stale: no loop (#1077's one clock). A render
+//     that fails writes no row, so the next download after the minute asks
+//     again, until the failures suppress the file (staleRerender).
+type staleRenditionHeal struct {
 	lookup func(ctx context.Context, rel string) (*manifest.Track, error)
 	// request is sourceRescanner.queue: whether the directory will be
 	// scanned.
 	request func(rel string) bool
-	now     func() time.Time
-	mu      sync.Mutex
+	// rerender asks for the render of the rendition variantID names, for the
+	// file whose track row records rel (staleRerender.rerender). Nil: a stale
+	// download asks for rescans only.
+	rerender func(ctx context.Context, rel, variantID string) error
+	// stat is the file a row names at rel, as a download stats it (the
+	// resolver's ResolveChecked). A render that waited for a rescan is asked
+	// for only if the rescan brought the row level with it.
+	stat func(rel string) (os.FileInfo, error)
+	now  func() time.Time
+	mu   sync.Mutex
 	// asked is when a download last asked for each library-relative
-	// directory, bounded at sourceRescanQueueCap directories: past that,
-	// the ones older than the window are forgotten first, and a request
-	// finding none to forget is dropped.
-	asked map[string]time.Time
+	// directory's rescan; rendered, when one last asked for each rendition's
+	// render (keyed by path and id).
+	asked, rendered recentKeys
+	// waiting holds the renders downloads asked for while their rows were
+	// behind, keyed by path and id, until the rescan of their directory.
+	waiting map[string]staleRenditionWant
 }
 
-func newStaleRenditionRescan(lookup func(ctx context.Context, rel string) (*manifest.Track, error), request func(rel string) bool) *staleRenditionRescan {
-	return &staleRenditionRescan{lookup: lookup, request: request, now: time.Now, asked: map[string]time.Time{}}
+// staleRenditionWant is a render a download asked for while the file's row
+// was behind it.
+type staleRenditionWant struct {
+	dir, rel, variantID string
+	at                  time.Time
+}
+
+func newStaleRenditionHeal(lookup func(ctx context.Context, rel string) (*manifest.Track, error), request func(rel string) bool,
+	rerender func(ctx context.Context, rel, variantID string) error, stat func(rel string) (os.FileInfo, error)) *staleRenditionHeal {
+	return &staleRenditionHeal{
+		lookup: lookup, request: request, rerender: rerender, stat: stat, now: time.Now,
+		asked: recentKeys{}, rendered: recentKeys{}, waiting: map[string]staleRenditionWant{},
+	}
 }
 
 // observe is the api.StaleRenditionFunc: clientPath is the source path the
-// GET named (any spelling the store's lookup accepts), info the stat the
-// freshness check compared against.
-func (h *staleRenditionRescan) observe(ctx context.Context, clientPath string, info os.FileInfo) {
+// GET named (any spelling the store's lookup accepts), variantID the stale
+// rendition's id, info the stat the freshness check compared against.
+func (h *staleRenditionHeal) observe(ctx context.Context, clientPath, variantID string, info os.FileInfo) {
 	track, err := h.lookup(ctx, clientPath)
 	if err != nil || track == nil {
 		return
 	}
 	if transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
+		h.render(ctx, track.Path, variantID)
 		return
 	}
 	dir := path.Dir(track.Path)
-	if !h.due(dir) {
+	h.await(dir, track.Path, variantID)
+	if !h.admit(h.asked, dir) {
 		return
 	}
 	if !h.request(track.Path) {
 		// Nothing will scan it (the rescanner's queue is full): the minute
 		// is not spent on a request that did not happen.
-		h.forget(dir)
+		h.forget(h.asked, dir)
 	}
 }
 
-// forget drops what due recorded for dir.
-func (h *staleRenditionRescan) forget(dir string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.asked, dir)
+// rescanned is sourceRescanner.run's `after` step for the renders downloads
+// asked for while the rows of dir's files were behind: each whose row the
+// rescan brought level with its file is asked for now. One still behind (the
+// file changed again, or the scan could not read it) is dropped, to be asked
+// for by the next download that finds it stale.
+func (h *staleRenditionHeal) rescanned(ctx context.Context, dir string) {
+	for _, w := range h.takeWaiting(dir) {
+		track, err := h.lookup(ctx, w.rel)
+		if err != nil || track == nil {
+			continue
+		}
+		info, err := h.stat(track.Path)
+		if err != nil || !transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
+			continue
+		}
+		h.render(ctx, track.Path, w.variantID)
+	}
 }
 
-// due records that a download asks for dir now, unless one did within
+// render asks for the render of variantID for the file whose row records
+// rel, unless it was asked for within the minute.
+func (h *staleRenditionHeal) render(ctx context.Context, rel, variantID string) {
+	if h.rerender == nil {
+		return
+	}
+	key := rel + "\x00" + variantID
+	if !h.admit(h.rendered, key) {
+		return
+	}
+	err := h.rerender(ctx, rel, variantID)
+	switch {
+	case err == nil:
+		logger.Info("a download found a rendition stale; rendering it again", "path", rel, "variant", variantID)
+	case errors.Is(err, api.ErrUpscaleQueueFull):
+		// Nothing was queued: the next download may ask again.
+		h.forget(h.rendered, key)
+	case errors.Is(err, errSourceAheadOfRow):
+		// The file changed again between the check here and the one in the
+		// enqueue, which asked for the rescan: the render waits for it.
+		h.forget(h.rendered, key)
+		h.await(path.Dir(rel), rel, variantID)
+	case errors.Is(err, errRerenderInactive):
+		// Refused on a gate, before any work: the minute stays free, so the
+		// first download after the kind is switched on renders.
+		h.forget(h.rendered, key)
+	case errors.Is(err, errRerenderSuppressed),
+		errors.Is(err, api.ErrUpscaleIneligible), errors.Is(err, api.ErrUpscaleSourceMissing):
+		logger.Debug("a download found a rendition stale; not rendering it again", "path", rel, "variant", variantID, "reason", err)
+	default:
+		logger.Warn("a download found a rendition stale, and asking for its render failed", "path", rel, "variant", variantID, "err", err)
+	}
+}
+
+// await keeps the render of variantID for rel until the rescan of dir, when
+// a render can be asked for at all. At most sourceRescanQueueCap renders
+// wait: past that, the ones older than staleRenditionWaitMax are forgotten
+// first, and a render finding none to forget is dropped, to be asked for by
+// the next download once the row is current.
+func (h *staleRenditionHeal) await(dir, rel, variantID string) {
+	if h.rerender == nil {
+		return
+	}
+	now := h.now()
+	key := rel + "\x00" + variantID
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.waiting[key]; !ok && len(h.waiting) >= sourceRescanQueueCap {
+		for k, w := range h.waiting {
+			if now.Sub(w.at) >= staleRenditionWaitMax {
+				delete(h.waiting, k)
+			}
+		}
+		if len(h.waiting) >= sourceRescanQueueCap {
+			return
+		}
+	}
+	h.waiting[key] = staleRenditionWant{dir: dir, rel: rel, variantID: variantID, at: now}
+}
+
+// takeWaiting removes and returns the renders waiting for dir's rescan.
+func (h *staleRenditionHeal) takeWaiting(dir string) []staleRenditionWant {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []staleRenditionWant
+	for k, w := range h.waiting {
+		if w.dir == dir {
+			out = append(out, w)
+			delete(h.waiting, k)
+		}
+	}
+	return out
+}
+
+// admit records in keys that key goes now, unless it went within
 // staleRenditionRescanEvery.
-func (h *staleRenditionRescan) due(dir string) bool {
+func (h *staleRenditionHeal) admit(keys recentKeys, key string) bool {
 	now := h.now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if at, ok := h.asked[dir]; ok && now.Sub(at) < staleRenditionRescanEvery {
+	return keys.admit(key, now, staleRenditionRescanEvery)
+}
+
+// forget drops what admit recorded for key.
+func (h *staleRenditionHeal) forget(keys recentKeys, key string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(keys, key)
+}
+
+// recentKeys is when each key was last let through, for at most
+// sourceRescanQueueCap keys. Its caller holds the lock.
+type recentKeys map[string]time.Time
+
+// admit records that key goes at now, unless it went within window. Past
+// sourceRescanQueueCap keys, the ones older than window are forgotten first,
+// and a key finding none to forget is refused.
+func (r recentKeys) admit(key string, now time.Time, window time.Duration) bool {
+	if at, ok := r[key]; ok && now.Sub(at) < window {
 		return false
 	}
-	if len(h.asked) >= sourceRescanQueueCap {
-		for d, at := range h.asked {
-			if now.Sub(at) >= staleRenditionRescanEvery {
-				delete(h.asked, d)
+	if _, ok := r[key]; !ok && len(r) >= sourceRescanQueueCap {
+		for k, at := range r {
+			if now.Sub(at) >= window {
+				delete(r, k)
 			}
 		}
-		if len(h.asked) >= sourceRescanQueueCap {
+		if len(r) >= sourceRescanQueueCap {
 			return false
 		}
 	}
-	h.asked[dir] = now
+	r[key] = now
 	return true
+}
+
+// errRerenderInactive and errRerenderSuppressed are staleRerender's two
+// refusals that are no fault: the rendition's kind is switched off on this
+// bridge (or its id names no family it renders, or the bridge is a demo),
+// and the file's renders have failed often enough to be suppressed.
+var (
+	errRerenderInactive   = errors.New("this rendition's kind is not active on this bridge")
+	errRerenderSuppressed = errors.New("renders of this file keep failing (suppressed)")
+)
+
+// renditionKindOf is the job kind that renders a rendition of this id's
+// family, read off its prefix (the manifest.VariantKindPrefix* names every
+// coverage query and the app route by): `optimized-`, the CarPlay tier of a
+// PCM source and, by the shared prefix, the compact tier of a DSD source;
+// `pcm-`, the faithful DSD tier; `upscaled-`. ok is false for any other id.
+func renditionKindOf(variantID string) (kind transcode.JobKind, ok bool) {
+	switch {
+	case strings.HasPrefix(variantID, manifest.VariantKindPrefixOptimized+"-"):
+		return transcode.JobKindOptimize, true
+	case strings.HasPrefix(variantID, manifest.VariantKindPrefixPCM+"-"):
+		return transcode.JobKindPCMRender, true
+	case strings.HasPrefix(variantID, manifest.VariantKindPrefixUpscaled+"-"):
+		return transcode.JobKindUpscale, true
+	}
+	return "", false
+}
+
+// renditionGates are the live gates of the three kinds: the closures runServe
+// hands POST /v1/upscale (api.WithUpscale, WithCarPlayOptimize, WithDSDRender),
+// so a stale download renders nothing a client's request for the family
+// would be refused (TestAStaleDownloadRendersUnderTheV1KindGates).
+type renditionGates struct {
+	upscale, optimize, pcm func() bool
+}
+
+// open reports whether kind's gate is open. A nil gate is closed.
+func (g renditionGates) open(kind transcode.JobKind) bool {
+	var gate func() bool
+	switch kind {
+	case transcode.JobKindOptimize:
+		gate = g.optimize
+	case transcode.JobKindPCMRender:
+		gate = g.pcm
+	case transcode.JobKindUpscale:
+		gate = g.upscale
+	}
+	return gate != nil && gate()
+}
+
+// staleRerender is how a stale download has a rendition rendered again: the
+// way a client's POST /v1/upscale for the family would, and with the
+// refusals every automatic path makes.
+//
+//   - The rendition's kind must be active (open): its live gate is the one
+//     POST /v1/upscale reads.
+//   - Never on a demo bridge (demo): POST /v1/upscale answers 403 there,
+//     since every bearer on a demo bridge is public, and a download is not a
+//     way around that. The demo's auto-optimize sweep renders its stale
+//     renditions instead.
+//   - Never for a file whose renders keep failing (suppressed: the
+//     transcode-failure suppression the sweep and the batch walks skip by),
+//     or a failing file would be rendered on every play of it.
+//   - enqueue is the adapter's entry point for the kind
+//     (upscaleEnqueuerAdapter.enqueueKind), which builds the spec from the
+//     TRACK ROW, refuses a file ahead of its row (and asks for its rescan),
+//     refuses a family already fresh, and puts the job on the lane a
+//     client's request takes. It renders the family's CURRENT id for the
+//     source, which is the stale id itself unless the id was minted under
+//     an older schema or another target (a DSD `v1` rendition, an upscale
+//     target the operator has since moved): then it is the id a request for
+//     the family would render, and the app, which picks the newest of a
+//     family, plays it.
+type staleRerender struct {
+	enqueue    func(kind transcode.JobKind, rel string) error
+	open       func(kind transcode.JobKind) bool
+	suppressed func(ctx context.Context, rel string) (bool, error)
+	demo       bool
+}
+
+func (r staleRerender) rerender(ctx context.Context, rel, variantID string) error {
+	kind, ok := renditionKindOf(variantID)
+	if !ok || r.demo || r.open == nil || !r.open(kind) {
+		return errRerenderInactive
+	}
+	if r.suppressed != nil {
+		suppressed, err := r.suppressed(ctx, rel)
+		if err != nil {
+			return fmt.Errorf("read the file's render failures: %w", err)
+		}
+		if suppressed {
+			return errRerenderSuppressed
+		}
+	}
+	return r.enqueue(kind, rel)
 }

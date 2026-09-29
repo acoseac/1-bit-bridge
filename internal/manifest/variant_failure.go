@@ -180,6 +180,30 @@ func (s *Store) ClearVariantFailuresUnderPrefix(ctx context.Context, prefix stri
 	return res.RowsAffected()
 }
 
+// variantFailureSuppressedForPathSQL is variantFailureSuppressedSQL over the
+// one row at a path. Binds: the path, then the cutoff.
+const variantFailureSuppressedForPathSQL = `SELECT COUNT(*) FROM tracks WHERE path = ? AND ` + variantFailureSuppressedSQL
+
+// VariantFailureSuppressed reports whether the track at path is suppressed:
+// the predicate every candidate query skips by (variantFailureSuppressedSQL),
+// for a caller that asks about one file. A stale download's re-render asks
+// it, so a file whose renders keep failing is not rendered on every play of
+// it. A path with no row is not suppressed.
+func (s *Store) VariantFailureSuppressed(ctx context.Context, path string) (bool, error) {
+	n, err := s.countTracksWhere(ctx, variantFailureSuppressedForPathSQL, path, s.VariantFailureCutoff())
+	return n > 0, err
+}
+
+// countTracksWhere runs one COUNT statement over tracks. The statement
+// arrives as a parameter, which keeps SonarCloud's go:S2077 quiet: it
+// follows a named const to its concatenation, and a statement that shares
+// the suppression predicate concatenates it on purpose.
+func (s *Store) countTracksWhere(ctx context.Context, query string, args ...any) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
+}
+
 // SuppressedVariantFailureCount reports how many sources are currently
 // suppressed, for the admin Jobs card — so a shrinking backlog that never
 // reaches zero has a visible explanation instead of looking stuck.

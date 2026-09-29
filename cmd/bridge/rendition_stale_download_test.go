@@ -15,23 +15,27 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain: the case the
-// rescan on a stale download exists for. The auto-optimize sweep
-// pre-generated a rendition, then the file was retagged. The phone asks
-// for that rendition on every play, gets 410 variant_stale, plays the
-// source, and never asks for a new one: the manifest lists the family.
-// Measured on main at 6dfba62c: five downloads after the retag each
-// answered 410, the row still recorded the old mtime three seconds later,
-// and a sweep then rendered nothing (the file had changed since its scan),
-// so the rendition answered 410 until the periodic scan, six hours by
-// default.
+// TestAStaleDownloadRescansItsSourceAndRendersItAgain: the case the rescan
+// on a stale download exists for. The auto-optimize sweep pre-generated a
+// rendition, then the file was retagged. A phone that keeps the rendition
+// listed asks for it on every play, gets 410 variant_stale, plays the
+// source, and asks for no new one. Measured on main at 6dfba62c: five
+// downloads after the retag each answered 410, the row still recorded the
+// old mtime three seconds later, and a sweep then rendered nothing (the file
+// had changed since its scan), so the rendition answered 410 until the
+// periodic scan, six hours by default.
 //
-// Now the first stale download asks for a rescan of the file's directory,
-// the rescan writes the row and nudges the sweep, and the sweep renders
-// the rendition again from the version the scan read. Once the row is
-// current a stale download asks for nothing more, since a rescan could not
-// change it. A download that answers 200 asks for nothing either.
-func TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain(t *testing.T) {
+// Since B53 the first stale download asks for a rescan of the file's
+// directory, and since B82 the render it wanted is queued once that rescan
+// has read the change, so the next download is served whether or not the
+// sweep runs. The sweep, nudged by the same rescan, then finds the
+// rendition fresh and renders nothing more. Once the row is current a stale
+// download asks for no rescan, since a rescan could not change it, and a
+// download that answers 200 asks for nothing at all.
+//
+// Named …StaleDownloadRescansItsSourceSoTheSweepRendersItAgain until B82:
+// the render the sweep made is the download's own now.
+func TestAStaleDownloadRescansItsSourceAndRendersItAgain(t *testing.T) {
 	b := newEmptyStampBridge(t)
 	abs, scanner := b.mintScannedDSF(t, stampDSD)
 	rescanned := b.startRescans(t, scanner)
@@ -48,6 +52,7 @@ func TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain(t *testing.T) {
 	if err := os.Chtimes(abs, later, later); err != nil {
 		t.Fatal(err)
 	}
+	before := b.queue.count()
 	if code := b.download(t, stampDSD, stampDSDCompact); code != http.StatusGone {
 		t.Fatalf("GET after the retag = %d, want 410", code)
 	}
@@ -55,23 +60,27 @@ func TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain(t *testing.T) {
 	select {
 	case <-rescanned:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the rescan did not signal: runServe nudges the auto-optimize sweep there")
+		t.Fatal("the rescan did not signal: runServe queues the waiting renders and nudges the auto-optimize sweep there")
 	}
-
-	if code := b.download(t, stampDSD, stampDSDCompact); code != http.StatusGone {
-		t.Fatalf("GET before the sweep = %d, want 410: the rendition is still the old version's", code)
-	}
-	if n := b.rescansWaiting(); n != 0 {
-		t.Errorf("%d rescans queued by a stale download whose row is current, want none: a rescan changes nothing", n)
-	}
-
-	before := b.queue.count()
-	b.sweep(t)
 	if got := b.queue.since(before); len(got) != 1 {
-		t.Fatalf("the sweep after the rescan rendered %v, want the compact tier again", got)
+		t.Fatalf("the rescan's step rendered %v, want the compact tier the stale download asked for", got)
 	}
 	if code := b.download(t, stampDSD, stampDSDCompact); code != http.StatusOK {
-		t.Errorf("GET after the sweep = %d, want 200", code)
+		t.Fatalf("GET after the rescan = %d, want 200: the stale download's render is stamped with the row the rescan wrote", code)
+	}
+
+	settled := b.queue.count()
+	b.sweep(t)
+	if got := b.queue.since(settled); len(got) != 0 {
+		t.Errorf("the sweep after the rescan rendered %v, want nothing: the rendition is fresh again", got)
+	}
+	for range 3 {
+		if code := b.download(t, stampDSD, stampDSDCompact); code != http.StatusOK {
+			t.Errorf("GET = %d, want 200", code)
+		}
+	}
+	if n := b.rescansWaiting(); n != 0 {
+		t.Errorf("%d rescans queued after the rendition was served again, want none", n)
 	}
 }
 
@@ -150,11 +159,14 @@ func TestSourceRescannerRefusesAnEmptyPath(t *testing.T) {
 // TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep: a rescan may have
 // read a retag that moved a DSD track to another album, and the album-gain
 // index is dropped only when a FULL scan lands, so it can be up to its
-// two-minute TTL old. The sweep a rescan nudges renders straight away, so
-// the index goes first: a render nudged ahead of it would record the gain of
-// the track's old album-mates (CodeRabbit on #1093). Without an album gain
-// wired the nudge still goes, and a nudge already pending does not block the
-// rescanner.
+// two-minute TTL old. The renders a rescan's step queues (the ones stale
+// downloads waited for) and the sweep it nudges render straight away, so
+// the index goes first: a render queued ahead of it would record the gain of
+// the track's old album-mates (CodeRabbit on #1093). The waiting renders go
+// next, with the directory the rescan read, onto the foreground lane ahead
+// of the sweep's background one (backlog B82), and the nudge last. Without
+// an album gain or a stale-download hook wired the nudge still goes, and a
+// nudge already pending does not block the rescanner.
 func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 	nudge := make(chan struct{}, 1)
 	var order []string
@@ -164,17 +176,26 @@ func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 			return
 		}
 		order = append(order, "invalidated")
+	}, func(_ context.Context, dir string) {
+		switch {
+		case len(nudge) != 0:
+			order = append(order, "rendered after the nudge")
+		case len(order) == 0:
+			order = append(order, "rendered before the index was dropped")
+		default:
+			order = append(order, "rendered "+dir)
+		}
 	}, nudge)
-	after()
-	if !slices.Equal(order, []string{"invalidated"}) || len(nudge) != 1 {
-		t.Fatalf("after a rescan: %v, %d nudges pending, want the index dropped and then one nudge", order, len(nudge))
+	after(context.Background(), "Album")
+	if want := []string{"invalidated", "rendered Album"}; !slices.Equal(order, want) || len(nudge) != 1 {
+		t.Fatalf("after a rescan: %v, %d nudges pending, want %v and then one nudge", order, len(nudge), want)
 	}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		after()
-		afterRescan(nil, nudge)()
+		after(context.Background(), "Album")
+		afterRescan(nil, nil, nudge)(context.Background(), "Album")
 	}()
 	// The goroutine takes no context: the cancel is a formality the drain
 	// asks for, and the drain waits for it to return.
@@ -187,9 +208,9 @@ func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 	}
 
 	<-nudge
-	afterRescan(nil, nudge)()
+	afterRescan(nil, nil, nudge)(context.Background(), "Album")
 	if len(nudge) != 1 {
-		t.Errorf("with no album gain wired: %d nudges pending, want 1", len(nudge))
+		t.Errorf("with no album gain and no stale-download hook wired: %d nudges pending, want 1", len(nudge))
 	}
 }
 
@@ -197,22 +218,27 @@ func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 // the rows it committed, and a rescan whose file was deleted in the seconds
 // before it ran deletes that row and counts none. That still changes an
 // album's membership, so the step after the rescan (the album-gain index
-// dropped, the sweep nudged) runs for it too; until review round 4 it ran
-// only when the count was above zero (CodeRabbit on #1093). A rescan the
-// shutdown interrupted runs nothing after it.
+// dropped, the waiting renders queued, the sweep nudged) runs for it too,
+// with the library-relative directory the rescan read; until review round 4
+// it ran only when the count was above zero (CodeRabbit on #1093). A rescan
+// the shutdown interrupted runs nothing after it.
 func TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote(t *testing.T) {
 	r := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
 	r.request("Deleted/01.dsf")
-	after := make(chan struct{}, 4)
+	after := make(chan string, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		r.run(ctx, func(context.Context, string) (int, error) { return 0, nil }, func() { after <- struct{}{} })
+		r.run(ctx, func(context.Context, string) (int, error) { return 0, nil },
+			func(_ context.Context, dir string) { after <- dir })
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
 	select {
-	case <-after:
+	case dir := <-after:
+		if dir != "Deleted" {
+			t.Errorf("the after step was told of %q, want the directory the rescan read, library-relative: Deleted", dir)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a rescan that committed no row ran no after step: a deletion-only rescan left the album-gain index as it was")
 	}
@@ -222,7 +248,8 @@ func TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote(t *testing.T) {
 	r2 := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
 	r2.request("Album/01.dsf")
 	var ran int
-	r2.run(stopped, func(context.Context, string) (int, error) { stop(); return 1, nil }, func() { ran++ })
+	r2.run(stopped, func(context.Context, string) (int, error) { stop(); return 1, nil },
+		func(context.Context, string) { ran++ })
 	if ran != 0 {
 		t.Errorf("a rescan the shutdown interrupted ran its after step %d times, want none", ran)
 	}
@@ -263,10 +290,11 @@ func TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute(t *
 	}
 	var asked []string
 	queueFull := false
-	h := newStaleRenditionRescan(lookup, func(rel string) bool {
+	// No re-render wired: this test is about the rescans alone.
+	h := newStaleRenditionHeal(lookup, func(rel string) bool {
 		asked = append(asked, rel)
 		return !queueFull
-	})
+	}, nil, nil)
 	now := time.Unix(1_800_000_000, 0)
 	h.now = func() time.Time { return now }
 	row := func(rel string) *manifest.Track {
@@ -283,7 +311,7 @@ func TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute(t *
 	observe := func(clientPath string, info os.FileInfo) []string {
 		t.Helper()
 		asked = nil
-		h.observe(context.Background(), clientPath, info)
+		h.observe(context.Background(), clientPath, "optimized-v2-48000-16", info)
 		return asked
 	}
 	for _, step := range []struct {
@@ -327,7 +355,7 @@ func TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute(t *
 
 	// A full table of directories asked for within the minute drops a new
 	// one; past the minute the oldest are forgotten and it is asked for.
-	h.asked = map[string]time.Time{}
+	h.asked = recentKeys{}
 	for i := 0; i < sourceRescanQueueCap; i++ {
 		row(fmt.Sprintf("D%04d/01.flac", i))
 		if got := observe(fmt.Sprintf("D%04d/01.flac", i), behind); len(got) != 1 {
