@@ -30650,7 +30650,8 @@ otherwise: "main" is a build of 01af4b2c, "after" a build of this branch.
 | | run | main | after |
 |---|---|---|---|
 | 1a | loopback first install given `--domain`, `--email` and `--admin-tls-proxy`, no `--public` | exit 0, stderr empty, the saved config names none of the three | exit 0, the same config, and `warning: --domain, --email and --admin-tls-proxy apply only with --public, so this run ignores them and sets up a loopback install; add --public for a public install.` |
-| 1b | `--yes --force` rewrite of a PUBLIC install (domain, proxy, `customEndpoints: [https://bridge.example.test:X]`) given `--domain` and `--admin-tls-proxy` but not `--public` | exit 0, stderr empty, a loopback config: no deployment, no autocert, no `customEndpoints` | exit 2, the config byte-identical, and four lines naming the two flags, saying the install there is a public one whose endpoint every paired device dials, and "the config was NOT changed." |
+| 1b | `--yes --force` rewrite of a PUBLIC install (domain, proxy, `customEndpoints: [https://bridge.example.test:X]`) given `--domain` and `--admin-tls-proxy` but not `--public` | exit 0, stderr empty, a loopback config: no deployment, no autocert, no `customEndpoints` | exit 2, the config byte-identical, and three lines naming the two flags, saying the rewrite would make the public install loopback and drop the endpoint every paired device dials, and "the config was NOT changed." |
+| 1c | `--yes --force` rewrite of a LOOPBACK install given the three, no `--public` | exit 0, stderr empty, loopback | exit 0, loopback, and 1a's warning |
 | 2a | `bridge doctor` with no config anywhere (fresh HOME, empty working directory) | `[warn] tls-cert no data dir set`, `16 ok, 1 warn, 0 fail` | `[ok] tls-cert absent (init will mint)`, `17 ok, 0 warn, 0 fail` |
 | 2b | the same with a cert and no key left in `<platform config dir>/data` | `[warn] tls-cert no data dir set`, "all clear.", exit 0; `bridge init --yes --library L` there then exited 1 on `[FAIL] tls-cert partial state` | `[FAIL] tls-cert partial state`, exit 1, and init refuses the same |
 | 2c | `bridge doctor --config` naming a config this user cannot read | `[warn] config-file …`, `[warn] tls-cert no data dir set`, `15 ok, 2 warn` | `[ok] tls-cert not checked: the config that sets its path is not readable by this user`, `16 ok, 1 warn` |
@@ -30662,19 +30663,31 @@ tailnet addresses beside the stale alternate; they are left out here.
 
 ### Decisions
 
-- **A first install warns; a rewrite refuses; a run that keeps the config
-  says nothing more** (`warnIgnoredPostureFlags`). The backlog's constraint
-  was never to stop a first run for a posture flag: a first install writes a
-  working loopback install and has nothing to lose, and the flag changes
-  nothing it writes. A rewrite is the run where the missing `--public` costs
-  something (1b: the endpoint every paired device dials), and a refusal
-  there leaves the install as it was. Refusing every re-run was rejected: an
-  idempotent `bridge init --yes` re-run (the keep path, the automation shape
-  `--yes` exists for) passing the three would have worked on its first run
-  and failed on its second. The keep path adds no warning either: every flag
-  goes unused there, which "keeping it" already says, and "sets up a
-  loopback install" would be false over a public config it keeps. Exit 2, a
-  usage refusal, as `--public requires --domain` and #1081's address flags.
+- **A rewrite of a public install refuses; a first install and a rewrite
+  of a loopback install warn; a run that keeps the config says nothing
+  more** (`warnIgnoredPostureFlags`). The backlog's constraint was never to
+  stop a first run for a posture flag: a first install writes a working
+  loopback install and has nothing to lose, and the flag changes nothing it
+  writes. The rewrite of a public install is the run where the missing
+  `--public` costs something (1b: the endpoint every paired device dials),
+  and a refusal there leaves the install as it was. **The first draft
+  refused every rewrite**, and reviewing it for automation shapes found the
+  one it breaks: a script that rewrites its config with `--yes --force` on
+  every run, passing these flags, warns on its first run (a first install)
+  and would be refused on its second, over a loopback install the rewrite
+  loses nothing by. So a loopback rewrite warns, as a first install does
+  (1c). Refusing every re-run was rejected for the same reason on the keep
+  path: an idempotent `bridge init --yes` re-run (the automation shape
+  `--yes` exists for) would have worked on its first run and failed on its
+  second. The keep path adds no warning either: every flag goes unused
+  there, which "keeping it" already says, and "sets up a loopback install"
+  would be false over a public config it keeps. Exit 2, a usage refusal, as
+  `--public requires --domain` and #1081's address flags. A config that
+  does not parse is no known posture, so a rewrite over it warns, and
+  `refuseRewrite` refuses it after, as before.
+- **Consult**: the question of which runs to refuse went to Gemini, which
+  answered with the project's monthly spending cap; decided without it, on
+  the measurements above.
 - **Warnings name the flags, never their values.** A `--domain` can carry a
   user name and password, which `--public` refuses without echoing (B54):
   `TestInitWarnsWithoutEchoingTheDomain`.
@@ -30715,11 +30728,11 @@ tailnet addresses beside the stale alternate; they are left out here.
   keeps or mints in `<config dir>/data` (`initDataDirFor`, now init's one
   definition of it). "Not checked" there would have kept 2b as it was, an
   "all clear." before an init that refuses, the shape #1023 fixed for
-  config-dir on the launcher's row. The row takes the default whatever its
-  lookup found, unreadable included, since Setup's preflight grades init's
-  data dir over a config it cannot read (readPriorInstall fails, and init
-  falls back to its own). With no config dir either (no HOME), and with no
-  lookup, it says why it was not checked.
+  config-dir on the launcher's row. The row takes the default over a config
+  its lookup cannot reach or read as well, since Setup's preflight grades
+  init's data dir over one (readPriorInstall fails, and init falls back to
+  its own). With no config dir either (no HOME), and with no lookup, it
+  says why it was not checked.
 - **What it changes in the counts.** A pre-init report on a fresh host goes
   from one warn to none (`absent (init will mint)`); one over a config this
   user cannot read, that does not load, or that is named and not there loses
@@ -30739,14 +30752,15 @@ tailnet addresses beside the stale alternate; they are left out here.
 - `cmd/bridge/init_posture_flags_test.go`:
   `TestInitFirstInstallWarnsAboutAPublicOnlyFlagWithoutPublic` (all three,
   and each alone: exit 0, a warning naming exactly the flags given, a
-  loopback config), `TestInitWarnsWithoutEchoingTheDomain`,
-  `TestInitRewriteRefusesAPublicOnlyFlagWithoutPublic` (over a loopback and
-  a public install: exit 2, the bytes unchanged, the public line exactly
-  over the public one), `TestInitRewriteWithPublicIsNotRefused`,
+  loopback config), `TestInitLoopbackRewriteWarnsAboutAPublicOnlyFlagWithoutPublic`
+  (the same over a loopback install, rewritten), `TestInitWarnsWithoutEchoingTheDomain`,
+  `TestInitPublicRewriteRefusesAPublicOnlyFlagWithoutPublic` (each shape over
+  a public install: exit 2, the bytes unchanged, the flags and "the public
+  install" named), `TestInitRewriteWithPublicIsNotRefused` (over either),
   `TestInitRunThatKeepsTheConfigIsNotRefused` (exit 0, "keeping it", no
-  warning), `TestInitInteractiveRewriteRefusesAPublicOnlyFlagWithoutPublic`
-  (y refused, n kept), `TestInitWarnsAboutAnEmailTheProxyDoesNotUse` (and its
-  control, the bridge's own ACME).
+  warning, over either), `TestInitInteractiveRewriteRefusesAPublicOnlyFlagWithoutPublic`
+  (over a public install: y refused, n kept), `TestInitWarnsAboutAnEmailTheProxyDoesNotUse`
+  (and its control, the bridge's own ACME).
 - `cmd/bridge/init_force_rewrite_ports_test.go`: the residual's control,
   `…InteractiveRunGradesTheInstallsPortsBeforeItsPrompt`, is replaced by
   `TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff`,
@@ -30773,26 +30787,27 @@ tailnet addresses beside the stale alternate; they are left out here.
   `TestPrintedHintsSpeakToTheOperator` lost their tls-cert rows, which
   required the warn.
 - **Red first, on the unchanged tree** (the test files alone, over
-  01af4b2c): every new test above but the controls, and the two reordered
+  01af4b2c, in a throwaway worktree where `warnIgnoredPostureFlags` does not
+  exist): every new test above but the controls, and the two reordered
   answer tests; the controls passed.
 
 ### Negative controls
 
-Each on the committed tree (fef8aee6), one mutation at a time, matched
+Each on the committed tree (caa69a25), one mutation at a time, matched
 once, restored with `git checkout --` and the tree confirmed clean after
 each; `-count=1` over the init, doctor and menu tests of both packages.
 
 | | mutation | red |
 |---|---|---|
-| NC1 | no posture warning or refusal at all | every first-install row, the no-echo test, every rewrite-refusal row, the interactive yes, the proxy email |
-| NC2 | a rewrite warns instead of refusing | the four rewrite-refusal rows and the interactive yes |
-| NC3 | a first install is refused | the first-install rows and the no-echo test |
-| NC4 | a run that keeps the config warns too | `TestInitRunThatKeepsTheConfigIsNotRefused`, alone |
-| NC5 | no public-install line | the two public rows |
-| NC6 | the public-install line always | the two loopback rows |
+| NC1 | no posture warning or refusal at all | every first-install and loopback-rewrite row, the no-echo test, every public-rewrite row, the interactive yes, the proxy email |
+| NC2 | a rewrite of a public install warns instead of refusing | the four public-rewrite rows and the interactive yes |
+| NC3 | the warning refuses (exit 2) | the first-install rows, the loopback-rewrite rows and the no-echo test |
+| NC4 | a run that keeps the config warns too | both rows of `TestInitRunThatKeepsTheConfigIsNotRefused` |
+| NC5 | every rewrite is refused, the first draft | the four loopback-rewrite rows, alone |
+| NC6 | the refusal does not say the install is public | the four public-rewrite rows, alone |
 | NC7 | only `--yes --force` is a certain rewrite, as before | `TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff`, `TestInitInteractiveRewriteStillRefusesAPortItKeeps` |
 | NC8 | a no still asks for a name | `TestInitInteractiveKeepAsksForNoName`, alone |
-| NC9 | an interactive no does not keep | the same, alone |
+| NC9 | an interactive no does not keep | `TestInitInteractiveKeepAsksForNoName` and the interactive no over a public install (the run goes on to rewrite it as loopback) |
 | NC10 | no kept-endpoint warning | both rows of the kept-endpoint test |
 | NC11 | no scheme ports | the 443 and 80 rows |
 | NC12 | no same-port guard | the "keeping the port" row and the keeping control |
@@ -30802,11 +30817,12 @@ each; `-count=1` over the init, doctor and menu tests of both packages.
 | NC16 | tls-cert warns again | all five "not checked" rows |
 | NC17 | the reason ignores the config problem | the three config-problem rows |
 
-NC9's single red is worth a note: `TestInitInteractiveSkipOnExistingConfig`
-and the interactive-no posture row stay green under it, because the rewrite
-a no then runs writes a config byte-identical to the first init's (the same
-library, name and default ports), and both assert only that the config did
-not change.
+Under NC9, `TestInitInteractiveSkipOnExistingConfig` stays green: the
+rewrite a no then runs writes a config holding the `libraryRoots:` it
+checks for, so it cannot tell a keep from a rewrite. The interactive-no
+posture row can, since it runs over a public install and the rewrite makes
+it loopback; over a loopback install (the first draft of that row) it could
+not either, since the rewrite wrote the same bytes.
 
 ### Out of scope
 
