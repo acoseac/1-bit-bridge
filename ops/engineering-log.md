@@ -30395,6 +30395,6 @@ endpoint refuses with the feature off. All now say what they do.
 
 Filed, not fixed (no code change was the decision): the admin console's
 analysis pool counters are shown with the feature off, and the health
-handler's gating comment, the `AnalysisStats` docblock and
-`TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock still
-describe a pool that is absent with the feature off, which #781 ended.
+handler's gating comment, the `AnalysisStats` and `UpscaleStats` docblocks
+and `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock
+still describe a pool that is absent with the feature off, which #781 ended.
