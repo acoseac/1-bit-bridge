@@ -28091,6 +28091,144 @@ retry is `nameFromHandle(get)` (`TestNameFromHandleFallsBackToTheVolumeGUIDPath`
 
 Gemini's `/gemini review` on the head answered with its daily quota notice.
 
+## 2026-09-29 — a link to a directory below a library root: the guard names it, and rows going under it are said once per streak (backlog B74)
+
+The scanner follows a library ROOT that is a link (#1076) and no link to a
+directory BELOW a root (#1070, loops). Nothing said the second half, and
+moving an album folder to another volume with a link left in its place (on
+Windows a junction, `mklink /J`) is the ordinary way to do it. Whether the
+scanner should follow such links is a product decision this change does not
+make (backlog B80). It makes today's behaviour say what it is.
+
+### Measured on main 6dfba62c
+
+A throwaway test indexed a root holding `Artist/Album/0{1,2}.flac` at the
+production threshold of three, then moved `Artist` out of the root and linked
+it back. macOS APFS with symlinks, and the Windows 11 test host with real
+junctions (`os.Lstat` mode `?rw-rw-rw-`, ModeIrregular), gave the same
+results:
+
+| shape | three scans | then |
+|---|---|---|
+| (a) the root holds only the link: full scans, subtree scans of the root, multi-root | per scan an ERROR `suspected clean-empty mount failure … rows_in_db=2 hint=place .bridge-allow-empty at the root to confirm intent` and two `spared …` Warns; rows kept | the sentinel placed, three more scans: 0 rows, 2 tombstones, and `Artist/Album/01.flac` still stat'ed through the link |
+| (b) the link beside `Other/Album/01.flac`: full scans, subtree scans of the root, of `Genre` holding `Genre/Artist`, multi-root, and a full scan with the link one folder down | only `INFO tracks missing this scan missing=2 deleted=0` twice, then `deleted=2`; both rows gone at scan 3, 2 tombstones | |
+
+A link one folder down (`Genre/Artist` with `Genre` real) is (b) even when
+nothing else is in the root: `Genre` is content. Two more shapes, measured
+while writing the tests: a root holding only a link to a directory NAMED like
+a track (`Live.flac -> dir`) passed the guard, because `isLibraryEntry`
+counted it by its name, and its rows went at scan 3 with no line; and the
+owning-root audit that refuses a subtree scan's deletion over a root holding
+nothing gave the same sentinel advice (`suspected mount drop; place
+.bridge-allow-empty to confirm intent`), and over a root holding only a
+track-named link let the scan go on to its deletion pass.
+
+### What changed
+
+- **Both walks record the links to directories they pass over.**
+  `dirLinkEntry` answers for an entry whose listing type is neither regular
+  nor a directory: a stat THROUGH it (`throughStat`, shared with
+  `walkedFileInfo`, so an audio-named link is still stat'ed once) that says
+  directory. A dot-name or another `ShouldSkipDir` name is not reported
+  (nothing would be indexed under it as a directory), nor is a link whose
+  target cannot be stat'ed. Such a link is never library content, whatever
+  its name; a track-named one is still in the "entries that are not files"
+  line, as before.
+- **(a)** A root whose walk found no content and at least one such link gets
+  its own ERROR, `library root holds no content but links to directories,
+  which the scanner does not follow; its rows are kept`, with `rows_in_db`,
+  `rows_under_links` (`CountOwnTracksUnderPrefix` per link, the statement
+  `CountTracksUnderRoot` now runs too), `dir_links`, an `example` and a hint:
+  nothing under the links is read or rescanned, the sentinel lets the scans
+  delete every row kept here with a tombstone to every paired device though
+  the links still lead to their files, and the way to index what a link
+  leads to is to add that directory as a library root. The rows are kept, as
+  before, every scan. The owning-root audit's refusal says the same. In
+  multi-root mode a root's line names that root's links only (the tally's
+  length before the root's walk).
+- **(b)** A deletion pass whose missing rows include rows under such a link
+  Warns `rows under links to directories are counted missing: the scanner
+  does not follow links below a library root`, with `dir_links`, an
+  `example`, `rows`, `threshold` and a hint saying they go with a tombstone to
+  every paired device at the threshold and how to keep them. Once per ROW's
+  streak: `TracksNotYetCountedMissing` asks, before the increment, which of
+  those rows are still at `missing_count` 0. A pass whose increment failed
+  or was stopped says nothing.
+
+### Decided and rejected
+
+- **Following the links.** Not here: it re-opens #1070's loop question, and
+  it is the operator's call what a link in a library means (B80).
+- **Counting a link to a directory as content**, the obvious way to make (a)
+  quiet. It turns (a) into (b): the guard stops keeping the rows and they go
+  at the threshold (NC2 below).
+- **Keeping the mount-failure message for (a) with a new hint.** A link the
+  walk stat'ed through to a directory proves the volume holding the root's
+  entries is there, so "suspected clean-empty mount failure" would be false.
+  The old message stays for a root holding nothing at all.
+- **The M-SEARCH latch in memory.** A per-link latch has to know which links
+  a scan's scope covered before it may end a streak (a subtree scan of
+  another folder ends nothing), and a restart says it again. The store's
+  `missing_count` answers both by construction, and a row that came back and
+  went again starts a new streak. Cost: one indexed SELECT per row under a
+  link, on a scan where such rows are missing. A failed read takes every
+  such row as a first miss: a duplicate line in a rare failure, rather than a
+  streak never said if the increment then lands.
+- **Naming the directory a link leads to.** A log line names a library file
+  library-relative (#1055), and the target is an absolute path outside the
+  library. The link's own path is enough to find it.
+- **A symlink-only test.** A junction, and a volume mounted in a folder, is
+  ModeIrregular without ModeDir and without ModeSymlink since Go 1.23. On
+  Windows with real junctions that mutation turned every behavioural test
+  red, and on macOS only the unit table saw it (NC7).
+- **Changing the guard's cadence.** (a) is still an ERROR per scan: the guard
+  refuses the deletion every scan, and the ask was what the line says, not
+  how often.
+
+### Tests
+
+Red on main 6dfba62c, each for the reason named above:
+`TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem` (full and subtree
+scans, single- and multi-root, with the sentinel as the positive control:
+the deletion is still authorised and the (b) line is said once),
+`TestScanner_RowsUnderALinkBesideContentAreAnnouncedOncePerStreak` (four
+shapes), `TestScanner_ALinkStreakIsSaidOnceAcrossARestartAndAgainWhenItRestarts`,
+`TestScanner_ALinkToADirectoryNamedLikeATrackIsNotContent` and
+`TestScanner_ASubtreeMissBesideOnlyLinksNamesThem` (a plain and a
+track-named link). New unit tables: `TestDirLinkEntryTellsALinkToADirectoryByTheStatThroughIt`,
+`TestThroughStatStatsOnce`, `TestDirLinkTallyHoldsOnlyWhatIsUnderALink`. The
+behavioural tests make their links with `linkDirOrSkip`, so on Windows they
+are real junctions; all passed on the Windows 11 host with every other link
+test in the package. `go build -gcflags=-m`: the per-entry `throughStat` does
+not escape.
+
+### Negative controls
+
+Each on the committed change, `-count=1`, restored and green after:
+
+| mutation | goes red |
+|---|---|
+| NC1: `dirLinkEntry` never answers yes | all five behavioural tests and the `dirLinkEntry` table |
+| NC2: a link to a directory counts as content | every subtest of `…OnlyLinksToDirectoriesNamesThem`, and `…NamedLikeATrackIsNotContent` |
+| NC3: said every scan, not once per streak (no first-miss read) | `…OnlyLinksToDirectoriesNamesThem` (after the sentinel), all four shapes of `…OncePerStreak`, `…AcrossARestart…` |
+| NC4: a root's line names every link met so far | the multi-root full-scan subtest of `…OnlyLinksToDirectoriesNamesThem` only |
+| NC5: the audit counts a link as content | the track-named case of `…SubtreeMissBesideOnlyLinksNamesThem` only |
+| NC6: the audit never names links | both cases of `…SubtreeMissBesideOnlyLinksNamesThem` |
+| NC7: `ModeSymlink` only | macOS: the junction row of the `dirLinkEntry` table (and the named pipe's stat count); Windows 11 with real junctions: all five behavioural tests |
+| NC8: a link holds its own path | `TestDirLinkTallyHoldsOnlyWhatIsUnderALink` only |
+| NC9: no `ShouldSkipDir` check | the dot-name and recycle-bin rows of the `dirLinkEntry` table only |
+
+### Left open
+
+B80 (the product decision: follow links to directories below a root, with
+the loop question, and what a dangling one should mean: measured here, a
+root holding only a dangling link still gets the mount-failure line and the
+sentinel hint, and a dangling link beside content loses its rows with no
+line). B81: a subtree scan of a folder reached THROUGH such a link (what an
+upload or a delete committed there asks for) walks it and keeps or mints
+its rows, which the next full scans count missing and delete; measured, the
+rows came back with the next subtree scan below the link.
+
 ## 2026-09-29 — a render refuses a source newer than its row at every step, and a stale download asks for the rescan (backlog B53)
 
 Backlog B53: the three rendition-freshness leftovers #1077 recorded, plus a
