@@ -136,13 +136,22 @@ func newSourceRescanner(resolve func(rel string) (string, error)) *sourceRescann
 // through here, so here is where it is refused. A file AT the root is
 // different: its directory is the root, and that walk is the one it needs.
 func (r *sourceRescanner) request(rel string) {
+	r.queue(rel)
+}
+
+// queue is request, reporting whether the directory will be scanned: true
+// when it was queued now or was already waiting, false when the request was
+// refused (an empty path, a directory that names no root) or dropped
+// because the queue is full. The download path's debounce reads it
+// (staleRenditionRescan).
+func (r *sourceRescanner) queue(rel string) bool {
 	if rel == "" {
-		return
+		return false
 	}
 	relDir := path.Dir(rel)
 	abs, err := r.resolve(relDir)
 	if err != nil {
-		return
+		return false
 	}
 	dir := sourceRescan{abs: abs, rel: relDir}
 	r.mu.Lock()
@@ -159,6 +168,7 @@ func (r *sourceRescanner) request(rel string) {
 		default:
 		}
 	}
+	return queued || waiting
 }
 
 // next takes the oldest waiting directory. It leaves the pending set here,
@@ -237,10 +247,14 @@ const staleRenditionRescanEvery = time.Minute
 // It asks only while the row is behind the file. Once a scan has read the
 // change, the rendition is stale against the row too, and a rescan would
 // change nothing; the sweep (with auto-optimize on) renders it on its next
-// pass. And at most once per directory per staleRenditionRescanEvery.
+// pass. And at most once per directory per staleRenditionRescanEvery, a
+// minute spent only on a request the rescanner queued or already had
+// waiting: one it dropped (its queue full) leaves the next GET free to ask.
 type staleRenditionRescan struct {
-	lookup  func(ctx context.Context, rel string) (*manifest.Track, error)
-	request func(rel string)
+	lookup func(ctx context.Context, rel string) (*manifest.Track, error)
+	// request is sourceRescanner.queue: whether the directory will be
+	// scanned.
+	request func(rel string) bool
 	now     func() time.Time
 	mu      sync.Mutex
 	// asked is when a download last asked for each library-relative
@@ -250,7 +264,7 @@ type staleRenditionRescan struct {
 	asked map[string]time.Time
 }
 
-func newStaleRenditionRescan(lookup func(ctx context.Context, rel string) (*manifest.Track, error), request func(rel string)) *staleRenditionRescan {
+func newStaleRenditionRescan(lookup func(ctx context.Context, rel string) (*manifest.Track, error), request func(rel string) bool) *staleRenditionRescan {
 	return &staleRenditionRescan{lookup: lookup, request: request, now: time.Now, asked: map[string]time.Time{}}
 }
 
@@ -265,10 +279,22 @@ func (h *staleRenditionRescan) observe(ctx context.Context, clientPath string, i
 	if transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
 		return
 	}
-	if !h.due(path.Dir(track.Path)) {
+	dir := path.Dir(track.Path)
+	if !h.due(dir) {
 		return
 	}
-	h.request(track.Path)
+	if !h.request(track.Path) {
+		// Nothing will scan it (the rescanner's queue is full): the minute
+		// is not spent on a request that did not happen.
+		h.forget(dir)
+	}
+}
+
+// forget drops what due recorded for dir.
+func (h *staleRenditionRescan) forget(dir string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.asked, dir)
 }
 
 // due records that a download asks for dir now, unless one did within

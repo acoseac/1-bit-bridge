@@ -3979,7 +3979,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			return apiSrv.Resolver().Resolve(rel)
 		})
 		upscalePool.SetSourceRescan(rescanner.request)
-		apiSrv.WithStaleRendition(newStaleRenditionRescan(manifestStore.LookupTrack, rescanner.request).observe)
+		apiSrv.WithStaleRendition(newStaleRenditionRescan(manifestStore.LookupTrack, rescanner.queue).observe)
 		enqueuer := &upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,

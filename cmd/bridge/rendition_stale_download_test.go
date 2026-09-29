@@ -135,14 +135,15 @@ func TestSourceRescannerRefusesAnEmptyPath(t *testing.T) {
 		resolved = append(resolved, rel)
 		return filepath.Join(filepath.FromSlash("/lib"), filepath.FromSlash(rel)), nil
 	})
-	r.request("")
-	if len(resolved) != 0 || len(r.waiting) != 0 {
+	if r.queue("") || len(resolved) != 0 || len(r.waiting) != 0 {
 		t.Errorf("an empty path resolved %q and queued %d scans, want neither: it names no file, "+
 			"and its directory resolves to the whole root", resolved, len(r.waiting))
 	}
-	r.request("01.flac")
-	if len(r.waiting) != 1 || r.waiting[0].abs != filepath.FromSlash("/lib") {
+	if !r.queue("01.flac") || len(r.waiting) != 1 || r.waiting[0].abs != filepath.FromSlash("/lib") {
 		t.Errorf("a file at the root queued %+v, want one scan of the root", r.waiting)
+	}
+	if !r.queue("02.flac") || len(r.waiting) != 1 {
+		t.Errorf("a second file of a waiting directory: %d queued, want it reported as queued and folded into the one scan", len(r.waiting))
 	}
 }
 
@@ -180,7 +181,11 @@ func TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute(t *
 		return rows[rel], nil
 	}
 	var asked []string
-	h := newStaleRenditionRescan(lookup, func(rel string) { asked = append(asked, rel) })
+	queueFull := false
+	h := newStaleRenditionRescan(lookup, func(rel string) bool {
+		asked = append(asked, rel)
+		return !queueFull
+	})
 	now := time.Unix(1_800_000_000, 0)
 	h.now = func() time.Time { return now }
 	row := func(rel string) *manifest.Track {
@@ -220,6 +225,23 @@ func TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute(t *
 		if got := observe(step.clientPath, step.info); !slices.Equal(got, step.want) {
 			t.Errorf("%s: asked for %v, want %v", step.what, got, step.want)
 		}
+	}
+
+	// A request the rescanner dropped (its queue full) spends no minute:
+	// the next download asks again, and only a queued one is debounced.
+	row("Full/01.flac")
+	queueFull = true
+	for _, what := range []string{"the queue is full", "again while it is still full"} {
+		if got := observe("Full/01.flac", behind); !slices.Equal(got, []string{"Full/01.flac"}) {
+			t.Errorf("%s: asked for %v, want the directory: nothing was queued, so nothing is debounced", what, got)
+		}
+	}
+	queueFull = false
+	if got := observe("Full/01.flac", behind); !slices.Equal(got, []string{"Full/01.flac"}) {
+		t.Errorf("once there is room: asked for %v, want the directory", got)
+	}
+	if got := observe("Full/01.flac", behind); got != nil {
+		t.Errorf("after a queued request, within the minute: asked for %v, want nothing", got)
 	}
 
 	// A full table of directories asked for within the minute drops a new

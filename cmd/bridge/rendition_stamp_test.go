@@ -167,7 +167,7 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 		WithCarPlayOptimize(on).
 		WithDSDRender(on).
 		WithUpscaleEnqueuer(b.adapter).
-		WithStaleRendition(newStaleRenditionRescan(store.LookupTrack, b.rescanner.request).observe)
+		WithStaleRendition(newStaleRenditionRescan(store.LookupTrack, b.rescanner.queue).observe)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	b.url = hs.URL
@@ -543,6 +543,9 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 	if len(full.waiting) != sourceRescanQueueCap || len(full.pending) != sourceRescanQueueCap {
 		t.Errorf("queue %d, pending %d after %d directories, want both at the cap %d",
 			len(full.waiting), len(full.pending), sourceRescanQueueCap+5, sourceRescanQueueCap)
+	}
+	if full.queue("Late/01.flac") {
+		t.Error("a directory dropped by the full queue was reported as queued: the download path's debounce would spend its minute on it")
 	}
 
 	// Queued before the loop runs, so which requests share a scan does not
