@@ -318,9 +318,12 @@ func DefaultDiscoveryConfig() DiscoveryConfig {
 // MediaServerDiscoveryClient drives SSDP M-SEARCH for upstream UPnP
 // MediaServers, populates a ServerCache, and evicts stale entries.
 // Identical lifecycle shape to internal/dlna/discovery.SSDPDiscoveryClient
-// — listen on a wildcard UDP socket, send M-SEARCH on tick, receive
-// unicast responses + NOTIFY ssdp:alive/byebye, fetch description.xml
-// the first time we see a UDN.
+// — listen on a wildcard UDP socket, send M-SEARCH on tick, receive the
+// unicast responses, fetch description.xml the first time we see a UDN.
+// The socket sits on an ephemeral port and joins no group, so it hears no
+// NOTIFY (they go to the group's port 1900): handlePacket's byebye arm
+// reads only what a device sends to this port, and until 2026-09-29 this
+// said it received NOTIFY ssdp:alive/byebye too.
 type MediaServerDiscoveryClient struct {
 	cfg            DiscoveryConfig
 	cache          *ServerCache
