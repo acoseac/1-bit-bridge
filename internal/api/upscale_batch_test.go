@@ -25,6 +25,9 @@ type stubBatchCoordinator struct {
 	submits   int
 	optimizes int
 	pcms      int
+	// rows is what ListBatches answers: the batches a past run recorded.
+	// Set before the server starts, never after.
+	rows []BatchRow
 }
 
 const (
@@ -62,7 +65,7 @@ func (s *stubBatchCoordinator) SubmitPCMRender(ctx context.Context, p string) (B
 }
 
 func (s *stubBatchCoordinator) Cancel(id uuid.UUID) error           { return nil }
-func (s *stubBatchCoordinator) ListBatches(int) ([]BatchRow, error) { return nil, nil }
+func (s *stubBatchCoordinator) ListBatches(int) ([]BatchRow, error) { return s.rows, nil }
 func (s *stubBatchCoordinator) Throughput() BatchThroughput         { return BatchThroughput{} }
 
 func batchFixture(t *testing.T) (*httptest.Server, string, *stubBatchCoordinator) {

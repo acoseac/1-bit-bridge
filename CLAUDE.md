@@ -5044,11 +5044,19 @@ mentions across the four `ops/audit-*.md` files.
   purpose**, as do cancel, list and the failure retry: the owner's call, so an
   operator who switched upscaling off can still reclaim the disk, where
   `DELETE /v1/upscale/variants` refuses. None of them starts sox work.
-  **Two READ routes still refuse on the store alone**, so they serve with the
-  feature off: `/v1/download?variant=` and `/v1/waveform` answered 200 with the
-  gate closed (measured 2026-09-29, the real `api.Server`), where PROTOCOL.md's
-  flag-off bullets say 404. Undecided, since a phone may hold a manifest that
-  lists a variant from before the switch-off (backlog B108).
+  **The READS refuse on the store alone, and that is the contract** (backlog
+  B108, 2026-09-29): `/v1/download?variant=`, `/v1/waveform`, `/v1/spectrum`
+  and `GET /v1/upscale/batches` answer with their feature off as with it on
+  (the list on a demo bridge too), and the manifest's analysis fields have no
+  gate; only its `variants` are stripped. A switch stops NEW work and
+  withdraws nothing made: a client drops a rendition or a curve it gets a 404
+  for, and a delta sync never carries the stripped `variants` (the switch
+  bumps no `indexed_at`), so a phone that listed a rendition keeps asking for
+  it. PROTOCOL.md said 404 (and 503 for the list) until then, and the owner
+  changed the spec to match the code. **Don't gate these reads on the live predicate**:
+  `internal/api/feature_off_reads_test.go` pins each route over stubs and
+  `TestServeWithItsFeaturesOffServesWhatItMadeBefore` the wiring, through a
+  real serve.
 - **…and a value runServe DECIDES from the config while it builds Deps is a
   boot snapshot, however live its reader is** (2026-09-28).
   `admin.Deps.ProjectedSize` and `AvailableDiskSpace` were function literals

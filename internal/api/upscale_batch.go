@@ -5,10 +5,13 @@
 // the admin Library Inspector + Jobs page render from
 // `upscale_batches`.
 //
-// Auth: minted-token bearer, same as /v1/upscale. The endpoints
-// surface a 503 `upscale_disabled` when no BatchCoordinator is
-// wired or the live upscale gate is closed (the flag off, or no
-// usable sox right now; see WithUpscale).
+// Auth: minted-token bearer, same as /v1/upscale. The two endpoints
+// that change a batch surface a 503 `upscale_disabled` when no
+// BatchCoordinator is wired or the live upscale gate is closed (the
+// flag off, or no usable sox right now; see WithUpscale), and a 403
+// `demo_read_only` on a demo bridge. The list refuses only when no
+// coordinator is wired: it reads work already done, so it answers
+// with the gate closed and on a demo bridge (backlog B108).
 
 package api
 
@@ -25,9 +28,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// Shared upscale-disabled error pair surfaced by every /v1/upscale*
-// handler when the feature is off (the live gate closed: the flag
-// off, or no usable sox) or no BatchCoordinator is wired. Same
+// Shared upscale-disabled error pair surfaced by the /v1/upscale*
+// handlers that start or change work when the feature is off (the
+// live gate closed: the flag off, or no usable sox), and by a handler
+// whose dependency is not wired at all. Same
 // payload shape as the admin package's pair, but the code uses an
 // underscore (`upscale_disabled`) matching the public wire
 // convention; admin uses kebab-case for the admin JSON channel.
@@ -325,7 +329,11 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, res)
 }
 
-// upscaleBatchList handles GET /v1/upscale/batches?limit=N.
+// upscaleBatchList handles GET /v1/upscale/batches?limit=N. A read of
+// work already done, so it takes neither the upscale gate nor the demo
+// refusal the two mutations take: switching upscaling off stops new
+// work and withdraws nothing (backlog B108,
+// TestTheBatchListAnswersWithUpscalingOffAndOnADemoBridge).
 func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 	if s.batchCoordinator == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
