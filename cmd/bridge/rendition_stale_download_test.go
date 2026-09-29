@@ -123,6 +123,29 @@ func TestARescanIndexesNoSecondSpellingOfTheDirectory(t *testing.T) {
 	}
 }
 
+// TestSourceRescannerRefusesAnEmptyPath: every rescan request funnels
+// through sourceRescanner.request, and an empty path is refused there
+// before anything resolves it. path.Dir("") is ".", which the resolver maps
+// onto the library root, so it would have queued a walk of the whole root.
+// The positive control is a file at the root, whose directory IS the root:
+// that one is queued.
+func TestSourceRescannerRefusesAnEmptyPath(t *testing.T) {
+	var resolved []string
+	r := newSourceRescanner(func(rel string) (string, error) {
+		resolved = append(resolved, rel)
+		return filepath.Join(filepath.FromSlash("/lib"), filepath.FromSlash(rel)), nil
+	})
+	r.request("")
+	if len(resolved) != 0 || len(r.waiting) != 0 {
+		t.Errorf("an empty path resolved %q and queued %d scans, want neither: it names no file, "+
+			"and its directory resolves to the whole root", resolved, len(r.waiting))
+	}
+	r.request("01.flac")
+	if len(r.waiting) != 1 || r.waiting[0].abs != filepath.FromSlash("/lib") {
+		t.Errorf("a file at the root queued %+v, want one scan of the root", r.waiting)
+	}
+}
+
 // fileStat is the os.FileInfo a download's freshness check hands the stale
 // rendition hook: only size and mtime are read.
 type fileStat struct {

@@ -128,7 +128,17 @@ func newSourceRescanner(resolve func(rel string) (string, error)) *sourceRescann
 // request queues the directory holding the file its track row records at
 // rel, unless it is already waiting, the queue is full, or rel's directory
 // names no library root this bridge has. It never blocks.
+//
+// An empty rel names no file and is refused before anything resolves it:
+// path.Dir("") is ".", which the resolver maps onto a library root, so it
+// would queue a walk of the whole root (CLAUDE.md, the rule on reapers that
+// refuse an empty root). No caller passes one today; every rescan funnels
+// through here, so here is where it is refused. A file AT the root is
+// different: its directory is the root, and that walk is the one it needs.
 func (r *sourceRescanner) request(rel string) {
+	if rel == "" {
+		return
+	}
 	relDir := path.Dir(rel)
 	abs, err := r.resolve(relDir)
 	if err != nil {
