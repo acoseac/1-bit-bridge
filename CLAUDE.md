@@ -1141,6 +1141,52 @@ lost my library."
   `FuzzOggFLACReadsBackTheMetadataItCarries` lays blocks out in pages of any size and
   requires them back byte for byte, and `FuzzExtractOGG` carries Ogg FLAC seeds, both
   picture bombs among them: the guards meet them in the join.
+- **An ID3v2 tag's MusicBrainz ids and ReplayGain are read BY NAME, from its TXXX
+  frames and the MusicBrainz UFID** (ExtractorVersion 19, 2026-09-29, backlog B116).
+  dhowden files a TXXX frame as a `*tag.Comm` under `TXXX`, `TXXX_0`, … (the renaming
+  B101 bounds) and a UFID as a `*tag.UFID` under `UFID`, and `stringOf` matches the raw
+  map's KEYS, so no MP3, DSF, AIFF or WAV ever gave up TXXX "MusicBrainz Album Id",
+  the recording id (the UFID owned by http://musicbrainz.org) or TXXX
+  "REPLAYGAIN_TRACK_GAIN" / "…_ALBUM_GAIN": the enricher searched by text for releases
+  the file names exactly. The call site's comment and `stringOf`'s docblock said
+  otherwise, and `TestStringOfMatchesVorbisAndID3v2Spellings` passed because it keyed
+  a synthetic map by the description, which is MP4's freeform shape (renamed
+  `…VorbisAndMP4Spellings`). `id3v2NamedValues` and `namedValueOf`
+  (id3v2_named_values.go) read them under the aliases a Vorbis comment and an MP4
+  freeform atom answer, normalised the same way, with the same precedence: per alias
+  in order, the raw map, then the named values. **Their order is never the map's**:
+  the MusicBrainz UFIDs, then the TXXX frames, each in the tag's order from dhowden's
+  suffix, the key breaking a tie. **The UFID answers `musicbrainz_trackid`, ahead of a
+  TXXX of that name**, and Picard's TXXX "MusicBrainz Release Track Id" names the
+  release's TRACK and answers nothing: `MusicBrainzTrackID` is the RECORDING id (the
+  Atlas lyrics tier asks `/v1/atlas/recording/{it}`). **Every writer measured
+  (mutagen, so Picard; ffmpeg) ends a TXXX value with a NUL, which dhowden keeps**, a
+  2.4 field holds its values NUL-separated, and a later UTF-16 value keeps its byte
+  order mark: `id3v2TextValue` takes the first value not empty after trimming space
+  and U+FEFF. Kept, the NUL makes the release id no UUID (the enricher drops it with a
+  Warn) and a gain no number. **Only these fields, never one ID3v2 gives a frame of
+  its own**: the compilation flag (TCMP; the app pins that neither side reads
+  TXXX:COMPILATION, `test_TXXXCompilationAndV22TCP_areNotRead`), the composer, the
+  conductor, the work, the original year and the tempo stay frame-only on both sides,
+  and the app's ID3v2Parser reads its MusicBrainz ids and ReplayGain from TXXX and
+  UFID too (`TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX`). **Don't widen it
+  without the app**, and don't let `hasAnyRawKey`'s presence gates see a TXXX: they
+  gate dhowden's accessors, which read frames (a TXXX "TRACKNUMBER" would make a nil
+  track number Some(0)). The two readers still differ where the app is wrong or
+  narrower (backlog B126), and neither reads Picard's TXXX:WORK (B127). **v19 changes
+  only files whose tag carries such a frame**:
+  they take the full-upsert leg (the tag's release id replaces one the enricher found
+  by searching, since the re-extract wins `mergePostScanFields`; the enricher's cover
+  stays until it runs again), their enrichment is re-queued once, and with a release
+  id in hand the enricher does not search MusicBrainz for the release but fetches its
+  cover (unless the file has local art) and resolves the artist. A tag ReplayGain now
+  outranks the analysis loudness spliced in for a file with none, which PROTOCOL.md
+  has always promised. No wire change and no Mirror-PR: the four fields exist and the
+  app decodes them. The fixtures are real files (`testdata/gen/id3_txxx_fixtures.py`:
+  mutagen writing as Picard's `_save` does, in its three encodings and four
+  containers, and ffmpeg); `TestPicardsID3v2IdsAndReplayGainReachTheirFields`,
+  `TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes` (each case twenty times: a map-order
+  winner flaps) and `TestScanner_V19_ATagNamingItsIDsJoinsTheDelta_APlainID3RowOnlyStamps`.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to

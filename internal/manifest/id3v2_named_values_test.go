@@ -299,8 +299,11 @@ func TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX(t *testing.T) {
 		t.Errorf("a TXXX filled a field ID3v2 has a frame for: Composer %q, Conductor %q, Work %q",
 			tr.Composer, tr.Conductor, tr.Work)
 	}
-	if tr.OriginalYear != nil || tr.BPM != nil {
-		t.Errorf("a TXXX filled OriginalYear (%v) or BPM (%v)", tr.OriginalYear, tr.BPM)
+	if tr.OriginalYear != nil {
+		t.Errorf("a TXXX filled OriginalYear: %d", *tr.OriginalYear)
+	}
+	if tr.BPM != nil {
+		t.Errorf("a TXXX filled BPM: %d", *tr.BPM)
 	}
 }
 
