@@ -62,7 +62,7 @@ func TestBuildPairURLWritesWhatTheAppReads(t *testing.T) {
 		code    = "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210_-ZyXwV"
 		fp      = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
 	)
-	alts := []string{primary, "https://192.168.0.24:7788", "https://[fd7a:115c:a1e0::1]:7788"}
+	alts := []string{primary, "https://192.168.50.24:7788", "https://[fd7a:115c:a1e0::1]:7788"}
 	for _, name := range []string{
 		"My Library",
 		config.DefaultLibraryName,

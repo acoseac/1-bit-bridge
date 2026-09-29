@@ -5668,10 +5668,10 @@ the branch rule, and #915–#921 each carried their rule in-PR.
 ### Two admin consumers PR #269 left on the old walk
 
 Report: a loopback bridge (0.2.0, `tailscale.mode: cli`) whose
-`GET /v1/health` advertised `endpoints: [192.168.0.24, nuc.local,
-nuc.sable-eagle.ts.net, 100.102.105.89, [fd7a:…]]` answered
+`GET /v1/health` advertised `endpoints: [<NUC-LAN-IP>, nuc.local,
+nuc.<TAILNET>.ts.net, <NUC-TAILSCALE-V4>, [fd7a:…]]` answered
 `POST /api/tokens {"name":"iPhone 13"}` with `alternates: [nuc.local,
-192.168.0.24]` — the QR's `bridge://pair?urls=` carried no Tailscale entry,
+<NUC-LAN-IP>]` — the QR's `bridge://pair?urls=` carried no Tailscale entry,
 so a phone paired on Wi-Fi could not roam without a re-pair, which is the
 exact promise in `buildPairURL`'s docblock.
 
@@ -5737,8 +5737,8 @@ test only; the MagicDNS entry mis-classed → red on the class pin.
 Live, on this Mac (tailnet-joined, `tailscale` CLI present, cert minted at
 boot), a throwaway loopback fixture with one customEndpoint: health, the
 mint's `alternates`, the QR's `urls=` and `GET /api/endpoints` all read
-`[192.168.0.85, Macbook.local, macbook.sable-eagle.ts.net, 100.79.163.73,
-[fd7a:115c:a1e0::3139:a34a], custom.example.test]` with the operator's
+`[<MAC-LAN-IP>, Macbook.local, macbook.<TAILNET>.ts.net, <MAC-TAILSCALE-V4>,
+[<MAC-TAILSCALE-V6>], custom.example.test]` with the operator's
 primary lifted to the head; the rotate with a different primary the same.
 No wire change: `/v1/health` is untouched and `urls=` was already one URL
 per line on the iOS parser. No ProtocolVersion bump.
@@ -7740,8 +7740,8 @@ component warn:
 ```
 cert SANs are stale relative to advertised endpoints — Tailscale and
 custom-endpoint URLs will fail TLS until you rotate …
-  missing_dns: [nuc nuc.local nuc.sable-eagle.ts.net]
-  missing_ips: [192.168.0.24 100.102.105.89 fd7a:…]
+  missing_dns: [nuc nuc.local nuc.<TAILNET>.ts.net]
+  missing_ips: [<NUC-LAN-IP> <NUC-TAILSCALE-V4> fd7a:…]
 ```
 
 and `/v1/health` withheld the uncovered endpoints. The remedy is two commands
@@ -30230,6 +30230,74 @@ script cannot verify the NUC and that a demo deploy carries `SVC` and
 `REMOTE_BIN`. The runbook already carries the move in its banner, and the
 host's other mentions in code comments are dated field cases, true as
 written.
+
+## 2026-09-29 — no tracked file names a live host's SSH target, tailnet or addresses: the demo section's SSH target is `<VPS-SSH>`, and the operator host's pasted coordinates are examples (backlog B110)
+
+Docs, comments and test fixtures only: no behaviour change and no wire
+change.
+
+### What was there
+
+- The runbook's "Demo bridge" section, written with #914 (2026-09-16),
+  spelled the VPS's SSH target (`user@host`) out six times: the Host / SSH
+  row, the admin-console tunnel, the `.env.demo` contents, the
+  release-artifact `scp`, the `ssh` verify step and the library `rsync`,
+  where the rest of the runbook writes `<VPS-SSH>`. `tools/demo-library/`'s
+  README wrote it a seventh time in its ship step. All seven are
+  `<VPS-SSH>` now; the gitignored `ops/coordinates.local.md` resolves that
+  placeholder to exactly the target they spelled (checked).
+- The operator host's (the NUC's) tailnet name, Tailscale IPv4 and LAN
+  address, copied from a real `bridge doctor` report and the #936 field
+  report: README's `bridge doctor` sample, `pairing.go`'s docblock, the
+  fixtures of `internal/tls/sancoverage_test.go`,
+  `internal/doctor/certsans_test.go`,
+  `internal/admin/pairing_endpoints_test.go` and `pairing_name_test.go`,
+  and three entries of this log. The same tailnet name as home-pc's
+  MagicDNS name in the tailscale, tls and admin tests and in the examples
+  of three production comments (`internal/tailscale/tailscale.go`,
+  `internal/tls/manager.go`). Home-pc's Tailscale IPv4 in
+  `internal/advertise/sans_test.go` and `internal/tls/tls_test.go`: the
+  v0.1.8 scrub (2026-07-22) had taken it out of
+  `internal/advertise/tailscale_test.go`, and it came back in two other
+  files. Home-pc's LAN address from before its 2026-09-20 DHCP move in
+  `cmd/bridge/netprobe_test.go` and `internal/mdns/mdns_test.go`. The dev
+  Mac's LAN address and Tailscale IPv4 and IPv6 in this log's #936 entry.
+
+### What they are now
+
+Code, README and fixtures take the examples the tree already uses for each
+kind: `tailnet.ts.net` for the tailnet (seven existing uses, none in a
+changed file, so no test now compares one tailnet with itself where it
+compared two), `100.64.0.24` and `100.64.0.88` (inside 100.64/10, so every
+address class is what it was), and `192.168.50.24` / `192.168.50.208`
+(private, as before). Each test keeps its order: `nuc.tailnet.ts.net` sorts
+after `nuc.local` as the real name did, and the address lists are in
+insertion order. This log takes redaction tokens instead
+(`nuc.<TAILNET>.ts.net`, `<NUC-LAN-IP>`, `<NUC-TAILSCALE-V4>`,
+`<MAC-LAN-IP>`, `<MAC-TAILSCALE-V4>`, `<MAC-TAILSCALE-V6>`), so each record
+still says what kind of address stood there, and no example reads as the
+observed value. gofmt (1.26.6) is clean on every changed Go file, and each
+changed package's tests pass under `-race`.
+
+### How the tree was searched
+
+Every value in the coordinates file's table and notes, and the addresses of
+the lab hosts the operator's sessions use, were searched in the tracked
+files (`git ls-files`) with the output reduced to file names, so no value
+was printed into anything tracked; then two shape scans over the same
+files: every IPv4 literal (126 distinct) and every `user@host`.
+Left as they are: `home-pc.local` (the host's own mDNS name, which the
+runbook uses as the host's name throughout, and which resolves only on its
+LAN), private and CGNAT literals in tests and PROTOCOL.md examples that no
+coordinate names, and a personal e-mail address in one test's MusicBrainz
+User-Agent string, which is not a host coordinate. Git history keeps the old
+text. Nothing needs rotating: the user name and the host name are not
+secrets, and the tailnet addresses route only inside the tailnet, the
+coordinates file's own assessment of the v0.1.8 scrub.
+
+Not built: a guard. A test that fails on these values has to carry them, or
+hashes of them, in the public tree, and the leaks came from pasting real
+output, which the rule in CLAUDE.md's "Production deployments" now names.
 
 ## 2026-09-29 — a feature switched off stops new work and withdraws nothing it made: PROTOCOL.md now says the reads go on answering (backlog B108)
 

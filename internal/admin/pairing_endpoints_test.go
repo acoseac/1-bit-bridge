@@ -15,9 +15,9 @@ import (
 // anything Tailscale-classed in PR #269 (the append moved to the api
 // layer), so both consumers lost every Tailscale entry: observed
 // 2026-09-20 on a loopback bridge whose health advertised
-// `nuc.sable-eagle.ts.net`, `100.102.105.89` and an `fd7a:…` address
+// `nuc.tailnet.ts.net`, `100.64.0.24` and an `fd7a:…` address
 // while `POST /api/tokens` answered `alternates: [nuc.local,
-// 192.168.0.24]`. A phone paired on Wi-Fi had no Tailscale fallback
+// 192.168.50.24]`. A phone paired on Wi-Fi had no Tailscale fallback
 // recorded, which is exactly what buildPairURL's docblock promises it has.
 
 // healthStyleEndpoints is the classed list a loopback bridge with
@@ -26,10 +26,10 @@ import (
 // The URLs are the shape of the 2026-09-20 report.
 func healthStyleEndpoints() []advertise.Endpoint {
 	return []advertise.Endpoint{
-		{URL: "https://192.168.0.24:7788", Class: advertise.ClassLANv4},
+		{URL: "https://192.168.50.24:7788", Class: advertise.ClassLANv4},
 		{URL: "https://nuc.local:7788", Class: advertise.ClassMDNSHost},
-		{URL: "https://nuc.sable-eagle.ts.net:7788", Class: advertise.ClassTailscaleDNS},
-		{URL: "https://100.102.105.89:7788", Class: advertise.ClassTailscaleV4},
+		{URL: "https://nuc.tailnet.ts.net:7788", Class: advertise.ClassTailscaleDNS},
+		{URL: "https://100.64.0.24:7788", Class: advertise.ClassTailscaleV4},
 		{URL: "https://[fd7a:115c:a1e0::1]:7788", Class: advertise.ClassTailscaleV6},
 		{URL: "https://custom.example.test:7788", Class: advertise.ClassCustom},
 	}
@@ -37,8 +37,8 @@ func healthStyleEndpoints() []advertise.Endpoint {
 
 // tailscaleURLs are the three entries only the api layer can supply.
 var tailscaleURLs = []string{
-	"https://nuc.sable-eagle.ts.net:7788",
-	"https://100.102.105.89:7788",
+	"https://nuc.tailnet.ts.net:7788",
+	"https://100.64.0.24:7788",
 	"https://[fd7a:115c:a1e0::1]:7788",
 }
 
@@ -54,9 +54,9 @@ func TestPairAlternatesLoopbackBakesTheAdvertisedTailscaleEndpoints(t *testing.T
 	// with the primary lifted out of its mDNS slot rather than repeated.
 	want := []string{
 		primary,
-		"https://192.168.0.24:7788",
-		"https://nuc.sable-eagle.ts.net:7788",
-		"https://100.102.105.89:7788",
+		"https://192.168.50.24:7788",
+		"https://nuc.tailnet.ts.net:7788",
+		"https://100.64.0.24:7788",
 		"https://[fd7a:115c:a1e0::1]:7788",
 		"https://custom.example.test:7788",
 	}
@@ -191,10 +191,10 @@ func TestEndpointsPanelRendersTheSharedEnumerationWithClasses(t *testing.T) {
 		t.Fatalf("endpoints: %d", code)
 	}
 	want := []adminEndpointEntry{
-		{URL: "https://192.168.0.24:7788", Class: "LAN"},
+		{URL: "https://192.168.50.24:7788", Class: "LAN"},
 		{URL: "https://nuc.local:7788", Class: "mDNS"},
-		{URL: "https://nuc.sable-eagle.ts.net:7788", Class: "Tailscale DNS"},
-		{URL: "https://100.102.105.89:7788", Class: "Tailscale"},
+		{URL: "https://nuc.tailnet.ts.net:7788", Class: "Tailscale DNS"},
+		{URL: "https://100.64.0.24:7788", Class: "Tailscale"},
 		{URL: "https://[fd7a:115c:a1e0::1]:7788", Class: "Tailscale"},
 		{URL: "https://custom.example.test:7788", Class: "Custom"},
 	}

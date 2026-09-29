@@ -599,7 +599,7 @@ func TestRebindAfterCloseIsNoop(t *testing.T) {
 }
 
 func TestAdvertisementOfANilInterfaceCarriesEveryAddress(t *testing.T) {
-	ips := []net.IP{net.ParseIP("192.168.0.208"), net.ParseIP("10.0.0.1")}
+	ips := []net.IP{net.ParseIP("192.168.50.208"), net.ParseIP("10.0.0.1")}
 	adv := advertisementOf(ips, nil, nil)
 	if adv.iface != nil || !ipSetEqual(adv.ips, ips) {
 		t.Fatalf("nil iface should pass every address through; got iface %v, ips %v", adv.iface, adv.ips)
@@ -616,7 +616,7 @@ func TestAdvertisementOfKeepsOnlyThePinnedInterfacesAddresses(t *testing.T) {
 	}
 	ips := []net.IP{
 		net.ParseIP("127.0.0.1"),
-		net.ParseIP("192.168.0.208"),
+		net.ParseIP("192.168.50.208"),
 		net.ParseIP("10.0.0.1"),
 	}
 	adv := advertisementOf(ips, loopback, addrs)

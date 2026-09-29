@@ -57,7 +57,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 [ok]   config-dir          /Users/me/Library/Application Support/1-bit-bridge
 [ok]   tls-cert            present, expires in 312 days
 [warn] tls-cert-sans       stale — 3 of 4 name(s) and 3 of 6 address(es) this bridge advertises are not in the certificate
-  ↳ clients dialling nuc, nuc.local, nuc.sable-eagle.ts.net, 192.168.0.24, 100.102.105.89, fd7a:115c:a1e0::1 fail TLS
+  ↳ clients dialling nuc, nuc.local, nuc.tailnet.ts.net, 192.168.50.24, 100.64.0.24, fd7a:115c:a1e0::1 fail TLS
     hostname verification. Either the data directory was moved to a host this certificate was not minted on, or an
     endpoint was added since. Run `bridge cert rotate` and restart the bridge, then re-pair every paired device —
     a rotation changes the SHA-256 fingerprint iOS pinned at pairing.

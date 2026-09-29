@@ -464,7 +464,7 @@ func TestGenerateWithOptions_IncludesExtraSANs(t *testing.T) {
 		Hostname:      "host.example.com",
 		ExtraDNSNames: []string{"magic.tailfoo.ts.net", "my-bridge.example.com"},
 		ExtraIPs: []net.IP{
-			net.ParseIP("100.91.73.88"),
+			net.ParseIP("100.64.0.88"),
 			net.ParseIP("192.168.1.10"),
 		},
 	}
@@ -507,7 +507,7 @@ func TestGenerateWithOptions_IncludesExtraSANs(t *testing.T) {
 		net.IPv4(127, 0, 0, 1),
 		net.IPv6loopback,
 		net.IPv4zero,
-		net.ParseIP("100.91.73.88"),
+		net.ParseIP("100.64.0.88"),
 		net.ParseIP("192.168.1.10"),
 	}
 	for _, want := range wantIPs {
