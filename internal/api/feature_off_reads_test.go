@@ -46,7 +46,7 @@ func requireAnalysisOff(t *testing.T, hs *httptest.Server) {
 func TestARenditionOnDiskIsServedWithUpscalingOff(t *testing.T) {
 	hs, tok, root, vs, sidecar := fileVariantFixtureGated(t, false)
 	if h := healthOf(t, hs); h.UpscaleEnabled == nil || *h.UpscaleEnabled {
-		t.Fatalf("/v1/health upscaleEnabled = %v, want false: the test needs the gate closed", h.UpscaleEnabled)
+		t.Fatal("/v1/health does not report upscaleEnabled false: the test needs the gate closed")
 	}
 	const rel = "Artist/Album/01.flac"
 	src := statSourceOrFail(t, root, rel)
