@@ -711,32 +711,12 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		// Pre-flight the PICTURE blocks before handing the file to
-		// dhowden/tag. Its readPictureBlock does `make([]byte, dataLen)`
-		// from a raw 4-byte file field BEFORE the io.ReadFull that would
-		// fail (dhowden's own guarded readBytes — 10 MiB cap with an
-		// io.CopyN fallback — is used everywhere else; this is the one
-		// site that bypasses it). A crafted PICTURE block therefore
-		// requests up to 4 GiB, and `maxArtworkBytes` is checked as
-		// `len(pic.Data) > max` — AFTER the allocation, so it is a policy
-		// filter, not a bound. Same fatal shape as the VORBIS_COMMENT
-		// bomb: the runtime throws rather than panicking, so recover()
-		// cannot catch it.
-		//
-		// Bounding the reader can't help (the allocation precedes the
-		// read, and an io.SectionReader tight enough to matter would
-		// break trailing-tag formats), so the fix is to not make the call
-		// on a file whose picture geometry is already inconsistent.
-		if !flacPictureBlocksSane(f) {
-			scanLogger.Warn("flac picture block declares a length beyond its metadata block; skipping tag read",
-				"path", absPath)
-		} else {
-			if _, err := f.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
-				return err
-			}
+		// The picture allocation guard runs inside
+		// extractViaDhowdenFromReader, for every extension: dhowden picks
+		// its parser by the file's first bytes, so a FLAC-shaped .mp3 is
+		// read as FLAC too (dhowden_picture_guard.go).
+		if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
+			return err
 		}
 		// dhowden/tag's Vorbis reader collapses multi-value tags into a
 		// single value (last-wins map insert) — a FLAC tagged with
@@ -796,7 +776,21 @@ func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) 
 // and the folder.jpg fallback both run from the same code path.
 //
 // Per Gemini A8 / iOS bug review #7.
+//
+// It is the one call of tag.ReadFrom, so the picture allocation guard is
+// here, for every extension (dhowden_picture_guard.go): a file whose pictures
+// would make dhowden allocate beyond what the file holds is not handed to it,
+// and ends as a file whose tags dhowden could not read.
 func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
+	if ok, refusal := dhowdenPicturesWithinBudget(f); !ok {
+		scanLogger.Warn("embedded picture declares more than the file could hold; skipping tag read",
+			"path", trackLogPath(absPath, t), "picture", refusal.What,
+			"declaredBytes", refusal.Declared, "budgetBytes", refusal.Budget)
+		if ec != nil && ec.ArtworkCacheDir != "" {
+			extractLocalArtwork(absPath, t, nil, ec)
+		}
+		return nil
+	}
 	m, err := tag.ReadFrom(f)
 	if errors.Is(err, tag.ErrNoTagsFound) {
 		// No embedded tags — but a folder.jpg next to the file is
@@ -1409,13 +1403,13 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 		// mewkiz/flac v1.0.14), so the offset here IS the body start and
 		// advancing by block.Length lands on the next header.
 		//
-		// flacPictureBlocksSane 30 lines below notes the position and
-		// seeks absolutely because it READS part of the body first and
-		// needs the start to come back to; this walk reads nothing, so
-		// the query is a syscall bought for nothing — and this runs per
-		// block on the NAS mounts the whole single-open path exists for
-		// (Gemini on #981). Fail-open on a seek error, like every other
-		// bail here.
+		// A walk that READS part of a body first would need to note the
+		// start and seek back to it absolutely (the picture guard reads by
+		// offset instead, dhowden_picture_guard.go); this walk reads
+		// nothing, so the query would be a syscall bought for nothing — and
+		// this runs per block on the NAS mounts the whole single-open path
+		// exists for (Gemini on #981). Fail-open on a seek error, like every
+		// other bail here.
 		if _, serr := r.Seek(block.Length, io.SeekCurrent); serr != nil {
 			return
 		}
@@ -1423,136 +1417,6 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			return
 		}
 	}
-}
-
-// flacPictureBlocksSane walks the FLAC metadata blocks and reports whether
-// every PICTURE block's declared internal lengths fit inside the block that
-// contains them. It exists to keep a corrupt or hostile file away from
-// dhowden/tag's unbounded `make([]byte, dataLen)` (see the call site).
-//
-// Fail-OPEN by design: a file we cannot walk at all (no fLaC magic, a
-// truncated header, an I/O error) returns true, because those inputs never
-// reach the picture path in the first place and the existing extractor
-// chain already degrades gracefully on them. We only return false when a
-// PICTURE block is positively self-inconsistent — the one shape that turns
-// into an unrecoverable allocation.
-//
-// The FLAC PICTURE body is: type(4) mimeLen(4) mime desc Len(4) desc
-// width(4) height(4) depth(4) colors(4) dataLen(4) data. Every length is
-// big-endian here (unlike the little-endian VORBIS_COMMENT vectors).
-//
-// Leaves the reader wherever it stops; callers MUST Seek before reuse.
-func flacPictureBlocksSane(rs io.ReadSeeker) bool {
-	if _, err := rs.Seek(0, io.SeekStart); err != nil {
-		return true
-	}
-	if err := skipID3v2(rs); err != nil {
-		return true
-	}
-	var magic [4]byte
-	if _, err := io.ReadFull(rs, magic[:]); err != nil {
-		return true
-	}
-	if string(magic[:]) != "fLaC" {
-		return true
-	}
-	for {
-		block, err := meta.New(rs)
-		if err != nil {
-			return true
-		}
-		if block.Type == meta.TypePicture {
-			// Note the body's start BEFORE validating so we can seek to
-			// the next block header instead of reading our way there.
-			// meta.New consumed only the 4-byte header and wraps rs in a
-			// plain io.LimitReader (no buffering — meta.go's Block.lr), so
-			// the file offset here IS the body start and an external Seek
-			// stays consistent with the walk.
-			pos, err := rs.Seek(0, io.SeekCurrent)
-			if err != nil {
-				return true // fail-open, per the docblock
-			}
-			sane := flacPictureBodySane(rs, block.Length)
-			// Skip the payload rather than draining it. Draining sent the
-			// whole 5–25 MiB cover over the wire, and the caller then
-			// Seek(0)s and hands the same file to dhowden which reads it
-			// again — reintroducing exactly the per-track double read the
-			// single-open FLAC path exists to eliminate (see the call
-			// site's docblock).
-			if _, err := rs.Seek(pos+block.Length, io.SeekStart); err != nil {
-				return true
-			}
-			if !sane {
-				return false
-			}
-		} else if err := block.Skip(); err != nil {
-			return true
-		}
-		if block.IsLast {
-			return true
-		}
-	}
-}
-
-// flacPictureBodySane reads one PICTURE block's fixed header fields,
-// validating each declared length against the bytes remaining in the
-// block. Returns false only on a positive inconsistency; a read error
-// returns true (fail-open, per flacPictureBlocksSane's contract).
-//
-// It reads ONLY as far as the dataLen field and leaves the reader
-// wherever it stops — it deliberately does NOT drain to the next block
-// header. Draining transferred the entire cover-art payload for a
-// verdict that needs ~30 bytes of header, and the file is read again by
-// dhowden immediately afterwards. Re-aligning the walk is the caller's
-// job, via a Seek it can do in O(1).
-func flacPictureBodySane(r io.Reader, blockLen int64) (sane bool) {
-	lr := &io.LimitedReader{R: r, N: blockLen}
-
-	readBE := func() (uint32, bool) {
-		var b [4]byte
-		if _, err := io.ReadFull(lr, b[:]); err != nil {
-			return 0, false
-		}
-		return binary.BigEndian.Uint32(b[:]), true
-	}
-	// picture type
-	if _, ok := readBE(); !ok {
-		return true
-	}
-	// MIME string
-	mimeLen, ok := readBE()
-	if !ok {
-		return true
-	}
-	if int64(mimeLen) > lr.N {
-		return false
-	}
-	if _, err := io.CopyN(io.Discard, lr, int64(mimeLen)); err != nil {
-		return true
-	}
-	// description string
-	descLen, ok := readBE()
-	if !ok {
-		return true
-	}
-	if int64(descLen) > lr.N {
-		return false
-	}
-	if _, err := io.CopyN(io.Discard, lr, int64(descLen)); err != nil {
-		return true
-	}
-	// width, height, depth, colors
-	for i := 0; i < 4; i++ {
-		if _, ok := readBE(); !ok {
-			return true
-		}
-	}
-	// The payload itself — the field dhowden allocates from unvalidated.
-	dataLen, ok := readBE()
-	if !ok {
-		return true
-	}
-	return int64(dataLen) <= lr.N
 }
 
 // errVorbisCommentOverrun reports a VORBIS_COMMENT body whose declared

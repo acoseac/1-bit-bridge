@@ -22,6 +22,18 @@
 // Seeds are minimal well-formed containers so the fuzzer starts inside the
 // parse rather than bouncing off the magic check. Without `-fuzz` these run as
 // ordinary seed-corpus tests, so they cost the normal suite ~nothing.
+//
+// # The allocation property
+//
+// Every target here also fails when one extraction allocates more than
+// extractionAllocLimit allows for the input's size: a length read out of a
+// file must never size a buffer the file cannot back (the v11 rule, and
+// backlog B99). Without it the fuzzer found such an input and could not say
+// so: dhowden allocated 4 GiB for a 40-byte FLAC, the runtime handed out the
+// address space, and the four workers re-zeroing it took the nightly runner's
+// memory until the runner itself was killed, with nothing saved. Measured
+// here, the same input is an ordinary crasher, written to testdata/fuzz with
+// the size it asked for.
 package manifest
 
 import (
@@ -32,8 +44,7 @@ import (
 
 // fuzzExtract drives one extractor entry point against arbitrary bytes written
 // to a real file, since every extractor opens by path (several seek, and the
-// FLAC path deliberately depends on seek alignment — see the
-// flacPictureBlocksSane invariant).
+// FLAC path deliberately depends on seek alignment).
 //
 // The ExtractContext carries no artwork cache dir: artwork extraction writes
 // files and is covered by its own tests, and leaving it empty keeps each
@@ -45,15 +56,25 @@ func fuzzExtract(f *testing.F, ext string, seeds [][]byte) {
 	}
 	dir := f.TempDir()
 	f.Fuzz(func(t *testing.T, b []byte) {
-		p := filepath.Join(dir, "fuzz"+ext)
-		if err := os.WriteFile(p, b, 0o600); err != nil {
-			t.Skip() // filesystem refused the input; not what we're testing
-		}
-		var tr Track
-		// An error return is a PASS: "this file is not parseable" is the
-		// correct answer for most inputs. Only a panic fails.
-		_ = ExtractWithContext(p, &tr, &ExtractContext{})
+		fuzzExtractOnce(t, dir, ext, b)
 	})
+}
+
+// fuzzExtractOnce extracts b as a file with extension ext, and fails on the
+// allocation property (see the file's docblock). An error return is a PASS:
+// "this file is not parseable" is the correct answer for most inputs.
+func fuzzExtractOnce(t *testing.T, dir, ext string, b []byte) {
+	p := filepath.Join(dir, "fuzz"+ext)
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Skip() // filesystem refused the input; not what we're testing
+	}
+	var tr Track
+	before := heapAllocated()
+	_ = ExtractWithContext(p, &tr, &ExtractContext{})
+	if got, limit := heapAllocated()-before, extractionAllocLimit(len(b)); got > limit {
+		t.Fatalf("extracting a %d-byte %s file allocated %d bytes (limit %d): a length read from the file sized a buffer the file cannot back",
+			len(b), ext, got, limit)
+	}
 }
 
 func FuzzExtractAIFF(f *testing.F) {
@@ -90,9 +111,40 @@ func FuzzExtractDSF(f *testing.F) {
 }
 
 func FuzzExtractFLAC(f *testing.F) {
-	fuzzExtract(f, ".flac", [][]byte{
+	seeds := [][]byte{
 		// fLaC + a last-block STREAMINFO header with a zeroed 34-byte body.
 		append([]byte("fLaC\x80\x00\x00\x22"), make([]byte, 34)...),
+	}
+	// Every way the old guard let dhowden allocate a picture past the bytes
+	// present (backlog B99), so the ordinary suite runs each through the
+	// allocation property. testdata/fuzz/FuzzExtractFLAC holds the input the
+	// fuzzer itself found.
+	for _, c := range pictureBombShapes() {
+		seeds = append(seeds, c.data)
+	}
+	fuzzExtract(f, ".flac", seeds)
+}
+
+// FuzzExtractOGG fuzzes the Ogg path through what dhowden reads of it: the
+// comment packet. A mutated page fails dhowden's CRC and ends its read at
+// once, so the fuzzer mutates the PACKETS and the harness lays them out as
+// pages with valid CRCs (pageData picks how the packet splits across pages,
+// which the reader has to join). The seeds carry a METADATA_BLOCK_PICTURE,
+// whose declared data length dhowden allocates before reading.
+func FuzzExtractOGG(f *testing.F) {
+	cover := make([]byte, 64)
+	f.Add(vorbisIdent(), vorbisCommentPacket("TITLE=t"), uint16(65025))
+	f.Add(vorbisIdent(), vorbisCommentPacket("TITLE=t", mbpComment("METADATA_BLOCK_PICTURE", uint32(len(cover)), cover)), uint16(255))
+	f.Add(append([]byte("OpusHead"), make([]byte, 11)...), opusCommentPacket(mbpComment("metadata_block_picture", pictureDataLen, nil)), uint16(510))
+	dir := f.TempDir()
+	f.Fuzz(func(t *testing.T, ident, comment []byte, pageData uint16) {
+		// Bound what one execution writes: the property is about what a
+		// file's declared lengths make the extractor allocate, not the
+		// file's own size.
+		if len(ident)+len(comment) > 1<<20 {
+			t.Skip()
+		}
+		fuzzExtractOnce(t, dir, ".ogg", oggStream(int(pageData), ident, comment))
 	})
 }
 
