@@ -812,12 +812,20 @@ func TestScanner_NoRecoveryForUUIDArtworkMBID(t *testing.T) {
 
 // --- stringOf case-insensitive lookup ---
 
-// TestStringOfMatchesVorbisAndID3v2Spellings locks the case + space
-// agnosticism. Vorbis writes `MUSICBRAINZ_ALBUMID`; ID3v2 TXXX writes
-// `MusicBrainz Album Id` (Picard's canonical form). Pre-fix the lookup
-// did exact case-sensitive map subscripts and silently missed every
-// ID3v2-tagged album. Per Gemini A6 / iOS bug review #6d.
-func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
+// TestStringOfMatchesVorbisAndMP4Spellings locks the case + space
+// agnosticism over the raw map's KEYS. Vorbis writes
+// `MUSICBRAINZ_ALBUMID`; dhowden keys an MP4 freeform atom by its name,
+// Picard's `MusicBrainz Album Id`. Pre-fix the lookup did exact
+// case-sensitive map subscripts and silently missed the spaced form. Per
+// Gemini A6 / iOS bug review #6d.
+//
+// This test was TestStringOfMatchesVorbisAndID3v2Spellings until
+// 2026-09-29, and its second case called the spaced key an ID3v2 TXXX
+// description. It never was one: dhowden keys a TXXX frame "TXXX",
+// "TXXX_0", … and holds the description inside a *tag.Comm, so the test
+// passed while no ID3v2 tag gave up its MusicBrainz ids (backlog B116).
+// TestPicardsID3v2IdsAndReplayGainReachTheirFields reads real ID3v2 tags.
+func TestStringOfMatchesVorbisAndMP4Spellings(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  map[string]any
@@ -829,9 +837,9 @@ func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
 			want: "vorbis-mbid",
 		},
 		{
-			name: "ID3v2 TXXX human-readable",
-			raw:  map[string]any{"MusicBrainz Album Id": "id3v2-mbid"},
-			want: "id3v2-mbid",
+			name: "MP4 freeform atom name",
+			raw:  map[string]any{"MusicBrainz Album Id": "mp4-mbid"},
+			want: "mp4-mbid",
 		},
 		{
 			name: "all-lower underscored",
@@ -864,7 +872,8 @@ func TestStringOfMatchesVorbisAndID3v2Spellings(t *testing.T) {
 }
 
 // TestStringOfTrimsResultValue locks the trim-on-return contract.
-// ID3v2 TXXX frames occasionally carry trailing whitespace; without
+// A hand-edited tag occasionally carries trailing whitespace (the raw
+// key here is an MP4 freeform atom's name); without
 // the trim, two tracks tagged identically except for trailing
 // whitespace would surface as different MBIDs (and on the iOS side
 // fan out into different per-album cover-art lookups).
