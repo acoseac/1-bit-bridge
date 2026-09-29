@@ -101,3 +101,27 @@ func TestWatcherWatchesARootThatIsALinkToALink(t *testing.T) {
 		}
 	}
 }
+
+// TestConfiguredNameRenamesOnlyWhatIsUnderAResolvedRoot pins the renaming
+// itself: a path at or below a linked root's resolved directory is named
+// under the configured root, the longest resolved directory wins when two
+// nest, and a sibling that merely shares the resolved directory's string
+// prefix is not under it.
+func TestConfiguredNameRenamesOnlyWhatIsUnderAResolvedRoot(t *testing.T) {
+	p := filepath.FromSlash
+	wt := &Watcher{aliases: []rootAlias{
+		{resolved: p("/mnt/nas/music"), configured: p("/srv/music")},
+		{resolved: p("/mnt/nas/music/live"), configured: p("/srv/live")},
+	}}
+	for _, c := range []struct{ in, want string }{
+		{p("/mnt/nas/music"), p("/srv/music")},
+		{p("/mnt/nas/music/Artist/01.flac"), p("/srv/music/Artist/01.flac")},
+		{p("/mnt/nas/music/live/Set/01.flac"), p("/srv/live/Set/01.flac")},
+		{p("/mnt/nas/music2/Artist/01.flac"), p("/mnt/nas/music2/Artist/01.flac")},
+		{p("/srv/music/Artist/01.flac"), p("/srv/music/Artist/01.flac")},
+	} {
+		if got := wt.configuredName(c.in); got != c.want {
+			t.Errorf("configuredName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
