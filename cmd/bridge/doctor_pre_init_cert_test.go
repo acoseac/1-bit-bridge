@@ -70,26 +70,40 @@ func TestDoctorBeforeInitGradesThePairInitWouldKeep(t *testing.T) {
 					return stripANSI(out.String() + errOut.String())
 				}},
 			} {
-				out := run.report()
-				line := reportLine(out, "tls-cert")
-				for _, want := range tc.want {
-					if !strings.Contains(line, want) {
-						t.Errorf("%s: tls-cert says %q, want %q", run.name, line, want)
-					}
-				}
-				if t.Failed() {
-					t.Logf("%s printed:\n%s", run.name, out)
-				}
+				checkReportLineSays(t, run.name, run.report(), "tls-cert", tc.want)
 			}
 
 			// What init does over the same data dir, with its preflight.
 			code, out := runInit(t, "--yes", "--no-service", "--dir", platform, "--library", testLibrary(t),
 				"--listen-address", loopbackAddr(freeLoopbackPort(t)), "--admin-address", loopbackAddr(freeLoopbackPort(t)))
-			refused := code == 1 && strings.Contains(reportLine(out, "tls-cert"), "[FAIL]")
-			if refused != tc.initRefuses {
+			if refused := initRefusedOnTLSCert(code, out); refused != tc.initRefuses {
 				t.Errorf("bridge init exited %d (refused on tls-cert: %v), want a refusal: %v:\n%s",
 					code, refused, tc.initRefuses, out)
 			}
 		})
 	}
+}
+
+// checkReportLineSays checks that out, the report `who` printed, has a line
+// for check that says every string in want, and logs the report when it does
+// not.
+func checkReportLineSays(t *testing.T, who, out, check string, want []string) {
+	t.Helper()
+	line := reportLine(out, check)
+	says := true
+	for _, w := range want {
+		if !strings.Contains(line, w) {
+			t.Errorf("%s: %s says %q, want %q", who, check, line, w)
+			says = false
+		}
+	}
+	if !says {
+		t.Logf("%s printed:\n%s", who, out)
+	}
+}
+
+// initRefusedOnTLSCert says a `bridge init` run that exited code and printed
+// out was refused by its preflight's tls-cert check.
+func initRefusedOnTLSCert(code int, out string) bool {
+	return code == 1 && strings.Contains(reportLine(out, "tls-cert"), "[FAIL]")
 }

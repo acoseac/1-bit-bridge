@@ -199,7 +199,7 @@ func TestInitRunThatKeepsTheConfigIsNotRefused(t *testing.T) {
 			if w := publicOnlyWarning(out); w != "" {
 				t.Errorf("the run that keeps the config warned %q", w)
 			}
-			if after := readConfigFile(t, cfgDir); after != before {
+			if readConfigFile(t, cfgDir) != before {
 				t.Errorf("the run changed the config it keeps")
 			}
 		})
@@ -246,11 +246,14 @@ func TestInitWarnsAboutAnEmailTheProxyDoesNotUse(t *testing.T) {
 		name  string
 		args  []string
 		warns bool
+		// saved is the autocert.email the run writes.
+		saved string
 	}{
 		{"with --admin-tls-proxy", []string{"--admin-tls-proxy", "--email", "ops@example.test",
-			"--listen-address", loopbackAddr(freeLoopbackPort(t)), "--admin-address", loopbackAddr(freeLoopbackPort(t))}, true},
+			"--listen-address", loopbackAddr(freeLoopbackPort(t)), "--admin-address", loopbackAddr(freeLoopbackPort(t))},
+			true, ""},
 		// The bridge's own ACME: the API on :443, which --skip-doctor does not bind.
-		{"with the bridge's own ACME", []string{"--email", "ops@example.test"}, false},
+		{"with the bridge's own ACME", []string{"--email", "ops@example.test"}, false, "ops@example.test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
@@ -260,21 +263,24 @@ func TestInitWarnsAboutAnEmailTheProxyDoesNotUse(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("a public first install exited %d", code)
 			}
-			w := emailIgnoredWarning(out)
-			if tc.warns && (w == "" || !strings.Contains(w, "--admin-tls-proxy")) {
-				t.Errorf("the run said nothing about the --email it does not write, or not why: %q", w)
-			}
-			if !tc.warns && w != "" {
-				t.Errorf("the run warned about an --email it writes: %q", w)
-			}
-			want := "ops@example.test"
-			if tc.warns {
-				want = ""
-			}
-			if got := loadInstallConfig(t, cfgDir).Autocert.Email; got != want {
-				t.Errorf("autocert.email = %q, want %q", got, want)
+			checkEmailIgnoredWarning(t, emailIgnoredWarning(out), tc.warns)
+			if got := loadInstallConfig(t, cfgDir).Autocert.Email; got != tc.saved {
+				t.Errorf("autocert.email = %q, want %q", got, tc.saved)
 			}
 		})
+	}
+}
+
+// checkEmailIgnoredWarning checks the warning w a run gave about the --email
+// it does not write: one that names --admin-tls-proxy, the reason, where the
+// run warns, and none where it does not.
+func checkEmailIgnoredWarning(t *testing.T, w string, warns bool) {
+	t.Helper()
+	switch {
+	case warns && !strings.Contains(w, "--admin-tls-proxy"):
+		t.Errorf("the run said nothing about the --email it does not write, or not why: %q", w)
+	case !warns && w != "":
+		t.Errorf("the run warned about an --email it writes: %q", w)
 	}
 }
 

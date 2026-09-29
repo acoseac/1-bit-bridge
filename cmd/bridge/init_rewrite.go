@@ -200,7 +200,7 @@ func refuseRewrite(stderr io.Writer, cfgPath string, prior *priorInstallFile, pr
 	default:
 		return false
 	}
-	fmt.Fprintln(stderr, "the config was NOT changed.")
+	fmt.Fprintln(stderr, configNotChanged)
 	return true
 }
 

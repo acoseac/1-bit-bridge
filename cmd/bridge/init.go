@@ -164,6 +164,11 @@ func (f postureFlags) publicOnly() []string {
 	return out
 }
 
+// configNotChanged is the line that closes a refusal init makes before it
+// writes over an install's config, so the operator knows the install is as
+// it was.
+const configNotChanged = "the config was NOT changed."
+
 // warnIgnoredPostureFlags says what init does with a posture flag this run
 // does not write, and returns the exit code of a refusal, or 0. exists says a
 // config is at cfgPath, replace that this run rewrites it (--yes --force, or
@@ -221,7 +226,7 @@ func warnIgnoredPostureFlags(stderr io.Writer, f postureFlags, exists, replace b
 	fmt.Fprintf(stderr, "%s %s only with --public, and this run would rewrite the public install at %s as a loopback "+
 		"one, which ignores %s and drops the endpoint every paired device dials.\n", names, verb, cfgPath, them)
 	fmt.Fprintf(stderr, "add --public to rewrite it as a public install, or leave %s out to make it a loopback one.\n", them)
-	fmt.Fprintln(stderr, "the config was NOT changed.")
+	fmt.Fprintln(stderr, configNotChanged)
 	return 2
 }
 
@@ -832,7 +837,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	_, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, certSANOptions(cfg))
 	if err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
-		fmt.Fprintln(stderr, "the config was NOT changed.")
+		fmt.Fprintln(stderr, configNotChanged)
 		return 1
 	}
 
@@ -901,7 +906,7 @@ func openInitAdminAuth(storePath string, stderr io.Writer) (*adminauth.Store, bo
 		fmt.Fprintf(stderr, "the admin credentials at %s do not load, and init keeps an install's credentials rather than replacing them.\n", storePath)
 		fmt.Fprintln(stderr, "restore that file from a backup, or move it aside and run this init again to mint new ones.")
 	}
-	fmt.Fprintln(stderr, "the config was NOT changed.")
+	fmt.Fprintln(stderr, configNotChanged)
 	return nil, false
 }
 

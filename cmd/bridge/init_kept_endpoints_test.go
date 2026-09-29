@@ -47,32 +47,48 @@ func TestInitRewriteWarnsAboutAKeptEndpointOnThePortItMovesOff(t *testing.T) {
 			const elsewhere = "https://music.example.test"
 			appendToConfig(t, cfgDir, "customEndpoints:\n    - "+moved+"\n    - "+elsewhere+"\n")
 
-			picked := freeLoopbackPort(t)
-			for picked == old || picked == 7788 {
-				picked = freeLoopbackPort(t)
-			}
+			picked := freeLoopbackPortOtherThan(t, old, 7788)
 			code, out := loopbackInit(t, cfgDir, lib, "", append([]string{"--force"}, tc.flags(picked)...)...)
 			defer logRunOnFailure(t, out)
 			if code != 0 {
 				t.Fatalf("the rewrite exited %d", code)
 			}
-			w := keptEndpointWarning(out)
-			if w == "" {
-				t.Fatalf("the rewrite said nothing about %s, which names :%d, the port it moves the API off", moved, old)
-			}
-			for _, want := range []string{moved, ":" + strconv.Itoa(old), ":" + strconv.Itoa(tc.newPort(picked))} {
-				if !strings.Contains(w, want) {
-					t.Errorf("the warning does not name %q", want)
-				}
-			}
-			if strings.Contains(w, elsewhere) {
-				t.Errorf("the warning names %s, which names no port the rewrite moves off", elsewhere)
-			}
+			checkKeptEndpointWarning(t, keptEndpointWarning(out), moved, elsewhere, old, tc.newPort(picked))
 			if got := loadInstallConfig(t, cfgDir).CustomEndpoints; !slices.Equal(got, []string{moved, elsewhere}) {
 				t.Errorf("customEndpoints = %v, want both kept as they were", got)
 			}
 		})
 	}
+}
+
+// checkKeptEndpointWarning checks the warning w a rewrite moving the API from
+// :from to :to gave about its kept endpoints: it names moved, the endpoint on
+// :from, and both ports, and not elsewhere, an endpoint on another port.
+func checkKeptEndpointWarning(t *testing.T, w, moved, elsewhere string, from, to int) {
+	t.Helper()
+	if w == "" {
+		t.Fatalf("the rewrite said nothing about %s, which names :%d, the port it moves the API off", moved, from)
+	}
+	for _, want := range []string{moved, ":" + strconv.Itoa(from), ":" + strconv.Itoa(to)} {
+		if !strings.Contains(w, want) {
+			t.Errorf("the warning does not name %q", want)
+		}
+	}
+	if strings.Contains(w, elsewhere) {
+		t.Errorf("the warning names %s, which names no port the rewrite moves off", elsewhere)
+	}
+}
+
+// freeLoopbackPortOtherThan is freeLoopbackPort, never one of taken.
+func freeLoopbackPortOtherThan(t *testing.T, taken ...int) int {
+	t.Helper()
+	for range 100 {
+		if p := freeLoopbackPort(t); !slices.Contains(taken, p) {
+			return p
+		}
+	}
+	t.Fatalf("100 free loopback ports were all among %v", taken)
+	return 0
 }
 
 // TestInitRewriteKeepingThePortSaysNothingOfItsEndpoints is the control: a
