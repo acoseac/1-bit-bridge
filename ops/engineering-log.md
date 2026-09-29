@@ -28706,3 +28706,11 @@ Gemini raised three findings on 759209e1:
   the handler has just made (`LookupVariant`) on the same request, and a
   goroutine per stale GET would be unbounded and outlive the request, when
   GETs are what the hook's debounce exists for.
+
+On the Windows test host the deleted-source change turned
+`TestPoolEnqueueReturnsErrQueueFullAtCap` red: it ran the real `Run` on
+`/dev/null/missing`, which Windows reports as not found, so `Run` now refuses
+it at once, and a single worker that fast kept the queue under its cap (on
+unix the path is ENOTDIR and still reaches the tool). Its docblock called
+the pigeonhole structural; it depended on a slow failure. The worker now
+holds its job until the test ends, which makes it structural.

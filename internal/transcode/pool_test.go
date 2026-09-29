@@ -103,6 +103,22 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 	// with a structural guarantee.
 	p := NewPool(store, 1, 2)
 	t.Cleanup(p.Stop)
+	// The worker holds the job it takes until the test ends, so the
+	// pigeonhole is structural: one job held, two queued, the rest
+	// refused. It used to run the real Run on /dev/null/missing and rely on
+	// that failing slowly; on Windows the path reads "not found", Run
+	// refuses a vanished source at once (ErrSourceChanged), and a worker
+	// that fast kept the queue under its cap. Registered after Stop, so it
+	// runs first and the held job is let go before Stop waits for it.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return RunResult{}, errors.New("held until the test ended")
+	}
 
 	// Each spec must have a unique dedup key; otherwise the
 	// second-and-onward calls hit the dedup early-return
