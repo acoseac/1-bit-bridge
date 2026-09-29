@@ -135,10 +135,12 @@ func finalPathNameByHandle(h windows.Handle, flags uint32) (string, error) {
 // nameFromHandle names an opened file by its drive-letter or UNC path, and
 // when it has none by its volume GUID path. A volume mounted only in a folder
 // has no drive letter, and VOLUME_NAME_DOS can fail for it (CodeRabbit on
-// #1090); `\\?\Volume{…}\…` reaches the files below the mount point, which
-// Go's os and filepath functions take as they are, where the mount point's
-// own spelling, left unresolved, is one entry to a walk. Both sides of a
-// comparison resolve alike, so a root and a path on that volume agree.
+// #1090; not measured, since mounting a volume takes an administrator);
+// `\\?\Volume{…}\…` reaches the files below the mount point, and Go's os
+// and filepath functions take it as it is (TestAVolumeGUIDPathIsWalkable),
+// where the mount point's own spelling, left unresolved, is one entry to a
+// walk. Both sides of a comparison resolve alike, so a root and a path on
+// that volume agree.
 func nameFromHandle(get func(flags uint32) (string, error)) (string, error) {
 	dos, err := get(volumeNameDOS)
 	if err == nil {

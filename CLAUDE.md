@@ -638,11 +638,18 @@ lost my library."
   mass reap through. On Windows `ResolveLinks` opens an absolute path
   following every reparse point and names it by the handle
   (`GetFinalPathNameByHandle`, `\\?\` taken off); a path that is not
-  there is `fs.ErrNotExist`, and one that is there but cannot be named that
-  way (two junctions pointing at each other, measured) gets `EvalSymlinks`'s
-  answer, as before; elsewhere it IS `EvalSymlinks`. **Not
+  there is `fs.ErrNotExist`; one the call cannot name by a drive letter (a
+  volume mounted only in a folder can be one) is named by its volume GUID
+  path, `\\?\Volume{…}\…`, which Go's os and filepath functions take as it
+  is; and one that is there but cannot be named at all (two junctions
+  pointing at each other, measured) gets `EvalSymlinks`'s answer, as
+  before, **unless that answer still ends at a link to a directory, which is
+  an error**: answered as resolved it is one entry to a walk and its own
+  spelling to a comparison (CodeRabbit on #1090). Elsewhere it IS
+  `EvalSymlinks`. **Not
   `os.Readlink` component by component**: that is a fork of the stdlib's
-  link walk, and it answers `\\?\Volume{…}\` for a mounted folder. The
+  link walk, and it answers `\\?\Volume{…}\` for every mounted folder, one
+  with a drive letter included. The
   sidecar walk now starts at the junction's TARGET, so the paths a sweep
   unlinks are in the tree it walked (#1063's rule, for junctions). A SUBST
   drive resolves to what it stands for (measured), a mapped drive by the

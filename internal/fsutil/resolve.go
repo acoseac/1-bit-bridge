@@ -18,13 +18,18 @@ package fsutil
 // On Windows an absolute p is opened, following every link in it, and named
 // by the handle (GetFinalPathNameByHandle, the resolution the OS itself
 // makes), with the `\\?\` prefix taken off so the answer is an ordinary
-// drive-letter or UNC path. A p that is not there is an error that
-// errors.Is reads as fs.ErrNotExist, as EvalSymlinks's is. A p that is there
-// but cannot be named that way (two junctions pointing at each other, whose
-// open fails with ERROR_CANT_RESOLVE_FILENAME; a filesystem that does not
-// support the call) gets EvalSymlinks's answer, which is what every caller
-// had before. A relative p is always EvalSymlinks's, so it stays relative.
-// Elsewhere this IS filepath.EvalSymlinks.
+// drive-letter or UNC path; one the call cannot name by a drive letter (a
+// volume mounted only in a folder can be one; not measured) is named by its
+// volume GUID path (`\\?\Volume{…}\…`), which Go's os and filepath
+// functions take as it is (measured). A p that is not there is an error
+// that errors.Is reads as fs.ErrNotExist, as EvalSymlinks's is. A p that is
+// there but cannot be named that way (two junctions pointing at each other,
+// whose open fails with ERROR_CANT_RESOLVE_FILENAME; a filesystem that does
+// not support the call) gets EvalSymlinks's answer, which is what every
+// caller had before, unless that answer still ends at a link to a directory:
+// that is an error, since answered as resolved it is one entry to a walk and
+// its own spelling to a comparison. A relative p is always EvalSymlinks's, so
+// it stays relative. Elsewhere this IS filepath.EvalSymlinks.
 //
 // The answer can spell the same directory differently from EvalSymlinks on
 // Windows: a drive made with SUBST resolves to the path it stands for

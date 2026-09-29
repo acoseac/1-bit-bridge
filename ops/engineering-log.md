@@ -27977,7 +27977,8 @@ with the new tests before the change they pin (the red run).
   target, so the paths a sweep unlinks are in the tree it walked (#1063's
   rule). Rejected: an `os.Readlink` walk over the components (a fork of the
   stdlib's link walk, and with Go's default `winreadlinkvolume=1` it answers
-  `\\?\Volume{GUID}\` for a mounted folder, a spelling nothing else uses);
+  `\\?\Volume{GUID}\` for every mounted folder, one with a drive letter
+  included, where the drive letter is the spelling everything else uses);
   `WalkableRoot`'s trailing separator for the sidecar walk (the walked
   paths would go through the junction, so a sweep would unlink through a
   link that can be repointed mid-sweep). Precedent for the primitive:
@@ -28049,3 +28050,43 @@ Negative controls on the committed change, each restored and re-run green
 | NC9 (Windows): `resolveLinks` ignores the final path | the two fsutil junction tests; both integrity junction tests (a second binary) |
 | NC10: the upscale walk skips a skip-named walk start too | `TestUpscaleFolderRequestWalksADotNamedRoot` |
 | NC11 (Windows): the fallback for a path that is there refuses instead | `TestResolveLinksFallsBackOnAJunctionLoop` |
+
+### Review round 1 (CodeRabbit on #1090)
+
+CodeRabbit's one finding, Major: for a volume mounted only in a folder,
+`GetFinalPathNameByHandle(VOLUME_NAME_DOS)` can fail (the volume has no
+drive letter) while `os.Stat` succeeds, and the fallback then answered
+`EvalSymlinks`'s spelling, the mount point itself, as resolved: a sidecar
+walk would see one entry and `TreeHoldsVariantSidecars` would read a
+populated tree as holding none. Taken, in both of the forms it proposed:
+
+- **A path the call cannot name by a drive letter is named by its volume
+  GUID path** (`nameFromHandle`: VOLUME_NAME_DOS, then VOLUME_NAME_GUID,
+  kept as `\\?\Volume{…}\…`). Whether VOLUME_NAME_DOS fails for a
+  letterless mount was not measured (mounting a volume takes an
+  administrator, and the only Windows host available runs a production
+  bridge). What was measured is that the GUID form is usable as it is:
+  `TestAVolumeGUIDPathIsWalkable` opens a temp directory the way
+  `finalPathName` does, asks for its GUID path, walks it with
+  `filepath.WalkDir` to the file below, and `IsUnderAny` reads a
+  GUID-spelled child of the drive-letter-spelled directory as nested.
+- **An answer that still ends at a link to a directory is an error**
+  (`resolveWith`, `errLinkNotResolved`): Lstat not a directory, Stat a
+  directory. `EvalSymlinksOrClean` then resolves an ancestor, which gives the
+  lexical answer it gave before; the sidecar walks fail closed (the
+  inventory returns the error, `TreeHoldsVariantSidecars` too, and both
+  sweeps and the reverse guard refuse). A link that leads nowhere it can stat
+  (the junction loop) keeps `EvalSymlinks`'s answer, as before, since a walk
+  of it counts one unreadable entry, which the sweeps already refuse on.
+
+The decision is `resolveWith(p, resolveOps)`, the stats passed in, so the
+shapes the host cannot make run in a table
+(`TestResolveWithRefusesALinkItCouldNotResolve`), and the DOS-then-GUID
+retry is `nameFromHandle(get)` (`TestNameFromHandleFallsBackToTheVolumeGUIDPath`).
+
+| mutation | goes red |
+|---|---|
+| NC12 (Windows): no GUID retry | the no-drive-letter case of `TestNameFromHandleFallsBackToTheVolumeGUIDPath` only |
+| NC13 (Windows): no refusal of an unresolved link | the link case of `TestResolveWithRefusesALinkItCouldNotResolve` only |
+
+Gemini's `/gemini review` on the head answered with its daily quota notice.
