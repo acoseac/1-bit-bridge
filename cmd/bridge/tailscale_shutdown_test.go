@@ -61,7 +61,9 @@ func (c *heldMintCLI) MintCert(ctx context.Context, _, _, certPath, _ string) er
 func (c *heldMintCLI) release() { c.releaseOnce.Do(func() { close(c.releaseCh) }) }
 
 // waitStarted blocks until serve's auto-pilot is inside MintCert. A serve
-// that exits first is reported with its exit code, not as a timeout.
+// that exits first is reported with its exit code, not as a timeout, and one
+// that never gets there fails the test when serve's waits give up
+// (serveGiveUp).
 func (c *heldMintCLI) waitStarted(t *testing.T, done <-chan int, stderr *safeBuffer) {
 	t.Helper()
 	select {
@@ -69,8 +71,9 @@ func (c *heldMintCLI) waitStarted(t *testing.T, done <-chan int, stderr *safeBuf
 	case code := <-done:
 		t.Fatalf("serve exited with code %d before its Tailscale auto-pilot reached the mint; stderr=%s",
 			code, stderr.String())
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the Tailscale auto-pilot never reached the mint within 30s; stderr=%s", stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("the Tailscale auto-pilot never reached the mint before the test's deadline; stderr=%s\n"+
+			"serve's goroutines:\n%s", stderr.String(), serveStacks())
 	}
 }
 
@@ -117,8 +120,9 @@ func TestServeWaitsForAnInFlightTailscaleMint(t *testing.T) {
 	cli.release()
 	select {
 	case <-exited:
-	case <-time.After(shutdownGrace + 5*time.Second):
-		t.Fatalf("runServe did not return once the mint was released; stderr=%s", stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("runServe did not return once the mint was released, before the test's deadline; "+
+			"stderr=%s\nserve's goroutines:\n%s", stderr.String(), serveStacks())
 	}
 	select {
 	case <-cli.finished:
@@ -165,11 +169,15 @@ func TestServeGivesUpOnAWedgedTailscaleMintAfterTheGrace(t *testing.T) {
 	cli.waitStarted(t, done, stderr)
 	cancelled := time.Now()
 	cancel()
+	// Until serve's waits give up, and not a bound after the grace: the
+	// teardown's disk writes follow the grace, which a starved host took
+	// 16 s over (B63). A serve that waited for the mint never returns,
+	// since the mint returns only once the test ends.
 	select {
 	case <-exited:
-	case <-time.After(shutdownGrace + 10*time.Second):
+	case <-serveGiveUp(t):
 		t.Fatalf("runServe hung on a mint that never returns; the wait for it must be "+
-			"bounded by the grace. stderr=%s", stderr.String())
+			"bounded by the grace. stderr=%s\nserve's goroutines:\n%s", stderr.String(), serveStacks())
 	}
 	if took := time.Since(cancelled); took < shutdownGrace {
 		t.Errorf("runServe returned %v after the cancel, inside the %v grace, with the mint "+

@@ -325,8 +325,9 @@ func stopLiveServe(t *testing.T, c *liveConsole, cancel context.CancelFunc, exit
 	cancel()
 	select {
 	case <-exited:
-	case <-time.After(shutdownGrace + 5*time.Second):
-		t.Fatalf("serve did not exit; stderr=%s", stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("serve did not exit before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+			stderr.String(), serveStacks())
 	}
 	if strings.Contains(stderr.String(), "adminauth: flush sessions on shutdown") {
 		t.Errorf("the shutdown flush failed:\n%s", stderr.String())

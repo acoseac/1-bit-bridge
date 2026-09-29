@@ -68,14 +68,20 @@ func requireServeReportsTheOrphanSweepRefusal(t *testing.T, rows int, want strin
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	var last map[string]any
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+	// Until serve's waits give up (serveGiveUp), not a fixed bound: the
+	// sweep's boot tick walks the tree and lists the catalog, which a
+	// starved runner can take longer than any number chosen here (B63).
+	giveUp := serveGiveUpTime(t)
+	for {
 		last = jobsMaintenanceOf(t, client, "http://"+adminAddr+"/api/jobs")
-		if last["orphanSidecarGCRefusal"] != nil {
+		if last["orphanSidecarGCRefusal"] != nil || (!giveUp.IsZero() && time.Now().After(giveUp)) {
 			break
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	if last["orphanSidecarGC"] != true || last["orphanSidecarGCRefusal"] != want {
-		t.Fatalf("the Jobs payload does not carry the sweep's %s refusal: %v\nstderr: %s", want, last, served.stderr.String())
+		t.Fatalf("the Jobs payload does not carry the sweep's %s refusal: %v\nstderr: %s\nserve's goroutines:\n%s",
+			want, last, served.stderr.String(), serveStacks())
 	}
 	if since, _ := last["orphanSidecarGCRefusingSince"].(string); since == "" {
 		t.Errorf("the refusal carries no start: %v", last)
