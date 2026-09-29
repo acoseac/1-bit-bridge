@@ -376,6 +376,20 @@ func TestPicturesDhowdenCanReadStillReachIt(t *testing.T) {
 			false,
 		},
 		{
+			// Most of the file is one 16 MB picture as base64, which dhowden
+			// decodes into 16 MB and copies into 16 MB more: 32 MB from a
+			// 21 MB file, more than its size plus the 10 MB allowance. The
+			// budget's factor of two is what keeps it. (Not an image, so no
+			// cover: the tags are what the budget decides.)
+			"a METADATA_BLOCK_PICTURE that is most of the file", "x.flac",
+			flacStream(streamInfo(), func() []byte {
+				big := payloadOf(16 << 20)
+				body := flacVorbisCommentBody("TITLE=t", mbpComment("METADATA_BLOCK_PICTURE", uint32(len(big)), big))
+				return flacBlock(true, 4, len(body), body)
+			}()),
+			false,
+		},
+		{
 			// Two VORBIS_COMMENT blocks are out of spec; in a file whose audio
 			// holds most of its bytes, decoding the picture twice stays well
 			// inside the budget.

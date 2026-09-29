@@ -122,9 +122,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gobuild-fuzz-${{ hashFiles('**/go.sum') }}-
             ${{ runner.os }}-gobuild-fuzz-
+      # Every fuzz process runs under an address-space limit (RLIMIT_AS, via
+      # -exec so the compiler and linker are not held to it). Without one, an
+      # input that makes a worker allocate gigabytes does not fail the run:
+      # the runtime is handed the address space, the four workers re-zero it
+      # on every execution, and the runner's memory runs out until the runner
+      # itself is shut down ("The runner has received a shutdown signal",
+      # exit 143), before the step below can save anything. That is how
+      # FuzzExtractFLAC failed on 8 of the 28 nights from 2026-09-02 (backlog
+      # B99). Under the limit the worker's allocation fails instead, the
+      # runtime exits with "fatal error: out of memory" (status 2, not a
+      # signal), and Go records the input as a crasher: measured, it saved
+      # the 4 GiB FLAC input 23 seconds in. A cgroup memory cap is not the
+      # same: the kernel kills a worker with SIGKILL, and Go records a worker
+      # a signal killed only when it dies minimizing an input; killed while
+      # fuzzing, the run fails with "terminated by unexpected signal; no
+      # crash will be recorded" (internal/fuzz/worker.go).
+      #
+      # 5 GiB per process. RLIMIT_AS counts reserved address space, and a
+      # FuzzExtractFLAC process on Linux reserves most of its size before it
+      # allocates anything: measured with go1.26.6, 2.2 to 2.4 GB for a
+      # worker and 3.8 GB for the coordinator, which maps every worker's
+      # shared memory. That leaves a worker about 3 GB of heap, so four of
+      # them and the coordinator stay under the runner's 16 GB even at the
+      # limit.
       - name: Fuzz
+        env:
+          FUZZ_AS_LIMIT: "5368709120"
         run: |
           go test ${{ matrix.target.package }} \
+            -exec "prlimit --as=${FUZZ_AS_LIMIT} --" \
             -run XXX \
             -fuzz '^${{ matrix.target.name }}$' \
             -fuzztime ${{ inputs.fuzztime || '5m' }} \
