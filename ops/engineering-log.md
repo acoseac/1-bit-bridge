@@ -28090,3 +28090,173 @@ retry is `nameFromHandle(get)` (`TestNameFromHandleFallsBackToTheVolumeGUIDPath`
 | NC13 (Windows): no refusal of an unresolved link | the link case of `TestResolveWithRefusesALinkItCouldNotResolve` only |
 
 Gemini's `/gemini review` on the head answered with its daily quota notice.
+
+## 2026-09-29 — an enrich base URL's user information travels as a Basic header, so no request URL, error, log line or skip detail names it (backlog B69)
+
+B54 (2026-09-28) kept a configured URL's credential out of the config's
+refusals and warnings, `/v1/health` and the pairing link, and left the
+enricher's own request errors for B69 (its "Out of scope" section). This is
+that one. `enrich.musicbrainzBaseURL` and `coverArtBaseURL` may carry a
+mirror's credential, `https://user:password@mirror/ws/2` or a token written as
+the user name, and net/http both sends a URL's user information as Basic auth
+and names the request URL in every error it returns, through a
+`stripPassword` that masks a password and nothing else.
+
+### What was measured on the old code
+
+main at 6dfba62c, go1.27.1 on macOS.
+
+- A ten-line program over `http.Get` against a refused port: the password
+  form prints `Get "http://user:***@127.0.0.1:1/ws/2/release?query=x": dial
+  tcp 127.0.0.1:1: connect: connection refused`, and a token written as the
+  user name prints `Get "http://s3cret-Pw@127.0.0.1:1/ws/2/release?query=x":
+  …` whole. B69's entry had this.
+- The real clients returned exactly those errors: `SearchRelease` and
+  `FetchReleaseFrontStream` over both bases named `s3cret-Pw` (and, over the
+  password form, the user name) in the `*url.Error`, and `IsTransient` was
+  true for the refused connect.
+- The real Enricher, over a mirror whose certificate this process does not
+  trust (a persistent failure, so the track reaches `markSkipped`), with the
+  token written into the base, logged four lines carrying it for two tracks:
+  `ERROR MB search`, `INFO enrichment skipped … detail=Get
+  "https://s3cret-Pw@127.0.0.1:58350/ws/2/release/?query=…": tls: failed to
+  verify certificate: x509: certificate signed by unknown authority`,
+  `ERROR release-group lookup` and `ERROR MB artist search`; with the token
+  in the Cover Art base, `ERROR artwork`. A base with user information in the
+  Atlas credential's state file (which `CanonicalHTTPSBase` keeps out of a
+  provisioned one, and a hand edit does not) put it in `WARN atlas premium
+  cover fetch` and in `RefetchPremium`'s error the same way.
+- **The backlog entry said the skip reason was stored, and it is not.**
+  `markSkipped` counts one of the fixed `skipReason*` keys (`mb_error` here,
+  `map[mb_error:1]` after the run) and hands the error to the `enrichment
+  skipped` line as its `detail`. So the credential reached the journal and
+  never a column.
+- Which clients build a request from a configured URL: `MusicBrainzClient`
+  and `CoverArtClient`, both built in `cmd/bridge/main.go` from
+  `cfg.Enrich.*` and `WithLiveBase(liveCfg…)`, and the Atlas premium cover
+  fetch, from the credential store's base. iTunes and Deezer are built with
+  their defaults (`""`), AcoustID likewise, and the harvest base refuses user
+  information (`CanonicalHTTPSBase`).
+
+### What was decided
+
+- **The user information is cut out of the base and sent with
+  `SetBasicAuth`.** `baseEndpoint` (baseauth.go): `root`, which every request
+  URL is built from and which carries none, and `user`, sent by
+  `newRequest`. It is the header net/http built from the URL, byte for byte
+  (`user:` for a user name alone, `:pw` for a password alone, `Og==` for a
+  bare `@`), and `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth` takes
+  that reference from net/http on every run for six shapes rather than
+  restating it. A base with none keeps its own bytes as the root, so the
+  public default and every credential-free mirror build the URL they always
+  did.
+- **"Once, at construction" is once per resolution.** The clients read a live
+  base per use (`WithLiveBase`), so the constructed base is cut in the
+  constructor and a live value each time `resolveBase` reads it:
+  `BenchmarkParseBaseEndpoint` measured 280 ns and one allocation for a base
+  with no user information and 526 ns and three for one with, against a
+  150 ms to 1.1 s pacing gap per request. **A request resolves once and the
+  credential travels with the root** (`resolveBase` returns the
+  `baseEndpoint`, and `get` and `fetchStream` take it): a credential read
+  apart from the URL, when the provider changes between the two reads, sends
+  one mirror's credential to another's host.
+  `TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost`
+  has a provider that answers a different mirror on every call.
+- **An unusable base is an error naming none of it** (`errBaseNotUsable`: not
+  absolute, not http(s), or no host), not a fallback to the constructed base
+  (that would send an operator's metadata queries to a host they did not just
+  configure) and not net/url's own error, whose `parse "…"` form quotes the
+  value with no mask at all. `normalizeBaseURL` refuses such a value before
+  any client sees it, so this is a backstop, and the parser's check is the
+  same three conditions. A base written without a scheme (`user:pw@mirror`)
+  parses with the user name as its scheme and no host, so it is refused here
+  rather than built into a request URL that names it.
+- **The header follows a redirect by net/http's rule for an explicit
+  Authorization header**: to the same host and its subdomains, never to
+  another domain (`shouldCopyHeaderOnRedirect`, which compares host names and
+  ignores scheme and port). The URL form sent user information only where a
+  redirect's Location was relative, because `url.ResolveReference` keeps the
+  base's user information there and an absolute Location has none. So a mirror
+  that redirects to an absolute URL on its own host now authenticates on the
+  second hop where it did not, and Cover Art Archive's redirect to Internet
+  Archive still carries no credential. Two tests pin both cases; the
+  cross-domain one uses `localhost` against `127.0.0.1`, which net/http reads
+  as two domains. A same-host redirect from https to http would also carry the
+  header; it is net/http's rule, the mirror already holds the credential, and
+  a mirror that sends its own clients to cleartext is not an attacker this
+  changes anything about, so it is left.
+- **The premium fetch is built the same way** and sends the bearer token
+  alone, so a state file edited by hand to hold user information no longer
+  puts it in the request URL. Its request URL and errors carry none
+  (`TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL`).
+- **A list of every request builder in the package**
+  (`TestEveryRequestThisPackageBuildsComesFromAListedBuilder`): the functions
+  that call `http.NewRequest`, `NewRequestWithContext` or the package-level
+  `Get`, `Head`, `Post` and `PostForm` must equal a map naming each with its
+  reason, in both directions, so a new client cannot build a request from an
+  operator's URL without going through `newRequest`, and an entry nothing
+  builds from is reported. It is the population guard the enumeration
+  failures in this file ask for: the clients built from a configured URL were
+  three, not two, and the next is where the class comes back.
+- **Rejected: a RoundTripper** (the client builds the error from the
+  request's own URL, as B69's entry said), **redacting at the log sites**
+  (four sites today, every future consumer of `err.Error()` after them, and
+  the text of a `*url.Error` is not an interface), and **refusing user
+  information in these two fields** (a mirror behind an auth proxy is what
+  the fields are for; the harvest base refuses it because its credential is a
+  bearer token).
+- **Left as it is:** the settings console shows the operator's own value, in
+  `GET /api/settings` (`enrichMusicBrainzBaseURL`, `enrichCoverArtBaseURL`)
+  and on the settings page it renders (the derived Atlas URL is one of its
+  template-only values), which is the form they edit and the file they wrote,
+  behind the loopback rule or a session; the config field's comment says so.
+
+### Tests
+
+New, in `internal/enrich`: `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth`
+(six shapes, MusicBrainz, a live base and both Cover Art fetches),
+`TestNoRequestErrorNamesABaseURLsCredential` (nine calls across both clients,
+live bases included, × three ways to fail (a refused connection, a
+certificate this process does not trust, a server that hangs up) × the five
+shapes that carry something to leak: 135 combinations, each also required to
+name the mirror, so it is the request's own error),
+`TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` (the real Enricher
+through `enrichOne`, both bases, every line at every level, each of `MB
+search`, `enrichment skipped`, `release-group lookup`, `MB artist search` and
+`artwork` required to have been logged so the run reached the site),
+`TestALiveBasesCredentialFollowsTheBaseItWasWrittenOn`,
+`TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost`,
+`TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader`,
+`TestTheBaseParserCutsUserInformationOutOfEveryUsableBase` (ten usable
+shapes, fourteen unusable ones, each of whose errors names none of the
+input), `TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL`
+and `TestEveryRequestThisPackageBuildsComesFromAListedBuilder`. The secret is
+searched without regard to case (B54: `url.Parse` lowercases a scheme).
+
+**Red on the old code first** (the tests written beside no production
+change): `TestNoRequestErrorNamesABaseURLsCredential` failed 108 of its 135
+combinations (the 27 that passed are the password-only shape, `:s3cret-Pw`,
+which net/http masks), both halves of
+`TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` failed with the five
+lines above, and the premium test's error half failed on the error and on the
+Warn line. The Basic-header parity, both live-base and both redirect tests
+passed on the old code, as they should: they pin what must not change.
+
+### Negative controls
+
+Each mutation applied to the committed tree, the named tests run with
+`-count=1`, the file restored and the tree checked clean after each.
+
+| mutation | goes red |
+|---|---|
+| NC1: `parseBaseEndpoint` keeps the user information in the root | `TestNoRequestErrorNamesABaseURLsCredential`, both halves of `TestNoLogLineOrSkipDetailCarriesABaseURLsCredential`, the premium test's error half and the parser table; the header parity test stays green, since net/http builds the same header from the URL |
+| NC2: `newRequest` sends no credential | the parity test (all six shapes), both live-base tests, both redirect subtests and both halves of the log test (each asserts the mirror it reached saw its credential) |
+| NC3: the password is dropped | the parity test's three password shapes and nothing else |
+| NC4a, NC4b: the MusicBrainz or the Cover Art client resolves the base twice for one request | `TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost` only |
+| NC5: the Cover Art client's `CheckRedirect` forwards the Authorization header | the cross-domain redirect subtest only |
+| NC6: `parseBaseEndpoint` accepts any base that parses | the parser table only |
+| NC7: an unusable base's error appends the base | the parser table only |
+| NC8: the premium fetch builds its URL from the stored base again | the premium test's error half, and the builder list (an unlisted `(*atlasPremiumFetcher).authedCoverGet`) |
+| NC9a: a builder is missing from the list | the builder list only |
+| NC9b: the list names a builder that does not exist | the builder list only |
+| NC9c: a stray non-test file calls `http.Get` | the builder list only |

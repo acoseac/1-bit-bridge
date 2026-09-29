@@ -1525,6 +1525,54 @@ no failing test — which is the shape to expect in this area.
   construction rather than by a code path remembering; don't put a fixed interval
   back in `NewEnricher`. `Enricher.Run` needs its
   own inter-batch pause too: the pacer only fires when a network call is made.
+- **A configured base URL's user information travels in a header, never in a
+  request URL** (backlog B69). `enrich.musicbrainzBaseURL` and
+  `coverArtBaseURL` may carry a mirror's credential (`https://user:password@mirror/ws/2`,
+  or a token written as the user name), and net/http both sends it as Basic
+  auth and names the request URL in every error it returns, through a
+  `stripPassword` that masks a PASSWORD and nothing else. So a token written
+  as the user name reached the journal whole on every transport failure:
+  the `MB search`, `MB artist search`, `release-group lookup` and `artwork`
+  Error lines, the `enrichment skipped` line's `detail`, and the premium
+  fetch's Warn (measured over a mirror whose certificate this process does
+  not trust, a persistent failure, and over a refused connect). The skip
+  REASON was never affected: `markSkipped` counts one of the fixed
+  `skipReason*` keys and the error rides only that log line, so "no stored
+  skip reason" is about the line, not a column. No RoundTripper can stop it,
+  because the client builds the error from the request's own URL; so
+  `baseEndpoint` (baseauth.go) cuts a base in two, the ROOT every request URL
+  is built from and the user information, which `newRequest` sends with
+  `SetBasicAuth` (the user alone as `user:`), byte for byte the header
+  net/http built from the URL: `TestABaseURLsCredentialReachesTheMirrorAsBasicAuth`
+  takes its reference from net/http on every run. Four rules keep it whole.
+  **Every request built from a configured base goes through `newRequest`**,
+  and `TestEveryRequestThisPackageBuildsComesFromAListedBuilder` lists every
+  function in the package that calls `http.NewRequest*` (or the package-level
+  `Get`, `Post`…), so the next client cannot skip it: a builder is listed
+  with the reason its URL is a public constant, or is not built. **A request
+  resolves its base ONCE and carries the credential with the root**
+  (`resolveBase` returns the `baseEndpoint`; never keep the root alone): a
+  live base can change between two reads, and a credential read apart from the
+  URL sends one mirror's to another's host
+  (`TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost`,
+  whose provider answers a different mirror on every call). **A base that is
+  not an absolute http(s) URL with a host is an error naming none of it**,
+  never a fallback and never net/url's own `parse "…"` error, which quotes the
+  value with no mask at all; config refuses such a value
+  (`normalizeBaseURL`), so this is a backstop. **The header follows a
+  redirect by net/http's rule for an explicit Authorization header**: to the
+  same host and its subdomains, never to another domain
+  (`TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorizationHeader`),
+  where the URL form followed a relative Location only. The Atlas premium
+  cover fetch builds its request the same way and sends the bearer token
+  alone: its stored base cannot carry user information
+  (`config.CanonicalHTTPSBase` refuses it when it is provisioned), and a
+  hand-edited state file can. iTunes and Deezer take no operator URL.
+  `TestNoRequestErrorNamesABaseURLsCredential` drives every request either
+  client makes against three ways for a mirror to fail and five ways to write a
+  credential, and `TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` runs
+  the real enricher and searches every line it logs, at every level, without
+  regard to case.
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
@@ -3359,10 +3407,11 @@ no failing test — which is the shape to expect in this area.
   `TestNoStartupErrorCarriesAURLsCredentials` (every shape, through Load,
   Validate and the environment) and
   `TestAStartupRefusalNamesAURLWithoutItsCredential` (serve and doctor).
-  **Not yet the enricher's own request errors** (backlog B69): net/http's
-  `*url.Error` names a request URL with its password masked
-  (`user:***@`) and a token written as the user name whole, and the
-  enricher logs those errors and stores them as skip reasons.
+  The enricher's own request errors are covered too, by keeping the
+  credential out of every request URL (the bullet on a configured base URL's
+  user information under **Enrichment**, backlog B69): net/http's
+  `*url.Error` names a request URL with its password masked (`user:***@`)
+  and a token written as the user name whole.
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true

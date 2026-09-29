@@ -130,8 +130,15 @@ func (f *atlasPremiumFetcher) authedCoverGet(ctx context.Context, mbid string, s
 	if !ok {
 		return nil, ErrNoCredential
 	}
-	url := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/release/%s/front-%d", mbid, size)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// The stored base is one config.CanonicalHTTPSBase reduced to scheme://host
+	// when it was provisioned, which refuses user information, so it carries
+	// none. A state file edited by hand can, and the request built from it
+	// must not carry it either: it would name it in every error (backlog B69).
+	// The bearer token below is the only credential this request sends, and
+	// Header.Set replaces the Basic header newRequest gives a base with user
+	// information.
+	req, err := parseBaseEndpoint(strings.TrimRight(baseURL, "/")).
+		newRequest(ctx, fmt.Sprintf("/release/%s/front-%d", mbid, size))
 	if err != nil {
 		return nil, err
 	}

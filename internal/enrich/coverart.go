@@ -28,7 +28,10 @@ const DefaultCoverSize = 1200
 // CoverArtClient fetches a release's front cover in one of the supported
 // sizes from Cover Art Archive.
 type CoverArtClient struct {
-	base      string
+	// base is the constructed base, cut once at construction into the root
+	// every request URL is built from and the credential that may only travel
+	// as a header (baseEndpoint). liveBase, below, is cut per use.
+	base      baseEndpoint
 	userAgent string
 	http      *http.Client
 
@@ -51,11 +54,12 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 		// sharedHTTPTransport tunes the pool size — see transport.go.
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: sharedHTTPTransport}
 	}
+	ep := parseBaseEndpoint(base)
 	return &CoverArtClient{
-		base:        base,
+		base:        ep,
 		userAgent:   userAgent,
 		http:        httpClient,
-		minInterval: minIntervalForBase(base, PublicCAAMinInterval, publicCAAHosts),
+		minInterval: minIntervalForBase(ep.root, PublicCAAMinInterval, publicCAAHosts),
 	}
 }
 
@@ -64,7 +68,7 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 // against an operator's own mirror. See pacing.go.
 func (c *CoverArtClient) MinInterval() time.Duration {
 	if c.liveBase != nil {
-		return minIntervalForBase(c.resolveBase(), PublicCAAMinInterval, publicCAAHosts)
+		return minIntervalForBase(c.resolveBase().root, PublicCAAMinInterval, publicCAAHosts)
 	}
 	return c.minInterval
 }
@@ -91,8 +95,7 @@ func (c *CoverArtClient) FetchReleaseFront(ctx context.Context, mbid string, siz
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d, want one of %v", size, SupportedCoverSizes)
 	}
-	u := fmt.Sprintf("%s/release/%s/front-%d", c.resolveBase(), mbid, size)
-	return c.fetch(ctx, u)
+	return c.fetch(ctx, c.resolveBase(), fmt.Sprintf("/release/%s/front-%d", mbid, size))
 }
 
 // FetchReleaseGroupFront is a fallback for when a specific release has no
@@ -105,8 +108,7 @@ func (c *CoverArtClient) FetchReleaseGroupFront(ctx context.Context, rgMBID stri
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d", size)
 	}
-	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.resolveBase(), rgMBID, size)
-	return c.fetch(ctx, u)
+	return c.fetch(ctx, c.resolveBase(), fmt.Sprintf("/release-group/%s/front-%d", rgMBID, size))
 }
 
 // FetchReleaseFrontStream returns an io.ReadCloser carrying the JPEG
@@ -122,8 +124,7 @@ func (c *CoverArtClient) FetchReleaseFrontStream(ctx context.Context, mbid strin
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d, want one of %v", size, SupportedCoverSizes)
 	}
-	u := fmt.Sprintf("%s/release/%s/front-%d", c.resolveBase(), mbid, size)
-	return c.fetchStream(ctx, u)
+	return c.fetchStream(ctx, c.resolveBase(), fmt.Sprintf("/release/%s/front-%d", mbid, size))
 }
 
 // FetchReleaseGroupFrontStream is the streaming counterpart to
@@ -135,12 +136,11 @@ func (c *CoverArtClient) FetchReleaseGroupFrontStream(ctx context.Context, rgMBI
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d", size)
 	}
-	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.resolveBase(), rgMBID, size)
-	return c.fetchStream(ctx, u)
+	return c.fetchStream(ctx, c.resolveBase(), fmt.Sprintf("/release-group/%s/front-%d", rgMBID, size))
 }
 
-func (c *CoverArtClient) fetch(ctx context.Context, u string) ([]byte, error) {
-	body, err := c.fetchStream(ctx, u)
+func (c *CoverArtClient) fetch(ctx context.Context, ep baseEndpoint, path string) ([]byte, error) {
+	body, err := c.fetchStream(ctx, ep, path)
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +151,11 @@ func (c *CoverArtClient) fetch(ctx context.Context, u string) ([]byte, error) {
 // fetchStream is the shared HTTP path. Returns the raw body so the
 // caller can stream straight to disk or buffer as needed. Status-code
 // classification (404 → errNotFound) lives here so both Fetch and
-// FetchStream paths surface the same error semantics.
-func (c *CoverArtClient) fetchStream(ctx context.Context, u string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+// FetchStream paths surface the same error semantics. ep is the base the
+// caller resolved for this one request, credential and all (see
+// MusicBrainzClient.get), and path is what follows its root.
+func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path string) (io.ReadCloser, error) {
+	req, err := ep.newRequest(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -229,11 +231,13 @@ func (c *CoverArtClient) WithLiveBase(f func() string) *CoverArtClient {
 	return c
 }
 
-// resolveBase returns the base URL to use right now.
-func (c *CoverArtClient) resolveBase() string {
+// resolveBase returns the base to use right now, cut into its root and its
+// credential (baseEndpoint); see MusicBrainzClient.resolveBase for why a
+// caller resolves once per request and never keeps the root alone.
+func (c *CoverArtClient) resolveBase() baseEndpoint {
 	if c.liveBase != nil {
 		if v := strings.TrimRight(strings.TrimSpace(c.liveBase()), "/"); v != "" {
-			return v
+			return parseBaseEndpoint(v)
 		}
 	}
 	return c.base
