@@ -28390,3 +28390,30 @@ Each on the committed fix, run with `-count=1`, restored before the next.
 | NC10 api: hook not called | the download heal test (row never caught up) | the rest |
 | NC11 rescanner: `wrote` never called | the download heal test, the case test | the rest |
 | NC12 adapter hands the rescanner a case variant, as main's did for a case-folded request | the case test (`[Fixture/DSD/01.dsf fixture/dsd/01.dsf]`, also on the Windows host), the refused-request test | the rest |
+
+### Review round 1
+
+CodeRabbit covered the first head with no actionable comments. Gemini raised
+four medium findings:
+
+- An empty path reaching the rescanner: `path.Dir("")` is `"."`, which the
+  resolver maps onto a library root, so it would queue a walk of the whole
+  root. No caller passes one (every rescan names a row's path), but it is the
+  empty-root rule under Config, settings and process lifecycle, and cheap:
+  `sourceRescanner.request` refuses `""` before it resolves anything, in the
+  one place every rescan request funnels through (Gemini proposed it there
+  and again in `Pool.requestSourceRescan`; one refusal at the funnel covers
+  both). `TestSourceRescannerRefusesAnEmptyPath` has a file AT the root as its
+  positive control, since that directory is the root and its walk is the one
+  it needs. NC13, the guard removed: that test alone went red (`an empty path
+  resolved ["."] and queued 1 scans`).
+- A nil `os.FileInfo` in `SourceIsAtRow` and in `staleRenditionRescan.observe`:
+  declined. Every caller's stat comes from a successful `os.Stat` or
+  `ResolveChecked`, which return a non-nil `FileInfo` whenever the error is
+  nil, and the one function-value seam, the coordinator's `ResolverFunc`,
+  already treats a nil stat as a resolver failure. Answering `false` for nil
+  would turn a programming error into a silent "the file changed" verdict, a
+  refusal plus a rescan request, rather than surfacing it.
+
+`main` moved under the branch (#1092 appended its own entry here); it was
+merged in, not rebased, keeping both entries.
