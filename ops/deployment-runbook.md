@@ -350,7 +350,7 @@ Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap 
 
 | Item | Value |
 |---|---|
-| Host / SSH | the bridge.ars.md VM: `ssh -i <VPS-SSH-KEY> arsenie@bridge.ars.md` (Azure NSG source-allowlists :22 — see the SSH-flap note above; multiplex over one connection) |
+| Host / SSH | the bridge.ars.md VM: `ssh -i <VPS-SSH-KEY> <VPS-SSH>` (Azure NSG source-allowlists :22 — see the SSH-flap note above; multiplex over one connection) |
 | Service manager | systemd `1-bit-bridge-demo.service` — `User=onebit-demo` (nologin system user), the tenant template's hardening (`ProtectSystem=strict`, `ProtectHome=yes`, empty capability set, `MemoryMax=2G`) |
 | Binary | `/usr/local/bin/bridge-demo` — the RELEASE ARTIFACT (see below), **separate from** `/usr/local/bin/bridge`, which is the operator's own bridge on the same host; a deploy of one never restarts the other |
 | Config | `/srv/onebit-demo/bridge.yaml` (owner `onebit-demo`, 0600 — `sudo cat` to read) |
@@ -359,7 +359,7 @@ Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap 
 | Storage | ZFS dataset `tank/public-demo` (quota 24 G, lz4) mounted at `/srv/onebit-demo` — the SAME path the old VM used, so nothing below this table changed |
 | Log | `journalctl -u 1-bit-bridge-demo` |
 | Public endpoint | `https://bridge.1-bit.app/` → HAProxy `:443` SNI passthrough (`use_backend demo_bridge if { req.ssl_sni -i bridge.1-bit.app }` in `1-bit-conductor/host/haproxy/haproxy.cfg`, pinned by `TestTenantsStayPassthroughOn443`) → the bridge on loopback `127.0.0.1:8446`. The bridge terminates its OWN TLS (autocert, TLS-ALPN-01 rides the passthrough), so the certificate the shipped apps see is the bridge's, never the proxy's |
-| Admin console | `https://127.0.0.1:7791/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7791:127.0.0.1:7791 -i <VPS-SSH-KEY> arsenie@bridge.ars.md`, then open `https://127.0.0.1:7791/`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` (`sudo cat`) |
+| Admin console | `https://127.0.0.1:7791/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7791:127.0.0.1:7791 -i <VPS-SSH-KEY> <VPS-SSH>`, then open `https://127.0.0.1:7791/`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` (`sudo cat`) |
 | Bridge CLIs | **always as the service user**: `sudo -u onebit-demo /usr/local/bin/bridge-demo <cmd> -config /srv/onebit-demo/bridge.yaml …` — a root- or `arsenie`-run CLI leaves root-owned files under `data/` and the service's sweepers then fail every job (observed 2026-08-18 on the old VM); heal with `sudo chown -R onebit-demo:onebit-demo /srv/onebit-demo && sudo systemctl restart 1-bit-bridge-demo`. A root-run `bridge pair` / `bridge token` does it to `tokens.json`: the bridge then checks devices against the tokens it last read (the device just paired is refused, one just revoked still accepted) and says so ONCE in the journal, `token store unreadable; checking devices against the tokens last read … uid=… hint=…`; the first request after the chown reads the file again, `token store readable again … tokens=N`, no restart needed for that file (from #1047; before it, the only trace was an ERROR per request from a device it already knew). **From v0.2.1 a root run keeps the owner of the files it REPLACES** — `tokens.json`, `adminauth.json` and its tickets, `bridge.yaml`, the TLS pair, `update-state.json` (`fsutil.KeepOwner`, #1048) — so `sudo bridge pair`, `sudo bridge admin reset-password`, `sudo bridge cert rotate` and `sudo bridge update` no longer break the service. **From the release that carries #1087, a root run of the job and database CLIs** (`scan`, `upscale` / `optimize` / `render` / `analyze`, `artwork`, `backup` / `restore`, `manifest`, `library`, `variants move`) **gives every directory and file it creates the install's owner too** (a new entry takes the owner of the directory it is created in; the render scratch in a shared temp dir and a `variants move --to` directory take the variants directory's), so `sudo` is safe for those as well. The rule above still stands for a run as ANOTHER non-root user (it cannot give files away), for `bridge tsnet auth`, and for a CLI on an older bridge: the job and database CLIs before that release, every CLI before v0.2.1 |
 
 **Network posture** is the host's, not the demo's: the VM's NSG (`1bitbridge-nsg`) opens 443/tcp to the internet and source-allowlists 22 and 7790; ufw allows everything it lists from anywhere and is not the gate (verified 2026-09-18). Nothing listens off-loopback for the demo itself. HTTP/3 does NOT reach it (HAProxy is a TCP passthrough; the old VM's 443/udp is gone) — same as bridge.ars.md, and the iOS client falls back to h2 by itself.
@@ -418,7 +418,7 @@ No `CAP_NET_BIND_SERVICE`: both listeners are loopback high ports; HAProxy owns 
 
 **Known interim on the v0.1.9 artifact — one unreachable alternate endpoint.** `/v1/health.endpoints` reads `["https://bridge.1-bit.app", "https://bridge.1-bit.app:8446"]`: the tag's `publicModeEndpoints` appends `https://<autocert.domain>:<listen port>` whenever the listen port is not 443, and `:8446` is loopback-only here. PR #871 (`fix(api): don't advertise a listen port a proxy has remapped`, 2026-09-08) fixed exactly this on `main`, after the tag. Cost until the next release artifact: iOS puts the alternate into its failover rotation, which it consults only after the primary FAILS — so normal operation is unaffected and a demo outage merely reads as offline more slowly. A loopback `:443` listener would collapse the pair on the tag, and it is not available: HAProxy's wildcard `:::443` conflicts with any loopback `:443` bind on Linux (measured `EADDRINUSE`, 2026-09-16). **After the first release-artifact deploy that includes #871, verify `endpoints` reads exactly `["https://bridge.1-bit.app"]`** and delete this paragraph.
 
-**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here). `.env.demo` (untracked) carries `HOST=arsenie@bridge.ars.md`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`, `SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`; the deploy script honours all of them:
+**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here). `.env.demo` (untracked) carries `HOST=<VPS-SSH>`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`, `SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`; the deploy script honours all of them:
 
 ```sh
 ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
@@ -454,9 +454,9 @@ gh release download v0.1.9 -R acoseac/1-bit-bridge \
 #    bridge.ars.md upload step above hardcodes the locally-built path, so
 #    "then follow the flow above" would ship a main build and reintroduce the
 #    exact version string this whole note exists to avoid.
-scp -i <VPS-SSH-KEY> /tmp/rel/bridge arsenie@bridge.ars.md:/tmp/bridge.new
+scp -i <VPS-SSH-KEY> /tmp/rel/bridge <VPS-SSH>:/tmp/bridge.new
 shasum -a 256 /tmp/rel/bridge                                          # local
-ssh -i <VPS-SSH-KEY> arsenie@bridge.ars.md 'chmod +x /tmp/bridge.new
+ssh -i <VPS-SSH-KEY> <VPS-SSH> 'chmod +x /tmp/bridge.new
                                   sha256sum /tmp/bridge.new
                                   /tmp/bridge.new version'             # remote
 
@@ -490,7 +490,7 @@ curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailabl
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then
 
 ```sh
-rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" <out>/library/ arsenie@bridge.ars.md:/srv/onebit-demo/library/
+rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" <out>/library/ <VPS-SSH>:/srv/onebit-demo/library/
 ```
 
 (the tree is owned by the service user, so a plain rsync as `arsenie` cannot write it — the remote side runs AS `onebit-demo`, which lands every file with the right owner and needs no chown pass) and trigger a **Full rescan** (admin console via tunnel, or `sudo systemctl restart 1-bit-bridge-demo` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.

@@ -50,7 +50,7 @@ func TestApiTailscaleStatus_HappyPathReturnsSnapshot(t *testing.T) {
 		status: TailscaleStatus{
 			CLIAvailable:      true,
 			NodeName:          "home-pc",
-			MagicDNSName:      "home-pc.sable-eagle.ts.net",
+			MagicDNSName:      "home-pc.tailnet.ts.net",
 			HTTPSCertsEnabled: true,
 			CertPresent:       true,
 			CertNotAfter:      &expiry,
@@ -65,7 +65,7 @@ func TestApiTailscaleStatus_HappyPathReturnsSnapshot(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status: %d, want 200", code)
 	}
-	if got.MagicDNSName != "home-pc.sable-eagle.ts.net" {
+	if got.MagicDNSName != "home-pc.tailnet.ts.net" {
 		t.Errorf("MagicDNSName = %q, want round-trip from stub", got.MagicDNSName)
 	}
 	if !got.CertPresent {
@@ -95,7 +95,7 @@ func TestApiTailscaleRefresh_RoutesThroughProvider(t *testing.T) {
 	stub := &fakeTailscale{
 		refreshResult: TailscaleStatus{
 			CLIAvailable: true,
-			MagicDNSName: "home-pc.sable-eagle.ts.net",
+			MagicDNSName: "home-pc.tailnet.ts.net",
 			CertPresent:  true,
 			CertNotAfter: &expiry,
 		},

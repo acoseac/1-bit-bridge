@@ -97,11 +97,11 @@ type NodeInfo struct {
 	NodeName string
 
 	// MagicDNSName is the fully-qualified MagicDNS hostname
-	// (e.g. "home-pc.sable-eagle.ts.net"). Empty when MagicDNS is
+	// (e.g. "home-pc.tailnet.ts.net"). Empty when MagicDNS is
 	// disabled in the tailnet.
 	MagicDNSName string
 
-	// TailnetSuffix is the bare tailnet suffix (e.g. "sable-eagle.ts.net"),
+	// TailnetSuffix is the bare tailnet suffix (e.g. "tailnet.ts.net"),
 	// used by the SNI cert switcher to decide which connections route
 	// to the LE cert vs the self-signed cert.
 	TailnetSuffix string
@@ -170,8 +170,8 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 		return info, fmt.Errorf("decode tailscale status JSON: %w", err)
 	}
 
-	// MagicDNSSuffix arrives without leading dot ("sable-eagle.ts.net").
-	// DNSName arrives WITH trailing dot ("home-pc.sable-eagle.ts.net.").
+	// MagicDNSSuffix arrives without leading dot ("tailnet.ts.net").
+	// DNSName arrives WITH trailing dot ("home-pc.tailnet.ts.net.").
 	// Normalize both.
 	info.NodeName = strings.TrimSpace(raw.Self.HostName)
 	info.TailnetSuffix = strings.TrimSpace(raw.MagicDNSSuffix)

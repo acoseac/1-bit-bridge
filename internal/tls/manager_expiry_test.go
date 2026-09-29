@@ -72,10 +72,10 @@ func mintExpiredCert(t *testing.T, dnsName string) *cryptotls.Certificate {
 // pin mismatch it has no way to explain.
 func TestFingerprintForServerName_ExpiredTailscaleCertFallsBackToSelfSigned(t *testing.T) {
 	self := mintTestCert(t, []string{"host.local"})
-	expired := mintExpiredCert(t, "home-pc.sable-eagle.ts.net")
+	expired := mintExpiredCert(t, "home-pc.tailnet.ts.net")
 
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
 	mgr.SetTailscaleCert(expired)
 
 	selfFP := fingerprintLeaf(self)
@@ -85,7 +85,7 @@ func TestFingerprintForServerName_ExpiredTailscaleCertFallsBackToSelfSigned(t *t
 			selfFP, expiredFP)
 	}
 
-	got := mgr.FingerprintForServerName("home-pc.sable-eagle.ts.net")
+	got := mgr.FingerprintForServerName("home-pc.tailnet.ts.net")
 	if got == expiredFP {
 		t.Fatal("advertised the EXPIRED Tailscale cert's fingerprint; the listener " +
 			"serves self-signed for this SNI, so every pairing attempt fails the pin check")
@@ -108,8 +108,8 @@ func TestFingerprintForServerName_ExpiredTailscaleCertFallsBackToSelfSigned(t *t
 // about the same cert.
 func TestFingerprintForServerName_AgreesWithGet(t *testing.T) {
 	const (
-		tsSNI    = "home-pc.sable-eagle.ts.net"
-		tsSuffix = "sable-eagle.ts.net"
+		tsSNI    = "home-pc.tailnet.ts.net"
+		tsSuffix = "tailnet.ts.net"
 		acmeSNI  = "bridge.example.com"
 	)
 	cases := []struct {

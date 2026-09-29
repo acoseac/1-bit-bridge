@@ -175,8 +175,8 @@ func TestDetect_ParsesMagicDNSAndSuffix(t *testing.T) {
 	skipOnNoSh(t)
 	// Minimal `tailscale status --json` shape — only the fields Detect reads.
 	stdout := `{
-		"Self": {"HostName": "home-pc", "DNSName": "home-pc.sable-eagle.ts.net."},
-		"MagicDNSSuffix": "sable-eagle.ts.net"
+		"Self": {"HostName": "home-pc", "DNSName": "home-pc.tailnet.ts.net."},
+		"MagicDNSSuffix": "tailnet.ts.net"
 	}`
 	orig := commandContext
 	commandContext = fakeCmd(t, stdout, "", 0)
@@ -204,11 +204,11 @@ func TestDetect_ParsesMagicDNSAndSuffix(t *testing.T) {
 	if info.NodeName != "home-pc" {
 		t.Errorf("NodeName = %q, want %q", info.NodeName, "home-pc")
 	}
-	if info.MagicDNSName != "home-pc.sable-eagle.ts.net" {
+	if info.MagicDNSName != "home-pc.tailnet.ts.net" {
 		t.Errorf("MagicDNSName = %q (note trailing-dot must be trimmed)", info.MagicDNSName)
 	}
-	if info.TailnetSuffix != "sable-eagle.ts.net" {
-		t.Errorf("TailnetSuffix = %q, want %q", info.TailnetSuffix, "sable-eagle.ts.net")
+	if info.TailnetSuffix != "tailnet.ts.net" {
+		t.Errorf("TailnetSuffix = %q, want %q", info.TailnetSuffix, "tailnet.ts.net")
 	}
 }
 
@@ -269,7 +269,7 @@ func TestLECertPaths_FixedFilenameNotMagicDNSKeyed(t *testing.T) {
 	// Plan-decision invariant: filenames are FIXED (`tailscale.crt` /
 	// `tailscale.key`), NOT keyed on the MagicDNS hostname. A tailnet
 	// or host rename would otherwise leave orphan files in dataDir
-	// (e.g. `old-name.sable-eagle.ts.net.crt` lingering after rename).
+	// (e.g. `old-name.tailnet.ts.net.crt` lingering after rename).
 	cert, key := LECertPaths("/data")
 	if !strings.HasSuffix(cert, "tailscale.crt") {
 		t.Errorf("cert = %q, want suffix tailscale.crt", cert)

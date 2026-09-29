@@ -13,7 +13,7 @@ func TestProbeLoopbackAddr(t *testing.T) {
 		{"ipv6 wildcard", "[::]:7789", "[::1]:7789"},
 		{"ipv4 loopback unchanged", "127.0.0.1:7789", "127.0.0.1:7789"},
 		{"ipv6 loopback unchanged", "[::1]:7789", "[::1]:7789"},
-		{"concrete lan ip unchanged", "192.168.0.208:7789", "192.168.0.208:7789"},
+		{"concrete lan ip unchanged", "192.168.50.208:7789", "192.168.50.208:7789"},
 		{"hostname unchanged", "example.com:7789", "example.com:7789"},
 		{"localhost unchanged", "localhost:7789", "localhost:7789"},
 		{"no port returned verbatim", "not-a-hostport", "not-a-hostport"},
