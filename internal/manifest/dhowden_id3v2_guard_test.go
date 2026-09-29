@@ -324,6 +324,20 @@ func id3v2Shapes() []id3v2Shape {
 			}, nil)),
 		},
 		{
+			// Encryption takes 1 from a data length indicator of 0, which
+			// wraps: readBytes reads nothing, and the method byte is all the
+			// payload dhowden reads. Everywhere else the method byte and the
+			// shorter payload add up to the same length.
+			name: "version 2.4 encryption with a zero data length indicator",
+			data: id3v2TagBytes(4, 0, bytes.Join([][]byte{
+				id3v2FrameBytes(4, "PRIV", 5, 0x05, []byte{0, 0, 0, 0, 0x80}),
+				textFrameBytes(4, "TIT2", "t"),
+			}, nil)),
+			hidden: func(n int) []byte {
+				return id3v2TagBytes(4, 0, append(id3v2FrameBytes(4, "PRIV", 5, 0x05, []byte{0, 0, 0, 0, 0x80}), repeatedTIT2(n)...))
+			},
+		},
+		{
 			// dhowden drops a zero byte that follows an emitted 0xFF, across
 			// frame boundaries: every FF 00 in a payload is one byte short of
 			// what the declared sizes count.
