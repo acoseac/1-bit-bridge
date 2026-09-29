@@ -34,7 +34,7 @@ import (
 func TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain(t *testing.T) {
 	b := newEmptyStampBridge(t)
 	abs, scanner := b.mintScannedDSF(t, stampDSD)
-	wrote := b.startRescans(t, scanner)
+	rescanned := b.startRescans(t, scanner)
 
 	b.sweep(t)
 	if got := b.queue.since(0); len(got) != 1 {
@@ -53,9 +53,9 @@ func TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain(t *testing.T) {
 	}
 	b.awaitRowAt(t, stampDSD, later, "a download found the rendition stale")
 	select {
-	case <-wrote:
+	case <-rescanned:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the rescan that wrote the row did not signal: runServe nudges the auto-optimize sweep there")
+		t.Fatal("the rescan did not signal: runServe nudges the auto-optimize sweep there")
 	}
 
 	if code := b.download(t, stampDSD, stampDSDCompact); code != http.StatusGone {
@@ -93,7 +93,7 @@ func TestARescanIndexesNoSecondSpellingOfTheDirectory(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(b.libDir, filepath.FromSlash(folded))); err != nil {
 		t.Skipf("this filesystem is case-sensitive: %s does not open %s", folded, stampDSD)
 	}
-	wrote := b.startRescans(t, scanner)
+	rescanned := b.startRescans(t, scanner)
 
 	later := time.Now().Add(time.Minute).Truncate(time.Second)
 	if err := os.Chtimes(abs, later, later); err != nil {
@@ -103,7 +103,7 @@ func TestARescanIndexesNoSecondSpellingOfTheDirectory(t *testing.T) {
 		t.Fatalf("the request for the changed file queued %d jobs, want the refusal", n)
 	}
 	select {
-	case <-wrote:
+	case <-rescanned:
 	case <-time.After(10 * time.Second):
 		t.Fatal("no rescan wrote a row within 10 s of the refused request")
 	}
@@ -147,18 +147,18 @@ func TestSourceRescannerRefusesAnEmptyPath(t *testing.T) {
 	}
 }
 
-// TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep: a rescan
-// that committed rows may have read a retag that moved a DSD track to
-// another album, and the album-gain index is dropped only when a FULL scan
-// lands, so it can be up to its two-minute TTL old. The sweep a writing
-// rescan nudges renders straight away, so the index goes first: a render
-// nudged ahead of it would record the gain of the track's old album-mates
-// (CodeRabbit on #1093). Without an album gain wired the nudge still goes,
-// and a nudge already pending does not block the rescanner.
-func TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
+// TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep: a rescan may have
+// read a retag that moved a DSD track to another album, and the album-gain
+// index is dropped only when a FULL scan lands, so it can be up to its
+// two-minute TTL old. The sweep a rescan nudges renders straight away, so
+// the index goes first: a render nudged ahead of it would record the gain of
+// the track's old album-mates (CodeRabbit on #1093). Without an album gain
+// wired the nudge still goes, and a nudge already pending does not block the
+// rescanner.
+func TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
 	nudge := make(chan struct{}, 1)
 	var order []string
-	after := afterRescanWrote(func() {
+	after := afterRescan(func() {
 		if len(nudge) != 0 {
 			order = append(order, "invalidated after the nudge")
 			return
@@ -167,14 +167,14 @@ func TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) 
 	}, nudge)
 	after()
 	if !slices.Equal(order, []string{"invalidated"}) || len(nudge) != 1 {
-		t.Fatalf("after a writing rescan: %v, %d nudges pending, want the index dropped and then one nudge", order, len(nudge))
+		t.Fatalf("after a rescan: %v, %d nudges pending, want the index dropped and then one nudge", order, len(nudge))
 	}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		after()
-		afterRescanWrote(nil, nudge)()
+		afterRescan(nil, nudge)()
 	}()
 	select {
 	case <-done:
@@ -183,9 +183,43 @@ func TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) 
 	}
 
 	<-nudge
-	afterRescanWrote(nil, nudge)()
+	afterRescan(nil, nudge)()
 	if len(nudge) != 1 {
 		t.Errorf("with no album gain wired: %d nudges pending, want 1", len(nudge))
+	}
+}
+
+// TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote: ScanSubtree counts
+// the rows it committed, and a rescan whose file was deleted in the seconds
+// before it ran deletes that row and counts none. That still changes an
+// album's membership, so the step after the rescan (the album-gain index
+// dropped, the sweep nudged) runs for it too; until review round 4 it ran
+// only when the count was above zero (CodeRabbit on #1093). A rescan the
+// shutdown interrupted runs nothing after it.
+func TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote(t *testing.T) {
+	r := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
+	r.request("Deleted/01.dsf")
+	after := make(chan struct{}, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.run(ctx, func(context.Context, string) (int, error) { return 0, nil }, func() { after <- struct{}{} })
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
+	select {
+	case <-after:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a rescan that committed no row ran no after step: a deletion-only rescan left the album-gain index as it was")
+	}
+
+	stopped, stop := context.WithCancel(context.Background())
+	r2 := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
+	r2.request("Album/01.dsf")
+	var ran int
+	r2.run(stopped, func(context.Context, string) (int, error) { stop(); return 1, nil }, func() { ran++ })
+	if ran != 0 {
+		t.Errorf("a rescan the shutdown interrupted ran its after step %d times, want none", ran)
 	}
 }
 

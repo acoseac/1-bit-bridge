@@ -175,24 +175,24 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 }
 
 // startRescans runs the rescanner's loop over scanner, as runServe does,
-// until the test ends. The channel receives once for each rescan that wrote
-// rows: runServe nudges the auto-optimize sweep there.
+// until the test ends. The channel receives once after each rescan: runServe
+// drops the album-gain index and nudges the auto-optimize sweep there.
 func (b *stampBridge) startRescans(t *testing.T, scanner *manifest.Scanner) <-chan struct{} {
 	t.Helper()
-	wrote := make(chan struct{}, 16)
+	rescanned := make(chan struct{}, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		b.rescanner.run(ctx, scanner.ScanSubtree, func() {
 			select {
-			case wrote <- struct{}{}:
+			case rescanned <- struct{}{}:
 			default:
 			}
 		})
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
-	return wrote
+	return rescanned
 }
 
 // rescansWaiting is how many directories wait for the rescanner's loop.

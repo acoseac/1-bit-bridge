@@ -34,8 +34,9 @@ package main
 //     asks for the same rescan (backlog B53).
 //   - A download that finds a rendition stale because its source changed
 //     after its row was written asks for the rescan as well
-//     (staleRenditionRescan), and a rescan that wrote rows nudges the
-//     auto-optimize sweep, so a pre-generated rendition of a retagged file
+//     (staleRenditionRescan), and every rescan drops the album-gain index
+//     and nudges the auto-optimize sweep, so a pre-generated rendition of a
+//     retagged file
 //     is rendered again without waiting for the next scan: the phone never
 //     asks again for a family the manifest lists.
 //
@@ -194,13 +195,16 @@ func (r *sourceRescanner) next() (sourceRescan, bool) {
 // run scans every queued directory until ctx ends. One wake can stand for
 // many requests, since its slot holds one, so each wake drains the queue.
 //
-// wrote, when set, is called after each scan that committed rows. runServe
-// passes a nudge of the auto-optimize sweep: a rescan that read a changed
-// file has made that file's renditions stale against its row, and the sweep
-// renders them again from the version the scan read. Without it they wait
-// for the sweep's next tick, which by default is the next periodic scan. It
-// must not block.
-func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error), wrote func()) {
+// after, when set, is called after each rescan, unless the context ended
+// during it. runServe passes afterRescan: a rescan that read a changed file
+// has made that file's renditions stale against its row, and the sweep it
+// nudges renders them again from the version the scan read; without it they
+// wait for the sweep's next tick, which by default is the next periodic
+// scan. Every rescan, not only one that committed rows: ScanSubtree counts
+// the rows it wrote, and a rescan whose file was deleted before it ran
+// deletes a row and counts none, which changes an album's membership all the
+// same (review round 4). It must not block.
+func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error), after func()) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,30 +216,29 @@ func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context
 			if !ok {
 				break
 			}
-			n, err := scan(ctx, dir.abs)
-			if err != nil {
+			if _, err := scan(ctx, dir.abs); err != nil {
 				if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 					logger.Warn("rescan of a changed source's directory failed",
 						"dir", dir.rel, "err", strings.ReplaceAll(failure.Error(), dir.abs, dir.rel))
 				}
 			}
-			if n > 0 && wrote != nil {
-				wrote()
+			if after != nil && ctx.Err() == nil {
+				after()
 			}
 		}
 	}
 }
 
-// afterRescanWrote is what runServe runs after a rescan that committed rows
-// (sourceRescanner.run's `wrote`). It drops the album-gain index first
-// (invalidate, nil when the album gain is not wired): the rescan may have
-// read a retag that moved a DSD track to another album, and the index is
-// otherwise dropped only when a FULL scan lands, so it can be up to its
-// two-minute TTL old. Then it nudges the auto-optimize sweep, whose renders
-// would otherwise take that index's album-mates for the gain they record.
-// The nudge never blocks: its channel holds one, and a pending nudge already
-// covers this one.
-func afterRescanWrote(invalidate func(), nudge chan<- struct{}) func() {
+// afterRescan is what runServe runs after each rescan (sourceRescanner.run's
+// `after`). It drops the album-gain index first (invalidate, nil when the
+// album gain is not wired): the rescan may have read a retag that moved a
+// DSD track to another album, or deleted one, and the index is otherwise
+// dropped only when a FULL scan lands, so it can be up to its two-minute TTL
+// old. Then it nudges the auto-optimize sweep, whose renders would otherwise
+// take that index's album-mates for the gain they record. The nudge never
+// blocks: its channel holds one, and a pending nudge already covers this
+// one.
+func afterRescan(invalidate func(), nudge chan<- struct{}) func() {
 	return func() {
 		if invalidate != nil {
 			invalidate()
