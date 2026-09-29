@@ -28731,6 +28731,16 @@ over it in their constructors.
   `newRequest` is not `http.NewRequest`, so
   `TestEveryRequestThisPackageBuildsComesFromAListedBuilder` does not see a
   fourth client that sends a credential; this does.
+- **SonarCloud failed the new head's gate on one line of the new test.** The
+  redirect-loop server did `http.Redirect(w, r, r.URL.Path, …)`, which is
+  `gosecurity:S5146` (an open redirect, BLOCKER) and took the Security Rating
+  on New Code to E; nothing in the guard was flagged, and the nine code smells
+  reported beside it (cognitive complexity on test functions, the earlier
+  heads' included) do not touch the gate. In the same file a path appended to
+  a prefix (`target+r.URL.Path`, `"/moved"+r.URL.Path`) was not flagged. The
+  loop server now redirects to a fixed `/loop`: the reference request and the
+  clients' still make the same ten requests. Recorded as a rule in CLAUDE.md
+  beside the S2077 one.
 
 New, in `internal/enrich` (credential_redirect_test.go and
 request_builders_test.go):

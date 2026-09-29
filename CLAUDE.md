@@ -6025,6 +6025,15 @@ its twin.** The top list is older, shorter, and read first.
   a statement must share predicate constants, run it through such a helper.
   SonarCloud is not a required check, but a MEDIUM "vulnerability" on a
   constant query is noise that buries a real one.
+- **A test server that redirects to the REQUEST'S OWN path is a BLOCKER for
+  SonarCloud's gate.** `http.Redirect(w, r, r.URL.Path, …)` is
+  `gosecurity:S5146`, an open redirect, and one such line takes a PR's
+  Security Rating on New Code to E, which fails the quality gate (#1091's
+  redirect-loop test server; the nine code smells beside it did not). Measured
+  in the same file: a bare request path is flagged, while a path appended to a
+  prefix (`target+r.URL.Path`, `"/moved"+r.URL.Path`) is not. A loop server
+  redirects to a fixed path. It is test code and a false positive by
+  construction, and a red gate on a PR still buries a real finding.
 - **A `needs` entry only makes a job WAIT; something has to READ its
   result.** `gate`'s `needs` listed six jobs and its verification step
   checked five, so with `if: always()` a failing `dsd-measure` produced a

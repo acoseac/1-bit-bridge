@@ -290,9 +290,12 @@ func TestTheCredentialGuardKeepsACallersRedirectPolicy(t *testing.T) {
 
 			t.Run("net/http's limit of ten redirects still ends a loop", func(t *testing.T) {
 				var hits atomic.Int32
+				// A fixed target, where the request's own path would do as well:
+				// a redirect taken from the request reads as an open redirect
+				// (SonarCloud gosecurity:S5146), which a loop server is not.
 				srv := startPlain(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					hits.Add(1)
-					http.Redirect(w, r, r.URL.Path, http.StatusFound)
+					http.Redirect(w, r, "/loop", http.StatusFound)
 				}))
 				_, refErr := (&http.Client{}).Get(srv.URL + "/loop")
 				refHits := hits.Swap(0)
