@@ -86,10 +86,13 @@ type Check struct {
 	Hint string
 }
 
-// Deps bundles the inputs doctor needs. All fields are required; an
-// empty ConfigDir is treated as "use the per-OS default", an empty
-// DataDir likewise. LibraryRoots may be empty (first-run, no config
-// yet), in which case the library-roots check is skipped.
+// Deps bundles the inputs doctor needs. The caller resolves the per-OS
+// defaults: an empty ConfigDir is none to grade (config-dir warns), and an
+// empty DataDir with no TLSCertPath is no certificate to grade (tls-cert
+// says it was not checked, and why). This said until 2026-09-29 that an
+// empty one of either was "use the per-OS default", which nothing here has
+// done. LibraryRoots may be empty (first-run, no config yet), in which case
+// the library-roots check is skipped.
 type Deps struct {
 	ConfigDir    string
 	DataDir      string
@@ -455,7 +458,7 @@ func checkConfigDir(_ context.Context, d Deps) Check {
 // certPaths resolves the cert pair the running bridge would load,
 // applying the same `cfg.TLSCertPath`-or-defaults fallback as
 // `bridge serve` and `bridge cert`. Returns ("", "") when there is
-// nothing to resolve from, which both cert checks report as a warn
+// nothing to resolve from, which both cert checks report as not checked
 // rather than answering about a path they invented.
 func certPaths(d Deps) (certPath, keyPath string) {
 	if d.TLSCertPath != "" && d.TLSKeyPath != "" {
@@ -467,15 +470,31 @@ func certPaths(d Deps) (certPath, keyPath string) {
 	return servertls.DefaultPaths(d.DataDir)
 }
 
-// noDataDirHint is tls-cert's hint when nothing says where the certificate
-// is: no config that loads names a data dir or a pair. That is `bridge doctor`
-// before `bridge init` (it found no config), or over a config that does not
-// load or that this user cannot read, which config-file reports above it. It
-// was "pass Deps.DataDir so doctor can inspect cert state" until 2026-09-28,
-// a note for whoever calls this package, on every pre-init `bridge doctor`
-// run.
-const noDataDirHint = "no config that loads says where the certificate is, so there is none to inspect " +
-	"(config-file above says why); `bridge init` mints one on a first install"
+// noCertificatePathReason says why tls-cert has no certificate to grade: the
+// caller gave no data dir and no pair. `bridge doctor` gives the data dir of
+// the config it loaded, and before `bridge init`, where it found none, the
+// data dir init writes beside the config dir, whose pair init keeps or mints
+// (cmd/bridge's buildDoctorDepsFor). So this is a config that was named or
+// found and could not be graded, which config-file reports above, or a config
+// dir that could not be resolved, which config-dir reports. Either way the
+// reason is another line's, and #1022's rule answers ok "not checked" and why,
+// as the port checks and config-dir do. It was a warn, "no data dir set",
+// until 2026-09-29 (backlog B61): on every pre-init `bridge doctor` run, the
+// report's one warn.
+func noCertificatePathReason(d Deps) string {
+	switch d.ConfigFile.problem() {
+	case configUnreadable:
+		return "the config that sets its path is not readable by this user"
+	case configNotThere:
+		return "the named config does not exist"
+	case configDoesNotLoad:
+		return "the config that sets its path does not load"
+	}
+	if d.ConfigFile != nil && d.ConfigDir == "" {
+		return "there is no config directory to look in (config-dir above says why)"
+	}
+	return "nothing says where the certificate is"
+}
 
 // checkTLSCert reports the cert pair's presence AND its remaining
 // validity.
@@ -496,7 +515,7 @@ const noDataDirHint = "no config that loads says where the certificate is, so th
 func checkTLSCert(_ context.Context, d Deps) Check {
 	certPath, keyPath := certPaths(d)
 	if certPath == "" {
-		return warn(checkNameTLSCert, "no data dir set", noDataDirHint)
+		return ok(checkNameTLSCert, "not checked: "+noCertificatePathReason(d))
 	}
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)

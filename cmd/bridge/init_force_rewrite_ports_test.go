@@ -1,11 +1,14 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/term"
 )
 
 // `bridge init --yes --force` over an install whose config loads: the one
@@ -143,27 +146,104 @@ func TestInitForceRewriteGradesThePortItMovesTo(t *testing.T) {
 	}
 }
 
-// TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt: an
-// interactive run over a config that loads is not certain to rewrite it. Its
-// "Overwrite?" comes after the preflight, and a no keeps the config, whose
-// ports are then the ones the bridge binds. So its preflight grades the
-// install's ports as it always has, the ones its flags would move off
-// included, and a refusal there is a verdict about the install, with no
-// word about the run's ports.
-func TestInitInteractiveRunGradesTheInstallsPortsBeforeItsPrompt(t *testing.T) {
-	cfgDir, oldAPI, _ := strangerOnTheInstallsListenPort(t)
+// An interactive run asks "Overwrite?" before its preflight since 2026-09-29
+// (backlog B61), so the answer decides what the preflight grades: a yes is
+// the rewrite a --yes --force run is, and a no keeps the config, whose ports
+// are then the ones the bridge binds. Until then the question came after the
+// preflight, which graded the install's ports for a run that might keep
+// them, and a stranger on a port the rewrite moves off refused the run
+// before it could ask (measured with the real binary: exit 1 on "[FAIL]
+// port-api :X in use", where the same flags with --yes --force exited 0).
+
+// interactiveInit runs `bridge init --no-service` over cfgDir with args and
+// the given answers on stdin. Its --library spares the library prompt, so the
+// first answer is the one to "Overwrite?".
+func interactiveInit(t *testing.T, cfgDir, answers string, args ...string) (int, string) {
+	t.Helper()
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal, where init would offer to start the bridge after the run")
+	}
 	var out, errOut strings.Builder
-	code := initCmd([]string{"--no-service", "--dir", cfgDir, "--library", testLibrary(t),
-		"--listen-address", loopbackAddr(freeLoopbackPort(t)), "--admin-address", loopbackAddr(freeLoopbackPort(t))},
-		strings.NewReader("Rewritten\ny\n"), &out, &errOut)
-	printed := stripANSI(out.String() + errOut.String())
+	code := initCmd(append([]string{"--no-service", "--dir", cfgDir, "--library", testLibrary(t)}, args...),
+		strings.NewReader(answers), &out, &errOut)
+	return code, stripANSI(out.String() + errOut.String())
+}
+
+// TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff: answered yes, an
+// interactive run moving both ports off the install's is not refused over
+// the listen port another process holds, as --yes --force is not
+// (TestInitForceRewriteIsNotRefusedOverAPortItMovesOff).
+func TestInitInteractiveRewriteIsNotRefusedOverAPortItMovesOff(t *testing.T) {
+	cfgDir, oldAPI, _ := strangerOnTheInstallsListenPort(t)
+	api, admin := freeLoopbackPort(t), freeLoopbackPort(t)
+	code, printed := interactiveInit(t, cfgDir, "y\nRewritten\n",
+		"--listen-address", loopbackAddr(api), "--admin-address", loopbackAddr(admin))
+	defer logRunOnFailure(t, printed)
+	if code != 0 {
+		t.Fatalf("an interactive rewrite moving the API from :%d to :%d exited %d while another process "+
+			"holds :%d, a port the rewritten config does not name", oldAPI, api, code, oldAPI)
+	}
+	cfg := loadInstallConfig(t, cfgDir)
+	if cfg.ListenAddress != loopbackAddr(api) || cfg.AdminAddress != loopbackAddr(admin) || cfg.LibraryName != "Rewritten" {
+		t.Errorf("saved %q, %q and %q, want the rewrite's %s, %s and Rewritten",
+			cfg.ListenAddress, cfg.AdminAddress, cfg.LibraryName, loopbackAddr(api), loopbackAddr(admin))
+	}
+}
+
+// TestInitInteractiveRewriteStillRefusesAPortItKeeps is the control: answered
+// yes, a rewrite that keeps the held port is refused as --yes --force is, and
+// says the port is one this init would write.
+func TestInitInteractiveRewriteStillRefusesAPortItKeeps(t *testing.T) {
+	cfgDir, kept, _ := strangerOnTheInstallsListenPort(t)
+	code, printed := interactiveInit(t, cfgDir, "y\nRewritten\n",
+		"--listen-address", loopbackAddr(kept), "--admin-address", loopbackAddr(freeLoopbackPort(t)))
+	defer logRunOnFailure(t, printed)
+	assertRewriteRefused(t, cfgDir, printed, code, kept)
+	if !strings.Contains(printed, portsThisInitWrites()) {
+		t.Errorf("the refusal does not say the port is one this init would write: no %q", portsThisInitWrites())
+	}
+}
+
+// TestInitInteractiveKeepGradesTheInstallsPorts: answered no, the run keeps
+// the config, whose listen port another process holds. Its preflight grades
+// the install's ports, the ones its flags would have moved off included, and
+// refuses: a service started from the kept config could not bind. The refusal
+// is a verdict about the install, with no word about the run's ports.
+func TestInitInteractiveKeepGradesTheInstallsPorts(t *testing.T) {
+	cfgDir, oldAPI, _ := strangerOnTheInstallsListenPort(t)
+	code, printed := interactiveInit(t, cfgDir, "n\n",
+		"--listen-address", loopbackAddr(freeLoopbackPort(t)), "--admin-address", loopbackAddr(freeLoopbackPort(t)))
 	defer logRunOnFailure(t, printed)
 	if code != 1 {
-		t.Fatalf("an interactive run exited %d while another process holds :%d, the install's listen port", code, oldAPI)
+		t.Fatalf("an interactive run keeping the config exited %d while another process holds :%d, "+
+			"the listen port the kept config binds", code, oldAPI)
 	}
 	assertPortFailed(t, printed, "port-api", oldAPI)
 	if strings.Contains(printed, portsThisInitWrites()) {
-		t.Errorf("the refusal says the port is one this init would write, and the run may keep the install's")
+		t.Errorf("the refusal says the port is one this init would write, and the run keeps the install's")
+	}
+}
+
+// TestInitInteractiveKeepAsksForNoName: answered no, the run asks for no
+// library name. The name prompt came before "Overwrite?" until 2026-09-29,
+// so a no discarded the name the operator had just typed.
+func TestInitInteractiveKeepAsksForNoName(t *testing.T) {
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
+	writeLoopbackInstall(t, cfgDir, testLibrary(t), freeLoopbackPort(t), freeLoopbackPort(t))
+	before := readConfigFile(t, cfgDir)
+	code, printed := interactiveInit(t, cfgDir, "n\n", "--skip-doctor")
+	defer logRunOnFailure(t, printed)
+	if code != 0 {
+		t.Fatalf("an interactive run keeping the config exited %d", code)
+	}
+	if strings.Contains(printed, "Library display name") {
+		t.Errorf("the run asked for a library name, which keeping the config discards")
+	}
+	if !strings.Contains(printed, "keeping existing config") {
+		t.Errorf("the run does not say it keeps the config")
+	}
+	if readConfigFile(t, cfgDir) != before {
+		t.Errorf("the run changed the config it keeps")
 	}
 }
 

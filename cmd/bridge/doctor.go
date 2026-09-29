@@ -280,6 +280,23 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 				d.ConfigFile.Tried = append(d.ConfigFile.Tried, absOrAsGiven(p))
 			}
 		}
+		// The pre-init report, which config-file sums up as "none found;
+		// the checks below use defaults": the port checks grade the ports
+		// `bridge init` writes, and tls-cert grades the pair in the data dir
+		// it writes beside the config dir, which init keeps where it finds
+		// one and mints where it finds none. Its preflight FAILs a broken
+		// pair there, so the report must too, or an "all clear." here is
+		// followed by an init that refuses. The launcher's row asks the same
+		// whatever its lookup found at the platform path: it previews the
+		// Setup wizard's preflight, which grades init's data dir over a
+		// config it cannot read (#1023's rule for that row). A named config
+		// that is not there, like one this user cannot read, is left without
+		// a data dir, and tls-cert says why it was not checked. Until
+		// 2026-09-29 no lookup that found nothing set one, and tls-cert
+		// warned "no data dir set" on every pre-init run (backlog B61).
+		if d.ConfigDir != "" && (d.ConfigFile.LoadErr == nil || absentIsPreSetup) {
+			d.DataDir = initDataDirFor(d.ConfigDir)
+		}
 	}
 	// If a config file was found, pull LibraryRoots / ports / dataDir
 	// from it so doctor's checks are accurate.

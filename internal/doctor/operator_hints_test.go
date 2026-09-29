@@ -24,9 +24,13 @@ import (
 //   - "pass Deps.ConfigDir so doctor can verify write access", under
 //     config-dir, on a `bridge doctor` run with no config and no HOME.
 
-// TestHintsWithNothingToGradeSpeakToTheOperator drives the three checks into
-// the states that printed those hints, and requires a sentence about the
-// install in each: what was not graded, and why.
+// TestHintsWithNothingToGradeSpeakToTheOperator drives the checks into the
+// states that printed those hints, and requires a sentence about the install
+// in each: what was not graded, and why. tls-cert is not among them since
+// 2026-09-29 (backlog B61): with nothing to say where the certificate is, it
+// answers ok "not checked" and why, as the port checks do for a config they
+// cannot grade (TestTLSCertIsNotCheckedWhereNothingSaysWhereTheCertificateIs),
+// and an ok prints no hint.
 func TestHintsWithNothingToGradeSpeakToTheOperator(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -36,7 +40,6 @@ func TestHintsWithNothingToGradeSpeakToTheOperator(t *testing.T) {
 	}{
 		{"port-api on port 0", checkAPIPort(t.Context(), Deps{APIPort: 0}), "port 0"},
 		{"port-admin on port 0", checkAdminPort(t.Context(), Deps{AdminPort: 0}), "port 0"},
-		{"tls-cert with no data dir", checkTLSCert(t.Context(), Deps{}), "bridge init"},
 		{"config-dir with no directory", checkConfigDir(t.Context(), Deps{}), "HOME"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

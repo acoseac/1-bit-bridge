@@ -23,6 +23,11 @@ import (
 //
 // A loopback init's --listen-address is a row too: it names :0 as legally as
 // a public one's, now that a loopback run reads the flag (initAddresses).
+//
+// The second state has no row since 2026-09-29 (backlog B61): before `bridge
+// init`, tls-cert grades the pair in the data dir init writes, and prints no
+// hint about a data dir
+// (TestDoctorBeforeInitGradesThePairInitWouldKeep).
 func TestPrintedHintsSpeakToTheOperator(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -39,10 +44,6 @@ func TestPrintedHintsSpeakToTheOperator(t *testing.T) {
 			dir := t.TempDir()
 			writeInstallConfig(t, dir, testLibrary(t), ":0", "127.0.0.1:0")
 			return runDoctor(t, "--config", filepath.Join(dir, "bridge.yaml"))
-		}},
-		{"bridge doctor before bridge init", "tls-cert", "`bridge init` mints one on a first install", func(t *testing.T) string {
-			isolateConfigEnv(t)
-			return runDoctor(t)
 		}},
 		{"bridge doctor with no home directory", "config-dir", "the default config directory could not be resolved", func(t *testing.T) string {
 			isolateConfigEnv(t)

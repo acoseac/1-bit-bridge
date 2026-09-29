@@ -138,7 +138,7 @@ func TestInitKeepsTheNameAnInstallIsServedUnder(t *testing.T) {
 			cfgDir, lib := install(t)
 			var stdout, stderr strings.Builder
 			code := initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir},
-				strings.NewReader(lib+"\n\ny\n"), &stdout, &stderr)
+				strings.NewReader(lib+"\ny\n\n"), &stdout, &stderr)
 			out := stripANSI("--- stdout ---\n" + stdout.String() + "\n--- stderr ---\n" + stderr.String())
 			defer logRunOnFailure(t, out)
 			if code != 0 {

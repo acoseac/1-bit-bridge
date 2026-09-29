@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -36,7 +38,9 @@ import (
 //     from every device at its next health check. A --public rewrite writes
 //     the domain's endpoint in their place, as it always has, and a rewrite
 //     that changes posture starts from the new posture's: the old list names
-//     the addresses the other posture listened on.
+//     the addresses the other posture listened on. A kept endpoint that names
+//     the port the rewrite moves the API off is kept, and named in a warning
+//     (warnKeptEndpointsOnAMovedPort).
 //   - libraryRoots, when the run names no --library, which only a public run
 //     may do: a public install takes its roots later, in the console, and a
 //     rewrite that emptied them left every track unplayable.
@@ -78,14 +82,20 @@ type priorInstallFile struct {
 	CustomEndpoints []string                `yaml:"customEndpoints"`
 	Deployment      config.DeploymentConfig `yaml:"deployment"`
 	Demo            config.DemoConfig       `yaml:"demo"`
+	// ListenAddress is not kept: a rewrite writes the run's ports. It is read
+	// to say which kept endpoint names the port the rewrite moves the API off
+	// (warnKeptEndpointsOnAMovedPort).
+	ListenAddress string `yaml:"listenAddress"`
 }
 
 // readPriorInstall reads the config at cfgPath as priorInstallFile, with its
 // paths resolved as config.Load resolves them: against the file's directory,
-// dataDir defaulting to the one beside it. The name is as written, with no
-// default: a rewrite keeps a name the config gives, and DefaultLibraryName,
-// which Load serves a config that gives none, is a fallback nobody chose. A
-// config that is not there is no install, and answers nil and no error.
+// dataDir defaulting to the one beside it. The listen address defaults as
+// Load defaults it, to the port the install listens on. The name is as
+// written, with no default: a rewrite keeps a name the config gives, and
+// DefaultLibraryName, which Load serves a config that gives none, is a
+// fallback nobody chose. A config that is not there is no install, and
+// answers nil and no error.
 func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 	raw, err := os.ReadFile(cfgPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -106,6 +116,9 @@ func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 	if p.DataDir == "" {
 		p.DataDir = config.DefaultDataDir
 	}
+	if p.ListenAddress == "" {
+		p.ListenAddress = config.DefaultListenAddress
+	}
 	p.DataDir = config.ResolvePath(base, p.DataDir)
 	p.TLSCertPath = config.ResolvePath(base, p.TLSCertPath)
 	p.TLSKeyPath = config.ResolvePath(base, p.TLSKeyPath)
@@ -120,6 +133,12 @@ func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 func (p *priorInstallFile) loopback() bool {
 	mode, err := p.Deployment.EffectiveMode()
 	return err == nil && mode == config.DeploymentModeLoopback
+}
+
+// public says the file's posture is public: deployment.mode "public".
+func (p *priorInstallFile) public() bool {
+	mode, err := p.Deployment.EffectiveMode()
+	return err == nil && mode == config.DeploymentModePublic
 }
 
 // refuseRewrite decides whether this run may overwrite the config at
@@ -224,6 +243,79 @@ func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept b
 	}
 	cfg.CustomEndpoints = slices.Clone(prior.CustomEndpoints)
 	return true
+}
+
+// warnKeptEndpointsOnAMovedPort warns about the kept custom endpoints that
+// name the port the rewrite moves the API off: fromListen is the install's
+// listen address, toListen the one the rewrite saves.
+//
+// A loopback rewrite of a loopback install keeps its customEndpoints and
+// writes the run's ports (the list above), so a kept endpoint can name a port
+// the bridge no longer binds, and /v1/health then advertises it beside the
+// bridge's own addresses: an alternate every device puts into its failover
+// rotation and fails on (measured with the real binary on 2026-09-29, backlog
+// B61). The rewrite keeps the endpoint and says so, rather than dropping it or
+// rewriting its port. The endpoint is the operator's word for what reaches
+// this bridge, and its port need not be the bridge's: a router or proxy may
+// forward it, and a forward from that port is right again once it is pointed
+// at the new one (the rule on endpoints synthesised from the listen port, in
+// CLAUDE.md, is the same fact from the other side).
+func warnKeptEndpointsOnAMovedPort(stderr io.Writer, fromListen, toListen string, endpoints []string) {
+	named, from, to := endpointsNamingAMovedPort(fromListen, toListen, endpoints)
+	if len(named) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "warning: customEndpoints kept from the config name :%d, the port this rewrite moves the API off "+
+		"(it listens on :%d now):\n", from, to)
+	for _, e := range named {
+		fmt.Fprintf(stderr, "  %s\n", e)
+	}
+	fmt.Fprintf(stderr, "where one reaches this bridge directly, a device tries it and fails over past it: change its port "+
+		"in bridge.yaml, or re-run init with --listen-address on :%d to keep the API there. Where a router or proxy "+
+		"forwards it, point that at :%d.\n", from, to)
+}
+
+// endpointsNamingAMovedPort returns the endpoints that name the port the API
+// listens on at fromListen when toListen moves it to another, and the two
+// ports. An endpoint names a port by its own, or by its scheme's (443 for
+// https, 80 for http). It returns nothing where the port does not move, or
+// where fromListen names no port a client can dial: one that does not parse,
+// or 0, the port the system picks at each start.
+func endpointsNamingAMovedPort(fromListen, toListen string, endpoints []string) (named []string, from, to int) {
+	from, okFrom := configuredPort(fromListen)
+	to, okTo := configuredPort(toListen)
+	if !okFrom || !okTo || from == 0 || from == to {
+		return nil, 0, 0
+	}
+	for _, e := range endpoints {
+		if endpointPort(e) == from {
+			named = append(named, e)
+		}
+	}
+	return named, from, to
+}
+
+// endpointPort is the port an endpoint URL names: its own, or its scheme's
+// default. 0 where it names none this can read.
+func endpointPort(raw string) int {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return 0
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	}
+	return 0
 }
 
 // keptFromHeading opens the list printKept prints.
