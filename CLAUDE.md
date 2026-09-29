@@ -85,8 +85,11 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   by unexpected signal; no crash will be recorded". **Size the limit from the measured
   reservation, not from RAM**: RLIMIT_AS counts reserved address space, and a
   `FuzzExtractFLAC` process reserves most of its size before it allocates (go1.26.6 on
-  Linux: 2.2 to 2.4 GB for a worker, 3.8 GB for the coordinator, which maps each worker's
-  shared memory), so 5 GiB leaves a worker about 3 GB of heap and the coordinator 1.5 GB. The
+  Linux: 2.2 to 2.4 GB for a worker, 3.8 to 4.3 GB for the coordinator, which maps each
+  worker's shared memory), so 5 GiB leaves a worker about 3 GB of heap and the coordinator
+  about 1 GB; a coordinator that reaches the limit fails its leg with its own out-of-memory,
+  which is visible, and raising the limit gives each of the four workers that much more of
+  the runner's 16 GB. The
   limit is the backstop; the allocation property is what names a bomb the limit would let
   through.
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.

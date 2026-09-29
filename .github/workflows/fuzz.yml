@@ -142,7 +142,7 @@ jobs:
       # 5 GiB per process. RLIMIT_AS counts reserved address space, and a
       # FuzzExtractFLAC process on Linux reserves most of its size before it
       # allocates anything: measured with go1.26.6, 2.2 to 2.4 GB for a
-      # worker and 3.8 GB for the coordinator, which maps every worker's
+      # worker and 3.8 to 4.3 GB for the coordinator, which maps every worker's
       # shared memory. That leaves a worker about 3 GB of heap, so four of
       # them and the coordinator stay under the runner's 16 GB even at the
       # limit.

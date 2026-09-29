@@ -29551,8 +29551,9 @@ decodes) a named test.
 - fuzz.yml runs every fuzz process under `prlimit --as=5368709120` through
   `go test -exec`, so the compiler and linker are not held to it. RLIMIT_AS
   counts reserved address space; measured above, a worker reserves 2.2 to
-  2.4 GB and the coordinator 3.8 GB before allocating, so 5 GiB leaves a
-  worker about 3 GB of heap and the coordinator 1.5 GB.
+  2.4 GB and the coordinator 3.8 GB before allocating (4.3 GB at most over
+  the fuzz runs after the fix), so 5 GiB leaves a worker about 3 GB of heap
+  and the coordinator about 1 GB.
 
 ### Fuzzed after the fix
 
@@ -29578,6 +29579,11 @@ dido, golang:1.26.6, 4 CPUs and an 8 GB cgroup per run,
 - fuzz.yml dispatched on the branch at the nightly 5 minutes a target
   (run 36581175281): all 41 targets passed under the limit, FuzzExtractFLAC
   with 1,551,423 execs.
+- The final code (the FLAC walk split per block, the picture kinds named
+  once, the fixed Ogg harness), 10 minutes each under the 5 GiB limit:
+  FuzzExtractFLAC, 5,690,460 execs, and FuzzExtractOGG, 5,938,473 execs,
+  passed. FLAC's coordinator reached 4.3 GB of address space (1.0 GB of
+  RSS), its workers 2.3 GB (272 MB).
 - One extraction of each bomb shape with the guard allocates at most 139 KB
   (the one named `.mp3`; every other at most 17 KB over two runs), where main
   allocated 1.07 GB or 387 MB. The small figures are coarse:
