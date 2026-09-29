@@ -293,15 +293,17 @@ const staleRenditionWaitMax = time.Hour
 //     render now would record a version the serve path refuses. At most once
 //     per directory per staleRenditionRescanEvery, a minute spent only on a
 //     request the rescanner queued or already had waiting: one it dropped
-//     (its queue full) leaves the next GET free to ask.
+//     (its queue full) leaves the next GET free to ask, and a rescan that
+//     brought every waiting file level frees it.
 //   - Once the row is current it asks for the render (rerender) at once, at
-//     most once per rendition per staleRenditionRescanEvery, a minute not
-//     spent when nothing was tried (the pool's queue full, the kind switched
-//     off). The render is stamped with the row, so the rendition it writes
-//     is fresh to the serve path, the sweep and the album gain alike, and no
-//     later download finds it stale: no loop (#1077's one clock). A render
-//     that fails writes no row, so the next download after the minute asks
-//     again, until the failures suppress the file (staleRerender).
+//     most once per version of the file and rendition per
+//     staleRenditionRescanEvery, a minute not spent when nothing was tried
+//     (the pool's queue full, the kind switched off). The render is stamped
+//     with the row, so the rendition it writes is fresh to the serve path,
+//     the sweep and the album gain alike, and no later download finds it
+//     stale: no loop (#1077's one clock). A render that fails writes no row,
+//     so the next download after the minute asks again, until the failures
+//     suppress the file (staleRerender).
 type staleRenditionHeal struct {
 	lookup func(ctx context.Context, rel string) (*manifest.Track, error)
 	// request is sourceRescanner.queue: whether the directory will be
@@ -319,7 +321,7 @@ type staleRenditionHeal struct {
 	mu   sync.Mutex
 	// asked is when a download last asked for each library-relative
 	// directory's rescan; rendered, when one last asked for each rendition's
-	// render (keyed by path and id).
+	// render (keyed by path, id and the row's size and mtime).
 	asked, rendered recentKeys
 	// waiting holds the renders downloads asked for while their rows were
 	// behind, keyed by path and id, until the rescan of their directory.
@@ -350,7 +352,7 @@ func (h *staleRenditionHeal) observe(ctx context.Context, clientPath, variantID 
 		return
 	}
 	if transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
-		h.render(ctx, track.Path, variantID)
+		h.render(ctx, track, variantID)
 		return
 	}
 	dir := path.Dir(track.Path)
@@ -370,27 +372,44 @@ func (h *staleRenditionHeal) observe(ctx context.Context, clientPath, variantID 
 // rescan brought level with its file is asked for now. One still behind (the
 // file changed again, or the scan could not read it) is dropped, to be asked
 // for by the next download that finds it stale.
+//
+// A rescan that brought every waiting file level frees the directory's
+// minute: it did what the downloads asked for, and a later change to one of
+// those files is a new change, whose download may ask for a rescan at once.
+// One that left a file behind keeps it, which is what the minute is for: a
+// file still being written, or a directory the scan cannot read, would
+// otherwise have every download ask for a rescan that changes nothing.
 func (h *staleRenditionHeal) rescanned(ctx context.Context, dir string) {
-	for _, w := range h.takeWaiting(dir) {
+	wants := h.takeWaiting(dir)
+	behind := false
+	for _, w := range wants {
 		track, err := h.lookup(ctx, w.rel)
 		if err != nil || track == nil {
 			continue
 		}
 		info, err := h.stat(track.Path)
 		if err != nil || !transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
+			behind = true
 			continue
 		}
-		h.render(ctx, track.Path, w.variantID)
+		h.render(ctx, track, w.variantID)
+	}
+	if len(wants) > 0 && !behind {
+		h.forget(h.asked, dir)
 	}
 }
 
-// render asks for the render of variantID for the file whose row records
-// rel, unless it was asked for within the minute.
-func (h *staleRenditionHeal) render(ctx context.Context, rel, variantID string) {
+// render asks for the render of variantID for the file whose row is track,
+// unless it was asked for within the minute for this VERSION of the file:
+// the minute bounds the tries of one render that fails (a failure writes no
+// row, so the rendition stays stale), and a file changed again is a render
+// that has not been tried.
+func (h *staleRenditionHeal) render(ctx context.Context, track *manifest.Track, variantID string) {
 	if h.rerender == nil {
 		return
 	}
-	key := rel + "\x00" + variantID
+	rel := track.Path
+	key := fmt.Sprintf("%s\x00%s\x00%d\x00%d", rel, variantID, track.ModTime.UnixNano(), track.Size)
 	if !h.admit(h.rendered, key) {
 		return
 	}

@@ -120,6 +120,45 @@ func TestAStaleDownloadWhoseRowIsBehindRendersAgainAfterItsRescan(t *testing.T) 
 	}
 }
 
+// TestAStaleDownloadRendersEveryNewVersionOfItsFileAgain: the minute a
+// render waits before it is asked for again bounds the renders of ONE
+// version of the file, the failed ones. A file retagged again is a new
+// version, and its render is asked for at once. Measured on a real bridge
+// with sox (ops/engineering-log.md, 2026-09-29): a retag, a scan and a
+// download rendered the CarPlay tier again, then a second retag 30 s later
+// answered 410 on 15 downloads over 30 s, because the render its rescan
+// queued, and every download after it, was refused as asked for within the
+// minute.
+func TestAStaleDownloadRendersEveryNewVersionOfItsFileAgain(t *testing.T) {
+	b := newEmptyStampBridge(t)
+	abs, scanner := b.mintScannedDSF(t, stampDSD)
+	rescanned := b.startRescans(t, scanner)
+	if n := b.request(t, stampDSD, "pcm"); n != 1 {
+		t.Fatalf("the faithful request queued %d jobs, want 1", n)
+	}
+	for i, what := range []string{"the first retag", "a second retag within the minute"} {
+		later := time.Now().Add(time.Duration(i+1) * time.Minute).Truncate(time.Second)
+		if err := os.Chtimes(abs, later, later); err != nil {
+			t.Fatal(err)
+		}
+		before := b.queue.count()
+		if code := b.download(t, stampDSD, stampDSDFaithful); code != http.StatusGone {
+			t.Fatalf("%s: GET = %d, want 410", what, code)
+		}
+		select {
+		case <-rescanned:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: the stale download's rescan did not run within 10 s", what)
+		}
+		if got := b.queue.since(before); len(got) != 1 {
+			t.Fatalf("%s: the rescan's step rendered %v, want the faithful tier again", what, got)
+		}
+		if code := b.download(t, stampDSD, stampDSDFaithful); code != http.StatusOK {
+			t.Errorf("%s: GET after the rescan = %d, want 200", what, code)
+		}
+	}
+}
+
 // TestAStaleDownloadRendersNothingForAKindThatIsSwitchedOff: a stale
 // download renders a rendition again under the live gate of its kind, the
 // one POST /v1/upscale reads, so it never renders what a client's request
@@ -327,21 +366,25 @@ func TestAStaleRerenderGoesThroughTheKindsGateAndTheSuppression(t *testing.T) {
 
 // TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan drives
 // staleRenditionHeal alone, over a fake clock. Once the row is current a
-// stale download asks for the render at once, and again only after a minute
-// (a failed render is tried once a minute, not on every GET), unless nothing
-// was tried: the pool's queue full, or the kind switched off. While the row
-// is behind, the render waits for the rescan the download asks for, and that
-// rescan asks for it only if it brought the row level with the file; one
-// still behind is dropped, and another directory's rescan takes nothing. A
-// file that changed again between the check here and the enqueue's
-// (errSourceAheadOfRow) waits for the rescan the enqueue asked for.
+// stale download asks for the render at once, and again for the same version
+// of the file only after a minute (a failed render is tried once a minute,
+// not on every GET), unless nothing was tried: the pool's queue full, or the
+// kind switched off. A new version of the file is asked for at once. While
+// the row is behind, the render waits for the rescan the download asks for,
+// and that rescan asks for it only if it brought the row level with the file;
+// one still behind is dropped, and another directory's rescan takes nothing.
+// A rescan that left a waiting file behind keeps its directory's minute; one
+// that brought every waiting file level frees it. A file that changed again
+// between the check here and the enqueue's (errSourceAheadOfRow) waits for
+// the rescan the enqueue asked for.
 func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testing.T) {
 	rowTime := time.Unix(1_700_000_000, 0)
 	rows := map[string]*manifest.Track{}
-	row := func(rel string) {
-		rows[rel] = &manifest.Track{Path: rel, Size: 4096, ModTime: rowTime}
+	row := func(rel string, mtime time.Time) {
+		rows[rel] = &manifest.Track{Path: rel, Size: 4096, ModTime: mtime}
 	}
-	current := fileStat{size: 4096, mtime: rowTime}
+	at := func(mtime time.Time) fileStat { return fileStat{size: 4096, mtime: mtime} }
+	current := at(rowTime)
 	behind := fileStat{size: 4104, mtime: rowTime.Add(time.Minute)}
 	onDisk := map[string]os.FileInfo{}
 	var rescans, renders []string
@@ -375,12 +418,16 @@ func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testin
 	}
 	rescanned := func(dir string) func() { return func() { h.rescanned(t.Context(), dir) } }
 
-	row("A/01.flac")
+	row("A/01.flac", rowTime)
 	step("row current", observe("A/01.flac", v, current), nil, []string{"A/01.flac " + v})
 	step("again within the minute", observe("A/01.flac", v, current), nil, nil)
 	step("another rendition of the file", observe("A/01.flac", v2, current), nil, []string{"A/01.flac " + v2})
 	now = now.Add(staleRenditionRescanEvery)
 	step("a minute on (the render failed)", observe("A/01.flac", v, current), nil, []string{"A/01.flac " + v})
+	retagged := rowTime.Add(time.Hour)
+	row("A/01.flac", retagged)
+	step("a new version of the file, within the minute", observe("A/01.flac", v, at(retagged)), nil, []string{"A/01.flac " + v})
+	row("A/01.flac", rowTime)
 
 	now = now.Add(staleRenditionRescanEvery)
 	renderErr = fmt.Errorf("pool: %w", api.ErrUpscaleQueueFull)
@@ -396,20 +443,22 @@ func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testin
 	step("again within the minute", observe("A/01.flac", v, current), nil, nil)
 	renderErr = nil
 
-	row("B/01.flac")
-	row("B/02.flac")
-	row("C/01.flac")
+	row("B/01.flac", rowTime)
+	row("B/02.flac", rowTime)
+	row("C/01.flac", rowTime)
 	step("row behind", observe("B/01.flac", v, behind), []string{"B/01.flac"}, nil)
 	step("another file of the directory, within the minute", observe("B/02.flac", v, behind), nil, nil)
 	step("another directory's rescan", rescanned("C"), nil, nil)
 	onDisk["B/01.flac"] = current
 	onDisk["B/02.flac"] = behind
 	step("the rescan of B: 01's row caught up, 02's did not", rescanned("B"), nil, []string{"B/01.flac " + v})
-	onDisk["B/02.flac"] = current
 	step("a second rescan of B: 02's render was dropped", rescanned("B"), nil, nil)
-	step("02's next download, its row current", observe("B/02.flac", v, current), nil, []string{"B/02.flac " + v})
+	step("02 still behind, within the minute its rescan kept", observe("B/02.flac", v, behind), nil, nil)
+	onDisk["B/02.flac"] = current
+	step("a rescan of B that brings 02 level", rescanned("B"), nil, []string{"B/02.flac " + v})
+	step("01 changed again: the level rescan freed the minute", observe("B/01.flac", v, behind), []string{"B/01.flac"}, nil)
 
-	row("D/01.flac")
+	row("D/01.flac", rowTime)
 	onDisk["D/01.flac"] = current
 	renderErr = errSourceAheadOfRow
 	step("the file changed again before the enqueue", observe("D/01.flac", v, current), nil, []string{"D/01.flac " + v})
