@@ -28462,3 +28462,20 @@ checks the order, the unwired case and that a pending nudge does not block.
 NC16 (nudge first): red ("invalidated after the nudge"). NC17 (no
 invalidation): red. A watcher-driven subtree scan misses the index drop the
 same way; that joins B83.
+
+### Review round 4
+
+CodeRabbit (outside the diff, Minor): `run` called its step only when
+`ScanSubtree` reported committed rows, and `ScanSubtree` counts the rows it
+wrote, so a rescan whose only change was a deletion (its file deleted in the
+seconds between the request and the scan: a file that still exists is
+re-upserted and counted) skipped the album-index drop. Narrow, but a
+deletion is a membership change. Suggested: expose the deletions from
+`ScanSubtree` separately. Taken more simply: the step runs after every
+rescan the shutdown did not interrupt, whatever its count. The index drop
+is a mutex and a nil, and the nudge coalesces on its one-slot channel, so a
+rescan that changed nothing costs one extra sweep pass at most. The
+callback and helper are renamed (`after`, `afterRescan`) since they no longer
+depend on rows written. `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`
+drives `run` with a scan that commits nothing, and an interrupted one. NC18
+(only a writing rescan): red. NC19 (the step run during shutdown too): red.

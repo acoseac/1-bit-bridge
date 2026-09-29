@@ -2184,12 +2184,14 @@ no failing test — which is the shape to expect in this area.
   directories: every play, device and range request makes that GET. The
   minute is spent only on a rescan the rescanner queued or already had
   waiting (`sourceRescanner.queue`); one its full queue dropped leaves the
-  next GET free to ask (review round 2). A rescan
-  that wrote rows drops the album-gain index and THEN nudges the
-  auto-optimize sweep, whose tick otherwise follows the periodic scan
-  (`afterRescanWrote`): only a full scan dropped that index, so a DSD render
+  next GET free to ask (review round 2). EVERY
+  rescan the shutdown did not interrupt drops the album-gain index and THEN
+  nudges the auto-optimize sweep, whose tick otherwise follows the periodic
+  scan (`afterRescan`): only a full scan dropped that index, so a DSD render
   the nudge starts could take a retagged track's old album-mates for its gain
-  (review round 3). **A rescan request names the file by its ROW's path, and
+  (review round 3), and not only a rescan that committed rows, since one whose
+  file was deleted before it ran deletes a row and counts none (round 4).
+  **A rescan request names the file by its ROW's path, and
   the rescanner resolves the directory itself**: the scanner makes each row's
   path from the spelling of the directory it is handed, and on main a request
   naming a changed file in lower case, on a filesystem that opens it, left the
@@ -2199,7 +2201,8 @@ no failing test — which is the shape to expect in this area.
   neither the sweep nor the player's catalog, nor drops the album-gain index
   (B83; `player_wiring.go` said it nudged the catalog until B53). Tests:
   `TestABatchPassesOverAFileThatChangedSinceItsScan`,
-  `TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep`,
+  `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep`,
+  `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`,
   `TestRunRendersNothingFromASourceThatChangedSinceItsStamp`,
   `TestPublishingRefusesASourceThatChangedWhileItRendered`,
   `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (the real pool and
