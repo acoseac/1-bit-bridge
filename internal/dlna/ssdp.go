@@ -204,7 +204,7 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 	}
 
 	// Multicast listener (joined to the SSDP group)
-	listener, err := net.ListenMulticastUDP("udp4", s.cfg.Interface, addr)
+	listener, err := listenSSDP(ctx, s.cfg.Interface, addr, s.log)
 	if err != nil {
 		return err
 	}
