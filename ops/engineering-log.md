@@ -29884,8 +29884,13 @@ comments in `runServe` (the analysis one also said serve-side analysis is
 CLI-driven, false since the auto-analysis sweeper), `UpscaleConfig` and
 `AnalysisConfig`, `WithUpscale` and `WithAnalysis` and their two store
 fields, the batch file's header and error pair, the analysis card's
-`DegradedReason`, and `FingerprintJobState` ("at startup" for a gate read
-live).
+`DegradedReason`, `FingerprintJobState` ("at startup" for a gate read
+live), and `admin.Deps.AnalysisActive`, which said the runtime stays at its
+startup value after a PATCH until a restart (CodeRabbit's round-1 finding,
+outside the diff), with `AnalysisPoolStats` beside it, which said the
+closure is nil while the feature is off because the pool is not built: the
+pool is built on every bridge, and the analysis queue line on the Jobs card
+shows its counters with the feature off (noted in B108).
 
 The sweep triggers' comments made the neighbouring claim that the admin
 trigger is nil while the feature is inactive, so the endpoint answers 503.

@@ -425,26 +425,27 @@ type Deps struct {
 	BookletNudge func(mbid string)
 
 	// AnalysisActive reports the LIVE runtime state of the audio-
-	// analysis feature — i.e. the startup-computed `analysisActive`
-	// (config flag AND sox-precheck outcome), NOT the persisted config
-	// flag. The two diverge after a restart-required PATCH: the config
-	// holder reflects the new value immediately, but the runtime stays
-	// at its startup value until restart. Wiring this lets
+	// analysis feature: cmd/bridge's analysisActiveFn, the config flag
+	// AND a usable sox, read per call, NOT the persisted flag alone. The
+	// two differ only while sox is unusable; a PATCH of the flag moves
+	// both at once, since the toggle is live (#781). Wiring this lets
 	// /api/analysis/stats.enabled agree with /v1/health's `waveform`
-	// flag (also startup-wired). Nil-safe: when absent the handler
-	// falls back to the persisted config + sox derivation (test
-	// harnesses). Mirrors the intent of the upscale tile's pool-derived
-	// `enabled`. Wired in cmd/bridge/main.go.
+	// flag, which reads the same closure. Nil-safe: when absent the
+	// handler falls back to the persisted config + sox derivation (test
+	// harnesses). This said until 2026-09-29 that the value stays at its
+	// startup state after a PATCH, a restart-bound gate #781 retired.
+	// Wired in cmd/bridge/main.go.
 	AnalysisActive func() bool
 
 	// AnalysisPoolStats returns a snapshot of the long-lived
 	// analyze.Pool's counters. Reuses the UpscalePoolStats DTO —
 	// analyze.PoolStats' field set matches transcode.PoolStats
 	// one-for-one (ActiveWorkers stays empty; the analysis pool has no
-	// per-worker grid). Same closure decoupling + nil semantics as
-	// UpscaleStats: nil when the feature is off (pool not
-	// instantiated), and the `pool` field is omitted rather than
-	// zero-padded. Wired in cmd/bridge/main.go.
+	// per-worker grid). Unlike UpscaleStats it does not read the gate:
+	// serve builds the pool on every bridge (#781) and wires this
+	// whatever the gate says, so the `pool` field is present with the
+	// feature off too, and only a nil closure (a test harness) omits
+	// it. Wired in cmd/bridge/main.go.
 	AnalysisPoolStats func() *UpscalePoolStats
 
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's

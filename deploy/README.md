@@ -45,16 +45,23 @@ pairing.
 
 ## linux/ — the Linux VPS, bridge.ars.md (public mode, systemd)
 
-Since 2026-09-22 this host runs only the public demo (`bridge.1-bit.app`, its
-own unit and binary); the operator bridge moved to a home NUC, which this
-script cannot verify (a self-signed certificate), so a deploy there follows the
-runbook's manual form. A demo deploy carries `SVC` and `REMOTE_BIN` (the
-runbook's `.env.demo`): the defaults name the operator bridge's old unit and
-binary on this host.
+Since 2026-09-22 this host runs only the public demo (`bridge.1-bit.app`, a
+unit and binary of its own); the operator bridge moved to a home NUC, which
+this script cannot verify (a self-signed certificate), so a deploy there
+follows the runbook's manual form. The demo is not deployed from this script's
+`main` build either: it ships the release artifact, because a `git describe`
+version makes it advertise an update forever (the runbook's "Demo bridge"
+section has the procedure). Any run against this host must carry the demo's
+overrides, since the defaults (`SVC=1-bit-bridge`,
+`REMOTE_BIN=/usr/local/bin/bridge`) name the operator bridge's old unit and
+binary here: keep them in an env file of their own
+(`SVC=1-bit-bridge-demo`, `REMOTE_BIN=/usr/local/bin/bridge-demo`,
+`HEALTH_URL=https://bridge.1-bit.app/v1/health` beside `HOST` and `SSH_KEY`)
+and pass it as `ENV_FILE=deploy/linux/.env.demo`. The general form:
 
 ```sh
 cp deploy/linux/.env.example deploy/linux/.env   # first run only; fill it in
-./deploy/linux/deploy-bridge-vps.sh
+./deploy/linux/deploy-bridge-vps.sh              # ENV_FILE=… picks another env file
 ```
 
 Cross-compiles linux/amd64, uploads as `.new`, **SHA-256-gates before swap**,
