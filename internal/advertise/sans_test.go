@@ -43,11 +43,11 @@ func TestGatherCertSANIPs_TakesTailscaleIPs(t *testing.T) {
 		Self: struct {
 			DNSName      string   `json:"DNSName"`
 			TailscaleIPs []string `json:"TailscaleIPs"`
-		}{TailscaleIPs: []string{"100.91.73.88"}},
+		}{TailscaleIPs: []string{"100.64.0.88"}},
 	}, nil)
 
 	got := GatherCertSANIPs(CertSANConfig{})
-	want := net.ParseIP("100.91.73.88")
+	want := net.ParseIP("100.64.0.88")
 	found := false
 	for _, ip := range got {
 		if ip.Equal(want) {

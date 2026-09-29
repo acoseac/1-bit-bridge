@@ -47,10 +47,10 @@ var oldHostCert = servertls.GenerateOptions{
 // serve-time WARN reported after the move.
 var newHostEndpoints = servertls.GenerateOptions{
 	Hostname:      "nuc",
-	ExtraDNSNames: []string{"nuc.sable-eagle.ts.net"},
+	ExtraDNSNames: []string{"nuc.tailnet.ts.net"},
 	ExtraIPs: []net.IP{
-		net.ParseIP("192.168.0.24"),
-		net.ParseIP("100.102.105.89"),
+		net.ParseIP("192.168.50.24"),
+		net.ParseIP("100.64.0.24"),
 		net.ParseIP("fd7a:115c:a1e0::1234"),
 	},
 }
@@ -74,8 +74,8 @@ func TestCheckTLSCertSANs_StaleCertWarnsWithTheExactMissingSet(t *testing.T) {
 	// "::1")` probe for the covered loopback matches it and the test
 	// fails on its own fixture.
 	wantMissing := []string{
-		"nuc", "nuc.local", "nuc.sable-eagle.ts.net",
-		"192.168.0.24", "100.102.105.89", "fd7a:115c:a1e0::1234",
+		"nuc", "nuc.local", "nuc.tailnet.ts.net",
+		"192.168.50.24", "100.64.0.24", "fd7a:115c:a1e0::1234",
 	}
 	if got := hintedMissing(t, c.Hint); !equalStrings(got, wantMissing) {
 		t.Errorf("hint lists %v, want %v", got, wantMissing)

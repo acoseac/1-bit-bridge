@@ -112,8 +112,8 @@ func TestManager_GetReturnsSelfSignedWhenNoSNI(t *testing.T) {
 	// hostnames only.
 	self := mintTestCert(t, []string{"host.local"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
-	mgr.SetTailscaleCert(mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"}))
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
+	mgr.SetTailscaleCert(mintTestCert(t, []string{"home-pc.tailnet.ts.net"}))
 
 	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: ""})
 	if err != nil {
@@ -126,12 +126,12 @@ func TestManager_GetReturnsSelfSignedWhenNoSNI(t *testing.T) {
 
 func TestManager_GetReturnsLECertOnMagicDNSSNI(t *testing.T) {
 	self := mintTestCert(t, []string{"host.local"})
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	le := mintTestCert(t, []string{"home-pc.tailnet.ts.net"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
 	mgr.SetTailscaleCert(le)
 
-	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.sable-eagle.ts.net"})
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.tailnet.ts.net"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -147,12 +147,12 @@ func TestManager_SetMagicDNSSuffixTrailingDot(t *testing.T) {
 	// suffix too, else every Tailscale handshake falls through to
 	// self-signed.
 	self := mintTestCert(t, []string{"host.local"})
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	le := mintTestCert(t, []string{"home-pc.tailnet.ts.net"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net.") // trailing dot
+	mgr.SetMagicDNSSuffix("tailnet.ts.net.") // trailing dot
 	mgr.SetTailscaleCert(le)
 
-	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.sable-eagle.ts.net"})
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.tailnet.ts.net"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -168,10 +168,10 @@ func TestManager_GetFallsThroughToSelfSignedWhenLECertMissing(t *testing.T) {
 	// same as today's no-LE-cert state. Honest fallback, no surprise.
 	self := mintTestCert(t, []string{"host.local"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
 	// Deliberately no SetTailscaleCert.
 
-	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.sable-eagle.ts.net"})
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.tailnet.ts.net"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -185,9 +185,9 @@ func TestManager_GetReturnsSelfSignedForLANSNI(t *testing.T) {
 	// — these are the connections iOS pins by fingerprint, and
 	// serving the LE cert on those would break every existing pin.
 	self := mintTestCert(t, []string{"host.local"})
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	le := mintTestCert(t, []string{"home-pc.tailnet.ts.net"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
 	mgr.SetTailscaleCert(le)
 
 	for _, sni := range []string{
@@ -195,7 +195,7 @@ func TestManager_GetReturnsSelfSignedForLANSNI(t *testing.T) {
 		"192.168.1.5",
 		"127.0.0.1",
 		"my-hostname",
-		"sable-eagle.ts.net.malicious.example", // not actually under the suffix
+		"tailnet.ts.net.malicious.example", // not actually under the suffix
 	} {
 		got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: sni})
 		if err != nil {
@@ -210,12 +210,12 @@ func TestManager_GetReturnsSelfSignedForLANSNI(t *testing.T) {
 func TestManager_GetCaseInsensitiveSNI(t *testing.T) {
 	// SNI hostnames are case-insensitive per RFC 6066.
 	self := mintTestCert(t, []string{"host.local"})
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	le := mintTestCert(t, []string{"home-pc.tailnet.ts.net"})
 	mgr := NewManager(self)
-	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
+	mgr.SetMagicDNSSuffix("tailnet.ts.net")
 	mgr.SetTailscaleCert(le)
 
-	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "HOME-PC.SABLE-EAGLE.TS.NET"})
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "HOME-PC.TAILNET.TS.NET"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -229,13 +229,13 @@ func TestManager_GetEmptySuffixDisablesLERouting(t *testing.T) {
 	// suffix → every SNI routes to self-signed regardless of LE
 	// cert presence.
 	self := mintTestCert(t, []string{"host.local"})
-	le := mintTestCert(t, []string{"home-pc.sable-eagle.ts.net"})
+	le := mintTestCert(t, []string{"home-pc.tailnet.ts.net"})
 	mgr := NewManager(self)
 	// SetMagicDNSSuffix("") — explicitly empty.
 	mgr.SetMagicDNSSuffix("")
 	mgr.SetTailscaleCert(le)
 
-	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.sable-eagle.ts.net"})
+	got, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: "home-pc.tailnet.ts.net"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

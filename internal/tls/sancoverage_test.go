@@ -35,10 +35,10 @@ func TestInspectSANCoverage_StaleCertNamesTheMissingSet(t *testing.T) {
 	// The new host, advertising a different name and three new addresses.
 	cov, err := InspectSANCoverage(certPath, GenerateOptions{
 		Hostname:      "nuc",
-		ExtraDNSNames: []string{"nuc.sable-eagle.ts.net"},
+		ExtraDNSNames: []string{"nuc.tailnet.ts.net"},
 		ExtraIPs: []net.IP{
-			net.ParseIP("192.168.0.24"),
-			net.ParseIP("100.102.105.89"),
+			net.ParseIP("192.168.50.24"),
+			net.ParseIP("100.64.0.24"),
 			net.ParseIP("fd7a:115c:a1e0::1234"),
 		},
 	})
@@ -51,11 +51,11 @@ func TestInspectSANCoverage_StaleCertNamesTheMissingSet(t *testing.T) {
 
 	// `nuc` and `nuc.local` come from the hostname, the ts.net name from
 	// the extras. `localhost` is in both certs and must NOT be listed.
-	wantDNS := []string{"nuc", "nuc.local", "nuc.sable-eagle.ts.net"}
+	wantDNS := []string{"nuc", "nuc.local", "nuc.tailnet.ts.net"}
 	if got := cov.MissingDNS; !equalStrings(got, wantDNS) {
 		t.Errorf("MissingDNS = %v, want %v", got, wantDNS)
 	}
-	wantIPs := []string{"192.168.0.24", "100.102.105.89", "fd7a:115c:a1e0::1234"}
+	wantIPs := []string{"192.168.50.24", "100.64.0.24", "fd7a:115c:a1e0::1234"}
 	if got := cov.MissingIPStrings(); !equalStrings(got, wantIPs) {
 		t.Errorf("MissingIPs = %v, want %v", got, wantIPs)
 	}
@@ -77,8 +77,8 @@ func TestInspectSANCoverage_StaleCertNamesTheMissingSet(t *testing.T) {
 func TestInspectSANCoverage_MatchingCertIsCovered(t *testing.T) {
 	opts := GenerateOptions{
 		Hostname:      "nuc",
-		ExtraDNSNames: []string{"nuc.sable-eagle.ts.net"},
-		ExtraIPs:      []net.IP{net.ParseIP("192.168.0.24"), net.ParseIP("100.102.105.89")},
+		ExtraDNSNames: []string{"nuc.tailnet.ts.net"},
+		ExtraIPs:      []net.IP{net.ParseIP("192.168.50.24"), net.ParseIP("100.64.0.24")},
 	}
 	cov, err := InspectSANCoverage(mintCert(t, opts), opts)
 	if err != nil {

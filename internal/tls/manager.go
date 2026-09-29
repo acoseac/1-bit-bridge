@@ -255,7 +255,7 @@ func (m *Manager) TailscaleCert() *cryptotls.Certificate {
 }
 
 // SetMagicDNSSuffix records the local tailnet's MagicDNS suffix
-// (e.g. "sable-eagle.ts.net"). Empty means "Tailscale not configured /
+// (e.g. "tailnet.ts.net"). Empty means "Tailscale not configured /
 // not detected" — Get falls through to self-signed for every
 // connection, same as if the LE cert weren't loaded.
 func (m *Manager) SetMagicDNSSuffix(suffix string) {
