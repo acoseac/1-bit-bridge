@@ -390,7 +390,21 @@ var Ext = map[string]bool{
 // virtual rows re-expand as on every bump (processSACDISO has no diff-guard),
 // which the client's diff-before-write absorbs. No other field of any file
 // changes — the synth's condition is unchanged.
-const ExtractorVersion = 17
+//
+// v18 — an Ogg FLAC file gets its tags (backlog B102). dhowden's Ogg reader
+// looks only for a Vorbis or Opus comment packet, so a FLAC stream in Ogg (an
+// .oga, or such a stream under any name) had none, and was read to its end
+// to find that out. Its metadata blocks are now read from its header packets,
+// laid out as a .flac file holds them (ogg_flac.go), through the same reader,
+// guards and multi-value pass as a .flac file's. Only those files change:
+// they gain their tags, their embedded pictures and their lyrics, take the
+// full-upsert leg (their enrichment is re-queued once, with the file's own
+// MusicBrainz ids now in hand) and are the iOS delta. Every other row
+// re-extracts byte-identical and rides the version-stamp leg (an Ogg Vorbis
+// or Opus stream is still dhowden's to read); SACD ISO virtual rows
+// re-expand as on every bump. The codec stays "OGG", and an Ogg file still
+// carries no sample rate, bit depth or duration: this bump is about tags.
+const ExtractorVersion = 18
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -770,12 +784,33 @@ func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) 
 // Takes an already-open io.ReadSeeker so the FLAC branch in
 // ExtractWithContext can hand off the same *os.File previously used
 // by extractFLACFormatFromReader (after a Seek(0,Start)) — single
-// open per FLAC scan instead of two. After populating tag fields it
-// hands the dhowden Metadata (which holds the embedded APIC bytes
-// via its Picture() accessor) to extractLocalArtwork so embedded art
-// and the folder.jpg fallback both run from the same code path.
+// open per FLAC scan instead of two. The tags are read by
+// readDhowdenTags, which hands the dhowden Metadata (holding the
+// embedded APIC bytes behind its Picture() accessor) to
+// extractLocalArtwork, so embedded art and the folder.jpg fallback run
+// from the same code path.
 //
 // Per Gemini A8 / iOS bug review #7.
+//
+// An Ogg FLAC stream, which dhowden's Ogg reader cannot read (it reads the
+// whole file looking for a Vorbis or Opus comment packet), is read from its
+// own metadata blocks instead, laid out as a .flac file holds them
+// (oggFLACMetadata, ogg_flac.go), and the FLAC multi-value pass follows, as it
+// follows the tag read of a .flac file. So an Ogg FLAC file's tags are a .flac
+// file's in every respect, whatever the file is called.
+func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
+	if flac, ok := oggFLACMetadata(f); ok {
+		err := readDhowdenTags(flac, absPath, t, ec)
+		if _, serr := flac.Seek(0, io.SeekStart); serr == nil {
+			applyFLACMultiValueArtists(flac, t)
+		}
+		return err
+	}
+	return readDhowdenTags(f, absPath, t, ec)
+}
+
+// readDhowdenTags reads f's tags through dhowden into t, and runs the local
+// artwork pipeline over the embedded picture it found, or the folder's.
 //
 // It is the one call of tag.ReadFrom, so both dhowden guards are here, for
 // every extension: a file whose pictures would make dhowden allocate beyond
@@ -783,7 +818,7 @@ func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) 
 // make it rename repeated frames, or store frames, past what it does in
 // bounded time (dhowden_id3v2_guard.go), is not handed to it, and ends as a
 // file whose tags dhowden could not read.
-func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
+func readDhowdenTags(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	if ok, refusal := dhowdenPicturesWithinBudget(f); !ok {
 		scanLogger.Warn("embedded picture declares more than the file could hold; skipping tag read",
 			"path", trackLogPath(absPath, t), "picture", refusal.What,
