@@ -6946,7 +6946,7 @@ its twin.** The top list is older, shorter, and read first.
   grace), a give-up's lower bound, and the tsnet join test's "no give-up
   line", asserted only when its start finished unwinding a second or more
   inside the grace (it measures when, and a 1 s start still fails the
-  control). **Not converted** (backlog B106): the in-process tests' waits
+  control). **Not converted** (backlog B107): the in-process tests' waits
   (the rescanner, the sweep passes, the album-gain render, sqlitetest's
   `Arm` in internal/backup and internal/manifest), loggingtest's 3 s
   `Park.Wait`, the tsnet front's unit tests, and clients' per-request

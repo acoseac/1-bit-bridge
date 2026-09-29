@@ -29581,4 +29581,4 @@ tests' waits (the rescanner's `awaitRowAt` and queue tests, `awaitOnePass`,
 `waitClosed`, the album-gain render's 3 min, sqlitetest's `Arm` in
 internal/backup and internal/manifest, loggingtest's 3 s `Park.Wait`) wait
 on the same kind of disk writes without a serve around them; none has
-failed on CI yet, and whether one does under this harness is backlog B106.
+failed on CI yet, and whether one does under this harness is backlog B107.
