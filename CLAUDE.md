@@ -14,7 +14,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **40** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **41** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
@@ -22,14 +22,15 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   2026-09-10: the sixth stale claim of the kind, and in the paragraph that
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
   `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
-  `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`.) They cover
+  `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`; 40 until
+  2026-09-29, when it gained `FuzzExtractOGG`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 40 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 39, because
+  **Count them by file:name pair** to get 41 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 40, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -39,7 +40,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Fourteen carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Twenty-two carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -58,12 +59,39 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `FuzzParseDeviceDescription` (every service URL the parser keeps, re-parsed, is http(s)
   with a host, stays on the description's host when discovered, names this machine or a
   link-local address only from a description URL that does too, and never names a cloud
-  metadata address; it fuzzes the base URL as well as the XML). This said "Four" until 2026-09-28, while eight more were added beside
-  them, and then "Twelve" and "Thirteen" that same day, as two more joined: **count them
+  metadata address; it fuzzes the base URL as well as the XML), and the eight whole-file
+  extractor targets (`FuzzExtract{AIFF,WAV,DFF,DSF,FLAC,OGG,M4A,MP3}`, through
+  `fuzzExtractOnce`: one extraction allocates no more than `extractionAllocLimit`, 64 MiB
+  plus 64 bytes per input byte; the rule is under **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
+  them, then "Twelve" and "Thirteen" that same day, as two more joined, and "Fourteen" until
+  2026-09-29: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
-  a panicking file is skipped, so it silently never reaches the manifest. Baseline at
+  a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of
+  memory) is not recovered at all. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.
+  **The nightly job runs every fuzz process under a 5 GiB address-space limit**
+  (`prlimit --as` through `go test -exec`, so the compiler and linker are not held to it;
+  2026-09-29, backlog B99). Without it an input that made a worker allocate gigabytes did
+  not fail the run: the four workers re-zeroed the address space on every execution until
+  GitHub shut the runner down ("The runner has received a shutdown signal", exit 143) before
+  the upload step ran, so the leg read as an infrastructure failure and saved nothing.
+  `FuzzExtractFLAC` died that way on 8 of the 28 nights from 2026-09-02, from 09-07 on, not
+  (as the backlog entry first read) since #991. Under the limit the allocation fails, the
+  runtime exits with status 2, and Go records the input: on dido (a 4.5 GiB limit), 23 s in,
+  a 40-byte FLAC whose PICTURE block declared 4,281,344,048 bytes of data. **Not a cgroup cap**: the kernel kills a
+  worker with SIGKILL, and Go records a worker a signal killed only when it dies MINIMIZING
+  an input (`internal/fuzz/worker.go`); killed while fuzzing, the run fails with "terminated
+  by unexpected signal; no crash will be recorded". **Size the limit from the measured
+  reservation, not from RAM**: RLIMIT_AS counts reserved address space, and a
+  `FuzzExtractFLAC` process reserves most of its size before it allocates (go1.26.6 on
+  Linux, in decimal units: 2.2 to 2.6 GB for a worker, up to 4.3 GB for the coordinator,
+  which maps each worker's shared memory), so 5 GiB (5.37 GB) leaves a worker at least
+  2.8 GB of heap and the coordinator about 1.1 GB; a coordinator that reaches the limit fails its leg with its own out-of-memory,
+  which is visible, and raising the limit gives each of the four workers that much more of
+  the runner's 16 GB. The
+  limit is the backstop; the allocation property is what names a bomb the limit would let
+  through.
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.
 - **On a host whose Go is newer than `go.mod`'s, `make fmt` rewrites files CI calls clean.** CI's gofmt check runs `go.mod`'s toolchain (`go-version-file: go.mod`, 1.26.6 as of 2026-09-25), and gofmt 1.27 indents a composite literal in a multi-value `return` differently: on a 1.27.1 host `make fmt` re-indents `internal/manifest/favorites_test.go` and `internal/atlasharvest/lyrics_test.go`, and 1.26.6's `gofmt -l` reports both rewrites. Never commit such a rewrite. Restore those files, and check your own with the pinned gofmt: `$(GOTOOLCHAIN=go1.26.6 go env GOROOT)/bin/gofmt -l <files>`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
@@ -948,7 +976,8 @@ lost my library."
   `meta.New` reads the 4-byte header directly from the reader and wraps it in a
   plain `io.LimitReader` — check that still holds before adding a seek anywhere
   else in that walk. A misaligned walk bails fail-open and silently disables the
-  allocation guard, so alignment needs its own pin. **Verified against
+  allocation guard, so alignment needs its own pin (that guard walked mewkiz's
+  framing until 2026-09-29; it walks dhowden's now, by offset: the next bullet). **Verified against
   mewkiz/flac v1.0.14** (2026-09-23): `meta.New` is byte-identical to 1.0.13,
   still reads exactly 4 header bytes through a non-buffering reader, still wraps
   the body in a plain `io.LimitReader` — and upstream's new `readString` now
@@ -965,6 +994,58 @@ lost my library."
   canonical `flac`/`metaflac` layout puts the comment block first (measured 0/4
   on real files). A fixture in that order proves nothing — the pin puts PICTURE
   first.
+- **A picture dhowden reads is guarded by walking the file AS DHOWDEN DOES, at the
+  one `tag.ReadFrom` call, for every extension** (2026-09-29, backlog B99).
+  dhowden's `readPictureBlock` does `make([]byte, dataLen)` from a 32-bit field
+  BEFORE the read that would fail, and the runtime THROWS on the out-of-memory:
+  `recover()` cannot catch a throw, so one file takes `bridge serve` down on every
+  scan that reaches it. The old guard, `flacPictureBlocksSane`, sat in the `.flac`
+  branch alone and walked the blocks by their DECLARED lengths, which dhowden does
+  not: it reads a VORBIS_COMMENT or PICTURE block field by field and takes the next
+  header from where the fields end. So it passed a PICTURE block declaring 0 or 6
+  bytes (its own read of the fields failed, and it failed open), a PICTURE header in
+  the unused tail of a VORBIS_COMMENT or PICTURE block, every METADATA_BLOCK_PICTURE
+  comment (base64 of the same structure, decoded at the end of every VORBIS_COMMENT
+  block and in an Ogg comment packet), and a FLAC- or Ogg-shaped file under any other
+  extension (dhowden picks its parser by the first bytes). Measured on main, one
+  extraction each: 13 shapes of 50 to 868 bytes allocated about 1 GiB apiece, the
+  fuzzer's 40-byte input 4.28 GB. `dhowdenPicturesWithinBudget` (dhowden_picture_guard.go) mirrors
+  `ReadFrom`'s dispatch, `ReadFLACTags` and `ReadOGGTags`, sums what dhowden would
+  allocate for pictures (a PICTURE block's MIME type, description and data; for each
+  METADATA_BLOCK_PICTURE decode, the decoded bytes, the MIME type, the description
+  and the data), and refuses the file when the sum passes `pictureBudget`: twice the
+  file's size plus dhowden's own 10 MB up-front allowance (a well-formed file needs
+  at most 1.5 times its size; the allowance lets a picture truncated within it be
+  read and dropped, as it always was). **Count the strings, not only the picture**:
+  a `readString` whose length is within that 10 MB allocates all of it up front,
+  there or not (`readStringCost`), and the fuzzer broke the first version, which
+  counted the picture alone, in under six minutes: a 787-byte file whose picture
+  declared a 2.9 MB MIME type allocated 68 MB. **A sum, not a per-picture bound**:
+  dhowden's comment map outlives the block, so one METADATA_BLOCK_PICTURE is decoded
+  again at every later VORBIS_COMMENT block (41 decodes of a 9 MB declared picture,
+  or of a 9 MB MIME length, 387 MB from under 800 bytes). A refused file is one
+  whose tags dhowden could not read: a Warn naming the picture kind, the folder-art
+  fallback, no tags. **Stop only where dhowden stops**: where it would fail with an
+  error the walk may read on (a comment with no '=' past the 67 bytes scanned for the
+  key, invalid base64 past the decoded header, an Ogg page with a bad CRC, which the
+  walk does not check), which only adds to the sum, and a file dhowden fails on has
+  no tags either way. It fails
+  OPEN on a read it cannot complete (dhowden's fails there too), I/O errors included.
+  **It reads no picture payload**: fields by offset, a METADATA_BLOCK_PICTURE's header
+  through base64's streaming decoder, Ogg page headers and segment tables and no
+  segment data it does not need (`TestThePictureGuardDoesNotReadAPicturePayload`).
+  **Lowercase as dhowden does**: U+212A KELVIN SIGN lowers to 'k', so a key spelled
+  with it is decoded (`TestNoRuneLongerThanThreeBytesLowersIntoThePictureKey` pins
+  the 67-byte scan). `TestDhowdenStillAllocatesAPictureBeforeReadingIt` fails the day
+  dhowden bounds the allocation itself; retire the guard then, and keep the seeds.
+  **No `ExtractorVersion` bump**: every picture of a well-formed file fits the
+  budget, so no such file's output moves, and a refused file either made dhowden fail
+  anyway (a PICTURE block whose data is not there: no tags before or after) or
+  declared a METADATA_BLOCK_PICTURE more than 10 MB past its bytes, whose stored row
+  keeps the tags it has until the file changes, which a bump would take away. **Every
+  whole-file extractor fuzz target carries the allocation property**
+  (`fuzzExtractOnce`), so a length that sizes a buffer the file cannot back is a
+  crasher, on any platform, with the size in its message.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to

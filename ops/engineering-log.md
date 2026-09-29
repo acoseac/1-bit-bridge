@@ -3112,7 +3112,7 @@ by-subsystem digest; the full text is kept here for the reasoning, the test
 names, and the PR provenance.
 
 - **Byte-by-byte async iteration kills throughput.** Early `BridgeSourceClient` on the iOS side used `URLSession.bytes(for:)` which yields one `UInt8` per async step — 20M yields for a 20 MB file stalled the pipeline and surfaced as "Network connection lost" even over localhost. Fixed by switching to `URLSession.download(for:)`. Don't regress the iOS side back to byte-wise async reads; and don't add a server-side chunked-encoding mode that assumes byte-wise client consumption.
-- **Anything walking FLAC metadata blocks SEEKS past a validated PICTURE payload — never drains it** (PR #568, regression of the #563 preflight). The single-open FLAC path ([extractors.go](internal/manifest/extractors.go) `.flac` branch) exists precisely because the 5–25 MiB embedded cover crossing the wire twice per track halved scanner throughput on NAS-mounted libraries. #563's `flacPictureBodySane` then deferred an `io.Copy(io.Discard, lr)` to re-align the walk, which re-read that payload for a verdict that needs ~30 bytes of header — and the caller `Seek(0)`s straight afterwards and hands the file to dhowden, which reads it again. `flacPictureBlocksSane` now records the body offset and `Seek`s to `pos+block.Length`. **This is only safe because `meta.New` reads the 4-byte header DIRECTLY from the reader and wraps it in a plain `io.LimitReader` — there is no internal buffering to desync** (`mewkiz/flac/meta/meta.go`); check that still holds before adding a seek anywhere else in that walk. Pinned by `TestFLACPictureBlocksSaneDoesNotReadThePayload` (byte-counting `io.ReadSeeker`, 4 MiB payload, ≤1 KiB budget) + `...LeavesWalkAlignedAfterPicture` (a misaligned walk bails fail-open and silently disables the allocation guard, so alignment needs its own pin).
+- **Anything walking FLAC metadata blocks SEEKS past a validated PICTURE payload — never drains it** (PR #568, regression of the #563 preflight). The single-open FLAC path ([extractors.go](internal/manifest/extractors.go) `.flac` branch) exists precisely because the 5–25 MiB embedded cover crossing the wire twice per track halved scanner throughput on NAS-mounted libraries. #563's `flacPictureBodySane` then deferred an `io.Copy(io.Discard, lr)` to re-align the walk, which re-read that payload for a verdict that needs ~30 bytes of header — and the caller `Seek(0)`s straight afterwards and hands the file to dhowden, which reads it again. `flacPictureBlocksSane` then recorded the body offset and `Seek`ed to `pos+block.Length` (until 2026-09-29, when backlog B99, below, replaced it with a guard that walks the file as dhowden does and reads every field by offset). **This is only safe because `meta.New` reads the 4-byte header DIRECTLY from the reader and wraps it in a plain `io.LimitReader` — there is no internal buffering to desync** (`mewkiz/flac/meta/meta.go`); check that still holds before adding a seek anywhere else in that walk. Pinned by `…FLACPictureBlocksSaneDoesNotReadThePayload` (byte-counting `io.ReadSeeker`, 4 MiB payload, ≤1 KiB budget) + `...LeavesWalkAlignedAfterPicture` (a misaligned walk bails fail-open and silently disables the allocation guard, so alignment needs its own pin). Both went with `flacPictureBlocksSane` on 2026-09-29 (backlog B99, below); their pins moved to `TestThePictureGuardDoesNotReadAPicturePayload` and `TestThePictureGuardFollowsDhowdenPastAPicture`.
 - **MusicBrainz `release-group` is an object, not a string.** Decoded as `*releaseGroup` struct with `{id, title, primary-type}`. Public MB's live response has this shape; mock fixtures must too (`TestMusicBrainzDecodeRealResponseShape` locks it in).
 - **Negative-cache MB errors.** On any MB search error, store an empty MBID under the `(artist, album)` cache key — otherwise sibling tracks on the same album re-query with the same inputs and hit the same error, turning a 1-track failure into an N-track spin loop. See `enricher.enrichOne`.
 - **`enriched_at` on upsert resets to 0.** Any edit to the upsert SQL must preserve this reset — otherwise re-scans after a tag change don't re-enrich.
@@ -29860,6 +29860,275 @@ failed on CI yet, and whether one does under this harness is backlog B107.
   up, and the test requires that not to be before the instant. Control: a
   give-up 100 ms early turned it red ("gave up 98.885208ms before the
   instant").
+
+## 2026-09-29 — every picture dhowden reads is guarded by walking the file as dhowden does, and a fuzz worker that runs away is recorded instead of killing the runner (backlog B99)
+
+Backlog B99: the nightly `FuzzExtractFLAC` leg kept dying with the runner and
+saving nothing. The allocation behind it was dhowden/tag's
+`readPictureBlock`, `make([]byte, dataLen)` from a 32-bit field before the
+read that would fail, and the pre-flight meant to keep such files away from
+it judged a different set of pictures than dhowden reads.
+
+### The CI record
+
+`gh run list --workflow fuzz.yml`: 28 nightly runs, 2026-09-02 to 09-29.
+`FuzzExtractFLAC` failed on 8 of them: 09-07, 09-10, 09-15, 09-17, 09-25,
+09-26, 09-27 and 09-29 (runs 34080154642, 34433797791, 34925508032,
+35178666400, 36090878897, 36215179958, 36291923479, 36517975543). Every one
+ended "The runner has received a shutdown signal", exit 143, after 2m6s to
+4m39s of fuzzing, with the exec rate falling from 4,000 to 7,000/s to a few
+hundred in the last samples (09-15: 4,928/s at 4m3s, 696/s at 4m24s). The
+upload step never ran, and no leg saved an input.
+
+The backlog entry dated the start to 09-24/25 and suspected #991; the record
+reaches back to 09-07, and #991's only code on the `.flac` path is
+`stripMP4FreeformLocales`. Three other failures in the window are not this
+one: `FuzzValidateRelPath` (09-06) and `FuzzExtractM4A` (09-18) ended
+"context deadline exceeded" at exactly 5m0s with no crasher (backlog B103),
+and `FuzzPickIsShuffleInvariant` (09-07) reported a real crasher that has not
+recurred (not investigated here).
+
+### Reproduced
+
+dido, `golang:1.26.6`, `docker run --cpus=4 --memory=8g`, main at 6bc4605a,
+`go test ./internal/manifest -exec "prlimit --as=4831838208 --" -run XXX -fuzz
+'^FuzzExtractFLAC$' -fuzztime 15m -fuzzminimizetime 1s`: at 23 s, "fuzzing
+process hung or terminated unexpectedly: exit status 2", and the input saved
+(testdata/fuzz/FuzzExtractFLAC/437448e281b8f5a4, 40 bytes): `fLaC`, a PICTURE
+block header (last, declared length 0), and 32 bytes of picture fields whose
+data length is 0xFF302030. Re-run alone under the same limit:
+
+```
+runtime: out of memory: cannot allocate 4282384384-byte block (7995392 in use)
+github.com/dhowden/tag.(*metadataVorbis).readPictureBlock  vorbis.go:132
+github.com/dhowden/tag.(*metadataFLAC).readFLACMetadataBlock  flac.go:79
+github.com/dhowden/tag.ReadFLACTags  flac.go:42
+github.com/dhowden/tag.ReadFrom  tag.go:43
+manifest.extractViaDhowdenFromReader  extractors.go:800
+manifest.extractByFormat  extractors.go:737   (the .flac branch, after flacPictureBlocksSane)
+```
+
+Why the pre-flight passed it: `flacPictureBodySane` read the fields through
+an `io.LimitedReader` of the block's declared length, the first read failed,
+and a failed read returned true ("fail-open"). dhowden never reads a PICTURE
+or VORBIS_COMMENT block's length: it reads the fields, and takes the next
+block header from wherever they end. The deleted docblock said the fail-open
+inputs "never reach the picture path in the first place" and that a positive
+inconsistency was "the one shape that turns into an unrecoverable
+allocation"; both were false, of this shape.
+
+With a cgroup memory cap alone (`--memory=3g`, no prlimit), main: the kernel
+killed a worker at 22.6 s (`Memory cgroup out of memory: Killed process ...
+(manifest.test) total-vm:5858632kB, anon-rss:1119484kB`). The kill landed
+while the worker was minimizing an input, and Go wrote it ("terminated
+unexpectedly while minimizing: EOF", 5c472a6266bbafa0, the same shape). That
+was luck: go1.26.6's `internal/fuzz/worker.go` records a worker killed by a
+signal only in the minimize path; in the fuzz path it returns "fuzzing
+process terminated by unexpected signal; no crash will be recorded", its
+comment naming the OOM killer. RLIMIT_AS fails the allocation itself, which
+exits with status 2 in either path.
+
+`FuzzExtractM4A` under the same 4.5 GiB limit on main, 15 minutes: 12,798,783
+execs, nothing found. Sampled every 2 s over that run (decimal units, as for
+every figure here): workers at most 235 MB of RSS and 2.44 GB of address
+space, the coordinator 1.06 GB and 3.93 GB.
+
+### Every way to the allocation
+
+One extraction each on main (through the new tests, run against main's
+`extractors.go`), heap allocation read from `runtime/metrics`:
+
+- a PICTURE block declaring length 0 (50 bytes): 1.07 GB; declaring 6 bytes,
+  room for the type and not the MIME length (88 bytes): 1.07 GB (declaring 10,
+  the old guard's second check caught it);
+- a PICTURE header in the unused tail of a VORBIS_COMMENT block (104 bytes),
+  or of a PICTURE block (134): 1.07 GB each;
+- a METADATA_BLOCK_PICTURE comment in a FLAC VORBIS_COMMENT, in upper, mixed
+  case, or spelled with U+212A KELVIN SIGN for the k (strings.ToLower lowers
+  it, and dhowden lowers every key): 1.07 GB each;
+- one METADATA_BLOCK_PICTURE declaring 9 MB, decoded again at each of 40 later
+  VORBIS_COMMENT blocks (dhowden's comment map outlives the block): 387 MB
+  from 792 bytes;
+- a METADATA_BLOCK_PICTURE in an Ogg Vorbis or Opus comment packet, on one
+  page or across pages: 1.07 GB each (a first probe: 256 MiB from 184 bytes,
+  and dhowden returned the title regardless; it ignores the picture's error);
+- a FLAC-shaped file named `.mp3` or `.m4a`, an Ogg-shaped one named `.flac`:
+  1.07 GB each (tag.ReadFrom picks its parser by the first bytes);
+- the fuzzer's 40-byte input: 4.28 GB.
+
+### Design
+
+- `dhowdenPicturesWithinBudget` (dhowden_picture_guard.go) runs in
+  `extractViaDhowdenFromReader`, the one `tag.ReadFrom` call, so every
+  extension is covered; the `.flac` branch's pre-flight and
+  `flacPictureBlocksSane` / `flacPictureBodySane` are gone.
+- It mirrors `ReadFrom`'s dispatch (11 bytes, then `fLaC` or `OggS`),
+  `ReadFLACTags` (1-byte header, 3-byte length; VORBIS_COMMENT and PICTURE
+  read by their contents, every other block skipped by its length) and
+  `ReadOGGTags` (pages in order, segments joined into packets per serial with
+  the continuation flag, the first `\x03vorbis` / `OpusTags` packet read and
+  then return).
+- It sums what dhowden would allocate for pictures: a PICTURE block's MIME,
+  description and data; for each METADATA_BLOCK_PICTURE decode, the decoded
+  bytes, the MIME and description reads and the data. A `readString` of a
+  length within dhowden's 10 MB `readBytesMaxUpfront` allocates all of it up
+  front, there or not; past it, what `io.CopyN` buffers of what is there
+  (`readStringCost`). The file is refused when the sum passes `pictureBudget`
+  = twice the file's size plus that 10 MB. A well-formed file needs at most
+  1.5 times its size; the 10 MB lets a picture truncated within dhowden's own
+  allowance be read and dropped, as it always was.
+- A sum, not a per-picture bound, because of the re-decode (above), which
+  also repeats the MIME and description reads (next section).
+- Refused = "dhowden could not read the tags": a Warn (path library-relative,
+  the picture kind, declared and budget bytes), the folder-art fallback,
+  no tags.
+- It stops only where dhowden stops, and may read on where dhowden would fail
+  (a comment with no `=` past the 67 bytes it scans for the key, invalid base64
+  past the decoded header, an Ogg page with a bad CRC, which dhowden checks and
+  the walk does not): that only adds to the sum, and a file dhowden fails on
+  has no tags whether or not it is refused. It fails open on a read it cannot
+  complete, I/O errors included.
+- It reads no picture payload: fields by `ReadAt`, a METADATA_BLOCK_PICTURE's
+  header through base64's streaming decoder (which skips `\r\n` as
+  `DecodeString` does), Ogg page headers and segment tables and no segment data
+  it does not need.
+- The key scan: `strings.ToLower` reaches a letter of
+  `metadata_block_picture` from no rune longer than 3 bytes (only U+0130 and
+  U+212A are non-ASCII preimages), so a matching key is at most 66 bytes and
+  its `=` within the first 67.
+
+### Found by fuzzing the fix
+
+The first version counted only the decoded bytes and the data. Fuzzed on dido
+(FLAC, 5 GiB limit), it failed the new allocation property at 5m52s: a
+787-byte input (260f9148c904c3c2) whose METADATA_BLOCK_PICTURE declared a
+2.9 MB MIME type and was decoded 23 times allocated 68,130,816 bytes (limit
+67,159,232): each decode's `readString(mimeLen)` allocated 2.9 MB up front and
+failed, and dhowden ignored the failure. Counting the MIME and description
+reads closed it; the input is a committed seed and its shape (9 MB, 40
+decodes) a named test.
+
+### The allocation property and the CI limit
+
+- Every whole-file extractor fuzz target (`FuzzExtract{AIFF,WAV,DFF,DSF,FLAC,
+  OGG,M4A,MP3}`, through `fuzzExtractOnce`) fails when one extraction
+  allocates more than `extractionAllocLimit(n)` = 64 MiB + 64 bytes per input
+  byte. So a bomb is a named crasher on any platform, and the committed seeds
+  are red-first tests in the ordinary suite (on main each seed "passed": the
+  allocation succeeded on a host that overcommits).
+- `FuzzExtractOGG` is new: the fuzzer mutates the packets and the harness lays
+  them out as pages with valid CRCs, since a mutated page fails dhowden's CRC
+  and ends its read at once.
+- fuzz.yml runs every fuzz process under `prlimit --as=5368709120` through
+  `go test -exec`, so the compiler and linker are not held to it. RLIMIT_AS
+  counts reserved address space; measured on these runs, a worker holds 2.2
+  to 2.6 GB of it and the coordinator up to 4.3 GB, so 5 GiB (5.37 GB)
+  leaves a worker at least 2.8 GB of heap and the coordinator about 1.1 GB.
+
+### Fuzzed after the fix
+
+dido, golang:1.26.6, 4 CPUs and an 8 GB cgroup per run,
+`-fuzzminimizetime 1s`:
+
+- The first version (the pictures alone counted): FuzzExtractFLAC failed at
+  5m52s (the section above); FuzzExtractM4A, 10 minutes, 5,487,957 execs, and
+  FuzzExtractOGG, 15 minutes, 6,471,900 execs, passed.
+- The final logic: FuzzExtractFLAC, 20 minutes under the nightly job's
+  5 GiB limit, 8,877,509 execs, passed; sampled every 2 s, a worker used at
+  most 279 MB of RSS and 2.58 GB of address space, the coordinator 1.06 GB
+  and 4.06 GB. FuzzExtractAIFF and FuzzExtractWAV, 6 minutes each (2,997,838
+  and 2,988,674 execs), and FuzzExtractDFF, FuzzExtractDSF and
+  FuzzExtractMP3, 5 minutes each (2,022,052, 2,091,002 and 1,655,039),
+  passed.
+- After the Ogg walk was split into a demuxer and a comment-body reader
+  without changing what it reads: FuzzExtractOGG, 10 minutes under the
+  5 GiB limit, 6,813,261 execs, passed. Every FuzzExtractOGG run above went
+  through the first version of the test harness, which mis-framed some
+  packets of 65,025 bytes or more on pages of 65,025 bytes or more (the
+  Tests section), so those inputs reached dhowden as a page it rejects.
+- fuzz.yml dispatched on the branch at the nightly 5 minutes a target
+  (run 36581175281): all 41 targets passed under the limit, FuzzExtractFLAC
+  with 1,551,423 execs.
+- The final code (the FLAC walk split per block, the picture kinds named
+  once, the fixed Ogg harness), 10 minutes each under the 5 GiB limit:
+  FuzzExtractFLAC, 5,690,460 execs, and FuzzExtractOGG, 5,938,473 execs,
+  passed. FLAC's coordinator reached 4.27 GB of address space (1.05 GB of
+  RSS), a worker 2.45 GB (285 MB).
+- One extraction of each bomb shape with the guard allocates at most 139 KB
+  (the one named `.mp3`; every other at most 17 KB over two runs), where main
+  allocated 1.07 GB or 387 MB. The small figures are coarse:
+  `/gc/heap/allocs:bytes` counts a small allocation when its span is
+  refilled, and a large one when it is made, which is the one that matters
+  here.
+
+### Tests
+
+- `TestNoPictureMakesAnExtractionAllocateBeyondTheFile` (15 shapes, the
+  allocation measured) and `TestThePictureGuardRefusesEveryBombShape` (the
+  guard itself on the same shapes).
+- `TestPicturesDhowdenCanReadStillReachIt`: real covers in a PICTURE block,
+  a FLAC METADATA_BLOCK_PICTURE, Ogg Vorbis, Opus and across Ogg pages keep
+  their title and cover; a picture truncated within the 10 MB allowance keeps
+  the title; a 16 MB picture that is most of a 21 MB file (32 MB of dhowden
+  allocation, past size + 10 MB) and a second VORBIS_COMMENT block are not
+  refused.
+- `TestThePictureGuardDoesNotReadAPicturePayload` (a 4 MiB cover: at most
+  1 KiB read for a PICTURE block, 8 KiB for a FLAC METADATA_BLOCK_PICTURE,
+  64 KiB of page headers for Ogg), `TestThePictureGuardFollowsDhowdenPastAPicture`,
+  `TestThePictureGuardPassesWhatDhowdenReadsNoPictureFrom`,
+  `TestThePictureGuardLeavesTheReaderWhereItFoundIt`.
+- Premises: `TestDhowdenStillAllocatesAPictureBeforeReadingIt` (fails the day
+  dhowden bounds it) and `TestNoRuneLongerThanThreeBytesLowersIntoThePictureKey`.
+- `TestExtractHostilePictureFLACStillIndexes` now measures what it allocated.
+- Seeds: the two fuzzer inputs in testdata/fuzz/FuzzExtractFLAC, every shape
+  as a FuzzExtractFLAC seed, and an Opus bomb as a FuzzExtractOGG seed.
+- `TestOggStreamFramesAPacketOfAnyLength` pins the Ogg harness through
+  dhowden's own demuxer: 36 packet and page sizes read back. A page holds at
+  most 255 segments, and the first harness could put 256 on one (the count
+  byte wrapped to 0): the terminating empty segment of a packet that ends
+  after 255 whole segments, and every full page once pageData rounded to
+  65,280. Red on it for 5 of the 36, each "expected crc". `oggPage` caps a
+  page at 254 whole segments.
+
+### Negative controls
+
+- main's `extractors.go` under these tests (dido, 8 GB cgroup): the allocation
+  test red on 13 of the first 14 shapes, 12 at 1.07 GB each and the re-decode
+  shape at 387 MB (the fourteenth, a PICTURE block declaring 10 bytes, was
+  caught by the old guard too, so it now declares 6, red on main at 1.07 GB),
+  every FuzzExtractFLAC seed and the crasher red (4,281,394,456 bytes), the
+  FuzzExtractOGG bomb seed red; the guard's own tests green (they test the new
+  function, present in that tree). The fifteenth shape, the MIME length the
+  fuzzer found, was added later and run against main's `extractors.go` alone
+  (on the Mac, that subtest only): red, 387,210,800 bytes from 748.
+- Mutations of the guard, each red exactly where expected: ASCII-only
+  lowering (the KELVIN SIGN shape); decoding the value once (the re-decode
+  shape); ignoring Ogg continuation (the across-pages shape); the guard call
+  removed (all 14 shapes, every seed, the guard tests green); a budget of
+  size + 10 MB (the most-of-the-file control); the decoder reading the whole
+  value (the two METADATA_BLOCK_PICTURE payload cases); `filePicture` reading
+  the data (the PICTURE payload case); the walk not advancing past a picture's
+  data (the alignment test); the MIME and description reads not counted (the
+  MIME-length shape and the fuzzer's 260f9148 seed).
+
+### ExtractorVersion
+
+Not bumped. Every picture of a well-formed file fits the budget, so no such
+file's output moves. A file the guard now refuses either made dhowden fail
+anyway (a PICTURE block whose data is not there: no tags before, none now) or
+declared a METADATA_BLOCK_PICTURE more than 10 MB past its bytes, whose stored
+row keeps the tags dhowden gave it if the process survived, until the file
+changes; a bump would re-extract it into no tags. A file the old guard refused
+for a picture its block could not hold, which dhowden reads within bounds,
+gains its tags when it next changes.
+
+### Left open
+
+- B101: dhowden renames a repeated ID3v2 frame in quadratic time (16,000
+  identical frames, 192 KB: 6.9 s through `tag.ReadFrom`).
+- B102: FLAC-in-Ogg (`.oga`) files never get their tags: dhowden's Ogg reader
+  finds no `\x03vorbis` / `OpusTags` packet, reads the whole file and fails.
+- B103: the "context deadline exceeded" nightly failures.
 
 ## 2026-09-29 — pre-v0.2.1 docs: the sox gate is live in PROTOCOL.md, the bridge judges a pairing code's shape, the app's host-kind twins, and where the operator bridge runs (backlog B44, B77, B78 part A)
 
