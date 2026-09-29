@@ -189,7 +189,7 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	// So wait for the admin socket itself. waitForListen is the repo's
 	// primitive for exactly this ("the process started" ≠ "the socket is
 	// bound", the PR #72 rationale behind actRestart's health probe).
-	waitForListening(t, stdout, 30*time.Second)
+	waitForListening(t, stdout, exited, done, stderr)
 	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
 
 	// Move the process off the config's directory now that the bridge is
@@ -264,22 +264,26 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 
 // waitForAdminReady blocks until the admin console's listener accepts on
 // addr. Delegates to waitForListen (200ms cadence, ctx-aware DialContext)
-// rather than sleeping, and reports a serve goroutine that already exited
-// instead of burning the whole deadline on a socket that will never bind.
+// rather than sleeping, in rounds of a second, and between them reports a
+// serve goroutine that already exited, whose exit code is the real story
+// (a failed admin bind, a config refusal), instead of waiting on a socket
+// that will never bind. A console that never binds fails the test when
+// serve's waits give up (serveGiveUp): it binds after the boot's disk
+// writes, which have no bound a starved host keeps to (B63).
 func waitForAdminReady(t *testing.T, addr string, done <-chan int, stderr *safeBuffer) {
 	t.Helper()
-	if waitForListen(addr, 30*time.Second) {
-		return
-	}
-	// Not up. If serve already returned, its exit code is the real story
-	// (a failed admin bind, a config refusal) — a bare timeout message
-	// would send the next reader hunting for a flake instead.
-	select {
-	case code := <-done:
-		t.Fatalf("serve exited with code %d before the admin console bound %s; stderr=%s",
-			code, addr, stderr.String())
-	default:
-		t.Fatalf("admin console never bound %s within 30s; stderr=%s", addr, stderr.String())
+	giveUp := serveGiveUpTime(t)
+	for !waitForListen(addr, time.Second) {
+		select {
+		case code := <-done:
+			t.Fatalf("serve exited with code %d before the admin console bound %s; stderr=%s",
+				code, addr, stderr.String())
+		default:
+		}
+		if !giveUp.IsZero() && time.Now().After(giveUp) {
+			t.Fatalf("admin console never bound %s before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+				addr, stderr.String(), serveStacks())
+		}
 	}
 }
 

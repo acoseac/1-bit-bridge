@@ -36,7 +36,6 @@ package backup
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,10 +47,8 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
-	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/version"
-	_ "modernc.org/sqlite" // register "sqlite" driver
 )
 
 // Snapshot schema version. Bump on incompatible layout changes
@@ -563,53 +560,8 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 }
 
 // --- Internal helpers ---
-
-// vacuumInto runs SQLite's VACUUM INTO to make a clean atomic copy
-// of a WAL-mode database. Read-only connection so it can't disturb
-// a running writer. Context-aware so a periodic snapshot can be
-// cancelled on bridge shutdown.
-func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
-	uri := dsn.File(srcDB, "mode=ro&_pragma=busy_timeout(5000)")
-	db, err := sql.Open("sqlite", uri)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return err
-	}
-	// VACUUM INTO refuses if the destination already exists; clear
-	// it so re-running a snapshot in the same second (collision-
-	// suffix paths) doesn't bail. The parent dir is already 0700.
-	_ = os.Remove(dstDB)
-	// SQLite, not this process, creates the destination, so as root it
-	// was root's. VACUUM INTO accepts an EMPTY file as well as none, and
-	// writes into it, so an empty one precreated with the snapshot
-	// directory's owner keeps that owner. A no-op unless this process is
-	// root.
-	if err := fsutil.Precreate(dstDB, 0o600, dstDB); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dstDB); err != nil {
-		// A failed VACUUM INTO can leave a partial/corrupt fragment on
-		// disk. Remove it so the snapshot dir doesn't accumulate broken
-		// DB files (and a later reader can't mistake one for a good copy).
-		_ = os.Remove(dstDB)
-		return err
-	}
-	// VACUUM INTO writes the destination at the umask-default mode
-	// (typically 0644). The file contains hashed-token references
-	// and is sensitive enough to warrant the same 0600 the rest of
-	// the snapshot uses. Chmod after the write so a tester reading
-	// `ls -l` sees consistent perms across the bundle.
-	if err := os.Chmod(dstDB, 0o600); err != nil {
-		// Don't leave a 0644 copy of token-hash data behind if we
-		// couldn't lock it down — unlink it and surface the error.
-		_ = os.Remove(dstDB)
-		return err
-	}
-	return nil
-}
+//
+// vacuumInto, the manifest database's copy, is in vacuum.go.
 
 // copyFile is an atomic byte-for-byte copy: write to `<dir>/.tmp-*`
 // then rename onto `dstPath`. The intermediate file is mode `mode`

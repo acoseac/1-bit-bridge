@@ -66,7 +66,7 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 		done <- run(ctx, []string{"serve", "--config", cfgPath}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, _ := waitForListening(t, stdout, 30*time.Second)
+	addr, _ := waitForListening(t, stdout, exited, done, stderr)
 
 	// The banner prints before ServeTLS starts accepting. A handshake that
 	// completes is the proof it has — and a verifying client that finishes

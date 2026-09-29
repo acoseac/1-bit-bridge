@@ -5294,6 +5294,44 @@ mentions across the four `ops/audit-*.md` files.
   duration: it holds the LAN drain's give-up line and requires the
   tailnet's HTTPS listener to be closed already, which the old order
   cannot do on any host. The error exits still drain one after another.
+- **A snapshot a shutdown cancels STOPS, and `VACUUM INTO` went on past its
+  cancel in three places** (2026-09-29, backlog B63). modernc stops a
+  running statement with `sqlite3_interrupt`, which SQLite reads only
+  between the steps of a statement that is running. On CI's Windows leg a
+  serve test's startup snapshot still held `data/backups/<stamp>/bridge.db`
+  after `runServe` returned: the `bgWriters` join had given up on it, as
+  it must (grace-bounded), and the TempDir cleanup met the open file.
+  **The commit reads no interrupt**, and VACUUM INTO builds its output in
+  a page cache the size of its source connection's (2 MB by default), so
+  what is still cached at the end is written by the commit: a database
+  under 2 MB was copied whole there. Of 3,818 cancels that landed while
+  the statement ran (an 820 KB database, dev Mac), 2,053 finished the
+  copy anyway, and on nomos under disk contention the commit spent 2.3 s
+  writing a 316 KB copy after its cancel, which the driver then answered
+  as `context.Canceled` and the snapshot threw away. `cache_size(-64)` on
+  the snapshot's source connection (`snapshotSourceQuery`) makes the copy
+  write as it goes and leaves the commit 64 KB (220 of 3,722; a 118 MB
+  snapshot took 326 to 698 ms whatever the cache). **A busy handler
+  sleeps through it**: `busy_timeout(5000)` answered a cancel 300 ms into
+  a lock wait 5 s later, with `database is locked`. The source takes
+  `busy_timeout(100)` and `retryWhileBusy` waits out a longer lock between
+  attempts, on the context, for `snapshotBusyPatience` (5 s) in all:
+  0.11 s now. **A cancel before the statement starts is cleared by it**
+  (`sqlite3Step` resets the flag when no other statement is active, and
+  the driver checks the context before it arms the interrupt): 2 of
+  4,000 random cancels, each a whole copy. The INTO target is a Go SQL
+  function (`vacuumTarget`), which SQLite evaluates once the statement
+  runs and before `OP_Vacuum` copies anything, and which refuses a
+  cancelled snapshot. What is left is a cancel in the commit's last
+  64 KB. **Don't raise the source's cache, don't give the snapshot
+  SQLite's busy wait back, and don't Ping before the VACUUM** (a Ping is
+  a statement that waits on the lock too, and the first attempt is the
+  probe). Any statement that must stop on a cancel meets the same three.
+  `TestASnapshotCancelledAsItsVacuumStartsCopiesNothing`,
+  `TestASnapshotWaitingOnALockedSourceStopsForItsCancel` (beside its
+  control, `TestASnapshotStillWaitsOutABriefLock`) and
+  `TestASnapshotWritesItsCopyWhileItCopies` were each red on the old code,
+  and each turns red alone when its fix is taken out.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
@@ -6839,11 +6877,21 @@ its twin.** The top list is older, shorter, and read first.
   cancel landed in 2 runs at `GOMAXPROCS=1`; one at a time without the
   yield, the cancel landed as late as the last comparison. Two traps met on
   the way. A held LOCK is not a park inside the statement: a VACUUM of a
-  DELETE-mode source behind `BEGIN EXCLUSIVE` waits in `Ping`'s `select 1`,
-  before the VACUUM starts, and a cancel there comes back as `database is
-  locked` after the busy timeout, not as `context.Canceled`. And modernc's
-  `Driver.Open` reads its collation and hook lists without a lock, so
-  register in `init`.
+  DELETE-mode source behind `BEGIN EXCLUSIVE` waits before the VACUUM
+  starts. (That wait was `Ping`'s `select 1` under `busy_timeout(5000)`,
+  and a cancel there came back as `database is locked` 5 s later, until
+  B63 took the Ping out and gave the wait to `retryWhileBusy`, which
+  answers it as `context.Canceled`: the snapshot bullet under The CLI and
+  the serve wiring.) And modernc's `Driver.Open` reads its collation and
+  hook lists without a lock, so register in `init`. **A Park's waits give
+  up: `Arm`'s 10 s after each begins, for a statement the test itself
+  started, and `ArmUntil`'s at the instant it is given.** A statement a
+  serve runs is parked with `ArmUntil(t, serveGiveUpTime(t))`, waited for
+  with `WaitUnless(t, exited)`, which reports serve's own exit rather than
+  a timeout, and let go by a `Disarm` registered after the drain (B63: the
+  seed test's `Arm` failed "no statement compared a key within 10s" on a
+  Windows leg whose boot took longer, and its release loop's 10 s also
+  bounded serve's whole teardown).
 - **A test handler that holds a request until the client gives up must
   DRAIN a POST's body first** (#1003). net/http notices a client hanging up
   only once the request body is consumed, so a POST held unread sits out the
@@ -7033,6 +7081,49 @@ its twin.** The top list is older, shorter, and read first.
   landed at whatever moment the goroutine was scheduled, which can be AFTER the
   drain and so invert the very ordering the drain establishes. Neither is
   visible to an AST shape check, so the guard does not claim them.
+- **A serve test waits for an EVENT until the test binary's deadline, never
+  for a fixed time after a boot or a cancel** (2026-09-29, backlog B63).
+  Serve's boot migrates and writes the store and its teardown checkpoints
+  and closes it: disk writes with no bound a starved host keeps to. On
+  nomos (Windows 11) with 24 writers syncing to its disk and 16 CPU hogs on
+  the test's four CPUs, the store close took up to 16.4 s after the grace
+  and a boot more than 30 s, and main's bounds failed 12 of 24 runs of the
+  three tests CI had failed ("no statement compared a key within 10s" 4 of
+  8, "serve never reached the tsnet start within 30s" and "runServe did not
+  return" 6 of 8, "serve never reached the tailnet listen within 30s" 2 of
+  8). With the waits below none of 24 failed, the seed test taking up to
+  74 s.
+  `serveGiveUp` (serve_wait_test.go) fires at the test's deadline less
+  `serveWaitReserve` (30 s), and every wait on serve in a serve test uses
+  it: the boot milestones (`waitForListening`, `waitForAdminReady`,
+  `waitForServe`, the tailscale fakes' starts), the exits (`waitServeExit`,
+  `waitBoundedServeExit`, `stopLiveServe`) and serve's work (the orphan
+  sweep's refusal, the sox gate's sweep and scan). A wait that gives up
+  prints serve's goroutines (`serveStacks`), and one on a serve that exits
+  first reports its exit code. **The drains give up LATER**
+  (`serveDrainGiveUp`, the deadline less 10 s): a drain after a wait that
+  gave up still sees serve out once the cleanups after it let go, and with
+  one give-up for both it reported a second failure about a serve on its
+  way out. **So a hold the test takes on serve is released in a cleanup
+  registered AFTER the drain**, or the drain waits on it to the deadline:
+  a gate, a held print, a held mint, a sqlitetest Park (its own `Disarm`
+  runs after the drain). **And nothing waits BEFORE the drain on what
+  only the drain's cancel ends**: the wedge test's cleanup waited for its
+  start there, on a start the drain's cancel releases, and every failed
+  boot also reported "the released start did not return" (5 of 8). **A
+  hang is still caught, at the deadline**: with the tsnet join unbounded,
+  the wedge test failed at 60 s under `-timeout 90s`, its report naming
+  `tsnetFront.stop`; debug a hang with a shorter `-timeout`. What a test
+  pins about serve's pace stays on what serve does before its teardown's
+  disk writes, from what it bounds: the drains-together test's order (a
+  grace), a give-up's lower bound, and the tsnet join test's "no give-up
+  line", asserted only when its start finished unwinding a second or more
+  inside the grace (it measures when, and a 1 s start still fails the
+  control). **Not converted** (backlog B107): the in-process tests' waits
+  (the rescanner, the sweep passes, the album-gain render, sqlitetest's
+  `Arm` in internal/backup and internal/manifest), loggingtest's 3 s
+  `Park.Wait`, the tsnet front's unit tests, and clients' per-request
+  timeouts.
 - **Put a test seam on the instance it serves; where a package-level seam
   must remain, its restore runs after every goroutine that read it has
   FINISHED, and cleanups run last-registered-first** (2026-09-28). The

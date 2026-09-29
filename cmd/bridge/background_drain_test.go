@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 )
 
 // drainServeOnCleanup registers the shutdown of a background `serve`
@@ -30,11 +29,21 @@ import (
 // `exited` must be a channel the serve goroutine CLOSES, never `done`
 // itself. A failure path may already have consumed the exit code —
 // waitForAdminReady does, to report a serve that died before the admin
-// console bound — and a second bare receive on `done` would block out
-// the whole grace window and then report a shutdown timeout about a
-// process that exited cleanly. The closed channel answers on every
-// path; `done` is then read behind a default arm, for the code, when it
-// is still there to read.
+// console bound — and a second bare receive on `done` would block until
+// the wait gave up and then report a shutdown timeout about a process
+// that exited cleanly. The closed channel answers on every path; `done`
+// is then read behind a default arm, for the code, when it is still
+// there to read.
+//
+// The wait is for the exit, until just before the test's deadline
+// (serveDrainGiveUp, later than serveGiveUp, so a drain after a wait that
+// gave up still sees serve out): the teardown's store close is disk writes
+// a starved host takes 16 s over (B63), and a fixed bound after the cancel
+// failed there. So a HOLD the
+// test takes on serve (a gate, a held print, a parked statement) must be
+// released in a cleanup registered AFTER this one, which runs before it:
+// held past the drain, serve cannot exit, and the drain waits until the
+// deadline. Every hold here is released that way.
 //
 // t.Errorf, never t.Fatalf: FailNow from a cleanup skips the cleanups
 // that have not run yet, which here are the very directory removals
@@ -60,8 +69,9 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 		cancel()
 		select {
 		case <-exited:
-		case <-time.After(shutdownGrace + 5*time.Second):
-			t.Errorf("serve did not shut down within grace window; stderr=%s", stderr.String())
+		case <-serveDrainGiveUp(t):
+			t.Errorf("serve did not shut down before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+				stderr.String(), serveStacks())
 			return
 		}
 		select {
@@ -78,7 +88,9 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 // the sweepers, the ingest loop, the regenerator — which carry no exit
 // code and no captured streams, only a done channel their goroutine
 // closes. Same reasoning, same reason it is a cleanup rather than a
-// tail; see that helper's docblock for both.
+// tail, and the same wait: for the exit, until just before the test's
+// deadline, since a pass the cancel lands in finishes its store write
+// first; see that helper's docblock for all three.
 //
 // These are in some ways the sharper half. A stranded `serve` writes
 // into a directory that is merely being removed, whereas these loops
@@ -105,8 +117,8 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Errorf("%s did not exit on ctx cancel", what)
+		case <-serveDrainGiveUp(t):
+			t.Errorf("%s did not exit on ctx cancel before the test's deadline", what)
 		}
 	})
 }

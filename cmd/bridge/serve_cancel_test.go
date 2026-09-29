@@ -522,10 +522,16 @@ func TestATsnetListenOnALiveContextOpensTheListener(t *testing.T) {
 // The seed's INSERT is parked (sqlitetest) and the cancel lands inside it.
 // A context cancelled before runServe starts cannot reach the seed at all:
 // the GetUpscaleTarget read before it fails first, and the seed is skipped.
+//
+// The Park is armed with ArmUntil, never Arm: its first wait covers serve's
+// boot up to the seed, and its last the whole teardown after the cancel,
+// neither of which a starved host keeps to Arm's 10 s per wait ("no
+// statement compared a key within 10s" on CI's Windows leg, gate run
+// 36524079308, backlog B63).
 func TestAServeStoppedInItsUpscaleSeedExitsCleanly(t *testing.T) {
 	cfgPath := writeValidConfig(t)
 	parkUpscaleSeed(t, filepath.Join(filepath.Dir(cfgPath), "data"))
-	park := sqlitetest.Arm(t)
+	park := sqlitetest.ArmUntil(t, serveGiveUpTime(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	stderr := &safeBuffer{}
 	done := make(chan int, 1)
@@ -536,8 +542,16 @@ func TestAServeStoppedInItsUpscaleSeedExitsCleanly(t *testing.T) {
 			&safeBuffer{}, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	// Registered after the drain, so it runs before it: a failing run lets
+	// the parked seed go, and the drain then finds a serve that can finish.
+	// Arm's own Disarm runs after the drain, which would wait on a serve
+	// held inside the collation until the drain gives up.
+	t.Cleanup(park.Disarm)
 
-	park.Wait(t)
+	if !park.WaitUnless(t, exited) {
+		t.Fatalf("serve exited with code %d before its upscale seed compared a key; stderr=%s",
+			<-done, stderr.String())
+	}
 	cancel()
 	park.ReleaseUntil(t, exited)
 	if code := <-done; code != 0 {

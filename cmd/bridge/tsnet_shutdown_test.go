@@ -100,9 +100,13 @@ func TestServeWaitsForItsTsnetStartBeforeClosingTheNode(t *testing.T) {
 	tail := newGate()
 	cfgPath := writeTsnetConfig(t, "127.0.0.1:0", true)
 	state := filepath.Join(filepath.Dir(cfgPath), filepath.FromSlash(tsnetStateFileRel))
+	// When the start finished unwinding. Read only once startReturned is
+	// closed, which the fake does after the start returns.
+	var unwound time.Time
 	node.start = func(ctx context.Context) error {
 		<-ctx.Done()
 		tail.wait()
+		defer func() { unwound = time.Now() }()
 		if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
 			return err
 		}
@@ -126,6 +130,7 @@ func TestServeWaitsForItsTsnetStartBeforeClosingTheNode(t *testing.T) {
 	t.Cleanup(tail.open)
 
 	waitForServe(t, node.startEntered, "the tsnet start", exited, done, stderr)
+	cancelled := time.Now()
 	cancel()
 	select {
 	case <-exited:
@@ -138,8 +143,10 @@ func TestServeWaitsForItsTsnetStartBeforeClosingTheNode(t *testing.T) {
 	if code := waitServeExit(t, exited, done, stderr); code != 0 {
 		t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
 	}
+	returned := false
 	select {
 	case <-node.startReturned:
+		returned = true
 	default:
 		t.Error("runServe returned before the tsnet start it was waiting for had returned")
 	}
@@ -147,8 +154,23 @@ func TestServeWaitsForItsTsnetStartBeforeClosingTheNode(t *testing.T) {
 		t.Errorf("the start's write had not landed when serve returned: %v", err)
 	}
 	node.mustHaveBeenClosedOnceAfterUse(t)
+	if !returned {
+		return
+	}
+	// serve's grace begins at its cancel or later, so a start that finished
+	// unwinding a second or more before cancel+grace did so inside it, and
+	// shutdown must not say it gave up. One whose write a starved disk held
+	// past that (B63) is a start serve rightly gave up on, and says nothing
+	// about the join, which the checks above pin either way.
+	took := unwound.Sub(cancelled)
+	if took >= shutdownGrace-time.Second {
+		t.Logf("the start took %v after the cancel to unwind, not inside the %v grace less a second; "+
+			"not asserting on the give-up line", took, shutdownGrace)
+		return
+	}
 	if s := stderr.String(); strings.Contains(s, msgTsnetGaveUp) {
-		t.Errorf("the start returned inside the grace, yet shutdown reported giving up on it; stderr=%s", s)
+		t.Errorf("the start returned %v after the cancel, inside the %v grace, yet shutdown reported "+
+			"giving up on it; stderr=%s", took, shutdownGrace, s)
 	}
 }
 
@@ -174,17 +196,30 @@ func TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace(t *testing.T) {
 		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0", tsnetNode: node},
 			&safeBuffer{}, stderr)
 	}()
-	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	// Runs before the drain: let the abandoned start return, and wait for
-	// it, so nothing it does overlaps the removal of the data dir.
+	// Registered before the drain, so it runs after it and before the data
+	// dir's removal: wait for the abandoned start, so nothing it does
+	// overlaps that removal. The start returns once serve's teardown has
+	// cancelled it and the tail is open, so this wait cannot come before the
+	// drain: there it waited on a start only the drain's cancel reaches, and
+	// every run that failed before its cancel also reported "the released
+	// start did not return" (5 of 8 starved runs, B63). A start never
+	// entered has nothing to wait for.
 	t.Cleanup(func() {
-		tail.open()
+		select {
+		case <-node.startEntered:
+		default:
+			return
+		}
 		select {
 		case <-node.startReturned:
 		case <-time.After(5 * time.Second):
 			t.Error("the released start did not return")
 		}
 	})
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	// Runs before the drain: the start the drain's cancel reaches returns
+	// only once the tail is open.
+	t.Cleanup(tail.open)
 
 	waitForServe(t, node.startEntered, "the tsnet start", exited, done, stderr)
 	cancelled := time.Now()
@@ -736,25 +771,35 @@ func (h *printHold) hold() {
 }
 
 // waitForServe blocks until ch is closed. A serve that exits first is
-// reported with its exit code, not as a timeout.
+// reported with its exit code, not as a timeout. A serve that never gets
+// there fails the test when serve's waits give up (serveGiveUp), since a
+// boot has no bound a starved disk keeps to.
 func waitForServe(t *testing.T, ch <-chan struct{}, what string, exited <-chan struct{}, done <-chan int, stderr *safeBuffer) {
 	t.Helper()
 	select {
 	case <-ch:
 	case <-exited:
 		t.Fatalf("serve exited with code %d before it reached %s; stderr=%s", <-done, what, stderr.String())
-	case <-time.After(30 * time.Second):
-		t.Fatalf("serve never reached %s within 30s; stderr=%s", what, stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("serve never reached %s before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+			what, stderr.String(), serveStacks())
 	}
 }
 
-// waitServeExit waits for runServe to return and gives its exit code.
+// waitServeExit waits for runServe to return and gives its exit code. The
+// wait is for the return itself, until serve's waits give up: what a test
+// holds serve on (a wedged start, a held handler) it holds past a grace,
+// and what follows the grace is the teardown's store close and flushes,
+// disk writes a starved host took 16 s over, so a bound after the cancel
+// said "did not return" about a serve that was writing (B63). A serve that
+// waited on the held thing itself never returns, and fails here.
 func waitServeExit(t *testing.T, exited <-chan struct{}, done <-chan int, stderr *safeBuffer) int {
 	t.Helper()
 	select {
 	case <-exited:
-	case <-time.After(shutdownGrace + 10*time.Second):
-		t.Fatalf("runServe did not return; stderr=%s", stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("runServe did not return before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
+			stderr.String(), serveStacks())
 	}
 	return <-done
 }
