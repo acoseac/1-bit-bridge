@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -75,16 +76,40 @@ type madeWhileOn struct {
 	rendition, curve []byte
 	tag              string
 	keyRoot          int
+	replayGainDB     float64
+	bpm              int
+	truePeakDB       float64
+	drScore          int
+	md5State         string
+	bandwidthHz      int
 }
 
 // manifestTrackFields holds the fields of one `/v1/manifest` track that the
-// feature-off test reads.
+// feature-off test reads: the renditions, and every field analysis
+// measured, from each of the manifest's three analysis splices
+// (waveformTagSQL, replayGainSQL, analysisScalarsSQL).
 type manifestTrackFields struct {
-	Path        string            `json:"path"`
-	Variants    []json.RawMessage `json:"variants"`
-	WaveformTag string            `json:"waveformTag"`
-	KeyRoot     *int              `json:"keyRoot"`
-	KeyMode     string            `json:"keyMode"`
+	Path              string            `json:"path"`
+	Variants          []json.RawMessage `json:"variants"`
+	WaveformTag       string            `json:"waveformTag"`
+	ReplayGainTrackDB *float64          `json:"replayGainTrackDB"`
+	KeyRoot           *int              `json:"keyRoot"`
+	KeyMode           string            `json:"keyMode"`
+	BPM               *int              `json:"bpm"`
+	BPMEstimated      bool              `json:"bpmEstimated"`
+	TruePeakDB        *float64          `json:"truePeakDB"`
+	DRScore           *int              `json:"drScore"`
+	AudioMD5State     string            `json:"audioMD5State"`
+	BandwidthHz       *int              `json:"bandwidthHz"`
+}
+
+// presentOrAbsent renders a manifest field a test compares: the value, or
+// "absent" for one the manifest left out.
+func presentOrAbsent[T any](p *T) string {
+	if p == nil {
+		return "absent"
+	}
+	return fmt.Sprint(*p)
 }
 
 // requireUpscalingAndAnalysisOff checks the fixture: a bridge booted with the
@@ -109,10 +134,16 @@ func requireUpscalingAndAnalysisOff(t *testing.T, b *consoleBridge) {
 func seedWhatARunWithTheFeaturesOnLeft(t *testing.T, b *consoleBridge, rel string) madeWhileOn {
 	t.Helper()
 	made := madeWhileOn{
-		variantID: "optimized-v2-48000-16",
-		rendition: []byte("a rendition made while upscaling was on"),
-		curve:     []byte{0x01, 0x02, 0x03, 0x04},
-		keyRoot:   7,
+		variantID:    "optimized-v2-48000-16",
+		rendition:    []byte("a rendition made while upscaling was on"),
+		curve:        []byte{0x01, 0x02, 0x03, 0x04},
+		keyRoot:      7,
+		replayGainDB: -7.5,
+		bpm:          128,
+		truePeakDB:   -0.5,
+		drScore:      11,
+		md5State:     "verified",
+		bandwidthHz:  20000,
 	}
 	sum := sha256.Sum256(made.curve)
 	made.tag = hex.EncodeToString(sum[:])[:8]
@@ -134,7 +165,8 @@ func seedWhatARunWithTheFeaturesOnLeft(t *testing.T, b *consoleBridge, rel strin
 	if err != nil {
 		t.Fatalf("open serve's store: %v", err)
 	}
-	keyRoot := made.keyRoot
+	keyRoot, replayGain, bpm := made.keyRoot, made.replayGainDB, made.bpm
+	truePeak, dr, bandwidth := made.truePeakDB, made.drScore, made.bandwidthHz
 	err = store.UpsertVariant(t.Context(), manifest.VariantRow{
 		SourcePath: rel, VariantID: made.variantID, SidecarPath: renditionPath,
 		Format: "flac", SampleRate: 48000, BitsPerSample: 16, SizeBytes: int64(len(made.rendition)),
@@ -145,6 +177,8 @@ func seedWhatARunWithTheFeaturesOnLeft(t *testing.T, b *consoleBridge, rel strin
 			SourcePath: rel, WaveformPath: curvePath, WaveformTag: made.tag, WaveformSize: int64(len(made.curve)),
 			SourceMTimeNS: src.ModTime().UnixNano(), SourceSize: src.Size(),
 			SchemaVersion: analyze.WaveformSchemaVersion, KeyRoot: &keyRoot, KeyMode: "major",
+			ReplayGainTrackDB: &replayGain, BPM: &bpm, TruePeakDB: &truePeak, DRScore: &dr,
+			AudioMD5State: made.md5State, BandwidthHz: &bandwidth,
 		})
 	}
 	if cerr := store.Close(); err == nil {
@@ -169,14 +203,24 @@ func requireTheManifestKeepsWhatAnalysisMeasured(t *testing.T, b *consoleBridge,
 		t.Fatalf("the manifest has no track %q", rel)
 	}
 	tr := m.Tracks[i]
-	if len(tr.Variants) != 0 {
-		t.Errorf("the manifest lists %d renditions with upscaling off, want none", len(tr.Variants))
+	if tr.Variants != nil {
+		t.Errorf("the manifest carries variants (%d) with upscaling off, want the field left out", len(tr.Variants))
 	}
-	if tr.WaveformTag != made.tag {
-		t.Errorf("waveformTag = %q, want %q: switching analysis off must not withdraw what it measured", tr.WaveformTag, made.tag)
-	}
-	if tr.KeyRoot == nil || *tr.KeyRoot != made.keyRoot || tr.KeyMode != "major" {
-		t.Errorf("keyRoot/keyMode = %v/%q, want %d/\"major\"", tr.KeyRoot, tr.KeyMode, made.keyRoot)
+	for _, c := range []struct{ field, got, want string }{
+		{"waveformTag", tr.WaveformTag, made.tag},
+		{"replayGainTrackDB", presentOrAbsent(tr.ReplayGainTrackDB), fmt.Sprint(made.replayGainDB)},
+		{"keyRoot", presentOrAbsent(tr.KeyRoot), fmt.Sprint(made.keyRoot)},
+		{"keyMode", tr.KeyMode, "major"},
+		{"bpm", presentOrAbsent(tr.BPM), fmt.Sprint(made.bpm)},
+		{"bpmEstimated", fmt.Sprint(tr.BPMEstimated), "true"},
+		{"truePeakDB", presentOrAbsent(tr.TruePeakDB), fmt.Sprint(made.truePeakDB)},
+		{"drScore", presentOrAbsent(tr.DRScore), fmt.Sprint(made.drScore)},
+		{"audioMD5State", tr.AudioMD5State, made.md5State},
+		{"bandwidthHz", presentOrAbsent(tr.BandwidthHz), fmt.Sprint(made.bandwidthHz)},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q: switching analysis off must not withdraw what it measured", c.field, c.got, c.want)
+		}
 	}
 }
 

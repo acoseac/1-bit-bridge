@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -137,9 +138,9 @@ func TestACachedSpectrumIsServedWithAnalysisOff(t *testing.T) {
 }
 
 // The batch list is a read of past work too: it answers with upscaling off
-// and on a demo bridge, where the two routes that change a batch refuse
-// (503 upscale_disabled, 403 demo_read_only). PROTOCOL.md said all three
-// refused until 2026-09-29.
+// and on a demo bridge, listing the batches already recorded, where the two
+// routes that change a batch refuse (503 upscale_disabled, 403
+// demo_read_only). PROTOCOL.md said all three refused until 2026-09-29.
 func TestTheBatchListAnswersWithUpscalingOffAndOnADemoBridge(t *testing.T) {
 	for _, c := range []struct {
 		name       string
@@ -150,11 +151,21 @@ func TestTheBatchListAnswersWithUpscalingOffAndOnADemoBridge(t *testing.T) {
 		{"a demo bridge", func(s *Server) *Server { return s.WithDemoMode(true) }, http.StatusForbidden},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			hs, tok, _ := batchFixtureWith(t, c.decorate)
+			past := BatchRow{ID: "00000000-0000-4000-8000-000000000002", Path: "Artist/Album", Status: "done", Kind: "optimize"}
+			hs, tok, _ := batchFixtureWith(t, func(s *Server) *Server {
+				return c.decorate(s.WithBatchCoordinator(&stubBatchCoordinator{rows: []BatchRow{past}}))
+			})
 			list := authGet(t, hs, "/v1/upscale/batches", tok)
 			defer list.Body.Close()
 			if list.StatusCode != http.StatusOK {
 				t.Errorf("GET /v1/upscale/batches: status = %d, want 200", list.StatusCode)
+			}
+			var got batchListResponse
+			if err := json.NewDecoder(list.Body).Decode(&got); err != nil {
+				t.Fatalf("decode GET /v1/upscale/batches: %v", err)
+			}
+			if len(got.Batches) != 1 || got.Batches[0].ID != past.ID || got.GeneratedAt.IsZero() {
+				t.Errorf("GET /v1/upscale/batches = %+v, want the one past batch %s and a generatedAt", got, past.ID)
 			}
 			cancel := authDelete(t, hs, "/v1/upscale/batches/00000000-0000-4000-8000-000000000001", tok)
 			defer cancel.Body.Close()
