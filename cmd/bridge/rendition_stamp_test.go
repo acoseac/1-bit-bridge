@@ -180,7 +180,7 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 	}
 	provider := manifest.NewProvider(store, nil)
 	srv := api.New(&config.Config{LibraryRoots: []string{b.libDir}}, tokens, provider, "stamp-fingerprint").
-		WithUpscale(on, &variantStoreAdapter{provider: provider, store: store, variantsDir: variantsDir}).
+		WithUpscale(gates.upscale, &variantStoreAdapter{provider: provider, store: store, variantsDir: variantsDir}).
 		WithCarPlayOptimize(gates.optimize).
 		WithDSDRender(gates.pcm).
 		WithUpscaleEnqueuer(b.adapter).

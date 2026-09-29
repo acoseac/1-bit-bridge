@@ -420,8 +420,8 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		// that keeps the rendition listed asks for no new one. The hook
 		// (cmd/bridge) renders it again once the source's row is
 		// current, asking for a rescan first when the source changed
-		// since its row was written. The id is the row's, as the reap
-		// below uses it: a client may have sent another spelling.
+		// since its row was written. The id is the row's, taken the way
+		// the reap below takes it.
 		if s.staleRendition != nil {
 			staleID := rec.VariantID
 			if staleID == "" {
