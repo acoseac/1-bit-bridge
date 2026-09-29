@@ -29590,3 +29590,25 @@ next (a script, never git).
 | NC20 the minute per rendition, not per version | the new-version test, the unit test |
 | NC21 a level rescan keeps the directory's minute | the new-version test, the unit test |
 | NC22 a rescan that left a file behind frees it too | the unit test |
+
+### Review round 1
+
+- CodeRabbit (Minor): run the whole stale-rendition callback asynchronously,
+  on a detached, timeout-bound context threaded into the enqueue path.
+  Declined, measured: the hook's synchronous shape is the one B53's round 5
+  kept (a goroutine per stale GET is unbounded and outlives the request), and
+  what this adds to the request is one suppression read and the on-demand
+  enqueue (a resolve, two indexed reads, a stat, the cached sox probe, the
+  pool's non-blocking `Enqueue`), at most once per rendition and file version
+  per minute; every other stale GET returns after B53's one lookup. All are
+  WAL reads. On a real `bridge serve` over loopback TLS (a new connection per
+  request), the first stale GET after each of 12 retags and scans took a
+  median of 3.71 ms (2.72–9.02) on the branch, where it also queues the
+  render, against 3.09 ms (1.78–24.88) on main.
+- Gemini: over its daily quota on both requests, so no review.
+- CI: the macOS leg of the first run failed in
+  `TestWatcherWatchesARootThatIsALinkToALink` (B51's, internal/manifest: "a
+  file dropped into a root that is a link to a link never reached the manifest
+  through the watcher", at its 3 s deadline), which this change does not
+  touch; the rerun passed, and main's gate runs that day were green. Recorded
+  as a flake in the backlog (B104).
