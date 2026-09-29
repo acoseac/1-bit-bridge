@@ -6919,7 +6919,8 @@ its twin.** The top list is older, shorter, and read first.
   three tests CI had failed ("no statement compared a key within 10s" 4 of
   8, "serve never reached the tsnet start within 30s" and "runServe did not
   return" 6 of 8, "serve never reached the tailnet listen within 30s" 2 of
-  8). The branch failed none of 24, the seed test taking up to 74 s.
+  8). With the waits below none of 24 failed, the seed test taking up to
+  74 s.
   `serveGiveUp` (serve_wait_test.go) fires at the test's deadline less
   `serveWaitReserve` (30 s), and every wait on serve in a serve test uses
   it: the boot milestones (`waitForListening`, `waitForAdminReady`,
