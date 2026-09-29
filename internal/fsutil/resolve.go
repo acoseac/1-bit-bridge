@@ -20,9 +20,9 @@ package fsutil
 // makes), with the `\\?\` prefix taken off so the answer is an ordinary
 // drive-letter or UNC path. A p that is not there is an error that
 // errors.Is reads as fs.ErrNotExist, as EvalSymlinks's is. A p that is there
-// but cannot be named that way (a filesystem that does not support the
-// call, a volume with no drive letter, a link loop) gets EvalSymlinks's
-// answer, which is what every caller had before. A relative p is always
+// but cannot be named that way (a filesystem that does not support the call,
+// say; none on the hosts this was tested on does) gets EvalSymlinks's answer,
+// which is what every caller had before. A relative p is always
 // EvalSymlinks's, so it stays relative. Elsewhere this IS
 // filepath.EvalSymlinks.
 //

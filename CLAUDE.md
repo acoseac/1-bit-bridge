@@ -639,8 +639,8 @@ lost my library."
   following every reparse point and names it by the handle
   (`GetFinalPathNameByHandle`, `\\?\` taken off); a path that is not
   there is `fs.ErrNotExist`, and one that is there but cannot be named that
-  way (an unsupported filesystem, a volume with no drive letter) gets
-  `EvalSymlinks`'s answer, as before; elsewhere it IS `EvalSymlinks`. **Not
+  way gets `EvalSymlinks`'s answer, as before (not measured: no filesystem
+  on the test hosts refuses the call); elsewhere it IS `EvalSymlinks`. **Not
   `os.Readlink` component by component**: that is a fork of the stdlib's
   link walk, and it answers `\\?\Volume{…}\` for a mounted folder. The
   sidecar walk now starts at the junction's TARGET, so the paths a sweep
