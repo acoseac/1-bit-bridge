@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -152,20 +153,64 @@ type Coordinator struct {
 }
 
 // ResolverFunc converts a library-relative path (e.g. `Music/Album/01.flac`)
-// to its absolute filesystem path. Required at JobSpec construction
-// time — `RunSox` consumes the absolute path directly and fails fast
-// on empty input. Wired in cmd/bridge/main.go via a closure around
-// `apiSrv.Resolver().Resolve(...)` so this package stays free of
-// internal/fs.
+// to its absolute filesystem path and stats the file there. Required at
+// JobSpec construction time — `RunSox` consumes the absolute path directly
+// and fails fast on empty input. Wired in cmd/bridge/main.go via a closure
+// around `apiSrv.Resolver().ResolveChecked(...)` so this package stays free
+// of internal/fs.
 //
-// Returns the absolute path on success. On failure (unknown root,
-// path traversal, IO error) the closure returns an error; Submit
-// silently filters those tracks out of the batch and surfaces the
-// rest, so a single bad path doesn't abort an otherwise-valid
-// folder submission. The filtered count is reflected in the
-// returned `TotalFiles` vs the input track count — operators can
-// reconcile from logs if they care which tracks dropped.
-type ResolverFunc func(libraryRel string) (absPath string, err error)
+// The stat is what the candidate walks compare with each track's row
+// (SourceIsAtRow): a file that changed after its last scan is passed over,
+// not rendered, as every other enqueuer passes it over (source_version.go).
+// It follows a link, as the scanner's does. A resolver answering a nil
+// FileInfo without an error is treated as a resolver failure.
+//
+// On failure (unknown root, path traversal, a missing file, an IO error)
+// the closure returns an error; Submit silently filters those tracks out of
+// the batch and surfaces the rest, so a single bad path doesn't abort an
+// otherwise-valid folder submission. The filtered count is reflected in the
+// returned `TotalFiles` vs the input track count — operators can reconcile
+// from logs if they care which tracks dropped.
+type ResolverFunc func(libraryRel string) (absPath string, info os.FileInfo, err error)
+
+// candidateSource resolves a candidate walk's track and checks the file
+// against the version its row records. ok=false passes the track over:
+// a resolver failure (logged under `op`, counted in *resolveErrors) or a
+// file that changed after its last scan (counted in *changed, and its
+// directory asked for a rescan through the pool, so a later submit finds
+// the row current).
+func (c *Coordinator) candidateSource(op string, t manifest.TrackProjection, resolveErrors, changed *int) (absPath string, ok bool) {
+	absPath, info, err := c.resolver(t.Path)
+	if err == nil && info == nil {
+		err = errors.New("resolver returned no file info")
+	}
+	if err != nil {
+		*resolveErrors++
+		c.logger.Warn(op+": resolve failed; skipping track",
+			"path", t.Path, "err", err)
+		return "", false
+	}
+	if !SourceIsAtRow(info, t.MTimeNS, t.Size) {
+		*changed++
+		c.pool.requestSourceRescan(t.Path)
+		return "", false
+	}
+	return absPath, true
+}
+
+// logWalkSkips reports what a candidate walk passed over for a reason the
+// batch row's skipped count does not name: resolver failures, and files
+// that changed on disk after their last scan.
+func (c *Coordinator) logWalkSkips(op, batchPath string, resolveErrors, changed int) {
+	if resolveErrors > 0 {
+		c.logger.Info(op+": filtered tracks with resolver failures",
+			"batchPath", batchPath, "count", resolveErrors)
+	}
+	if changed > 0 {
+		c.logger.Info(op+": skipped files that changed on disk since their last scan; their directories are queued for a rescan",
+			"batchPath", batchPath, "count", changed)
+	}
+}
 
 // batchState mirrors the live row's counters. Snapshot-only — every
 // mutation immediately writes through to `upscale_batches` so a
@@ -409,6 +454,7 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 		out            upscaleCandidates
 		compressionFct = DefaultCompressionFactor(targetBits)
 		resolveErrors  int
+		changed        int
 	)
 	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
 	// and a large walk can outlive it, so re-probing per track could apply two
@@ -491,12 +537,11 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 		// Resolve abs path BEFORE projecting size, so a resolver
 		// failure (unknown root, traversal, etc.) drops the track
 		// from the projection too — operators don't see a number
-		// for work that won't actually run.
-		absPath, err := c.resolver(t.Path)
-		if err != nil {
-			resolveErrors++
-			c.logger.Warn("submit: resolve failed; skipping track",
-				"path", t.Path, "err", err)
+		// for work that won't actually run. A file that changed after
+		// its last scan drops out the same way: a render would read
+		// bytes the row's stamp does not describe.
+		absPath, ok := c.candidateSource("submit", t, &resolveErrors, &changed)
+		if !ok {
 			continue
 		}
 		out.cands = append(out.cands, upscaleCandidate{
@@ -510,10 +555,7 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 		out.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 			targetRate, targetBits, compressionFct)
 	}
-	if resolveErrors > 0 {
-		c.logger.Info("submit: filtered tracks with resolver failures",
-			"batchPath", batchPath, "count", resolveErrors)
-	}
+	c.logWalkSkips("submit", batchPath, resolveErrors, changed)
 	return out
 }
 
@@ -1159,6 +1201,7 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		out            optimizeCandidates
 		compressionFct = DefaultCompressionFactor(16)
 		resolveErrors  int
+		changed        int
 	)
 	// Capture pre-filter total so the caller can derive `skipped =
 	// total − len(cands) − alreadyCovered` and persist it on the
@@ -1214,19 +1257,13 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		if terr != nil {
 			continue
 		}
-		absPath, err := c.resolver(t.Path)
-		if err != nil {
-			resolveErrors++
-			c.logger.Warn("submit optimize: resolve failed; skipping track",
-				"path", t.Path, "err", err)
+		absPath, ok := c.candidateSource("submit optimize", t, &resolveErrors, &changed)
+		if !ok {
 			continue
 		}
 		out.add(t, absPath, targetRate, JobKindOptimize, 16, compressionFct)
 	}
-	if resolveErrors > 0 {
-		c.logger.Info("submit optimize: filtered tracks with resolver failures",
-			"batchPath", batchPath, "count", resolveErrors)
-	}
+	c.logWalkSkips("submit optimize", batchPath, resolveErrors, changed)
 	return out
 }
 
@@ -1242,6 +1279,7 @@ func (c *Coordinator) buildPCMRenderCandidates(batchPath string, projections []m
 		out            optimizeCandidates
 		compressionFct = DefaultCompressionFactor(24)
 		resolveErrors  int
+		changed        int
 	)
 	out.projectionsSeen = len(projections)
 	caps := c.dsdCaps()
@@ -1263,19 +1301,13 @@ func (c *Coordinator) buildPCMRenderCandidates(batchPath string, projections []m
 		if terr != nil {
 			continue
 		}
-		absPath, err := c.resolver(t.Path)
-		if err != nil {
-			resolveErrors++
-			c.logger.Warn("submit pcm: resolve failed; skipping track",
-				"path", t.Path, "err", err)
+		absPath, ok := c.candidateSource("submit pcm", t, &resolveErrors, &changed)
+		if !ok {
 			continue
 		}
 		out.add(t, absPath, targetRate, JobKindPCMRender, 24, compressionFct)
 	}
-	if resolveErrors > 0 {
-		c.logger.Info("submit pcm: filtered tracks with resolver failures",
-			"batchPath", batchPath, "count", resolveErrors)
-	}
+	c.logWalkSkips("submit pcm", batchPath, resolveErrors, changed)
 	return out
 }
 

@@ -20,21 +20,25 @@ package main
 //   - Every writer stamps the ROW: the on-demand requests (POST /v1/upscale),
 //     the CLI, the sweeper, the batch coordinator and the album survey.
 //   - A render is queued only while the file still matches its row
-//     (sourceIsAtRow). The on-demand path refuses otherwise, and asks for a
-//     rescan of the file's directory so the next request can render; the
-//     sweeper and the CLI pass the file over until a scan reads it. The
-//     batch coordinator does not check: it renders only a track with no
-//     rendition of the family, so it takes no part in the loop below, but
-//     a render it makes of a changed file is one the serve path refuses
-//     until something renders that file again after its scan.
-//     The album survey measures a changed album-mate all the same, since a
-//     peak describes the bytes on disk and its row stamp makes the next
-//     version measure it again.
-//   - The check is made when a render is queued, not when the pool starts
-//     it: a file that changes while its job waits, or while it renders, is
-//     rendered from new bytes under the row's older stamp, and the serve
-//     path refuses the result. The live stamp this replaced was taken at
-//     enqueue too, so the window is not new (backlog B53).
+//     (transcode.SourceIsAtRow, the one check). The on-demand path refuses
+//     otherwise, and asks for a rescan of the file's directory so the next
+//     request can render; the sweeper, the CLI and the batch walks pass the
+//     file over until a scan reads it, the batch walks asking for the
+//     rescan too. The album survey measures a changed album-mate all the
+//     same, since a peak describes the bytes on disk and its row stamp
+//     makes the next version measure it again.
+//   - transcode.Run checks again when it starts and before it publishes, so
+//     a file that changes while its job waits in a queue, or while it
+//     renders, is not rendered under the row's older stamp either: the job
+//     fails with transcode.ErrSourceChanged, strikes nothing, and the pool
+//     asks for the same rescan (backlog B53).
+//   - A download that finds a rendition stale because its source changed
+//     after its row was written asks for the rescan as well
+//     (staleRenditionRescan), and every rescan drops the album-gain index
+//     and nudges the auto-optimize sweep, so a pre-generated rendition of a
+//     retagged file
+//     is rendered again without waiting for the next scan: the phone never
+//     asks again for a family the manifest lists.
 //
 // Before this, the on-demand path and the CLI stamped a live stat while the
 // rest stamped the row, and each writer undid the other: measured on a real
@@ -48,23 +52,15 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
-
-// sourceIsAtRow reports whether the file on disk is still the version its
-// track row records. It is the scanner's own test for a changed file (its
-// skip gate compares size and mtime exactly), so a file this answers false
-// for is one the next scan re-reads, and the serve path's 2 s tolerance does
-// not belong here: that tolerance is about stamps taken through different
-// mounts, and a row and a stat of the same file are taken through one.
-func sourceIsAtRow(info os.FileInfo, rowMTimeNS, rowSize int64) bool {
-	return info.Size() == rowSize && info.ModTime().UnixNano() == rowMTimeNS
-}
 
 // errSourceAheadOfRow is the on-demand refusal of a file that changed on
 // disk after the scan that wrote its row. It wraps api.ErrUpscaleIneligible,
@@ -92,10 +88,13 @@ type sourceRescan struct {
 }
 
 // sourceRescanner reads again the directory of a file whose row is behind
-// it, when an on-demand request for a rendition of that file is refused. It
-// makes the refusal cost the client one play of the source rather than every
-// play until the periodic scan (six hours by default): the scan it runs
-// writes the row the next request stamps from.
+// it: when an on-demand request for a rendition of that file is refused,
+// when a render job or a batch walk finds the file changed since its row
+// (transcode.Pool.SetSourceRescan), and when a download finds a rendition
+// of it stale (staleRenditionRescan). It makes the refusal cost the client
+// one play of the source rather than every play until the periodic scan
+// (six hours by default): the scan it runs writes the row the next request
+// stamps from.
 //
 // A directory is queued at most once at a time, and scanned by one loop
 // (run), oldest first, one after another and behind any scan in progress:
@@ -103,23 +102,59 @@ type sourceRescan struct {
 // itself, so a directory asked for while others wait is kept until the
 // loop reaches it, up to sourceRescanQueueCap.
 type sourceRescanner struct {
+	// resolve maps a library-relative directory onto the directory on disk
+	// (the bridge's fs.Resolver). A request names its file by the path its
+	// ROW records, and the directory scanned is resolved from that, never
+	// taken from a path a client sent: the scanner makes each row's path
+	// from the spelling of the directory it is handed, so a case variant of
+	// the directory, which a case-insensitive filesystem opens all the same,
+	// indexed its files a second time (measured on main at 6dfba62c: a
+	// request naming `fixture/dsd/01.dsf` left the rows `Fixture/DSD/01.dsf`
+	// and `fixture/dsd/01.dsf`).
+	resolve func(rel string) (string, error)
 	wake    chan struct{} // one slot: something was queued since run last looked
 	mu      sync.Mutex
 	waiting []sourceRescan      // queued, oldest first
 	pending map[string]struct{} // the absolute directories in waiting
 }
 
-func newSourceRescanner() *sourceRescanner {
+func newSourceRescanner(resolve func(rel string) (string, error)) *sourceRescanner {
 	return &sourceRescanner{
+		resolve: resolve,
 		wake:    make(chan struct{}, 1),
 		pending: map[string]struct{}{},
 	}
 }
 
-// request queues the directory holding the file at abs (library-relative
-// rel) unless it is already waiting or the queue is full. It never blocks.
-func (r *sourceRescanner) request(abs, rel string) {
-	dir := sourceRescan{abs: filepath.Dir(abs), rel: path.Dir(rel)}
+// request queues the directory holding the file its track row records at
+// rel, unless it is already waiting, the queue is full, or rel's directory
+// names no library root this bridge has. It never blocks.
+//
+// An empty rel names no file and is refused before anything resolves it:
+// path.Dir("") is ".", which the resolver maps onto a library root, so it
+// would queue a walk of the whole root (CLAUDE.md, the rule on reapers that
+// refuse an empty root). No caller passes one today; every rescan funnels
+// through here, so here is where it is refused. A file AT the root is
+// different: its directory is the root, and that walk is the one it needs.
+func (r *sourceRescanner) request(rel string) {
+	r.queue(rel)
+}
+
+// queue is request, reporting whether the directory will be scanned: true
+// when it was queued now or was already waiting, false when the request was
+// refused (an empty path, a directory that names no root) or dropped
+// because the queue is full. The download path's debounce reads it
+// (staleRenditionRescan).
+func (r *sourceRescanner) queue(rel string) bool {
+	if rel == "" {
+		return false
+	}
+	relDir := path.Dir(rel)
+	abs, err := r.resolve(relDir)
+	if err != nil {
+		return false
+	}
+	dir := sourceRescan{abs: abs, rel: relDir}
 	r.mu.Lock()
 	_, waiting := r.pending[dir.abs]
 	queued := !waiting && len(r.waiting) < sourceRescanQueueCap
@@ -134,6 +169,7 @@ func (r *sourceRescanner) request(abs, rel string) {
 		default:
 		}
 	}
+	return queued || waiting
 }
 
 // next takes the oldest waiting directory. It leaves the pending set here,
@@ -158,7 +194,17 @@ func (r *sourceRescanner) next() (sourceRescan, bool) {
 
 // run scans every queued directory until ctx ends. One wake can stand for
 // many requests, since its slot holds one, so each wake drains the queue.
-func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error)) {
+//
+// after, when set, is called after each rescan, unless the context ended
+// during it. runServe passes afterRescan: a rescan that read a changed file
+// has made that file's renditions stale against its row, and the sweep it
+// nudges renders them again from the version the scan read; without it they
+// wait for the sweep's next tick, which by default is the next periodic
+// scan. Every rescan, not only one that committed rows: ScanSubtree counts
+// the rows it wrote, and a rescan whose file was deleted before it ran
+// deletes a row and counts none, which changes an album's membership all the
+// same (review round 4). It must not block.
+func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context, absDir string) (int, error), after func()) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -176,6 +222,124 @@ func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context
 						"dir", dir.rel, "err", strings.ReplaceAll(failure.Error(), dir.abs, dir.rel))
 				}
 			}
+			if after != nil && ctx.Err() == nil {
+				after()
+			}
 		}
 	}
+}
+
+// afterRescan is what runServe runs after each rescan (sourceRescanner.run's
+// `after`). It drops the album-gain index first (invalidate, nil when the
+// album gain is not wired): the rescan may have read a retag that moved a
+// DSD track to another album, or deleted one, and the index is otherwise
+// dropped only when a FULL scan lands, so it can be up to its two-minute TTL
+// old. Then it nudges the auto-optimize sweep, whose renders would otherwise
+// take that index's album-mates for the gain they record. The nudge never
+// blocks: its channel holds one, and a pending nudge already covers this
+// one.
+func afterRescan(invalidate func(), nudge chan<- struct{}) func() {
+	return func() {
+		if invalidate != nil {
+			invalidate()
+		}
+		select {
+		case nudge <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// staleRenditionRescanEvery is how often downloads may ask for a rescan of
+// one directory. A stale rendition is asked for on every play of its track,
+// by every paired device, and in range requests, so without it a file whose
+// rescan does not bring its row level with it (one still being written, a
+// directory the scan cannot read) would keep the rescanner busy with that
+// directory for as long as GETs arrive: each rescan that reads a changed
+// file also runs the whole-library duplicate restamp (1.1 s over 50,012 rows
+// on the dev Mac).
+const staleRenditionRescanEvery = time.Minute
+
+// staleRenditionRescan is the download path's side of the rescans
+// (api.StaleRenditionFunc): told of every rendition a GET found stale, it
+// asks for a rescan of the source's directory when the file has changed
+// since its row was written, so its row catches up and the auto-optimize
+// sweep renders the rendition again. Nothing else would: the phone never
+// asks again for a family the manifest lists, and a batch counts a track
+// with any rendition of the family as covered.
+//
+// It asks only while the row is behind the file. Once a scan has read the
+// change, the rendition is stale against the row too, and a rescan would
+// change nothing; the sweep (with auto-optimize on) renders it on its next
+// pass. And at most once per directory per staleRenditionRescanEvery, a
+// minute spent only on a request the rescanner queued or already had
+// waiting: one it dropped (its queue full) leaves the next GET free to ask.
+type staleRenditionRescan struct {
+	lookup func(ctx context.Context, rel string) (*manifest.Track, error)
+	// request is sourceRescanner.queue: whether the directory will be
+	// scanned.
+	request func(rel string) bool
+	now     func() time.Time
+	mu      sync.Mutex
+	// asked is when a download last asked for each library-relative
+	// directory, bounded at sourceRescanQueueCap directories: past that,
+	// the ones older than the window are forgotten first, and a request
+	// finding none to forget is dropped.
+	asked map[string]time.Time
+}
+
+func newStaleRenditionRescan(lookup func(ctx context.Context, rel string) (*manifest.Track, error), request func(rel string) bool) *staleRenditionRescan {
+	return &staleRenditionRescan{lookup: lookup, request: request, now: time.Now, asked: map[string]time.Time{}}
+}
+
+// observe is the api.StaleRenditionFunc: clientPath is the source path the
+// GET named (any spelling the store's lookup accepts), info the stat the
+// freshness check compared against.
+func (h *staleRenditionRescan) observe(ctx context.Context, clientPath string, info os.FileInfo) {
+	track, err := h.lookup(ctx, clientPath)
+	if err != nil || track == nil {
+		return
+	}
+	if transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
+		return
+	}
+	dir := path.Dir(track.Path)
+	if !h.due(dir) {
+		return
+	}
+	if !h.request(track.Path) {
+		// Nothing will scan it (the rescanner's queue is full): the minute
+		// is not spent on a request that did not happen.
+		h.forget(dir)
+	}
+}
+
+// forget drops what due recorded for dir.
+func (h *staleRenditionRescan) forget(dir string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.asked, dir)
+}
+
+// due records that a download asks for dir now, unless one did within
+// staleRenditionRescanEvery.
+func (h *staleRenditionRescan) due(dir string) bool {
+	now := h.now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if at, ok := h.asked[dir]; ok && now.Sub(at) < staleRenditionRescanEvery {
+		return false
+	}
+	if len(h.asked) >= sourceRescanQueueCap {
+		for d, at := range h.asked {
+			if now.Sub(at) >= staleRenditionRescanEvery {
+				delete(h.asked, d)
+			}
+		}
+		if len(h.asked) >= sourceRescanQueueCap {
+			return false
+		}
+	}
+	h.asked[dir] = now
+	return true
 }

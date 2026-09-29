@@ -96,16 +96,19 @@ const (
 
 // stampBridge is the rendition half of a bridge, wired over one store as
 // runServe wires it: the adapter POST /v1/upscale hands a request to, the
-// auto-optimize sweeper, and GET /v1/download, with committingQueue in the
-// pool's place.
+// auto-optimize sweeper, GET /v1/download, and the source rescanner the
+// adapter's refusals and the download's stale answers ask, with
+// committingQueue in the pool's place. The rescanner's loop runs only once
+// a test starts it (startRescans); until then a request only queues.
 type stampBridge struct {
-	store   *manifest.Store
-	libDir  string
-	queue   *committingQueue
-	adapter *upscaleEnqueuerAdapter
-	sweeper *autoOptimizeSweeper
-	url     string
-	token   string
+	store     *manifest.Store
+	libDir    string
+	queue     *committingQueue
+	adapter   *upscaleEnqueuerAdapter
+	sweeper   *autoOptimizeSweeper
+	rescanner *sourceRescanner
+	url       string
+	token     string
 }
 
 // newStampBridge is newEmptyStampBridge over a library holding a hi-res
@@ -136,10 +139,12 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 	caps := func() transcode.DSDRenderCaps { return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: true} }
 	variantsDir := func() string { return filepath.Join(dir, "variants") }
 	resolver := bridgefs.New([]string{b.libDir})
+	b.rescanner = newSourceRescanner(resolver.Resolve)
 	b.adapter = &upscaleEnqueuerAdapter{
 		pool: b.queue, store: store, resolver: resolver, cfg: &config.Config{},
 		outputDir: variantsDir, dsdCaps: caps,
 		tempDir: func() string { return filepath.Join(dir, "scratch") },
+		rescan:  b.rescanner.request,
 	}
 	b.sweeper = &autoOptimizeSweeper{
 		store: store, resolver: resolver, enqueue: b.queue.Enqueue, enabled: on,
@@ -161,11 +166,78 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 		WithUpscale(on, &variantStoreAdapter{provider: provider, store: store, variantsDir: variantsDir}).
 		WithCarPlayOptimize(on).
 		WithDSDRender(on).
-		WithUpscaleEnqueuer(b.adapter)
+		WithUpscaleEnqueuer(b.adapter).
+		WithStaleRendition(newStaleRenditionRescan(store.LookupTrack, b.rescanner.queue).observe)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	b.url = hs.URL
 	return b
+}
+
+// startRescans runs the rescanner's loop over scanner, as runServe does,
+// until the test ends. The channel receives once after each rescan: runServe
+// drops the album-gain index and nudges the auto-optimize sweep there.
+func (b *stampBridge) startRescans(t *testing.T, scanner *manifest.Scanner) <-chan struct{} {
+	t.Helper()
+	rescanned := make(chan struct{}, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.rescanner.run(ctx, scanner.ScanSubtree, func() {
+			select {
+			case rescanned <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
+	return rescanned
+}
+
+// rescansWaiting is how many directories wait for the rescanner's loop.
+func (b *stampBridge) rescansWaiting() int {
+	b.rescanner.mu.Lock()
+	defer b.rescanner.mu.Unlock()
+	return len(b.rescanner.waiting)
+}
+
+// mintScannedDSF writes a one-second DSD64 tone at rel and scans the
+// library, as a bridge's startup scan would.
+func (b *stampBridge) mintScannedDSF(t *testing.T, rel string) (string, *manifest.Scanner) {
+	t.Helper()
+	abs := filepath.Join(b.libDir, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dsdtone.MintDSF(abs, dsdtone.Tone{RateHz: 2822400, Seconds: 1, AmplitudeDBFS: -6}); err != nil {
+		t.Fatal(err)
+	}
+	scanner := manifest.NewScanner([]string{b.libDir}, b.store, filepath.Join(t.TempDir(), "artwork"))
+	if _, err := scanner.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	return abs, scanner
+}
+
+// awaitRowAt waits until rel's row records mtime, the version a rescan
+// reads, and fails after 10 s.
+func (b *stampBridge) awaitRowAt(t *testing.T, rel string, mtime time.Time, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		tr, err := b.store.LookupTrack(context.Background(), rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr != nil && tr.ModTime.UnixNano() == mtime.UnixNano() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the row still records %v 10 s after %s, want %v: nothing rescanned the file", tr.ModTime, what, mtime)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // seed writes a source file and its row as a scan leaves them: the row's
@@ -416,26 +488,8 @@ func TestAChangedFileIsNotRenderedUntilItsRowIsReRead(t *testing.T) {
 // with the version the scan read.
 func TestARefusedRequestRescansTheFileSoTheNextOneRenders(t *testing.T) {
 	b := newEmptyStampBridge(t)
-	abs := filepath.Join(b.libDir, stampDSD)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dsdtone.MintDSF(abs, dsdtone.Tone{RateHz: 2822400, Seconds: 1, AmplitudeDBFS: -6}); err != nil {
-		t.Fatal(err)
-	}
-	scanner := manifest.NewScanner([]string{b.libDir}, b.store, filepath.Join(t.TempDir(), "artwork"))
-	if _, err := scanner.Scan(context.Background()); err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	rescanner := newSourceRescanner()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		rescanner.run(ctx, scanner.ScanSubtree)
-	}()
-	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
-	b.adapter.rescan = rescanner.request
+	abs, scanner := b.mintScannedDSF(t, stampDSD)
+	b.startRescans(t, scanner)
 
 	later := time.Now().Add(time.Minute).Truncate(time.Second)
 	if err := os.Chtimes(abs, later, later); err != nil {
@@ -444,20 +498,7 @@ func TestARefusedRequestRescansTheFileSoTheNextOneRenders(t *testing.T) {
 	if n := b.request(t, stampDSD, "pcm"); n != 0 {
 		t.Fatalf("the request for the changed file queued %d jobs, want the refusal", n)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		tr, err := b.store.LookupTrack(context.Background(), stampDSD)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tr != nil && tr.ModTime.UnixNano() == later.UnixNano() {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the row still records %v 10 s after the refused request, want %v: nothing rescanned the file", tr.ModTime, later)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	b.awaitRowAt(t, stampDSD, later, "the refused request")
 	if n := b.request(t, stampDSD, "pcm"); n != 1 {
 		t.Fatalf("the request after the rescan queued %d jobs, want the render", n)
 	}
@@ -471,18 +512,27 @@ func TestARefusedRequestRescansTheFileSoTheNextOneRenders(t *testing.T) {
 	}
 }
 
+// underRoot is a one-root resolver for the rescanner's tests: a
+// library-relative directory under root, as fs.Resolver.Resolve maps one on
+// a single-root bridge ("." is the root itself).
+func underRoot(root string) func(rel string) (string, error) {
+	return func(rel string) (string, error) {
+		return filepath.Join(root, filepath.FromSlash(rel)), nil
+	}
+}
+
 // TestSourceRescannerQueuesADirectoryOnceAtATime: requests for the files
 // of one directory queue one scan of it; a request for a directory whose
 // scan has already started queues another, since the file may have changed
 // after the walk passed it; and a full queue drops a request rather than
 // block the HTTP request that made it.
 func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
-	full := newSourceRescanner()
+	full := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
 	filled := make(chan struct{})
 	go func() {
 		defer close(filled)
 		for i := 0; i < sourceRescanQueueCap+5; i++ {
-			full.request(fmt.Sprintf("/lib/D%03d/01.flac", i), fmt.Sprintf("D%03d/01.flac", i))
+			full.request(fmt.Sprintf("D%03d/01.flac", i))
 		}
 	}()
 	select {
@@ -494,16 +544,19 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 		t.Errorf("queue %d, pending %d after %d directories, want both at the cap %d",
 			len(full.waiting), len(full.pending), sourceRescanQueueCap+5, sourceRescanQueueCap)
 	}
+	if full.queue("Late/01.flac") {
+		t.Error("a directory dropped by the full queue was reported as queued: the download path's debounce would spend its minute on it")
+	}
 
 	// Queued before the loop runs, so which requests share a scan does not
-	// depend on when the loop takes one. The directories are OS paths, as
-	// the ones the adapter hands over are (filepath.Dir of the resolved
-	// file): on Windows a scan of "\lib\A", never "/lib/A".
+	// depend on when the loop takes one. The directories scanned are OS
+	// paths, as the resolver maps a row's directory: on Windows a scan of
+	// "\lib\A", never "/lib/A".
 	dirA, dirB := filepath.FromSlash("/lib/A"), filepath.FromSlash("/lib/B")
-	r := newSourceRescanner()
-	r.request(filepath.Join(dirA, "01.flac"), "A/01.flac")
-	r.request(filepath.Join(dirA, "02.flac"), "A/02.flac")
-	r.request(filepath.Join(dirB, "01.flac"), "B/01.flac")
+	r := newSourceRescanner(underRoot(filepath.FromSlash("/lib")))
+	r.request("A/01.flac")
+	r.request("A/02.flac")
+	r.request("B/01.flac")
 	if len(r.waiting) != 2 {
 		t.Fatalf("%d scans queued for two directories, want 2: two files of one directory share a scan", len(r.waiting))
 	}
@@ -522,7 +575,7 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 			case <-ctx.Done():
 			}
 			return 0, nil
-		})
+		}, nil)
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
 	next := func(want string) {
@@ -539,8 +592,8 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 
 	next(dirA)
 	// A's scan has started, and may already have passed these files.
-	r.request(filepath.Join(dirA, "03.flac"), "A/03.flac")
-	r.request(filepath.Join(dirA, "04.flac"), "A/04.flac")
+	r.request("A/03.flac")
+	r.request("A/04.flac")
 	release <- struct{}{}
 	next(dirB)
 	release <- struct{}{}
@@ -567,11 +620,10 @@ func TestSourceRescannerQueuesADirectoryOnceAtATime(t *testing.T) {
 func TestSourceRescannerScansEveryDirectoryABurstAsksFor(t *testing.T) {
 	const dirs = 200
 	lib := filepath.FromSlash("/lib")
-	r := newSourceRescanner()
+	r := newSourceRescanner(underRoot(lib))
 	for i := 0; i < dirs; i++ {
 		for _, file := range []string{"01.flac", "02.flac"} {
-			name := fmt.Sprintf("D%03d", i)
-			r.request(filepath.Join(lib, name, file), name+"/"+file)
+			r.request(fmt.Sprintf("D%03d", i) + "/" + file)
 		}
 	}
 
@@ -590,7 +642,7 @@ func TestSourceRescannerScansEveryDirectoryABurstAsksFor(t *testing.T) {
 				close(all)
 			}
 			return 0, nil
-		})
+		}, nil)
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the source rescanner")
 

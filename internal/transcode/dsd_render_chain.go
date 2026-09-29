@@ -463,7 +463,17 @@ func soxFileDuration(ctx context.Context, path string) float64 {
 
 // publishSidecar is the atomic publish both chains share: rename the temp
 // onto the final path (same filesystem, so rename(2)) and stat the result.
-func publishSidecar(ctx context.Context, tmpPath, finalPath string) (int64, error) {
+//
+// It asks first whether the source is still the version the spec records,
+// and publishes nothing when it is not (ErrSourceChanged): a file that
+// changed while it rendered was read, in part or whole, as bytes the stamp
+// does not describe, and the serve path would refuse the result anyway. The
+// caller's deferred cleanup removes the temp. A method, and the only publish
+// helper, so a chain cannot publish without the check.
+func (j JobSpec) publishSidecar(ctx context.Context, tmpPath, finalPath string) (int64, error) {
+	if err := j.sourceChanged("it changed while it rendered, so the rendition was discarded"); err != nil {
+		return 0, err
+	}
 	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
 		return 0, fmt.Errorf("rename sidecar: %w", err)
 	}
@@ -652,7 +662,7 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, fmt.Errorf("dsd render: settings: %w", err)
 	}
-	size, err := publishSidecar(ctx, tmpPath, finalPath)
+	size, err := j.publishSidecar(ctx, tmpPath, finalPath)
 	if err != nil {
 		return RunResult{}, err
 	}

@@ -50,7 +50,7 @@ func wedgeCoordinator(t *testing.T, s *manifest.Store, fastPath string) (*Coordi
 		return RunResult{SizeBytes: spec.SourceSize * 2}, nil
 	}
 	c, err := NewCoordinator(p, s, t.TempDir(), nil,
-		func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+		scannedResolver(s))
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}

@@ -215,6 +215,15 @@ type Pool struct {
 	albumGainerMu sync.RWMutex
 	albumGainer   AlbumGainer
 
+	// sourceRescan asks for the directory of a source that changed after
+	// its row was written to be read again (SetSourceRescan): a job whose
+	// run refused its source (ErrSourceChanged) asks for it, and so does a
+	// batch walk that passes over such a file. Nil when unwired: the file
+	// then waits for the periodic scan. Guarded by its own mutex, like the
+	// callbacks above: wired once after construction.
+	sourceRescanMu sync.RWMutex
+	sourceRescan   func(libraryRel string)
+
 	// jobTimeout is the BASE per-job deadline; processJob widens it per
 	// spec through jobTimeoutFor (a long DSD source needs more than the
 	// fixed default) and applies the result via context.WithTimeout.
@@ -580,6 +589,36 @@ func (p *Pool) SetAlbumGainer(g AlbumGainer) {
 	p.albumGainerMu.Lock()
 	p.albumGainer = g
 	p.albumGainerMu.Unlock()
+}
+
+// SetSourceRescan wires the request for a rescan of the directory holding a
+// source that changed after its row was written, named by the path its row
+// records: cmd/bridge passes its sourceRescanner's request, which queues
+// without blocking. A job whose run refused its source (ErrSourceChanged)
+// makes the request, and so does a batch walk that passes over such a file,
+// so the next request for it finds the row current. Race-safe; nil removes
+// it.
+func (p *Pool) SetSourceRescan(fn func(libraryRel string)) {
+	p.sourceRescanMu.Lock()
+	p.sourceRescan = fn
+	p.sourceRescanMu.Unlock()
+}
+
+// requestSourceRescan asks for a rescan of the directory holding the source
+// its row records at libraryRel, when one is wired. It must not block: a
+// worker calls it inside its job's claim, and a batch walk on the request
+// that submitted the batch. Nil-safe on the pool too, for the Coordinator of
+// a test that has none.
+func (p *Pool) requestSourceRescan(libraryRel string) {
+	if p == nil {
+		return
+	}
+	p.sourceRescanMu.RLock()
+	fn := p.sourceRescan
+	p.sourceRescanMu.RUnlock()
+	if fn != nil {
+		fn(libraryRel)
+	}
 }
 
 func (p *Pool) currentAlbumGainer() AlbumGainer {
@@ -1319,13 +1358,29 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			p.outages.fail(tool, job.spec.SourceLibraryRel, msg)
 			return
 		}
+		// A source that changed after its row was written, found by Run
+		// before it rendered or before it published (source_version.go), is
+		// a fact about the file's VERSION: the job failed, and is counted and
+		// announced like any other failure (a batch must hear it to drain),
+		// but it reached no verdict on the file, so it strikes nothing.
+		// Three strikes would suppress a good file for 30 days, keyed on a
+		// version its row does not even record yet. It asks for a rescan of
+		// the directory instead, inside the claim like every exit's
+		// bookkeeping, so the next request finds the row current.
+		if errors.Is(err, ErrSourceChanged) {
+			p.requestSourceRescan(job.spec.SourceLibraryRel)
+			logger.Info("pool: source changed on disk since its scan",
+				"path", job.spec.SourceLibraryRel, "err", msg)
+			return
+		}
 		logger.Warn("pool: sox failed",
 			"path", job.spec.SourceLibraryRel,
 			"err", msg)
 		// One strike against this file version. Only HERE: shutdown is
 		// excluded by the closed check above, the timeout exit is
 		// excluded because a deadline says as much about a hung mount as
-		// about the source, and a missing tool by the exit just above. A
+		// about the source, and a missing tool and a changed source by
+		// the two exits just above. A
 		// failed job writes no variant row, so without
 		// this the candidate queries re-select the same doomed source on
 		// every sweep, forever. Suppression needs `variantFailureThreshold`

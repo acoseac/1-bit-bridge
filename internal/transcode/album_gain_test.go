@@ -129,13 +129,16 @@ func mintTone(t *testing.T, dir, name string, dbfs float64) string {
 	return p
 }
 
+// dsdToneSpec is the spec a render of the minted tone at src is queued
+// with, stamped with the version of the file a scan records (Run renders a
+// file only while it is still that version).
 func dsdToneSpec(src, outDir, tempDir string, kind JobKind, rate, bits int) JobSpec {
-	return JobSpec{
+	return stampedAsScanned(JobSpec{
 		SourceAbsPath: src, SourceLibraryRel: "Album/" + filepath.Base(src),
 		SourceSampleRate: 2822400, SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: 3.0,
 		TargetSampleRate: rate, TargetBits: bits, Quality: QualityVeryHigh,
 		OutputDir: outDir, TempDir: tempDir, Kind: kind,
-	}
+	})
 }
 
 // albumGainCase is one render of TestRunDSD_AlbumGain_RealToolchain.

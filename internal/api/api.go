@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -132,6 +133,7 @@ type Server struct {
 	upnpPublicProvider     UPnPUpstreamPublicProvider   // nil unless WithUPnPUpstreamPublicProvider wired (UPnP upstream advertisement on /v1/health)
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
+	staleRendition         StaleRenditionFunc           // nil unless WithStaleRendition wired: told of every 410 variant_stale
 	upscaleEnabled         func() bool                  // LIVE; mirrors cfg.Upscale.Enabled AND the sox probe
 	carPlayOptimizeEnabled func() bool                  // LIVE predicate; gated AND-wise on upscaleEnabled by the wiring layer
 	dsdRenderEnabled       func() bool                  // LIVE predicate: the DSD-render caps (operator flag ∧ ffmpeg decoders), gated AND-wise on upscaleEnabled by the wiring layer
@@ -874,6 +876,24 @@ type RenderersResponse struct {
 // outside the v1 supported surface.
 func (s *Server) WithRendererDiscovery(snap RendererDiscoverySnapshotter) *Server {
 	s.rendererDiscovery = snap
+	return s
+}
+
+// StaleRenditionFunc is told of every download that found a rendition stale
+// (410 variant_stale): the source path the client asked for and the stat the
+// freshness check compared against. cmd/bridge wires it to ask for a rescan
+// of the source's directory when the file has changed since its row was
+// written, so a pre-generated rendition of a retagged file heals without
+// waiting for the next scan: the phone never asks again for a family the
+// manifest lists. It runs on the request, so it must not block; ctx is the
+// request's.
+type StaleRenditionFunc func(ctx context.Context, clientPath string, sourceInfo os.FileInfo)
+
+// WithStaleRendition wires the StaleRenditionFunc the download path tells
+// of a stale rendition. Optional: unwired, a stale rendition answers 410 and
+// waits for the scan that reads its source's change.
+func (s *Server) WithStaleRendition(fn StaleRenditionFunc) *Server {
+	s.staleRendition = fn
 	return s
 }
 

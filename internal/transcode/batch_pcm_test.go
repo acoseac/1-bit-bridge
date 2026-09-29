@@ -320,7 +320,7 @@ func TestEnqueuedDSDJobSpecsCarryTheRenderFacts(t *testing.T) {
 		<-ctx.Done()
 		return RunResult{SizeBytes: spec.SourceSize}, nil
 	}
-	c, err := NewCoordinator(p, s, t.TempDir(), nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
+	c, err := NewCoordinator(p, s, t.TempDir(), nil, scannedResolver(s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,6 +440,9 @@ func TestBuildPCMRenderCandidates_ScratchIsTheLargestSingleJob(t *testing.T) {
 		{Path: "DSD/short.dsf", Size: hour / 6, SampleRate: 2822400, BitsPerSample: 1, Codec: "DSF", IsDSD: true},
 		{Path: "DSD/pcm.flac", Size: hour, SampleRate: 96000, BitsPerSample: 24, Codec: "FLAC"},
 	}
+	// Hand-made projections have no rows in the store, so each resolves to
+	// the stat its projection records: a library that matches its rows.
+	c.resolver = projectionResolver(projections)
 	pcm := c.buildPCMRenderCandidates("DSD", projections)
 	if want := TempBytesForRender(2, 176400, 3600); pcm.maxRenderScratch != want || len(pcm.cands) != 2 {
 		t.Errorf("pcm scratch = %d (%d candidates), want %d for the hour-long DSF", pcm.maxRenderScratch, len(pcm.cands), want)

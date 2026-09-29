@@ -29067,3 +29067,326 @@ suggested change is wrong as written: applied to the tree it turns
 functions, which call the LRU caches' `Get(key)` and `Header.Get` (eight such
 calls, none on a client). Declined on that evidence and filed as backlog B98,
 with the ways to type the receiver.
+
+## 2026-09-29 — a render refuses a source newer than its row at every step, and a stale download asks for the rescan (backlog B53)
+
+Backlog B53: the three rendition-freshness leftovers #1077 recorded, plus a
+defect in #1077's rescanner found while measuring them. #1077 made every
+rendition writer stamp the track row and made three entry points (the
+on-demand path, the sweeper, the CLI) queue a render only while the file
+still matches its row. Three places still rendered or served around that.
+
+### Measured on main at 6dfba62c
+
+Throwaway probes in a worktree of main (macOS; the pool probe ran the real
+`transcode.Run` with a stand-in sox on PATH that renders anything):
+
+- The batch coordinator. `SubmitOptimize` over `Album/{01,02}.flac`, with 01
+  changed on disk after its scan: both enqueued; 01's rendition was stamped
+  with the row, so the serve path's check answered 410 `variant_stale`, 02
+  200. After a scan read 01, a second `SubmitOptimize` enqueued 0 and counted
+  both "already covered" (a projection's `HasVariant` is any rendition of the
+  family, fresh or not), so 01 stayed 410. With auto-optimize off (the
+  default) nothing renders it again.
+- The pool. A job whose source changed while it waited in the queue: done=1
+  failed=0, and the rendition answered 410. A job whose source changed while
+  the stand-in sox ran: the same.
+- The download path. The sweep rendered a DSF's compact tier (GET 200); the
+  file was retagged (mtime +1 min); five GETs answered 410 each; three
+  seconds later the row still recorded the old mtime, since nothing rescans
+  on a download; a sweep then rendered 0 (the file had changed since its
+  scan, `changedSinceScan`) and the GET stayed 410 until the periodic scan.
+- #1077's rescanner scanned the directory in the spelling a request arrived
+  with. A POST /v1/upscale naming a changed file in lower case
+  (`fixture/dsd/01.dsf`), on a case-insensitive filesystem, was refused as
+  designed and queued a rescan of `.../fixture/dsd`; `ScanSubtree` makes each
+  row's path lexically from the directory it is handed (`filepath.Rel`), so
+  the library then held `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`: the
+  album twice, in every paired device's manifest. Reproduced on macOS and on
+  the Windows test host. Today's app sends `sourceFetchPath`, the manifest's
+  own spelling, so it is latent there; any client that case-folds a path
+  (the adapter's own comment says an older app did) reaches it.
+
+### Design
+
+- `transcode.SourceIsAtRow` is the one check, moved from cmd/bridge's
+  `sourceIsAtRow`: exact size and mtime, the scanner's skip-gate comparison.
+- The batch walks (upscale, optimize, pcm) compare each candidate's file with
+  its projection. `ResolverFunc` now returns the stat with the path: the
+  production resolver was already `ResolveChecked` and threw the stat away,
+  so the check costs no syscall. A changed file is passed over (it lands in
+  the batch row's skipped count, as every other `continue` arm does), its
+  directory is asked for a rescan through the pool's hook, and one Info line
+  per submit gives the count. A resolver answering a nil stat is a resolver
+  failure.
+- `transcode.Run` checks first, before a decoder probe, a scratch file or an
+  album-gain claim, and answers `ErrSourceChanged`. It checks again in
+  `JobSpec.publishSidecar`, now a method and the only publish helper both
+  chains call, so a render whose source changed while it ran never renames
+  its output into place; the chain's deferred cleanup removes the temp. A
+  source it cannot stat is not the check's question: the tools report it as
+  before.
+- The pool classifies `ErrSourceChanged` by type, beside the missing-tool
+  exit. The job is counted and announced like any failure (a batch must hear
+  it to drain), #988's ordered tail is unchanged, it strikes nothing (a newer
+  version is not a bad file), and it asks for a rescan inside the claim. Info
+  per job: for an on-demand job the log is the only record, and the lines
+  are distinct per path and bounded by the queue.
+- The CLI worker renders through `Run`, so `bridge render` over a file
+  retagged mid-run prints `FAIL <path>: the file changed on disk after its
+  last scan: ...` and records nothing.
+- A 410 `variant_stale` tells `api.StaleRenditionFunc` (`WithStaleRendition`).
+  cmd/bridge's `staleRenditionRescan` looks the track up and asks for a rescan
+  only while the row is behind the file, and at most once per directory per
+  minute (`staleRenditionRescanEvery`), remembering at most 1,024 directories.
+  GETs drive it: every play of a stale rendition, on every device, in range
+  requests.
+- A rescan request names the file by its row's path, and the rescanner
+  resolves the directory through the live resolver. Every caller has the row
+  (the adapter's `track.Path`, the pool's `SourceLibraryRel`, the walks'
+  projection, the hook's lookup), so the request's spelling never reaches the
+  scanner.
+- After every rescan the shutdown did not interrupt, including one that
+  committed no row, `run` calls its `after` step, `afterRescan`: it drops the
+  album-gain index, then sends a non-blocking nudge to the auto-optimize
+  sweep. (The first version called it only after a rescan that committed
+  rows; review rounds 3 and 4 below.) Without the nudge the re-render waited
+  for the sweep's tick, which by default follows the periodic scan
+  (`autoOptimize.intervalSec: 0` inherits `scanIntervalSec`), so the download
+  hook alone would have healed almost nothing sooner. The rescanner's loop now
+  starts after the auto-optimize block, where the nudge exists.
+
+Rejected:
+
+- A check in `processJob` before `p.runner`, as the review of #1077 proposed.
+  It leaves the CLI worker, which calls `Run` directly, and the during-render
+  window, which a pool-level check can close only by removing a sidecar `Run`
+  has already published. In `Run` both windows close for every caller, and
+  the pool's stub runners keep their tests free of the stat.
+- A zero stamp as "unstamped, skip the check". Every production writer
+  stamps the row; a fixture that rendered a real file with no stamp was
+  describing a library no scan leaves, and seven were fixed to stamp the
+  file's version (`stampedAsScanned`, and `pool_missing_tool_test.go`'s
+  stand-in source now has the row's size and mtime).
+- Counting a refused job as a new outcome (neither done nor failed): it would
+  change `PoolStats`, the SSE frames and the Coordinator's callbacks for a
+  case the failure message already names.
+- A time debounce alone on the download path: a stale rendition whose row has
+  caught up would still rescan once a minute per directory for nothing. The
+  row check makes that case ask for nothing; the time debounce covers a row a
+  rescan does not bring level.
+
+Left open: with auto-optimize off, a stale rendition whose row has caught up
+is rendered again by nothing, since the phone never re-asks a listed family
+and a batch counts it covered (backlog B82); and a watcher-driven subtree
+scan does not nudge the sweep, so with the watcher on a retag leaves
+pre-generated renditions stale until the sweep's tick (B83). The player's
+catalog invalidator hangs off the same full-scan-only hook, and
+`cmd/bridge/player_wiring.go` claimed a watcher-driven `ScanSubtree` fired it;
+`ScanSubtree` never loads the hook and the watcher calls nothing else, so the
+comment is corrected here and the gap is in B83. The console
+player's own 410 `variant_stale` (`internal/admin/player_audio.go`) does not
+ask for a rescan: its picker already skips a stale rendition and plays the
+source, and the operator can rescan from the same console.
+
+### Tests
+
+- `TestABatchPassesOverAFileThatChangedSinceItsScan` (upscale, optimize,
+  pcm; real files through `fs.Resolver.ResolveChecked`).
+- `TestRunRendersNothingFromASourceThatChangedSinceItsStamp` (FLAC and DSF,
+  PATH empty; the positive control is the missing-tool failure).
+- `TestPublishingRefusesASourceThatChangedWhileItRendered`.
+- `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (unix: the real
+  pool and `Run` over a stand-in sox; changed while it waited, while it
+  rendered, and unchanged).
+- A "source changed" row in both #988 tables
+  (`TestACountedTranscodeFailureHasAlreadyReleasedItsPath` checks that only
+  this exit asks for a rescan, before its count;
+  `TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath`).
+- `TestTheCLIRendersNothingFromAFileThatChangedDuringItsRun` (unix).
+- `TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`,
+  `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
+  `TestARescanIndexesNoSecondSpellingOfTheDirectory` (skips on a
+  case-sensitive filesystem; runs on macOS and Windows).
+
+The harness from `#1077` now wires the rescanner and the download hook as
+runServe does (the loop runs only when a test starts it). The fixtures of the other
+transcode batch tests resolve through `scannedResolver`, which answers the
+row's own stat.
+
+### Negative controls
+
+Each on the committed fix, run with `-count=1`, restored before the next.
+
+| mutation | red | green |
+|---|---|---|
+| NC1 walks: no check | the batch test (all three walks) | the other ten |
+| NC2 walks: check without the rescan | the batch test (rescans) | the other ten |
+| NC3 `Run`: no start check | the Run test (flac, dsf), the pool test's "waited" (the tool ran; the publish check caught it) | the rest |
+| NC4 `Run`: no publish check | the publish test, the pool test's "rendered" | the rest |
+| NC5 `Run`: neither check | the Run and publish tests, both pool cases, the CLI test | the rest |
+| NC6 pool: no classification | the pool test (a strike, no rescan), the parked table's "source changed" | the rest |
+| NC7 pool: classified, no rescan | the pool test, the parked table's "source changed" | the rest |
+| NC8 hook: no row check | the debounce test | the rest |
+| NC9 hook: no time debounce | the debounce test | the rest |
+| NC10 api: hook not called | the download heal test (row never caught up) | the rest |
+| NC11 rescanner: `wrote` never called | the download heal test, the case test | the rest |
+| NC12 adapter hands the rescanner a case variant, as main's did for a case-folded request | the case test (`[Fixture/DSD/01.dsf fixture/dsd/01.dsf]`, also on the Windows host), the refused-request test | the rest |
+
+### Review round 1
+
+CodeRabbit covered the first head with no actionable comments. Gemini raised
+four medium findings:
+
+- An empty path reaching the rescanner: `path.Dir("")` is `"."`, which the
+  resolver maps onto a library root, so it would queue a walk of the whole
+  root. No caller passes one (every rescan names a row's path), but it is the
+  empty-root rule under Config, settings and process lifecycle, and cheap:
+  `sourceRescanner.request` refuses `""` before it resolves anything, in the
+  one place every rescan request funnels through (Gemini proposed it there
+  and again in `Pool.requestSourceRescan`; one refusal at the funnel covers
+  both). `TestSourceRescannerRefusesAnEmptyPath` has a file AT the root as its
+  positive control, since that directory is the root and its walk is the one
+  it needs. NC13, the guard removed: that test alone went red (`an empty path
+  resolved ["."] and queued 1 scans`).
+- A nil `os.FileInfo` in `SourceIsAtRow` and in `staleRenditionRescan.observe`:
+  declined. Every caller's stat comes from a successful `os.Stat` or
+  `ResolveChecked`, which return a non-nil `FileInfo` whenever the error is
+  nil, and the one function-value seam, the coordinator's `ResolverFunc`,
+  already treats a nil stat as a resolver failure. Answering `false` for nil
+  would turn a programming error into a silent "the file changed" verdict, a
+  refusal plus a rescan request, rather than surfacing it.
+
+`main` moved under the branch (#1092 appended its own entry here); it was
+merged in, not rebased, keeping both entries.
+
+### Review round 2
+
+- CodeRabbit (outside the diff, Minor): the download path's debounce recorded
+  a directory's minute before asking the rescanner, so a request the
+  rescanner dropped with its queue full (1,024 directories waiting) still
+  suppressed the next minute's GETs. Correct, and taken:
+  `sourceRescanner.queue` reports whether the directory will be scanned
+  (queued now or already waiting; `request` is the void form the other hooks
+  keep), and `staleRenditionRescan.observe` forgets the minute when it will
+  not. The debounce test gained a full-queue step, and the rescanner test a
+  check that a dropped directory is not reported as queued. NC14 (the minute
+  always spent): the debounce test went red ("again while it is still
+  full: asked for []"). NC15 (`queue` always true): the rescanner test went
+  red. Each alone.
+- Gemini: stop draining the rescanner's queue once its context is cancelled.
+  Declined: the drain loop is `for ctx.Err() == nil { dir, ok := r.next();
+  ...; scan(ctx, dir.abs) }`, which checks the context before every
+  directory, and `ScanSubtree` returns at once on a cancelled one.
+- CodeQL flagged the two Info lines in `Coordinator.logWalkSkips` as
+  `go/log-injection` (alerts 140 and 141): a structured `batchPath`
+  attribute, the batch label the console sends. The first is the
+  "filtered tracks with resolver failures" line the three walks already
+  logged, moved into the helper; main's three copies (`batch.go:515`, 1228,
+  1277) were dismissed as false positives. The second is its sibling with the
+  same attribute. Not dismissed here; left for triage.
+
+### Review round 3
+
+CodeRabbit (outside the diff, Major): drop the album-gain index before the
+nudge. Checked against `internal/albumgain`: the index is dropped by
+`Resolver.Invalidate`, which only the post-scan hook calls, and the hook
+fires after a FULL scan alone; otherwise the index lives out
+`defaultIndexTTL` (two minutes, documented as bounding "a missed hook"). A
+rescan that read a retag moving a DSD track to another album is such a
+missed hook, and round 1's nudge makes a render inside that window likely:
+the render would record the gain of the track's old album-mates, and a
+rendition stamped fresh against its row is never rendered again for a gain
+change. Taken: `afterRescanWrote` (the `wrote` callback runServe passes)
+calls the resolver's `Invalidate`, when an album gain is wired, and then
+sends the non-blocking nudge. `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep` (so named since round 4)
+checks the order, the unwired case and that a pending nudge does not block.
+NC16 (nudge first): red ("invalidated after the nudge"). NC17 (no
+invalidation): red. A watcher-driven subtree scan misses the index drop the
+same way; that joins B83.
+
+### Review round 4
+
+CodeRabbit (outside the diff, Minor): `run` called its step only when
+`ScanSubtree` reported committed rows, and `ScanSubtree` counts the rows it
+wrote, so a rescan whose only change was a deletion (its file deleted in the
+seconds between the request and the scan: a file that still exists is
+re-upserted and counted) skipped the album-index drop. Narrow, but a
+deletion is a membership change. Suggested: expose the deletions from
+`ScanSubtree` separately. Taken more simply: the step runs after every
+rescan the shutdown did not interrupt, whatever its count. The index drop
+is a mutex and a nil, and the nudge coalesces on its one-slot channel, so a
+rescan that changed nothing costs one extra sweep pass at most. The
+callback and helper are renamed (`after`, `afterRescan`) since they no longer
+depend on rows written. `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`
+drives `run` with a scan that commits nothing, and an interrupted one. NC18
+(only a writing rescan): red. NC19 (the step run during shutdown too): red.
+
+The round-3 helper test launched its non-blocking check in a goroutine
+with no drain on cleanup, and `TestEveryBackgroundGoroutineDrainsOnCleanup`
+failed CI on 759209e1 (macOS, Windows and the race `rest` shard). Only the
+doc sweeps had been run locally that round, not the whole `cmd/bridge`
+package, which holds that guard too. The test now registers
+`drainLoopOnCleanup`.
+
+### Review round 5
+
+Gemini raised three findings on 759209e1:
+
+- (high) A source that is no longer there: `sourceChanged` answered nil for
+  any stat error, so the job went to the tool, which failed on the missing
+  input and struck the file. Taken, for `os.ErrNotExist` only: gone is a
+  change of version, and it is also what a NAS mount that drops under a
+  queued batch looks like to every job behind it, each of which struck its
+  file on the old code. A rescan of a directory that cannot be seen touches
+  no row (#1076's owning-root audit). Other stat failures (permission, I/O)
+  still go to the tools. The Run test deletes the file after its retag step,
+  and the pool test gained "deleted while it waited" (on the prior code the
+  stand-in sox rendered a deleted file). `TestRun_DSDJobRefusesANonDSDRoute`
+  ran `Run` on sources that did not exist; it now renders stamped files
+  (`sourceAt`). NC20 (ENOENT answering nil again): the Run test (both
+  cases) and the pool test's deletion case went red.
+- (high) The batch walk's resolver failure for a deleted file, to be counted
+  as a change and rescanned. Declined: its premise, that the resolver's error
+  wraps `os.ErrNotExist`, is false for the production resolver.
+  `fs.Resolver.ResolveChecked` maps ENOENT to `fs.ErrNotFound`, which is
+  `errors.New("path not found")`, so the suggested branch could never fire. The
+  walk already passes a missing file over without queueing or striking it,
+  and the transcode package does not import `internal/fs`.
+- (medium) Run the stale-download hook in a goroutine with a detached
+  context. Declined: its lookup is one indexed read under WAL, the same kind
+  the handler has just made (`LookupVariant`) on the same request, and a
+  goroutine per stale GET would be unbounded and outlive the request, when
+  GETs are what the hook's debounce exists for.
+
+On the Windows test host the deleted-source change turned
+`TestPoolEnqueueReturnsErrQueueFullAtCap` red: it ran the real `Run` on
+`/dev/null/missing`, which Windows reports as not found, so `Run` now refuses
+it at once, and a single worker that fast kept the queue under its cap (on
+unix the path is ENOTDIR and still reaches the tool). Its docblock called
+the pigeonhole structural; it depended on a slow failure. The worker now
+holds its job until the test ends, which makes it structural.
+
+### Review round 6
+
+- Gemini (high): a stat that fails with anything but "not found" (a stale
+  NFS handle, a FUSE mount answering ENOTCONN, EIO) sent the job to the tool,
+  which failed and struck the file. Checked: true, and the same class as
+  round 5's deletion. Every enqueuer stats the file before it queues the job
+  (the adapter's `os.Stat`, the sweeper's and the walks' `ResolveChecked`, the
+  CLI's `os.Stat`), so a stat that fails in `Run` set in while the job
+  waited, and a file that stays unreadable is refused at its next enqueue,
+  so no retry loop follows. `sourceChanged` now answers `ErrSourceChanged` for
+  any stat failure ("it could not be checked (<cause>)", the cause without the
+  `*fs.PathError`'s absolute path). At publish time this discards a finished
+  render whose source cannot be checked; the next request renders it again.
+  `TestRunRendersNothingFromASourceItCannotCheck` stats a path through a
+  regular file (ENOTDIR on unix, not found on Windows). NC21 (only ENOENT
+  refused, as in round 5): that test went red.
+- Gemini (critical): `*resolveErrors++` said to parse as `*(resolveErrors++)`
+  and not compile. Declined: in Go `++` is a statement applied to the operand
+  expression, so it increments the pointee; CI builds and tests it.
+- CodeRabbit: a `defer stop()` for a test context (taken), and two lines in
+  this entry (the design summary still described the first `wrote` behaviour,
+  and a line began with `#1077`, which markdown reads as a heading; both
+  taken).

@@ -13,14 +13,25 @@ import (
 // can disagree, and the disagreement used to fall through to sox-direct
 // (no clip guard, no measured true peak, no appliedGainDB, under a DSD
 // variant id). Both reachable shapes are pinned here.
+// sourceAt writes a stand-in source named name in a temp dir: Run checks
+// that a source is the version its spec records before anything else, so
+// every case renders a file that is there, stamped as a scan leaves it.
+func sourceAt(t *testing.T, name string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	writeSource(t, p, 4096)
+	return p
+}
+
 func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 	// Case 1: a row the scanner stamped DSF whose filename is not. The
 	// extension short-circuits needsDecodeRouting, so the route is
 	// sox-direct whatever the toolchain says — no probe involved, and no
-	// filesystem access before the refusal.
+	// filesystem access before the refusal but Run's stat of the source,
+	// a scanned file at the version its row records (sourceAt).
 	t.Run("codec says DSD, extension does not", func(t *testing.T) {
-		_, err := Run(context.Background(), JobSpec{
-			SourceAbsPath:    filepath.Join(t.TempDir(), "01.flac"),
+		_, err := Run(context.Background(), stampedAsScanned(JobSpec{
+			SourceAbsPath:    sourceAt(t, "01.flac"),
 			SourceLibraryRel: "A/01.flac",
 			SourceIsDSD:      true,
 			SourceSampleRate: 2822400,
@@ -29,7 +40,7 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 			TargetBits:       24,
 			Kind:             JobKindPCMRender,
 			OutputDir:        t.TempDir(),
-		})
+		}))
 		if !errors.Is(err, ErrDSDDecodeUnavailable) {
 			t.Errorf("err = %v, want ErrDSDDecodeUnavailable", err)
 		}
@@ -51,8 +62,8 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 		ffmpegLookPath = func() (string, error) { return "", errors.New("not found") }
 		ffprobeLookPath = func() (string, error) { return "", errors.New("not found") }
 
-		_, err := Run(context.Background(), JobSpec{
-			SourceAbsPath:    filepath.Join(t.TempDir(), "01.dsf"),
+		_, err := Run(context.Background(), stampedAsScanned(JobSpec{
+			SourceAbsPath:    sourceAt(t, "01.dsf"),
 			SourceLibraryRel: "A/01.dsf",
 			SourceIsDSD:      true,
 			SourceSampleRate: 2822400,
@@ -61,7 +72,7 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 			TargetBits:       16,
 			Kind:             JobKindOptimize,
 			OutputDir:        t.TempDir(),
-		})
+		}))
 		if !errors.Is(err, ErrDSDDecodeUnavailable) {
 			t.Errorf("err = %v, want ErrDSDDecodeUnavailable", err)
 		}
@@ -78,8 +89,8 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 	// here). If this ever returns ErrDSDDecodeUnavailable the guard has
 	// widened to every job and the two cases above prove nothing.
 	t.Run("a PCM job is untouched by the guard", func(t *testing.T) {
-		_, err := Run(context.Background(), JobSpec{
-			SourceAbsPath:    filepath.Join(t.TempDir(), "01.flac"),
+		_, err := Run(context.Background(), stampedAsScanned(JobSpec{
+			SourceAbsPath:    sourceAt(t, "01.flac"),
 			SourceLibraryRel: "A/01.flac",
 			SourceSampleRate: 44100,
 			SourceBits:       16,
@@ -87,7 +98,7 @@ func TestRun_DSDJobRefusesANonDSDRoute(t *testing.T) {
 			TargetBits:       24,
 			Kind:             JobKindUpscale,
 			OutputDir:        t.TempDir(),
-		})
+		}))
 		if errors.Is(err, ErrDSDDecodeUnavailable) {
 			t.Errorf("a non-DSD job hit the DSD route guard: %v", err)
 		}

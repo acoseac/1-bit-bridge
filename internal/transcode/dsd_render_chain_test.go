@@ -508,12 +508,12 @@ func TestRunDSD_RealToolchain(t *testing.T) {
 	tempDir := filepath.Join(root, "tmp")
 
 	spec := func(src string, kind JobKind, rate, bits int) JobSpec {
-		return JobSpec{
+		return stampedAsScanned(JobSpec{
 			SourceAbsPath: src, SourceLibraryRel: "Album/" + filepath.Base(src),
 			SourceSampleRate: 2822400, SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: seconds,
 			TargetSampleRate: rate, TargetBits: bits, Quality: QualityVeryHigh,
 			OutputDir: outDir, TempDir: tempDir, Kind: kind,
-		}
+		})
 	}
 	cases := []struct {
 		name             string
@@ -601,12 +601,12 @@ func TestRunDSD_RealToolchain_RefusesGeometryMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	tempDir := filepath.Join(root, "tmp")
-	j := JobSpec{
+	j := stampedAsScanned(JobSpec{
 		SourceAbsPath: src, SourceLibraryRel: "tone.dsf",
 		SourceSampleRate: 5644800, // lies: the file is DSD64
 		SourceIsDSD:      true, TargetSampleRate: 176400, TargetBits: 24, Quality: QualityVeryHigh,
 		OutputDir: filepath.Join(root, "variants"), TempDir: tempDir, Kind: JobKindPCMRender,
-	}
+	})
 	_, err := Run(context.Background(), j)
 	if !isErr(err, ErrDSDGeometryMismatch) {
 		t.Fatalf("want ErrDSDGeometryMismatch, got %v", err)
