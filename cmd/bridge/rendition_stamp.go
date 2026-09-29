@@ -226,6 +226,27 @@ func (r *sourceRescanner) run(ctx context.Context, scan func(ctx context.Context
 	}
 }
 
+// afterRescanWrote is what runServe runs after a rescan that committed rows
+// (sourceRescanner.run's `wrote`). It drops the album-gain index first
+// (invalidate, nil when the album gain is not wired): the rescan may have
+// read a retag that moved a DSD track to another album, and the index is
+// otherwise dropped only when a FULL scan lands, so it can be up to its
+// two-minute TTL old. Then it nudges the auto-optimize sweep, whose renders
+// would otherwise take that index's album-mates for the gain they record.
+// The nudge never blocks: its channel holds one, and a pending nudge already
+// covers this one.
+func afterRescanWrote(invalidate func(), nudge chan<- struct{}) func() {
+	return func() {
+		if invalidate != nil {
+			invalidate()
+		}
+		select {
+		case nudge <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // staleRenditionRescanEvery is how often downloads may ask for a rescan of
 // one directory. A stale rendition is asked for on every play of its track,
 // by every paired device, and in range requests, so without it a file whose

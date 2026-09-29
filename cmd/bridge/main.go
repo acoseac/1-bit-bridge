@@ -4103,21 +4103,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}()
 		}
 
-		// The rescanner's loop. A rescan that wrote rows nudges the
-		// auto-optimize sweep, which renders again what the rows it read
-		// made stale; its tick otherwise follows the periodic scan.
-		// bgWriters-joined: the scan writes the store, and it runs on
-		// scanCtx, which the shutdown cancels.
-		rescanNudge := autoOptimizeNudge
+		// The rescanner's loop. A rescan that wrote rows drops the
+		// album-gain index and then nudges the auto-optimize sweep, which
+		// renders again what the rows it read made stale; its tick otherwise
+		// follows the periodic scan (afterRescanWrote). bgWriters-joined:
+		// the scan writes the store, and it runs on scanCtx, which the
+		// shutdown cancels.
+		var invalidateAlbums func()
+		if albumGainResolver != nil {
+			invalidateAlbums = albumGainResolver.Invalidate
+		}
+		afterRescan := afterRescanWrote(invalidateAlbums, autoOptimizeNudge)
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			rescanner.run(scanCtx, scanner.ScanSubtree, func() {
-				select {
-				case rescanNudge <- struct{}{}:
-				default:
-				}
-			})
+			rescanner.run(scanCtx, scanner.ScanSubtree, afterRescan)
 		}()
 
 		// Periodic integrity sweep: walks `track_variants` on the

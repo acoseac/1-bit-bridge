@@ -147,6 +147,48 @@ func TestSourceRescannerRefusesAnEmptyPath(t *testing.T) {
 	}
 }
 
+// TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep: a rescan
+// that committed rows may have read a retag that moved a DSD track to
+// another album, and the album-gain index is dropped only when a FULL scan
+// lands, so it can be up to its two-minute TTL old. The sweep a writing
+// rescan nudges renders straight away, so the index goes first: a render
+// nudged ahead of it would record the gain of the track's old album-mates
+// (CodeRabbit on #1093). Without an album gain wired the nudge still goes,
+// and a nudge already pending does not block the rescanner.
+func TestARescanThatWroteDropsTheAlbumIndexBeforeItNudgesTheSweep(t *testing.T) {
+	nudge := make(chan struct{}, 1)
+	var order []string
+	after := afterRescanWrote(func() {
+		if len(nudge) != 0 {
+			order = append(order, "invalidated after the nudge")
+			return
+		}
+		order = append(order, "invalidated")
+	}, nudge)
+	after()
+	if !slices.Equal(order, []string{"invalidated"}) || len(nudge) != 1 {
+		t.Fatalf("after a writing rescan: %v, %d nudges pending, want the index dropped and then one nudge", order, len(nudge))
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		after()
+		afterRescanWrote(nil, nudge)()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a nudge already pending blocked the rescanner's loop")
+	}
+
+	<-nudge
+	afterRescanWrote(nil, nudge)()
+	if len(nudge) != 1 {
+		t.Errorf("with no album gain wired: %d nudges pending, want 1", len(nudge))
+	}
+}
+
 // fileStat is the os.FileInfo a download's freshness check hands the stale
 // rendition hook: only size and mtime are read.
 type fileStat struct {
