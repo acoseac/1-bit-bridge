@@ -42,6 +42,50 @@ const API = {
   },
 };
 
+/**
+ * setDisabled is how the console disables a control while a request is out,
+ * and enables it again. It gives focus back.
+ *
+ * A browser moves focus off a focused control that becomes disabled (the
+ * focus fixup rule) and does not give it back when the control is enabled
+ * again (measured on Chrome 152: a focused button reads document.activeElement
+ * as the body after `disabled = true`, and still after `disabled = false`).
+ * So every control that disabled itself around a request left a keyboard or
+ * screen-reader user on the body, whatever the answer: the Jobs page's "Scan
+ * now" did, and every button beside it (backlog B68). `saveTrayField` gave
+ * focus back for a tray's switch alone, and this is that rule for every other
+ * control.
+ *
+ * Disabling notes whether the control had focus, on the control itself, so
+ * the enabling call (a `finally`, a timer, another handler) needs no variable
+ * carried to it. Enabling gives focus back to a control that had it, unless
+ * something else took focus while it was disabled, and never takes focus a
+ * control did not have (Safari does not focus a button on a click). A control
+ * that is gone or hidden by then, because a redraw replaced it, takes none.
+ *
+ * Every control that disables itself goes through here, and never sets
+ * `.disabled` to a literal itself: TestNoConsoleControlDisablesItselfOutsideSetDisabled
+ * sweeps the console's scripts for it. The player's modules reach this
+ * through window.BridgeControls, since app.js is a classic script and they
+ * cannot import it.
+ */
+function setDisabled(control, disabled) {
+  if (disabled) {
+    if (document.activeElement === control) control.dataset.refocus = "1";
+    control.disabled = true;
+    return;
+  }
+  control.disabled = false;
+  if (!control.dataset.refocus) return;
+  delete control.dataset.refocus;
+  const at = document.activeElement;
+  if ((!at || at === document.body) && control.isConnected) {
+    control.focus({ preventScroll: true });
+  }
+}
+
+window.BridgeControls = { setDisabled };
+
 // Returns true when the update payload's `lastCheck` field reflects
 // a Go `time.Time{}` zero value rather than a real timestamp. The
 // server marshals zero time as the literal RFC-3339 `0001-01-01T00:00:00Z`
@@ -125,14 +169,14 @@ function wireUpdatePanel() {
         "This swaps the running binary and clears the update state. " +
         "The bridge must be restarted afterwards to load it."
       )) return;
-      rollbackBtn.disabled = true;
+      setDisabled(rollbackBtn, true);
       rollbackBtn.textContent = "Rolling back…";
       try {
         await API.post("/api/updates/rollback");
         rollbackBtn.textContent = "Rolled back — restart to apply";
       } catch (err) {
         rollbackBtn.textContent = "Roll back";
-        rollbackBtn.disabled = false;
+        setDisabled(rollbackBtn, false);
         alert("Rollback failed: " + err.message);
       }
     });
@@ -144,7 +188,7 @@ function wireUpdatePanel() {
   if (updateCheckBtn) {
     updateCheckBtn.addEventListener("click", async () => {
       const oldText = updateCheckBtn.textContent;
-      updateCheckBtn.disabled = true;
+      setDisabled(updateCheckBtn, true);
       updateCheckBtn.textContent = "Checking…";
       try {
         const u = await API.post("/api/updates/check");
@@ -153,7 +197,7 @@ function wireUpdatePanel() {
         renderUpdateTile({ lastError: err.message });
       } finally {
         updateCheckBtn.textContent = oldText;
-        updateCheckBtn.disabled = false;
+        setDisabled(updateCheckBtn, false);
       }
     });
   }
@@ -187,11 +231,11 @@ function initStats() {
   const scanBtn = document.getElementById("scan-now");
   if (scanBtn) {
     scanBtn.addEventListener("click", async () => {
-      scanBtn.disabled = true;
+      setDisabled(scanBtn, true);
       try {
         await API.post("/api/scan");
       } finally {
-        setTimeout(() => (scanBtn.disabled = false), 500);
+        setTimeout(() => setDisabled(scanBtn, false), 500);
       }
     });
   }
@@ -228,7 +272,7 @@ function initStats() {
   if (enrichRetryBtn) {
     const idleText = enrichRetryBtn.textContent;
     enrichRetryBtn.addEventListener("click", async () => {
-      enrichRetryBtn.disabled = true;
+      setDisabled(enrichRetryBtn, true);
       enrichRetryBtn.textContent = "Retrying…";
       try {
         const r = await API.post("/api/enrichment/retry");
@@ -250,7 +294,7 @@ function initStats() {
         alert("Retry failed: " + err.message);
       } finally {
         setTimeout(() => {
-          enrichRetryBtn.disabled = false;
+          setDisabled(enrichRetryBtn, false);
           enrichRetryBtn.textContent = idleText;
         }, 4000);
       }
@@ -1169,7 +1213,7 @@ function bindTailscaleRefreshButton() {
   if (!btn) return;
   btn.addEventListener("click", async () => {
     const oldText = btn.textContent;
-    btn.disabled = true;
+    setDisabled(btn, true);
     btn.textContent = "Minting…";
     try {
       const s = await API.post("/api/tailscale/refresh-cert");
@@ -1178,7 +1222,7 @@ function bindTailscaleRefreshButton() {
       alert("Re-mint failed: " + (err?.message ?? "unknown error"));
     } finally {
       btn.textContent = oldText;
-      btn.disabled = false;
+      setDisabled(btn, false);
     }
   });
 }
@@ -1281,7 +1325,7 @@ function bindInstallButton(btn) {
 async function runInstall(btn, force) {
   const supervised = btn.dataset.supervised === "true";
   const oldText = btn.textContent;
-  btn.disabled = true;
+  setDisabled(btn, true);
   btn.textContent = "Installing…";
   try {
     const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
@@ -1318,7 +1362,7 @@ async function runInstall(btn, force) {
       alert("Install failed: " + err.message);
     }
     btn.textContent = oldText;
-    btn.disabled = false;
+    setDisabled(btn, false);
   }
 }
 
@@ -1963,7 +2007,7 @@ async function startUpload() {
   const err = document.getElementById("upload-error");
   const start = document.getElementById("upload-start");
   err.hidden = true;
-  start.disabled = true;
+  setDisabled(start, true);
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
 
@@ -2036,7 +2080,7 @@ async function startUpload() {
   } catch (e) {
     showUploadError(e?.message ? e.message : String(e));
   } finally {
-    start.disabled = false;
+    setDisabled(start, false);
     document.getElementById("upload-progress").hidden = true;
   }
 }
@@ -2576,7 +2620,7 @@ async function handlePairingAction(btn, action) {
   // Disable both buttons in the card while the call is in flight to
   // prevent double-tap submitting both actions.
   const card = btn.closest(".pairing-card");
-  card?.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  card?.querySelectorAll("button").forEach((b) => setDisabled(b, true));
   // Latch the optimistic state so the next render doesn't briefly
   // flip back to "pending" before the server has processed.
   pendingActionLatch.set(id, action === "approve" ? "approved" : "declined");
@@ -2604,7 +2648,7 @@ function initConsoleSessions() {
   const count = document.getElementById("console-sessions-count");
   if (!btn || !count) return;
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     try {
       const r = await API.post("/api/console-sessions/sign-out-others");
       const n = r?.ended ?? 0;
@@ -2613,7 +2657,7 @@ function initConsoleSessions() {
         ? `${ended} The bridge could not save that yet: a restart before it does would sign them back in.`
         : `${ended} Only this browser is signed in to this console now.`;
     } catch (err) {
-      btn.disabled = false;
+      setDisabled(btn, false);
       count.textContent = `Could not sign the other browsers out: ${err.message}`;
     }
   });
@@ -3115,7 +3159,7 @@ function wireUpnpEditModal() {
 
 async function onUpnpRescanClick(btn) {
   const udn = btn.dataset.udn || "";
-  btn.disabled = true;
+  setDisabled(btn, true);
   const original = btn.textContent;
   btn.textContent = "Rescanning…";
   try {
@@ -3126,7 +3170,7 @@ async function onUpnpRescanClick(btn) {
   } catch (err) {
     alert("Rescan failed: " + (err.message || err));
   } finally {
-    btn.disabled = false;
+    setDisabled(btn, false);
     btn.textContent = original;
   }
 }
@@ -3142,7 +3186,7 @@ async function onUpnpRemoveClick(btn) {
   if (!confirm(`Remove "${name}" from the configured UPnP servers? Its routed tracks will drop from the manifest on the next restart.`)) {
     return;
   }
-  btn.disabled = true;
+  setDisabled(btn, true);
   const original = btn.textContent;
   btn.textContent = "Removing…";
   try {
@@ -3153,7 +3197,7 @@ async function onUpnpRemoveClick(btn) {
   } catch (err) {
     alert("Remove failed: " + (err.message || err));
   } finally {
-    btn.disabled = false;
+    setDisabled(btn, false);
     btn.textContent = original;
   }
 }
@@ -3408,6 +3452,16 @@ function trayFieldManaged(field) {
   return !!trayManaged && trayManaged.has(field);
 }
 
+// trayManagedKnown reports whether a snapshot has told this document which
+// fields are managed. A tray shows every row until one has, because its rows
+// sit in a gear the reader opens; a control on the page itself that only
+// offers a change (the fingerprint Enable button) waits for it instead, since
+// showing it to a bridge that turns out to own the switch is offering
+// something that can only fail.
+function trayManagedKnown() {
+  return trayManaged !== null;
+}
+
 // Every tray mounted on the CURRENT page, so a save in one can re-sync
 // the others: analysisEnabled appears on both the Audio analysis card
 // and the Smart mixes card, and two open trays disagreeing about the
@@ -3462,7 +3516,12 @@ function traySettingsSnapshot() {
  *
  * spec = {
  *   title: string,          // names the feature, not the page
- *   blurb?: string,         // one line: what turning this on does
+ *   blurb?: string | ((shown: Set<string>) => string),
+ *                           // one line: what turning this on does. A function is
+ *                           // given the fields of the rows the reader can see (a
+ *                           // managed row is hidden, applyTrayManaged) and is asked
+ *                           // again whenever that set may have changed, for a blurb
+ *                           // that says how many switches it needs
  *   rows: Row[],
  *   link?: { href, text },  // deep link to the full settings section
  *   onSaved?: (field) => void, // after a save the server applied live; see saveTrayField
@@ -3501,11 +3560,13 @@ function buildFeatureTray(spec) {
   h.className = "tray-title";
   h.textContent = spec.title;
   head.appendChild(h);
+  // The text is written by applyTrayManaged, which knows which rows the
+  // reader can see: a blurb may depend on that.
+  let blurbEl = null;
   if (spec.blurb) {
-    const b = document.createElement("p");
-    b.className = "tray-blurb";
-    b.textContent = spec.blurb;
-    head.appendChild(b);
+    blurbEl = document.createElement("p");
+    blurbEl.className = "tray-blurb";
+    head.appendChild(blurbEl);
   }
   tray.appendChild(head);
 
@@ -3545,7 +3606,7 @@ function buildFeatureTray(spec) {
   // (Gemini on PR #763.)
   pruneDetachedTrays();
   const hasNote = (spec.rows || []).some((row) => row.type === "note");
-  const entry = { button, tray, controls, hasNote };
+  const entry = { button, tray, controls, hasNote, blurbEl, blurb: spec.blurb };
   // From the first paint when a snapshot has already told this document
   // which fields are managed; syncTray applies it again when one lands.
   applyTrayManaged(entry);
@@ -3624,7 +3685,7 @@ function buildTrayRow(row, status, controls, onSaved) {
   // "off", and a reader who flips it is turning ON something that may
   // already be on — or, worse, watching a PATCH send the value the
   // control happened to default to.
-  input.disabled = true;
+  setDisabled(input, true);
   input.dataset.field = row.field;
 
   const wrap = document.createElement("div");
@@ -3762,7 +3823,7 @@ function syncTray(entry) {
   }
   for (const ctl of entry.controls) {
     trayApplyValue(ctl, traySettings[ctl.row.field]);
-    ctl.input.disabled = false;
+    setDisabled(ctl.input, false);
   }
   applyTrayManaged(entry);
 }
@@ -3781,14 +3842,25 @@ function syncTray(entry) {
 // as something the reader could earn. The row's input is disabled too, so
 // nothing can send it. A tray keeps its gear while a field row or a note
 // row is left, since a note is written for the reader whatever the switches
-// are (History's).
+// are (History's). A blurb given as a function is written here too, from the
+// fields the reader can see: the CarPlay pre-generation tray said "All three
+// switches have to be on" beside the two rows a managed bridge leaves it
+// (backlog B68), and a sentence that counts switches has to count the ones
+// the reader can see.
 function applyTrayManaged(entry) {
   let shown = entry.hasNote;
+  const shownFields = new Set();
   for (const ctl of entry.controls) {
     const managed = trayFieldManaged(ctl.row.field);
     ctl.wrap.hidden = managed;
-    if (managed) ctl.input.disabled = true;
-    else shown = true;
+    if (managed) setDisabled(ctl.input, true);
+    else {
+      shown = true;
+      shownFields.add(ctl.row.field);
+    }
+  }
+  if (entry.blurbEl) {
+    entry.blurbEl.textContent = typeof entry.blurb === "function" ? entry.blurb(shownFields) : entry.blurb;
   }
   entry.button.hidden = !shown;
   if (!shown && !entry.tray.hidden) {
@@ -3814,13 +3886,12 @@ async function saveTrayField(ctl, status) {
   }
   status.dataset.tone = "";
   status.textContent = "Saving…";
-  // Disabling a focused control moves focus to the body (the focus fixup
-  // rule), and enabling it again does not give focus back, so every tray
-  // save left a keyboard user nowhere until 2026-09-28 (Chrome 152). The
-  // finally below gives focus back to the switch if it had it, unless
-  // something else took focus while the save was out.
-  const hadFocus = document.activeElement === ctl.input;
-  ctl.input.disabled = true;
+  // setDisabled gives focus back to the switch once it is enabled again,
+  // unless something else took focus while the save was out: every tray
+  // save left a keyboard user's focus on the body until 2026-09-28 (Chrome
+  // 152). syncTray enables the switch too, on a save that landed, and gives
+  // it back there; the finally does for every other outcome.
+  setDisabled(ctl.input, true);
   let appliedLive = false;
   try {
     const r = await API.patch("/api/settings", { [ctl.row.field]: value });
@@ -3858,11 +3929,7 @@ async function saveTrayField(ctl, status) {
     status.dataset.tone = "err";
     status.textContent = `Save failed: ${err.message || err}`;
   } finally {
-    ctl.input.disabled = false;
-    const at = document.activeElement;
-    if (hadFocus && ctl.input.isConnected && (!at || at === document.body)) {
-      ctl.input.focus({ preventScroll: true });
-    }
+    setDisabled(ctl.input, false);
   }
   // A save the server applied live can change what the page around the
   // tray shows, and only the page can redraw that: the variant panel's
@@ -4409,7 +4476,7 @@ function initSettings() {
   if (backupBtn) {
     backupBtn.addEventListener("click", async () => {
       const oldText = backupBtn.textContent;
-      backupBtn.disabled = true;
+      setDisabled(backupBtn, true);
       backupBtn.textContent = "Snapshotting…";
       try {
         await API.post("/api/backups");
@@ -4418,7 +4485,7 @@ function initSettings() {
         alert("Snapshot failed: " + err.message);
       } finally {
         backupBtn.textContent = oldText;
-        backupBtn.disabled = false;
+        setDisabled(backupBtn, false);
       }
     });
   }
@@ -4647,7 +4714,7 @@ function initUpscaleClearAllModal() {
 
   btn.addEventListener("click", () => {
     input.value = "";
-    submitBtn.disabled = true;
+    setDisabled(submitBtn, true);
     statusEl.hidden = true;
     statusEl.textContent = "";
     modal.showModal();
@@ -4670,7 +4737,7 @@ function initUpscaleClearAllModal() {
     // to fire the delete without the operator's exact typed
     // confirmation.
     if (input.value !== UPSCALE_CLEAR_PHRASE) return;
-    submitBtn.disabled = true;
+    setDisabled(submitBtn, true);
     statusEl.hidden = false;
     statusEl.textContent = "Deleting every variant…";
     try {
@@ -4688,7 +4755,7 @@ function initUpscaleClearAllModal() {
         // reasoning, same fix shape. CodeRabbit Minor on PR #220
         // (post-merge — comment landed 37 s after merge).
         statusEl.textContent = "Upscale feature is disabled on this bridge.";
-        submitBtn.disabled = false;
+        setDisabled(submitBtn, false);
         return;
       }
       if (!res.ok) {
@@ -4711,7 +4778,7 @@ function initUpscaleClearAllModal() {
       }, 1500);
     } catch (err) {
       statusEl.textContent = `Couldn’t delete: ${err.message}`;
-      submitBtn.disabled = false; // allow retry without retyping
+      setDisabled(submitBtn, false); // allow retry without retyping
     }
   });
 }
@@ -4800,7 +4867,7 @@ function initUpscaleTarget() {
       const t = await API.get("/api/upscale/target");
       if (t.targetRate > 0) selectValue(rateSel, t.targetRate);
       if (t.targetBits > 0) selectValue(bitsSel, t.targetBits);
-      applyBtn.disabled = false;
+      setDisabled(applyBtn, false);
     } catch (err) {
       // 503 = manifest store not wired (test harness) — leave the
       // button disabled so Apply can't fire against a dead endpoint.
@@ -4813,7 +4880,7 @@ function initUpscaleTarget() {
       targetRate: parseInt(rateSel.value, 10),
       targetBits: parseInt(bitsSel.value, 10),
     };
-    applyBtn.disabled = true;
+    setDisabled(applyBtn, true);
     try {
       const r = await API.patch("/api/upscale/target", body);
       showMsg(msg, "ok",
@@ -4821,7 +4888,7 @@ function initUpscaleTarget() {
     } catch (err) {
       showMsg(msg, "err", `Couldn’t set the target: ${err.message}`);
     } finally {
-      applyBtn.disabled = false;
+      setDisabled(applyBtn, false);
     }
   });
 }
@@ -5353,30 +5420,14 @@ function initJobs() {
   }, "Cleared — will retry");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
-  // gets its own handler instead of wireJobButton. The switch applies live,
-  // so the card is redrawn as soon as the save lands: it reads "active", or
-  // "degraded" with what is missing (fpcalc, the AcoustID key) in its note,
-  // and the button goes. It latched "Enabled — restart to apply" until
-  // 2026-09-28, from when /api/jobs reported the switch as it was at
-  // startup; both halves are live since.
-  const fpEnable = document.getElementById("jobs-fp-enable");
-  fpEnable?.addEventListener("click", async () => {
-    fpEnable.disabled = true;
-    try {
-      await API.patch("/api/settings", { fingerprintEnabled: true });
-    } catch (err) {
-      fpEnable.disabled = false;
-      fpEnable.textContent = "Enable failed — retry";
-      return;
-    }
-    fpEnable.disabled = false;
-    fpEnable.textContent = "Enable";
-    // The card's own gear offers the same switch: show it saved there too,
-    // as a tray's own save does for every tray on the page.
-    if (traySettings) traySettings.fingerprintEnabled = true;
-    for (const t of mountedTrays) syncTray(t);
-    // A failed refresh is the 10 s poll's to repeat: the save has landed.
-    await jobsSnapshotRefresh().catch(() => {});
+  // gets its own handler instead of wireJobButton (enableFingerprint), and
+  // it waits for the settings snapshot that says whether the control plane
+  // owns the switch (syncFingerprintEnable). The trays' mount already
+  // started that request, and it is shared.
+  document.getElementById("jobs-fp-enable")?.addEventListener("click", (e) => enableFingerprint(e.currentTarget));
+  void traySettingsSnapshot().then(syncFingerprintEnable).catch(() => {
+    // Silent: the button simply stays hidden, and the card's gear shows the
+    // error where the reader opens it.
   });
   wireJobButton("jobs-backup-now", () => API.post("/api/backups"), "Snapshot written");
   wireJobButton("jobs-mix-regen", async () => {
@@ -5398,7 +5449,7 @@ function initJobs() {
   const retry = document.getElementById("enrich-retry");
   if (retry) {
     retry.addEventListener("click", async () => {
-      retry.disabled = true;
+      setDisabled(retry, true);
       try {
         const r = await API.post("/api/enrichment/retry");
         if (r?.enrichment) applyEnrichment(r.enrichment);
@@ -5406,11 +5457,27 @@ function initJobs() {
       } catch (err) {
         retry.textContent = err.message.includes("rate_limited") ? "Try again in a minute" : "Retry failed";
       }
-      setTimeout(() => { retry.textContent = "Retry missing"; retry.disabled = false; }, 4000);
+      setTimeout(() => { retry.textContent = "Retry missing"; setDisabled(retry, false); }, 4000);
     });
   }
 }
 
+
+// carPlayBlurb words the CarPlay pre-generation tray's blurb for the switches
+// the reader can see. The three that have to be on are PCM upscaling (the
+// pool), CarPlay-optimized variants (the kind) and the sweep itself; the
+// DSD → PCM row beside them is not one of the three. Where the control plane
+// owns some, the tray hides those rows, and the sentence says how many are set
+// for the bridge rather than counting switches that are not on the screen.
+function carPlayBlurb(shown) {
+  const hidden = ["upscaleEnabled", "optimizeEnabled", "autoOptimizeEnabled"]
+    .filter((field) => !shown.has(field)).length;
+  const base = "Builds the optimized copies ahead of time instead of waiting for a " +
+    "device to ask for one. All three switches have to be on for anything to run";
+  if (hidden === 0) return `${base}.`;
+  if (hidden === 3) return `${base}; all three are set for this bridge.`;
+  return `${base}; the ${hidden === 1 ? "one not shown here is" : "two not shown here are"} set for this bridge.`;
+}
 
 // mountJobTrays hangs a feature tray off every job card that HAS a
 // switch. The Jobs page shows what each job is doing; before this, the
@@ -5493,8 +5560,7 @@ function mountJobTrays() {
 
   attachFeatureTray(head("job-ao-card"), {
     title: "CarPlay pre-generation",
-    blurb: "Builds the optimized copies ahead of time instead of waiting for a " +
-      "device to ask for one. All three switches have to be on for anything to run.",
+    blurb: carPlayBlurb,
     rows: [
       { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
       { field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants" },
@@ -5594,6 +5660,50 @@ function mountJobTrays() {
   });
 }
 
+// syncFingerprintEnable shows the fingerprint card's Enable button while the
+// switch is off AND the control plane leaves it to this console.
+//
+// The button PATCHes fingerprintEnabled, which the PATCH refuses whole on a
+// bridge that lists it in deployment.managedSettings: until 2026-09-29 the
+// button was offered there and answered "Enable failed — retry" (backlog
+// B68), the trays' defect (B35) on a control beside them. Hidden, not
+// greyed, as the trays hide a managed row. It stays hidden until a snapshot
+// has named the managed set (trayManagedKnown), so a managed bridge never
+// flashes it, and initJobs calls this again the moment one lands. The card's
+// own state is on the button (data-switch-on), written by renderJobCards.
+function syncFingerprintEnable() {
+  const btn = document.getElementById("jobs-fp-enable");
+  if (!btn || !btn.dataset.switchOn) return;
+  btn.hidden = btn.dataset.switchOn === "1" || !trayManagedKnown() || trayFieldManaged("fingerprintEnabled");
+}
+
+// enableFingerprint is the Enable button's click: a settings PATCH rather
+// than a job trigger, so it is not wireJobButton's. The switch applies live,
+// so the card is redrawn as soon as the save lands: it reads "active", or
+// "degraded" with what is missing (fpcalc, the AcoustID key) in its note,
+// and the button goes. It sends nothing for a managed field, as a tray's
+// save does (saveTrayField): the button is hidden there, so only a click
+// dispatched from script gets here.
+async function enableFingerprint(btn) {
+  if (trayFieldManaged("fingerprintEnabled")) return;
+  setDisabled(btn, true);
+  try {
+    await API.patch("/api/settings", { fingerprintEnabled: true });
+  } catch (err) {
+    setDisabled(btn, false);
+    btn.textContent = "Enable failed — retry";
+    return;
+  }
+  setDisabled(btn, false);
+  btn.textContent = "Enable";
+  // The card's own gear offers the same switch: show it saved there too,
+  // as a tray's own save does for every tray on the page.
+  if (traySettings) traySettings.fingerprintEnabled = true;
+  for (const t of mountedTrays) syncTray(t);
+  // A failed refresh is the 10 s poll's to repeat: the save has landed.
+  await jobsSnapshotRefresh().catch(() => {});
+}
+
 // wireJobButton — shared trigger-button UX: disable while in flight,
 // flash the outcome (the action's own return string, or `okText`),
 // restore after 4 s. All POSTs route through API.post so the CSRF
@@ -5603,7 +5713,7 @@ function wireJobButton(id, action, okText) {
   if (!btn) return;
   const original = btn.textContent;
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     btn.textContent = "Working…";
     try {
       const out = await action();
@@ -5612,7 +5722,7 @@ function wireJobButton(id, action, okText) {
       btn.textContent = "Failed";
       console.warn(`${id}:`, err.message);
     }
-    setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 4000);
+    setTimeout(() => { btn.textContent = original; setDisabled(btn, false); }, 4000);
   });
 }
 
@@ -5783,9 +5893,13 @@ function renderJobCards(j) {
     // (fingerprintEnabled answers `live`, and /api/jobs reads it per
     // request), so the refresh after a click hides it; it latched
     // "Enabled — restart to apply" until 2026-09-28, written when this card
-    // reported the switch as it was at startup.
+    // reported the switch as it was at startup. Where the control plane owns
+    // the switch it is never shown (syncFingerprintEnable).
     const fpEnable = document.getElementById("jobs-fp-enable");
-    if (fpEnable) fpEnable.hidden = fp.enabled;
+    if (fpEnable) {
+      fpEnable.dataset.switchOn = fp.enabled ? "1" : "0";
+      syncFingerprintEnable();
+    }
     // The description beneath keeps its "Fingerprint settings" link, which
     // is where a missing key is fixed.
     showJobDegraded("job-fp-degraded",
@@ -6631,7 +6745,7 @@ async function runDoctor() {
   const status = document.getElementById("doctor-status");
   const results = document.getElementById("doctor-results");
   if (!status || !results) return;
-  if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
+  if (btn) { setDisabled(btn, true); btn.textContent = "Running…"; }
   status.textContent = "Running checks…";
   results.replaceChildren();
   try {
@@ -6644,7 +6758,7 @@ async function runDoctor() {
   } catch (err) {
     status.textContent = `Couldn't run the checks: ${err.message}`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "Run checks"; }
+    if (btn) { setDisabled(btn, false); btn.textContent = "Run checks"; }
   }
 }
 
@@ -6731,7 +6845,7 @@ function wireDatabaseCompact() {
     // walks straight past the attribute.
     if (btn.dataset.busy === "1") return;
     btn.dataset.busy = "1";
-    btn.disabled = true;
+    setDisabled(btn, true);
     const previous = btn.textContent;
     btn.textContent = "Compacting…";
     if (status) status.textContent = "";
@@ -6756,7 +6870,7 @@ function wireDatabaseCompact() {
       if (status) status.textContent = "Compaction failed: " + err.message;
     } finally {
       btn.dataset.busy = "";
-      btn.disabled = false;
+      setDisabled(btn, false);
       btn.textContent = previous;
     }
   }, { signal: pageSignal() });
@@ -7309,7 +7423,7 @@ function initLogout() {
   const btn = document.getElementById("logout-btn");
   if (!btn) return;
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     try {
       await API.post("/logout");
     } catch (e) { /* fall through to the redirect either way */ }
@@ -7359,6 +7473,9 @@ async function refreshDupesSummary() {
   // an external change).
   const radio = document.querySelector(`#dupes-policy input[value="${CSS.escape(sum.policy || "")}"]`);
   if (radio && !radio.checked) radio.checked = true;
+  // What a bridge that owns the policy shows in the radios' place: the
+  // policy in force, named as the radio names it.
+  setText("dupes-policy-name", dupesPolicyName(radio, sum.policy));
 
   const stampLine = document.getElementById("dupes-stamp-line");
   if (!sum.stamped) {
@@ -7513,25 +7630,71 @@ async function loadDupeGroups(reset) {
   if (more) more.hidden = !dupesGroupsCursor;
 }
 
+// dupesPolicyName names the serving policy as its radio does ("Highest
+// quality"), for the line a managed bridge shows in the radios' place; the
+// raw policy value when the page has no radio for it, a dash for none.
+function dupesPolicyName(radio, policy) {
+  return radio?.closest("label")?.querySelector("strong")?.textContent || policy || "—";
+}
+
+// applyDupesPolicyManaged hides the serving-policy radios, and the prose
+// about saving one, on a bridge whose control plane owns duplicatesFilter,
+// and shows the policy in force in their place.
+//
+// The radios PATCH duplicatesFilter, which the PATCH refuses whole there:
+// until 2026-09-29 they were offered, and a click answered an alert saying
+// the setting is managed (backlog B68), the trays' defect (B35) on a
+// control beside them. Hidden, not greyed, as the trays hide a managed row;
+// the inputs are disabled too, so nothing can send one. The page is
+// readable without them only because it says which policy is in force, the
+// one thing the radios also told. Unlike the fingerprint Enable button this
+// shows the control until a snapshot says otherwise (trayFieldManaged reads
+// an unknown as not managed): the radios also carry the policy in force, and
+// initDuplicates applies the set an earlier page's snapshot left before the
+// first paint, so a boosted navigation never shows them.
+function applyDupesPolicyManaged() {
+  const managed = trayFieldManaged("duplicatesFilter");
+  for (const id of ["dupes-policy", "dupes-policy-hint"]) {
+    const node = document.getElementById(id);
+    if (node) node.hidden = managed;
+  }
+  const readout = document.getElementById("dupes-policy-managed");
+  if (readout) readout.hidden = !managed;
+  document.querySelectorAll("#dupes-policy input").forEach((input) => setDisabled(input, managed));
+}
+
+// saveDupesPolicy is a radio's change: PATCH the policy, then refresh the
+// counts the pass will move. It sends nothing for a managed field (the
+// radios are hidden there, so only a change dispatched from script gets
+// here) and snaps the radios back to what the bridge holds.
+async function saveDupesPolicy(value) {
+  if (!value) return;
+  if (trayFieldManaged("duplicatesFilter")) {
+    refreshDupesSummary();
+    return;
+  }
+  try {
+    await API.patch("/api/settings", { duplicatesFilter: value });
+  } catch (err) {
+    alert(`Saving the policy failed: ${err.message || err}`);
+    refreshDupesSummary(); // snap the radio back to reality
+    return;
+  }
+  scheduleDupesRefresh();
+}
+
 function initDuplicates() {
   if (!document.getElementById("duplicates-page-root")) return;
+  applyDupesPolicyManaged();
+  void traySettingsSnapshot().then(applyDupesPolicyManaged).catch(() => {
+    // Silent: the radios stay, and a save that the bridge refuses says why.
+  });
   refreshDupesSummary();
   loadDupeGroups(true);
-  document.getElementById("dupes-policy")?.addEventListener("change", async (e) => {
-    const v = e.target?.value;
-    if (!v) return;
-    try {
-      await API.patch("/api/settings", { duplicatesFilter: v });
-    } catch (err) {
-      alert(`Saving the policy failed: ${err.message || err}`);
-      refreshDupesSummary(); // snap the radio back to reality
-      return;
-    }
-    scheduleDupesRefresh();
-  });
+  document.getElementById("dupes-policy")?.addEventListener("change", (e) => saveDupesPolicy(e.target?.value));
   document.getElementById("dupes-reevaluate")?.addEventListener("click", async (e) => {
     const btn = e.currentTarget;
-    btn.disabled = true;
+    setDisabled(btn, true);
     try {
       const ack = await API.post("/api/duplicates/sweep");
       if (ack?.scanInFlight) {
@@ -7548,7 +7711,7 @@ function initDuplicates() {
     } catch (err) {
       alert(`Re-evaluate failed: ${err.message || err}`);
     } finally {
-      setTimeout(() => { btn.disabled = false; }, 1500);
+      setTimeout(() => setDisabled(btn, false), 1500);
     }
   });
   document.getElementById("dupes-tier-filter")?.addEventListener("change", () => loadDupeGroups(true));
@@ -8019,7 +8182,7 @@ function wireVariantsDirChange() {
 
   save.addEventListener("click", async () => {
     const input = document.getElementById("variants-dir-input");
-    save.disabled = true;
+    setDisabled(save, true);
     try {
       // The server validates: absolute, writable, and NOT inside a
       // library root. Re-checking here would be a second copy of a rule
@@ -8034,7 +8197,7 @@ function wireVariantsDirChange() {
     } catch (err) {
       showError("variants-dir-error", err.message);
     } finally {
-      save.disabled = false;
+      setDisabled(save, false);
     }
   });
 }
@@ -8048,7 +8211,7 @@ function wireVariantsClear() {
 
   open.addEventListener("click", () => {
     phrase.value = "";
-    go.disabled = true;
+    setDisabled(go, true);
     hideEl("variants-clear-error");
     setText("variants-clear-dir", variantsDirState?.current || "the cache");
     setText("variants-clear-bytes", formatBytes(variantsDirState?.usedBytes || 0));
@@ -8067,7 +8230,7 @@ function wireVariantsClear() {
 
   go.addEventListener("click", async () => {
     if (phrase.value !== "CLEAR") return;
-    go.disabled = true;
+    setDisabled(go, true);
     try {
       const res = await API.delete("/api/upscale/variants?confirm=true");
       dialog.close();
@@ -8077,7 +8240,7 @@ function wireVariantsClear() {
         `freed ${formatBytes(res.freedBytes)}.`);
     } catch (err) {
       showError("variants-clear-error", err.message);
-      go.disabled = false;
+      setDisabled(go, false);
     }
   });
 }
@@ -8086,7 +8249,7 @@ function wireVariantsRetry() {
   const btn = document.getElementById("variants-retry-failures");
   if (!btn) return;
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     setText("variants-status", "Clearing failure debounces…");
     try {
       // No body: the endpoint's unscoped form is the whole library,
@@ -8100,7 +8263,7 @@ function wireVariantsRetry() {
     } catch (err) {
       setText("variants-status", "Retry failed: " + err.message);
     } finally {
-      btn.disabled = false;
+      setDisabled(btn, false);
     }
   });
 }

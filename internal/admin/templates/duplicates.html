@@ -30,7 +30,10 @@
         <span><strong>Off</strong> — serve everything. Groups are still detected and counted here.</span>
       </label>
     </fieldset>
-    <p class="hint">
+    <p class="hint" id="dupes-policy-managed" hidden>
+      The serving policy is set for this bridge: <strong id="dupes-policy-name">—</strong>.
+    </p>
+    <p class="hint" id="dupes-policy-hint">
       Applies immediately (no restart): saving re-runs the stamping pass. Copies that stop being
       suppressed re-sync to devices on their next delta; copies that become suppressed disappear for
       new pairings and full rescans, and stay hidden by the app's own de-duplication until then.

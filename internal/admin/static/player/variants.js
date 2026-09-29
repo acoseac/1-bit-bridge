@@ -7,9 +7,9 @@
 // "0 / 16" would be an accusation. The exempt remainder is a muted
 // footnote for the same reason.
 
-import { el, clear } from "./ui.js";
+import { el, clear, setDisabled } from "./ui.js";
 import { bytes } from "./format.js";
-import { generateVariants, deleteVariants } from "./api.js";
+import { generateVariants, deleteVariants, isAborted } from "./api.js";
 
 // Button labels are SPELLED OUT per kind rather than derived from the
 // chip label. Deriving them meant lower-casing a proper noun, and
@@ -45,80 +45,192 @@ const OPTIMIZE_SWITCH_ROW = {
  *   caller can re-fetch. The panel deliberately does NOT re-fetch itself:
  *   generation is asynchronous, so the numbers that matter arrive later,
  *   from the live refresh rather than from the response to the click.
- *   Also called after a tray saves a switch that changes what the panel
- *   draws, since only a re-fetch learns what the switch now allows.
+ *   Also what a tray save falls back to, when the panel was given no
+ *   `refresh` to redraw itself with.
  * @param {object} [opts]
  * @param {boolean} [opts.plain=false] - drop the heading and the card
  *   chrome, for a container that already frames and labels the panel —
  *   i.e. a tab. The folder view, where this is one section among
  *   several on an unframed page, keeps both.
+ * @param {function} [opts.refresh] - answers a fresh `variants` block. A
+ *   tray save that changes what the panel draws (the panel's own switches,
+ *   see paint) redraws the panel IN PLACE from it: the gears and their
+ *   trays are built once per panel and stay in the document, so the tray's
+ *   "Saved." and the reader's focus survive, as the Smart mixes page's do
+ *   (drawMixes). Until 2026-09-29 the save called onChanged, which re-runs
+ *   the whole route, and that took the tray, its "Saved." and the focus
+ *   (moved to the page title) with it (backlog B68). Absent, a tray save
+ *   calls onChanged, as before.
+ * @param {function} [opts.alive] - whether the route this panel was drawn for
+ *   is still the current one. A redraw whose answer lands after the reader
+ *   has moved on paints nothing.
  */
-export function variantPanel(summary, scope, onChanged, { plain = false } = {}) {
+export function variantPanel(summary, scope, onChanged, { plain = false, refresh = null, alive = null } = {}) {
   if (!summary) return null;
 
-  const root = el("section", { class: plain ? "variants variants-plain" : "variants" });
-  if (!plain) root.appendChild(el("h2", { class: "variants-head", text: "Variants" }));
+  const panel = {
+    scope, onChanged, refresh, alive,
+    summary,
+    // The newest redraw: an answer that is not the newest paints nothing, so
+    // two saves in quick succession end on the later one's state whichever
+    // answer lands last.
+    seq: 0,
+    root: el("section", { class: plain ? "variants variants-plain" : "variants" }),
+    head: plain ? null : el("h2", { class: "variants-head", text: "Variants" }),
+    totals: el("p", { class: "muted small" }),
+  };
+  // The block that stops both kinds ("switched off for this bridge", sox
+  // missing) and the CarPlay kind's own note are the same shape: a note, and
+  // the gear that opens the switch behind it. The panel-wide one is offered
+  // only for a SETTING; sox missing is a package to install on the host, and
+  // a switch that cannot fix it would be the wrong offer.
+  panel.gate = switchNote(() => window.BridgeFeatureTray?.build({
+    title: "Variant generation",
+    blurb: "Cached hi-res and CarPlay-optimized copies, generated offline by " +
+      "sox. Nothing is transcoded on the fly and the originals are untouched.",
+    rows: [
+      { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
+      OPTIMIZE_SWITCH_ROW,
+    ],
+    link: { href: "/settings?tab=audio", text: "All audio settings →" },
+    onSaved: (field) => {
+      // The upscaling switch decides what the whole panel draws. The CarPlay
+      // one decides the CarPlay row alone, and only once generation is on:
+      // while it is off nothing here depends on it, and a redraw would
+      // repaint the same panel. Generate does not redraw either: its work
+      // has only been queued. Both are read from the panel as it is NOW: this tray
+      // stays once built, so it can answer for the CarPlay switch after
+      // generation has come on.
+      if (field === "upscaleEnabled" || (field === "optimizeEnabled" && panel.summary.enabled)) {
+        redraw(panel);
+      }
+    },
+  }));
+  panel.kinds = KINDS.map((kind) => kindRow(kind, panel));
+  paint(panel, summary);
+  return panel.root;
+}
 
+/**
+ * Put a summary on the panel: update what is drawn in place, and reconcile
+ * which nodes are in the document.
+ *
+ * Every node the panel owns is built once, so a paint changes text, disabled
+ * states and attributes on the nodes already there, and `reconcile` adds and
+ * removes only the ones a state does or does not need. A node a paint leaves
+ * where it was is not detached, and detaching a node takes the focus with it:
+ * the gears and their trays (with the switch the reader just toggled, and its
+ * "Saved.") are among them.
+ */
+function paint(panel, summary) {
+  panel.summary = summary;
   const totals = [];
   if (summary.sourceBytes) totals.push(`${bytes(summary.sourceBytes)} of originals`);
   if (summary.variantBytes) totals.push(`${bytes(summary.variantBytes)} of variants`);
-  if (totals.length) {
-    root.appendChild(el("p", { class: "muted small", text: totals.join(" · ") }));
-  }
+  panel.totals.textContent = totals.join(" · ");
 
   const blocked = blockedReason(summary);
-  if (blocked) {
-    const note = el("p", { class: "variants-blocked small", text: blocked });
-    // A gear beside the note when the block is a SETTING. The other
-    // reason — sox missing — is a package to install on the host, and a
-    // switch that cannot fix it would be the wrong offer.
-    //
-    // This note is the exact "go to Settings → Audio" round trip the
-    // trays exist to remove, on a panel showing coverage bars the reader
-    // cannot act on. window.BridgeFeatureTray, guarded: see mixesToolbar.
-    const tray = !summary.enabled && window.BridgeFeatureTray?.build({
-      title: "Variant generation",
-      blurb: "Cached hi-res and CarPlay-optimized copies, generated offline by " +
-        "sox. Nothing is transcoded on the fly and the originals are untouched.",
-      rows: [
-        { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
-        OPTIMIZE_SWITCH_ROW,
-      ],
-      link: { href: "/settings?tab=audio", text: "All audio settings →" },
-      // Redrawn for the upscaling switch only. While generation is off
-      // nothing here depends on the CarPlay one, so a redraw for it would
-      // repaint the same panel and take the tray and its "Saved." with it:
-      // Generate does not redraw for the same reason (kindActions). A
-      // redraw once upscaling is on reads the CarPlay switch from the
-      // server anyway.
-      onSaved: (field) => { if (field === "upscaleEnabled" && onChanged) onChanged(); },
-    });
-    if (tray) {
-      root.appendChild(el("div", { class: "variants-blocked-row" }, note, tray.button));
-      root.appendChild(tray.tray);
-    } else {
-      root.appendChild(note);
-      // No gear means no route to the switch, and the note stopped
-      // naming Settings when the gear started answering for it — so a
-      // bridge where app.js failed to publish the tray would state the
-      // problem and offer nothing. The link is the fallback ONLY: beside
-      // a gear it would duplicate the tray's own footer.
-      // (CodeRabbit on PR #763.)
-      if (!summary.enabled) {
-        root.appendChild(el("p", { class: "small" },
-          el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" })));
-      }
-    }
-  }
-
-  for (const kind of KINDS) {
+  // No "→ Settings" in the copy: the gear beside this line IS the fix now, and
+  // a sentence sending the reader elsewhere would compete with the control
+  // next to it. The gear is the exact "go to Settings → Audio" round trip the
+  // trays exist to remove, on a panel showing coverage bars the reader cannot
+  // act on.
+  const gate = panel.gate.nodes(blocked, !summary.enabled);
+  const nodes = [];
+  if (panel.head) nodes.push(panel.head);
+  if (totals.length) nodes.push(panel.totals);
+  nodes.push(...gate);
+  for (const row of panel.kinds) {
     // A block that stops both kinds is said once, above them. One that
     // stops a single kind is said in that kind's row, beside the button it
     // disables.
-    const off = blocked ? "" : kindOffReason(kind.key, summary);
-    root.appendChild(kindRow(kind, summary[kind.key], scope, !blocked && !off, off, onChanged));
+    const off = blocked ? "" : kindOffReason(row.kind.key, summary);
+    row.update(summary[row.kind.key], !blocked && !off, off);
+    nodes.push(row.node);
   }
-  return root;
+  reconcile(panel.root, nodes);
+}
+
+/**
+ * Make `parent`'s children exactly `desired`, in order, moving as little as
+ * possible: what is not wanted goes, what is wanted and missing is inserted
+ * before its successor, and a node that is already in place is never touched.
+ * The relative order of the nodes that persist never changes, which is what
+ * makes "never touched" true for them.
+ */
+function reconcile(parent, desired) {
+  const wanted = new Set(desired);
+  for (const child of [...parent.children]) {
+    if (!wanted.has(child)) parent.removeChild(child);
+  }
+  desired.forEach((node, i) => {
+    const at = parent.children[i];
+    if (at !== node) parent.insertBefore(node, at || null);
+  });
+}
+
+/**
+ * Redraw the panel after a tray saved a switch that changes what it draws.
+ *
+ * In place from a fresh summary when the panel was given a way to fetch one,
+ * and through onChanged (the route's own re-render) when it was not, or when
+ * the fetch fails: the route fetches again and says what went wrong in its
+ * own error state. A redraw is refused once the route has moved on, and an
+ * answer that a newer redraw has overtaken paints nothing.
+ */
+async function redraw(panel) {
+  if (!panel.refresh) {
+    if (panel.onChanged) panel.onChanged();
+    return;
+  }
+  const seq = ++panel.seq;
+  const gone = () => panel.alive !== null && !panel.alive();
+  let next;
+  try {
+    next = await panel.refresh();
+  } catch (e) {
+    if (isAborted(e) || gone()) return;
+    if (panel.onChanged) panel.onChanged();
+    return;
+  }
+  // No summary in the answer (the bridge logged and dropped it): keep what is
+  // drawn rather than blank a panel the reader is using.
+  if (seq !== panel.seq || gone() || !next) return;
+  paint(panel, next);
+}
+
+/**
+ * A note that a switch is off, with the gear beside it that opens that
+ * switch: the panel-wide note and the CarPlay kind's own are this one shape.
+ *
+ * The gear and its tray are built once, the first time a note is offered one
+ * (`offerGear`) and the app published a tray, and then they STAY: they are
+ * where the reader's focus is after a save, and a redraw that took them away
+ * would take it too. The note's text follows the state, and is left out while
+ * there is nothing to say. Without a tray (app.js did not publish one) a
+ * setting's note is followed by a link to Settings, the fallback ONLY: beside
+ * a gear it would duplicate the tray's own footer. (CodeRabbit on PR #763.)
+ *
+ * `nodes` returns what belongs in the document now, in order.
+ */
+function switchNote(buildTray) {
+  const note = el("p", { class: "variants-blocked small" });
+  const row = el("div", { class: "variants-blocked-row" });
+  const link = el("p", { class: "small" },
+    el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" }));
+  let tray = null;
+  return {
+    nodes(reason, offerGear) {
+      if (!tray && offerGear) tray = buildTray() || null;
+      note.textContent = reason;
+      if (tray) {
+        reconcile(row, reason ? [note, tray.button] : [tray.button]);
+        return [row, tray.tray];
+      }
+      if (!reason) return [];
+      return offerGear ? [note, link] : [note];
+    },
+  };
 }
 
 /**
@@ -131,9 +243,6 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
  */
 function blockedReason(summary) {
   if (!summary.enabled) {
-    // No "→ Settings" in the copy: the gear beside this line IS the fix
-    // now, and a sentence sending the reader elsewhere would compete
-    // with the control next to it.
     return "Variant generation is switched off for this bridge.";
   }
   if (!summary.soxAvailable) {
@@ -167,143 +276,128 @@ function kindOffReason(key, summary) {
 }
 
 /**
- * The note a kind carries when its own switch is off, with a gear beside it
- * that opens that one switch: the panel-wide note's shape, one kind down.
- * The fallback, when app.js did not publish the tray, is the same link the
- * panel-wide note falls back to.
+ * One kind's row: built once, then updated by `update` as summaries arrive.
  *
- * A save of that switch redraws the panel through onChanged, so the note,
- * the gear and the disabled button go as the switch comes on. Without it
- * the row said "switched off" beside the tray's "Saved." until the next
- * render (CodeRabbit on #1068).
+ * A save of the CarPlay kind's switch redraws the panel, so the note, and the
+ * disabled Generate, follow the switch; without it the row said "switched off"
+ * beside the tray's "Saved." until the next render (CodeRabbit on #1068). The
+ * row, its gear and its tray stay, for the reason `switchNote` gives.
  */
-function kindOffNote(reason, onChanged) {
-  const note = el("p", { class: "variants-blocked small", text: reason });
-  const tray = window.BridgeFeatureTray?.build({
-    title: "CarPlay-optimized variants",
-    blurb: "16-bit copies for head units and cellular streaming, generated offline " +
-      "by sox. The originals are untouched.",
-    rows: [OPTIMIZE_SWITCH_ROW],
-    link: { href: "/settings?tab=audio", text: "All audio settings →" },
-    onSaved: onChanged,
-  });
-  if (tray) {
-    return el("div", { class: "variant-kind-off" },
-      el("div", { class: "variants-blocked-row" }, note, tray.button), tray.tray);
-  }
-  return el("div", { class: "variant-kind-off" }, note,
-    el("p", { class: "small" },
-      el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" })));
-}
-
-function kindRow(kind, cov, scope, actionable, off, onChanged) {
-  const c = cov || { covered: 0, eligible: 0, exempt: 0, stale: 0 };
-  const row = el("div", { class: "variant-kind" });
-
+function kindRow(kind, panel) {
   // Title, ratio and both buttons share ONE line, with the bar under
   // it. Stacked — title / bar / note / buttons / status — each kind was
   // five rows tall and the pair filled a screen for two numbers and two
   // controls. Nothing was dropped; it is the same content on half the
   // lines.
   const status = el("p", { class: "small variant-status", attrs: { "aria-live": "polite" } });
-  const head = el("div", { class: "variant-kind-head" },
-    el("span", { class: "variant-kind-title", text: kind.title }),
-    el("span", { class: "variant-kind-ratio", text: `${c.covered} / ${c.eligible}` }),
-    kindActions(kind, c, scope, actionable, onChanged, status));
-  row.appendChild(head);
-  row.appendChild(bar(c, kind.title));
-  if (off) row.appendChild(kindOffNote(off, onChanged));
+  const ratio = el("span", { class: "variant-kind-ratio" });
+  const fill = el("div", { class: "variant-bar-fill" });
+  const bar = el("div", {
+    class: "variant-bar",
+    attrs: { role: "progressbar", "aria-label": `${kind.title} coverage`, "aria-valuemin": "0" },
+  }, fill);
+  const note = el("p", { class: "muted small variant-kind-note" });
+  const stale = el("p", { class: "small variant-kind-stale" });
+  const offSlot = el("div", { class: "variant-kind-off" });
+  const off = switchNote(() => kind.key === "optimize" ? window.BridgeFeatureTray?.build({
+    title: "CarPlay-optimized variants",
+    blurb: "16-bit copies for head units and cellular streaming, generated offline " +
+      "by sox. The originals are untouched.",
+    rows: [OPTIMIZE_SWITCH_ROW],
+    link: { href: "/settings?tab=audio", text: "All audio settings →" },
+    onSaved: () => redraw(panel),
+  }) : null);
 
-  // One note, not a list. An empty denominator and a non-zero exempt
-  // count are the SAME fact told twice — "2 need nothing · nothing here
-  // can take this" reads like two problems.
-  let note = kind.blurb;
-  if (c.eligible === 0 && c.exempt > 0) {
-    note = "Nothing here needs this.";
-  } else if (c.exempt > 0) {
-    note = `${c.exempt} of these need nothing.`;
-  }
-  row.appendChild(el("p", { class: "muted small variant-kind-note", text: note }));
-
-  // A stale copy exists and will not be served, and the bar counts it
-  // as covered — which is the truth about what Generate will do, since
-  // the batch skips any track that already has a variant of the kind.
-  // So it needs saying out loud, WITH the remedy: Delete then Generate
-  // is the only route back to a current copy.
-  if (c.stale > 0) {
-    row.appendChild(el("p", {
-      class: "small variant-kind-stale",
-      text: c.stale === 1
-        ? "1 copy is out of date — its source changed after it was made. " +
-          "Delete, then generate again."
-        : `${c.stale} copies are out of date — their sources changed after they ` +
-          "were made. Delete, then generate again.",
-    }));
-  }
-
-  row.appendChild(status);
-  return row;
-}
-
-/** The Generate / Delete pair, which now rides the kind's title line. */
-function kindActions(kind, c, scope, actionable, onChanged, status) {
-  const missing = Math.max(0, c.eligible - c.covered);
-
+  const row = { kind, cov: { covered: 0, eligible: 0, exempt: 0, stale: 0 } };
   const gen = el("button", { class: "btn btn-primary", text: kind.action });
-  // Nothing eligible and nothing missing means there is no work to
-  // request. A live button that answers "enqueued 0" reads as a
-  // failure; a disabled one with the note beside it reads as done.
-  gen.disabled = !actionable || missing === 0;
   // No refresh callback on generate, deliberately. The work has only
   // been QUEUED when the response arrives, so re-rendering here would
   // repaint the same numbers and destroy the status line the operator
   // just read. The live refresh brings the real result when it lands.
   gen.addEventListener("click", () =>
-    run(gen, status, () => generateVariants(scope, kind.key),
+    run(gen, status, () => generateVariants(panel.scope, kind.key),
       (r) => r.enqueuedCount > 0
         ? `Queued ${r.enqueuedCount}. They appear as they finish.`
         : "Nothing to queue — everything eligible is already covered."));
-
   const del = el("button", { class: "btn", text: "Delete" });
-  // Delete stays available on a bridge with no sox: reclaiming disk is
-  // exactly what an operator without a toolchain still needs to do.
-  //
-  // The exception is the WHOLE-LIBRARY folder scope, where "delete"
-  // means every variant the bridge has ever made. That is a different
-  // magnitude of action and it keeps its own typed-confirmation control
-  // on the Roots page; a single browser confirm() beside a coverage bar
-  // is not the guard it deserves.
-  const wholeLibrary = scope.path === "";
-  del.disabled = c.covered === 0 || wholeLibrary;
-  if (wholeLibrary && c.covered > 0) {
-    del.title = "Clearing every variant is done from the Roots page.";
-  }
   del.addEventListener("click", () => {
+    const c = row.cov;
     if (!confirm(
       `Delete ${c.covered} ${kind.title} variant${c.covered === 1 ? "" : "s"}?\n\n` +
       `The cached copies are removed from disk. Your original files are not touched.`)) return;
-    run(del, status, () => deleteVariants(scope, kind.key),
+    run(del, status, () => deleteVariants(panel.scope, kind.key),
       (r) => `Deleted ${r.deletedCount}, freed ${bytes(r.freedBytes) || "0 B"}.`,
-      onChanged);
+      panel.onChanged);
   });
+  const head = el("div", { class: "variant-kind-head" },
+    el("span", { class: "variant-kind-title", text: kind.title }),
+    ratio,
+    el("div", { class: "variant-actions" }, gen, del));
+  row.node = el("div", { class: "variant-kind" });
 
-  return el("div", { class: "variant-actions" }, gen, del);
-}
+  row.update = (cov, actionable, offReason) => {
+    const c = cov || { covered: 0, eligible: 0, exempt: 0, stale: 0 };
+    row.cov = c;
+    ratio.textContent = `${c.covered} / ${c.eligible}`;
+    const pct = c.eligible > 0 ? Math.round((c.covered / c.eligible) * 100) : 0;
+    bar.setAttribute("aria-valuenow", String(c.covered));
+    bar.setAttribute("aria-valuemax", String(c.eligible));
+    fill.style.width = `${pct}%`;
 
-function bar(c, label) {
-  const pct = c.eligible > 0 ? Math.round((c.covered / c.eligible) * 100) : 0;
-  const outer = el("div", {
-    class: "variant-bar",
-    attrs: {
-      role: "progressbar", "aria-label": `${label} coverage`,
-      "aria-valuenow": String(c.covered), "aria-valuemin": "0",
-      "aria-valuemax": String(c.eligible),
-    },
-  });
-  const fill = el("div", { class: "variant-bar-fill" });
-  fill.style.width = `${pct}%`;
-  outer.appendChild(fill);
-  return outer;
+    // Nothing eligible and nothing missing means there is no work to
+    // request. A live button that answers "enqueued 0" reads as a
+    // failure; a disabled one with the note beside it reads as done.
+    const missing = Math.max(0, c.eligible - c.covered);
+    setDisabled(gen, !actionable || missing === 0);
+    // Delete stays available on a bridge with no sox: reclaiming disk is
+    // exactly what an operator without a toolchain still needs to do.
+    //
+    // The exception is the WHOLE-LIBRARY folder scope, where "delete"
+    // means every variant the bridge has ever made. That is a different
+    // magnitude of action and it keeps its own typed-confirmation control
+    // on the Roots page; a single browser confirm() beside a coverage bar
+    // is not the guard it deserves.
+    const wholeLibrary = panel.scope.path === "";
+    setDisabled(del, c.covered === 0 || wholeLibrary);
+    if (wholeLibrary && c.covered > 0) {
+      del.title = "Clearing every variant is done from the Roots page.";
+    } else {
+      del.removeAttribute("title");
+    }
+
+    reconcile(offSlot, off.nodes(offReason, offReason !== ""));
+
+    // One note, not a list. An empty denominator and a non-zero exempt
+    // count are the SAME fact told twice — "2 need nothing · nothing here
+    // can take this" reads like two problems.
+    let text = kind.blurb;
+    if (c.eligible === 0 && c.exempt > 0) {
+      text = "Nothing here needs this.";
+    } else if (c.exempt > 0) {
+      text = `${c.exempt} of these need nothing.`;
+    }
+    note.textContent = text;
+
+    // A stale copy exists and will not be served, and the bar counts it
+    // as covered — which is the truth about what Generate will do, since
+    // the batch skips any track that already has a variant of the kind.
+    // So it needs saying out loud, WITH the remedy: Delete then Generate
+    // is the only route back to a current copy.
+    stale.textContent = c.stale === 0 ? "" : c.stale === 1
+      ? "1 copy is out of date — its source changed after it was made. " +
+        "Delete, then generate again."
+      : `${c.stale} copies are out of date — their sources changed after they ` +
+        "were made. Delete, then generate again.";
+
+    reconcile(row.node, [
+      head, bar,
+      ...(offSlot.children.length ? [offSlot] : []),
+      note,
+      ...(c.stale > 0 ? [stale] : []),
+      status,
+    ]);
+  };
+  return row;
 }
 
 /**
@@ -311,10 +405,12 @@ function bar(c, label) {
  *
  * The button is re-enabled on failure only. On success the caller
  * re-renders from fresh data, which replaces this node — re-enabling it
- * first would be a frame of the old state.
+ * first would be a frame of the old state. It takes focus back when it is
+ * re-enabled (setDisabled), so a failed request does not cost a keyboard
+ * user their place.
  */
 async function run(button, status, call, describe, onChanged) {
-  button.disabled = true;
+  setDisabled(button, true);
   clear(status);
   status.textContent = "Working…";
   status.classList.remove("variant-status-error");
@@ -325,7 +421,7 @@ async function run(button, status, call, describe, onChanged) {
   } catch (e) {
     status.textContent = e?.message || "Request failed.";
     status.classList.add("variant-status-error");
-    button.disabled = false;
+    setDisabled(button, false);
   }
 }
 

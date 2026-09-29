@@ -5750,14 +5750,15 @@ its twin.** The top list is older, shorter, and read first.
   status line and every other tray have the new value, and outside the
   `try`, so a callback that throws cannot turn a save that landed into
   "Save failed". Never for `restart` or `unchanged`: nothing on the page
-  moved, and a redraw takes the tray, and the restart instruction in it,
-  with it. The variant panel hands its `onChanged` (the view's re-render)
-  to the CarPlay kind's tray for its one switch, and to the panel-wide
-  tray for `upscaleEnabled` ALONE: nothing the panel draws while
-  generation is off depends on the CarPlay switch, so a redraw for it
-  would repaint the same panel and take the tray and its "Saved." away
-  for nothing, the reason Generate does not redraw either. **Don't make
-  a tray redraw by itself, or a page redraw for every field.**
+  moved, and a redraw that took the tray would take the restart
+  instruction in it with it. The variant panel's trays call its own
+  redraw (the bullet on the panel's in-place redraw, below): the CarPlay
+  kind's tray for its one switch, and the panel-wide tray for
+  `upscaleEnabled`, and for `optimizeEnabled` once generation is on:
+  while it is off nothing the panel draws depends on the CarPlay switch,
+  so a redraw for it would fetch and repaint the same panel for nothing,
+  the reason Generate does not redraw either. **Don't make a tray redraw
+  by itself, or a page redraw for every field.**
   `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` runs the
   shipped `buildFeatureTray` and save under node, and
   `TestAVariantTraySaveRedrawsThePanelWhereTheSwitchChangesIt` the shipped
@@ -5776,8 +5777,8 @@ its twin.** The top list is older, shorter, and read first.
   redraws for `smartPlaylistsEnabled` alone, and IN PLACE: toolbar and tray
   are built once per route, the redraw repaints the view and the bar ahead
   of the gear, and is refused once the route has moved on, so the tray and
-  its "Saved." survive, which the variant panel's whole-route redraw does
-  not (a follow-up; the focus is the next bullet's). **The player also drops the
+  its "Saved." survive, as the variant panel's do since 2026-09-29 (its
+  bullet, below). **The player also drops the
   trays' shared settings snapshot on every route**
   (`BridgeFeatureTray.invalidate`, from boot.js's `route()`), the drop an
   operator page gets from its page init, which the player never runs: a
@@ -5809,8 +5810,40 @@ its twin.** The top list is older, shorter, and read first.
   else took focus meanwhile, and never takes focus the switch did not have.
   `TestATraySaveGivesFocusBackToItsSwitch` runs the shipped save under node
   with the fixup rule modelled in the harness. **Every other control the
-  console disables while a request is out loses focus the same way** (the
-  Jobs page's `wireJobButton` buttons among them): open (a follow-up).
+  console disables while a request is out lost focus the same way** (the
+  Jobs page's `wireJobButton` buttons among them, measured on "Scan now"),
+  until 2026-09-29: the next bullet is the rule for all of them.
+- **Every control that disables itself around a request goes through
+  `setDisabled`, which gives focus back** (2026-09-29, backlog B68). The
+  Jobs page's "Scan now" read `document.activeElement` as the body while its
+  handler had it disabled, and still 4.5 s later once it was enabled again
+  (Chrome 152), so a keyboard or screen-reader user lost their place after
+  every "Scan now", "Retry missing" and the like; `saveTrayField` had given
+  focus back for a tray's switch alone. `setDisabled(control, disabled)` in
+  app.js is that rule for the 36 sites that disabled a control by a literal
+  (app.js's 29 and the player's 7), and the enables that ended them:
+  disabling notes on the control (`dataset.refocus`) whether it
+  had focus, and enabling gives focus back to a control that had it, unless
+  something else took focus meanwhile (`document.body` or nothing has it),
+  never to a control that did not (Safari focuses no button on a click), and
+  to nothing a redraw replaced. The note is on the control so the enabling
+  call, a `finally` or a 4 s timer away, needs no variable carried to it,
+  and `saveTrayField` no longer holds a copy of the rule. **The player
+  reaches it through `window.BridgeControls`** (app.js is a classic script
+  and the modules cannot import it, the `BridgeFeatureTray` handshake), with
+  `ui.js`'s `setDisabled` as the forwarding wrapper whose fallback is a plain
+  assignment: one implementation, and a page without app.js only loses the
+  focus. **Never write `.disabled = true` or `= false`, or the attribute
+  forms, outside the helper**: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`
+  sweeps app.js and every player module for them (a value computed from state,
+  `gen.disabled = !actionable`, is not a request in flight, and the variant
+  panel routes even those through the helper because an in-place repaint can
+  disable a control the reader is on). `TestSetDisabledGivesFocusBackToAControlThatHadIt`
+  and `TestAJobButtonGivesFocusBackAfterItsRequest` run the shipped helper and
+  `wireJobButton` under node with the fixup rule modelled in the DOM.
+  **Not covered: a control that VANISHES on success** (the fingerprint Enable
+  button hides once the switch is on, a Delete re-renders the route), which
+  has no control left to give focus to.
 - **A tray offers no switch the control plane owns** (2026-09-28, backlog
   B35). Trays ignored `deployment.managedSettings`, so on a managed bridge
   they offered switches the settings PATCH refuses whole: the album page's
@@ -5829,9 +5862,75 @@ its twin.** The top list is older, shorter, and read first.
   paint; on a fresh page load it is unknown until the tray's settings
   fetch lands (2 ms on loopback), and every row shows disabled meanwhile,
   the Settings page's own window. `TestATrayOffersNoSwitchTheControlPlaneOwns`
-  runs the shipped tray under node. **Two controls outside the trays still
-  offer a managed field** (the Jobs page's fingerprint Enable button, the
-  Duplicates page's policy select; a follow-up).
+  runs the shipped tray under node. **Two controls outside the trays
+  offered a managed field** until 2026-09-29 (the Jobs page's fingerprint
+  Enable button, the Duplicates page's policy radios): the next bullet.
+- **A control on the page that offers a managed field is hidden like a
+  tray's row, and one that only offers a change waits to know** (2026-09-29,
+  backlog B68). On a public-mode bridge whose `deployment.managedSettings`
+  listed `fingerprintEnabled` and `duplicatesFilter`, the Jobs page offered
+  the fingerprint Enable button and its click answered "Enable failed —
+  retry", and the Duplicates page offered the policy radios and a click
+  answered an alert, "these settings are managed by the control plane…":
+  B35's trays on a control beside them. There are exactly four console
+  callers of `PATCH /api/settings` (the Settings form, which hides managed
+  fields and drops unoffered keys, the trays, and these two) and the PATCH
+  is the only handler that reads the managed set. Both read the trays'
+  snapshot (`trayManaged`, kept across page inits). **The Enable button
+  waits for it**: `syncFingerprintEnable` shows it only for a switch that is
+  off, a managed set that is known and does not name the field
+  (`trayManagedKnown`; a card's button on a managed bridge must never
+  flash, which a tray's rows in a closed gear can afford), and `initJobs`
+  runs it again the moment the snapshot lands, not at the next 10 s poll.
+  **The policy radios stay until the set says otherwise**, since they also
+  say which policy is in force (`applyDupesPolicyManaged`, first from the
+  set an earlier page's snapshot left, so a boosted navigation never shows
+  them): the fieldset and the prose about saving one are hidden, the inputs
+  disabled, and a line says which policy is set for the bridge, named as its
+  radio names it (`dupesPolicyName`). Both handlers send nothing for a
+  managed field (`enableFingerprint`, `saveDupesPolicy`), as `saveTrayField`
+  does. **A tray blurb that counts switches is written from the rows the
+  reader can see**: `spec.blurb` may be a function of the shown fields,
+  which `applyTrayManaged` calls whenever the managed set may have changed,
+  and the CarPlay pre-generation tray's "All three switches have to be on
+  for anything to run" says how many are set for the bridge instead of
+  standing beside the two rows a hosted bridge leaves it (`carPlayBlurb`;
+  the DSD row is not one of the three).
+  `TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch`,
+  `TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt` and
+  `TestTheCarPlayTrayBlurbCountsOnlySwitchesTheReaderCanSee` run the shipped
+  functions under node.
+- **The variant panel redraws IN PLACE after a tray save** (2026-09-29,
+  backlog B68). A save in the panel's gear called `onChanged`, the whole
+  route's re-render: after turning PCM upscaling on from the Variants tab,
+  `document.activeElement` was `#player-title`, the panel had no gear left
+  and the tray's "Saved." was gone (Chrome 152). The panel now takes
+  `refresh` (a fresh `variants` block: the album view and the artist view
+  fetch their detail again) and `alive` (`gen() === at`, whether the route
+  is still the one it was drawn for), and repaints around its gears.
+  **Every node the panel owns is built once** and `paint` updates text,
+  disabled states and attributes on them; `reconcile` adds and removes only
+  the nodes a state needs and **never moves one that is already in place,
+  because detaching a node takes the focus out of its subtree**, and the
+  reader is in the tray's switch. The gears stay once built (a note, and the
+  gear beside it, are `switchNote`; the note's text follows the state and
+  the gear outlives it), so the panel's tray answers for the CarPlay switch
+  too once generation is on, and a redraw for that field is skipped while
+  generation is off. Concurrent redraws end on the newest one's answer
+  (`seq`); an answer after the route moved on, an aborted fetch, and an
+  answer with no summary paint nothing; a failed fetch hands over to
+  `onChanged`, whose re-render fetches again and shows its own error state;
+  a panel given no `refresh` (the folder view has no trays) calls
+  `onChanged` as it always did. **Not redrawn in place, still whole-route:
+  Delete (the numbers are true when it answers, and the track marks beside
+  the panel change with them) and the live refresh
+  (`onVariantChange`, every 8 s while a batch runs).**
+  `TestAVariantTraySaveRedrawsThePanelInPlace` runs the shipped panel on a
+  DOM that models the focus rules (a `reconcile` that rebuilds its children
+  is red on the focus lines alone), and
+  `TestTheAlbumAndArtistViewsLetTheirVariantPanelRedrawInPlace` the shipped
+  views: a panel that can redraw and is never handed the fetch falls back to
+  the re-render without a word.
 - **A job card says why a switched-on job is inactive in a note of its
   own, never over its description, and never asks for a restart a live
   gate does not need** (2026-09-28, backlog B45). The analysis and

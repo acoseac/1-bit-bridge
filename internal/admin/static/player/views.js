@@ -6,7 +6,7 @@ import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, download
          playlistExportURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
-import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce } from "./ui.js";
+import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
 import { bindTrackMarks } from "./trackmarks.js";
@@ -358,7 +358,7 @@ async function appendDeleteAction(actions, tracks, label) {
           upstream)) {
           return;
         }
-        btn.disabled = true;
+        setDisabled(btn, true);
         btn.textContent = "Deleting…";
         try {
           const res = await api.trash(paths);
@@ -367,7 +367,7 @@ async function appendDeleteAction(actions, tracks, label) {
             ? `${res.ok} deleted, ${failed.length} failed`
             : `${res.ok} moved to trash`;
         } catch (e) {
-          btn.disabled = false;
+          setDisabled(btn, false);
           btn.textContent = "Delete…";
           alert(e?.message ? e.message : String(e));
         }
@@ -487,10 +487,18 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // The variant panel's onChanged callback is the DELETE path's
   // refresh: deletion is synchronous, so its numbers are already true
   // when the response lands. Generation deliberately does not use it —
-  // see variants.js.
+  // see variants.js. A tray save redraws the panel in place instead, from
+  // `refresh` (a fresh summary) while `alive` says this route is still the
+  // current one.
   const tracksPanel = d.tracks.length ? await albumTracksPanel(d.tracks, art) : null;
   if (gen() !== at) return;
-  const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, { plain: true });
+  const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, {
+    plain: true,
+    // A tray save redraws the panel in place from a fresh summary, so the
+    // tray, its "Saved." and the reader's focus stay (variantPanel).
+    refresh: async () => (await api.album(id))?.variants,
+    alive: () => gen() === at,
+  });
   appendIf(view, detailTabs(`album:${id}`, [
     // An empty track list is a truthy <ol>, so detailTabs would keep the
     // tab and open on a blank panel. Say what happened instead: a row
@@ -946,7 +954,11 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   // An artist is where a bulk variant action actually belongs — "give
   // this whole discography CarPlay copies" is the request, and doing it
   // album by album is the tedium the Inspector's folder tree absorbed.
-  const variants = variantPanel(d.variants, { artistId: id }, rerenderView, { plain: true });
+  const variants = variantPanel(d.variants, { artistId: id }, rerenderView, {
+    plain: true,
+    refresh: async () => (await api.artist(id))?.variants,
+    alive: () => gen() === at,
+  });
   const albums = d.albums.length
     ? grid
     : emptyState("No albums here",
@@ -1498,7 +1510,7 @@ function deletedRow(p, status) {
 function restoreButton(ids, label, status) {
   const btn = el("button", { class: "btn btn-quiet", text: label });
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     status.textContent = "Restoring…";
     let ok = 0;
     for (const id of ids) {
@@ -1513,7 +1525,7 @@ function restoreButton(ids, label, status) {
       announce(`Restored ${plural(ok, "playlist")}.`);
     } else {
       status.textContent = `Restored ${ok} of ${ids.length}.`;
-      btn.disabled = false;
+      setDisabled(btn, false);
     }
     await window.__player?.route?.();
   });
@@ -1523,9 +1535,9 @@ function restoreButton(ids, label, status) {
 export async function renderMixes(view, ctx) {
   // The toolbar is built ONCE per route and outlives a redraw. The gear's
   // tray holds a save's "Saved." and the focus, and a redraw that rebuilt
-  // the toolbar would take both away, which is what the variant panel's
-  // redraw does (#1068). "Regenerate all" joins the bar, ahead of the gear,
-  // when there are mixes to regenerate.
+  // the toolbar would take both away. (The variant panel keeps its trays the
+  // same way, in variants.js.) "Regenerate all" joins the bar, ahead of the
+  // gear, when there are mixes to regenerate.
   const page = { view, ctx, bar: el("div", { class: "toolbar" }), gear: null, at: ctx.gen() };
   const built = mixesTray((field) => {
     // Only the Smart mixes switch decides what this page shows. Audio
@@ -1651,7 +1663,7 @@ function regenerateAllControls() {
   const status = el("span", { class: "muted small", attrs: { role: "status" } });
   const btn = el("button", { class: "btn", text: "Regenerate all" });
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    setDisabled(btn, true);
     const was = btn.textContent;
     btn.textContent = "Regenerating…";
     status.textContent = "";
@@ -1664,7 +1676,7 @@ function regenerateAllControls() {
     } catch (e) {
       status.textContent = e.message || "Could not regenerate.";
     } finally {
-      btn.disabled = false;
+      setDisabled(btn, false);
       btn.textContent = was;
     }
   });
@@ -1896,7 +1908,7 @@ function mixActions(c, view, ctx) {
 
   const regen = el("button", { class: "btn btn-quiet", text: "Regenerate" });
   regen.addEventListener("click", async () => {
-    regen.disabled = true;
+    setDisabled(regen, true);
     const was = regen.textContent;
     regen.textContent = "Regenerating…";
     status.textContent = "";
@@ -1911,7 +1923,7 @@ function mixActions(c, view, ctx) {
     } catch (e) {
       status.textContent = e.message || "Could not regenerate.";
     } finally {
-      regen.disabled = false;
+      setDisabled(regen, false);
       regen.textContent = was;
     }
   });
@@ -1928,14 +1940,14 @@ function mixActions(c, view, ctx) {
     const form = el("form", { class: "save-form" }, input, confirm);
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
-      confirm.disabled = true;
+      setDisabled(confirm, true);
       try {
         const r = await api.saveMixAsPlaylist(c.id, input.value.trim() || c.name);
         status.textContent = `Saved "${r?.name || input.value}" as a playlist.`;
         form.remove();
       } catch (e) {
         status.textContent = e.message || "Could not save.";
-        confirm.disabled = false;
+        setDisabled(confirm, false);
       }
     });
     box.appendChild(form);
@@ -2022,14 +2034,14 @@ function coverControl(scope, c, status) {
   if (c.hasCover) {
     const remove = el("button", { class: "btn btn-quiet", text: "Remove cover" });
     remove.addEventListener("click", async () => {
-      remove.disabled = true;
+      setDisabled(remove, true);
       status.textContent = "Removing…";
       try {
         await api.deleteCover(scope, c.id);
         status.textContent = "Cover removed.";
         await window.__player?.route?.();
       } catch (e) {
-        remove.disabled = false;
+        setDisabled(remove, false);
         status.textContent = e.message || "Remove failed.";
       }
     });

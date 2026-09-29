@@ -131,9 +131,16 @@ class Node {
   setAttribute(k, v) { this.attributes[k] = String(v); }
   getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; }
   appendChild(c) { this.children.push(c); return c; }
+  removeAttribute(k) { delete this.attributes[k]; }
   addEventListener() {}
   get firstChild() { return this.children[0] || null; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
+  insertBefore(c, ref) {
+    this.children = this.children.filter((x) => x !== c);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
 }
 globalThis.document = {
   createElement: (tag) => new Node(tag),
