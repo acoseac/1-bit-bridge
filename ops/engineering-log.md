@@ -28292,6 +28292,19 @@ the config's), so this is robustness rather than a live defect.
   with and without user information, none, one and two trailing slashes; the
   mirror records every path and none may hold `//`), and four cases in the
   parser table.
+- **Left: a base that carries a query or a fragment** (CodeRabbit's second
+  pass, Major, on the sentence above). `normalizeBaseURL` accepts one, and
+  `newRequest` appends the path after the root, so
+  `https://mirror/ws/2/?tenant=x` requests `…/ws/2/?tenant=x/release/…`: on
+  main too, where `resolveBase() + "/release/…"` was the same concatenation.
+  A trim of slashes was never going to help it, and this change does not claim
+  to. Refusing one belongs in `normalizeBaseURL` as well as in the parser (the
+  parser alone would contradict "the same three conditions as config"), and a
+  stored value that Load refused would stop `bridge serve` after an update, the
+  trade-off #1042 and B54 settled as "refuse what the operator types, repair
+  what is stored"; supporting one means holding the path and the query apart.
+  A token written as that query reaches every transport error as the user-name
+  token did. Backlog B96, with the options.
 
 | mutation | goes red |
 |---|---|
