@@ -20,6 +20,13 @@ import (
 // fields, blank the curve, …).
 func spectrumFixture(t *testing.T, mutate func(*AnalysisRecord)) (*httptest.Server, string, string, []byte) {
 	t.Helper()
+	return spectrumFixtureGated(t, true, mutate)
+}
+
+// spectrumFixtureGated is spectrumFixture with the analysis gate set to
+// analysisOn. Production wires the analysis store whatever the gate says.
+func spectrumFixtureGated(t *testing.T, analysisOn bool, mutate func(*AnalysisRecord)) (*httptest.Server, string, string, []byte) {
+	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
 	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
@@ -67,7 +74,7 @@ func spectrumFixture(t *testing.T, mutate func(*AnalysisRecord)) (*httptest.Serv
 	cfg := &config.Config{LibraryRoots: []string{root}, ListenAddress: ":7788", LibraryName: "T"}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("sp")
-	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return true }, stubAnalysisStore{rec: rec})
+	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return analysisOn }, stubAnalysisStore{rec: rec})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, srcRel, curve
