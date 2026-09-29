@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,9 @@ type committingQueue struct {
 	store *manifest.Store
 	mu    sync.Mutex
 	done  []string // "<source> <variant id>", one per committed render
+	// background is the lane of each committed render, in done's order
+	// (transcode.JobSpec.Background).
+	background []bool
 }
 
 func (q *committingQueue) Enqueue(spec transcode.JobSpec) error {
@@ -70,6 +74,7 @@ func (q *committingQueue) Enqueue(spec transcode.JobSpec) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.done = append(q.done, spec.SourceLibraryRel+" "+spec.VariantID())
+	q.background = append(q.background, spec.Background)
 	return nil
 }
 
@@ -78,6 +83,14 @@ func (q *committingQueue) since(n int) []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return append([]string(nil), q.done[n:]...)
+}
+
+// lanesSince returns the lane of each render committed after the first n,
+// true for the background one.
+func (q *committingQueue) lanesSince(n int) []bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]bool(nil), q.background[n:]...)
 }
 
 func (q *committingQueue) count() int {
@@ -96,10 +109,12 @@ const (
 
 // stampBridge is the rendition half of a bridge, wired over one store as
 // runServe wires it: the adapter POST /v1/upscale hands a request to, the
-// auto-optimize sweeper, GET /v1/download, and the source rescanner the
-// adapter's refusals and the download's stale answers ask, with
-// committingQueue in the pool's place. The rescanner's loop runs only once
-// a test starts it (startRescans); until then a request only queues.
+// auto-optimize sweeper, GET /v1/download, the source rescanner the
+// adapter's refusals and the download's stale answers ask, and the stale
+// download's re-render (heal), with committingQueue in the pool's place. The
+// rescanner's loop runs only once a test starts it (startRescans); until
+// then a request only queues. Every kind's gate is open unless a test
+// closes it (closed).
 type stampBridge struct {
 	store     *manifest.Store
 	libDir    string
@@ -107,6 +122,8 @@ type stampBridge struct {
 	adapter   *upscaleEnqueuerAdapter
 	sweeper   *autoOptimizeSweeper
 	rescanner *sourceRescanner
+	heal      *staleRenditionHeal
+	closed    map[transcode.JobKind]*atomic.Bool
 	url       string
 	token     string
 }
@@ -136,6 +153,12 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 	b.store, b.queue = store, &committingQueue{store: store}
 
 	on := func() bool { return true }
+	b.closed = map[transcode.JobKind]*atomic.Bool{}
+	gate := func(kind transcode.JobKind) func() bool {
+		b.closed[kind] = &atomic.Bool{}
+		return func() bool { return !b.closed[kind].Load() }
+	}
+	gates := renditionGates{upscale: gate(transcode.JobKindUpscale), optimize: gate(transcode.JobKindOptimize), pcm: gate(transcode.JobKindPCMRender)}
 	caps := func() transcode.DSDRenderCaps { return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: true} }
 	variantsDir := func() string { return filepath.Join(dir, "variants") }
 	resolver := bridgefs.New([]string{b.libDir})
@@ -146,6 +169,12 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 		tempDir: func() string { return filepath.Join(dir, "scratch") },
 		rescan:  b.rescanner.request,
 	}
+	b.heal = newStaleRenditionHeal(store.LookupTrack, b.rescanner.queue,
+		staleRerender{enqueue: b.adapter.enqueueKind, open: gates.open, suppressed: store.VariantFailureSuppressed}.rerender,
+		func(rel string) (os.FileInfo, error) {
+			_, info, err := resolver.ResolveChecked(rel)
+			return info, err
+		})
 	b.sweeper = &autoOptimizeSweeper{
 		store: store, resolver: resolver, enqueue: b.queue.Enqueue, enabled: on,
 		outputDir: variantsDir, dsdCaps: caps,
@@ -163,11 +192,11 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 	}
 	provider := manifest.NewProvider(store, nil)
 	srv := api.New(&config.Config{LibraryRoots: []string{b.libDir}}, tokens, provider, "stamp-fingerprint").
-		WithUpscale(on, &variantStoreAdapter{provider: provider, store: store, variantsDir: variantsDir}).
-		WithCarPlayOptimize(on).
-		WithDSDRender(on).
+		WithUpscale(gates.upscale, &variantStoreAdapter{provider: provider, store: store, variantsDir: variantsDir}).
+		WithCarPlayOptimize(gates.optimize).
+		WithDSDRender(gates.pcm).
 		WithUpscaleEnqueuer(b.adapter).
-		WithStaleRendition(newStaleRenditionRescan(store.LookupTrack, b.rescanner.queue).observe)
+		WithStaleRendition(b.heal.observe)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	b.url = hs.URL
@@ -175,16 +204,20 @@ func newEmptyStampBridge(t *testing.T) *stampBridge {
 }
 
 // startRescans runs the rescanner's loop over scanner, as runServe does,
-// until the test ends. The channel receives once after each rescan: runServe
-// drops the album-gain index and nudges the auto-optimize sweep there.
+// until the test ends: after each rescan, afterRescan queues the renders the
+// stale downloads waited for (the harness has no album gain, and its sweep
+// nudge goes nowhere). The channel receives once after each rescan, after
+// that step.
 func (b *stampBridge) startRescans(t *testing.T, scanner *manifest.Scanner) <-chan struct{} {
 	t.Helper()
 	rescanned := make(chan struct{}, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	step := afterRescan(nil, b.heal.rescanned, make(chan struct{}, 1))
 	go func() {
 		defer close(done)
-		b.rescanner.run(ctx, scanner.ScanSubtree, func() {
+		b.rescanner.run(ctx, scanner.ScanSubtree, func(ctx context.Context, dir string) {
+			step(ctx, dir)
 			select {
 			case rescanned <- struct{}{}:
 			default:

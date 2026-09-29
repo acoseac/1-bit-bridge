@@ -2200,10 +2200,11 @@ no failing test — which is the shape to expect in this area.
   scan interval; the faithful tier took part through
   `drainSupersededPCMRenditions` (a live-stamped `pcm-v2` row is not "fresh"),
   and a live-stamped peak was re-decoded by every album-mate render. The phone
-  never asks again for a family it has listed (PlayerService tier 0,
-  `shouldAutoGenerateVariant`, `BridgeRenditionRequestGate`), so one of its
-  requests cost 3 renders and up to a scan interval of 410; the CLI, a folder
-  POST or a script repeat it. `transcode.SourceIsAtRow` is the one check
+  asks for a family only while it lists none of it (PlayerService tier 0,
+  `shouldAutoGenerateVariant`, `BridgeRenditionRequestGate`; what it does
+  after a 410 is in the B82 bullet two down), so one of its requests cost 3
+  renders and up to a scan interval of 410; the CLI, a folder POST or a
+  script repeat it. `transcode.SourceIsAtRow` is the one check
   (`sourceIsAtRow` in cmd/bridge until B53), the scanner's
   EXACT skip-gate comparison, never serve's 2 s tolerance: the on-demand path
   refuses (`errSourceAheadOfRow`, counted `rejected`, no wire change) and
@@ -2222,7 +2223,7 @@ no failing test — which is the shape to expect in this area.
   live stat anywhere** (`FreshnessFromFile` is gone), **and don't render a file
   its row no longer describes**: a row-stamped render of new bytes is the one
   the serve path refuses, and with auto-optimize off (the default) nothing
-  renders it again and the phone never asks. The album survey still MEASURES a
+  rendered it again until B82 (two bullets down). The album survey still MEASURES a
   changed mate (a peak describes the bytes on disk; `cliAlbumMateSpec` ignores
   needsRun). Until B53 (the next bullet) this bullet also said the batch
   coordinator does not check and that nothing checks when the pool starts a
@@ -2259,14 +2260,16 @@ no failing test — which is the shape to expect in this area.
   file; three strikes would suppress a good one for 30 days), and it asks for
   the rescan inside the claim. The CLI worker renders through `Run`, so a file
   retagged during a long `bridge render` fails with the change named. A 410
-  `variant_stale` tells `api.StaleRenditionFunc`, and `staleRenditionRescan`
-  asks only while the ROW is behind the file (once a scan read the change a
+  `variant_stale` tells `api.StaleRenditionFunc`, and its hook
+  (`staleRenditionRescan` until B82, `staleRenditionHeal` since) asks for a
+  rescan only while the ROW is behind the file (once a scan read the change a
   rescan changes nothing) and once per directory per minute, bounded at 1,024
   directories: every play, device and range request makes that GET. The
   minute is spent only on a rescan the rescanner queued or already had
   waiting (`sourceRescanner.queue`); one its full queue dropped leaves the
   next GET free to ask (review round 2). EVERY
-  rescan the shutdown did not interrupt drops the album-gain index and THEN
+  rescan the shutdown did not interrupt drops the album-gain index, queues
+  the renders stale downloads waited for (B82, the next bullet), and THEN
   nudges the auto-optimize sweep, whose tick otherwise follows the periodic
   scan (`afterRescan`): only a full scan dropped that index, so a DSD render
   the nudge starts could take a retagged track's old album-mates for its gain
@@ -2276,11 +2279,11 @@ no failing test — which is the shape to expect in this area.
   the rescanner resolves the directory itself**: the scanner makes each row's
   path from the spelling of the directory it is handed, and on main a request
   naming a changed file in lower case, on a filesystem that opens it, left the
-  rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: with
-  auto-optimize off, a stale rendition whose row has caught up is rendered
-  again by nothing (backlog B82), and a watcher-driven subtree scan nudges
-  neither the sweep nor the player's catalog, nor drops the album-gain index
-  (B83; `player_wiring.go` said it nudged the catalog until B53). Tests:
+  rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: a
+  watcher-driven subtree scan nudges neither the sweep nor the player's
+  catalog, nor drops the album-gain index (B83; `player_wiring.go` said it
+  nudged the catalog until B53). This said a stale rendition whose row has
+  caught up is rendered again by nothing (B82) until the next bullet. Tests:
   `TestABatchPassesOverAFileThatChangedSinceItsScan`,
   `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep`,
   `TestEveryRescanRunsItsAfterStepHoweverFewRowsItWrote`,
@@ -2288,9 +2291,97 @@ no failing test — which is the shape to expect in this area.
   `TestPublishingRefusesASourceThatChangedWhileItRendered`,
   `TestAJobWhoseSourceChangedIsNotRenderedAndStrikesNothing` (the real pool and
   `Run` over a stand-in sox), `TestTheCLIRendersNothingFromAFileThatChangedDuringItsRun`,
-  `TestAStaleDownloadRescansItsSourceSoTheSweepRendersItAgain`,
+  `TestAStaleDownloadRescansItsSourceAndRendersItAgain` (renamed by B82),
   `TestAStaleDownloadAsksForARescanOnlyWhileItsRowIsBehindAndOncePerMinute`,
   `TestARescanIndexesNoSecondSpellingOfTheDirectory`.
+- **…and a download that finds a rendition stale has it rendered again; a
+  batch and the coverage bars still count a stale rendition as covered**
+  (backlog B82). Measured on main at 6bc4605a: with auto-optimize off (the
+  default), renditions made on request before a retag answered 410
+  `variant_stale` once a scan read the change and nothing rendered them
+  again: the stale downloads rendered nothing, and a batch counts a track
+  with ANY rendition of the family covered (`TrackProjection.HasVariant`).
+  On a real `bridge serve` with sox, after a retag and a scan the batch
+  answered `enqueuedCount: 0, alreadyCovered: 1` and 15 downloads over 30 s
+  all answered 410; with the fix the second download was served (the render
+  took under 2 s), and so it was after a second retag with no scan.
+  What the app does after a 410 (read in the iOS source, 2026-09-29): on a
+  PLAYBACK 410 it drops the id from its local row, in memory and persisted,
+  and retries; the retry asks for the family again only under CarPlay or
+  cellular routing of a PCM source (the Tier 0 lazy POST) or where a DSD
+  source's route wants a rendition (`BridgeRenditionRequestGate`); an offline
+  download keeps the id and fails, the upscaled toggle and a picked rendition
+  never ask, and every manifest delta for the track lists the stale id again.
+  So "the phone never asks again for a family the manifest lists", B82's
+  premise and this file's until now, holds only while the app still lists
+  it. Now `staleRenditionHeal` (B53's hook,
+  renamed) asks for the render at once when the row is current, and when the
+  file is ahead of its row it keeps the render until the rescan it asks for:
+  the rescanner's `after` step takes the directory it read, and `afterRescan`
+  drops the album-gain index, queues the waiting renders whose rows the
+  rescan brought level (`rescanned`; one still behind keeps waiting for a
+  later rescan, at most an hour from the first ask, and one whose row is
+  gone is dropped), and THEN nudges the sweep, so a DSD render never takes a
+  stale album index. `staleRerender.rerender`
+  reads the kind off the id's prefix (`renditionKindOf`; `optimized-` covers
+  the DSD compact tier), and refuses unless the kind's LIVE gate is open
+  (`renditionGates`: the very closures `/v1` reads, `dsdRenderActiveFn` among
+  them, pinned by `TestAStaleDownloadRendersUnderTheV1KindGates`), never on a
+  demo bridge (its POST `/v1/upscale` answers 403: every bearer there is
+  public), never for a suppressed file (`Store.VariantFailureSuppressed`, the
+  one-row form of `variantFailureSuppressedSQL`), and only then calls the
+  adapter's entry point for the kind (`enqueueKind`), which renders what a
+  request for the family would: the family's CURRENT id, stamped from the row
+  (a DSD `v1` rendition is rendered as the `v2` one, which the app, taking the
+  newest of a family, plays; the `v1` row stays, and its later downloads
+  render nothing). **On the BACKGROUND lane** (`JobSpec.Background`), the
+  sweep's: nobody waits on it, since the download that asked has already
+  played the source, and on the foreground lane a library retagged at once
+  would queue its renditions ahead of a request a client does wait on (a
+  CarPlay plug-in). That is also what bounds a token holder's GETs, which
+  pass no write bucket: they can queue at most one render per stale
+  rendition and file version, all behind the waiting work (CodeRabbit's
+  review of #1097). **At most once per rendition AND VERSION of the file per
+  minute**: the minute bounds the tries of a render that fails (a failure
+  writes no row), and a file retagged again is a render not yet tried.
+  Keyed without the version, on a real bridge a second retag 30 s after the
+  first answered 410 on 15 downloads over 30 s: the render its rescan queued
+  was refused as asked for within the minute. The minute is not spent when
+  nothing was tried (the pool's queue full, the kind off), and a file that
+  changed again before the enqueue (`errSourceAheadOfRow`) waits for a
+  rescan: the wait is recorded, THEN the heal asks for the rescan (folded
+  into the one the enqueue asked for), since the enqueue's request comes
+  first and a quick rescan could otherwise go by before the wait exists.
+  **A rescan that brought every waiting file
+  level frees its directory's rescan minute** (B53's), so the next change
+  asks at once; one that left a file behind keeps it, which is the minute's
+  job (a file still being written, a directory the scan cannot read). At
+  most 1,024 renders wait, those older than an hour forgotten first.
+  **No loop**: the render is stamped with the row, fresh to the serve path,
+  the sweep and the album gain alike (#1077's one clock), and a served
+  rendition calls no hook. **A batch and the Inspector's coverage bars were
+  left counting a stale rendition as covered, on purpose**: making them
+  freshness-aware is a product decision, backlog B100 (a whole-library
+  projection 421 → 476 ms, `AllEligibleKinds` 122 → 133 ms, the root folder
+  rollup 94 → 128 ms over 50,000 tracks; about six SQL sites plus
+  `catalog_refs`). **Don't render from a download whose row is behind** (the
+  render would record a version the serve path refuses), **and don't give
+  the re-render gates of its own**: a copy is how a kind's sox half has
+  drifted before. Residual: the render replaces a same-id rendition in place,
+  so an offline copy of the old bytes on a phone takes the new
+  `appliedGainDB` by id, as the auto-optimize sweep's in-place re-render
+  already did. Tests: `TestAStaleRenditionIsRenderedAgainWhenADownloadFindsItsRowCurrent`,
+  `TestAStaleDownloadWhoseRowIsBehindRendersAgainAfterItsRescan`,
+  `TestAStaleDownloadRescansItsSourceAndRendersItAgain`,
+  `TestAStaleDownloadRendersEveryNewVersionOfItsFileAgain`,
+  `TestAStaleDownloadRendersNothingForAKindThatIsSwitchedOff`,
+  `TestAStaleDownloadRendersNothingForAFileWhoseRendersKeepFailing`,
+  `TestAStaleRenditionOfAnOlderSchemaIsRenderedAsTheCurrentOne`,
+  `TestAStaleRerenderGoesThroughTheKindsGateAndTheSuppression`,
+  `TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan`,
+  `TestAtMostACapOfRendersWaitForARescan`,
+  `TestARescanDropsTheAlbumIndexBeforeItNudgesTheSweep`,
+  `TestAStaleDownloadRendersUnderTheV1KindGates`.
 - **`maxPerSweep` is not just a queue guard**: `UpsertVariant` strict-advances
   `indexed_at`, so an uncapped first sweep pushes one delta row per variant to
   every paired device at once. The disk floor is a RUNNING budget and the probe

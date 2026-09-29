@@ -880,18 +880,21 @@ func (s *Server) WithRendererDiscovery(snap RendererDiscoverySnapshotter) *Serve
 }
 
 // StaleRenditionFunc is told of every download that found a rendition stale
-// (410 variant_stale): the source path the client asked for and the stat the
-// freshness check compared against. cmd/bridge wires it to ask for a rescan
-// of the source's directory when the file has changed since its row was
-// written, so a pre-generated rendition of a retagged file heals without
-// waiting for the next scan: the phone never asks again for a family the
-// manifest lists. It runs on the request, so it must not block; ctx is the
-// request's.
-type StaleRenditionFunc func(ctx context.Context, clientPath string, sourceInfo os.FileInfo)
+// (410 variant_stale): the source path the client asked for, the
+// rendition's id as its row records it, and the stat the freshness check
+// compared against. cmd/bridge wires it to render the rendition again: at
+// once when the source's row is current, and after a rescan of the source's
+// directory, which it asks for, when the file has changed since its row was
+// written (staleRenditionHeal). With the auto-optimize sweep off, the
+// default, it is the one path that renders a stale rendition again whatever
+// the client does: a batch counts it covered, and a client asks for a new
+// one only once it stops listing the old one. It runs on the request, so it
+// must not block; ctx is the request's.
+type StaleRenditionFunc func(ctx context.Context, clientPath, variantID string, sourceInfo os.FileInfo)
 
 // WithStaleRendition wires the StaleRenditionFunc the download path tells
-// of a stale rendition. Optional: unwired, a stale rendition answers 410 and
-// waits for the scan that reads its source's change.
+// of a stale rendition. Optional: unwired, a stale rendition answers 410
+// until something renders it again.
 func (s *Server) WithStaleRendition(fn StaleRenditionFunc) *Server {
 	s.staleRendition = fn
 	return s

@@ -48,16 +48,36 @@ func seedFailTrack(t *testing.T, s *Store, path string, size, mtimeNS int64) {
 	}
 }
 
+// suppressed asks the one-file form of the predicate
+// (Store.VariantFailureSuppressed), so every test here that reads it pins
+// that form too: a stale download's re-render asks it (cmd/bridge).
 func suppressed(t *testing.T, s *Store, path string) bool {
 	t.Helper()
-	var n int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM tracks WHERE path = ? AND `+variantFailureSuppressedSQL,
-		path, s.VariantFailureCutoff()).Scan(&n)
+	got, err := s.VariantFailureSuppressed(context.Background(), path)
 	if err != nil {
 		t.Fatalf("suppression query: %v", err)
 	}
-	return n > 0
+	return got
+}
+
+// TestVariantFailureSuppressedAnswersForTheOneRowAtAPath: the one-file form
+// reads the row at exactly the path it is given, the canonical one a caller
+// took from the row, so a case twin's strikes are not its, and a path with
+// no row is not suppressed.
+func TestVariantFailureSuppressedAnswersForTheOneRowAtAPath(t *testing.T) {
+	s := openVariantFailStore(t)
+	seedFailTrack(t, s, "Album/01.flac", 1000, 1700000000)
+	seedFailTrack(t, s, "album/01.flac", 1000, 1700000000)
+	for i := 0; i < variantFailureThreshold; i++ {
+		if err := s.RecordVariantFailure(context.Background(), "Album/01.flac", 1000, 1700000000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, want := range map[string]bool{"Album/01.flac": true, "album/01.flac": false, "Other/01.flac": false} {
+		if got := suppressed(t, s, path); got != want {
+			t.Errorf("VariantFailureSuppressed(%q) = %v, want %v", path, got, want)
+		}
+	}
 }
 
 // TestVariantFailureSuppressesOnlyAfterThreshold pins the debounce. One

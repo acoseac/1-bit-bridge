@@ -108,6 +108,93 @@ func requireConsoleGateIsTheV1Gate(t *testing.T, option, field, missing, pair st
 	}
 }
 
+// TestAStaleDownloadRendersUnderTheV1KindGates pins the gates a stale
+// download's re-render reads (backlog B82): runServe's one renditionGates
+// literal must name, field by field, the very closures the /v1 server's
+// options get, the ones POST /v1/upscale and /v1/health read. A copy could
+// answer differently (the sox half of a gate is where copies have drifted
+// before: TestConsoleCarPlayGateIsTheV1CarPlayGate), and then a download
+// would render a kind a client's request for it is refused. No behavioural
+// test sees this wiring: the harness builds its own gates.
+func TestAStaleDownloadRendersUnderTheV1KindGates(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := topLevelFuncNamed(f, "runServe")
+	if serve == nil {
+		t.Fatal("main.go has no runServe")
+	}
+	options := map[string][]string{} // option → the identifiers the /v1 server's calls hand it
+	var gates []*ast.CompositeLit
+	ast.Inspect(serve.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			sel, ok := x.Fun.(*ast.SelectorExpr)
+			if !ok || len(x.Args) == 0 || !chainStartsAtAPINew(sel.X) {
+				return true
+			}
+			if id, ok := x.Args[0].(*ast.Ident); ok {
+				options[sel.Sel.Name] = append(options[sel.Sel.Name], id.Name)
+			} else {
+				options[sel.Sel.Name] = append(options[sel.Sel.Name], fmt.Sprintf("a %T", x.Args[0]))
+			}
+		case *ast.CompositeLit:
+			if id, ok := x.Type.(*ast.Ident); ok && id.Name == "renditionGates" {
+				gates = append(gates, x)
+			}
+		}
+		return true
+	})
+	if len(gates) != 1 {
+		t.Fatalf("runServe builds %d renditionGates literals, want 1: this test compares that one with the /v1 options", len(gates))
+	}
+	fields := map[string]string{}
+	forEachKeyedElement(gates[0], func(key *ast.Ident, value ast.Expr) {
+		if id, ok := value.(*ast.Ident); ok {
+			fields[key.Name] = id.Name
+		} else {
+			fields[key.Name] = fmt.Sprintf("a %T", value)
+		}
+	})
+	for field, option := range map[string]string{"upscale": "WithUpscale", "optimize": "WithCarPlayOptimize", "pcm": "WithDSDRender"} {
+		v1 := options[option]
+		if len(v1) != 1 {
+			t.Errorf("the /v1 server's chain calls %s %d times (%v), want once", option, len(v1), v1)
+			continue
+		}
+		if fields[field] != v1[0] {
+			t.Errorf("renditionGates.%s at %s is %q, not %s, the closure %s gets: "+
+				"a stale download could render what a request for the kind is refused",
+				field, fset.Position(gates[0].Pos()), fields[field], v1[0], option)
+		}
+	}
+}
+
+// chainStartsAtAPINew reports whether x is a method chain rooted at
+// `api.New(...)`: the /v1 server's option calls, as against another type's
+// method of the same name (the coordinator's WithDSDRender takes the caps).
+func chainStartsAtAPINew(x ast.Expr) bool {
+	for {
+		switch e := x.(type) {
+		case *ast.CallExpr:
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "api" && sel.Sel.Name == "New" {
+					return true
+				}
+				x = sel.X
+				continue
+			}
+			return false
+		case *ast.SelectorExpr:
+			x = e.X
+		default:
+			return false
+		}
+	}
+}
+
 // isAdminDepsType reports whether a composite literal's type is `admin.Deps`.
 func isAdminDepsType(x ast.Expr) bool {
 	sel, ok := x.(*ast.SelectorExpr)

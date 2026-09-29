@@ -1137,6 +1137,13 @@ func renditionSpec(track *manifest.Track, absPath, outputDir, tempDir string, so
 // Same error taxonomy as EnqueueOne so the handler's switch arm
 // doesn't have to discriminate.
 func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) error {
+	return a.enqueueOptimize(libraryRelativePath, false)
+}
+
+// enqueueOptimize is EnqueueOptimize on the lane `background` picks
+// (transcode.JobSpec.Background): a client's request takes the foreground
+// one, a stale download's re-render the background one (enqueueKind).
+func (a *upscaleEnqueuerAdapter) enqueueOptimize(libraryRelativePath string, background bool) error {
 	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
 		return err
@@ -1145,6 +1152,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
+	spec.Background = background
 	return a.finalizeAndEnqueue(spec, track, false)
 }
 
@@ -1154,6 +1162,12 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 // the gate (transcode.PCMRenderEligible — a non-DSD source is refused
 // with the typed ineligible error), the target resolver and the bits.
 func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) error {
+	return a.enqueuePCMRender(libraryRelativePath, false)
+}
+
+// enqueuePCMRender is EnqueuePCMRender on the lane `background` picks, as
+// enqueueOptimize is EnqueueOptimize.
+func (a *upscaleEnqueuerAdapter) enqueuePCMRender(libraryRelativePath string, background bool) error {
 	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
 		return err
@@ -1162,7 +1176,28 @@ func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) er
 	if err != nil {
 		return err
 	}
+	spec.Background = background
 	return a.finalizeAndEnqueue(spec, track, false)
+}
+
+// enqueueKind is the entry point a client's request for kind reaches
+// (POST /v1/upscale routes on the same three), for the file whose track row
+// records libraryRelativePath, on the BACKGROUND lane. A stale download's
+// re-render goes through it (staleRerender), so it renders what such a
+// request would, under the same refusals; and on the lane the auto-optimize
+// sweep's renders take, since nobody waits on it (the download that asked
+// has already played the source), so a library retagged at once cannot
+// queue its renditions ahead of a request a client does wait on (a CarPlay
+// plug-in). An upscale takes that lane whatever its flag.
+func (a *upscaleEnqueuerAdapter) enqueueKind(kind transcode.JobKind, libraryRelativePath string) error {
+	switch kind {
+	case transcode.JobKindOptimize:
+		return a.enqueueOptimize(libraryRelativePath, true)
+	case transcode.JobKindPCMRender:
+		return a.enqueuePCMRender(libraryRelativePath, true)
+	default:
+		return a.EnqueueOne(libraryRelativePath)
+	}
 }
 
 // albumMateSpec is the album-level gain's albumgain.SpecFor: the spec that
@@ -3357,6 +3392,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ff := transcode.FFmpegSnapshot()
 		return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: ff.HasDSD, DecodeDST: ff.HasDST}
 	}
+	// dsdRenderActiveFn is the live gate of the faithful `pcm` kind: the
+	// caps above, active. One closure for /v1/health's `dsdRender` and the
+	// /v1 pcm path (WithDSDRender) and a stale download's re-render of a
+	// `pcm-` rendition (renditionGates).
+	dsdRenderActiveFn := func() bool { return dsdRenderCapsFn().Active() }
 	liveRenderTempDir := func() string { return liveCfg().Upscale.TempDir }
 	// Boot-time courtesy log, once: an operator who enabled either
 	// feature without a usable sox gets told at startup rather than
@@ -3424,7 +3464,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// every DSD gate on the bridge reads (dsdRenderCapsFn: the live
 		// flag ∧ the cached ffmpeg probe, fail-closed), so the health
 		// response cannot advertise a kind the enqueuer would refuse.
-		WithDSDRender(func() bool { return dsdRenderCapsFn().Active() }).
+		WithDSDRender(dsdRenderActiveFn).
 		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider, store: manifestStore, waveformDir: liveWaveformDir}).
 		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
@@ -3985,7 +4025,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			return apiSrv.Resolver().Resolve(rel)
 		})
 		upscalePool.SetSourceRescan(rescanner.request)
-		apiSrv.WithStaleRendition(newStaleRenditionRescan(manifestStore.LookupTrack, rescanner.queue).observe)
 		enqueuer := &upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
@@ -3998,6 +4037,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			rescan:    rescanner.request,
 		}
 		apiSrv.WithUpscaleEnqueuer(enqueuer)
+		// A download that finds a rendition stale has it rendered again
+		// (staleRenditionHeal, backlog B82): with auto-optimize off nothing
+		// else does, since a batch counts it covered and a client asks for a
+		// new one only once it stops listing the old one. At once when the
+		// row is current, after the rescan it asks for when the file is ahead
+		// of its row (the rescanner's loop, below, runs that step). The
+		// render goes through the enqueuer, under the live gate of the
+		// rendition's kind: the closures /v1 reads, never a copy
+		// (TestAStaleDownloadRendersUnderTheV1KindGates).
+		staleHeal := newStaleRenditionHeal(manifestStore.LookupTrack, rescanner.queue,
+			staleRerender{
+				enqueue:    enqueuer.enqueueKind,
+				open:       renditionGates{upscale: upscaleActiveFn, optimize: carPlayOptimizeActiveFn, pcm: dsdRenderActiveFn}.open,
+				suppressed: manifestStore.VariantFailureSuppressed,
+				demo:       cfg.Demo.Enabled,
+			}.rerender,
+			func(rel string) (os.FileInfo, error) {
+				_, info, err := apiSrv.Resolver().ResolveChecked(rel)
+				return info, err
+			})
+		apiSrv.WithStaleRendition(staleHeal.observe)
 		albumGainResolver, err = wireAlbumGain(upscalePool, manifestStore, enqueuer)
 		if err != nil {
 			fmt.Fprintf(stderr, "album gain: %v\n", err)
@@ -4109,17 +4169,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}()
 		}
 
-		// The rescanner's loop. Each rescan drops the album-gain index and
-		// then nudges the auto-optimize sweep, which renders again what the
-		// rows it read made stale; its tick otherwise follows the periodic
-		// scan (afterRescan). bgWriters-joined:
-		// the scan writes the store, and it runs on scanCtx, which the
-		// shutdown cancels.
+		// The rescanner's loop. Each rescan drops the album-gain index, then
+		// queues the renders stale downloads asked for while its rows were
+		// behind, then nudges the auto-optimize sweep, which renders again
+		// what the rows it read made stale; its tick otherwise follows the
+		// periodic scan (afterRescan). bgWriters-joined: the scan writes the
+		// store, and it runs on scanCtx, which the shutdown cancels.
 		var invalidateAlbums func()
 		if albumGainResolver != nil {
 			invalidateAlbums = albumGainResolver.Invalidate
 		}
-		afterEachRescan := afterRescan(invalidateAlbums, autoOptimizeNudge)
+		afterEachRescan := afterRescan(invalidateAlbums, staleHeal.rescanned, autoOptimizeNudge)
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
