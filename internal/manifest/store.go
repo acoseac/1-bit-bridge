@@ -4755,14 +4755,29 @@ func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, miss
 // guard line on every scan and refused every subtree scan below the
 // root, and a routed path prefix spelled like a root's basename inflated
 // that root's count in multi-root mode. The byte range and the
-// empty-base fail-safe are CountTracksByPrefix's.
+// empty-base fail-safe are CountTracksByPrefix's, through
+// CountOwnTracksUnderPrefix.
 func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multiRoot bool) (int, error) {
-	base := ""
-	if multiRoot {
-		base = strings.TrimRight(filepath.Base(rootBase), "/")
+	if !multiRoot {
+		return s.CountOwnTracksUnderPrefix(ctx, "")
 	}
+	return s.CountOwnTracksUnderPrefix(ctx, filepath.Base(rootBase))
+}
+
+// CountOwnTracksUnderPrefix returns the number of track rows under the
+// library-relative folder prefix that no UPnP upstream routes: the rows a
+// walk of the library owns there. The clean-empty guard asks it of a root
+// (CountTracksUnderRoot) and of each link to a directory the walk found in
+// a root it saw nothing else in, whose rows are the ones the operator is
+// told the sentinel would delete (the scanner's links line).
+//
+// The byte range and the decide-after-the-trim rule are CountTracksByPrefix's:
+// a prefix that is empty once its trailing slashes are trimmed counts the
+// whole table, the fail-safe answer for a guard that a 0 would bypass.
+func (s *Store) CountOwnTracksUnderPrefix(ctx context.Context, prefix string) (int, error) {
+	base, scoped := subtreeRangeBase(prefix)
 	var n int
-	if base == "" {
+	if !scoped {
 		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks t
 			WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`).Scan(&n)
 		return n, err
@@ -4773,6 +4788,42 @@ func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multi
 		base, base,
 	).Scan(&n)
 	return n, err
+}
+
+// TracksNotYetCountedMissing returns the paths among paths whose rows no
+// deletion pass has counted missing (missing_count = 0), in the order given.
+// A path with no row is left out. Asked before a pass increments the count,
+// it names the rows whose miss this pass is the first of a streak: the
+// scanner says once, at that start, that rows under a link to a directory
+// are going (the M-SEARCH rule, applied per row, so a restart mid-streak
+// does not say it again, and a row that came back and went again does).
+//
+// One statement per path, not an IN list: the paths are the few under such
+// links, and a literal statement is what keeps SonarCloud's S2077 quiet.
+// Reads are not serialised (WAL), like every read here.
+func (s *Store) TracksNotYetCountedMissing(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	stmt, err := s.db.PrepareContext(ctx, `SELECT missing_count FROM tracks WHERE path = ?`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+	var out []string
+	for _, p := range paths {
+		var count int
+		if err := stmt.QueryRowContext(ctx, p).Scan(&count); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		if count == 0 {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // CountTracksByPrefix returns the number of track rows under the folder
