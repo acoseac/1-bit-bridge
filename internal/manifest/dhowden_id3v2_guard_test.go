@@ -522,6 +522,57 @@ func TestATagTheID3v2GuardPassesMeetsTheAllocationProperty(t *testing.T) {
 	}
 }
 
+// TestAHeavilyTaggedFileStillReads is the over-strictness guard: a tag
+// carrying more than heavy real tagging does reads its tags. Taggers repeat an
+// id a handful of times (TXXX for every custom field, COMM, a scanned booklet's
+// APIC pages, Windows Media Player's PRIV, DJ software's GEOB), and a chapter
+// is one CHAP frame each; the files on the dev Mac, counted, carried at most 10
+// frames and 3 copies of one id (TXXX).
+func TestAHeavilyTaggedFileStillReads(t *testing.T) {
+	var body []byte
+	add := func(n int, frame func(i int) []byte) {
+		for i := range n {
+			body = append(body, frame(i)...)
+		}
+	}
+	body = append(body, textFrameBytes(4, "TIT2", "t")...)
+	add(60, func(i int) []byte {
+		p := fmt.Appendf([]byte{3}, "field %d\x00value", i)
+		return id3v2FrameBytes(4, "TXXX", uint32(len(p)), 0, p)
+	})
+	add(6, func(i int) []byte {
+		p := fmt.Appendf([]byte{3, 'e', 'n', 'g'}, "iTun%d\x00text", i)
+		return id3v2FrameBytes(4, "COMM", uint32(len(p)), 0, p)
+	})
+	add(30, func(i int) []byte {
+		p := fmt.Appendf([]byte("\x03image/jpeg\x00\x05"), "page %d\x00", i)
+		p = append(p, payloadOf(64)...)
+		return id3v2FrameBytes(4, "APIC", uint32(len(p)), 0, p)
+	})
+	add(12, func(i int) []byte {
+		p := fmt.Appendf(nil, "WM/Owner%d\x00data", i)
+		return id3v2FrameBytes(4, "PRIV", uint32(len(p)), 0, p)
+	})
+	add(8, func(i int) []byte {
+		p := fmt.Appendf([]byte{0}, "application/octet-stream\x00\x00Serato %d\x00data", i)
+		return id3v2FrameBytes(4, "GEOB", uint32(len(p)), 0, p)
+	})
+	// A long audiobook's chapters, each its start and end time and offsets.
+	add(1000, func(i int) []byte {
+		p := append(fmt.Appendf(nil, "ch%d\x00", i), make([]byte, 16)...)
+		return id3v2FrameBytes(4, "CHAP", uint32(len(p)), 0, p)
+	})
+	body = append(body, textFrameBytes(4, "TALB", "a")...)
+	data := append(id3v2TagBytes(4, 0, body), mp3Audio()...)
+	if ok, refusal := id3v2TagWithinBudget(bytes.NewReader(data)); !ok {
+		t.Fatalf("refused a heavily tagged file: %+v", refusal)
+	}
+	tr := requireBoundedExtraction(t, "x.mp3", data, &ExtractContext{})
+	if tr.Title != "t" || tr.Album != "a" {
+		t.Errorf("Title, Album = %q, %q; want the tag's (t, a)", tr.Title, tr.Album)
+	}
+}
+
 // TestNoRepeatedID3v2FrameMakesAnExtractionUnbounded is the regression test
 // for backlog B101, through every way dhowden reads an ID3v2 tag: tag.ReadFrom
 // on a tag at the start of any file and at a "DSD " stream's pointer, and
