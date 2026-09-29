@@ -35,9 +35,11 @@ import (
 // is then read behind a default arm, for the code, when it is still
 // there to read.
 //
-// The wait is for the exit, until serve's waits give up (serveGiveUp): the
-// teardown's store close is disk writes a starved host takes 16 s over
-// (B63), and a fixed bound after the cancel failed there. So a HOLD the
+// The wait is for the exit, until just before the test's deadline
+// (serveDrainGiveUp, later than serveGiveUp, so a drain after a wait that
+// gave up still sees serve out): the teardown's store close is disk writes
+// a starved host takes 16 s over (B63), and a fixed bound after the cancel
+// failed there. So a HOLD the
 // test takes on serve (a gate, a held print, a parked statement) must be
 // released in a cleanup registered AFTER this one, which runs before it:
 // held past the drain, serve cannot exit, and the drain waits until the
@@ -67,7 +69,7 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 		cancel()
 		select {
 		case <-exited:
-		case <-serveGiveUp(t):
+		case <-serveDrainGiveUp(t):
 			t.Errorf("serve did not shut down before the test's deadline; stderr=%s\nserve's goroutines:\n%s",
 				stderr.String(), serveStacks())
 			return
@@ -86,9 +88,9 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 // the sweepers, the ingest loop, the regenerator — which carry no exit
 // code and no captured streams, only a done channel their goroutine
 // closes. Same reasoning, same reason it is a cleanup rather than a
-// tail, and the same wait: for the exit, until serve's waits give up,
-// since a pass the cancel lands in finishes its store write first; see
-// that helper's docblock for all three.
+// tail, and the same wait: for the exit, until just before the test's
+// deadline, since a pass the cancel lands in finishes its store write
+// first; see that helper's docblock for all three.
 //
 // These are in some ways the sharper half. A stranded `serve` writes
 // into a directory that is merely being removed, whereas these loops
@@ -115,7 +117,7 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 		cancel()
 		select {
 		case <-done:
-		case <-serveGiveUp(t):
+		case <-serveDrainGiveUp(t):
 			t.Errorf("%s did not exit on ctx cancel before the test's deadline", what)
 		}
 	})

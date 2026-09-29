@@ -33,20 +33,43 @@ import (
 // and the report.
 const serveWaitReserve = 30 * time.Second
 
+// serveDrainReserve is the part a drain leaves unspent (serveDrainGiveUp). It
+// is smaller than serveWaitReserve, so a drain that follows a wait which gave
+// up still has the time between the two to see serve exit, once the cleanups
+// registered after it have released what the test held serve on. With one
+// reserve for both, the drain's give-up had passed by then, and it reported
+// a second failure about a serve that was on its way out.
+const serveDrainReserve = 10 * time.Second
+
 // serveGiveUpTime is when a wait on serve gives up, or the zero time when the
 // test binary runs with no deadline, and it never does.
 func serveGiveUpTime(t *testing.T) time.Time {
-	deadline, ok := t.Deadline()
-	if !ok {
-		return time.Time{}
-	}
-	return deadline.Add(-serveWaitReserve)
+	return serveDeadlineLess(t, serveWaitReserve)
 }
 
 // serveGiveUp fires when a wait on serve gives up (serveGiveUpTime), at once
 // if that has passed, and never when the test binary has no deadline.
 func serveGiveUp(t *testing.T) <-chan time.Time {
-	at := serveGiveUpTime(t)
+	return firesAt(serveGiveUpTime(t))
+}
+
+// serveDrainGiveUp is serveGiveUp for a drain, which runs in a cleanup: it
+// fires serveDrainReserve before the deadline.
+func serveDrainGiveUp(t *testing.T) <-chan time.Time {
+	return firesAt(serveDeadlineLess(t, serveDrainReserve))
+}
+
+func serveDeadlineLess(t *testing.T, reserve time.Duration) time.Time {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return time.Time{}
+	}
+	return deadline.Add(-reserve)
+}
+
+// firesAt fires at the instant at, at once if that has passed, and never for
+// the zero time.
+func firesAt(at time.Time) <-chan time.Time {
 	if at.IsZero() {
 		return nil
 	}
