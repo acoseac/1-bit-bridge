@@ -14,7 +14,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **42** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **43** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
@@ -23,15 +23,16 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
   `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
   `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`; 40 until
-  2026-09-29, when it gained `FuzzExtractOGG`, and 41 until later that day,
-  when it gained `FuzzID3v2WalkAgreesWithDhowden`.) They cover
+  2026-09-29, when it gained `FuzzExtractOGG`, 41 until later that day,
+  when it gained `FuzzID3v2WalkAgreesWithDhowden`, and 42 until later still, when
+  it gained `FuzzOggFLACReadsBackTheMetadataItCarries`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 42 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 41, because
+  **Count them by file:name pair** to get 43 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 42, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -41,7 +42,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twenty-three carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Twenty-four carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -63,11 +64,13 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   metadata address; it fuzzes the base URL as well as the XML), the eight whole-file
   extractor targets (`FuzzExtract{AIFF,WAV,DFF,DSF,FLAC,OGG,M4A,MP3}`, through
   `fuzzExtractOnce`: one extraction allocates no more than `extractionAllocLimit`, 64 MiB
-  plus 64 bytes per input byte; the rule is under **Scanner**), and
+  plus 64 bytes per input byte; the rule is under **Scanner**),
   `FuzzID3v2WalkAgreesWithDhowden` (wherever dhowden reads an ID3v2 tag, the ID3v2 guard's
-  walk counts what dhowden stores, per frame id; the rule is under **Scanner** too). This said "Four" until 2026-09-28, while eight more were added beside
+  walk counts what dhowden stores, per frame id; the rule is under **Scanner** too) and
+  `FuzzOggFLACReadsBackTheMetadataItCarries` (a FLAC stream's metadata laid out as Ogg FLAC
+  pages of any size reads back byte for byte as a .flac file's; also under **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
   them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
-  2026-09-29, and "Twenty-two" until later that day: **count them
+  2026-09-29, "Twenty-two" until later that day, and "Twenty-three" until later still: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of
@@ -1108,6 +1111,41 @@ lost my library."
   asks the guards for what it reads, and refuses any other reader;
   `TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime` fails the day dhowden
   stops counting up, and the renaming bound can go then.
+- **An Ogg FLAC stream's tags are read from its own header packets, as a .flac
+  file's are** (2026-09-29, backlog B102). dhowden's `ReadOGGTags` looks only for a
+  `\x03vorbis` or `OpusTags` packet, and a FLAC stream in Ogg carries its comments as
+  a FLAC VORBIS_COMMENT block in a header packet, so an `.oga` (or such a stream under
+  any name: dhowden picks its reader by the first bytes) had no tags, and dhowden read
+  every page to the end of the file, CRC-checking each, on every extraction (measured
+  on main: an ffmpeg `.oga` and a `flac --ogg` one, both tagless, both read to their
+  last byte). `oggFLACMetadata` (ogg_flac.go), at the top of
+  `extractViaDhowdenFromReader`, finds a FLAC stream's first packet among the leading
+  BOS pages (another stream's first page may come ahead of it) and joins that mapping
+  packet, from its `fLaC` on, with the header packets after it: the metadata of a
+  .flac file, read in place from the file. `readDhowdenTags` (both guards and
+  `tag.ReadFrom`) and then `applyFLACMultiValueArtists` read the join, so an Ogg FLAC
+  file's tags, pictures, multi-value artists and lyrics are a .flac file's. **The
+  header packets end at the first of**: the count the mapping declares, the block
+  flagged last, an empty packet or one opening `0xFF` (a frame's sync code: no block
+  type is 127), the stream's EOS page, and `maxOggFLACHeaderPackets` (65,535, the most
+  the count can declare: with no count and no last flag a stream would hold a
+  packetSource per packet). Removing one of these leaves the join, and so the tags,
+  unchanged, so each is pinned by how far the extraction READS
+  (`TestAnOggFLACStreamIsReadNoFurtherThanItsHeaderPackets`). **An empty PADDING block
+  flagged last ends the join** (`oggFLACTerminator`): in a .flac file the first audio
+  frame's `0xFF` reads to dhowden as a header flagged last, and the join has no frame,
+  so a stream whose last block is not flagged read no tags without it. **It declines a
+  stream beside a Vorbis or Opus one**: dhowden reads those (it returns the first
+  comment packet it meets), so no file dhowden could read changes. It reads no page
+  after the last header packet and no segment data but the first bytes of a packet
+  (the fixtures: 360 of 2,117 bytes, 610 of 1,441), and it wants mapping major version
+  1, which libFLAC and ffmpeg both require (measured: both refuse 2). **ExtractorVersion
+  18**; the codec stays "OGG", and an Ogg row still has no sample rate, bit depth or
+  duration (backlog B118). The iOS app lists no `.ogg` or `.oga` from SMB or the device
+  and takes a bridge row's tags as strings: no twin, no Mirror-PR.
+  `FuzzOggFLACReadsBackTheMetadataItCarries` lays blocks out in pages of any size and
+  requires them back byte for byte, and `FuzzExtractOGG` carries Ogg FLAC seeds, both
+  picture bombs among them: the guards meet them in the join.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
