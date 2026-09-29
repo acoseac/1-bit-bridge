@@ -107,7 +107,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
-**Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo.
+**Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo; the one exception, on this repo only, is a change to `CLAUDE.md` alone (**Development workflow**, step 1), and a rule that describes code lands in the PR that changes the code.
 
 ## Wire-type discipline
 
@@ -7150,7 +7150,7 @@ The repeatable external-LLM (DeepSeek v4-pro) review process spans BOTH repos �
 
 Standard single-PR loop for any non-trivial change:
 
-1. **Branch off main.** `git checkout -b feat/<topic>`. Never push code directly to main (CLAUDE.md-only docs changes are the sole exception).
+1. **Branch off main.** `git checkout -b feat/<topic>`. Never push code directly to main (CLAUDE.md-only docs changes are the sole exception; a rule that describes code is not one: it lands in the PR that changes the code, with its log record, so a review reads the two together).
 2. **Pre-push gate.** `make fmt vet test build-all` — clean before pushing. Paste the output into the PR body.
 3. **Open PR to main.** One PR per logical theme. Push the branch and open the PR; don't wait to batch unrelated changes into it.
 4. **Wait ~6 min for bot reviews.** CodeRabbit, Gemini, and Qodo/Greptile each post within ~3 min; 6 min covers the slow tail. Don't poll.
@@ -7175,7 +7175,7 @@ For any larger job spanning **3+ PRs**, use the **stack-and-batch** pattern inst
 4. **Address all comments in one combined pass per branch.** Don't merge anything yet. Bots see cross-PR context on a stack — their PR-N+1 comments may reference PR-N's invariants, and folding both into a single fix is cheaper than amending after merge. Reject bot suggestions that contradict deliberate in-code rationale (the PR-76 review's "cache transient MB errors" suggestion vs the PR #74 invariant is the canonical example — verify, don't blindly apply).
 5. **Merge bottom-up in dependency order at the end.** GitHub auto-closes a stacked PR when its base branch is deleted, so as each ancestor merges, retarget the next via `git rebase --onto main <ancestor-tip>` and open a fresh PR (the previous one auto-closed). Plan ~2 min of rebase per child PR; `--reapply-cherry-picks` is unnecessary because already-applied commits are detected and skipped automatically.
 6. **One combined follow-up PR** for any post-merge bot comments. Bots run a second review pass after the first round of fixes lands — that's the realistic floor (two rounds, not one). Batch the late-arriving items into a single follow-up PR rather than amending merged branches.
-7. **CLAUDE.md updates direct to main.** Per the existing memory-entry convention — docs-only changes bypass the feature-branch path.
+7. **CLAUDE.md-only updates direct to main.** A change to `CLAUDE.md` alone (the batch's closing entry, a corrected claim) is the one change that bypasses the feature-branch path, per step 1 of the Development workflow. A rule that describes a PR's code rides in that PR, and a change to any other doc, `AGENTS.md` included, goes through a PR. This step said "docs-only changes bypass the feature-branch path" until 2026-09-29, and `AGENTS.md` said new invariants went "committed direct to `main`", which review bots quoted back on PRs carrying a rule with its code (#1079, #1087).
 8. **End-of-session quality gate.** `make fmt vet test build-all` on bridge, `xcodebuild build` on iOS, resolve any warnings before reporting done. The stacked workflow's main risk is cross-PR drift; the build matrix catches it cheaply at the end.
 9. **Post-merge deploy** after the whole stack lands — see [Post-merge deployment](#post-merge-deployment). For a stack, deploy ONCE at the end carrying every merged fix, not per-merge.
 

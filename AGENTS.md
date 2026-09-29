@@ -12,17 +12,23 @@ number when a rule looks arbitrary.
 
 **Agent-doc maintenance.** `CLAUDE.md` is the authority, and it is a living
 document: new invariants — the "things that have bitten before" entries a
-fix produces — go THERE, committed direct to `main` as that file's own
-convention prescribes, with the supporting record appended to
-`ops/engineering-log.md`. Only `CLAUDE.md` is auto-loaded into an agent
+fix produces — go THERE, in the same PR as the fix they describe, with the
+supporting record appended to `ops/engineering-log.md` in that PR too, so a
+review reads the rule beside the code it is about. A push straight to `main`
+is the one exception `CLAUDE.md`'s Development workflow makes, for a change
+to `CLAUDE.md` alone (a corrected claim, a stale count); it is never the
+route for a rule that ships with code, and a change to this file goes
+through a PR like any other. Only `CLAUDE.md` is auto-loaded into an agent
 session, so a finding written only into the log is inert. This file is the
 onboarding layer: project shape, build commands, module map. Keep it current
 when those change, and don't duplicate invariant history into it.
 
-(An earlier revision of this line said to treat `CLAUDE.md` as read-only and
-never edit it. That contradicted `CLAUDE.md`'s own "CLAUDE.md updates direct
-to main" rule and would have stranded every future invariant in the wrong
-file; the two docs would have drifted apart within weeks.)
+(Two earlier revisions of this paragraph were wrong. The first said to treat
+`CLAUDE.md` as read-only and never edit it, which would have stranded every
+future invariant in the wrong file. The second said new invariants went
+"committed direct to `main`", and review bots quoted it back on PRs that
+carried a rule with its code (#1079, #1087), asking for the rule to be taken
+out of the PR and pushed to `main` on its own.)
 
 ## Project overview
 
@@ -308,9 +314,10 @@ the canonical copies — sync hosts FROM the repo, never edit in place.
 ## Development workflow
 
 - Work on `feat/<topic>` branches; open a PR against `main`. **Never push
-  code directly to `main`** (docs-only changes to agent-doc files are the
-  sole exception). One logical theme per PR; avoid micro-PRs — ~5 cohesive
-  ~200-line PRs beat 15 tiny ones.
+  directly to `main`**: the sole exception is a change to `CLAUDE.md` alone
+  (see "Agent-doc maintenance" above), and a rule that describes code lands
+  in the PR that changes the code. One logical theme per PR; avoid
+  micro-PRs — ~5 cohesive ~200-line PRs beat 15 tiny ones.
 - Pre-push: `make fmt vet test build-all` clean; paste the output into the PR
   body. CI reproduces the same gate.
 - Bot reviews (CodeRabbit, Gemini, Qodo/Greptile) post within ~3–6 min —
