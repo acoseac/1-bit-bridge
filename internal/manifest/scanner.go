@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -646,6 +647,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	)
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
+		linksBefore := len(tallies.dirLinks.rels)
 		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, &tallies, paths)
 		if err != nil {
 			walkErr = err
@@ -671,7 +673,10 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		if observed == 0 && !hasAllowEmptySentinel(root) && s.emptyRootMustBeSpared(ctx, root, multiRoot) {
+		// The links this root's walk passed over: a root holding nothing
+		// else gets the line that names them (emptyRootMustBeSpared).
+		rootLinks := tallies.dirLinks.rels[linksBefore:]
+		if observed == 0 && !hasAllowEmptySentinel(root) && s.emptyRootMustBeSpared(ctx, root, multiRoot, rootLinks) {
 			errorSubtrees[rootSentinel] = struct{}{}
 		}
 	}
@@ -766,11 +771,18 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
+	// Rows under a link to a directory the walk passed over are missing
+	// because the walk follows no such link, not because their files went.
+	// Asked before the increment, which is what makes a row's first miss
+	// tell-able from its second; said once the increment has landed.
+	linkMisses := s.firstMissesUnderDirLinks(ctx, missingTracks, &tallies.dirLinks)
 	// A pass the shutdown stopped rolled back, so it is not reported, and
 	// the scan returns at the ctx check below without reconciling.
 	deletedTracks, err := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 		scanLogger.Error("missing-count tracks pass", "err", failure, "missing", len(missingTracks))
+	} else if err == nil {
+		linkMisses.report(threshold)
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
@@ -938,7 +950,17 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 // rather than letting the deletion pass run on untrusted state. CodeRabbit
 // Major + Gemini medium on PR #289 — pre-fix the .warn+continue silently
 // disabled the safety gate.
-func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiRoot bool) bool {
+//
+// links are the links to directories the walk of the root passed over
+// (dirLinkTally), library-relative. A root holding nothing else is not a
+// suspected mount failure (the walk stat'ed through each link to a
+// directory, so the volume holding them is there), and its line says what it
+// is instead: the scanner follows none of them, the sentinel the old hint
+// asked for deletes the rows under them while the links still lead to them,
+// and the way to index a linked directory is to make it a library root. Until
+// 2026-09-29 the line was the mount-failure one, with that hint (backlog B74).
+// The rows are kept either way, as before.
+func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiRoot bool, links []string) bool {
 	n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
 	if countErr != nil {
 		// Spared either way. A count the shutdown stopped is not reported:
@@ -947,6 +969,12 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 			scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
 				"root", root, "err", failure)
 		}
+		return true
+	}
+	if n > 0 && len(links) > 0 {
+		scanLogger.Error(msgRootOnlyDirLinks, rootLineAttrs(root, rootLinkTarget(root),
+			"rows_in_db", n, "rows_under_links", s.rowsUnderDirLinks(ctx, links),
+			"dir_links", len(links), "example", links[0], "hint", dirLinkSentinelHint)...)
 		return true
 	}
 	if n > 0 {
@@ -998,6 +1026,28 @@ func rootLinkTarget(root string) string {
 		return dest
 	}
 	return ""
+}
+
+// rowsUnderDirLinks is countRowsUnderDirLinks over the scanner's store.
+func (s *Scanner) rowsUnderDirLinks(ctx context.Context, links []string) any {
+	return countRowsUnderDirLinks(ctx, s.store, links)
+}
+
+// countRowsUnderDirLinks is the number of rows a walk owns under the given
+// links to directories (library-relative), for the guard's line and the
+// owning-root audit's refusal: the rows the sentinel would delete while the
+// links still lead to them. "unknown" when a count fails; the line is said
+// anyway, and the rows are kept either way.
+func countRowsUnderDirLinks(ctx context.Context, store *Store, links []string) any {
+	total := 0
+	for _, link := range links {
+		n, err := store.CountOwnTracksUnderPrefix(ctx, link)
+		if err != nil {
+			return "unknown"
+		}
+		total += n
+	}
+	return total
 }
 
 // reportReconciliation logs a reconciliation pass that failed. One the
@@ -2146,6 +2196,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			seenFolders[rel] = struct{}{}
 			return nil
 		}
+		// A link to a directory: walkRoot's decision (dirLinkEntry). The
+		// subtree scanned can be one itself (a scan asked for at a link's
+		// path), which WalkDir hands over as its one entry.
+		through := throughStat{abs: abs}
+		if info, linked := dirLinkEntry(d.Type(), d.Name(), through.stat); linked {
+			rel := relPath(owningRoot, abs, multiRoot)
+			tallies.dirLinks.note(rel)
+			if isLibraryEntry(abs, d.Name(), false) {
+				tallies.noteNotAFile(rel, info.Mode())
+			}
+			return nil
+		}
 		if !isLibraryEntry(abs, d.Name(), false) {
 			return nil
 		}
@@ -2153,7 +2215,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		// The same decision walkRoot makes (walkedFileInfo), and the same
 		// answer to each verdict.
 		rel := relPath(owningRoot, abs, multiRoot)
-		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
+		info, verdict, err := walkedFileInfo(d.Type(), d.Info, through.stat)
 		switch verdict {
 		case walkedFileStatFailed:
 			scanLogger.Warn("subtree stat", "path", abs, "err", err)
@@ -2209,7 +2271,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// is spared by that failure and says so, as in Scan.
 	rootSentinel := relPath(owningRoot, owningRoot, multiRoot)
 	if _, errored := errorSubtrees[rootSentinel]; atRoot && !errored && observed == 0 &&
-		!hasAllowEmptySentinel(owningRoot) && s.emptyRootMustBeSpared(ctx, owningRoot, multiRoot) {
+		!hasAllowEmptySentinel(owningRoot) && s.emptyRootMustBeSpared(ctx, owningRoot, multiRoot, tallies.dirLinks.rels) {
 		errorSubtrees[rootSentinel] = struct{}{}
 	}
 
@@ -2273,9 +2335,13 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// tail read the wrong one and skipped the pass whenever the tracks
 	// pass failed while the folders pass succeeded. Separate names make
 	// that class of clobber impossible rather than merely fixed.
+	// Scan's rule for rows under a link to a directory (firstMissesUnderDirLinks).
+	linkMisses := s.firstMissesUnderDirLinks(ctx, missingTracks, &tallies.dirLinks)
 	deletedTracks, tracksDelErr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
 	if failure := ctxerr.WithoutCancellation(ctx, tracksDelErr); failure != nil {
 		scanLogger.Error("subtree missing-count tracks pass", "err", failure, "missing", len(missingTracks))
+	} else if tracksDelErr == nil {
+		linkMisses.report(threshold)
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
@@ -2516,6 +2582,21 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			seenFolders[rel] = struct{}{}
 			return nil
 		}
+		// A link to a directory is not walked (#1070: loops) and is not
+		// library content, whatever its name (dirLinkEntry). It is
+		// recorded, so the clean-empty guard can name it when the root
+		// holds nothing else and the deletion pass can say when rows
+		// under it start going. An audio-named one is also an entry
+		// that is not a file, as it always was.
+		through := throughStat{abs: abs}
+		if info, linked := dirLinkEntry(d.Type(), d.Name(), through.stat); linked {
+			rel := relPath(root, abs, multiRoot)
+			tallies.dirLinks.note(rel)
+			if isLibraryEntry(abs, d.Name(), false) {
+				tallies.noteNotAFile(rel, info.Mode())
+			}
+			return nil
+		}
 		// Skip dot-files and anything else the walk does not index;
 		// what is left is library content, which is all the
 		// clean-empty guard counts.
@@ -2525,7 +2606,7 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 		observed++
 
 		rel := relPath(root, abs, multiRoot)
-		info, verdict, err := walkedFileInfo(d.Type(), d.Info, func() (fs.FileInfo, error) { return os.Stat(abs) })
+		info, verdict, err := walkedFileInfo(d.Type(), d.Info, through.stat)
 		switch verdict {
 		case walkedFileStatFailed:
 			scanLogger.Warn("stat", "path", abs, "err", err)
@@ -2622,7 +2703,11 @@ func hasAllowEmptySentinel(root string) bool {
 //   - root holds no content AND CountTracksUnderRoot > 0:
 //     untrusted — DB carries history but the root has nothing, this
 //     looks like a mount drop. Return a suspected-mount-drop error
-//     to abort the deletion pass.
+//     to abort the deletion pass. A root whose only entries of note are
+//     links to directories (dirLinkEntry) is refused the same way, with
+//     the guard's account of it instead (emptyRootMustBeSpared): the
+//     scanner follows none of them, and the sentinel deletes the rows
+//     under them while the links still lead to them.
 //   - root holds no content AND CountTracksUnderRoot == 0:
 //     trustworthy — fresh install or post-wipe state with no rows
 //     to protect.
@@ -2641,10 +2726,30 @@ func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot 
 	if err != nil {
 		return fmt.Errorf("audit owning root: count tracks: %w", err)
 	}
-	if n > 0 {
-		return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
+	if n == 0 {
+		return nil
 	}
-	return nil
+	if links := dirLinksIn(owningRoot, entries, multiRoot); len(links) > 0 {
+		return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB, %v of them under the links to directories it holds (%d, e.g. %s), "+
+			"which the scanner does not follow; placing .bridge-allow-empty would delete them, with a tombstone to every paired device, though the links still lead to their files; "+
+			"to index what a link leads to, add that directory as a library root of its own",
+			owningRoot, n, countRowsUnderDirLinks(ctx, store, links), len(links), links[0])
+	}
+	return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
+}
+
+// dirLinksIn returns the links to directories among a root's entries
+// (dirLinkEntry), each by its library-relative path.
+func dirLinksIn(root string, entries []fs.DirEntry, multiRoot bool) []string {
+	var links []string
+	for _, e := range entries {
+		abs := filepath.Join(root, e.Name())
+		through := throughStat{abs: abs}
+		if _, linked := dirLinkEntry(e.Type(), e.Name(), through.stat); linked {
+			links = append(links, relPath(root, abs, multiRoot))
+		}
+	}
+	return links
 }
 
 // isUnderErroredSubtree reports whether `path` is at or under any of
@@ -2875,6 +2980,11 @@ func ShouldSkipDir(name string) bool {
 // Synology @eaDir, a desktop.ini, a cover image) is empty. The guard
 // counted every entry until 2026-09-28, so one stray .DS_Store let the
 // deletion pass reap every row under an emptied mount point.
+//
+// It is the NAME rule, and it is never asked about a link to a directory:
+// the walks and holdsLibraryContent take one out first (dirLinkEntry), since
+// by its name alone a link named like a track counted as content, and a root
+// holding nothing else lost its rows with no line (2026-09-29, backlog B74).
 func isLibraryEntry(abs, name string, isDir bool) bool {
 	if isDir {
 		return !ShouldSkipDir(name)
@@ -2883,10 +2993,16 @@ func isLibraryEntry(abs, name string, isDir bool) bool {
 }
 
 // holdsLibraryContent reports whether a directory's listing holds an entry
-// isLibraryEntry takes as library content.
+// isLibraryEntry takes as library content, never counting a link to a
+// directory (dirLinkEntry), as the walks do not.
 func holdsLibraryContent(dir string, entries []fs.DirEntry) bool {
 	for _, e := range entries {
-		if isLibraryEntry(filepath.Join(dir, e.Name()), e.Name(), e.IsDir()) {
+		abs := filepath.Join(dir, e.Name())
+		through := throughStat{abs: abs}
+		if _, linked := dirLinkEntry(e.Type(), e.Name(), through.stat); linked {
+			continue
+		}
+		if isLibraryEntry(abs, e.Name(), e.IsDir()) {
 			return true
 		}
 	}
@@ -3065,7 +3181,9 @@ func (w *walkTally) report(msg, key string) {
 }
 
 // walkTallies are the audio-named entries a scan's walk passed over
-// (walkedFileInfo), each reason reported in one line once the walk is done.
+// (walkedFileInfo), each reason reported in one line once the walk is done,
+// and the links to directories it passed over, which the clean-empty guard
+// and the deletion pass name (dirLinkTally).
 type walkTallies struct {
 	// unreadable: links whose target could not be stat'ed. Their rows are
 	// kept (walkedFileTargetUnreadable).
@@ -3073,6 +3191,171 @@ type walkTallies struct {
 	// notFiles: entries that are not files. Nothing is indexed for them
 	// (walkedFileNotAFile).
 	notFiles walkTally
+	// dirLinks: links to directories, whatever their names. Nothing under
+	// them is walked.
+	dirLinks dirLinkTally
+}
+
+// throughStat stats one walked entry through a link, once: the walk asks
+// whether an entry is a link to a directory (dirLinkEntry) before
+// walkedFileInfo asks what an audio-named one is, and a link is then stat'ed
+// once, not twice. A regular file never reaches it.
+type throughStat struct {
+	abs  string
+	done bool
+	info fs.FileInfo
+	err  error
+}
+
+// stat is os.Stat of the entry, the first answer kept.
+func (t *throughStat) stat() (fs.FileInfo, error) {
+	if !t.done {
+		t.info, t.err = os.Stat(t.abs)
+		t.done = true
+	}
+	return t.info, t.err
+}
+
+// dirLinkEntry reports whether an entry the walk does not take for a
+// directory (its listing type is not ModeDir) is a link to one, and returns
+// the stat through it when it is. A symbolic link, and on Windows a junction
+// or a volume mounted in a folder, which since Go 1.23 are ModeIrregular
+// without ModeDir: WalkDir descends none of them, and the scanner follows no
+// link to a directory below a library root (loops, #1070), so nothing under
+// one is indexed and a row under one is not seen by any walk. A name the walk
+// would skip as a directory (ShouldSkipDir: a dot-name, a recycle bin) is not
+// one: nothing could be indexed under it if it were a directory, so it is
+// nothing to report. A link whose target cannot be stat'ed is not one either:
+// what it names is not known, as for walkedFileTargetUnreadable.
+//
+// It is never library content (isLibraryEntry), whatever its name: counted,
+// a root holding nothing else passed the clean-empty guard, and its rows went
+// at the threshold where the guard exists to keep them and say why.
+func dirLinkEntry(typ fs.FileMode, name string, through func() (fs.FileInfo, error)) (fs.FileInfo, bool) {
+	if typ.IsRegular() || typ.IsDir() || ShouldSkipDir(name) {
+		return nil, false
+	}
+	info, err := through()
+	if err != nil || !info.IsDir() {
+		return nil, false
+	}
+	return info, true
+}
+
+// dirLinkTally is the links to directories a walk passed over, each by its
+// library-relative path (relPath), in the order the walk met them. The
+// clean-empty guard names them when a root held nothing else, and the
+// deletion pass says when rows under them start going (dirLinkMisses).
+type dirLinkTally struct {
+	rels []string
+	set  map[string]struct{}
+}
+
+// note records the link at rel.
+func (d *dirLinkTally) note(rel string) {
+	if d.set == nil {
+		d.set = make(map[string]struct{})
+	}
+	if _, dup := d.set[rel]; dup {
+		return
+	}
+	d.set[rel] = struct{}{}
+	d.rels = append(d.rels, rel)
+}
+
+// holding returns the link whose tree holds the library-relative path p, and
+// whether there is one. p itself is never its own holder: a row AT a link's
+// path is a file that became a link, reaped like a deleted file's (#1070).
+func (d *dirLinkTally) holding(p string) (string, bool) {
+	if len(d.set) == 0 {
+		return "", false
+	}
+	for dir := path.Dir(p); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
+		if _, ok := d.set[dir]; ok {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+// msgRootOnlyDirLinks is the clean-empty guard's line for a root whose walk
+// found no library content and at least one link to a directory. It is not a
+// suspected mount failure: a link the walk stat'ed through to a directory
+// says the volume holding the root's entries is there. The rows are kept as
+// the guard keeps an emptied root's, and the hint is dirLinkSentinelHint.
+const msgRootOnlyDirLinks = "library root holds no content but links to directories, which the scanner does not follow; its rows are kept"
+
+// dirLinkSentinelHint is what the guard's line, and the owning-root audit's
+// refusal, tell an operator whose root holds only links to directories. The
+// hint they gave before, to place .bridge-allow-empty, deleted every row under
+// the links, a tombstone to every paired device, while the links still led to
+// the files (measured 2026-09-29, backlog B74).
+const dirLinkSentinelHint = "the scanner follows no link to a directory below a library root, so nothing under these links is read or rescanned. " +
+	"Placing .bridge-allow-empty lets the scans delete every row kept here, with a tombstone to every paired device, " +
+	"the rows_under_links under the links included, though the links still lead to their files. " +
+	"To index what a link leads to, add that directory as a library root of its own"
+
+// msgDirLinkRows is the line a deletion pass logs when rows under a link to a
+// directory start going: once per row's streak (TracksNotYetCountedMissing),
+// never once per scan.
+const msgDirLinkRows = "rows under links to directories are counted missing: the scanner does not follow links below a library root"
+
+// dirLinkRowsHint is msgDirLinkRows's hint.
+const dirLinkRowsHint = "these rows are deleted, with a tombstone to every paired device, by the scan that has missed them threshold times in a row, " +
+	"though the links still lead to their files. To keep them, add the directory each link leads to as a library root of its own " +
+	"(one already under a library root is indexed there)"
+
+// dirLinkMisses are the rows a deletion pass is about to count missing for the
+// first time (a streak's start) that are under a link to a directory its walk
+// passed over, and the links holding them, in the order met.
+type dirLinkMisses struct {
+	links []string
+	rows  int
+}
+
+// firstMissesUnderDirLinks returns the rows among missing (the paths a
+// deletion pass is about to count) that sit under one of the walk's links to
+// directories and that no pass has counted missing yet. It must run BEFORE the
+// pass increments: after it, every such row reads as counted. A failed read
+// takes every row under a link as a first miss: the line is then said twice
+// in a rare failure rather than, if the pass's increment lands, never for
+// that streak.
+func (s *Scanner) firstMissesUnderDirLinks(ctx context.Context, missing []string, links *dirLinkTally) dirLinkMisses {
+	var under []string
+	for _, p := range missing {
+		if _, ok := links.holding(p); ok {
+			under = append(under, p)
+		}
+	}
+	if len(under) == 0 {
+		return dirLinkMisses{}
+	}
+	first, err := s.store.TracksNotYetCountedMissing(ctx, under)
+	if err != nil {
+		first = under
+	}
+	var out dirLinkMisses
+	seen := make(map[string]struct{})
+	for _, p := range first {
+		link, _ := links.holding(p)
+		if _, dup := seen[link]; !dup {
+			seen[link] = struct{}{}
+			out.links = append(out.links, link)
+		}
+		out.rows++
+	}
+	return out
+}
+
+// report logs msgDirLinkRows for the misses, when there are any. Called once
+// the pass's increment has landed: a pass that failed or was stopped counted
+// nothing, so its rows are still at the start of their streak for the next.
+func (m dirLinkMisses) report(threshold int) {
+	if m.rows == 0 {
+		return
+	}
+	scanLogger.Warn(msgDirLinkRows, "dir_links", len(m.links), "example", m.links[0],
+		"rows", m.rows, "threshold", threshold, "hint", dirLinkRowsHint)
 }
 
 // noteUnreadable records the link at rel, whose target the walk could not
