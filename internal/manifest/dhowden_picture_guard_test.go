@@ -205,8 +205,10 @@ func pictureBombShapes() []struct {
 			flacStream(flacBlock(true, 6, 0, bomb)),
 		},
 		{
+			// Room for the picture type and not the MIME length: the old
+			// guard's second read failed, and it passed the block.
 			"a PICTURE block too short for its own fields", "x.flac",
-			flacStream(streamInfo(), flacBlock(true, 6, 10, bomb)),
+			flacStream(streamInfo(), flacBlock(true, 6, 6, bomb)),
 		},
 		{
 			// dhowden reads a VORBIS_COMMENT by its contents, not its declared
