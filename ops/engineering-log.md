@@ -30357,7 +30357,15 @@ real serve (`TestServeWithItsFeaturesOffServesWhatItMadeBefore`): a
 rendition and an analysis row seeded into serve's store, both features at
 their default (off), a paired token; the manifest carried `waveformTag` and
 `keyRoot`/`keyMode` and no `variants`, and the rendition and the curve were
-served through the production adapters.
+served through the production adapters. A review round (CodeRabbit on
+#1102) widened what the two tests read rather than only that the routes
+answer: the served test seeds and checks every field analysis measured
+(`replayGainTrackDB`, `bpm` with `bpmEstimated`, `truePeakDB`, `drScore`,
+`audioMD5State`, `bandwidthHz`, beside the tag and the key), so each of the
+manifest's three analysis splices (`waveformTagSQL`, `replayGainSQL`,
+`analysisScalarsSQL`) is under a check, and it requires `variants` to be
+left out, not merely empty; the api test's batch list carries a past batch
+and must list it.
 
 Negative controls, each committed first and restored with `git checkout`:
 gating `serveVariant`, `lookupAnalysisForRequest` and the list handler on
@@ -30365,7 +30373,11 @@ the live predicate (and the list on the demo refusal) turned all four api
 tests red (five assertions); gating the two handlers turned the serve test's
 two reads red; stripping `waveformTag` and `keyRoot` in the manifest writer
 with upscaling off turned its manifest assertions red; not stripping
-`variants` turned its variant assertion red. Opening each gate in the api
+`variants` turned its variant assertion red. For the widened checks, NULL
+in `replayGainSQL` and in the scalar bundle's `bpm`, `tp`, `dr`, `md5` and
+`bw` turned each of those seven assertions red, and a list handler that
+drops its rows with the gate closed or on a demo bridge turned both list
+cases red. Opening each gate in the api
 tests trips their precondition, so none can pass on an open gate.
 The test once named `…DownloadVariantWhenFeatureDisabledReturns404` is
 `TestDownloadVariantWithNoStoreReturns404` now: its name and docblock called
