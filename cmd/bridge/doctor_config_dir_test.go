@@ -157,6 +157,13 @@ func TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead(t *testing.T) {
 				check, r, s, row.String(), setup.String())
 		}
 	}
+	// And tls-cert, which grades the pair in the data dir Setup writes, as
+	// Setup's preflight does (backlog B61). It warned "no data dir set" on
+	// the row until 2026-09-29, where Setup graded that pair.
+	if r, s := reportLine(row.String(), "tls-cert"), reportLine(setup.String(), "tls-cert"); r == "" || r != s {
+		t.Errorf("tls-cert: the row says %q and Setup's preflight %q; want the same line.\nrow:\n%s\nSetup:\n%s",
+			r, s, row.String(), setup.String())
+	}
 }
 
 // reportLine is the line of a printed doctor report that grades check, or

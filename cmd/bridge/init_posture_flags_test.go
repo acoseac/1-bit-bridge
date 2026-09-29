@@ -194,6 +194,11 @@ func TestInitRunThatKeepsTheConfigIsNotRefused(t *testing.T) {
 	if !strings.Contains(out, "keeping it") {
 		t.Errorf("the run does not say it keeps the config")
 	}
+	// A warning that the run "sets up a loopback install" would be false:
+	// it sets up nothing, and the config it keeps may be public.
+	if w := publicOnlyWarning(out); w != "" {
+		t.Errorf("the run that keeps the config warned %q", w)
+	}
 	if after := readConfigFile(t, cfgDir); after != before {
 		t.Errorf("the run changed the config it keeps")
 	}

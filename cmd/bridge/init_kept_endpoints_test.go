@@ -106,6 +106,9 @@ func TestEndpointsNamingAMovedPort(t *testing.T) {
 		"https://music.example.test",
 		"http://plain.example.test",
 		"https://other.example.test:7788",
+		// A port no client dials, so an install listening on :0 has no
+		// endpoint on the port it moves off.
+		"https://zero.example.test:0",
 	}
 	for _, tc := range []struct {
 		name     string
