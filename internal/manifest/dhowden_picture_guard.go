@@ -142,35 +142,102 @@ func (w *pictureWalk) spend(n int64, what string) bool {
 //
 // rs is left at the offset it came in at.
 func dhowdenPicturesWithinBudget(rs io.ReadSeeker) (bool, pictureRefusal) {
+	st, ok := openDhowdenStream(rs)
+	if !ok {
+		return true, pictureRefusal{}
+	}
+	src := st.from()
+	w := &pictureWalk{budget: pictureBudget(src.Size())}
+	if head, ok := st.head(); ok {
+		switch dhowdenReaderFor(head) {
+		case dhowdenReadsFLAC:
+			w.flac(src)
+		case dhowdenReadsOgg:
+			w.ogg(src)
+		}
+	}
+	if !st.restore() {
+		return true, pictureRefusal{}
+	}
+	return w.refusal.What == "", w.refusal
+}
+
+// dhowdenStream is a stream a guard walks before dhowden reads it: the
+// ReadSeeker a tag reader is handed, read by offset from where that reader
+// will start, so a walk never moves it (except through seekingReaderAt, which
+// restore puts right).
+type dhowdenStream struct {
+	rs         io.ReadSeeker
+	ra         io.ReaderAt // the whole stream, by absolute offset
+	start, end int64
+}
+
+// openDhowdenStream measures rs for a walk, and false when it cannot be
+// measured (the guards then fail open: dhowden's own seeks fail the same way).
+func openDhowdenStream(rs io.ReadSeeker) (dhowdenStream, bool) {
 	start, err := rs.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return true, pictureRefusal{}
+		return dhowdenStream{}, false
 	}
 	end, err := rs.Seek(0, io.SeekEnd)
 	if _, serr := rs.Seek(start, io.SeekStart); err != nil || serr != nil || end < start {
-		return true, pictureRefusal{}
+		return dhowdenStream{}, false
 	}
 	ra, ok := rs.(io.ReaderAt)
 	if !ok {
 		ra = &seekingReaderAt{rs: rs}
 	}
-	src := io.NewSectionReader(ra, start, end-start)
-	w := &pictureWalk{budget: pictureBudget(src.Size())}
-	// tag.ReadFrom reads 11 bytes first and fails without them.
+	return dhowdenStream{rs: rs, ra: ra, start: start, end: end}, true
+}
+
+// from is the stream from the offset the tag reader starts at to its end.
+func (s dhowdenStream) from() *io.SectionReader {
+	return io.NewSectionReader(s.ra, s.start, s.end-s.start)
+}
+
+// head reads what tag.ReadFrom reads first, the 11 bytes it picks a parser by
+// and fails without.
+func (s dhowdenStream) head() ([11]byte, bool) {
 	var head [11]byte
-	if !readFullAt(src, 0, head[:]) {
-		return true, pictureRefusal{}
-	}
+	return head, readFullAt(s.from(), 0, head[:])
+}
+
+// restore puts the reader back at the offset it came in at, and reports
+// whether it could.
+func (s dhowdenStream) restore() bool {
+	_, err := s.rs.Seek(s.start, io.SeekStart)
+	return err == nil
+}
+
+// dhowdenReader names the parser tag.ReadFrom hands a stream to.
+type dhowdenReader int
+
+const (
+	dhowdenReadsID3v1 dhowdenReader = iota // no magic it knows: it looks for an ID3v1 tag at the end
+	dhowdenReadsFLAC
+	dhowdenReadsOgg
+	dhowdenReadsMP4
+	dhowdenReadsID3v2
+	dhowdenReadsDSF
+)
+
+// dhowdenReaderFor is tag.ReadFrom's dispatch on the stream's first 11 bytes,
+// in its order: an "ID3" stream whose bytes 4 to 8 read "ftyp" is read as
+// MP4, never as ID3v2.
+func dhowdenReaderFor(head [11]byte) dhowdenReader {
 	switch {
-	case string(head[:4]) == "fLaC":
-		w.flac(src)
-	case string(head[:4]) == "OggS":
-		w.ogg(src)
+	case string(head[0:4]) == "fLaC":
+		return dhowdenReadsFLAC
+	case string(head[0:4]) == "OggS":
+		return dhowdenReadsOgg
+	case string(head[4:8]) == "ftyp":
+		return dhowdenReadsMP4
+	case string(head[0:3]) == "ID3":
+		return dhowdenReadsID3v2
+	case string(head[0:4]) == "DSD ":
+		return dhowdenReadsDSF
 	}
-	if _, err := rs.Seek(start, io.SeekStart); err != nil {
-		return true, pictureRefusal{}
-	}
-	return w.refusal.What == "", w.refusal
+	return dhowdenReadsID3v1
 }
 
 // flac mirrors tag.ReadFLACTags: after "fLaC", blocks of a 1-byte header
