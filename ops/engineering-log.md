@@ -29556,9 +29556,28 @@ decodes) a named test.
 
 ### Fuzzed after the fix
 
-dido, the final guard unless noted, `-fuzzminimizetime 1s`:
+dido, golang:1.26.6, 4 CPUs and an 8 GB cgroup per run,
+`-fuzzminimizetime 1s`:
 
-{FUZZ_AFTER}
+- The first version (the pictures alone counted): FuzzExtractFLAC failed at
+  5m52s (the section above); FuzzExtractM4A, 10 minutes, 5,487,957 execs, and
+  FuzzExtractOGG, 15 minutes, 6,471,900 execs, passed.
+- The final logic: FuzzExtractFLAC, 20 minutes under the nightly job's
+  5 GiB limit, 8,877,509 execs, passed; sampled every 2 s, a worker used at
+  most 266 MB of RSS and 2.27 GB of address space, the coordinator 1.0 GB
+  and 3.78 GB. FuzzExtractAIFF and FuzzExtractWAV, 6 minutes each (2,997,838
+  and 2,988,674 execs), and FuzzExtractDFF, FuzzExtractDSF and
+  FuzzExtractMP3, 5 minutes each (2,022,052, 2,091,002 and 1,655,039),
+  passed.
+- The final code, after the Ogg walk was split into a demuxer and a
+  comment-body reader without changing what it reads: FuzzExtractOGG,
+  10 minutes under the 5 GiB limit, 6,813,261 execs, passed.
+- One extraction of each bomb shape with the guard allocates at most 139 KB
+  (the one named `.mp3`; every other at most 17 KB over two runs), where main
+  allocated 1.07 GB or 387 MB. The small figures are coarse:
+  `/gc/heap/allocs:bytes` counts a small allocation when its span is
+  refilled, and a large one when it is made, which is the one that matters
+  here.
 
 ### Tests
 
