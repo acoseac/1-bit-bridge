@@ -1137,6 +1137,13 @@ func renditionSpec(track *manifest.Track, absPath, outputDir, tempDir string, so
 // Same error taxonomy as EnqueueOne so the handler's switch arm
 // doesn't have to discriminate.
 func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) error {
+	return a.enqueueOptimize(libraryRelativePath, false)
+}
+
+// enqueueOptimize is EnqueueOptimize on the lane `background` picks
+// (transcode.JobSpec.Background): a client's request takes the foreground
+// one, a stale download's re-render the background one (enqueueKind).
+func (a *upscaleEnqueuerAdapter) enqueueOptimize(libraryRelativePath string, background bool) error {
 	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
 		return err
@@ -1145,6 +1152,7 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
+	spec.Background = background
 	return a.finalizeAndEnqueue(spec, track, false)
 }
 
@@ -1154,6 +1162,12 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 // the gate (transcode.PCMRenderEligible — a non-DSD source is refused
 // with the typed ineligible error), the target resolver and the bits.
 func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) error {
+	return a.enqueuePCMRender(libraryRelativePath, false)
+}
+
+// enqueuePCMRender is EnqueuePCMRender on the lane `background` picks, as
+// enqueueOptimize is EnqueueOptimize.
+func (a *upscaleEnqueuerAdapter) enqueuePCMRender(libraryRelativePath string, background bool) error {
 	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
 		return err
@@ -1162,20 +1176,25 @@ func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) er
 	if err != nil {
 		return err
 	}
+	spec.Background = background
 	return a.finalizeAndEnqueue(spec, track, false)
 }
 
 // enqueueKind is the entry point a client's request for kind reaches
 // (POST /v1/upscale routes on the same three), for the file whose track row
-// records libraryRelativePath. A stale download's re-render goes through it
-// (staleRerender), so it renders what such a request would, under the same
-// refusals.
+// records libraryRelativePath, on the BACKGROUND lane. A stale download's
+// re-render goes through it (staleRerender), so it renders what such a
+// request would, under the same refusals; and on the lane the auto-optimize
+// sweep's renders take, since nobody waits on it (the download that asked
+// has already played the source), so a library retagged at once cannot
+// queue its renditions ahead of a request a client does wait on (a CarPlay
+// plug-in). An upscale takes that lane whatever its flag.
 func (a *upscaleEnqueuerAdapter) enqueueKind(kind transcode.JobKind, libraryRelativePath string) error {
 	switch kind {
 	case transcode.JobKindOptimize:
-		return a.EnqueueOptimize(libraryRelativePath)
+		return a.enqueueOptimize(libraryRelativePath, true)
 	case transcode.JobKindPCMRender:
-		return a.EnqueuePCMRender(libraryRelativePath)
+		return a.enqueuePCMRender(libraryRelativePath, true)
 	default:
 		return a.EnqueueOne(libraryRelativePath)
 	}

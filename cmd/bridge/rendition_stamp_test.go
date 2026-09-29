@@ -44,6 +44,9 @@ type committingQueue struct {
 	store *manifest.Store
 	mu    sync.Mutex
 	done  []string // "<source> <variant id>", one per committed render
+	// background is the lane of each committed render, in done's order
+	// (transcode.JobSpec.Background).
+	background []bool
 }
 
 func (q *committingQueue) Enqueue(spec transcode.JobSpec) error {
@@ -71,6 +74,7 @@ func (q *committingQueue) Enqueue(spec transcode.JobSpec) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.done = append(q.done, spec.SourceLibraryRel+" "+spec.VariantID())
+	q.background = append(q.background, spec.Background)
 	return nil
 }
 
@@ -79,6 +83,14 @@ func (q *committingQueue) since(n int) []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return append([]string(nil), q.done[n:]...)
+}
+
+// lanesSince returns the lane of each render committed after the first n,
+// true for the background one.
+func (q *committingQueue) lanesSince(n int) []bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]bool(nil), q.background[n:]...)
 }
 
 func (q *committingQueue) count() int {

@@ -273,9 +273,11 @@ func afterRescan(invalidate func(), rescanned func(ctx context.Context, relDir s
 const staleRenditionRescanEvery = time.Minute
 
 // staleRenditionWaitMax is how long a render a download asked for may wait
-// for the rescan of its directory before a full table forgets it: longer
-// than a full rescan queue (about nineteen minutes of work at its cap, see
-// sourceRescanQueueCap) behind a full scan holding the scanner's lock.
+// for a rescan of its directory that brings its row level: past it, a
+// rescan that leaves the row behind drops it, and a full table forgets it
+// first. Longer than a full rescan queue (about nineteen minutes of work at
+// its cap, see sourceRescanQueueCap) behind a full scan holding the
+// scanner's lock.
 const staleRenditionWaitMax = time.Hour
 
 // staleRenditionHeal is the download path's side of a stale rendition
@@ -289,12 +291,14 @@ const staleRenditionWaitMax = time.Hour
 //
 //   - While the file's row is behind it (the file changed since the scan
 //     that wrote the row), it asks for a rescan of the file's directory
-//     (backlog B53), and the render waits for that rescan (rescanned): a
-//     render now would record a version the serve path refuses. At most once
-//     per directory per staleRenditionRescanEvery, a minute spent only on a
-//     request the rescanner queued or already had waiting: one it dropped
-//     (its queue full) leaves the next GET free to ask, and a rescan that
-//     brought every waiting file level frees it.
+//     (backlog B53), and the render waits for a rescan of that directory
+//     that brings the row level (rescanned), for at most
+//     staleRenditionWaitMax: a render now would record a version the serve
+//     path refuses. The rescan is asked for at most once per directory per
+//     staleRenditionRescanEvery, a minute spent only on a request the
+//     rescanner queued or already had waiting: one it dropped (its queue
+//     full) leaves the next GET free to ask, and a rescan that brought every
+//     waiting file level frees it.
 //   - Once the row is current it asks for the render (rerender) at once, at
 //     most once per version of the file and rendition per
 //     staleRenditionRescanEvery, a minute not spent when nothing was tried
@@ -370,8 +374,9 @@ func (h *staleRenditionHeal) observe(ctx context.Context, clientPath, variantID 
 // rescanned is sourceRescanner.run's `after` step for the renders downloads
 // asked for while the rows of dir's files were behind: each whose row the
 // rescan brought level with its file is asked for now. One still behind (the
-// file changed again, or the scan could not read it) is dropped, to be asked
-// for by the next download that finds it stale.
+// file changed again, the scan failed or could not read it) keeps waiting,
+// with the time it was first asked for, for a later rescan of dir; one whose
+// row is gone is dropped.
 //
 // A rescan that brought every waiting file level frees the directory's
 // minute: it did what the downloads asked for, and a later change to one of
@@ -384,12 +389,18 @@ func (h *staleRenditionHeal) rescanned(ctx context.Context, dir string) {
 	behind := false
 	for _, w := range wants {
 		track, err := h.lookup(ctx, w.rel)
-		if err != nil || track == nil {
+		if err != nil {
+			behind = true
+			h.keep(w)
+			continue
+		}
+		if track == nil {
 			continue
 		}
 		info, err := h.stat(track.Path)
 		if err != nil || !transcode.SourceIsAtRow(info, track.ModTime.UnixNano(), track.Size) {
 			behind = true
+			h.keep(w)
 			continue
 		}
 		h.render(ctx, track, w.variantID)
@@ -422,9 +433,14 @@ func (h *staleRenditionHeal) render(ctx context.Context, track *manifest.Track, 
 		h.forget(h.rendered, key)
 	case errors.Is(err, errSourceAheadOfRow):
 		// The file changed again between the check here and the one in the
-		// enqueue, which asked for the rescan: the render waits for it.
-		h.forget(h.rendered, key)
+		// enqueue, and the enqueue asked for a rescan. The render waits for
+		// it, and asks for the rescan again once it is waiting, which the
+		// rescanner folds into the one already queued: the enqueue's request
+		// came first, so a quick rescan could have run, and its step gone
+		// by, before the wait was recorded. The minute stays spent: the
+		// rescan reads a new version, whose render is another key.
 		h.await(path.Dir(rel), rel, variantID)
+		h.request(rel)
 	case errors.Is(err, errRerenderInactive):
 		// Refused on a gate, before any work: the minute stays free, so the
 		// first download after the kind is switched on renders.
@@ -446,13 +462,34 @@ func (h *staleRenditionHeal) await(dir, rel, variantID string) {
 	if h.rerender == nil {
 		return
 	}
+	h.wait(staleRenditionWant{dir: dir, rel: rel, variantID: variantID, at: h.now()}, true)
+}
+
+// keep puts back a render a rescan left behind, with the time it was first
+// asked for, so it still ages out an hour after that: a file that never
+// comes level is not carried through every rescan for ever. A download that
+// asked for it again meanwhile has already put back a newer one.
+func (h *staleRenditionHeal) keep(w staleRenditionWant) {
+	if h.now().Sub(w.at) >= staleRenditionWaitMax {
+		return
+	}
+	h.wait(w, false)
+}
+
+// wait records w, over one already waiting for the same render when replace
+// is set, under await's bound.
+func (h *staleRenditionHeal) wait(w staleRenditionWant, replace bool) {
 	now := h.now()
-	key := rel + "\x00" + variantID
+	key := w.rel + "\x00" + w.variantID
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.waiting[key]; !ok && len(h.waiting) >= sourceRescanQueueCap {
-		for k, w := range h.waiting {
-			if now.Sub(w.at) >= staleRenditionWaitMax {
+	_, ok := h.waiting[key]
+	if ok && !replace {
+		return
+	}
+	if !ok && len(h.waiting) >= sourceRescanQueueCap {
+		for k, old := range h.waiting {
+			if now.Sub(old.at) >= staleRenditionWaitMax {
 				delete(h.waiting, k)
 			}
 		}
@@ -460,7 +497,7 @@ func (h *staleRenditionHeal) await(dir, rel, variantID string) {
 			return
 		}
 	}
-	h.waiting[key] = staleRenditionWant{dir: dir, rel: rel, variantID: variantID, at: now}
+	h.waiting[key] = w
 }
 
 // takeWaiting removes and returns the renders waiting for dir's rescan.

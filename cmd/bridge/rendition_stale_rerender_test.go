@@ -41,6 +41,9 @@ func TestAStaleRenditionIsRenderedAgainWhenADownloadFindsItsRowCurrent(t *testin
 	renditions := b.queue.since(0)
 	sort.Strings(renditions)
 	b.wantServed(t, "after the requests", renditions)
+	if lanes := b.queue.lanesSince(0); !slices.Equal(lanes, []bool{false, false}) {
+		t.Fatalf("the client's requests went to the lanes %v (true: background), want the foreground one", lanes)
+	}
 
 	b.change(t, stampPCM)
 	b.change(t, stampDSD)
@@ -59,6 +62,13 @@ func TestAStaleRenditionIsRenderedAgainWhenADownloadFindsItsRowCurrent(t *testin
 	if !slices.Equal(got, renditions) {
 		t.Fatalf("the stale downloads rendered %v, want each stale rendition again: %v\n"+
 			"with auto-optimize off nothing else renders them, and the download answers 410 for ever", got, renditions)
+	}
+	// Nobody waits on these renders (each download has played the source),
+	// so they take the background lane the sweep's take, never the one a
+	// CarPlay plug-in waits in: a library retagged at once would queue its
+	// renditions ahead of it (CodeRabbit on #1097).
+	if lanes := b.queue.lanesSince(before); !slices.Equal(lanes, []bool{true, true}) {
+		t.Errorf("the stale downloads' renders went to the lanes %v (true: background), want the background one", lanes)
 	}
 	b.wantServed(t, "after the stale downloads", renditions)
 
@@ -370,13 +380,14 @@ func TestAStaleRerenderGoesThroughTheKindsGateAndTheSuppression(t *testing.T) {
 // of the file only after a minute (a failed render is tried once a minute,
 // not on every GET), unless nothing was tried: the pool's queue full, or the
 // kind switched off. A new version of the file is asked for at once. While
-// the row is behind, the render waits for the rescan the download asks for,
-// and that rescan asks for it only if it brought the row level with the file;
-// one still behind is dropped, and another directory's rescan takes nothing.
-// A rescan that left a waiting file behind keeps its directory's minute; one
-// that brought every waiting file level frees it. A file that changed again
-// between the check here and the enqueue's (errSourceAheadOfRow) waits for
-// the rescan the enqueue asked for.
+// the row is behind, the render waits for a rescan of its directory that
+// brings the row level, through rescans that do not (another directory's
+// rescan takes nothing), for at most staleRenditionWaitMax. A rescan that
+// left a waiting file behind keeps its directory's minute; one that brought
+// every waiting file level frees it. A file that changed again between the
+// check here and the enqueue's (errSourceAheadOfRow) waits for a rescan, and
+// is waiting before the heal asks for it (CodeRabbit on #1097: the enqueue's
+// own request came first, and a quick rescan could have gone by).
 func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testing.T) {
 	rowTime := time.Unix(1_700_000_000, 0)
 	rows := map[string]*manifest.Track{}
@@ -389,9 +400,18 @@ func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testin
 	onDisk := map[string]os.FileInfo{}
 	var rescans, renders []string
 	var renderErr error
+	var h *staleRenditionHeal
+	var waitingAtRequest []bool
 	lookup := func(_ context.Context, rel string) (*manifest.Track, error) { return rows[rel], nil }
-	h := newStaleRenditionHeal(lookup,
-		func(rel string) bool { rescans = append(rescans, rel); return true },
+	h = newStaleRenditionHeal(lookup,
+		func(rel string) bool {
+			rescans = append(rescans, rel)
+			h.mu.Lock()
+			_, waiting := h.waiting[rel+"\x00optimized-v2-48000-16"]
+			h.mu.Unlock()
+			waitingAtRequest = append(waitingAtRequest, waiting)
+			return true
+		},
 		func(_ context.Context, rel, variantID string) error {
 			renders = append(renders, rel+" "+variantID)
 			return renderErr
@@ -452,18 +472,35 @@ func TestAStaleDownloadAsksForARenderOncePerMinuteAndWaitsForItsRescan(t *testin
 	onDisk["B/01.flac"] = current
 	onDisk["B/02.flac"] = behind
 	step("the rescan of B: 01's row caught up, 02's did not", rescanned("B"), nil, []string{"B/01.flac " + v})
-	step("a second rescan of B: 02's render was dropped", rescanned("B"), nil, nil)
-	step("02 still behind, within the minute its rescan kept", observe("B/02.flac", v, behind), nil, nil)
+	if _, kept := h.asked["B"]; !kept {
+		t.Error("a rescan that left 02 behind freed B's rescan minute: a file that never comes level would have every download ask again")
+	}
 	onDisk["B/02.flac"] = current
-	step("a rescan of B that brings 02 level", rescanned("B"), nil, []string{"B/02.flac " + v})
+	step("a later rescan of B, with no download between: 02 was kept", rescanned("B"), nil, []string{"B/02.flac " + v})
 	step("01 changed again: the level rescan freed the minute", observe("B/01.flac", v, behind), []string{"B/01.flac"}, nil)
+
+	row("E/01.flac", rowTime)
+	step("E behind", observe("E/01.flac", v, behind), []string{"E/01.flac"}, nil)
+	now = now.Add(staleRenditionWaitMax)
+	step("a rescan of E past the wait, still behind: dropped", rescanned("E"), nil, nil)
+	onDisk["E/01.flac"] = current
+	step("a rescan of E that brings it level: nothing waits", rescanned("E"), nil, nil)
 
 	row("D/01.flac", rowTime)
 	onDisk["D/01.flac"] = current
 	renderErr = errSourceAheadOfRow
-	step("the file changed again before the enqueue", observe("D/01.flac", v, current), nil, []string{"D/01.flac " + v})
+	waitingAtRequest = nil
+	step("the file changed again before the enqueue", observe("D/01.flac", v, current),
+		[]string{"D/01.flac"}, []string{"D/01.flac " + v})
+	if !slices.Equal(waitingAtRequest, []bool{true}) {
+		t.Errorf("the heal asked for the rescan with the render waiting %v, want [true]: a rescan that ran before the wait "+
+			"was recorded would leave the render for the next download", waitingAtRequest)
+	}
 	renderErr = nil
-	step("the rescan the enqueue asked for", rescanned("D"), nil, []string{"D/01.flac " + v})
+	reread := rowTime.Add(2 * time.Hour)
+	row("D/01.flac", reread)
+	onDisk["D/01.flac"] = at(reread)
+	step("the rescan reads the new version", rescanned("D"), nil, []string{"D/01.flac " + v})
 
 	// No re-render wired (the rescans alone): no render waits.
 	h2 := newStaleRenditionHeal(lookup, func(string) bool { return true }, nil, nil)
