@@ -29513,9 +29513,10 @@ One extraction each on main (through the new tests, run against main's
   no tags.
 - It stops only where dhowden stops, and may read on where dhowden would fail
   (a comment with no `=` past the 67 bytes it scans for the key, invalid base64
-  past the decoded header, an Ogg page whose CRC it skips): that only adds to
-  the sum, and a file dhowden fails on has no tags whether or not it is
-  refused. It fails open on a read it cannot complete, I/O errors included.
+  past the decoded header, an Ogg page with a bad CRC, which dhowden checks and
+  the walk does not): that only adds to the sum, and a file dhowden fails on
+  has no tags whether or not it is refused. It fails open on a read it cannot
+  complete, I/O errors included.
 - It reads no picture payload: fields by `ReadAt`, a METADATA_BLOCK_PICTURE's
   header through base64's streaming decoder (which skips `\r\n` as
   `DecodeString` does), Ogg page headers and segment tables and no segment data
@@ -29584,11 +29585,14 @@ dido, the final guard unless noted, `-fuzzminimizetime 1s`:
 ### Negative controls
 
 - main's `extractors.go` under these tests (dido, 8 GB cgroup): the allocation
-  test red on 13 of 14 shapes at 1.07 GB each and 387 MB (the fourteenth, a
-  PICTURE block declaring 10 bytes, was caught by the old guard too, so it now
-  declares 6, red on main), every FuzzExtractFLAC seed and the crasher red
-  (4,281,394,456 bytes), the FuzzExtractOGG bomb seed red; the guard's own
-  tests green (they test the new function, present in that tree).
+  test red on 13 of the first 14 shapes, 12 at 1.07 GB each and the re-decode
+  shape at 387 MB (the fourteenth, a PICTURE block declaring 10 bytes, was
+  caught by the old guard too, so it now declares 6, red on main at 1.07 GB),
+  every FuzzExtractFLAC seed and the crasher red (4,281,394,456 bytes), the
+  FuzzExtractOGG bomb seed red; the guard's own tests green (they test the new
+  function, present in that tree). The fifteenth shape, the MIME length the
+  fuzzer found, was added later and run against main's `extractors.go` alone
+  (on the Mac, that subtest only): red, 387,210,800 bytes from 748.
 - Mutations of the guard, each red exactly where expected: ASCII-only
   lowering (the KELVIN SIGN shape); decoding the value once (the re-decode
   shape); ignoring Ogg continuation (the across-pages shape); the guard call

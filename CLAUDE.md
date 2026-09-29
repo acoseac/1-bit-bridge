@@ -1003,20 +1003,26 @@ lost my library."
   extension (dhowden picks its parser by the first bytes). Measured on main, one
   extraction each: 13 shapes of 50 to 868 bytes allocated about 1 GiB apiece, the
   fuzzer's 40-byte input 4.28 GB. `dhowdenPicturesWithinBudget` (dhowden_picture_guard.go) mirrors
-  `ReadFrom`'s dispatch, `ReadFLACTags` and `ReadOGGTags`, sums the picture buffers
-  dhowden would allocate (a PICTURE block's data; for each METADATA_BLOCK_PICTURE
-  decode, the decoded bytes and the picture), and refuses the file when the sum
-  passes `pictureBudget`: twice the file's size plus dhowden's own 10 MB up-front
-  allowance (a well-formed file needs at most 1.5 times its size; the allowance lets
-  a picture truncated within it be read and dropped, as it always was). **A sum, not
-  a per-picture bound**: dhowden's comment map outlives the block, so one
-  METADATA_BLOCK_PICTURE is decoded again at every later VORBIS_COMMENT block (41
-  decodes of a 9 MB declared picture, 387 MB from 792 bytes). A refused file is one
+  `ReadFrom`'s dispatch, `ReadFLACTags` and `ReadOGGTags`, sums what dhowden would
+  allocate for pictures (a PICTURE block's MIME type, description and data; for each
+  METADATA_BLOCK_PICTURE decode, the decoded bytes, the MIME type, the description
+  and the data), and refuses the file when the sum passes `pictureBudget`: twice the
+  file's size plus dhowden's own 10 MB up-front allowance (a well-formed file needs
+  at most 1.5 times its size; the allowance lets a picture truncated within it be
+  read and dropped, as it always was). **Count the strings, not only the picture**:
+  a `readString` whose length is within that 10 MB allocates all of it up front,
+  there or not (`readStringCost`), and the fuzzer broke the first version, which
+  counted the picture alone, in under six minutes: a 787-byte file whose picture
+  declared a 2.9 MB MIME type allocated 68 MB. **A sum, not a per-picture bound**:
+  dhowden's comment map outlives the block, so one METADATA_BLOCK_PICTURE is decoded
+  again at every later VORBIS_COMMENT block (41 decodes of a 9 MB declared picture,
+  or of a 9 MB MIME length, 387 MB from under 800 bytes). A refused file is one
   whose tags dhowden could not read: a Warn naming the picture kind, the folder-art
   fallback, no tags. **Stop only where dhowden stops**: where it would fail with an
   error the walk may read on (a comment with no '=' past the 67 bytes scanned for the
-  key, invalid base64 past the decoded header, an Ogg page whose CRC it skips), which
-  only adds to the sum, and a file dhowden fails on has no tags either way. It fails
+  key, invalid base64 past the decoded header, an Ogg page with a bad CRC, which the
+  walk does not check), which only adds to the sum, and a file dhowden fails on has
+  no tags either way. It fails
   OPEN on a read it cannot complete (dhowden's fails there too), I/O errors included.
   **It reads no picture payload**: fields by offset, a METADATA_BLOCK_PICTURE's header
   through base64's streaming decoder, Ogg page headers and segment tables and no
