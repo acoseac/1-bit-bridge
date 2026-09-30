@@ -35244,3 +35244,105 @@ path was.
   count the row whose check saw the change among the refused, was
   declined: that row's missing verdict is about the directory the path
   named then, not the one the tick began on.
+
+## 2026-09-29 — a restart request exits with status 75, which launchd and the Windows SCM relaunch; a stop still exits 0 (backlog B201)
+
+Found by the pre-v0.2.1 ops review: the console's Restart, "Install &
+restart" (which POSTs /api/restart after the install) and the
+auto-installer's restart all cancel serve through runServe's own cancel, as
+CLAUDE.md requires, and serve then returned 0. The LaunchAgent `bridge init`
+writes keeps the job alive on an unsuccessful exit only (KeepAlive
+{SuccessfulExit: false}); the Windows service had no recovery actions, and
+its handler reported a clean stop. `supervision.IsSupervised` answers true
+under both, so the console promised a relaunch that never came.
+
+### Measured before the fix
+
+- **macOS 27, a real LaunchAgent** shaped like the shipped plist (label
+  `com.acoseac.b201-probe`, the binary built from main, loopback ports):
+  POST /api/restart answered `{"restarting":true,...}`, then
+  `launchctl print` said `state = not running`, `runs = 1`,
+  `last exit code = 0`, and the console was still down 15 s later.
+  `launchctl bootstrap` of that loaded, stopped job answered
+  `Bootstrap failed: 5: Input/output error` (exit 5), which `startForOS`
+  did not swallow ("service already loaded" and "17: File exists" only), so
+  `bridge start` failed over it; `launchctl kickstart gui/<uid>/<label>`
+  started it (runs 1 to 2) and was a no-op on the running job (exit 0, same
+  pid).
+- **Windows 11 (nomos), a real SCM service** installed by main's
+  `bridge init --service`: no recovery actions (`sc qfailure`: reset period
+  0, none), and POST /api/restart left it `STOPPED` with
+  `WIN32_EXIT_CODE 0`, `SERVICE_EXIT_CODE 0`, console down.
+
+### The fix
+
+- `supervision.RestartExitCode` = 75 (sysexits' EX_TEMPFAIL). runServe
+  builds a `serveRestart` over its cancel; `admin.Deps.Restart` and
+  `AutoInstallRestart` are `restart.request`, which marks the stop and
+  cancels; runServe's named result is set by its second defer, after the
+  whole shutdown, to 75 for a clean exit after a request. A failure keeps
+  its code; a stop (SIGINT, SIGTERM, the SCM's Stop) stays 0. The admin
+  fallback with no Restart wired exits 75 too.
+- Windows: `packaging.setServiceRecovery` (restart after 2 s, 2 s, then
+  30 s; reset after 3600 s; FailureActionsOnNonCrashFailures) runs at
+  install, and `packaging.EnsureServiceRecovery` runs in the service handler
+  as it starts, with its own name (args[0]), setting them only when the
+  service has none: a v0.2.0 install is never re-installed by a console
+  update. The handler returns (true, 75) for a restart, (true, 1) for a
+  failure, without reporting Stopped first.
+- `startLaunchdAgent` (packaging): bootstrap, and on any failure a
+  kickstart; both failing report both answers.
+
+### Measured after
+
+- macOS, the same probe with the fixed binary: two restarts relaunched it
+  (`runs = 2`, then 3, `last exit code = 75: EX_TEMPFAIL`), the console
+  back in 4 s and 11 s (the second waited out launchd's 10 s throttle, the
+  job having run for less). `launchctl kill SIGTERM` exited 0 and stayed
+  down (`runs` unchanged). Unloaded afterwards.
+- nomos: swapping the fixed binary into main's service and starting it set
+  the recovery actions (`sc qfailure`: 3600 s, RESTART 2000/2000/30000 ms;
+  `FAILURE_ACTIONS_ON_NONCRASH_FAILURES: TRUE`; the log line "set the
+  service's recovery actions"). POST /api/restart: event 7024 ("terminated
+  with the following service-specific error: 75"), event 7031 ("The
+  following corrective action will be taken in 2000 milliseconds: Restart
+  the service"), console back in 4 s, `RUNNING`. `sc stop`: `STOPPED`,
+  exit 0, still stopped 12 s later.
+- **The early Stopped status is load-bearing** (Windows control): the fixed
+  binary with the old handler's `status <- Stopped` put back ahead of the
+  return, over the same service with its recovery actions set, stayed
+  `STOPPED` after a restart, `WIN32_EXIT_CODE 0`: svc.Run reports the
+  handler's Stopped with the exit code it holds then, 0, and the SCM takes
+  the first Stopped it receives.
+
+### Tests and controls
+
+`TestARestartRequestedFromTheConsoleExitsToBeRestarted` (a real serve, POST
+/api/restart, exit 75), `TestAStopStillExitsZero`,
+`TestServeRestartKeepsAFailureAndMarksOnlyAStop`,
+`TestAWindowsServiceTellsARestartFromAFailure`,
+`TestEveryRestartInServeGoesThroughTheRestartRequest` (AST, both wirings),
+`TestTheServiceAnswersARestartWithItsRestartCode` and
+`TestTheServiceAnswersAFailureAndAStopAsBefore` (Windows only, the handler
+driven with channels), and the three launchd start tests. Controls,
+committed first: `Restart: cancel` turns the console test and the AST test
+red (exit 0); the auto-installer's closure on `cancel()` turns the AST test
+red alone; the exit-code defer removed turns the console test red alone; on
+nomos the early Stopped put back turns both handler tests red.
+
+### Release note
+
+A macOS (LaunchAgent) or Windows (`--service`) install that updates from
+v0.2.0 through the console runs v0.2.0's restart, which exits 0: it comes
+back down after "Install & restart" or an auto-install. Run
+`bridge restart` once after that update. From v0.2.1 on a restart from the
+console relaunches the bridge (and a Windows service installed by v0.2.0
+gains its recovery actions at its first start under v0.2.1).
+
+### Review
+
+SonarCloud failed the PR's quality gate (Security Rating on New Code B) on
+one `go:S4036` in `runLaunchctl`: `exec.Command("launchctl", …)` by its bare
+name, in a function this change added. Every launchctl the file runs now
+names `launchctlBin`, `/bin/launchctl`, where macOS keeps it on the sealed
+system volume. CodeRabbit's first pass had no actionable comments.

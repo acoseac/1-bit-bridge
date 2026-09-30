@@ -20,6 +20,10 @@ func InstallWindowsService(_ Params) (string, error) {
 // a best-effort uninstall doesn't fail across platforms.
 func UninstallWindowsService() error { return nil }
 
+// EnsureServiceRecovery is a non-Windows stub: there is no service
+// manager whose recovery actions it could set. It sets nothing.
+func EnsureServiceRecovery(string) (bool, error) { return false, nil }
+
 // tryInstallWindowsService is the elevation-aware wrapper used by
 // `Install` on Windows. The non-Windows stub returns ("", nil) so
 // the dispatch in packaging.go falls through to the unix-side

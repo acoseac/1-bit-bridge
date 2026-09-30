@@ -29,7 +29,7 @@ func runSystemctlUser(verb string) error {
 // SonarCloud per-PR duplication gate caught it on PR #253 after the
 // first refactor pass).
 func runLaunchctlBootout(plistPath string) error {
-	out, err := exec.Command("launchctl", "bootout", "gui/"+uidString(), plistPath).CombinedOutput()
+	out, err := exec.Command(launchctlBin, "bootout", "gui/"+uidString(), plistPath).CombinedOutput()
 	if err != nil && !bytes.Contains(out, []byte("Could not find")) && !bytes.Contains(out, []byte("not currently loaded")) {
 		return fmt.Errorf("launchctl bootout: %v: %s", err, string(out))
 	}
@@ -61,10 +61,8 @@ func stopForOS(kind ServiceKind) error {
 	return nil
 }
 
-// startForOS asks the service manager to boot the installed bridge.
-// `launchctl bootstrap` on darwin (idempotent — a not-already-loaded
-// agent loads, an already-loaded one returns "service already
-// loaded" which we swallow). `systemctl --user start` on linux,
+// startForOS asks the service manager to boot the installed bridge:
+// startLaunchdAgent on darwin, `systemctl --user start` on linux,
 // idempotent against an already-running unit.
 func startForOS(kind ServiceKind) error {
 	switch kind {
@@ -73,15 +71,53 @@ func startForOS(kind ServiceKind) error {
 		if err != nil {
 			return fmt.Errorf(plistPathErrFormat, err)
 		}
-		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
-		if err != nil && !bytes.Contains(out, []byte("service already loaded")) && !bytes.Contains(out, []byte("Bootstrap failed: 17: File exists")) {
-			return fmt.Errorf("launchctl bootstrap: %v: %s", err, string(out))
-		}
-		return nil
+		return startLaunchdAgent(path, runLaunchctl)
 	case KindSystemdUser:
 		return runSystemctlUser("start")
 	}
 	return nil
+}
+
+// launchctlRunner runs launchctl with args and returns its combined
+// output: runLaunchctl in production, a stand-in in tests.
+type launchctlRunner func(args ...string) ([]byte, error)
+
+// launchctlBin is where macOS keeps launchctl, on the sealed system
+// volume, so every launchctl this package runs names it absolutely and no
+// PATH entry can stand in for it. That also keeps these exec sites clear
+// of SonarCloud's go:S4036, which flagged the bare name on B201's new one.
+const launchctlBin = "/bin/launchctl"
+
+// runLaunchctl is the launchctlRunner that runs the real launchctl.
+func runLaunchctl(args ...string) ([]byte, error) {
+	return exec.Command(launchctlBin, args...).CombinedOutput()
+}
+
+// startLaunchdAgent loads the agent at plistPath into the user's GUI
+// domain and starts it. A loaded agent is not bootstrapped again:
+// launchctl refuses ("Bootstrap failed: 5: Input/output error" on
+// macOS 27, "17: File exists" or "service already loaded" on older
+// ones), and a loaded agent that is not running stays down, which is
+// where an exit 0 leaves it, since its KeepAlive relaunches an
+// unsuccessful exit only. So a bootstrap that fails is followed by a
+// kickstart, which starts a loaded agent and leaves a running one as it
+// is (both measured on macOS 27, 2026-09-30). Until backlog B201 the
+// refusal of the macOS 27 form was reported as the answer, and `bridge
+// start` failed with exit 5 over a stopped agent. A kickstart that fails
+// too (no agent loaded, so the bootstrap's own failure is the story)
+// reports both answers.
+func startLaunchdAgent(plistPath string, launchctl launchctlRunner) error {
+	domain := "gui/" + uidString()
+	out, err := launchctl("bootstrap", domain, plistPath)
+	if err == nil {
+		return nil
+	}
+	kout, kerr := launchctl("kickstart", domain+"/"+ServiceLabel)
+	if kerr == nil {
+		return nil
+	}
+	return fmt.Errorf("launchctl bootstrap: %v: %s; launchctl kickstart: %v: %s",
+		err, bytes.TrimSpace(out), kerr, bytes.TrimSpace(kout))
 }
 
 // restartForOS bootstraps a freshly-stopped agent (darwin) or asks
@@ -102,7 +138,7 @@ func restartForOS(kind ServiceKind) error {
 		if err := runLaunchctlBootout(path); err != nil {
 			return err
 		}
-		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
+		out, err := exec.Command(launchctlBin, "bootstrap", "gui/"+uidString(), path).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("launchctl bootstrap: %v: %s", err, string(out))
 		}

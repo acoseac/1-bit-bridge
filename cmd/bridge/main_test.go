@@ -239,6 +239,8 @@ type servedBridge struct {
 	stdout, stderr *safeBuffer
 	// done delivers serve's exit code once it returns.
 	done <-chan int
+	// stop cancels serve's context, as SIGINT and SIGTERM do.
+	stop context.CancelFunc
 }
 
 // bootServe runs `bridge serve` with args, through run as a command line
@@ -273,7 +275,7 @@ func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io
 	}()
 	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
 	addr, _ := waitForListening(t, stdout, exited, exitCode, stderr)
-	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode}
+	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode, stop: cancel}
 }
 
 func TestServeMissingConfigReturns2(t *testing.T) {
