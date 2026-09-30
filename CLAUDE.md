@@ -1439,9 +1439,15 @@ lost my library."
   text beneath the ID3 tag: the tag answers each field it has a value for and the
   DIIN or INFO the rest, whichever chunk comes first, as TagLib reads a DSDIFF
   file (measured on `testdata/dff/diin_then_id3.dff` and `id3_then_diin.dff`).
-  **A DIIN holds a title and an artist and no album**: TagLib drops an album set
-  on its DIIN tag when it saves, EMID is an opaque id and MARK a position in the
-  audio. A DIIN or ID3 chunk the file ends inside is never allocated
+  **An ID3 chunk nested in PROP counts too**, where the file holds no root one:
+  TagLib 2.0.2 reads that placement (and rewrites a tag it found there in
+  place), and a root tag wins whole wherever the chunks sit (`prop_id3.dff`,
+  `prop_and_root_id3.dff`; CodeRabbit on #1118). So PROP's cap is 1 MiB plus
+  the ID3 chunk cap, behind a fit check: at 1 MiB a nested tag holding a cover
+  refused the whole file. **A DIIN holds a title and an artist and no album**:
+  TagLib drops an album set on its DIIN tag when it saves, EMID is an opaque id
+  and MARK a position in the audio. A DIIN or ID3 chunk the file ends inside is
+  never allocated
   (`readDFFTagChunk`, the payloadFits rule): the walk ends there with the format
   stamped, where a truncated DIIN failed the file (indexed by name alone, no
   sample rate). **Don't write a path-guessed field only while it is empty**:

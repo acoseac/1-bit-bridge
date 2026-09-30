@@ -453,11 +453,14 @@ var Ext = map[string]bool{
 // skipped the "ID3 " chunk, which is where mutagen, and so Picard, tags a
 // DSDIFF file. A DFF's DIIN title and artist and its ID3 chunk's tag now reach
 // the track, the ID3 tag answering each field it has a value for and the DIIN
-// the rest, as TagLib reads the two (containerText.applyUnder); a WAV's INFO
-// title, artist, album and genre rank the same way beneath its ID3 chunk. A
-// DIIN or ID3 chunk the file ends inside ends the walk with the format stamped
-// and allocates nothing, where a truncated DIIN failed the file (indexed by
-// name alone, no sample rate). The picture in a DFF's ID3 chunk is its cover.
+// the rest, as TagLib reads the two (containerText.applyUnder); an ID3 chunk
+// nested in PROP counts where the file holds no root one, as TagLib reads it,
+// and PROP is read up to the ID3 cap for it, where a nested tag with a cover
+// over 1 MiB refused the file. A WAV's INFO title, artist, album and genre rank
+// the same way beneath its ID3 chunk. A DIIN or ID3 chunk the file ends inside
+// ends the walk with the format stamped and allocates nothing, where a
+// truncated DIIN failed the file (indexed by name alone, no sample rate). The
+// picture in a DFF's ID3 chunk is its cover.
 //
 // Only files carrying such text change: a DFF with a DIIN or an ID3 chunk, a
 // WAV whose LIST/INFO names a title, artist or album, and a DFF cut short in a
