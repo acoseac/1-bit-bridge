@@ -677,14 +677,15 @@ func TestInitInteractiveRewriteOffersTheInstallsName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
 			lib := testLibrary(t)
-			// The library, the name, and "Overwrite?" where there is a config.
-			answers := lib + "\n" + tc.typed + "\n"
+			// The library, "Overwrite?" where there is a config, and the name.
+			answers := lib + "\n"
 			if tc.first != "" {
 				if code, out := loopbackInit(t, cfgDir, lib, tc.first); code != 0 {
 					t.Fatalf("the first init exited %d:\n%s", code, out)
 				}
 				answers += "y\n"
 			}
+			answers += tc.typed + "\n"
 
 			var stdout, stderr strings.Builder
 			code := initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir},
