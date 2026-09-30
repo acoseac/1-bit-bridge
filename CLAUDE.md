@@ -3569,11 +3569,16 @@ no failing test — which is the shape to expect in this area.
   mountpoint that already holds any entry when a tick STARTS (a
   `.DS_Store`, a folder a failed render left) reads as a healthy variants
   directory, and that tick deletes every row (measured, 40 of 40; B223),
-  and `upscale --gc` re-checks health but not identity (B224). Residual: a
-  remount between one row's missing read and the check after it (two
-  system calls apart) is not seen, and that row's entry is deleted in pass
-  two with its sidecar back on the volume; nothing records a change the
-  checks did not observe (CodeRabbit on #1127).
+  and `upscale --gc` re-checks health but not identity (B224). **Pass two
+  asks `LocateSidecar` again just before each delete** (`classifyRow`, the
+  one per-row verdict both passes use) and deletes only a row still at
+  neither location: the checks see a change they observe and nothing
+  between them, so a remount between one row's missing read and the check
+  after it left that row's verdict stale with its sidecar back on the
+  volume (CodeRabbit on #1127;
+  `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete`). A row
+  kept there is counted as pass one would have counted it. What stays open
+  is a volume that is gone again at that recheck.
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure

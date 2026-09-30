@@ -491,11 +491,16 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// in between leaves it walking an empty local directory, which holds
 	// no sidecars and lets a relocation's deletions through.
 	//
-	// Pass two is not re-checked, and needs no check: it deletes catalog
-	// ROWS, never files, and every row it deletes was found missing while
-	// the path named the directory the tick began on (the check as each
-	// row read missing, this one after the last). A volume that goes during
-	// pass two changes no verdict it acts on, only the next tick's probe.
+	// Pass two deletes catalog ROWS, never files, and every row it deletes
+	// was found missing while the path named the directory the tick began
+	// on, as far as the checks saw (the check as each row read missing,
+	// this one after the last). They see a change they observe and nothing
+	// between them: a volume that went and came back between one row's
+	// read and its check leaves that row here with its sidecar on the
+	// volume again. So pass two asks LocateSidecar once more, just before
+	// each delete, and deletes only a row still at neither location; any
+	// other answer is counted as pass one would have counted it
+	// (CodeRabbit on #1127).
 	if changed := variantsDirChanged(dir, start); changed != "" {
 		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
@@ -515,8 +520,13 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 			return report
 		default:
 		}
-		if w.deleteMissing(ctx, r, &report, &sample, &gone) {
-			// A delete the shutdown stopped ends the tick, as above.
+		stillGone, stopped := w.classifyRow(ctx, dir, r, &report, &sample)
+		if !stopped && !stillGone {
+			continue
+		}
+		if stopped || w.deleteMissing(ctx, r, &report, &sample, &gone) {
+			// A delete the shutdown stopped, or an adoption at the
+			// recheck, ends the tick, as above.
 			report.Cancelled = true
 			w.publishDeleted(gone.paths, gone.variantIDs)
 			w.logSummary(dir, report)
@@ -541,7 +551,8 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 // is not; asked of that verdict alone, so a tick whose rows are all where
 // they belong pays nothing for it. A remount between a row's read and its
 // check (two system calls apart) is not seen, and that row goes to pass
-// two. The row that saw the change is not returned: its verdict is about
+// two, whose recheck before the delete keeps it if its sidecar is back.
+// The row that saw the change is not returned: its verdict is about
 // whatever the path named then.
 func (w *VariantWatcher) classify(ctx context.Context, dir string, start os.FileInfo, rows []VariantSnapshot, report *SweepReport, sample *logSampler) (missing []VariantSnapshot, changed string, stopped bool) {
 	for _, r := range rows {
@@ -551,42 +562,59 @@ func (w *VariantWatcher) classify(ctx context.Context, dir string, start os.File
 		if ctx.Err() != nil {
 			return missing, "", true
 		}
-		loc := LocateSidecar(dir, r)
-		switch loc.Verdict {
-		case SidecarPresent:
-			report.Present++
-		case SidecarRelocated:
-			if w.adoptRelocated(ctx, r, loc, report, sample) {
-				// An adoption the shutdown stopped ends the tick, as the
-				// check at the top of this loop would.
-				return missing, "", true
-			}
-		case SidecarMismatched:
-			report.Mismatched++
-			sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
-				slog.String("source_path", r.SourcePath),
-				slog.String("variant_id", r.VariantID),
-				slog.String("canonical", loc.Canonical),
-				slog.Int64("recorded_size", r.SizeBytes),
-			)
-		case SidecarUnknown:
-			// Permission errors, I/O faults, etc. — log and skip rather
-			// than treating as "missing". `--gc`'s reverse pass behaves
-			// the same way.
-			report.Failed++
-			sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
-				slog.String("sidecar", r.SidecarPath),
-				slog.String("variant_id", r.VariantID),
-				slog.Any("err", loc.Err),
-			)
-		case SidecarMissing:
-			if changed := variantsDirChanged(dir, start); changed != "" {
-				return missing, changed, false
-			}
-			missing = append(missing, r)
+		gone, stopped := w.classifyRow(ctx, dir, r, report, sample)
+		if stopped {
+			// An adoption the shutdown stopped ends the tick, as the
+			// check at the top of this loop would.
+			return missing, "", true
 		}
+		if !gone {
+			continue
+		}
+		if changed := variantsDirChanged(dir, start); changed != "" {
+			return missing, changed, false
+		}
+		missing = append(missing, r)
 	}
 	return missing, "", false
+}
+
+// classifyRow asks LocateSidecar where r's sidecar is and acts on the
+// answer: it counts a present, mismatched or unreadable sidecar in report,
+// and adopts a relocated one. A sidecar at neither location (gone) is
+// counted by nothing here: pass one asks whether the directory is still
+// the tick's before it keeps the row for pass two, and pass two asks again
+// just before it deletes. stopped is true when the shutdown stopped an
+// adoption.
+func (w *VariantWatcher) classifyRow(ctx context.Context, dir string, r VariantSnapshot, report *SweepReport, sample *logSampler) (gone, stopped bool) {
+	loc := LocateSidecar(dir, r)
+	switch loc.Verdict {
+	case SidecarPresent:
+		report.Present++
+	case SidecarRelocated:
+		return false, w.adoptRelocated(ctx, r, loc, report, sample)
+	case SidecarMismatched:
+		report.Mismatched++
+		sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("canonical", loc.Canonical),
+			slog.Int64("recorded_size", r.SizeBytes),
+		)
+	case SidecarUnknown:
+		// Permission errors, I/O faults, etc. — log and skip rather
+		// than treating as "missing". `--gc`'s reverse pass behaves
+		// the same way.
+		report.Failed++
+		sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
+			slog.String("sidecar", r.SidecarPath),
+			slog.String("variant_id", r.VariantID),
+			slog.Any("err", loc.Err),
+		)
+	case SidecarMissing:
+		return true, false
+	}
+	return false, false
 }
 
 // refuseChangedDir ends a tick whose variants directory stopped being the

@@ -255,6 +255,39 @@ func TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt(t *testing
 	requireRefusedAsAnUnmount(t, w, store, r, rec, "no longer the directory this sweep began on")
 }
 
+// TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete — a
+// missing verdict from pass one can be stale by pass two: a volume that
+// goes and comes back between one row's read and the identity check after
+// it leaves both checks seeing the directory the tick began on, and the
+// sidecar is on the volume again (CodeRabbit on #1127). Stood in here by
+// the sidecar reappearing after its row read as missing, at a later row's
+// adoption, one row under the mass-delete floor. Pass two asks again just
+// before it deletes, and keeps the row, counted as present.
+func TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete(t *testing.T) {
+	dir := mountedVariantsDir(t)
+	oldDir := filepath.Join(t.TempDir(), "old-host", "variants")
+	gone := VariantSnapshot{SourcePath: mountSource(0), VariantID: mountVariant,
+		SidecarPath: transcode.VariantSidecarPath(dir, mountSource(0), mountVariant), SizeBytes: 10}
+	moved := movedRow(oldDir, 1)
+	writeSidecar(t, CanonicalSidecarPath(dir, moved))
+	rows := []VariantSnapshot{gone, moved}
+	for i := 2; i < 40; i++ {
+		rows = append(rows, presentRow(t, dir, i))
+	}
+	store := &mountHooks{onAdopt: map[string]func(){
+		mountSource(1): func() { writeSidecar(t, gone.SidecarPath) },
+	}}
+	w := NewVariantWatcher(&fakeLister{snapshots: [][]VariantSnapshot{rows}}, store, nil, staticDir(dir), time.Hour, 20)
+
+	r := w.tick(context.Background())
+	if r.Deleted != 0 || len(store.deleted()) != 0 {
+		t.Errorf("deleted %d row(s) whose sidecar was back before pass two: %v (report %+v)", r.Deleted, store.deleted(), r)
+	}
+	if r.Present != 39 || r.Adopted != 1 || r.Refused != 0 {
+		t.Errorf("report %+v, want 39 present (the row kept at the recheck among them) and 1 adopted", r)
+	}
+}
+
 // TestVariantWatcherDeletesWhatIsGoneWhileItsDirectoryStays — the control:
 // the same forty rows with the volume left alone, and three sidecars
 // removed by hand, are three deletions, and the tick refuses nothing.
