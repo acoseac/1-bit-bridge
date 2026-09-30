@@ -19,9 +19,10 @@ import (
 // re-rendering and had written 200 rows before anyone looked. A
 // `bridge upscale --gc` at that moment would have walked 10,248 files,
 // matched 200 of them against the catalog and unlinked the other 10,048 —
-// 254 GiB — with `gcRefuseEmptyKnownSetOverPopulatedDir` satisfied, because
-// 200 is not zero, and with the relocation guard silent, because every one
-// of those 200 rows had its file exactly where it said.
+// 254 GiB — with its empty-catalog refusal (now `gcRefuseEmptyCatalog`)
+// satisfied, because 200 is not zero, and with the relocation guard
+// silent, because every one of those 200 rows had its file exactly where
+// it said.
 //
 // So the forward sweeps need their own denominator, and it is not the one
 // the reverse sweeps use. MassDeleteRefusal asks "how much of the CATALOG
@@ -498,6 +499,52 @@ func MassOrphanRefusalFor(inv SidecarInventory, rows, maxOrphanPercent int) stri
 		reason += fmt.Sprintf(", counting the %d entr(y/ies) the walk could not stat as unreferenced files", unstatted)
 	}
 	return reason
+}
+
+// EmptyCatalogOrphans is the empty-catalog refusal's one rule: how many
+// files a forward sweep whose known set is EMPTY would read as orphans in
+// inv, and how many of those are entries the walk could not stat. A sweep
+// refuses, without an operator's say-so, whenever orphans is not zero;
+// both are zero when the known set holds anything, since the rule is only
+// about an empty one. The background sweep (emptyCatalogRefusal) and
+// `upscale --gc` and `analyze --gc` (cmd/bridge's gcRefuseEmptyCatalog)
+// all decide by it, so they cannot disagree about what an empty catalog
+// puts at risk.
+//
+// With no row naming a sidecar, every file the walk classified (inv.Files:
+// the files the sweep's Consider takes) is an orphan, and each entry the
+// walk could not stat is weighed as one more, as MassOrphanRefusalFor
+// weighs it: the sweep refuses when some reading of the tree holds a file
+// it would remove, below the mass-orphan floor too. Nothing else counts,
+// because nothing else is a file the sweep would remove as an orphan: a
+// directory, empty or not, a file its Consider rejects, anything under a
+// pruned dot-directory, the filesystem's lost+found, and a scratch file,
+// which the sweep that has any removes whatever the catalog says, so an
+// empty catalog puts none at risk. What the Consider takes is each sweep's
+// own: the background sweep takes `.flac` files and `analyze --gc`
+// waveforms, while `upscale --gc` takes EVERY file, so a `.DS_Store` in the
+// variants directory is a file it would remove and still refuses there.
+//
+// A directory the walk could not LIST is not weighed: it may hold sidecars
+// or nothing, and the walk reached no file to count. A verdict over part
+// of the tree is PartialWalkRefusal's.
+//
+// Until 2026-09-28 the background sweep, and until 2026-09-29 the CLI
+// sweeps, asked instead whether the directory held any entry at all
+// (VariantsDirSweepBlockReason's one-entry read), so a directory holding
+// only empty folders, a .DS_Store or the filesystem's lost+found refused a
+// sweep that had nothing to remove (backlog B42, B65).
+func EmptyCatalogOrphans(inv SidecarInventory, known int) (orphans, unstatted int) {
+	if known > 0 {
+		return 0, 0
+	}
+	unstatted = inv.Unreadable - inv.UnlistedDirs
+	if unstatted < 0 {
+		// Only an inventory built by hand can say this, as for
+		// MassOrphanRefusalFor.
+		unstatted = 0
+	}
+	return inv.Files + unstatted, unstatted
 }
 
 // PartialWalkRefusal decides whether a forward sweep must refuse to take

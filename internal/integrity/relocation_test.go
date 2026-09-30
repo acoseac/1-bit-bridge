@@ -287,9 +287,16 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 			} else if len(refusals) != 0 {
 				t.Errorf("unexpected refusal: %v", refusals)
 			}
-			summaries := logLines(buf, "integrity variant sweep: summary")
-			if len(summaries) != 1 || !strings.Contains(summaries[0], "level=WARN") {
-				t.Errorf("a tick that deleted or refused must summarise at WARN, got %v", summaries)
+			// A tick that deleted summarises at WARN. One that refused
+			// summarises at Info: its WARN is the refusal's, through the
+			// latch (TestVariantWatcherLatchesItsMassDeleteRefusal).
+			wantLevel := "level=WARN"
+			if tc.wantRefused > 0 {
+				wantLevel = "level=INFO"
+			}
+			summaries := logLines(buf, msgVariantSweepSummary)
+			if len(summaries) != 1 || !strings.Contains(summaries[0], wantLevel) {
+				t.Errorf("want one summary line at %s, got %v", wantLevel, summaries)
 			}
 		})
 	}
