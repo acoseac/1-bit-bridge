@@ -34743,21 +34743,19 @@ record now that the fix ships.
 ### What was measured on the old code
 
 main at e256d6b7, go1.27.1 on macOS, a loopback fixture (`bridge init --yes
---no-service`, the console on 127.0.0.1:27789, an enrich base URL carrying a
-`user:password`), curl from 127.0.0.1 with `Host: evil.example:27789`, the
-request a browser sends once a page has pointed its own name at 127.0.0.1:
-`GET /api/settings` 200 with the password in the body,
-`GET /api/player/download?path=Artist/Album/01.flac` 200 and 48,755 bytes of
-FLAC, `GET /metrics` 200. `POST /api/scan` with the page's own Origin was
-refused (403): `csrfGuard` reads the Origin, which a same-origin GET does not
-carry. `boundaryMiddleware`'s loopback branch was `loopbackOnly`, the source
-address alone.
+--no-service`), requests from 127.0.0.1 whose `Host` named another host, as a
+browser's do once a page has pointed its own name at 127.0.0.1: every read
+route tried answered 200 with its content; a POST carrying the page's own
+Origin was refused (403), since `csrfGuard` reads the Origin, which a
+same-origin GET does not carry. `boundaryMiddleware`'s loopback branch was
+`loopbackOnly`, the source address alone. (The exact requests and what each
+returned are kept out of this public record, per SECURITY.md.)
 
 The DLNA listener, main at d16d1aba in a container on dido (its own network
-namespace, so no multicast left the docker bridge): `Host: evil.example:7790`
-got the device description (200) and a Browse (200) whose first `<res>` was
-`http://evil.example:7790/dlna/file/21a47d30c6405b31`, since the
-ContentDirectory builds its URLs from `r.Host`.
+namespace, so no multicast left the docker bridge): a `Host` naming another
+host got the device description and a Browse (200), whose `<res>` URLs named
+the request's host, since the ContentDirectory builds its URLs from
+`r.Host`.
 
 ### What was decided
 

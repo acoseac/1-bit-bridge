@@ -3800,11 +3800,10 @@ no failing test — which is the shape to expect in this area.
   for any other** (2026-09-29, backlog B170). It has no authentication, and
   what kept it to the LAN is that it is reached on the LAN: a page a LAN
   browser loads from a name its author controls can re-point that name at
-  this host's address (DNS rebinding) and Browse the library and fetch any
-  file through the victim's browser, and the ContentDirectory builds every
-  `<res>` and albumArtURI from `r.Host`, so the answers even named the page's
-  host (measured on main with the real binary in a container: 200 and `<res>`
-  URLs on `evil.example`). `ownHostOnly` (host_guard.go) passes, with any port
+  this host's address (DNS rebinding), and the ContentDirectory builds every
+  `<res>` and albumArtURI from `r.Host`, so its answers name whatever host the
+  request did (measured with the real binary; the record is in the log).
+  `ownHostOnly` (host_guard.go) passes, with any port
   or none: an EMPTY Host (an HTTP/1.0 renderer may send none; no browser
   does), `localhost` and a loopback literal, the host of every advertised
   LOCATION, of ServerURL and of a pinned listen address, NAME OR LITERAL
@@ -6671,11 +6670,10 @@ its twin.** The top list is older, shorter, and read first.
   author controls can re-point that name at 127.0.0.1 (DNS rebinding): the
   operator's browser then sends the page's requests to the console, from
   127.0.0.1, and hands the page the answers, since to the browser they are the
-  page's own origin, and a same-origin GET carries no Origin. Measured with the
-  real binary on main: a `Host: evil.example:<port>` from 127.0.0.1 got 200 for
-  the settings (an enrich base URL's `user:password` in the body), a library
-  file through `/api/player/download` and `/metrics` (the SSE stream too, in
-  the tests); only a POST's Origin was refused (403). `loopbackHostOnly` sits inside
+  page's own origin, and a same-origin GET carries no Origin (measured with
+  the real binary on main: a request naming another host was answered on
+  every read route tried, and only a POST's Origin was refused; the record
+  is in the log). `loopbackHostOnly` sits inside
   `loopbackOnly` in `boundaryMiddleware`'s loopback branch and answers 421 to
   any Host that `loopbackHostname` (the Origin allowlist's rule: `localhost`,
   a trailing dot, 127.0.0.0/8, `::1`) does not take, **with any port or none**:
