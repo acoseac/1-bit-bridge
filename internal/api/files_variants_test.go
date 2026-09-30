@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -467,13 +468,21 @@ func TestHealthAdvertisesUpscaleCompleteEventsFeature(t *testing.T) {
 	}
 }
 
-// TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled — bridges
-// without an upscale pool (sox missing OR cfg.Upscale.Enabled=false)
-// must NOT advertise the upscaleCompleteEvents capability. iOS gates
-// 4-of-5 ladder rungs on the flag and waits for SSE events that can
-// never arrive when upscalePool == nil → SetOnJobComplete was never
-// called. (Greptile P1 round-2 on PR #187.) `variantBumpsIndex` is
-// orthogonal (manifest correctness, not upscale-specific) and stays.
+// TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled — a bridge with
+// upscaling off (the flag off, or no usable sox) must NOT advertise the
+// upscaleCompleteEvents capability. iOS gates 4-of-5 ladder rungs on the
+// flag and waits for an `upscale.complete` event for a job it asked for,
+// and with the gate closed the bridge takes no such job, so the flag goes
+// with the feature. (Greptile P1 round-2 on PR #187.) `variantBumpsIndex`
+// is orthogonal (manifest correctness, not upscale-specific) and stays.
+//
+// Disabled the way serve disables it: WithUpscale wired, as serve wires it
+// on every bridge, with a gate answering false, flipped on and off again
+// per request, the gate being live. Until 2026-09-29 this test wired no
+// WithUpscale at all, a state serve never produces, and its doc said the
+// event could never arrive because a disabled bridge had no pool and no
+// SetOnJobComplete; since #781 serve builds both on every bridge (backlog
+// B113). The case with nothing wired, a test harness's, is kept after it.
 func TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
@@ -482,35 +491,48 @@ func TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled(t *testing.T) {
 		LibraryName:   "Test",
 	}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	srv := New(cfg, store, nil, "fp")
-	// Deliberately do NOT call WithUpscale → upscaleEnabled stays false.
+	var gate atomic.Bool
+	srv := New(cfg, store, nil, "fp").WithUpscale(gate.Load, newStubVariantStore())
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
+	for step, on := range []bool{false, true, false} {
+		gate.Store(on)
+		got := healthForTest(t, hs)
+		if got.UpscaleEnabled == nil || *got.UpscaleEnabled != on {
+			t.Fatalf("step %d: upscaleEnabled = %v with the gate answering %t, so the check below "+
+				"measures nothing", step, got.UpscaleEnabled, on)
+		}
+		if advertised := containsString(got.Features, "upscaleCompleteEvents"); advertised != on {
+			t.Errorf("step %d: the upscale gate answers %t and Features advertise "+
+				"upscaleCompleteEvents=%t; got %v", step, on, advertised, got.Features)
+		}
+		// variantBumpsIndex is orthogonal and must remain present.
+		if !containsString(got.Features, "variantBumpsIndex") {
+			t.Errorf("step %d: variantBumpsIndex should be present whatever the upscale gate says; "+
+				"got %v", step, got.Features)
+		}
+	}
+
+	// Nothing wired at all (a harness): the nil gate reads as off.
+	bare := httptest.NewServer(New(cfg, store, nil, "fp").Handler())
+	t.Cleanup(bare.Close)
+	if got := healthForTest(t, bare); containsString(got.Features, "upscaleCompleteEvents") {
+		t.Errorf("with no upscale gate wired, Features advertised upscaleCompleteEvents; got %v", got.Features)
+	}
+}
+
+// healthForTest GETs /v1/health unauthenticated and decodes it.
+func healthForTest(t *testing.T, hs *httptest.Server) HealthResponse {
+	t.Helper()
 	resp := authGet(t, hs, "/v1/health", "")
 	body := readAllOrFail(t, resp)
 	resp.Body.Close()
-
 	var got HealthResponse
 	if err := jsonUnmarshalForTest(body, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, f := range got.Features {
-		if f == "upscaleCompleteEvents" {
-			t.Errorf("upscale disabled but Features advertised upscaleCompleteEvents; got %v", got.Features)
-		}
-	}
-	// variantBumpsIndex is orthogonal and must remain present.
-	found := false
-	for _, f := range got.Features {
-		if f == "variantBumpsIndex" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("variantBumpsIndex should remain present when upscale is disabled; got %v", got.Features)
-	}
+	return got
 }
 
 // TestHealthAdvertisesPushEventsSupportedWhenBrokerWired — iOS / third-party

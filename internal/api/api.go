@@ -1203,10 +1203,10 @@ func (s *Server) StartEventBroker() (stopFn func()) {
 // distinguishing missing-endpoint from disabled-feature. Lets older
 // bridges expose the route without the wiring overhead.
 //
-// Wired in cmd/bridge serve startup with the same closure the admin
-// `/api/upscale/stats` tile already consumes — the two surfaces
-// stay in lockstep so the admin operator and the paired iOS client
-// see the same numbers.
+// Wired in cmd/bridge serve startup over the same sources the admin
+// `/api/upscale/stats` tile reads (the pool, the live upscale gate and
+// the shared sox probe) — the two surfaces stay in lockstep so the
+// operator and a bearer-token client see the same numbers.
 func (s *Server) WithUpscaleStats(p UpscaleStatsProvider) *Server {
 	s.upscaleStatsProvider = p
 	return s
@@ -1763,13 +1763,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//
 	// Gating rules:
 	//   - `upscaleCompleteEvents`, `deleteVariants`, `operatorDrivenUpscale`:
-	//     gated on `s.upscaleEnabled` because iOS will skip
-	//     4-of-5 ladder rungs when `upscaleCompleteEvents` is
-	//     present and wait for an `upscale.complete` SSE event —
-	//     but a bridge with upscale disabled has no transcode pool
-	//     and `SetOnJobComplete` was never called, so no event ever
-	//     arrives. Mirrors how `resp.UpscaleEnabled` already gates
-	//     the feature visibility. (Greptile P1 on PR #187.)
+	//     gated on the live upscale gate (`s.upscaleActive()`, the
+	//     predicate `resp.UpscaleEnabled` reads) because iOS will skip
+	//     4-of-5 ladder rungs when `upscaleCompleteEvents` is present
+	//     and wait for an `upscale.complete` SSE event for a job it
+	//     asked for. With the gate closed the bridge takes no such job
+	//     (every enqueue path reads the same gate), so the flag goes
+	//     with the feature. (Greptile P1 on PR #187.) Not because no
+	//     event can come: since #781 serve builds the transcode pool
+	//     and wires `SetOnJobComplete` on every bridge, and a job
+	//     queued before the gate closed still completes and publishes
+	//     one. This said until 2026-09-29 that a bridge with upscale
+	//     disabled has no pool and no callback (backlog B113).
 	//   - `operatorDrivenUpscale` additionally requires a wired
 	//     `batchCoordinator` — without it the /v1/upscale/batch
 	//     endpoints surface 503 with nothing to fall back to.
@@ -1780,8 +1785,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//   - `pushEventsSupported` / `pairingEventsSupported`: gated on
 	//     `s.eventBroker != nil` (and `s.pairing != nil` for the
 	//     pairing variant). Orthogonal to `upscaleEnabled` — the
-	//     event surfaces are wired by `StartEventBroker` regardless
-	//     of whether the transcode pool exists.
+	//     event surfaces are wired by `StartEventBroker` whatever the
+	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
 	// appends in lex order. Capacity 28 covers the current maximum
