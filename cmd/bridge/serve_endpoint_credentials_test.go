@@ -87,7 +87,7 @@ func TestAStartupRefusalNamesAURLWithoutItsCredential(t *testing.T) {
 
 // TestServePublishesNoCustomEndpointCredential boots the real `serve` on a
 // bridge.yaml whose customEndpoints carry a secret in each part of a URL
-// that can carry one (backlog B54), and asks every surface the secret must
+// that can carry one (backlog B54; the path since B66), and asks every surface the secret must
 // never reach: /v1/health with no token, which published every entry as
 // written until B54; the pairing link the console mints (POST /api/tokens:
 // its url=, its urls= and the JSON beside it); and every line serve logs
@@ -103,12 +103,14 @@ func TestServePublishesNoCustomEndpointCredential(t *testing.T) {
 		"https://" + secret + "@b.example.test:7788",
 		"https://c.example.test:7788/?token=" + secret,
 		"https://d.example.test:7788/#" + secret,
+		"https://e.example.test:7788/" + secret + "/",
 	}
 	published := []string{
 		"https://a.example.test:7788",
 		"https://b.example.test:7788",
 		"https://c.example.test:7788/",
 		"https://d.example.test:7788/",
+		"https://e.example.test:7788",
 	}
 	carries := func(s string) bool {
 		return strings.Contains(strings.ToLower(s), strings.ToLower(secret))
@@ -172,7 +174,7 @@ func TestServePublishesNoCustomEndpointCredential(t *testing.T) {
 			t.Errorf("serve's %s carries the secret:\n%s", name, out)
 		}
 	}
-	if got := len(rec.Failures("custom endpoint published without its user name, password, query or fragment; " +
+	if got := len(rec.Failures("custom endpoint published without its user name, password, path, query or fragment; " +
 		"a save stores it that way")); got != len(declared) {
 		t.Errorf("%d warnings that an endpoint was published without its credential, want one per entry (%d); lines: %q",
 			got, len(declared), rec.Failures())

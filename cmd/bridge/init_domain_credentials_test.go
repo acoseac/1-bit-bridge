@@ -15,11 +15,11 @@ import (
 // QR publish that list (backlog B54). A domain carrying a user name, a
 // password, a query or a fragment is refused before anything is written,
 // exit 2, as any other bad flag is, and the refusal does not echo it. So is
-// one that does not parse (a password with a space in it), whose parts no
-// predicate can read, while public mode still builds the autocert host's URL
-// from the string. A config that already holds such an endpoint is
-// published without the part instead (config.ValidateCustomEndpoints): the
-// operator typed this one.
+// one that does not parse (a password with a space in it). And since backlog
+// B66 so is any domain that is not a host name alone (a path, a scheme, a
+// port, no host at all): Normalize serves a stored one as the host it names
+// (config.AutocertHost), and init refuses what the operator TYPED rather
+// than write a value they did not.
 func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 	const secret = "s3cret-Pw"
 	for _, tc := range []struct{ name, domain string }{
@@ -27,10 +27,14 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 		{"a token as the user name", secret + "@bridge.example.test"},
 		{"a query", "bridge.example.test?token=" + secret},
 		{"a fragment", "bridge.example.test#" + secret},
-		// url.Parse refuses a space in the userinfo, so HasCredentialParts
-		// answers false for it: the value is refused for not parsing.
+		// url.Parse refuses a space in the userinfo, so no host can be read
+		// from it (config.AutocertHost answers ""), and it is refused.
 		{"a password that does not parse", "user:" + secret + " x@bridge.example.test"},
 		{"a password behind a space", " user:" + secret + "@bridge.example.test"},
+		{"a path", "bridge.example.test/" + secret},
+		{"a scheme", "https://bridge.example.test"},
+		{"a port", "bridge.example.test:8443"},
+		{"no host", "user:" + secret + "@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")

@@ -4012,3 +4012,13 @@ func (c *Config) Save(path string) error {
 	tmpName = "" // suppress defer cleanup
 	return nil
 }
+
+// SCAFFOLD (red-first run, replaced by the fix): main's behaviour.
+const InvalidAutocertDomain = "autocert-domain.invalid"
+
+const autocertDomainServedAsItsHost = "scaffold: served as its host"
+
+const autocertDomainNamesNoHost = "scaffold: names no host"
+
+// AutocertHost is main's behaviour in the scaffold: the value, trimmed.
+func AutocertHost(value string) string { return strings.TrimSpace(value) }

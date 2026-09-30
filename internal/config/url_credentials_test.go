@@ -8,9 +8,10 @@ package config
 // written by /v1/health, which answers without a token, and baked into every
 // pairing QR. The rule: an error or a warning names a configured URL by its
 // field, and its scheme and host alone; an endpoint the bridge publishes
-// carries no user name, password, query or fragment. A config that loaded
-// before still loads: an endpoint it holds is published without them, with a
-// warning, and one the operator types is refused.
+// carries no user name, password, path, query or fragment (the path since
+// backlog B66). A config that loaded before still loads: an endpoint it holds
+// is published without them, with a warning, and one the operator types is
+// refused.
 
 import (
 	"errors"
@@ -139,8 +140,13 @@ var credentialEndpointShapes = []struct{ name, in, published string }{
 	{"a query", "https://c.example:7788/?token=" + credentialSecret, "https://c.example:7788/"},
 	{"a fragment", "https://d.example:7788/#" + credentialSecret, "https://d.example:7788/"},
 	{"all of them", "https://user:" + credentialSecret + "@e.example:7788/bridge?k=" + credentialSecret + "#" + credentialSecret,
-		"https://e.example:7788/bridge"},
+		"https://e.example:7788"},
 	{"an IPv6 host", "https://" + credentialSecret + "@[2001:db8::7]:7788", "https://[2001:db8::7]:7788"},
+	// The app sets every request's path over the endpoint's, or appends to
+	// it where that request then misses the bridge (backlog B66), so a
+	// path is a part the endpoint is published without, a token in it too.
+	{"a path", "https://p.example:7788/" + credentialSecret + "/", "https://p.example:7788"},
+	{"a path an escape spells", "https://q.example:7788/%2F" + credentialSecret, "https://q.example:7788"},
 }
 
 // TestACustomEndpointIsPublishedWithoutItsCredentials drives the prune every
@@ -267,8 +273,8 @@ func TestALoadedConfigPublishesItsEndpointsWithoutCredentials(t *testing.T) {
 
 // TestCheckCustomEndpointsRefusesATypedCredential pins the other half of the
 // rule: a list the operator TYPES (the console's settings PATCH) is refused
-// when an entry carries a user name, password, query or fragment, rather
-// than stored as a URL they did not type. The refusal names the entry by
+// when an entry carries a user name, password, path, query or fragment,
+// rather than stored as a URL they did not type. The refusal names the entry by
 // position, scheme and host and never carries the secret. Entries that are
 // invalid for another reason are left to the prune, as they always were.
 func TestCheckCustomEndpointsRefusesATypedCredential(t *testing.T) {
@@ -302,16 +308,21 @@ func TestCheckCustomEndpointsRefusesATypedCredential(t *testing.T) {
 }
 
 // TestHasCredentialPartsReadsEveryPartThatCanCarryOne is the predicate the
-// three sites share (the prune, the PATCH, `bridge init --domain`): true for
-// a user name, a password, a query and a fragment, empty ones included,
-// false for a URL with none and for a value that does not parse.
+// prune and the PATCH share: true for a user name, a password, a path other
+// than the root, a query and a fragment, empty ones included, false for a URL
+// with none and for a value that does not parse. `bridge init --domain`
+// asked it too until backlog B66; it asks AutocertHost now, which removes
+// every part this reads and a scheme and a port besides.
 func TestHasCredentialPartsReadsEveryPartThatCanCarryOne(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
 		want bool
 	}{
 		{"https://host:7788", false},
-		{"https://host:7788/path/", false},
+		{"https://host:7788/", false},
+		{"https://host:7788/path/", true},
+		{"https://host:7788//", true},
+		{"https://host:7788/%2F", true},
 		{"https://[fe80::1%25en0]:7788", false},
 		{"https://user@host", true},
 		{"https://user:pw@host", true},
