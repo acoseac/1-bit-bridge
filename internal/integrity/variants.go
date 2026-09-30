@@ -490,6 +490,12 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// the tree AFTER the last row was classified, and a volume that went
 	// in between leaves it walking an empty local directory, which holds
 	// no sidecars and lets a relocation's deletions through.
+	//
+	// Pass two is not re-checked, and needs no check: it deletes catalog
+	// ROWS, never files, and every row it deletes was found missing while
+	// the path named the directory the tick began on (the check as each
+	// row read missing, this one after the last). A volume that goes during
+	// pass two changes no verdict it acts on, only the next tick's probe.
 	if changed := variantsDirChanged(dir, start); changed != "" {
 		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
