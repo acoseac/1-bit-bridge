@@ -361,7 +361,7 @@ func (s *Store) ListUPnPTracksByServer(ctx context.Context, serverUDN string) (m
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.tags_json
+		SELECT t.tags_json, t.indexed_at
 		  FROM tracks t
 		  JOIN upnp_track_routing r ON r.source_path = t.path
 		 WHERE r.server_udn = ?
@@ -373,13 +373,15 @@ func (s *Store) ListUPnPTracksByServer(ctx context.Context, serverUDN string) (m
 	out := make(map[string]*Track)
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var version int64
+		if err := rows.Scan(&raw, &version); err != nil {
 			return nil, fmt.Errorf("manifest: scan UPnP track row: %w", err)
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, fmt.Errorf("manifest: decode UPnP track row: %w", err)
 		}
+		t.rowVersion, t.hasRowVersion = version, true
 		out[t.Path] = &t
 	}
 	return out, rows.Err()

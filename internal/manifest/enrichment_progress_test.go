@@ -374,12 +374,13 @@ func TestMarkEnrichedDoesNotPersistEnrichedField(t *testing.T) {
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 
-	if err := s.UpsertTrack(context.Background(), &Track{Path: "y.flac", Size: 1, ModTime: now}); err != nil {
+	tr := &Track{Path: "y.flac", Size: 1, ModTime: now}
+	if err := s.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
 
 	yes := true
-	tr := &Track{Path: "y.flac", Size: 1, ModTime: now, Enriched: &yes}
+	tr.Enriched = &yes
 	if err := s.MarkEnriched(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}

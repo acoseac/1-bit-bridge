@@ -1037,6 +1037,55 @@ lost my library."
   which is how #840 reintroduced the dead `CASE WHEN` form — so
   `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package and
   classifies each assignment against the SQL literal that contains it.
+- **A writer that writes back a row it READ earlier writes it only while the
+  row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
+  compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote
+  back the WHOLE `tags_json` of an earlier read with no check, so whatever
+  another writer did in between was overwritten for good. Measured through
+  the real Store and Scanner on main 1f784879: a file retagged between the
+  enricher's read (`UnenrichedTracks`) and its stamp kept its old title and
+  a `size` of 124 inside `tags_json` against 161 on disk, `enriched_at` set,
+  through three more scans; a `cover.jpg` added while the enricher worked
+  lost the scanner's `local-` art (`ArtworkMBID` "") while `folder_art_key`
+  recorded the cover as seen; and a reconcile pass that read a row before a
+  stamp and wrote it after took every MBID away, `enriched_at` still set.
+  Nothing healed any of it: the skip gate compares the `size` and
+  `mtime_ns` COLUMNS, which neither writer touches, the enricher never
+  revisits a stamped row, and the phone's exact-size check
+  (`validateDownloadedSize`) fails every offline download of such a file.
+  **`indexed_at` is the row's version**: every `tags_json` writer moves it
+  (the two upserts' conflict arms, the two write-backs through
+  `indexedAtAdvanceSQL`), so a write-back carries the version it read
+  (`Track.rowVersion`, unexported, never marshaled) and writes `WHERE path
+  = ? AND indexed_at = ?`. On a miss it writes nothing. `MarkEnriched`
+  answers `ErrTrackChanged`, and the enricher counts nothing, logs one
+  Debug line (`msgChangedWhileEnriched`) and leaves the row unenriched for
+  its next batch, which reads it again and answers mostly from its caches;
+  the pass skips the row, uncounted, and the next scan reconciles it from
+  what it holds then. A row deleted in between is a miss too. **Every store
+  reader that returns a Track records the version** (`GetTrack`,
+  `LookupTrack`'s folded fallback, `UnenrichedTracks`, the list, stream and
+  page readers, the UPnP baseline), and `UpsertTrack` and `MarkEnriched`
+  the version they wrote. **A Track the store did not hand out is refused**
+  (`errTrackNotRead`), never written unchecked: failing open is how a
+  reader that forgets the version would reopen the race without a word, and
+  a reconcile batch refuses before it writes anything. A writer that bumps
+  `indexed_at` without changing `tags_json` (a rendition, lyrics, a booklet
+  tag) costs at most a spurious miss, one more enrichment from the caches,
+  never a livelock: each bump is a one-off, and no enricher path bumps the
+  row it is enriching. **Don't compare the `tags_json` bytes** (older rows
+  hold TEXT or BLOB, and it buys only fewer spurious misses), **and don't
+  `json_set` only the fields a writer owns**: that stamps an enrichment of
+  the old tags onto new ones and marks them done. `TestNoHandRolledIndexedAtBump`
+  reads a WHERE clause's `indexed_at = ?` as a comparison, not an
+  assignment (`TestTheIndexedAtSweepTellsAnAssignmentFromAComparison`).
+  `TestAStampOverARowTheScannerRewroteWritesNothing`,
+  `TestAStampOverARowWhoseCoverArrivedWritesNothing`,
+  `TestAReconcileWriteOverAStampedRowWritesNothing`,
+  `TestAWriteBackOfATrackTheStoreDidNotHandOutIsRefused`,
+  `TestAStampRecordsTheVersionItWrote`, and the enricher's
+  `TestAStampOverARowThatChangedMidEnrichmentIsNotCounted` and
+  `TestASkipOverARowThatChangedMidEnrichmentIsNotCounted`.
 - **Any path predicate that writes, deletes, or bounds a scope MUST be a byte
   range, never `LIKE`.** Nothing sets `case_sensitive_like`, so `path LIKE
   'p/%'` matches a case-twin sibling — a DIFFERENT directory on a case-sensitive
@@ -2224,6 +2273,9 @@ no failing test — which is the shape to expect in this area.
   `enrichment skipped` line, and the row stays `enriched_at = 0`. The stop is
   at `stampEnriched` / `markSkipped`, never at the fetches that absorb their
   own errors. The rule is under **The CLI and the serve wiring**. (#1001)
+  **Nor does a stamp over a row that changed since the batch read it**
+  (`manifest.ErrTrackChanged`: it writes nothing, and the next batch reads
+  the row again; the compare-and-set bullet under **Scanner**, B187).
 - **Pacing derives from the client's base URL** (`minIntervalForBase`,
   fail-safe to the public interval, dot-anchored suffix match) — public MB is
   1.1s and self-hosted is 150ms — **not zero**, because Atlas's own per-IP tier

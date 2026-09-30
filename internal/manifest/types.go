@@ -415,6 +415,20 @@ type Track struct {
 	// (folderArtDrifted): a cover added, replaced or removed beside an
 	// unchanged audio file re-extracts it. Never marshaled.
 	folderArtKey string
+
+	// rowVersion is the version of the row this Track was read from or
+	// written as: the row's indexed_at, which every write of tags_json
+	// advances. Every store reader that returns a Track records the version
+	// it read (GetTrack, LookupTrack, UnenrichedTracks, the list, stream and
+	// page readers, the UPnP baseline), and UpsertTrack and MarkEnriched the
+	// version they wrote. MarkEnriched and the reconciliation writer
+	// (applyReconciledTracks) write back a row they read earlier, whole, so
+	// they write only while the row still has this version (ErrTrackChanged
+	// otherwise), and refuse a Track that has none (hasRowVersion false: one
+	// built by hand, which no read backs). Unexported, never marshaled (the
+	// versionStampOnly shape).
+	rowVersion    int64
+	hasRowVersion bool
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

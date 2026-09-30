@@ -225,14 +225,11 @@ func TestApiLibraryEnrichmentRetryScoped(t *testing.T) {
 	// Two enriched-but-incomplete tracks under Gap/, one complete.
 	seed := func(path, artwork, artist string) {
 		t.Helper()
-		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-			Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist,
-		}); err != nil {
+		tr := &manifest.Track{Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist}
+		if err := srv.deps.Manifest.UpsertTrack(ctx, tr); err != nil {
 			t.Fatal(err)
 		}
-		if err := srv.deps.Manifest.MarkEnriched(ctx, &manifest.Track{
-			Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist,
-		}); err != nil {
+		if err := srv.deps.Manifest.MarkEnriched(ctx, tr); err != nil {
 			t.Fatal(err)
 		}
 	}
