@@ -539,8 +539,9 @@ lost my library."
   that judged only the size, and the walk judges only audio-named entries,
   so a named pipe called `cover.jpg` held every scan that extracted a track
   of its album without embedded art, and a link to `/dev/zero` called
-  `cover.jpg` (0 bytes by its stat) grew the heap by 3 GiB in 0.85 s: an
-  out-of-memory throw, which no `recover` catches. The lyrics sidecar read,
+  `cover.jpg` (0 bytes by its stat) grew the heap past 3 GiB in 0.85 s and
+  was still reading, toward the out-of-memory throw no `recover` catches
+  (B99's bullet). The lyrics sidecar read,
   the analysis job's STREAMINFO read and the fingerprint prefix read had the
   swap window too. Each now opens through `fsutil.OpenAsFile`, or
   `fsutil.ReadAsFile` for a whole read (`os.ReadFile`, opened as a file),

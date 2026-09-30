@@ -31659,9 +31659,10 @@ open call bounded by `fsutiltest.AwaitPastFIFOs`, which then plays the writer:
   parent-folder fallback of a disc folder. A link to `/dev/zero` called
   `cover.jpg` stats as 0 bytes, under the 25 MiB cap; a throwaway program
   doing exactly that stat and read had 3 GiB of heap in 0.85 s and was still
-  reading. An allocation that fails is a throw, which no `recover` catches,
-  so one such link took `bridge serve` down on any scan that looked for its
-  album's cover (every scan after an `ExtractorVersion` bump).
+  reading when it stopped itself. What comes after is B99's measurement: an
+  allocation that fails is a throw, which no `recover` catches. So, by
+  reading, one such link takes `bridge serve` down on any scan that looks for
+  its album's cover (every scan after an `ExtractorVersion` bump).
 - **The lyrics sidecar** (`readSidecarCandidate`, after its callers' stat
   and `IsRegular` check), **the analysis job's STREAMINFO read**
   (`verifyFLACAudioMD5`) and **the fingerprint prefix read**
@@ -31670,7 +31671,7 @@ open call bounded by `fsutiltest.AwaitPastFIFOs`, which then plays the writer:
 - **The listing.** Through a per-server opener seam (`Server.openDir`, below)
   that replaces the album directory with a named pipe just before the real
   open runs, `/v1/list` waited 5 s, and once the writer came answered 500
-  "couldn't read this directory" (`fdopendir: not a directory`).
+  "couldn't read this directory" (on macOS, `fdopendir: not a directory`).
 
 Linux and macOS agree on the facts the fix rests on (a throwaway program, run
 in `golang:1.26.6` on dido and on the dev Mac): an open with `O_DIRECTORY`

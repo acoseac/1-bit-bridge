@@ -162,9 +162,10 @@ type Server struct {
 	startedAt              time.Time
 
 	// openDir opens the directory /v1/list lists (openListDir). New sets
-	// it; a test replaces it to reach the window between the resolver's
-	// stat and the open, which no file on disk can be made to hold open.
-	// Per server, never a package var, so no other test's server sees it.
+	// it to fsutil.OpenDir; a test wraps it to change the directory inside
+	// the window between the resolver's stat and the open, which no fixture
+	// on disk can reach. Per server, never a package var, so no other
+	// test's server sees it.
 	openDir func(string) (*os.File, error)
 
 	// deviceRegistrar binds the client's durable X-Device-Token recovery
