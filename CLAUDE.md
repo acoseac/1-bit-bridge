@@ -147,7 +147,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the `cmd/bridge` bullet on what a rewrite keeps).
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this, and `admin.loopbackHostOnly` holds a request's Host to loopback as well (421 otherwise, backlog B170: the source alone admits a browser a page has rebound to 127.0.0.1). **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what the public demo and the hosted tenants run, and what `bridge.ars.md` ran as the operator bridge until it moved to a home NUC on 2026-09-22; this bullet omitted public mode until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
-- **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
+- **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`, as `restart.request`, which also makes serve exit with `supervision.RestartExitCode` (75) where a stop exits 0: launchd and the Windows SCM relaunch only the former (B201, under **Config, settings and process lifecycle**).
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets).
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
@@ -302,7 +302,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Fifteen claims in this list have been wrong and been corrected** — the
+**Sixteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -317,8 +317,9 @@ giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 force a re-extraction", (2026-09-29) "the app's SSDP path has no
 LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
 listener to the group address", (2026-09-29) "`isLossyCodec` gates every
-`BitsPerSample` write site", and (2026-09-29) "reconciliation never
-crosses directories". The first five cost a later session real
+`BitsPerSample` write site", (2026-09-29) "reconciliation never
+crosses directories", and (2026-09-29) "`os.SameFile` answers [a
+directory's identity] portably". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -352,6 +353,11 @@ the same; both were found while naming the compressed AIFF-C and WAV encodings
 The fifteenth sat in the Scanner bullet on the reconciliation passes, true of
 four passes and not of the fifth, the year fill by release id, which crosses
 folders by design; it was found while replaying the passes in memory (B188).
+The sixteenth was the model a fix was told to copy: B203's entry pointed at
+the delete handler's directory identity, kept from an `os.Stat`, and the
+first version built the same way passed on macOS and deleted 39 rows of 40
+on Windows, where `os.Stat` reads a directory's identity only when it is
+compared.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -441,7 +447,7 @@ lost my library."
   seeds (on the first harness and on the final one), and not in 90 s
   (468,005 inputs) from one seed whose fault touched no read.
 - **…and a container the walk SEES keeps its virtual rows' missing count
-  at 0, whatever the scan writes for it** (2026-09-30, backlog B217). A
+  at 0, whatever the scan writes for it** (2026-09-29, backlog B217). A
   virtual row (`<container>/st/NN.dff`) is in no walk: the deletion pass
   counts it seen whenever its container is (the container-seen branch),
   and never counts it missing then, but nothing reset its count, since the
@@ -3543,6 +3549,115 @@ no failing test — which is the shape to expect in this area.
   under node, over the served payloads) and
   `TestServeReportsTheVariantWatcherRefusalOnTheJobsCard` (the wiring
   line; red alone with it nil).
+- **…and the watcher asks again, BY IDENTITY, as each row reads as missing
+  and before it deletes: the probe at the start of a tick says nothing
+  about the rows after it** (2026-09-29, backlog B203). `VariantWatcher.tick`
+  probed its variants directory once, before its first pass, so a clean
+  unmount during the tick (the mountpoint reverts to a local directory)
+  made every later row read as a rendition that is gone, the relocation
+  check walked that directory and found no sidecars, and the tick deleted
+  the rows: 39 of 40, through the real watcher. The tick keeps the probe's
+  view of the directory (`VariantsDirBlock.Info`) and asks
+  `variantsDirChanged` as each row reads as missing (`classify`: the one
+  verdict that leads to a deletion, so a tick whose rows are where they
+  belong pays nothing, and a volume that goes and comes back inside the
+  pass is seen if it is still gone when a missing read's check runs), and
+  once more after `MassDeleteRefusal` and before pass
+  two, since that check walks the tree after the last row is classified
+  and a volume gone in between lets a relocation's deletions through. A
+  change refuses the tick as the mount-loss kind (`variantsDirUnavailable`),
+  deleting nothing, the rows it had found missing counted as refused; the
+  next tick's own probe continues the streak. **Identity, never "does it
+  LOOK unmounted" again**: the local directory need not be empty.
+  **Read an identity kept for later from an open handle
+  (`fsutil.DirIdentity`, or the handle the emptiness read uses), never from
+  `os.Stat`**: on Windows `os.Stat` of a plain directory reads its volume
+  serial and file index only when `os.SameFile` first asks, from whatever
+  the path names then (measured on nomos: the first version, on `os.Stat`,
+  deleted 39 rows there and passed on macOS;
+  `TestOSStatLeavesTheWindowsIdentityToTheComparison` pins the premise). The
+  delete handler's kept instance (`SidecarStoreState`, #968) was that
+  `os.Stat` and compared as any directory later put at the path: it takes
+  the probe's `Info` now, from the handle that read `Empty`, so the two are
+  about one directory (a second lookup could take them from a directory
+  swapped in between; CodeRabbit). **A test of a kept identity compares it with
+  nothing before the change**: on Windows a comparison reads the lazy
+  identity and fixes it at that moment, which passed the handler's test on
+  the old line until the early comparison went. The unmount is stood in by
+  moving the directory aside and making another at its path, from inside
+  the tick's one call during pass one, an adoption (`mountHooks`):
+  `TestVariantWatcherRefusesATickWhoseVolumeIsUnmountedDuringIt`,
+  `TestVariantWatcherRefusesATickWhoseDirectoryIsReplacedByANonEmptyOne`,
+  `TestVariantWatcherRefusesATickWhoseVolumeGoesAfterItsLastMissingRow`,
+  `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
+  `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
+  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
+  `upscale --gc` re-checks health but not identity (B224). **Pass two
+  asks `LocateSidecar` again just before each delete** (`classifyRow`, the
+  one per-row verdict both passes use) and deletes only a row still at
+  neither location: the checks see a change they observe and nothing
+  between them, so a remount between one row's missing read and the check
+  after it left that row's verdict stale with its sidecar back on the
+  volume (CodeRabbit on #1127;
+  `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete`). A row
+  kept there is counted as pass one would have counted it. What stays open
+  is a volume that is gone again at that recheck. A mountpoint that already
+  held an entry when a tick STARTED was open here too, until the next
+  bullet.
+- **…and the probe counts RENDITIONS, not entries: a variants directory
+  holding none is what an unmounted volume looks like, whatever else it
+  holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a
+  directory healthy when it held any entry, and the local directory an
+  unmount leaves holds what was written there while the volume was away
+  (a Finder `.DS_Store`, a README, the folders a render makes before sox
+  writes, which a failed render leaves): one watcher tick deleted all 40
+  rows (measured, five shapes), and `upscale --gc` deleted all 40 after
+  unlinking the `.DS_Store` as an orphan and reading the emptiness as its
+  own work. The serve reap and the delete handler read the same probe.
+  **One walk behind the probe and `TreeHoldsVariantSidecars`**,
+  `scanForRenditions`: a rendition is a file `looksLikeVariantSidecar`
+  names (regular, or a link to one) outside a dot-directory; the
+  filesystem's lost+found counts as nothing; a link to a directory, which
+  it does not follow, keeps the directory healthy (it cannot say what is
+  behind it); it reads each directory a batch at a time and stops at the
+  first rendition (never `filepath.WalkDir`: a whole sorted listing per
+  call, and the delete handler asks once per row that unlinked nothing);
+  and it is ORDER-INDEPENDENT, a directory it cannot list noted and the
+  walk going on, a rendition anywhere answering yes (the WalkDir form
+  stopped at its first error). No rendition is Empty ("is empty" for no
+  entry, "holds no rendition" otherwise); an error with no rendition
+  refuses as unreadable. **The directory cannot tell a lost volume from a
+  tree whose every rendition was deleted by hand, or from a fresh volume**,
+  so all three are refused, and `bridge upscale --gc --allow-mass-delete`
+  is the operator's way past (the background watcher has none): so the
+  watcher mass-deletes only over a tree that still holds a rendition with
+  the relocation guard disabled (`integrity.variantSweepMaxDeletePercent:
+  100`), since a mass that leaves renditions is otherwise the relocation
+  refusal and one that leaves none is this one, at any threshold. **Don't
+  take a lost+found as proof the volume is mounted** (ext-only, stacked
+  mounts, and the rule below makes it evidence neither way), so a fresh
+  ext4 volume, which the sweeps reaped from 2026-09-28, needs the flag.
+  **`upscale --gc` asks the probe BEFORE anything is classified or
+  unlinked** (`gcRefuseUnavailableVariantsDir`), and its reverse guard's
+  Empty exception counts the RENDITIONS the forward sweep's own unlink
+  removed (`runGCForwardSweep`'s `renditionsUnlinked`): never every file,
+  or a removed `.DS_Store` explains an unmounted volume, and never one
+  whose unlink failed or found it already gone, since a volume unmounted
+  between the inventory and the unlinks makes every unlink ENOENT
+  (CodeRabbit on #1129); `--allow-mass-delete` waives
+  the Empty refusal in both and nothing else. **The delete handler keeps a
+  refusal for the rest of its request** until it next unlinks inside the
+  store (`storeRefused`; a refusal only keeps rows), since a tree holding
+  no rendition is read whole on every ask. Tests in eight files asserted the
+  defect (a "healthy" directory holding `sidecar.flac`, a lone folder, the
+  watcher fixtures' `decoy.flac`, a streak ended by removing the last
+  sidecar); fixtures that stand for a mounted volume hold a rendition-named
+  file. `TestVariantWatcherRefusesAMountpointHoldingNoRendition`,
+  `TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`,
+  `TestRunGCReapsATreeWhoseRenditionsWereDeletedByHandWhenAllowed`,
+  `TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable`,
+  `TestTheVariantsDirProbeReadsLinksAndDirectoriesItCannotList`,
+  `TestUpscaleDeleteAsksAnUnavailableStoreOnceUntilItUnlinksFromIt`.
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -3578,9 +3693,13 @@ no failing test — which is the shape to expect in this area.
   row k and says NOTHING about row k+1 — which is why the probe is per row
   in the first place. `SidecarStoreIdentifier` is opaque because identity is
   device+inode on POSIX and volume+file index on Windows, which
-  `os.SameFile` answers portably and no exported type carries as a value;
-  nil or foreign is NOT the same, because the compare exists to refuse an
-  unmount. Captured on the FIRST in-store unlink only — a re-probe per row
+  `os.SameFile` compares and no exported type carries as a value; nil or
+  foreign is NOT the same, because the compare exists to refuse an
+  unmount. **Portably only for an identity read from an open handle**
+  (`fsutil.DirIdentity`): this bullet said "answers portably" of the
+  `os.Stat` the handler kept, and on Windows that stat's identity is read
+  when it is first compared, from whatever the path names then (the B203
+  bullet below). Captured on the FIRST in-store unlink only — a re-probe per row
   puts a stat on the happy path of a whole-library delete and a differing
   instance is refused by the comparison anyway. Missing, unreadable and
   not-a-directory still refuse however much was unlinked: the loop removes
@@ -3758,6 +3877,9 @@ no failing test — which is the shape to expect in this area.
   read"), and it refused a tree whose sidecars sort after it for the
   error rather than for the sidecars. It is evidence neither way there
   now; any other directory the probe cannot list still fails it closed.
+  Since backlog B223 a fresh volume holding only its lost+found holds no
+  rendition, which the mount-loss probe refuses before `MassDeleteRefusal`
+  is asked (the B223 bullet above): its rows go with `--allow-mass-delete`.
   A Gemini consult was attempted for the `lost+found` trade-off and
   refused by the API's spending cap; the rule is the narrow one, decided
   here.
@@ -3847,7 +3969,10 @@ no failing test — which is the shape to expect in this area.
   serve-time `VariantWatcher` has the same shape one layer over —
   `OrphanSidecarSweeper` can empty a flat directory under it — and is
   deliberately left: it removes nothing itself, so it has no count to be told,
-  and the CLI is the repair tool. (#941)
+  and the CLI is the repair tool. (#941) **Since backlog B223 the count is of
+  RENDITIONS unlinked, and `--allow-mass-delete` reaches this refusal**:
+  "empty" means holds no rendition, and a count of every file let a removed
+  `.DS_Store` explain an unmounted volume (the B223 bullet above).
 
 ### DLNA, UPnP and discovery
 
@@ -4905,6 +5030,47 @@ no failing test — which is the shape to expect in this area.
   SIGINT/SIGTERM**, never `os.Exit(0)` — that is what honours the `bgScans`
   WaitGroup (SQLite corruption), cleans up in-flight jobs, and flushes the auth
   store's debounce buffer. Same rule for the updater's auto-install restart.
+- **…and a restart request exits with `supervision.RestartExitCode` (75),
+  a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29,
+  backlog B201). The console's Restart, "Install & restart" and the
+  auto-installer's restart all exited 0, and the LaunchAgent `bridge init`
+  writes relaunches an unsuccessful exit only (KeepAlive
+  {SuccessfulExit: false}), while the Windows service had no recovery
+  actions: measured under a real LaunchAgent on the dev Mac and a real SCM
+  service on nomos, `restarting: true`, then exit 0 and nothing listening,
+  for good. `serveRestart.request` marks the stop and calls runServe's own
+  cancel (so the whole shutdown runs, the rule above), and runServe's
+  second defer turns a clean exit after a request into 75 (EX_TEMPFAIL):
+  launchd relaunched the probe with `last exit code = 75: EX_TEMPFAIL`,
+  and a SIGTERM (`launchctl kill`) still exited 0 and stayed down.
+  `admin.Deps.Restart` and `AutoInstallRestart` are both
+  `restart.request`, never a bare `cancel`
+  (`TestEveryRestartInServeGoesThroughTheRestartRequest` reads the wiring;
+  `TestARestartRequestedFromTheConsoleExitsToBeRestarted` drives the
+  console's). **Windows needs two more parts, both load-bearing**: the
+  service's recovery actions (restart after 2 s, 2 s, then 30 s, reset
+  after an hour) with `FailureActionsOnNonCrashFailures`, set by the
+  installer and, for a service installed before v0.2.1, by the running
+  service itself as it starts (`packaging.EnsureServiceRecovery` with its
+  own name, args[0]; it leaves recovery an operator configured alone), since
+  a console update replaces the binary and never re-installs; and the
+  service handler returns the exit code WITHOUT reporting Stopped first,
+  because the SCM takes the exit code from the first Stopped status: the
+  old handler's early Stopped (exit 0) made a failure read as a clean stop
+  (measured on nomos with recovery set: the early-Stopped build stayed down
+  with exit code 0; the fixed one logged event 7024, "service-specific
+  error 75", then 7031, "corrective action … Restart the service", and was
+  back in 4 s; an SCM Stop stays stopped). systemd's Restart=always restarts
+  either (its journal names this one 75/TEMPFAIL), and Docker's
+  `on-failure` policy, which restarts a non-zero exit, now relaunches it
+  too (docs/docker.md). **And `bridge start` kickstarts a
+  loaded agent**: `launchctl bootstrap` of one answers "Bootstrap failed:
+  5: Input/output error" on macOS 27, which `startForOS` did not swallow,
+  so `bridge start` over the stopped agent failed; a kickstart starts a
+  loaded agent and leaves a running one alone (both measured).
+  **Release note**: a macOS or Windows service install that updates from
+  v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
+  comes back down: run `bridge restart` once after that update.
 - **Atomic writes: stage, then rename with retry.** `RenameWithRetry` absorbs
   the Windows AV scan-on-close window; the deferred `Close` must be registered
   AFTER the deferred `Remove` (LIFO — Windows won't unlink an open file).
@@ -7811,6 +7977,14 @@ its twin.** The top list is older, shorter, and read first.
   prefix (`target+r.URL.Path`, `"/moved"+r.URL.Path`) is not. A loop server
   redirects to a fixed path. It is test code and a false positive by
   construction, and a red gate on a PR still buries a real finding.
+- **A new exec site names its binary by an absolute path, or by
+  `exec.LookPath`'s absolute answer, never a bare name.** SonarCloud's
+  `go:S4036` ("Make sure the PATH variable only contains fixed, unwriteable
+  directories") flags `exec.Command("name", …)` as a VULNERABILITY, and one
+  on new code takes Security Rating on New Code to B, which fails the gate:
+  B201's `runLaunchctl` did (#1130), where `launchctlBin` (`/bin/launchctl`,
+  on the sealed system volume) now names it, as `resolveBin` does for the
+  audio tools. Moving an old bare call into a new function counts as new.
 - **A `needs` entry only makes a job WAIT; something has to READ its
   result.** `gate`'s `needs` listed six jobs and its verification step
   checked five, so with `if: always()` a failing `dsd-measure` produced a

@@ -86,14 +86,16 @@ type VariantDeleter interface {
 type VariantSidecarStoreState struct {
 	// Available reports whether a MISSING sidecar is evidence about the
 	// FILE rather than about the VOLUME. False when the directory is
-	// gone, unreadable, not a directory, or empty — a clean unmount
-	// reverts a mountpoint to an empty local directory, which is why
-	// "empty" belongs here too.
+	// gone, unreadable, not a directory, or holds no rendition — a clean
+	// unmount reverts a mountpoint to a local directory holding nothing,
+	// or only what was written there while the volume was away (a
+	// .DS_Store, the folders a failed render left: backlog B223), which is
+	// why "holds no rendition" belongs here too.
 	Available bool
-	// Empty is true only for the exists-is-a-directory-holds-no-entries
+	// Empty is true only for the exists-is-a-directory-holds-no-rendition
 	// case, and is the ONE reason a caller can explain away: a request
-	// that has just unlinked files from this directory is what made it
-	// empty. A MISSING directory is not Empty — the two are different
+	// that has just unlinked renditions from this directory is what made
+	// it hold none. A MISSING directory is not Empty — the two are different
 	// facts and a caller acting on one must not act on the other, which
 	// is the split gcCheckOutputDirBeforeReverseSweep makes one layer up
 	// (#941).
@@ -625,6 +627,17 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// whole-library delete, and a later instance that differs is refused
 	// by the comparison anyway.
 	var unlinkedFrom SidecarStoreIdentifier
+	// storeRefused keeps the probe's refusal for the rest of the request,
+	// until this request next unlinks a file inside the store: every later
+	// row that unlinked nothing gets the same answer without asking again.
+	// The probe looks for a rendition (backlog B223), and a tree holding
+	// none is read whole, so a whole-library delete over a tree whose
+	// renditions were deleted by hand, leaving its folders, read that tree
+	// once per row. Only a refusal is kept: it keeps rows and deletes none,
+	// so a volume that comes back mid-request costs nothing but a re-run.
+	// A verdict of "available" is still asked per row (the unmount this
+	// probe exists for can happen between two rows, #968).
+	storeRefused := false
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -720,13 +733,24 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// the two LocateVariantSidecar already took on the same volume,
 		// and only on rows that unlinked nothing.
 		if errors.Is(removeErr, os.ErrNotExist) {
+			if storeRefused {
+				skippedUnavailable++
+				continue
+			}
 			st := s.variantDeleter.SidecarStoreState()
 			emptiedByUs := st.Empty && unlinkedFrom != nil &&
 				st.Store != nil && st.Store.Same(unlinkedFrom)
 			if !st.Available && !emptiedByUs {
+				storeRefused = true
 				skippedUnavailable++
 				continue
 			}
+		}
+		if removeErr == nil && loc.WithinStore {
+			// A file unlinked from inside the store: whatever the probe
+			// last refused, the store held a file, so the next row that
+			// unlinks nothing asks again.
+			storeRefused = false
 		}
 		if removeErr == nil && loc.WithinStore && unlinkedFrom == nil {
 			// One probe, on the FIRST in-store unlink, to record which

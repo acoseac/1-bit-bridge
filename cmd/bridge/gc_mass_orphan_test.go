@@ -357,7 +357,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	removed, _, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
+	removed, _, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
 	if failed != 0 || exitCode != 0 {
 		t.Fatalf("a file that vanished before the unlink counted as a failure (failed=%d exit=%d): %s",
 			failed, exitCode, stderr.String())
@@ -374,7 +374,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	sub := filepath.Join(dir, "sub")
 	writeFixtureFile(t, filepath.Join(sub, "child.flac"), 1)
 	stderr.Reset()
-	_, _, failed, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
+	_, _, failed, _, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
 		integrity.SidecarInventory{OrphanPaths: []string{sub}, OrphanWalkedPaths: []string{sub}})
 	if failed != 1 {
 		t.Errorf("a genuine remove failure was swallowed (failed=%d): %s", failed, stderr.String())

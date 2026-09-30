@@ -59,7 +59,7 @@ func TestUpscaleGCForwardSweepUnlinksTheWalkedPath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	removed, _, failed, code := runGCForwardSweep(context.Background(), &stdout, &stderr, inv)
+	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv)
 	if removed != 1 || failed != 0 || code != 0 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 1, 0, 0\nstderr: %s", removed, failed, code, stderr.String())
 	}
@@ -114,7 +114,7 @@ func TestUpscaleGCForwardSweepRefusesAnUnpairedInventory(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	removed, _, failed, code := runGCForwardSweep(context.Background(), &stdout, &stderr, inv)
+	removed, _, failed, code, _ := runGCForwardSweep(context.Background(), &stdout, &stderr, inv)
 	if removed != 0 || failed != 0 || code != 1 {
 		t.Fatalf("removed %d, failed %d, exit %d, want 0, 0, 1\nstderr: %s", removed, failed, code, stderr.String())
 	}

@@ -101,13 +101,90 @@ func InstallWindowsService(p Params) (string, error) {
 	}
 	defer s.Close()
 
+	// Before the start, so the bridge it starts is restarted when a
+	// restart is requested from its console (backlog B201). A failure
+	// is reported with the service installed, as a failed start is,
+	// and the running service tries again (EnsureServiceRecovery).
+	recoveryErr := setServiceRecovery(s)
+
 	// Start the service immediately so the operator doesn't have to
 	// reboot to see the bridge come up. Failure here is non-fatal —
 	// the service is installed, it'll start on next boot.
 	if err := s.Start(); err != nil {
 		return ServiceLabel, fmt.Errorf("service installed but failed to start: %w", err)
 	}
+	if recoveryErr != nil {
+		return ServiceLabel, fmt.Errorf("service installed and started, but a restart from its console will leave it stopped: %w", recoveryErr)
+	}
 	return ServiceLabel, nil
+}
+
+// serviceRecoveryActions are what the SCM does when the bridge's service
+// stops with a failure: start it again, 2 s after each of the first two
+// within serviceRecoveryResetPeriod (systemd's unit waits RestartSec=2) and
+// 30 s after each later one, so a bridge that fails at every start (a port
+// another process holds) is started twice a minute rather than in a loop.
+//
+// A restart requested from the console is such a failure: serve exits with
+// supervision.RestartExitCode, which the service reports as its
+// service-specific exit code, and FailureActionsOnNonCrashFailures
+// (setServiceRecovery) makes a stop with a non-zero exit code a failure.
+// Without them the service stayed stopped after every restart the console
+// asked for (backlog B201). A stop the SCM asks for exits 0 and is left
+// stopped.
+var serviceRecoveryActions = []mgr.RecoveryAction{
+	{Type: mgr.ServiceRestart, Delay: 2 * time.Second},
+	{Type: mgr.ServiceRestart, Delay: 2 * time.Second},
+	{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+}
+
+// serviceRecoveryResetPeriod is how long, in seconds, the service must
+// run without a failure before the SCM counts from the first recovery
+// action again: an hour.
+const serviceRecoveryResetPeriod = 60 * 60
+
+// setServiceRecovery gives s the bridge's recovery actions and makes a
+// stop with a non-zero exit code a failure they answer.
+func setServiceRecovery(s *mgr.Service) error {
+	if err := s.SetRecoveryActions(serviceRecoveryActions, serviceRecoveryResetPeriod); err != nil {
+		return fmt.Errorf("set recovery actions: %w", err)
+	}
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("set recovery on non-crash failures: %w", err)
+	}
+	return nil
+}
+
+// EnsureServiceRecovery gives the service named name the bridge's recovery
+// actions when it has none, and reports whether it set them. The running
+// service calls it as it starts (the service handler's Execute, with its
+// own name): a service installed before v0.2.1 has none, and a console
+// update replaces the binary without installing the service again, so
+// without this a restart requested from the console left such a service
+// stopped for good (backlog B201). Recovery actions an operator configured
+// are left as they are.
+func EnsureServiceRecovery(name string) (bool, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, fmt.Errorf("connect to the service manager: %w", err)
+	}
+	defer func() { _ = m.Disconnect() }()
+	s, err := m.OpenService(name)
+	if err != nil {
+		return false, fmt.Errorf("open service %s: %w", name, err)
+	}
+	defer func() { _ = s.Close() }()
+	actions, err := s.RecoveryActions()
+	if err != nil {
+		return false, fmt.Errorf("read recovery actions: %w", err)
+	}
+	if len(actions) > 0 {
+		return false, nil
+	}
+	if err := setServiceRecovery(s); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UninstallWindowsService stops and removes the SCM service. Missing

@@ -681,6 +681,70 @@ func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
 	}
 }
 
+// TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne — the delete
+// handler keeps the directory it first unlinked from (SidecarStoreState's
+// Store) and later asks whether an EMPTY directory at the path is that one,
+// the only emptiness it may explain away (#968). A directory replaced by
+// another, the shape a clean unmount leaves at a mountpoint, must not
+// compare as the one it kept. It did on Windows until backlog B203: the
+// identity came from os.Stat, which there reads it only when SameFile asks,
+// from whatever the path names then (fsutil.DirIdentity). Red there alone:
+// on POSIX an os.Stat reads the device and inode at the call. The kept
+// identity is compared with nothing before the directory is replaced, as
+// in the handler, whose first comparison is at the first missing sidecar:
+// a comparison before it would read, and fix, the identity at that moment,
+// which passed this test with os.Stat on Windows.
+func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "variants")
+	writeFixtureFile(t, filepath.Join(dir, "Artist", "01.flac.upscaled-v2-176400-24.flac"), 10)
+	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
+	kept := a.SidecarStoreState()
+	if !kept.Available || kept.Store == nil {
+		t.Fatalf("a variants directory holding a rendition: state %+v, want available with its identity", kept)
+	}
+	if err := os.Rename(dir, dir+".volume"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := a.SidecarStoreState()
+	if !now.Empty {
+		t.Fatalf("the directory left at the path: state %+v, want it empty", now)
+	}
+	if now.Store == nil || now.Store.Same(kept.Store) {
+		t.Error("an empty directory made at the path compares as the directory the handler kept, so an unmount reads as its own unlinks")
+	}
+	if again := a.SidecarStoreState(); again.Store == nil || !again.Store.Same(now.Store) {
+		t.Error("the same directory, asked twice, is not the same directory")
+	}
+}
+
+// TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable —
+// the serve path's reap and the variant delete handler ask the adapter
+// whether a missing rendition is evidence about the file or about the
+// volume, from the probe the watcher and `--gc` refuse on (backlog B223).
+// A local directory under an unmounted mountpoint that holds a .DS_Store
+// and the folders a failed render left read as available until then, so a
+// play of each rendition reaped its row while the files sat on the
+// volume. It is unavailable now, and Empty (the one reason the delete
+// handler may explain away by its own unlinks), with its identity.
+func TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "variants")
+	writeFixtureFile(t, filepath.Join(dir, ".DS_Store"), 10)
+	if err := os.MkdirAll(filepath.Join(dir, "Artist", "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
+	if st := a.SidecarStoreState(); st.Available || !st.Empty || st.Store == nil {
+		t.Fatalf("a mountpoint holding a .DS_Store and empty folders: state %+v, want unavailable, Empty, with its identity", st)
+	}
+	writeFixtureFile(t, filepath.Join(dir, "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac"), 10)
+	if st := a.SidecarStoreState(); !st.Available || st.Empty {
+		t.Fatalf("the same directory holding a rendition: state %+v, want available", st)
+	}
+}
+
 // TestPathUnderRefusesASiblingWithAPrefixName.
 //
 // `pathUnder` decides whether an unlink can explain the probed variants

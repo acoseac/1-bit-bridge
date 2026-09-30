@@ -612,10 +612,19 @@ func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState
 	// this" from "something else is at this path now". os.SameFile is
 	// the portable comparison (device+inode on POSIX, volume+file index
 	// on Windows) and there is no exported value type for it, hence the
-	// wrapper. A failed stat leaves it nil, which the handler reads as
-	// "cannot claim I emptied it".
-	if fi, err := os.Stat(dir); err == nil {
-		st.Store = sidecarStoreID{fi}
+	// wrapper. A directory the probe could not read leaves it nil,
+	// which the handler reads as "cannot claim I emptied it".
+	//
+	// The probe's own Info: the stat of the handle it read the
+	// directory's first entry with, so Empty and the identity are about
+	// one directory (a second lookup could take them from a directory
+	// swapped in between; CodeRabbit on #1127). Never an os.Stat: on
+	// Windows that reads a plain directory's identity only when SameFile
+	// asks, from whatever the path names then, so the instance the
+	// handler kept at its first unlink compared as the same as any
+	// directory put at the path later (backlog B203).
+	if block.Info != nil {
+		st.Store = sidecarStoreID{block.Info}
 	}
 	return st
 }
@@ -2153,11 +2162,7 @@ func main() {
 			context.Background(),
 			"1-bit-bridge",
 			func(ctx context.Context) error {
-				code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
-				if code != 0 {
-					return fmt.Errorf("subcommand exited with code %d", code)
-				}
-				return nil
+				return serviceServeResult(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
 			},
 			os.Stderr,
 		); err != nil {
@@ -2180,7 +2185,9 @@ func main() {
 
 // run parses argv (without the program name) and dispatches to a subcommand.
 // It is extracted from main so tests can drive it without spawning a process.
-// Exit codes: 0 success, 1 subcommand failure, 2 usage error.
+// Exit codes: 0 success, 1 subcommand failure, 2 usage error, and
+// supervision.RestartExitCode (75) from serve stopped by a restart request,
+// so that its supervisor starts it again.
 //
 // ctx is used by serveCmd to trigger graceful shutdown (signal from main or
 // cancellation from a test).
@@ -2491,10 +2498,17 @@ func dsdRenderToolchainVerdict(ff transcode.FFmpegInfo) (ok bool, why string) {
 // runServe is the library-callable serve loop. Identical behavior to
 // the flag-driven serveCmd path — same TLS material, same admin
 // listener, same SIGINT graceful-shutdown — just with the inputs
-// pre-parsed. Returns the exit code the CLI would.
-func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
+// pre-parsed. Returns the exit code the CLI would:
+// supervision.RestartExitCode when a restart request stopped it
+// (serveRestart).
+func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (code int) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// A restart request cancels through this same cancel, and says so in
+	// the exit code. This defer runs after every one registered below it,
+	// so the whole shutdown has run when it sets the code (backlog B201).
+	restart := newServeRestart(cancel)
+	defer func() { code = restart.exitCode(code) }()
 
 	configPath := &opts.configPath
 	addrOverride := &opts.addrOverride
@@ -3291,18 +3305,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			Sessions:   sessions,
 			Force:      false,
 		}
-		// On successful auto-install we exit; service-manager
-		// (launchd / systemd / SCM) respawns into the new binary.
-		// The Phase B `maybeRollbackOnBoot` housekeeping then
-		// verifies version-match and either confirms or rolls back.
+		// On successful auto-install we exit with
+		// supervision.RestartExitCode, and the service manager (launchd
+		// / systemd / SCM) respawns into the new binary. The Phase B
+		// `maybeRollbackOnBoot` housekeeping then verifies
+		// version-match and either confirms or rolls back.
 		updOpts.AutoInstallRestart = func() {
 			fmt.Fprintln(stdout, "Restarting after auto-install (service manager will respawn).")
-			// Route through the graceful cancellation — the same closure SIGINT
-			// and the admin restart use (admin.Deps.Restart == cancel) — so the
-			// transcode/analysis pools drain, the auth debounce flushes, and the
-			// manifest DB checkpoints before exit. os.Exit(0) here would skip
-			// every runServe defer (the "restart MUST NOT os.Exit(0)" contract).
-			cancel()
+			// Route through the graceful cancellation — the same cancel SIGINT
+			// and the admin restart reach (admin.Deps.Restart ==
+			// restart.request) — so the transcode/analysis pools drain, the
+			// auth debounce flushes, and the manifest DB checkpoints before
+			// exit. os.Exit here would skip every runServe defer (the
+			// "restart MUST NOT os.Exit(0)" contract). restart.request, not
+			// cancel alone: an exit 0 is a stop, which launchd and the SCM
+			// do not relaunch (backlog B201).
+			restart.request()
 		}
 	}
 	upd := updater.New(updOpts)
@@ -4768,7 +4786,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		TailscaleDisable:     tailscaleDisableCallback,
 		StartedAt:            time.Now().UTC(),
 		ScanCtx:              scanCtx,
-		Restart:              cancel,
+		// The same cancel SIGINT and SIGTERM reach, marked so serve exits
+		// with supervision.RestartExitCode, which launchd and the SCM
+		// relaunch where they do not relaunch an exit 0 (backlog B201).
+		Restart: restart.request,
 		// Same tracker the auto-installer gates on before swapping a
 		// binary — the admin restart path simply never consulted it.
 		InflightSessions: sessions.Inflight,

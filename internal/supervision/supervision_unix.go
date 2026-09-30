@@ -10,9 +10,11 @@ import (
 
 // isSupervisedForOS checks the macOS / Linux supervisor environment
 // variables. A meaningful value means we're running under a
-// supervisor that will relaunch us after os.Exit (launchd KeepAlive
-// / systemd Restart=always, both of which the bridge's `init`
-// command writes into the unit files it ships). Otherwise →
+// supervisor that will relaunch us after we exit with
+// RestartExitCode (launchd's KeepAlive {SuccessfulExit: false},
+// which relaunches an unsuccessful exit only, and systemd's
+// Restart=always, which relaunches any: both of which the bridge's
+// `init` command writes into the unit files it ships). Otherwise →
 // unsupervised; the admin UI must not promise auto-relaunch.
 //
 // Tested via `supervision_unix_test.go` which sets / unsets the

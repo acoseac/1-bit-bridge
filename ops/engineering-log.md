@@ -35136,7 +35136,377 @@ listed `fe80::/10` was refused, as `metricsGate` refused it before B171.
 The zone is dropped before the match (a CIDR names no zone); the table
 test's zoned row was red before the change.
 
-## 2026-09-30 — an SACD container the walk sees keeps its virtual rows' missing count at 0 (backlog B217)
+## 2026-09-29 — the variant watcher asks again, by identity, whether its variants directory is the one its tick began on, as rows read as missing and before it deletes (backlog B203)
+
+Found by the pre-v0.2.1 review: `VariantWatcher.tick` probed the variants
+directory (`VariantsDirSweepBlockReason`: missing, not a directory,
+unreadable or empty) once, before its first pass. A clean unmount during the
+tick reverts the mountpoint to a local directory, so every row classified
+after it read as a rendition missing at both places, `MassDeleteRefusal`
+walked that directory, found no sidecars ("a library whose files really
+went"), and pass two deleted the rows. The review's scratch test: 39 rows of
+40. `upscale --gc` re-checks the directory before its reverse sweep; the
+watcher did not.
+
+### Reproduced through the real watcher
+
+The tick calls out once during pass one, to adopt a relocated row, so the
+tests' reconciler (`mountHooks`) runs a hook there and stands in for the
+unmount with what one leaves on disk: the directory moved aside
+(`atomicwrite.RenameWithRetry`, for Windows' scan-on-close) and a new one
+made at its path. On main (24523cff), each tick below deleted:
+
+| shape | main | fixed |
+|---|---|---|
+| row 0 adopted, then unmounted to an empty directory; rows 1-39 on the volume | 39 deleted | refused, 0 |
+| the same, unmounted to a directory holding a README | 39 deleted | refused, 0 |
+| rows 0-38 missing while mounted, the tree holding a sidecar no row names (the relocation `MassDeleteRefusal` refuses), row 39 adopted, then unmounted | 39 deleted | refused, 0 |
+| unmounted at row 0, remounted at row 5 (adopted from the local directory), rows 1-4 read in between | 4 deleted (under the floor of 10) | refused, 0 |
+| control: forty rows on an untouched volume, three sidecars removed by hand | 3 deleted | 3 deleted |
+
+### The fix
+
+`VariantsDirBlock.Info` carries the directory the probe judged healthy, and
+`variantsDirChanged` compares the path's directory now with it
+(`os.SameFile`): in `classify` (pass one, split out of `tick`) as each row
+reads as missing, the one verdict that leads to a deletion, and once more
+after `MassDeleteRefusal` and before pass two. A change refuses the tick as
+`variantsDirUnavailable`, the mount-loss kind, through the latch (one WARN;
+the next tick's own probe of the empty mountpoint continues the streak), and
+counts the rows it had found missing as refused. The hint drops "nothing was
+swept" (a changed tick has adopted rows) and names the change.
+
+Negative controls, each committed first and restored with `git checkout`:
+the per-row check removed turns only the came-back test red (the final check
+catches the rest); the final check removed turns only the after-the-last-row
+test red; a re-check of HEALTH in place of identity turns the README and the
+came-back tests red (both local directories hold an entry).
+
+### Windows: an `os.Stat` reads a directory's identity when it is compared
+
+The first version kept the probe's `os.Stat`. It passed on macOS and failed
+on Windows 11 (nomos, go1.26.6): the empty-directory and README tests each
+deleted 39 rows. Go's Windows `os.Stat` reads a path that is no reparse
+point with `GetFileAttributesEx` and leaves the volume serial and file index
+to `os.SameFile`, which opens the PATH when it first compares, so a stat
+taken before a replacement is read from the replacement.
+`TestOSStatLeavesTheWindowsIdentityToTheComparison` pins it (true on
+Windows, false on POSIX, where a stat reads the device and inode at the
+call). The two tests the first version passed there passed by accident: a
+comparison made before the swap had fixed the kept identity.
+
+`fsutil.DirIdentity` opens the directory (`OpenDir`) and stats the handle,
+which reads the identity from the handle at the call on every platform; the
+probe takes its identity from the handle it reads the first entry with, so
+the identity and the emptiness are of one directory.
+
+The variant delete handler (#968) kept exactly that `os.Stat`
+(`SidecarStoreState`'s `sidecarStoreID`), so on Windows the directory it
+first unlinked from compared as the same as any empty directory later put at
+the path, and its empty-store exception could run over an unmount. It takes
+the probe's `Info` now, which the probe sets for an empty directory too:
+the stat of the handle that read `Empty`, so the emptiness and the identity
+are about one directory (review round 2 took the first version's separate
+`fsutil.DirIdentity` lookup away: between the probe and it, a directory
+swapped at the path could supply the identity while the emptiness was the
+first one's; CodeRabbit). `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`
+is red on nomos with the old line and green on POSIX either way. Its first
+draft compared the kept identity once before the replacement and passed on
+Windows with the old line: the comparison had read the identity early. So
+the kept identity is compared with nothing before the change, in that test
+and in `TestDirIdentitySeesAnotherDirectoryAtThePath` (red on nomos with
+`DirIdentity` built on `os.Stat`). A real Windows unmount of a volume
+mounted in a folder was never this shape (the folder is a reparse point, so
+its stat reads the identity at once, and the variants directory BELOW such
+a folder goes missing); a plain directory replaced by another at the same
+path was.
+
+### Left open
+
+- A mountpoint that already holds an entry when a tick STARTS reads as
+  healthy: an unmounted variants directory holding one `.DS_Store` had all
+  40 rows deleted in one tick (scratch test on this branch, not committed).
+  Backlog B223.
+- `upscale --gc` classifies its rows with no probe before, and re-checks
+  health, not identity, before its reverse sweep. Backlog B224.
+- A remount between one row's missing read and the identity check after it
+  (two system calls apart) is not seen by the checks: the row reached pass
+  two with its sidecar back on the volume (CodeRabbit on the merged head,
+  27bad388, and on dfb7bc27). Pass two now asks `LocateSidecar` again just
+  before each delete, through `classifyRow`, the per-row verdict pass one
+  uses, and deletes only a row still at neither location; a row kept there
+  is counted as pass one would count it.
+  `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete` stands the
+  stale verdict in with the sidecar reappearing at a later row's adoption,
+  one row under the mass-delete floor: red before the recheck (the row
+  deleted, 38 present), green after (39 present, none deleted). Left open:
+  a volume gone again at the recheck. The other finding on 27bad388, to
+  count the row whose check saw the change among the refused, was
+  declined: that row's missing verdict is about the directory the path
+  named then, not the one the tick began on.
+
+## 2026-09-29 — a restart request exits with status 75, which launchd and the Windows SCM relaunch; a stop still exits 0 (backlog B201)
+
+Found by the pre-v0.2.1 ops review: the console's Restart, "Install &
+restart" (which POSTs /api/restart after the install) and the
+auto-installer's restart all cancel serve through runServe's own cancel, as
+CLAUDE.md requires, and serve then returned 0. The LaunchAgent `bridge init`
+writes keeps the job alive on an unsuccessful exit only (KeepAlive
+{SuccessfulExit: false}); the Windows service had no recovery actions, and
+its handler reported a clean stop. `supervision.IsSupervised` answers true
+under both, so the console promised a relaunch that never came.
+
+### Measured before the fix
+
+- **macOS 27, a real LaunchAgent** shaped like the shipped plist (label
+  `com.acoseac.b201-probe`, the binary built from main, loopback ports):
+  POST /api/restart answered `{"restarting":true,...}`, then
+  `launchctl print` said `state = not running`, `runs = 1`,
+  `last exit code = 0`, and the console was still down 15 s later.
+  `launchctl bootstrap` of that loaded, stopped job answered
+  `Bootstrap failed: 5: Input/output error` (exit 5), which `startForOS`
+  did not swallow ("service already loaded" and "17: File exists" only), so
+  `bridge start` failed over it; `launchctl kickstart gui/<uid>/<label>`
+  started it (runs 1 to 2) and was a no-op on the running job (exit 0, same
+  pid).
+- **Windows 11 (nomos), a real SCM service** installed by main's
+  `bridge init --service`: no recovery actions (`sc qfailure`: reset period
+  0, none), and POST /api/restart left it `STOPPED` with
+  `WIN32_EXIT_CODE 0`, `SERVICE_EXIT_CODE 0`, console down.
+
+### The fix
+
+- `supervision.RestartExitCode` = 75 (sysexits' EX_TEMPFAIL). runServe
+  builds a `serveRestart` over its cancel; `admin.Deps.Restart` and
+  `AutoInstallRestart` are `restart.request`, which marks the stop and
+  cancels; runServe's named result is set by its second defer, after the
+  whole shutdown, to 75 for a clean exit after a request. A failure keeps
+  its code; a stop (SIGINT, SIGTERM, the SCM's Stop) stays 0. The admin
+  fallback with no Restart wired exits 75 too.
+- Windows: `packaging.setServiceRecovery` (restart after 2 s, 2 s, then
+  30 s; reset after 3600 s; FailureActionsOnNonCrashFailures) runs at
+  install, and `packaging.EnsureServiceRecovery` runs in the service handler
+  as it starts, with its own name (args[0]), setting them only when the
+  service has none: a v0.2.0 install is never re-installed by a console
+  update. The handler returns (true, 75) for a restart, (true, 1) for a
+  failure, without reporting Stopped first.
+- `startLaunchdAgent` (packaging): bootstrap, and on any failure a
+  kickstart; both failing report both answers.
+
+### Measured after
+
+- macOS, the same probe with the fixed binary: two restarts relaunched it
+  (`runs = 2`, then 3, `last exit code = 75: EX_TEMPFAIL`), the console
+  back in 4 s and 11 s (the second waited out launchd's 10 s throttle, the
+  job having run for less). `launchctl kill SIGTERM` exited 0 and stayed
+  down (`runs` unchanged). Unloaded afterwards.
+- nomos: swapping the fixed binary into main's service and starting it set
+  the recovery actions (`sc qfailure`: 3600 s, RESTART 2000/2000/30000 ms;
+  `FAILURE_ACTIONS_ON_NONCRASH_FAILURES: TRUE`; the log line "set the
+  service's recovery actions"). POST /api/restart: event 7024 ("terminated
+  with the following service-specific error: 75"), event 7031 ("The
+  following corrective action will be taken in 2000 milliseconds: Restart
+  the service"), console back in 4 s, `RUNNING`. `sc stop`: `STOPPED`,
+  exit 0, still stopped 12 s later.
+- **The early Stopped status is load-bearing** (Windows control): the fixed
+  binary with the old handler's `status <- Stopped` put back ahead of the
+  return, over the same service with its recovery actions set, stayed
+  `STOPPED` after a restart, `WIN32_EXIT_CODE 0`: svc.Run reports the
+  handler's Stopped with the exit code it holds then, 0, and the SCM takes
+  the first Stopped it receives.
+
+### Tests and controls
+
+`TestARestartRequestedFromTheConsoleExitsToBeRestarted` (a real serve, POST
+/api/restart, exit 75), `TestAStopStillExitsZero`,
+`TestServeRestartKeepsAFailureAndMarksOnlyAStop`,
+`TestAWindowsServiceTellsARestartFromAFailure`,
+`TestEveryRestartInServeGoesThroughTheRestartRequest` (AST, both wirings),
+`TestTheServiceAnswersARestartWithItsRestartCode` and
+`TestTheServiceAnswersAFailureAndAStopAsBefore` (Windows only, the handler
+driven with channels), and the three launchd start tests. Controls,
+committed first: `Restart: cancel` turns the console test and the AST test
+red (exit 0); the auto-installer's closure on `cancel()` turns the AST test
+red alone; the exit-code defer removed turns the console test red alone; on
+nomos the early Stopped put back turns both handler tests red.
+
+### Release note
+
+A macOS (LaunchAgent) or Windows (`--service`) install that updates from
+v0.2.0 through the console runs v0.2.0's restart, which exits 0: it comes
+back down after "Install & restart" or an auto-install. Run
+`bridge restart` once after that update. From v0.2.1 on a restart from the
+console relaunches the bridge (and a Windows service installed by v0.2.0
+gains its recovery actions at its first start under v0.2.1).
+
+### Review
+
+SonarCloud failed the PR's quality gate (Security Rating on New Code B) on
+one `go:S4036` in `runLaunchctl`: `exec.Command("launchctl", …)` by its bare
+name, in a function this change added. Every launchctl the file runs now
+names `launchctlBin`, `/bin/launchctl`, where macOS keeps it on the sealed
+system volume. CodeRabbit's first pass had no actionable comments.
+
+## 2026-09-29 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
+
+Left open by B203: `VariantsDirSweepBlock` called a variants directory
+healthy when it held ANY entry (`dirIsEmpty` read one). A clean unmount
+leaves the local directory under the mountpoint, and anything written there
+while the volume is away made that directory "healthy": a Finder
+`.DS_Store`, a README, or the bridge's own render path, which makes
+`Artist/Album/` before sox writes and leaves the folders when the render
+fails. A tick that STARTS on such a directory has no identity to compare
+with, so B203's re-check cannot see it.
+
+### Reproduced red-first
+
+- **The watcher** (`TestVariantWatcherRefusesAMountpointHoldingNoRendition`,
+  the backlog's scratch test made real): forty rows on a "volume", the
+  volume moved aside, a local directory at the path holding a `.DS_Store`,
+  the folders a failed render left, a README and a Thumbs.db, a `.flac` that
+  is not a rendition, or renditions only in a `.Trashes`. On the old code
+  every shape: `{Rows:40 Deleted:40}` in one tick.
+- **`upscale --gc`** (`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`,
+  through the real `runGC`): the same volume, three shapes, each exit 0 with
+  all forty rows deleted. With a `.DS_Store` the forward sweep unlinked it as
+  an orphan (`--gc`'s nil Consider takes every file) and the reverse guard
+  then read the empty directory as that run's own work (#941's
+  `forwardRemoved > 0` exception); with the folders nothing needed
+  explaining, the directory was "healthy".
+- **The serve path's reap and the delete handler** read the same probe
+  through `variantDeleterAdapter.SidecarStoreState`, so each play of a
+  rendition on such a volume reaped its row (the adapter reported
+  available).
+
+### What distinguishes a lost volume from an emptied tree
+
+Nothing in the directory: a volume that is not mounted and a tree whose
+every rendition was deleted by hand both hold no rendition, whatever else
+they hold. The one the bridge must never get wrong is the first (the
+catalog, hours of sox work), and the second is rare and operator-made. So a
+directory holding no rendition is refused like an empty one, by every
+reaper, and the operator's word is the way past it: `bridge upscale --gc
+--allow-mass-delete` ("the sidecars really are gone", the flag the
+relocation refusal already had). The background watcher has no override,
+as before.
+
+Weighed and declined:
+
+- **Remember the identity of the last healthy tick** (the backlog's second
+  idea). In memory it is gone at a restart, and the classic lost mount is a
+  reboot whose NAS mount failed: the first tick would have nothing to
+  compare with. Persisted, it needs a writer that knows the volume is there
+  (a rendition written, a row found present) and a migration story for every
+  existing install.
+- **A marker file on the volume** (`.bridge-variants`). The same existing-
+  install problem, and `--gc`'s nil Consider unlinks dot-files as orphans.
+- **A lost+found at the root as proof the volume is mounted** (it exists only
+  at an ext filesystem's root). ext-only, fooled by stacked mounts, and it
+  contradicts the 2026-09-28 rule that the filesystem's lost+found is
+  evidence neither way. So a fresh ext4 volume holding only its lost+found,
+  which the watcher and `--gc` reaped since 2026-09-28, is refused now and
+  reaped with `--allow-mass-delete` (`TestRunGCReapsTheRowsOfAFreshVolume`
+  and the relocation table say so).
+- **The WalkDir walk `TreeHoldsVariantSidecars` made.** It reads each
+  directory's whole sorted listing; the delete handler asks the probe once
+  per row that unlinked nothing, and a flat 100,000-sidecar tree would be
+  listed whole each time.
+- **A mass-deletion rule in `MassDeleteRefusal` instead of the probe.** It
+  would cover the watcher and `--gc` but not the serve reap or the delete
+  handler, which read the probe, and the adapter's own docblock is that the
+  reapers cannot disagree about what an unmounted directory looks like.
+
+### The fix
+
+- `scanForRenditions` (internal/integrity/renditions.go) is the one walk
+  behind `TreeHoldsVariantSidecars` and the probe: the root resolved, each
+  directory read a batch of 256 at a time, depth first, stopping at the
+  first rendition (`looksLikeVariantSidecar`, regular or a link to a regular
+  file, outside a dot-directory), the filesystem's lost+found skipped. It
+  reports links to directories (not followed) and whether the root held any
+  entry. **Order-independent**: a directory it cannot open or list is noted
+  and the walk goes on, a rendition found anywhere answers true, and only a
+  walk that found none returns the error (the WalkDir form stopped at the
+  first error, so a readable rendition sorted after a locked directory was
+  never seen).
+- `VariantsDirSweepBlock`: healthy for a rendition, or a link to a directory
+  (the scan cannot see behind it, the reading every entry got before);
+  "cannot read" for an error with no rendition; Empty, "variants directory
+  is empty" or "holds no rendition", otherwise. `dirIsEmpty` is gone.
+- `upscale --gc` asks the probe first, before anything is classified or
+  unlinked (`gcRefuseUnavailableVariantsDir`), and its reverse guard's Empty
+  exception counts the RENDITIONS the forward sweep unlinked
+  (`SidecarInventory.OrphanRenditions`), never every file; `--allow-mass-delete`
+  waives the Empty refusal in both, and nothing else.
+- The delete handler keeps a refusal for the rest of its request, until it
+  next unlinks a file inside the store (`storeRefused`): a tree holding no
+  rendition is read whole, and a whole-library delete over a hand-emptied
+  tree read it once per row. Only a refusal is kept, since it keeps rows.
+- The watcher's hint, the Jobs card's wording, the doctor's variants-index
+  hint (which said the sweeps refuse a directory that "reads missing or
+  empty, so nothing is being deleted", false for any other content) and
+  `--allow-mass-delete`'s help say what the probe reads now.
+
+### Tests that asserted the defect
+
+- `TestVariantsDirSweepBlockReason`: "dir with a file is healthy" (a file
+  named `sidecar.flac`) and "dir with only a subdir is healthy".
+- The watcher fixtures wrote `decoy.flac`, `present.flac` or `ok.flac` to keep
+  the guard out; they write rendition-named files now, and the variants-dir
+  guard table gained the junk case the old fixture was.
+- The relocation table's "proceeds: the tree holds no sidecars" and
+  "proceeds: a fresh volume holds only its lost+found", and two latch tests
+  that ended a relocation streak by removing the stray sidecar (thirty rows
+  then deleted over a tree holding none): they end it now the way the
+  refusal's hint says, by putting the files back, which the tick adopts.
+- `TestRunGCReapsTheRowsOfAFreshVolume` (reaped without the flag) and B203's
+  `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne` (its "healthy"
+  directory held one folder).
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: the probe reads a directory holding no rendition as healthy | the watcher test (5 of 5 shapes), the gc test (3 of 3), the hand-deleted "folders left" case, the adapter test |
+| NC2: `--gc`'s pre-flight skipped | the gc test's `.DS_Store` and junk-`.flac` shapes (the forward sweep unlinked them); rows still kept by the reverse guard |
+| NC3: NC2 plus the reverse guard counting every unlinked file | the same two shapes exit 0 with every row deleted |
+| NC4: no refusal cache in the delete handler / no reset after an in-store unlink | 23 probes, 2 probes (want 3) |
+| NC5: the scan stops at its first unlistable directory | both orders of "a rendition beside a directory it cannot list" |
+| NC6: links to directories not counted | "a link to a directory keeps it healthy" |
+
+### The cost, accepted
+
+A tree whose every rendition was deleted by hand, and a fresh volume, keep
+their rows until `bridge upscale --gc --allow-mass-delete`, with the
+watcher's latched WARN and the Jobs card's "refusing" meanwhile; a
+download of such a rendition answers 410 and keeps its row. A variants
+directory pointed at a fresh folder while every row is still present at its
+recorded path elsewhere was refused as "empty" already; it is refused now
+if the folder holds junk too, until the first rendition is written there.
+
+### Review
+
+- CodeRabbit (round 1, on 746b59e7): the reverse guard's count was the
+  renditions the INVENTORY listed (`OrphanRenditions`), so an unlink that
+  failed counted, and so did one that found the file gone: a volume
+  unmounted between the inventory and the unlinks makes every unlink ENOENT
+  (a success to the exit code), and the listed count then explained the
+  empty mountpoint as this run's work. `runGCForwardSweep` returns the
+  renditions its own `os.Remove` unlinked (`renditionsUnlinked`, per orphan
+  through `SidecarInventory.OrphanIsRendition`), and runGC hands the guard
+  that. `TestTheReverseGuardCountsOnlyTheRenditionsThisRunUnlinked` runs
+  runGC's three steps with the unmount between the inventory and the
+  forward sweep; `TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt`
+  counts one of four (an unlinked rendition; not one already gone, one in a
+  directory this user may not write, or a file that is not a rendition).
+  Both red with the ENOENT unlink counted (NC1) and with every listed
+  rendition counted, the old reading (NC2).
+
+### Left open
+
+- Backlog B224.
+
+## 2026-09-29 — an SACD container the walk sees keeps its virtual rows' missing count at 0 (backlog B217)
 
 From the pre-v0.2.1 data review (2026-09-30, read-only): SACD virtual rows
 were deleted while their `.iso` was on disk. Since v0.2.0.
