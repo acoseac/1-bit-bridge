@@ -219,17 +219,22 @@ func recordFolderArtKey(absPath string, t *Track, ec *ExtractContext) {
 // no row records an identity newer than its cover.
 func folderArtFor(ec *ExtractContext, dir string) folderArtResult {
 	st := folderArtDirStateOf(ec, dir)
-	promiseI, _ := ec.FolderArtCache.LoadOrStore(dir, &folderArtPromise{})
-	promise := promiseI.(*folderArtPromise)
-	promise.once.Do(func() {
-		promise.res = scanFolderArtwork(dir, st.names, ec.ArtworkCacheDir, ec.readArt)
-		if !st.seen && promise.res.failure == nil {
+	lookup := func() folderArtResult {
+		res := scanFolderArtwork(dir, st.names, ec.ArtworkCacheDir, ec.readArt)
+		if !st.seen && res.failure == nil {
 			// A candidate the lookup could not stat, or a directory it
 			// could not list: whatever the others gave, the answer may
 			// change once it can see them.
-			promise.res.failure = st.failure
+			res.failure = st.failure
 		}
-	})
+		return res
+	}
+	if ec.FolderArtCache == nil {
+		return lookup() // one caller, nothing to share
+	}
+	promiseI, _ := ec.FolderArtCache.LoadOrStore(dir, &folderArtPromise{})
+	promise := promiseI.(*folderArtPromise)
+	promise.once.Do(func() { promise.res = lookup() })
 	return promise.res
 }
 

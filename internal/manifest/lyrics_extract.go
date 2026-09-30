@@ -96,7 +96,12 @@ func dirListingFor(ec *ExtractContext, dir string) *sidecarListing {
 	if ec == nil || ec.SidecarIndex == nil {
 		return loadDirListing(dir)
 	}
-	pI, _ := ec.SidecarIndex.LoadOrStore(dir, &sidecarListing{})
+	// Load first: the skip gate asks for a listing of every unchanged
+	// track, and all but the first ask of a folder find one.
+	pI, ok := ec.SidecarIndex.Load(dir)
+	if !ok {
+		pI, _ = ec.SidecarIndex.LoadOrStore(dir, &sidecarListing{})
+	}
 	p := pI.(*sidecarListing)
 	p.once.Do(func() { p.fill(dir) })
 	return p
