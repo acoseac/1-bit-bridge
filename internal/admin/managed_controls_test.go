@@ -276,9 +276,11 @@ func TestSettingsPageDropsHostOwnedControls(t *testing.T) {
 	}
 }
 
-// TestDiagnosticsDropsTheMetricsPointerWhenManaged — /metrics is gated to
-// loopback, so on a hosted bridge the paragraph offering it points at a
-// URL that answers 403 to the very reader being told to scrape it.
+// TestDiagnosticsDropsTheMetricsPointerWhenManaged — a scraper of /metrics
+// needs loopback mode's own host, or public mode's metrics.allowCidrs, and a
+// hosted bridge's reader can arrange neither (the control plane owns the
+// config), so there the paragraph offering it would tell the reader to point
+// a scraper at a URL that refuses it.
 func TestDiagnosticsDropsTheMetricsPointerWhenManaged(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
@@ -300,7 +302,7 @@ func TestDiagnosticsDropsTheMetricsPointerWhenManaged(t *testing.T) {
 	}
 	manageControls(t, srv, config.ManagedControlRestart)
 	if strings.Contains(get(), `href="/metrics"`) {
-		t.Error("managed /diagnostics still points at the loopback-gated /metrics")
+		t.Error("managed /diagnostics still offers /metrics to a scraper it cannot configure")
 	}
 }
 
