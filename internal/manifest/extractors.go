@@ -108,13 +108,14 @@ type ExtractContext struct {
 	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
 	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
 	// SidecarIndex memoizes one os.ReadDir per directory so the lyrics
-	// sidecar lookup (extractor AND skip gate) costs no per-file directory
-	// reads: dir-path string -> *sidecarListing. nil → an unmemoized read
-	// per call. Unlike FolderArtCache — which is &s.folderArt, shared by
-	// every worker and replaced at the top of Scan — this one is built
-	// inside runScanWorker, so it is per WORKER per scan: a directory is
-	// read at most once per worker that touches it, and no listing outlives
-	// the scan that made it.
+	// sidecar lookup and the folder-art state (extractor AND skip gate) cost
+	// no per-file directory reads: dir-path string -> *sidecarListing. nil →
+	// an unmemoized read per call. Like FolderArtCache, the scanner's is
+	// shared by every worker (&s.dirListings) and replaced at the start and
+	// the end of each Scan and ScanSubtree, so a directory is read once per
+	// scan, and no listing outlives the scan that made it. It was per WORKER
+	// until 2026-09-30 (backlog B141), which read an album's directory once
+	// for each worker that took one of its tracks.
 	SidecarIndex *sync.Map
 	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
 	// roots — callers must supply keys in the same path form the
@@ -135,6 +136,11 @@ type ExtractContext struct {
 	// fsutil.OpenAsFile (openAudioFile). The scan worker copies it from
 	// Scanner.openAudio, a TEST seam; nil in production.
 	openAudio func(abs string) (extractSource, error)
+
+	// readArt, when set, reads a folder-art candidate in place of
+	// readFolderArt. The scan worker copies it from Scanner.readArt, a TEST
+	// seam; nil in production.
+	readArt folderArtReader
 
 	// reads records the reads of the audio file that did not complete. Set
 	// by ExtractWithContext, on its own copy of the context, for one call.
@@ -497,6 +503,13 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	err := extractByFormat(absPath, t, &run)
 	if run.reads.first != nil {
 		return &readIncompleteError{err: run.reads.first}
+	}
+	// The folder art this row was given, by identity, for the skip gate
+	// (folderArtDrifted): every row a scan writes from here records it,
+	// whichever extractor ran and whichever art won, a file its extractor
+	// refused included (the scan writes that one by its name).
+	if ec != nil && ec.ArtworkCacheDir != "" {
+		recordFolderArtKey(absPath, t, ec)
 	}
 	if err != nil {
 		return err
@@ -2872,7 +2885,14 @@ func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 // not a bug). The folder-level branch is single-flighted so a
 // 15-track album with no embedded art does ReadDir + read + hash +
 // write exactly once total.
+//
+// It records on t what it concluded (t.localArt): settled when every
+// picture and cover it looked at was read and judged, unsettled when a
+// folder's cover could not be seen or read (folderArtResult.failure),
+// so that the row keeps the art it had and a later scan reads the cover
+// again (backlog B141).
 func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractContext) {
+	t.localArt = localArtSettled
 	// 1) Embedded picture, when the dhowden Metadata is available
 	//    and carries one. dhowden's Picture() returns nil for ID3v1
 	//    (no image support) and for any other format whose parser
@@ -2914,16 +2934,14 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	if ec.FolderArtCache == nil {
 		// Defensive: caller should always pass a cache, but a nil
 		// cache means we'd race on every track. Skip rather than
-		// reintroduce the stampede.
+		// reintroduce the stampede, and say the folder was not read.
+		t.localArt = localArtUnsettled
 		return
 	}
-	promiseI, _ := ec.FolderArtCache.LoadOrStore(dir, &folderArtPromise{})
-	promise := promiseI.(*folderArtPromise)
-	promise.once.Do(func() {
-		promise.res = scanFolderArtwork(dir, ec.ArtworkCacheDir)
-	})
-	if promise.res.found {
-		t.ArtworkMBID = promise.res.mbid
+	own := folderArtFor(ec, dir)
+	notePendingFolderArt(t, own)
+	if own.found {
+		t.ArtworkMBID = own.mbid
 		return
 	}
 
@@ -2947,26 +2965,31 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	//    `Album/` that also holds loose tracks) share exactly one
 	//    ReadDir + hash for the album root per scan — positive AND
 	//    negative results cached, identical to an own-dir lookup of
-	//    that directory.
-	if !isDiscFolderName(filepath.Base(dir)) {
+	//    that directory. discArtParent decides the climb (a disc-named
+	//    directory that is not a library root, whose parent is outside
+	//    the library), and the folder-art key asks it too, so the key
+	//    names exactly the directories read here.
+	parent, climbs := discArtParent(dir, ec)
+	if !climbs {
 		return
 	}
-	if ec.isLibraryRoot(dir) {
-		// The track's directory IS a configured root — its parent is
-		// outside the library; never read it.
+	up := folderArtFor(ec, parent)
+	notePendingFolderArt(t, up)
+	if up.found {
+		t.ArtworkMBID = up.mbid
+	}
+}
+
+// notePendingFolderArt marks t unsettled when a folder-art lookup it was
+// given did not complete (folderArtResult.failure), keeping the first
+// failure for the scan's line.
+func notePendingFolderArt(t *Track, res folderArtResult) {
+	if res.failure == nil {
 		return
 	}
-	parent := filepath.Dir(dir)
-	if parent == dir {
-		return // filesystem root
-	}
-	parentI, _ := ec.FolderArtCache.LoadOrStore(parent, &folderArtPromise{})
-	parentPromise := parentI.(*folderArtPromise)
-	parentPromise.once.Do(func() {
-		parentPromise.res = scanFolderArtwork(parent, ec.ArtworkCacheDir)
-	})
-	if parentPromise.res.found {
-		t.ArtworkMBID = parentPromise.res.mbid
+	t.localArt = localArtUnsettled
+	if t.localArtFailure == nil {
+		t.localArtFailure = res.failure
 	}
 }
 
@@ -3028,32 +3051,32 @@ func looksLikeJPEG(data []byte) bool {
 	return len(data) >= len(jpegSOI) && bytes.HasPrefix(data, jpegSOI)
 }
 
-// scanFolderArtwork does a single os.ReadDir(dir) and matches entries
-// against folderArtCandidates via strings.EqualFold. On hit, reads
-// the file (capped at maxArtworkBytes), hashes the bytes, atomically
-// writes <cacheDir>/local-<hash>-500.jpg, and returns
-// folderArtResult{found: true, mbid: "local-<hash>"}. On miss or any
-// I/O error, returns folderArtResult{found: false}.
-func scanFolderArtwork(dir, cacheDir string) folderArtResult {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return folderArtResult{}
+// folderArtReader reads a folder-art candidate whose stat is info
+// (readFolderArt; a scanner test's reader in its place, Scanner.readArt).
+type folderArtReader func(full string, info os.FileInfo) ([]byte, error)
+
+// scanFolderArtwork looks at the folder-art candidates names in dir (the
+// ones its folder-art state listed and stat'ed, folderArtDirStateOf) in
+// listing order. On the first that reads as an image, it reads the file
+// (capped at maxArtworkBytes), hashes the bytes, atomically writes
+// <cacheDir>/local-<hash>-500.jpg, and returns
+// folderArtResult{found: true, mbid: "local-<hash>"}. On a miss it returns
+// found false.
+//
+// A candidate whose stat or read did not complete (folderArtReadIncomplete:
+// an EIO or ESTALE from a NAS, a permission the service user lacks) is noted
+// in the result's failure and passed over: the answer is then not one, and
+// the tracks given it keep the art they had until a scan reads it (backlog
+// B141). The skip gate retries such a folder on every scan, so its line is
+// the scan's one (msgUnreadFolderArt), never one per folder here: a Debug
+// line names each. A candidate too large, not an image, or not a file is a
+// verdict about it, logged as it always was.
+func scanFolderArtwork(dir string, names []string, cacheDir string, read folderArtReader) folderArtResult {
+	if read == nil {
+		read = readFolderArt
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		matched := false
-		for _, candidate := range folderArtCandidates {
-			if strings.EqualFold(name, candidate) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
+	var res folderArtResult
+	for _, name := range names {
 		full := filepath.Join(dir, name)
 		// Stat to enforce the size cap before we slurp the file —
 		// otherwise a misnamed huge image (someone called their
@@ -3064,7 +3087,9 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// below follows the link and would slurp the full target.
 		info, err := os.Stat(full)
 		if err != nil {
-			scanLogger.Warn("folder-art stat", "path", full, "err", err)
+			if folderArtReadIncomplete(err) {
+				notePendingFolderArtRead(&res, err)
+			}
 			continue
 		}
 		if info.Size() > maxArtworkBytes {
@@ -3072,9 +3097,13 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 				"path", full, "bytes", info.Size(), "cap", maxArtworkBytes)
 			continue
 		}
-		data, err := readFolderArt(full, info)
+		data, err := read(full, info)
 		if err != nil {
-			scanLogger.Warn("folder-art read", "path", full, "err", err)
+			if folderArtReadIncomplete(err) {
+				notePendingFolderArtRead(&res, err)
+			} else {
+				scanLogger.Warn("folder-art read", "path", full, "err", err)
+			}
 			continue
 		}
 		// Magic-byte sniff: JPEG and PNG both pass (PNG is transcoded
@@ -3089,12 +3118,26 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 			continue
 		}
 		if mbid, ok := stampLocalArtwork(data, cacheDir); ok {
-			return folderArtResult{found: true, mbid: mbid}
+			res.found, res.mbid = true, mbid
+			return res
 		}
 		// stampLocalArtwork already logged the failure; fall through
-		// in case the directory has another candidate (rare).
+		// in case the directory has another candidate (rare). A cache
+		// file that could not be written is not retried: that is the
+		// bridge's own directory failing for every cover alike, and
+		// retrying would re-read the library every scan.
 	}
-	return folderArtResult{}
+	return res
+}
+
+// notePendingFolderArtRead keeps the first folder-art stat or read that did
+// not complete in res. It logs nothing: the scan's one Warn counts the tracks
+// such a folder left unsettled (msgUnreadFolderArt), by their
+// library-relative paths.
+func notePendingFolderArtRead(res *folderArtResult, err error) {
+	if res.failure == nil {
+		res.failure = err
+	}
 }
 
 // readFolderArt reads a folder-art candidate whose stat is info, and refuses

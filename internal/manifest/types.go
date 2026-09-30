@@ -367,6 +367,28 @@ type Track struct {
 	lyricsCandidates []lyrics.Candidate
 	// lyricsSidecar remembers the sidecar's stat for the staleness columns.
 	lyricsSidecar *sidecarStat
+
+	// localArt is what the local-artwork pipeline (extractLocalArtwork)
+	// concluded for this extraction: whether an ArtworkMBID it left empty
+	// is a verdict about the file's art (localArtSettled), or says nothing
+	// because the pipeline did not run or a folder cover could not be read
+	// (localArtNotLooked, localArtUnsettled). Unexported, never marshaled
+	// (the versionStampOnly shape): the scanner reads it to decide whether a
+	// stored `local-` value is stale (mergePostScanFields) or must be kept
+	// (keepArtOfUnsettledRead). localArtFailure is the read that did not
+	// complete, for the scan's one line about them.
+	localArt        localArtOutcome
+	localArtFailure error
+
+	// folderArtKey is the identity of the folder art this extraction was
+	// given (folderArtKey: each cover candidate's name, size and mtime, the
+	// disc folder's parent's after a '|'), or folderArtUnsettledKey when a
+	// cover could not be seen or read. It travels from ExtractWithContext
+	// into the tracks.folder_art_key column (v49) on both write legs, like
+	// audioMD5, and the skip gate compares it with the folder's key now
+	// (folderArtDrifted): a cover added, replaced or removed beside an
+	// unchanged audio file re-extracts it. Never marshaled.
+	folderArtKey string
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
