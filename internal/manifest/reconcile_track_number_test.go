@@ -115,9 +115,9 @@ func TestRunTrackNumberReconciliation_FillsFSSparesRouted(t *testing.T) {
 		t.Fatalf("routedExclusionSet: %v", err)
 	}
 
-	n, err := s.runTrackNumberReconciliation(ctx, routedSet)
+	n, err := s.runReconcileStep(ctx, routedSet, trackNumberStep)
 	if err != nil {
-		t.Fatalf("runTrackNumberReconciliation: %v", err)
+		t.Fatalf("trackNumberStep: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("filled %d tracks, want 1 (fs only; routed spared)", n)
@@ -133,7 +133,7 @@ func TestRunTrackNumberReconciliation_FillsFSSparesRouted(t *testing.T) {
 	}
 
 	// Idempotent: a clean library produces zero writes on the next pass.
-	if n2, err := s.runTrackNumberReconciliation(ctx, routedSet); err != nil || n2 != 0 {
+	if n2, err := s.runReconcileStep(ctx, routedSet, trackNumberStep); err != nil || n2 != 0 {
 		t.Errorf("second pass: n=%d err=%v, want 0/nil", n2, err)
 	}
 }
@@ -155,8 +155,8 @@ func TestRunTrackNumberReconciliation_LeavesEnrichedAtUntouched(t *testing.T) {
 	if err := store.MarkEnriched(ctx, fsBefore); err != nil {
 		t.Fatalf("MarkEnriched: %v", err)
 	}
-	if _, err := s.runTrackNumberReconciliation(ctx, routedSet); err != nil {
-		t.Fatalf("runTrackNumberReconciliation: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, trackNumberStep); err != nil {
+		t.Fatalf("trackNumberStep: %v", err)
 	}
 	un, err := store.UnenrichedTracks(ctx, 100)
 	if err != nil {
