@@ -1942,7 +1942,8 @@ no failing test — which is the shape to expect in this area.
   where the URL form followed a relative Location only. That rule compares
   host names and not the scheme, so it also carried the header from an https
   request onto a plain-http hop on the same host, in cleartext, where the URL
-  form's absolute Location carried none. `guardRedirects` (baseauth.go) is the
+  form's absolute Location carried none. `guardRedirects` (baseauth.go, a
+  delegate to `authredirect.Guard` since backlog B133) is the
   `CheckRedirect` of every client that sends a credential: it strips the
   header from a hop that is not https when the request began on https, judged
   per hop, because net/http copies the header from the FIRST request onto
@@ -2033,9 +2034,28 @@ no failing test — which is the shape to expect in this area.
   `TestTheStoreHoldsABaseInItsCanonicalForm`,
   `TestARevokeLeavesNoStoredBaseBehind`,
   `TestOpeningAStoreThatCannotDropItsBaseFails` and
-  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. A follow-up found
-  beside it is backlog B133, which is private: an unfixed weakness is not
-  described in this public repo before its fix ships (SECURITY.md).
+  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`.
+- **…and the harvest client is built over the enrich clients' redirect guard,
+  `authredirect.Guard`** (backlog B133, found by the B97 session). Every
+  harvest request (submit, poll, the booklet check and PDF, the lyrics tier)
+  sets its bearer token as an explicit Authorization header, and
+  `defaultHarvestHTTPClient` had no `CheckRedirect`, so an https Atlas
+  answering with a redirect to http on its own host had the token sent in
+  the clear: #1091's round-2 finding, fixed then for the enrich clients
+  alone, because their guard lived in `internal/enrich`, which
+  `internal/atlasharvest` must not import (measured: a TLS fake Atlas 307ing
+  to a plain server on 127.0.0.1, and the plain hop saw `Bearer <token>` on
+  all three legs tested). The guard moved to `internal/authredirect`;
+  enrich's `guardRedirects` is a delegate, so its population test
+  (`TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard`) still
+  finds each constructor's call by name, and `Client.httpClient` builds the
+  default client and any client a caller hands in over the guard (a copy,
+  never the caller's own). **A client that sends a credential is built over
+  this guard, whatever package it lives in**: the population test sees
+  enrich alone. `TestNoHarvestRequestCarriesItsTokenOntoACleartextHop`,
+  `TestTheDefaultHarvestClientDropsTheTokenLeavingHTTPS`, and
+  `internal/authredirect`'s own two tests. B97's log entry named B133 and no
+  more while it was unfixed (the rule in the backlog section above).
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
