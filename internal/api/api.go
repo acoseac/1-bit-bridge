@@ -160,6 +160,12 @@ type Server struct {
 	fingerprint            string
 	startedAt              time.Time
 
+	// openDir opens the directory /v1/list lists (openListDir). New sets
+	// it; a test replaces it to reach the window between the resolver's
+	// stat and the open, which no file on disk can be made to hold open.
+	// Per server, never a package var, so no other test's server sees it.
+	openDir func(string) (*os.File, error)
+
 	// deviceRegistrar binds the client's durable X-Device-Token recovery
 	// token to the auth token currently presenting it. Nil unless
 	// WithDeviceRegistrar is wired (test harnesses leave it nil). The
@@ -466,6 +472,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		writeRateLimiter:    newTokenRateLimiter(cfg.Limits.Write.EffectiveRPM(), cfg.Limits.Write.EffectiveBurst()),
 		searchRateLimiter:   newTokenRateLimiter(cfg.Limits.Search.EffectiveRPM(), cfg.Limits.Search.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
+		openDir:             os.Open,
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
 		endpointsCache:      newEndpointsCache(),

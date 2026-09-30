@@ -115,7 +115,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir, err := os.Open(abs)
+	dir, err := s.openListDir(abs)
 	if err != nil {
 		writeFileErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't open this directory", clientPath, err)
@@ -152,6 +152,15 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	sortEntriesByName(entries)
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// openListDir opens the directory the listing reads, through s.openDir,
+// which New sets; a Server built without New opens it the same way.
+func (s *Server) openListDir(abs string) (*os.File, error) {
+	if s.openDir != nil {
+		return s.openDir(abs)
+	}
+	return os.Open(abs)
 }
 
 // stat handles GET /v1/stat?path=<rel>. Returns a single-entry StatResponse.
