@@ -30964,6 +30964,59 @@ posture row can, since it runs over a public install and the rewrite makes
 it loopback; over a loopback install (the first draft of that row) it could
 not either, since the rewrite wrote the same bytes.
 
+### Review rounds: SonarCloud, and the window the reorder widened
+
+SonarCloud's five new issues on #1106 (all code smells; its gate passed):
+the refusal's closing line was the fourth copy of one literal (go:S1192,
+now `configNotChanged`), three of the new tests read above its cognitive
+complexity bar (go:S3776; their checks moved into helpers,
+`checkEmailIgnoredWarning`, `checkReportLineSays` with
+`initRefusedOnTLSCert`, `checkKeptEndpointWarning` with
+`freeLoopbackPortOtherThan`), and one test declared a variable it never
+read (godre:S8193). No behaviour changed, and three controls on the
+refactored checks each went red as before: no kept-endpoint warning, no
+email warning behind the proxy, doctor setting no data dir before init.
+
+CodeRabbit's included review of 1ace151f posted no actionable comment, and
+its security note named a window: "the concurrent-overwrite outcome is
+bounded to the selected installation config", with the proposal to tie the
+commit to the observed config identity. The reorder had widened it. A run
+decides at "Overwrite?", now ahead of the preflight and the name prompt,
+which wait on the operator, and writes only after both. Measured with the
+real binary (stdin a pipe that sleeps a second at the name prompt while
+the script writes the config):
+
+| | case | main (3c49f7e3) | before the fix (1ace151f) | after |
+|---|---|---|---|---|
+| r8a | a first install; another init's config written while the name prompt waits | exit 0, asked "Overwrite?" after the prompt (EOF, default no), the other config kept | exit 0, the other config written over (`libraryName: Mine`) | exit 1, "changed while this init ran", the other config as written |
+| r8b | a rewrite answered y; the config edited while the name prompt waits | (main asks in the other order, so the answers do not map) | exit 0, the edit gone | exit 1, the edit kept |
+
+The fix keeps the bytes the run read at its start (`configAsRead`, the read
+`readPriorInstall` parses, now `priorInstallFrom` over it) and, after the
+last prompt and before anything is written, compares a fresh read
+(`configChangedSinceRead`): the same bytes, no file both times, or two reads
+that both failed (an unreadable config, which `refuseRewrite` refuses) pass;
+anything else is refused, exit 1, "this run wrote nothing". It also closes
+a change the old order let through, read from the code and not measured: a
+`--yes --force` rewrite keeps what it read before its preflight, so an edit
+made during the preflight was written over.
+Bytes, not a stat: they are what the rewrite keeps from, and a write in the
+same mtime tick passes a stat (#1043).
+
+`TestInitRefusesAConfigThatChangedWhileItRan` (`init_config_changed_test.go`)
+drives it through a stdin that returns one line per read and runs a hook
+before the name prompt's read (`linesWithAHook`): a first install and a
+rewrite, each with nothing written meanwhile (exit 0) and with a config
+written meanwhile (exit 1, the config as that writer left it). Red first on
+1ace151f in a throwaway worktree: both "meanwhile" rows (exit 0, want 1),
+the two controls green. Controls on the committed tree (31c66803): the check
+never made turns both "meanwhile" rows red; two readable reads comparing
+equal whatever their bytes, the rewrite row alone; an absent file comparing
+equal to a present one, the first-install row alone; two failed reads
+comparing unequal, `TestInitRefusesToRewriteAConfigThisUserCannotRead`
+alone (the run says "changed" where it should say who cannot read the
+file).
+
 ### Out of scope
 
 - **A loopback rewrite that names no `--listen-address` moves an install off
