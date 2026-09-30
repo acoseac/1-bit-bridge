@@ -6635,10 +6635,12 @@ its twin.** The top list is older, shorter, and read first.
   learns another loopback name teaches the rule the same name. A refused name
   is logged once (`noteForeignHost`, at most 16 names), which is how an
   operator's own proxy shows up. **The cost is a reverse proxy that forwards
-  the browser's Host**: Caddy's `reverse_proxy` and Traefik do by default, and
-  so does nginx with `proxy_set_header Host $host` (measured in Docker on
-  dido: 421 for those, 200 with Caddy's `header_up Host {upstream_hostport}`
-  and with nginx's default `proxy_pass`); `docs/docker.md` says how. Don't
+  the browser's Host**: Caddy's `reverse_proxy` does by default, and so does
+  nginx with `proxy_set_header Host $host` (measured in Docker on dido: 421
+  for those, 200 with Caddy's `header_up Host {upstream_hostport}` and with
+  nginx's default `proxy_pass`), and Traefik by its documentation
+  (`passHostHeader` defaults to true; not measured); `docs/docker.md` says
+  how. Don't
   accept a forwarding header as the proof instead: a page can set
   `X-Forwarded-For` on a same-origin request. Public mode is untouched (a
   tenant console behind the host's proxy arrives from 127.0.0.1 under the
