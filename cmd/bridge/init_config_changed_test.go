@@ -27,18 +27,7 @@ func TestInitRefusesAConfigThatChangedWhileItRan(t *testing.T) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		t.Skip("stdin is a terminal, where init would offer to start the bridge after a run it does not refuse")
 	}
-	for _, tc := range []struct {
-		name string
-		// install writes the config the run starts from, if any.
-		install func(t *testing.T, cfgDir, lib string)
-		// answers are the run's stdin lines; the last one is its name.
-		answers []string
-		// meanwhile writes the config while the name prompt waits; nil
-		// writes nothing.
-		meanwhile func(t *testing.T, cfgDir, lib string)
-		wantCode  int
-		wantName  string
-	}{
+	for _, tc := range []changedWhileItRan{
 		{"a first install, nothing written meanwhile", nil, []string{"Mine\n"}, nil, 0, "Mine"},
 		{"a first install, another init's config written meanwhile", nil, []string{"Mine\n"},
 			func(t *testing.T, cfgDir, lib string) {
@@ -52,36 +41,64 @@ func TestInitRefusesAConfigThatChangedWhileItRan(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
-			lib := testLibrary(t)
-			if tc.install != nil {
-				tc.install(t, cfgDir, lib)
-			}
-			var written string
-			stdin := &linesWithAHook{lines: tc.answers, before: func(i int) {
-				if i == len(tc.answers)-1 && tc.meanwhile != nil {
-					tc.meanwhile(t, cfgDir, lib)
-					written = readConfigFile(t, cfgDir)
-				}
-			}}
-			var out, errOut strings.Builder
-			code := initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir, "--library", lib}, stdin, &out, &errOut)
-			printed := stripANSI(out.String() + errOut.String())
+			code, printed, written := tc.run(t, cfgDir)
 			defer logRunOnFailure(t, printed)
 			if code != tc.wantCode {
 				t.Fatalf("the run exited %d, want %d", code, tc.wantCode)
 			}
 			if tc.meanwhile != nil {
-				if got := readConfigFile(t, cfgDir); got != written {
-					t.Errorf("the run wrote over the config written while it waited:\n%s", got)
-				}
-				if !strings.Contains(printed, "changed while this init ran") {
-					t.Errorf("the run does not say the config changed while it ran")
-				}
+				checkLeftAsWritten(t, cfgDir, written, printed)
 			}
 			if got := loadInstallConfig(t, cfgDir).LibraryName; got != tc.wantName {
 				t.Errorf("libraryName = %q, want %q", got, tc.wantName)
 			}
 		})
+	}
+}
+
+// changedWhileItRan is a case of TestInitRefusesAConfigThatChangedWhileItRan.
+type changedWhileItRan struct {
+	name string
+	// install writes the config the run starts from, if any.
+	install func(t *testing.T, cfgDir, lib string)
+	// answers are the run's stdin lines; the last one is its name.
+	answers []string
+	// meanwhile writes the config while the name prompt waits; nil writes
+	// nothing.
+	meanwhile func(t *testing.T, cfgDir, lib string)
+	wantCode  int
+	wantName  string
+}
+
+// run runs init over cfgDir with the case's answers on stdin, calling
+// meanwhile as the last answer, the name, is read. It returns the exit code,
+// what init printed, and the config as meanwhile left it, or "".
+func (c changedWhileItRan) run(t *testing.T, cfgDir string) (code int, printed, written string) {
+	t.Helper()
+	lib := testLibrary(t)
+	if c.install != nil {
+		c.install(t, cfgDir, lib)
+	}
+	stdin := &linesWithAHook{lines: c.answers, before: func(i int) {
+		if i == len(c.answers)-1 && c.meanwhile != nil {
+			c.meanwhile(t, cfgDir, lib)
+			written = readConfigFile(t, cfgDir)
+		}
+	}}
+	var out, errOut strings.Builder
+	code = initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir, "--library", lib}, stdin, &out, &errOut)
+	return code, stripANSI(out.String() + errOut.String()), written
+}
+
+// checkLeftAsWritten checks that a run a config's writer overtook left that
+// config as written, and said it changed.
+func checkLeftAsWritten(t *testing.T, cfgDir, written, printed string) {
+	t.Helper()
+	if got := readConfigFile(t, cfgDir); got != written {
+		t.Errorf("the run wrote over the config written while it waited:\n%s", got)
+	}
+	if !strings.Contains(printed, "changed while this init ran") {
+		t.Errorf("the run does not say the config changed while it ran")
 	}
 }
 
