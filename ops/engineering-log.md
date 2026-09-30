@@ -32807,8 +32807,16 @@ change. The comments are corrected; that entry stands as written.
   which named absolute paths, are gone. A folder whose listing or a candidate's
   stat fails keeps its rows untouched (the gate answers no): read as "no cover",
   an unstat-able cover dropped the album's art (NC12). A cache file that could
-  not be written is NOT retried: that is the bridge's own directory, failing
-  for every cover, and a retry would re-read the library every scan.
+  not be written is NOT retried by the gate: that is the bridge's own
+  directory, failing for every cover alike. It is no verdict either
+  (`stampLocalArtworkCached` answers `errLocalArtworkCacheWrite`, the Track
+  carries `localArtWriteFailed`), so the merge copies the row's old `local-`
+  value. That was found after the first round of tests, reading the merge
+  rule against `needsLocalArtworkRecovery`: a wiped artwork cache whose
+  rewrite failed (a full or read-only data directory) dropped the rows'
+  cover, and with the art "" and the folder unchanged nothing sent the gate
+  back, so the cover was lost for good where main's copy kept it for the
+  recovery to retry (NC13).
 - **A file its extractor refuses** (read whole, not its format, written by name)
   never reaches the pipeline, records `folderArtNotLookedKey` ("-"), and the
   gate never re-checks it. One the gate re-reads anyway (an upgraded row with
@@ -32863,7 +32871,9 @@ on the branch, `-count=1`: `TestScanner_ACoverAddedAfterIndexingReachesItsTracks
 root) and `TestScanner_AFolderWhoseCoverCannotBeSeenKeepsItsRows` (unix, a
 self-link cover, then a link to nothing). Green on both:
 `TestScanner_ACoverBesideAnEmbeddedPictureChangesNothing` (the embedded
-picture keeps winning; it pins what the fix must not change). Through the
+picture keeps winning) and `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`
+(unix, the artwork directory made read-only after its cache file was
+wiped): both pin what the fix must not change. Through the
 per-scanner cover-reader seam (`Scanner.readArt`), on every platform:
 `TestScanner_ACoverThatCouldNotBeReadIsReadOnALaterScan`,
 `TestScanner_AReplacedCoverThatCouldNotBeReadKeepsTheOldArt` (with and without
@@ -32895,6 +32905,7 @@ Negative controls on the committed fix, each restored and re-run green:
 | NC10: the gate's failed retry is not counted | the retry test's second line |
 | NC11: an extraction's unsettled read is not counted | the retry test's first line |
 | NC12: a candidate that cannot be stat'ed reads as absent | the unseen-cover test: the album's art dropped, both rows moved |
+| NC13: a failed cache write is a verdict (the merge drops an old `local-` value) | the wiped-cache test: the art "" after the read-only scan, still "" and the cache file never restored once it was writable |
 
 ### Platforms
 

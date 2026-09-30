@@ -685,8 +685,12 @@ lost my library."
   counts its tracks (`msgUnreadFolderArt`). A folder whose listing or a
   candidate's stat fails keeps its rows untouched (an ELOOP'd cover read as
   "no cover" dropped the album's art). **A cover's cache file that could not
-  be written is NOT retried**: that is the bridge's own directory failing
-  for every cover, and a retry would re-read the library every scan. **A
+  be written is NOT retried** by the gate (the bridge's own directory,
+  failing for every cover alike), **and is no verdict either**
+  (`localArtWriteFailed`): the merge keeps the row's old `local-` value, so
+  a wiped cache whose rewrite fails is still retried by
+  `needsLocalArtworkRecovery`; read as "no cover", the rows lost it for good
+  (`TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`). **A
   file its extractor refuses** (read whole, not its format, written by
   name) records `folderArtNotLookedKey` ("-"), which the gate never
   re-checks, and one the gate re-reads records it through
