@@ -96,8 +96,12 @@ func OpenStateStore(path string) (*StateStore, error) {
 		logger.Warn("atlasharvest.state.base_refused", "path", path,
 			"detail", "the atlasBaseUrl this file holds is not a plain https base URL naming a host (https://host[:port]); "+
 				"it is dropped with the credential held against it, and the app provisions a new one")
-		// No lock: nothing else holds s yet.
-		if err := s.persistLocked(); err != nil {
+		// Nothing else holds s yet, so the lock is uncontended; it is taken
+		// because persistLocked's contract asks for it.
+		s.mu.Lock()
+		err := s.persistLocked()
+		s.mu.Unlock()
+		if err != nil {
 			return nil, fmt.Errorf("atlasharvest: %s holds an Atlas base URL no credential can be held against, "+
 				"and could not be rewritten without it: %w", path, err)
 		}
@@ -113,9 +117,9 @@ func OpenStateStore(path string) (*StateStore, error) {
 //
 // A base that reduces to the form (a trailing slash, the default port or an
 // empty one, an uppercase scheme, surrounding space) addresses the same
-// endpoint, so it
-// keeps its credential, and is written in the reduced form at the next
-// write. A re-provision of the same host is then not taken for a new Atlas.
+// endpoint, so it keeps its credential, and is written in the reduced form
+// at the next write. A re-provision of the same host is then not taken for a
+// new Atlas.
 //
 // Before backlog B97 the store kept whatever the file held, and the harvest
 // client built every request URL from it: user information reached every

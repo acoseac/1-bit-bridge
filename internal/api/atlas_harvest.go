@@ -43,8 +43,10 @@ func (s *Server) WithAtlasHarvest(sink AtlasHarvestCredentialSink, pinnedBaseURL
 	// string that merely LOOKS equivalent (`https://host:443`, a trailing
 	// slash) would produce a pin nothing can ever match — refusing the
 	// operator's own bootstrap, which reads as a broken feature rather than a
-	// broken comparison. Idempotent: cmd/bridge already passes
-	// cfg.Atlas.CanonicalHarvestBaseURL().
+	// broken comparison. Idempotent, because baseurl.CanonicalHTTPS is a fixed
+	// point: cmd/bridge already passes cfg.Atlas.CanonicalHarvestBaseURL().
+	// It was not one for `https://:443` until backlog B97, and this second
+	// reduction turned a pin written that way into "" (unpinned).
 	s.atlasHarvestPinnedBase = baseurl.CanonicalHTTPS(pinnedBaseURL)
 	return s
 }
