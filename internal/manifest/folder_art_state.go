@@ -14,7 +14,7 @@ import (
 // A folder's cover (cover.jpg, folder.jpg, cover.png, folder.png) is read
 // when a track in the folder is extracted, and a track is extracted only
 // when its audio file changed, its extractor version is stale, its local-art
-// cache file went missing or its lyrics sidecar drifted. So until 2026-09-30
+// cache file went missing or its lyrics sidecar drifted. So until 2026-09-29
 // a cover added beside tracks already indexed was never read, nor was one
 // whose read failed during the scan that indexed them (backlog B141): the
 // skip gate kept their rows, without the cover, until their audio files

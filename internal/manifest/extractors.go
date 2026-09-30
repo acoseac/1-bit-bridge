@@ -114,7 +114,7 @@ type ExtractContext struct {
 	// shared by every worker (&s.dirListings) and replaced at the start and
 	// the end of each Scan and ScanSubtree, so a directory is read once per
 	// scan, and no listing outlives the scan that made it. It was per WORKER
-	// until 2026-09-30 (backlog B141), which read an album's directory once
+	// until 2026-09-29 (backlog B141), which read an album's directory once
 	// for each worker that took one of its tracks.
 	SidecarIndex *sync.Map
 	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
@@ -678,18 +678,17 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 
 // extractByFormat is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
-// the local-artwork pipeline runs: an embedded ID3 APIC picture (or a
-// directory-level cover.jpg / folder.jpg) is hashed (SHA-256), atomic-
-// written to <ec.ArtworkCacheDir>/local-<hash>-500.jpg, and
-// t.ArtworkMBID is stamped with `local-<hash>`. The /v1/artwork
+// the local-artwork pipeline runs (extractLocalArtwork): an embedded
+// picture, or a directory-level cover (folderArtCandidates), is hashed
+// (SHA-256), atomic-written to <ec.ArtworkCacheDir>/local-<hash>-500.jpg,
+// and t.ArtworkMBID is stamped with `local-<hash>`. The /v1/artwork
 // handler serves the file transparently via its relaxed MBID regex.
 //
-// JPEG-only by design. Embedded APIC frames must declare
-// `image/jpeg` MIME (or the `image/jpg` variant) AND start with the
-// JPEG SOI marker; folder-level fallback only matches `cover.jpg`
-// and `folder.jpg` (case-insensitive). PNG support would require
-// path-scheme + Content-Type changes done together; that's a follow-
-// up, not V1 scope. See folderArtCandidates and looksLikeJPEG.
+// The cache file is JPEG whatever the source: JPEG and PNG are accepted
+// by their magic bytes, and scaleLocalArtwork transcodes a PNG, so the
+// `*-500.jpg` path and its `image/jpeg` Content-Type stay honest. This
+// said until 2026-09-29 that only JPEG was accepted and PNG was a
+// follow-up; PNG candidates joined with the scaler (folderArtCandidates).
 func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	// KEEP IN SYNC with the Ext map: every extension routed to a
@@ -3068,9 +3067,10 @@ type folderArtReader func(full string, info os.FileInfo) ([]byte, error)
 // in the result's failure and passed over: the answer is then not one, and
 // the tracks given it keep the art they had until a scan reads it (backlog
 // B141). The skip gate retries such a folder on every scan, so its line is
-// the scan's one (msgUnreadFolderArt), never one per folder here: a Debug
-// line names each. A candidate too large, not an image, or not a file is a
-// verdict about it, logged as it always was.
+// the scan's one (msgUnreadFolderArt), never one per folder here, where it
+// used to be a Warn per extraction naming the absolute path. A candidate too
+// large, not an image, or not a file is a verdict about it, logged as it
+// always was; a candidate gone since the listing is no cover, and quiet.
 func scanFolderArtwork(dir string, names []string, cacheDir string, read folderArtReader) folderArtResult {
 	if read == nil {
 		read = readFolderArt

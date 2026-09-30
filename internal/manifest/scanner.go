@@ -101,7 +101,7 @@ type Scanner struct {
 	// the cached result. Reset at the top of each Scan / ScanSubtree,
 	// so each scan reads a folder's cover afresh. A reset alone never
 	// made a cover added between scans reach tracks already indexed,
-	// though this comment said so until 2026-09-30: the skip gate never
+	// though this comment said so until 2026-09-29: the skip gate never
 	// extracted them for it. The folder-art key does (folderArtDrifted,
 	// backlog B141).
 	folderArt sync.Map // dir-path string -> *folderArtPromise
@@ -283,9 +283,10 @@ type folderArtResult struct {
 	failure error
 }
 
-// folderArtPromise serializes per-directory ReadDir + read + hash +
-// atomic write so a 15-track album processed by 15 parallel workers
-// does the I/O exactly once instead of 15 times. The first worker to
+// folderArtPromise serializes per-directory read + hash + atomic
+// write so a 15-track album processed by 15 parallel workers does
+// the I/O exactly once instead of 15 times (the directory's listing
+// is the scan's own, dirListings). The first worker to
 // LoadOrStore the pointer wins the once.Do; the rest retrieve the
 // same pointer and park inside Do until the first worker's
 // scanFolderArtwork returns. After Do unblocks every caller reads
@@ -502,7 +503,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.noteScanProgress(time.Now())
 	// Per-Scan reset of the folder-art single-flight cache and the
 	// directory listings: each scan reads a folder's listing and cover
-	// afresh. (This said until 2026-09-30 that the scanner re-extracts a
+	// afresh. (This said until 2026-09-29 that the scanner re-extracts a
 	// track when a user adds cover.jpg between scans; it did not, since
 	// the skip gate kept the track. folderArtDrifted does, backlog B141.)
 	s.resetScanCaches()
@@ -1663,7 +1664,8 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 
 // reExtractUnchanged is the version-stale leg of the skip gate: the file's
 // size+mtime are UNCHANGED but its extractor_version is stale (or its
-// local-art cache file needs rebuilding), so it must re-extract — yet a
+// local-art cache file needs rebuilding, its lyrics sidecar drifted, or its
+// folder's cover changed: folderArtDrifted), so it must re-extract — yet a
 // blind hand-off to the upsert would bump indexed_at, zero enriched_at,
 // and replace tags_json wholesale for a row that most likely didn't
 // change, turning every ExtractorVersion bump into a full-library iOS
@@ -1784,7 +1786,7 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // gone (a folder's cover.jpg removed, say), and the row loses it, as a
 // changed file re-extracted on the full path always did; the upsert's
 // enriched_at reset lets the enricher give it a network cover. Until
-// 2026-09-30 the copy kept a removed cover's art forever (backlog
+// 2026-09-29 the copy kept a removed cover's art forever (backlog
 // B141). A pipeline that did not complete (localArtUnsettled: a cover
 // it could not read) keeps the old value whatever it found
 // (keepArtOfUnsettledRead), and one that did not run
