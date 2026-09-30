@@ -217,6 +217,7 @@ func TestApiLibraryBrowse_SubtreeRollupIsPageIndependent(t *testing.T) {
 	// (CodeRabbit on PR #343).
 	req := httptest.NewRequest("GET", "/api/library/browse?afterFolder=MusicA&limit=1", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusOK {
@@ -275,6 +276,7 @@ func TestApiLibraryBrowse_RejectsTraversal(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/api/library/browse?path="+raw, nil)
 			req.RemoteAddr = "127.0.0.1:54321"
+			req.Host = testConsoleHost
 			rw := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rw, req)
 			if rw.Code != http.StatusBadRequest {
@@ -296,6 +298,7 @@ func TestApiLibraryBrowseProjection_503WhenClosuresUnwired(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/library/browse-projection?path=MusicA", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusServiceUnavailable {
@@ -388,6 +391,7 @@ func TestApiLibraryBrowseProjection_RejectsTraversal(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/library/browse-projection?path=../etc/passwd", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusBadRequest {

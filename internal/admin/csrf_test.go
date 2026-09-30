@@ -32,6 +32,7 @@ func TestCSRFContentTypeRequired(t *testing.T) {
 			body := bytes.NewBufferString(`{"path":"/tmp/whatever"}`)
 			r := httptest.NewRequest(http.MethodPost, "/api/roots", body)
 			r.RemoteAddr = "127.0.0.1:54321"
+			r.Host = testConsoleHost
 			if tc.contentType != "" {
 				r.Header.Set("Content-Type", tc.contentType)
 			}
@@ -78,6 +79,7 @@ func TestCSRFOriginAllowlist(t *testing.T) {
 			body := bytes.NewBufferString(`{"path":"/tmp/whatever"}`)
 			r := httptest.NewRequest(http.MethodPost, "/api/roots", body)
 			r.RemoteAddr = "127.0.0.1:54321"
+			r.Host = testConsoleHost
 			r.Header.Set("Content-Type", "application/json")
 			if tc.origin != "" {
 				r.Header.Set("Origin", tc.origin)
@@ -108,6 +110,7 @@ func TestCSRFGetHeadAllowed(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		r := httptest.NewRequest(method, "/api/stats", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
+		r.Host = testConsoleHost
 		// No Content-Type, malicious-looking Origin — must still pass.
 		r.Header.Set("Origin", "https://attacker.com")
 		w := httptest.NewRecorder()
@@ -127,6 +130,7 @@ func TestCSRFBodylessMutationAllowed(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodPost, "/api/scan", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
+	r.Host = testConsoleHost
 	// No Content-Type, no Origin — bodyless POST is allowed.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

@@ -280,6 +280,7 @@ func TestEventsRejectsCrossOriginGET(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/events", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("Origin", "http://attacker.example")
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)

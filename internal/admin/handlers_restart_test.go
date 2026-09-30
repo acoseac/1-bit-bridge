@@ -146,6 +146,7 @@ func TestRestartBodylessPostStillDrains(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/restart", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("content-type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

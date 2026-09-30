@@ -31,6 +31,7 @@ func TestRetiredInspectorURLsStillResolve(t *testing.T) {
 		t.Run(tc.from, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.from, nil)
 			req.RemoteAddr = "127.0.0.1:54321"
+			req.Host = testConsoleHost
 			w := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(w, req)
 			if w.Code != http.StatusMovedPermanently {
@@ -51,6 +52,7 @@ func TestRetiredInspectorRedirectTargetsAreRegistered(t *testing.T) {
 	for _, target := range []string{"/folders", "/tracks?camelot=8A"} {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code == http.StatusNotFound {

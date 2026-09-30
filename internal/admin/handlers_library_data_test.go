@@ -109,6 +109,7 @@ func TestHistoryPageRenders(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/history", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -137,6 +138,7 @@ func TestRetiredDataPageRedirects(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/data", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusMovedPermanently {
@@ -385,6 +387,7 @@ func doExport(t *testing.T, h http.Handler, path string) *httptest.ResponseRecor
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
 	req.RemoteAddr = "127.0.0.1:5000"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	return rw
