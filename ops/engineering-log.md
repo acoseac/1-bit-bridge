@@ -33856,3 +33856,156 @@ for DIIN.
 Gemini (round 0): a `len(body) >= 4` guard before `body[0:4]` in the WAV LIST arm.
 Declined: that arm refuses `size < 4` before reading, and `readIFFChunkBody`
 returns a body of exactly `size` bytes or none.
+
+## 2026-09-29 — a compressed AIFF-C or WAV is named by its encoding and counted lossy; ExtractorVersion 21 (backlog B124, B154)
+
+B124 read: every AIFF-C is stamped "AIFF" and counted lossless, and five tables
+have no `.aifc`. B154, folded into the same change at the orchestrator's word:
+every WAV is stamped "WAV" and counted lossless. Both true, and for an IMA4
+AIFF-C the label was not the worst of it.
+
+### What real files hold, measured
+
+Twenty fixtures written by afconvert (macOS 27), ffmpeg 9.0.2 and sox 14.4.2
+(`testdata/gen/compressed_pcm_fixtures.sh`), the same encodings as 1 s files,
+and one 30 s IMA4 AIFF-C, extracted by main (548537d8) and scored by
+librarycat's `Classify` and `transcode.OptimizeEligible`:
+
+| file | main: codec, rate, depth, duration | tier | CarPlay candidate | branch |
+|---|---|---|---|---|
+| µ-law, A-law AIFF-C, 44.1 kHz (afconvert, ffmpeg) | AIFF, 44100, none, right | CD Quality | no | ULAW / ALAW, Lossy |
+| IMA4 AIFF-C, 44.1 kHz, 1 s (afconvert, ffmpeg) | AIFF, 44100, none, none | CD Quality | no | IMA4, 1.0014 s, Lossy |
+| IMA4 AIFF-C, 44.1 kHz, 30 s | AIFF, 44100, none, 0.4688 s | CD Quality | no | IMA4, 30.0002 s, Lossy |
+| IMA4 AIFF-C, 96 kHz | AIFF, 96000, none, none | Hi-Res | yes | IMA4, Lossy, no |
+| IMA, MS ADPCM WAV, 44.1 kHz (ffmpeg, sox) | WAV, 44100, none | CD Quality | no | ADPCM, Lossy |
+| IMA, MS ADPCM WAV, 96 kHz (ffmpeg's extensible header) | WAV, 96000, none | Hi-Res | yes | ADPCM, Lossy, no |
+| µ-law, A-law, MP2, MP3 WAV, 44.1 kHz | WAV, 44100, none | CD Quality | no | ULAW / ALAW / MP2 / MP3, Lossy |
+| GSM 6.10 WAV, 8 kHz (sox) | WAV, 8000, none | Unknown | no | GSM, Lossy |
+| G.726 WAV, 8 kHz (a code the bridge does not name) | WAV, 8000, none | Unknown | no | WAV, no rate, Unknown |
+| linear AIFF-C (twos, in24, fl32, fl64, sowt), float and 24-bit WAV | as before | | | as before |
+
+afinfo reads the 30 s file as 20,672 packets of 64 frames, 30.000181 s: main
+divided the packet count by the rate. A 1 s IMA4 file had no duration at all,
+1/64 s being under `plausibleDuration`'s 0.1 s floor. The old depth gate
+(`aiffCOMMHasPCMDepth`) already kept a compressed AIFF-C's COMM sample size out
+of `BitsPerSample`, and the WAV walk a compressed code's, so the lost depth was
+right; the name was what put every such file on the lossless lists.
+
+What the app does, read from ~/dev/com.acoseac.dsdplayer origin/main: #2014
+(B112 there) names an AIFF-C by `canonicalCodec(fromFormatID:)`, "ULAW", "ALAW",
+"IMA4", a linear one "PCM", and one nothing has read "AIFC" (from the
+extension, in neither quality list); `ProgressivePCMLayout`'s linear set is
+NONE, twos, sowt, "raw ", in24, 42ni, in32, 23ni, fl32, FL32, fl64, FL64, of
+which the bridge's depth list lacked 42ni, FL32 and FL64. #2028 (B139 there)
+names IMA and MS ADPCM "ADPCM" and GSM 6.10 "GSM"; µ-law and A-law take "ULAW"
+and "ALAW" from the same format IDs in a WAV, and MPEG layer III "MP3". Its
+`isLossyCodec` lists AAC, MP3, OPUS, OGG, WMA, ULAW, ALAW, IMA4, ADPCM and GSM.
+It has no MP2 (backlog B158). The wire's `codec` is a string PROTOCOL.md does
+not enumerate, so there is no Mirror-PR.
+
+### The change
+
+- `aifcEncodingOf` names an AIFF-C by its COMM compression type: the app's
+  linear set keeps "AIFF" and its depth, µ-law, A-law and IMA4 (either case:
+  Apple writes lower, SGI's audiofile upper) are "ULAW", "ALAW" and "IMA4" with
+  no depth, and IMA4's packet count is scaled to frames (`framesPerCount`, in
+  64 bits); anything else, a COMM too short to hold a type, or no COMM at all is
+  "AIFC", with no depth and no duration, its count being in units the bridge
+  cannot read. The rate stays: COMM's is the decompressed signal's.
+- `wavEncodingOf` names a WAV by its fmt format code, or an extensible header's
+  subformat (ffmpeg writes one for every ADPCM WAV above 48 kHz): PCM and IEEE
+  float keep "WAV"; 0x0002 and 0x0011 are "ADPCM", 0x0031 "GSM", 0x0006 "ALAW",
+  0x0007 "ULAW", 0x0055 "MP3" and 0x0050 "MP2". A code it does not name keeps
+  "WAV", the app's name for it, and loses its rate (default-deny, as for a DFF
+  of an unknown compression), so the lossless name claims no tier; its duration
+  from `nAvgBytesPerSec` stays.
+- The six names join the four lossy sets: `manifest.IsLossyCodec`, its SQL
+  mirror in `upscaleEligibleSQL`, librarycat's `lossyCodecs` and the dupes
+  ranking set. The dupes lockstep test (`TestDupesLossyCodecsMirrorIsLossyCodec`)
+  checked only that each dupes name is lossy, so the ranking would have gone on
+  calling a µ-law copy lossless with the test green; it checks both directions
+  over every name the extractors stamp now.
+- `.aifc` joins the DLNA MIME table (audio/aiff), the UPnP walker's audio
+  extensions, the ingest's codec table ("AIFC": a DIDL cannot say what one
+  holds) and the console player's MIME and playability tables, where a WAV
+  whose codec is not "WAV" (or empty) plays engine-dependent. The optimize
+  gate's codec-empty extension fallback leaves `.aifc` out on purpose, in
+  `transcode.OptimizeEligible` and `optimizeEligibleSQL` alike: the extension
+  cannot say whether one is compressed. That SQL mirror was a site the backlog
+  entry did not list.
+- Comments that were wrong: `canSetBitsPerSample`'s ("only FLAC + DSF + DFF
+  assign"), `Track.BitsPerSample`'s (named `isLossyCodec`, the denylist #225
+  replaced, and the same formats), `Track.Codec`'s (listed no WAV, AIFF or
+  DFF), and CLAUDE.md's extraction bullet (named `isLossyCodec`).
+- ExtractorVersion 21. Only those rows change, on the full-upsert leg (one
+  re-enrichment, the iOS delta): the compressed files, an AIFF-C the bridge
+  cannot read, a WAV of a code it does not name, and a linear AIFF-C of a type
+  the old depth list lacked, which gains its depth. Every other row rides the
+  version-stamp leg.
+
+### Tests
+
+- `TestACompressedAIFCOrWAVIsNamedByItsEncoding` (the twenty fixtures, codec,
+  rate, depth and duration), `TestAIFCEncodingOf` (the table; it replaced the
+  old depth gate's test, `…AIFFCOMMHasPCMDepth`), `TestTheCompressedPCMCodecsAreLossy`,
+  `TestScanner_V21_ACompressedAIFCOrWAVJoinsTheDelta_ALinearOneOnlyStamps` (rows
+  rewound to what v20 stored, through a real scan),
+  `TestClassifyCountsTheCompressedPCMCodecsLossy`, `TestPlayabilityOfCompressedPCM`,
+  eight rows in the admin eligibility matrix, and `.aifc` rows in the DLNA,
+  walker and ingest table tests.
+- `TestExtractAIFC_RoutedFromExtractWithContext` asked for "AIFF" from an
+  AIFF-C with no COMM: the defect as a want. It asks for "AIFC".
+- Red first, on the red commit over main's implementation: 14 of the 20
+  fixtures failed (the six linear ones passed), as did the lossy, v21,
+  librarycat, DLNA, walker, ingest and playability tests. The eligibility matrix
+  passed there: it pins the Go gate against the SQL one, and both lacked the
+  names.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+Seventeen, each red on its own tests only:
+
+- µ-law named "AIFF": the µ-law fixture, the table and v21.
+- IMA4 counted in packets: both IMA4 fixtures (duration) and the table.
+- An unknown AIFF-C compression read as linear: the table.
+- 42ni left out of the linear set: the table.
+- ADPCM named "WAV": the four ADPCM fixtures and v21.
+- An unknown WAV code keeping its rate: the G.726 fixture.
+- The extensible subformat ignored: both 96 kHz ADPCM fixtures, the 24-bit WAV,
+  `TestExtractWAV_FmtChunkExtensiblePCM` and v21.
+- The six names out of `IsLossyCodec`: the lossy test, the dupes lockstep and
+  the admin matrix (Go against SQL).
+- Out of the SQL mirror alone: the admin matrix.
+- Out of the dupes set alone: the dupes lockstep, in its new direction.
+- Out of librarycat's set: the classify test.
+- `.aifc` out of the DLNA table, the walker's set, the ingest's table, the
+  player's MIME table: each table's test. The player's WAV arm codec-blind: the
+  playability test.
+- No bump (ExtractorVersion 20): v21 alone.
+
+### Fuzzing
+
+Five minutes a target on dido (golang:1.26.6, `-fuzzminimizetime 1s`, the four
+in parallel at `-parallel 4`), no crasher and no input recorded:
+FuzzExtractAIFF 1,073,879 executions and FuzzExtractWAV 1,218,572 (the
+allocation property; new seeds: afconvert's IMA4, µ-law and fl32 AIFF-C,
+ffmpeg's extensible IMA ADPCM, MS ADPCM, MP2 and G.726 WAVs),
+FuzzParseAIFFCOMMChunk 3,108,359 (a new seed: an ima4 COMM at the largest
+count, whose scaled frames must not wrap) and FuzzParseWAVFmtChunk 3,034,033 (a
+new seed: an extensible header naming IMA ADPCM at 96 kHz).
+
+### Not covered
+
+- A CarPlay rendition main made of a 96 kHz IMA4 AIFF-C or ADPCM WAV stays and
+  is served; the sweep makes no new one (the gate refuses the name), and
+  nothing reaps it.
+- A WAV of a code the bridge does not name reads "universal" in the console
+  player, as on main: the player's table reads the codec, "WAV" for both.
+- An MP3-in-WAV from ffmpeg carries no duration, as on main: ffmpeg writes
+  `nAvgBytesPerSec` 0 there, and the `fact` chunk's sample count, which would
+  give any compressed WAV one, is not read.
+- The app files a bridge "MP2" row in no tier (backlog B158).
+- PROTOCOL.md's duration paragraph says an AIFF's comes from COMM
+  `numSampleFrames` over its rate; an IMA4 AIFF-C counts packets there, and its
+  duration is that count times 64. Left as written: the field and its meaning
+  are unchanged, and the paragraph is mirrored byte for byte in the app's repo.
