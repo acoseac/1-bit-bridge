@@ -604,3 +604,73 @@ func TestScanner_AFileItsExtractorRefusesIsNotReReadForItsFolder(t *testing.T) {
 	f.requireStill(t, before)
 	f.requireSettled(t, rel)
 }
+
+// TestScanner_AChangedFileWhoseCoverCouldNotBeReadKeepsItsArt pins the full
+// path's half of the failed read: a retagged file (its audio changed) whose
+// folder's cover could not be read takes its new tags and keeps the art it
+// had, where it was written with none and lost its cover until a scan read
+// it; the cover read once it can be leaves it as it was.
+func TestScanner_AChangedFileWhoseCoverCouldNotBeReadKeepsItsArt(t *testing.T) {
+	f := newArtFixture(t)
+	const rel = "Artist/Album/01.flac"
+	f.flac(t, rel)
+	data := coverBytes("kept")
+	f.cover(t, "Artist/Album/cover.jpg", data, t0)
+	f.scan(t, "index")
+	f.requireArt(t, expectedLocalMBID(data), rel)
+
+	writeMinimalFLAC(t, f.path(rel), 44100, 16, map[string]string{"TITLE": "Retagged", "ARTIST": "Artist", "ALBUM": "Album"})
+	f.sc.readArt = failingArtRead("cover.jpg")
+	f.scan(t, "the file retagged, the cover's read failing")
+	if title, _ := rowTitle(t, f.store, rel); title != "Retagged" {
+		t.Errorf("title = %q, want the new tags written", title)
+	}
+	f.requireArt(t, expectedLocalMBID(data), rel)
+	if k := f.key(t, rel); k != folderArtUnsettledKey {
+		t.Errorf("folder_art_key = %q, want %q", k, folderArtUnsettledKey)
+	}
+
+	f.sc.readArt = nil
+	f.scan(t, "the cover readable")
+	f.requireArt(t, expectedLocalMBID(data), rel)
+	f.requireSettled(t, rel)
+}
+
+// TestScanner_ACoverReplacedWhileItIsReadIsReadAgain pins the order in which
+// a folder's identity and its cover are taken: the identity first, so a
+// cover replaced just after the lookup read it is recorded under the old
+// identity, and the next scan, seeing the new one, reads it. Taken the other
+// way round, the row records the new identity beside the old cover, and no
+// scan reads the cover again.
+func TestScanner_ACoverReplacedWhileItIsReadIsReadAgain(t *testing.T) {
+	f := newArtFixture(t)
+	const rel = "Artist/Album/01.flac"
+	f.flac(t, rel)
+	f.scan(t, "index")
+
+	old := coverBytes("while")
+	replacement := coverBytes("after!!")
+	p := f.path("Artist/Album/cover.jpg")
+	f.cover(t, "Artist/Album/cover.jpg", old, t0)
+	var once sync.Once
+	f.sc.readArt = func(full string, info os.FileInfo) ([]byte, error) {
+		data, err := readFolderArt(full, info)
+		once.Do(func() {
+			// The cover is replaced the moment the lookup has read it.
+			if werr := os.WriteFile(p, replacement, 0o644); werr != nil {
+				t.Error(werr)
+			}
+			if werr := os.Chtimes(p, t0.Add(time.Hour), t0.Add(time.Hour)); werr != nil {
+				t.Error(werr)
+			}
+		})
+		return data, err
+	}
+	f.scan(t, "the cover replaced as it is read")
+	f.requireArt(t, expectedLocalMBID(old), rel)
+
+	f.sc.readArt = nil
+	f.scan(t, "the scan after")
+	f.requireArt(t, expectedLocalMBID(replacement), rel)
+	f.requireSettled(t, rel)
+}
