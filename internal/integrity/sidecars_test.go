@@ -796,12 +796,12 @@ func TestOrphanSidecarSweeperRepeatsARefusalOnceADay(t *testing.T) {
 	rec := loggingtest.Record(t)
 
 	s.tick(context.Background())
-	s.lastRefusalLog = s.lastRefusalLog.Add(-(orphanRefusalRepeat - time.Minute))
+	s.latch.lastLog = s.latch.lastLog.Add(-(sweepRefusalRepeat - time.Minute))
 	s.tick(context.Background())
 	if got := len(rec.Lines(msgOrphanRefusal)); got != 1 {
 		t.Fatalf("a refusal a minute short of a day old was repeated: %d lines", got)
 	}
-	s.lastRefusalLog = s.lastRefusalLog.Add(-2 * time.Minute)
+	s.latch.lastLog = s.latch.lastLog.Add(-2 * time.Minute)
 	s.tick(context.Background())
 	if got := len(rec.Lines(msgOrphanRefusal)); got != 2 {
 		t.Fatalf("a refusal over a day old was not repeated: %d lines, want 2", got)
@@ -1327,7 +1327,7 @@ func TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal(t *testing.T) {
 		t.Fatalf("an empty catalog over a directory that holds files: status %+v, want emptyCatalog with a start", first)
 	}
 
-	s.lastRefusalLog = s.lastRefusalLog.Add(-orphanRefusalRepeat)
+	s.latch.lastLog = s.latch.lastLog.Add(-sweepRefusalRepeat)
 	requireTicksUnlinkNothing(t, s, 2, "the catalog is still empty a day later")
 	requireLinesSay(t, rec.Failures(msgOrphanEmptyCatalog), 2, "the streak logged again a day on, once")
 	if got := s.Status(); got != first {

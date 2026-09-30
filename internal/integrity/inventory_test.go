@@ -821,3 +821,63 @@ func TestCheckPairedRefusesListsThatDoNotPairUp(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyCatalogOrphansCountsOnlyWhatAnEmptyCatalogPutsAtRisk — the one
+// rule the three empty-catalog refusals decide by (the background sweep's,
+// `upscale --gc`'s and `analyze --gc`'s). With an empty known set, every
+// file the walk classified is an orphan and each entry it could not stat is
+// weighed as one more; a directory it could not list, a scratch file and a
+// file its Consider rejects are not. A known set with anything in it is
+// never this rule's business.
+func TestEmptyCatalogOrphansCountsOnlyWhatAnEmptyCatalogPutsAtRisk(t *testing.T) {
+	for _, c := range []struct {
+		name                     string
+		inv                      SidecarInventory
+		known                    int
+		wantOrphans, wantUnstatd int
+	}{
+		{"files it would remove", SidecarInventory{Files: 12, Orphans: 12}, 0, 12, 0},
+		{"one file, below the mass-orphan floor", SidecarInventory{Files: 1, Orphans: 1}, 0, 1, 0},
+		{"an entry the walk could not stat", SidecarInventory{Unreadable: 1}, 0, 1, 1},
+		{"a directory the walk could not list", SidecarInventory{Unreadable: 1, UnlistedDirs: 1}, 0, 0, 0},
+		{"both, with a file in view", SidecarInventory{Files: 2, Orphans: 2, Unreadable: 3, UnlistedDirs: 1}, 0, 4, 2},
+		{"scratch only", SidecarInventory{ScratchPaths: []string{"a.tmp"}, ScratchWalkedPaths: []string{"a.tmp"}}, 0, 0, 0},
+		{"nothing", SidecarInventory{}, 0, 0, 0},
+		{"a hand-built inventory with more unlisted directories than unreadable entries", SidecarInventory{Files: 1, Orphans: 1, UnlistedDirs: 2}, 0, 1, 0},
+		{"a known set with anything in it", SidecarInventory{Files: 12, Orphans: 12, Unreadable: 1}, 1, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			orphans, unstatted := EmptyCatalogOrphans(c.inv, c.known)
+			if orphans != c.wantOrphans || unstatted != c.wantUnstatd {
+				t.Errorf("EmptyCatalogOrphans = (%d, %d), want (%d, %d)", orphans, unstatted, c.wantOrphans, c.wantUnstatd)
+			}
+		})
+	}
+
+	// Over a real walk: empty folders, a file the Consider rejects, a
+	// scratch file and a pruned dot-directory's sidecar put nothing at risk;
+	// one sidecar does.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Artist", "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedTree(t, root, ".DS_Store", "Artist/cover.jpg", "Artist/Album/half.flac.tmp", ".Trashes/501/Album/01.flac")
+	opts := SidecarInventoryOptions{
+		Consider: shouldConsiderSidecarFile,
+		Scratch:  func(name string) bool { return strings.HasSuffix(name, ".tmp") },
+	}
+	inv, err := TakeSidecarInventory(context.Background(), root, map[string]struct{}{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orphans, _ := EmptyCatalogOrphans(inv, 0); orphans != 0 {
+		t.Errorf("a tree holding nothing the sweep removes: %d orphan(s), want 0 (inventory %+v)", orphans, inv)
+	}
+	seedTree(t, root, "Artist/Album/01.flac")
+	if inv, err = TakeSidecarInventory(context.Background(), root, map[string]struct{}{}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if orphans, _ := EmptyCatalogOrphans(inv, 0); orphans != 1 {
+		t.Errorf("one sidecar beside them: %d orphan(s), want 1", orphans)
+	}
+}
