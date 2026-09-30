@@ -17,13 +17,13 @@ import (
 // TestHealthPublishesNoCustomEndpointCredential asks /v1/health, with no
 // token, for the endpoint list of a bridge whose customEndpoints carry a
 // secret in each part of a URL that can carry one, in both postures
-// (backlog B54; the path since B66). The config goes through Normalize, as every config the
-// bridge serves from does (Load, and every writer), and nothing on the way
-// out strips anything: what keeps the secret off the wire is that the list
-// every enumeration reads is published without those parts. Each endpoint
-// is still advertised, to the host and port it names; the phone relies on
-// none of those parts, and dropping the endpoint would cost it a route. The
-// body is searched whole, not just the endpoints field.
+// (backlog B54; the path since B66). The config goes through Normalize, as
+// every config the bridge serves from does (Load, and every writer), and
+// nothing on the way out strips anything: what keeps the secret off the
+// wire is that the list every enumeration reads is published without those
+// parts. Each endpoint is still advertised, to the host and port it names;
+// the phone relies on none of those parts, and dropping the endpoint would
+// cost it a route. The body is searched whole, not just the endpoints field.
 func TestHealthPublishesNoCustomEndpointCredential(t *testing.T) {
 	const secret = "s3cret-Pw"
 	declared := []string{

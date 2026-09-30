@@ -1592,12 +1592,15 @@ lost my library."
   both banner lines). Every other consumer wants a host too and matched
   nothing: the ACME whitelist (`autocert.HostWhitelist` runs IDNA, which
   refuses the `:` and the `/` such values carry, measured), the SNI route,
-  and the console's Origin allowlist,
-  which compares a browser's Origin hostname with the domain. So
-  `Normalize` serves it as `config.AutocertHost`'s reading (no scheme,
-  user information, port, path, query or fragment), warning once under its
-  own message and naming the field by scheme and host (`urlFieldForLog`),
-  never the value. **Repaired, never refused**: the value loaded before.
+  and the console's Origin allowlist, which compares a browser's Origin
+  hostname with the domain. So `Normalize` serves it as
+  `config.AutocertHost`'s reading (no scheme, user information, port, path,
+  query or fragment), warning once under its own message and naming the
+  field by scheme and host (`urlFieldForLog`), never the value. **Repaired,
+  never refused**: the value loaded before. **Refuse what is typed**:
+  `bridge init --public --domain` refuses any value `AutocertHost` would
+  change (exit 2, nothing written), and trims once and writes what it
+  checked.
   **A value that names no host that can be read is served as
   `config.InvalidAutocertDomain`** (`autocert-domain.invalid`, RFC 6761),
   never blanked: `Validate` refuses an empty public domain, and the phones of
@@ -1618,8 +1621,9 @@ lost my library."
   loopback config with autocert off keeps its value, unwarned.
   **Don't strip at the publish sites** (the bullet above: they read the
   normalized value). The Gemini consult on the placeholder was refused by
-  the API's spending cap; decided here. `TestAutocertHostReadsTheHostAValueNames`
-  (a table, every shape, the fixed point),
+  the API's spending cap; decided here.
+  `TestAutocertHostReadsTheHostAValueNames` (a table, every shape, the
+  fixed point),
   `TestNormalizeServesAutocertDomainAsItsHost`,
   `TestHealthPublishesNoAutocertDomainCredential`,
   `TestPublicPairingCarriesNoAutocertDomainCredential` and
@@ -3646,8 +3650,10 @@ no failing test — which is the shape to expect in this area.
   and net/http's `*url.Error` (as re-serialized, a password masked `***`,
   a token as the user name, a query and a fragment whole), read from the
   error's own `URL` field, never guessed. The bridge prints no Debug line
-  today (`logging.Init` fixes the level at Info), so that half bit only
-  the day one is added. `TestAControlURLsUserInformationTravelsAsBasicAuth`
+  today (`logging.Init` fixes the level at Info), so that half would have
+  bitten only the day one is added. A byte fetch through `upnpproxy`
+  sends no such credential at all (backlog B143).
+  `TestAControlURLsUserInformationTravelsAsBasicAuth`
   (net/http's header taken on every run),
   `TestAWalkErrorNamesNoControlURLUserInformation` (the ingest's
   per-server error) and `TestManualPollerDebugLinesNameTheHostAlone` (five
@@ -4354,7 +4360,12 @@ no failing test — which is the shape to expect in this area.
   credential out of every request URL (the bullet on a configured base URL's
   user information under **Enrichment**, backlog B69): net/http's
   `*url.Error` names a request URL with its password masked (`user:***@`)
-  and a token written as the user name whole.
+  and a token written as the user name whole. So are `autocert.domain`'s
+  two warnings (the field, and its scheme and the host it is served as), a
+  manual upstream's control URL, whose user information goes in a header,
+  and the manual poller's Debug lines (backlog B66: the `autocert.domain`
+  bullet under **The wire contract**, and the manual-URL one under **DLNA,
+  UPnP and discovery**).
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true

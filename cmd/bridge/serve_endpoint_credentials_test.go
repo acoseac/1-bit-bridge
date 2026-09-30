@@ -87,11 +87,11 @@ func TestAStartupRefusalNamesAURLWithoutItsCredential(t *testing.T) {
 
 // TestServePublishesNoCustomEndpointCredential boots the real `serve` on a
 // bridge.yaml whose customEndpoints carry a secret in each part of a URL
-// that can carry one (backlog B54; the path since B66), and asks every surface the secret must
-// never reach: /v1/health with no token, which published every entry as
-// written until B54; the pairing link the console mints (POST /api/tokens:
-// its url=, its urls= and the JSON beside it); and every line serve logs
-// or prints. The config LOADED before B54 and must still load: each
+// that can carry one (backlog B54; the path since B66), and asks every
+// surface the secret must never reach: /v1/health with no token, which
+// published every entry as written until B54; the pairing link the console
+// mints (POST /api/tokens: its url=, its urls= and the JSON beside it); and
+// every line serve logs or prints. The config LOADED before B54 and must still load: each
 // endpoint is still advertised, to the host and port it names, without the
 // part, and the load warns once per entry. Only this test sees the whole
 // chain: the file, Load's Normalize, the live config, the one enumeration
