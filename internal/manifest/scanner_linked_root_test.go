@@ -457,29 +457,15 @@ func TestWatcherWatchesALinkedLibraryRoot(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "music")
 	linkDirOrSkip(t, target, link)
 	store, sc := newScanFixture(t, link)
-	w, err := NewWatcher(sc, 50*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
+	w := runWatcherOn(t, sc)
+	// The decision itself, read once the walk is done: without it the drop
+	// below waits for a row until the test's deadline.
+	if !watched(w, "Album") {
+		t.Fatalf("the initial walk registered no watch below the linked root (watches: %q)", w.w.WatchList())
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); _ = w.Run(ctx) }()
-	// Registered after the store's Close, so it runs first: the watcher
-	// is joined before the store it writes to is closed.
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("the watcher did not stop on cancel")
-		}
-	})
-	// fsnotify's Add is synchronous; this is headroom for the initial walk.
-	time.Sleep(100 * time.Millisecond)
 
 	writeMinimalFLAC(t, filepath.Join(link, "Artist", "Album", "dropped.flac"), 44100, 16, map[string]string{"TITLE": "Dropped"})
-	waitForTrack(t, store, "no watch below a linked library root: the dropped file never reached the manifest")
+	waitForTrack(t, store, "a file dropped below a linked library root never reached the manifest")
 	if got := titleOf(t, store, "Artist/Album/dropped.flac"); got != "Dropped" {
 		t.Errorf("title %q, want the dropped file's tag", got)
 	}

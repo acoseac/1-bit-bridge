@@ -5215,7 +5215,26 @@ what it claimed**, and none of it had a failing test.
   records a pid of its own choosing forces what the probe says about it**
   (`procOwnerFunc`, `withUnattributedMiss`). On Linux, pid 4242 may be a
   readable process of the test's own user, and Windows' table rules it
-  out, so a test left to the host was grading a different arm.
+  out, so a test left to the host was grading a different arm. **And it
+  records `standInPID`, never a literal** (2026-09-29, backlog B106):
+  4242, or 4243 when the test binary is 4242. Every such test binds its
+  port in the test process, so a probe left to the host names that
+  process as the holder, and where it IS the recorded pid the check
+  answers "bound by our own bridge": a freshly booted macOS CI runner
+  handed out pid 4242, and `TestPortCheck_DeadPIDStillFails` and a
+  `TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening` row, which
+  left the probe to the host, failed that way (a no-lsof row would have on
+  Linux; main as pid 4242 in a pid namespace fails all three). Left to the
+  host, the dead-pid test was also blind on Windows, whose table rules the
+  stand-in out: a `checkPort` that ignored liveness still FAILed its port.
+  `TestStandInTestsHoldWhenTheStandInIsThisProcess` finds every test that
+  reaches `standInPID` in the source, runs them in a child whose stand-in
+  is its own pid, the collision on every run, and refuses a
+  `writePIDFile` given a pid literal. **A pid a scripted lsof lists as
+  ANOTHER process dodges the stand-in too** (`otherThanStandIn`): that
+  child can be pid 1305, and with the stand-in at 1305 the fixed "other"
+  pid named the recorded bridge, failing the lsof-account tests
+  (CodeRabbit on #1115).
 - **…and a bridge no probe can read is ruled out by the port's OTHER
   holders, and the uid arm answers only for a listener no readable
   process holds** (#1030). Row L6, #1029's open shape: a bridge granted
@@ -5655,9 +5674,11 @@ mentions across the four `ops/audit-*.md` files.
   `TestMatrixDocMatchesWhatTheHandlerReports` checks only the REPORT**: it
   passed throughout. The consumers are checked by a boot test that flips the
   field through the PATCH and asks each one
-  (`TestServeProjectionFollowsTheLiveUpscaleGate`, which puts a stand-in sox
-  first on PATH, POSIX only, so the switch-on leg means something on a host
-  without sox, and checks health agrees before it compares).
+  (`TestServeProjectionFollowsTheLiveUpscaleGate`, which answers serve's sox
+  probe itself, `serveOpts.soxProbe`, so the switch-on leg means something
+  on a host without sox, and checks health agrees before it compares; it
+  put a stand-in sox first on PATH, POSIX only, until B105, under Build,
+  CI, and test discipline).
 - **…and a LIVE reader of the flag alone splits the gate too: every consumer
   that answers "is upscaling on" reads `upscaleActiveFn`, the flag AND a
   usable sox** (2026-09-28). Four read `upscale.enabled` live and without the
@@ -7871,6 +7892,53 @@ its twin.** The top list is older, shorter, and read first.
   `Arm` in internal/backup and internal/manifest), loggingtest's 3 s
   `Park.Wait`, the tsnet front's unit tests, and clients' per-request
   timeouts.
+- **…and a watcher test waits for the watcher's walk, a watch and a row
+  the same way** (2026-09-29, backlog B104). The watcher tests slept 100
+  or 150 ms for Run's initial walk and gave the row 3 s, and a file created
+  before its directory is watched makes no event at all:
+  `TestWatcherWatchesARootThatIsALinkToALink` failed that way on the macOS
+  CI leg ("…never reached the manifest through the watcher"), and a drop
+  with no sleep fails it 10 of 10. On a Linux host starved by a CPU hog
+  (one CPU, cgroup weight 1 against 100) the walk ended up to 288 ms after
+  Run started, the test failed 11 of 110 runs and the four other watcher
+  tests with the same sleep 26 of 50; after, none of 100 and none of 50.
+  `startWatcher` returns once `afterInitialWalkHookForTests` says every
+  watch is registered (per instance, set before Run, as
+  `afterDispatchHookForTests` is), and `watchWaitUntil` waits for a row or
+  a folder's watch until the test binary's deadline less
+  `watchWaitReserve`, or less half of what is left when that is less: a
+  whole reserve under `-timeout 20s` put every give-up in the past, and
+  each wait failed at once (CodeRabbit on #1115; B63's serve helpers keep
+  the whole reserve). **A wait that can end on a failure event does**:
+  the link-chain test stops on a subtree scan outside the root (#1090's
+  defect, red in 0.09 s), and the dot-named and linked-root tests read the
+  watch list once the walk is done. An absence has no event of its own, so
+  `TestWatcherIgnoresDotfiles` drops a track after its dotfiles and waits
+  for a scan that indexed the track to return
+  (`afterDispatchHookForTests`): that scan listed the dotfiles too. Its
+  dotfile was `.DS_Store`, which the scan's extension filter keeps out
+  whatever the dot rule says; `._track.flac` (macOS's AppleDouble twin on
+  exFAT or SMB) is kept out by the dot alone, and goes red without it.
+  That test said until then that a dotfile's event triggers no scan;
+  handleEvent filters by operation, not by name, so it always did.
+- **A serve test that needs a tool the live gate probes answers the
+  probe, never with a process on PATH** (2026-09-29, backlog B105).
+  `TestServeProjectionFollowsTheLiveUpscaleGate` opened the upscale gate
+  with a stand-in sox, a shell script first on PATH. `ProbeSox` gives
+  `sox --help` 2 s, a timed-out probe reads as no sox, and the shared
+  cache keeps that 30 s, so under sibling sessions' load the dev Mac
+  failed step 1 ("/v1/health says upscaleEnabled=false with the flag at
+  true…") in two sessions' gate runs. A stand-in slower than 2 s fails it
+  every time, and on a Linux host starved by a CPU hog, under -race, the
+  health request that ran the probe took up to 2.08 s. `serveOpts.soxProbe`
+  stands in for the probe inside `soxToolchainCache`, the one sox probe
+  serve makes (`withUsableSox`), which also puts the test's health check
+  on Windows, where no shell script runs. With every `/bin/sh` exec
+  delayed 2.2 s, main failed 10 of 10 and the branch none. **Serve's boot
+  line reads that probe too**: it probed for itself (`soxFeatureReady`),
+  the one consumer the stand-in did not reach, and a second fork at boot
+  (`TestServeBootLineReadsTheSharedSoxProbe`). The product's 2 s is not
+  the test's to raise.
 - **Put a test seam on the instance it serves; where a package-level seam
   must remain, its restore runs after every goroutine that read it has
   FINISHED, and cleanups run last-registered-first** (2026-09-28). The

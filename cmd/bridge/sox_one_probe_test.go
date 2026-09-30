@@ -19,7 +19,6 @@ import (
 // read too.
 var soxProbeCallers = map[string]string{
 	"soxToolchainCache.snapshot": "the shared probe itself",
-	"soxFeatureReady":            "serve's boot-time courtesy line, printed once",
 	"soxCLIReady":                "a CLI command's preflight, once per run",
 	"runUpscaleBatch":            "a CLI command's classifier probe, once per run",
 }
