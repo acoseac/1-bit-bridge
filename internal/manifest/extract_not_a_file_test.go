@@ -303,8 +303,9 @@ func removeOrFatal(t *testing.T, p string) {
 // folder.jpg, cover.png or folder.png that is not a file (a named pipe, a
 // link to one, a link to a device, a socket) holds no scan and becomes no
 // cover, in a track's own folder and in the album folder a disc folder's
-// track looks in (extractLocalArtwork's parent fallback). A real cover beside
-// another album is still stamped, so the lookup did run.
+// track looks in (extractLocalArtwork's parent fallback), and each is refused
+// by what it is, the socket by its stat, since no open reaches one. A real
+// cover beside another album is still stamped, so the lookup did run.
 //
 // Until 2026-09-30 the lookup read a candidate with os.ReadFile after a stat
 // that judged only its size, so a named pipe called cover.jpg held the scan
@@ -345,9 +346,26 @@ func TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped(t *testing.T) {
 	fsutiltest.MakeFIFO(t, boxedPipe)
 	// Last: BindSocket changes the working directory.
 	fsutiltest.BindSocket(t, filepath.Join(album, "folder.png"))
+	rec := loggingtest.Record(t)
 
 	scanPastFIFOs(t, "full scan", []string{coverPipe, parkedPipe, boxedPipe},
 		func() error { _, err := sc.Scan(context.Background()); return err })
+
+	// Each candidate is refused as what it is, and named: three named
+	// pipes (one reached through a link), a link to a character device,
+	// and a socket, which only a stat names (no open reaches one).
+	counts := map[string]int{}
+	for _, line := range rec.Lines("folder-art read") {
+		for _, kind := range []string{"named pipe", "character device", "socket"} {
+			if strings.Contains(line, kind+" is not a file") {
+				counts[kind]++
+			}
+		}
+	}
+	if counts["named pipe"] != 3 || counts["character device"] != 1 || counts["socket"] != 1 {
+		t.Errorf("folder-art refusals by kind %v, want 3 named pipes, 1 character device and 1 socket; lines %q",
+			counts, rec.Lines("folder-art read"))
+	}
 
 	for rel, title := range map[string]string{
 		"Music/Album/01.flac":        "Album track",
