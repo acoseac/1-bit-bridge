@@ -1595,6 +1595,10 @@ type Server struct {
 	// updated via a PATCH before a restart).
 	boundAdminAddr string
 
+	// refusedScrapeNoted is set by the first noteRefusedScrape line, which
+	// is the only one this process logs.
+	refusedScrapeNoted atomic.Bool
+
 	// foreignHostSeen holds the Host names loopbackHostOnly has refused,
 	// so each is logged once (noteForeignHost), bounded by
 	// foreignHostSeenCap: a page that rebinds a fresh name per request
@@ -1892,18 +1896,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pairing/{id}/approve", s.apiPairingApprove)
 	mux.HandleFunc("POST /api/pairing/{id}/decline", s.apiPairingDecline)
 
-	// Prometheus exposition. Loopback-bound HERE at registration —
-	// scrapers must run on the same host (local Prometheus / Grafana
-	// Alloy / node_exporter sidecar). The outer `boundaryMiddleware`
-	// loopback wrap is BYPASSED in public mode (the listener is
-	// exposed beyond loopback by design), so the endpoint needs its
-	// own loopbackOnly gate to stay same-host-only regardless of
-	// deployment mode. `/metrics` is also on `isAuthBypassPath`, so a
-	// cookie-less local scraper isn't 302'd to /login in public mode —
-	// the loopback gate is the sole trust boundary and matches the
-	// "scrapers run on the same host" intent. The CSRF guard is a
-	// no-op for GET so the bare promhttp handler passes through safely.
-	mux.Handle("GET /metrics", s.metricsGate(promhttp.Handler()))
+	// Prometheus exposition: a console route like any other. In loopback
+	// mode the boundary admits this host and nothing else; in public mode
+	// the session middleware wants a signed-in session, and answers
+	// without one only a scrape metrics.allowCidrs vouches for
+	// (metricsScrapeVouched, backlog B171). The CSRF guard is a no-op for
+	// GET, so the bare promhttp handler passes through safely.
+	mux.Handle("GET "+metricsPath, promhttp.Handler())
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.
@@ -2462,44 +2461,94 @@ func (s *Server) noteForeignHost(hostport string) {
 			"a reverse proxy in front of it must send Host: 127.0.0.1")
 }
 
-// metricsGate is loopbackOnly widened by config.Metrics.AllowCIDRs.
-//
-// Loopback is always permitted, so the default posture is byte-for-byte
-// what it was. The CIDR list exists because the loopback default is
-// UNREACHABLE in a container: a Prometheus outside the network
-// namespace gets a 403, and the only workaround was a sidecar whose
-// entire job is to be on the correct side of that check.
-//
-// The list is read live from the config holder, so widening it is a
-// settings change rather than a restart. Parsing per request is
-// affordable — a scrape is once every 15 seconds at most, and caching a
-// parsed list would need invalidation for no measurable gain.
-//
-// An unparseable entry is skipped, not fatal: it can only ever make the
-// gate NARROWER, so the failure mode is a scraper that is refused and
-// an operator who notices, rather than a bridge that will not boot.
-func (s *Server) metricsGate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			http.Error(w, errMsgBadRemoteAddr, http.StatusForbidden)
-			return
+// metricsPath is the Prometheus route, which public mode's session
+// middleware treats apart from every other page (sessionMiddleware).
+const metricsPath = "/metrics"
+
+// errMsgMetricsNeedsSession is public mode's answer to a /metrics request
+// that is neither signed in nor a scrape metrics.allowCidrs vouches for. A
+// status, not the login redirect every other page gets: a scraper follows a
+// 302 to the login form and then reports HTML it cannot parse, where the
+// answer is that it is not allowed.
+const errMsgMetricsNeedsSession = "admin refused: /metrics on a public bridge needs a signed-in session, " +
+	"or a scraper whose address metrics.allowCidrs lists and whose request carries no forwarding header (a direct scrape)"
+
+// metricsForwardingHeaders are the request headers a proxy adds to say it
+// relayed a request: RFC 7239's Forwarded, the de-facto X-Forwarded-*
+// (HAProxy's option forwardfor, Caddy, Traefik, nginx configs, Apache
+// mod_proxy, `tailscale serve`), nginx's X-Real-IP idiom, and Via, which RFC
+// 9110 has a gateway add to every request it forwards. A Prometheus scrape
+// sends none of them.
+var metricsForwardingHeaders = [...]string{
+	"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Via",
+}
+
+// forwardedByAProxy reports whether r carries any header a proxy adds when
+// it relays a request (metricsForwardingHeaders), whatever its value.
+func forwardedByAProxy(r *http.Request) bool {
+	for _, name := range metricsForwardingHeaders {
+		if len(r.Header.Values(name)) > 0 {
+			return true
 		}
-		ip := net.ParseIP(host)
-		if ip == nil {
-			http.Error(w, errMsgBadRemoteAddr, http.StatusForbidden)
-			return
-		}
-		if ip.IsLoopback() {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if cfg := s.deps.CfgHolder.Load(); cfg != nil && ipInAnyCIDR(ip, cfg.Metrics.AllowCIDRs) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		http.Error(w, "admin refused: non-loopback remote", http.StatusForbidden)
-	})
+	}
+	return false
+}
+
+// remoteIP is the connection's source address, or nil when RemoteAddr does
+// not parse. A link-local IPv6 source arrives with its zone
+// ("[fe80::1%en0]:port"), which net.ParseIP refuses, so the zone is dropped
+// first: no CIDR names one, and a scraper on a range metrics.allowCidrs
+// lists (fe80::/10) must match it.
+func remoteIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return nil
+	}
+	if i := strings.LastIndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	return net.ParseIP(host)
+}
+
+// metricsScrapeVouched reports whether public mode may answer a /metrics
+// request without a session (backlog B171): it comes from an address
+// metrics.allowCidrs lists, over a connection that carries no forwarding
+// header. Nothing is implied, loopback included. A proxy on the bridge's
+// own host relays every request from 127.0.0.1, and a relay that adds no
+// header (a TCP relay, nginx's default proxy_pass) cannot be told from a
+// local scraper at all,
+// so only the operator can say that nothing on this host relays
+// connections to the console, and listing 127.0.0.1/32 is how they say it.
+// The header check is what keeps a listed address honest when a proxy that
+// announces itself sits on it too.
+func metricsScrapeVouched(r *http.Request, allow []string) bool {
+	if len(allow) == 0 || forwardedByAProxy(r) {
+		return false
+	}
+	ip := remoteIP(r)
+	return ip != nil && ipInAnyCIDR(ip, allow)
+}
+
+// noteRefusedScrape logs, once per process, a public-mode /metrics request
+// refused for want of a session that came from this host or a private
+// network and carries no forwarding header: the scraper an upgrade past B171
+// stops answering, since loopback was implied before. A refusal from a
+// public address (a scanner), or of a request carrying a forwarding header
+// (a proxy that announces itself), says nothing. A relay that adds no
+// header reads as a local scraper here as it does to metricsScrapeVouched,
+// so its first refusal logs the line too.
+func (s *Server) noteRefusedScrape(r *http.Request) {
+	ip := remoteIP(r)
+	if ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) || forwardedByAProxy(r) {
+		return
+	}
+	if !s.refusedScrapeNoted.CompareAndSwap(false, true) {
+		return
+	}
+	logger.Warn("a /metrics scrape without a session was refused",
+		"hint", "on a public bridge a scraper needs its address in metrics.allowCidrs and a direct "+
+			"connection; list 127.0.0.1/32 (and ::1/128) for one on this host only when nothing "+
+			"on this host relays connections to the console")
 }
 
 // ipInAnyCIDR reports whether ip falls inside any of the given CIDRs.

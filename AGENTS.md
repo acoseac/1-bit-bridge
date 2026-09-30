@@ -251,7 +251,9 @@ mode). iOS never talks to the admin listener.
   re-points its own name at 127.0.0.1 is otherwise same-origin with the
   console. Don't expose admin behind Tailscale/reverse-proxy in loopback
   mode; `public` mode (VPS) is the supported non-loopback posture and gates
-  everything behind `adminauth`.
+  everything behind `adminauth`, `/metrics` included: a scraper without a
+  session needs its address in `metrics.allowCidrs` and a direct connection,
+  and loopback is not implied (a same-host proxy connects from it too).
 - **Graceful shutdown triggers full cleanup**: `POST /api/restart` must invoke
   the same cancellation closure as SIGINT/SIGTERM (honors the `bgScans`
   WaitGroup, cleans up transcode jobs, flushes the auth last-used-at buffer) —

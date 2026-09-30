@@ -4711,8 +4711,12 @@ no failing test — which is the shape to expect in this area.
   prints a host path into the tenant's report) skip on `Deps.Managed`; the
   log EXPORT refuses for the same reason, ahead of the terminal / journald /
   `docker logs` branches, and for all three export routes rather than only
-  status. Same for the Diagnostics `/metrics` pointer, which is
-  loopback-gated and answers 403 to the reader being told to scrape it.
+  status. Same for the Diagnostics `/metrics` pointer: a scraper there needs
+  its address in `metrics.allowCidrs`, which the control plane owns, so the
+  paragraph would tell the reader to point a scraper at a URL that refuses
+  it. This said until 2026-09-30 that the pointer "is loopback-gated and
+  answers 403", a claim about the gate B171 replaced (under **Auth,
+  pairing, TLS and security posture**).
 - **The console must SEND only what it SHOWED.** The settings Save payload is
   an explicit allowlist naming every field, `hideManagedSettings` sets `hidden`
   on the enclosing `.field` rather than removing the input, and a hidden input
@@ -6769,6 +6773,38 @@ its twin.** The top list is older, shorter, and read first.
 - **Any long-lived GET needs its own Origin gate** — `csrfGuard` lets GETs
   through, which is right for one-shot reads and wrong for a held SSE
   connection.
+- **In public mode `/metrics` is a console page: a signed-in session reads
+  it, and without one it answers only a scraper whose address
+  `metrics.allowCidrs` lists, over a connection that carries no forwarding
+  header** (2026-09-29, backlog B171). Since #472 it sat on
+  `isAuthBypassPath` behind `metricsGate`, which admitted any loopback
+  source, and a proxy on the bridge's own host relays every request from
+  127.0.0.1, so the gate could not tell the proxy's clients from a local
+  scraper (measured with the real binary; the record is in the log). The
+  bypass is gone, and `metricsGate` with it: `metricsScrapeVouched`, in
+  `sessionMiddleware`, is the one exemption, and an unauthenticated
+  `/metrics` gets a plain 403 (`errMsgMetricsNeedsSession`), never the
+  login redirect, which a scraper follows to HTML it cannot parse.
+  **Loopback is not implied, and the forwarding headers are not the fix on
+  their own**: a relay that adds none (a TCP relay such as an SNI router,
+  nginx's default `proxy_pass`) cannot be told from a local scraper by
+  anything in the request, so only the operator can say that nothing on the
+  host relays connections to the console, by listing `127.0.0.1/32` (and
+  `::1/128`). The header check (`Forwarded`, `X-Forwarded-For`, `-Host`,
+  `-Proto`, `X-Real-IP`, `Via`) keeps a listed address honest when a proxy
+  that announces itself sits on it too. A link-local source's zone
+  (`fe80::1%en0`) is dropped before the match (`remoteIP`): no CIDR names
+  one, and `net.ParseIP` refuses it. **The cost**: a same-host
+  Prometheus on a public bridge that relied on the implied loopback gets
+  403 until its address is listed. The first such refusal from this host or
+  a private network logs one Warn per process naming the fix
+  (`noteRefusedScrape`); one from a public address (a scanner) or carrying a
+  forwarding header (a proxy that announces itself) logs nothing, and a
+  relay that adds no header reads as a local scraper there too, so its first
+  refusal logs the Warn. Loopback mode is unchanged: its boundary admits this
+  host alone, and `metrics.allowCidrs` plays no part there, as it never did
+  (the boundary refused a non-loopback source before the old gate ran, so
+  #803's list only ever took effect in public mode).
 - **Pairing token delivery is read-many**: `Poll` returns the token on every
   authorized poll while Approved, and only a client `DELETE` or TTL+grace
   consumes it. A network blip must be recoverable — **don't add a "clear `RawToken` on first
