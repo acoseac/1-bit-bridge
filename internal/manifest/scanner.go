@@ -95,13 +95,24 @@ type Scanner struct {
 
 	// folderArt single-flights `cover.jpg` / `folder.jpg` lookups on a
 	// per-directory basis: the first worker to touch a given directory
-	// installs a `*folderArtPromise`, runs the ReadDir + hash + atomic
+	// installs a `*folderArtPromise`, runs the read + hash + atomic
 	// write inside `once.Do`, and every subsequent worker on the same
 	// directory parks inside Do until that work completes, then reads
-	// the cached result. Reset at the top of each Scan / ScanSubtree
-	// — cross-scan persistence would create stale "no folder.jpg" hits
-	// when a user adds cover.jpg between scans.
+	// the cached result. Reset at the top of each Scan / ScanSubtree,
+	// so each scan reads a folder's cover afresh. A reset alone never
+	// made a cover added between scans reach tracks already indexed,
+	// though this comment said so until 2026-09-29: the skip gate never
+	// extracted them for it. The folder-art key does (folderArtDrifted,
+	// backlog B141).
 	folderArt sync.Map // dir-path string -> *folderArtPromise
+
+	// dirListings is the scan's directory listings, one os.ReadDir per
+	// directory per scan, shared by every worker (ExtractContext.
+	// SidecarIndex): the lyrics sidecars and the folder-art candidates,
+	// with the candidates' stats (folderArtDirStateOf). Replaced at the
+	// start and the end of each Scan / ScanSubtree, so no listing
+	// outlives its scan.
+	dirListings sync.Map // dir-path string -> *sidecarListing
 
 	mu       sync.Mutex
 	scanning atomic.Bool
@@ -187,11 +198,23 @@ type Scanner struct {
 	// one runs.
 	openAudio func(abs string) (extractSource, error)
 
+	// readArt, when set, reads a folder-art candidate in place of
+	// readFolderArt, the way openAudio opens an audio file: a TEST seam,
+	// per scanner, through which a test fails a cover's read where it
+	// says. Nil in production. Set it before Scan, never while one runs.
+	readArt folderArtReader
+
 	// unread counts the audio files a scan's workers could not read whole
 	// (keepUnread), for the one line the scan logs about them. Reset at the
 	// start of each Scan and ScanSubtree, which hold mu for their run, and
 	// reported once their workers are done.
 	unread unreadTally
+
+	// artUnread counts the tracks whose folder's cover a scan could not
+	// read (localArtUnsettled, or a retry the skip gate made that failed
+	// again), for the one line the scan logs about them
+	// (msgUnreadFolderArt). Reset and reported with unread.
+	artUnread unreadTally
 }
 
 // sacdContainer is what processSACDISO reads an `.iso` container through:
@@ -247,14 +270,24 @@ func (s *Scanner) effectiveDeleteThreshold() int {
 // `local-<sha256>` sentinel ready to stamp on every track in that
 // directory; `found == false` is a known-absent answer cached so
 // sibling tracks short-circuit with no further filesystem work.
+//
+// `failure` is the first stat or read of a candidate that did not
+// complete (folderArtReadIncomplete), a candidate read whole whose cache
+// file could not be written (errLocalArtworkCacheWrite), or the
+// directory's own failure when its state could not be seen: the answer is
+// then not one, and the tracks given it keep the art they had
+// (localArtUnsettled) until a scan reads and stores the cover. Settled
+// refusals (a candidate too large, not an image, not a file) carry none.
 type folderArtResult struct {
-	found bool
-	mbid  string
+	found   bool
+	mbid    string
+	failure error
 }
 
-// folderArtPromise serializes per-directory ReadDir + read + hash +
-// atomic write so a 15-track album processed by 15 parallel workers
-// does the I/O exactly once instead of 15 times. The first worker to
+// folderArtPromise serializes per-directory read + hash + atomic
+// write so a 15-track album processed by 15 parallel workers does
+// the I/O exactly once instead of 15 times (the directory's listing
+// is the scan's own, dirListings). The first worker to
 // LoadOrStore the pointer wins the once.Do; the rest retrieve the
 // same pointer and park inside Do until the first worker's
 // scanFolderArtwork returns. After Do unblocks every caller reads
@@ -469,12 +502,15 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// commits nothing until the first batch fills) counts as progress
 	// rather than as a stall in flight.
 	s.noteScanProgress(time.Now())
-	// Per-Scan reset of the folder-art single-flight cache. Cross-scan
-	// persistence would create stale "no folder.jpg" hits when a user
-	// adds cover.jpg between scans (the scanner re-extracts the track
-	// but the cache still says "absent").
-	s.folderArt = sync.Map{}
+	// Per-Scan reset of the folder-art single-flight cache and the
+	// directory listings: each scan reads a folder's listing and cover
+	// afresh. (This said until 2026-09-29 that the scanner re-extracts a
+	// track when a user adds cover.jpg between scans; it did not, since
+	// the skip gate kept the track. folderArtDrifted does, backlog B141.)
+	s.resetScanCaches()
+	defer s.resetScanCaches()
 	s.unread.reset()
+	s.artUnread.reset()
 	defer s.scanning.Store(false)
 	// Zeroing the clock alongside the flag keeps ScanStalledFor's "no
 	// scan running" answer honest without depending on read ordering
@@ -720,6 +756,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	}
 	tallies.report()
 	s.unread.report()
+	s.artUnread.reportAs(msgUnreadFolderArt)
 
 	// Deletion pass: anything in the "before" snapshot that we didn't
 	// see in this walk gets its missing_count bumped; rows whose
@@ -1298,19 +1335,21 @@ func (s *Scanner) loadAndApplyReconciled(
 func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, rootDirs map[string]struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	// One ExtractContext per worker, reused across every track this
-	// worker pulls. The pointer to s.folderArt is stable for the
-	// lifetime of the Scan (we replaced the value at the top of Scan,
-	// and nothing else mutates the field during the scan), so all
-	// workers share the same single-flight map. Empty s.artDir
-	// disables local-artwork extraction inside ExtractWithContext.
-	// rootDirs is the per-scan roots snapshot (cleaned) so the disc-
-	// subfolder parent-art fallback can't climb out of the library.
+	// worker pulls. The pointers to s.folderArt and s.dirListings are
+	// stable for the lifetime of the Scan (we replaced the values at the
+	// top of Scan, and nothing else mutates the fields during the scan),
+	// so all workers share the same single-flight maps: one listing and
+	// one cover lookup per directory per scan. Empty s.artDir disables
+	// local-artwork extraction inside ExtractWithContext. rootDirs is
+	// the per-scan roots snapshot (cleaned) so the disc-subfolder
+	// parent-art fallback can't climb out of the library.
 	ec := &ExtractContext{
-		SidecarIndex:    new(sync.Map),
+		SidecarIndex:    &s.dirListings,
 		ArtworkCacheDir: s.artDir,
 		FolderArtCache:  &s.folderArt,
 		LibraryRootDirs: rootDirs,
 		openAudio:       s.openAudio,
+		readArt:         s.readArt,
 	}
 	for pi := range paths {
 		if ctx.Err() != nil {
@@ -1406,7 +1445,8 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				existing.MTimeNS == pi.info.ModTime().UnixNano() {
 				if existing.ExtractorVersion >= ExtractorVersion &&
 					!s.needsLocalArtworkRecovery(existing.ArtworkMBID) &&
-					!sidecarLyricsDrifted(pi.abs, existing, ec) {
+					!sidecarLyricsDrifted(pi.abs, existing, ec) &&
+					!s.folderArtDrifted(pi.abs, pi.rel, existing, ec) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -1426,15 +1466,18 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					return
 				}
 				// Content-unchanged but version-stale (or the local-art
-				// cache needs rebuilding): re-extract honestly, diff
+				// cache needs rebuilding, or the lyrics sidecar or the
+				// folder's cover changed): re-extract honestly, diff
 				// before deciding what to write. A byte-identical merged
 				// result becomes a light extractor_version stamp (no
 				// indexed_at bump — see reExtractUnchanged); a real
 				// change takes the normal upsert. The art-recovery case
 				// lands on the stamp leg naturally: the fresh extract's
 				// stampLocalArtwork already re-wrote the missing cache
-				// file, and the row itself is unchanged.
-				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec); t != nil {
+				// file, and the row itself is unchanged. So does a cover
+				// change beside a track whose embedded picture wins: the
+				// stamp records the folder's new key.
+				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec, existing); t != nil {
 					tracksToWrite = []*Track{t}
 				}
 				if hook := afterExtractHookForTests; hook != nil {
@@ -1469,6 +1512,13 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// its format): indexed by name, as it always was.
 				scanLogger.Error("extract", "path", pi.abs, "err", err)
 			}
+			if existing != nil {
+				// A folder cover the extraction could not read: the
+				// row keeps the art it had (keepArtOfUnsettledRead),
+				// and records folderArtUnsettledKey for the next scan.
+				keepArtOfUnsettledRead(t, existing.ArtworkMBID)
+			}
+			s.noteUnsettledArt(pi.rel, t)
 			// Capture-then-call so a concurrent test that nils the
 			// hook between the check and invocation can't trigger a
 			// nil-deref panic. The hook is set/cleared from test
@@ -1561,6 +1611,14 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 	}
 }
 
+// noteUnsettledArt counts, for the scan's one line (msgUnreadFolderArt),
+// a track whose extraction could not read its folder's cover.
+func (s *Scanner) noteUnsettledArt(rel string, t *Track) {
+	if t.localArt == localArtUnsettled {
+		s.artUnread.note(rel, t.localArtFailure)
+	}
+}
+
 // needsLocalArtworkRecovery reports whether an unchanged-eligible
 // track must still be re-extracted because its locally-curated
 // artwork cache file went missing. Takes the bare ArtworkMBID rather
@@ -1607,7 +1665,8 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 
 // reExtractUnchanged is the version-stale leg of the skip gate: the file's
 // size+mtime are UNCHANGED but its extractor_version is stale (or its
-// local-art cache file needs rebuilding), so it must re-extract — yet a
+// local-art cache file needs rebuilding, its lyrics sidecar drifted, or its
+// folder's cover changed: folderArtDrifted), so it must re-extract — yet a
 // blind hand-off to the upsert would bump indexed_at, zero enriched_at,
 // and replace tags_json wholesale for a row that most likely didn't
 // change, turning every ExtractorVersion bump into a full-library iOS
@@ -1633,7 +1692,13 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 // stored-row LOOKUP failure fails OPEN to the full upsert (today's
 // pre-guard behaviour — churn plus the same bounded post-scan re-fill
 // window the mergePostScanFields maintenance note describes).
-func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext) *Track {
+//
+// A file its extractor refused (read whole, not its format) keeps its row
+// as it is, and only its folder-art key moves (SetFolderArtKey, to
+// folderArtNotLookedKey: no cover changes what a refused file is given), so
+// the folder-art gate does not come back for it every scan. stored is the
+// row's stat as the skip gate read it.
+func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext, stored *TrackStat) *Track {
 	t := &Track{
 		Path:    pi.rel,
 		Size:    pi.info.Size(),
@@ -1650,8 +1715,16 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 			return nil
 		}
 		scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
+		if t.folderArtKey != "" && stored != nil && stored.FolderArtKey != t.folderArtKey {
+			if kerr := s.store.SetFolderArtKey(ctx, pi.rel, t.folderArtKey); kerr != nil {
+				if failure := ctxerr.WithoutCancellation(ctx, kerr); failure != nil {
+					scanLogger.Warn("record folder-art key of a refused file", "path", pi.rel, "err", failure)
+				}
+			}
+		}
 		return nil
 	}
+	s.noteUnsettledArt(pi.rel, t)
 	old, err := s.store.GetTrack(ctx, pi.rel)
 	if err != nil || old == nil {
 		if err != nil && ctx.Err() == nil {
@@ -1705,8 +1778,29 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // enriched_at (so the enricher re-fills its fields on the next pass)
 // and the reconciliation passes re-run every scan. Still: add the
 // field.
+//
+// ArtworkMBID has two writers, and only the enricher's value is
+// post-scan: a `local-<sha256>` value is the SCANNER's (the enricher
+// writes MusicBrainz ids, never over a `local-` one). So an old `local-`
+// value is not copied onto a fresh extraction whose artwork pipeline
+// ran and completed (localArtSettled) and found nothing: its cover is
+// gone (a folder's cover.jpg removed, say), and the row loses it, as a
+// changed file re-extracted on the full path always did; the upsert's
+// enriched_at reset lets the enricher give it a network cover. Until
+// 2026-09-29 the copy kept a removed cover's art forever (backlog
+// B141). A pipeline that did not complete (localArtUnsettled: a folder
+// cover it could not read or store) keeps the old value whatever it found
+// (keepArtOfUnsettledRead), and one that did not run
+// (localArtNotLooked), or could not store an embedded picture it read in
+// the artwork cache (localArtWriteFailed), says nothing, so the old value
+// is copied: dropped there, a wiped cache whose rewrite failed lost its
+// cover for good, where the copy keeps it for needsLocalArtworkRecovery to
+// retry.
 func mergePostScanFields(fresh, old *Track) {
-	if fresh.ArtworkMBID == "" {
+	keepArtOfUnsettledRead(fresh, old.ArtworkMBID)
+	if fresh.ArtworkMBID == "" &&
+		!(fresh.localArt == localArtSettled && !fresh.localArtWriteFailed &&
+			isLocalArtworkMBID(old.ArtworkMBID)) {
 		fresh.ArtworkMBID = old.ArtworkMBID
 	}
 	if fresh.ArtistMBID == "" {
@@ -2076,10 +2170,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Same per-scan reset rationale as Scan(): each subtree scan starts
-	// with a fresh folder-art single-flight cache, and counts its own
-	// unread files.
-	s.folderArt = sync.Map{}
+	// with a fresh folder-art single-flight cache and directory listings,
+	// and counts its own unread files.
+	s.resetScanCaches()
+	defer s.resetScanCaches()
 	s.unread.reset()
+	s.artUnread.reset()
 
 	// Marks a scan in flight for the duplicates sweeper's commit-time
 	// guard. ScanSubtree deliberately does NOT set `scanning` (that is
@@ -2380,6 +2476,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	}
 	tallies.report()
 	s.unread.report()
+	s.artUnread.reportAs(msgUnreadFolderArt)
 
 	// FUSE drop mode (b), the guard Scan runs after each root's walk, for a
 	// subtree scan of the root: a root that holds nothing, over a store
@@ -3548,9 +3645,32 @@ func (u *unreadTally) note(rel string, fault error) {
 
 // report logs msgUnreadAudio, once, when the scan noted a file.
 func (u *unreadTally) report() {
+	u.reportAs(msgUnreadAudio)
+}
+
+// reportAs logs msg, once, when the scan noted a file.
+func (u *unreadTally) reportAs(msg string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.files.report(msgUnreadAudio, "err")
+	u.files.report(msg, "err")
+}
+
+// msgUnreadFolderArt is the line a scan logs, once, for the tracks whose
+// folder's cover it could not read or store (localArtUnsettled): an EIO or
+// ESTALE from a NAS, a permission the service user lacks, a folder it could
+// not list, an artwork cache it could not write. Their rows keep the art
+// they had, record folderArtUnsettledKey, and the skip gate tries the cover
+// again on every scan until it is stored, at one failed attempt per folder a
+// scan; the count is of tracks, the example one of them.
+const msgUnreadFolderArt = "tracks whose folder cover the scan could not read or store; they keep the art they had, and a later scan tries the cover again"
+
+// resetScanCaches replaces the scan's per-directory caches, the folder-art
+// lookups and the directory listings, at the start and the end of a scan
+// (which holds mu, so no worker is running): each scan reads a folder
+// afresh, and nothing a scan read outlives it.
+func (s *Scanner) resetScanCaches() {
+	s.folderArt = sync.Map{}
+	s.dirListings = sync.Map{}
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx

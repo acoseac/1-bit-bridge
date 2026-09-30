@@ -33247,3 +33247,250 @@ The branch's binary (at the fix commit), over the same files:
 - A public `autocert.domain` written as an IPv6 address builds an invalid
   advertised URL unbracketed and fails the console's Origin check
   bracketed (review round 3). It was so before B66 as well: B152.
+
+## 2026-09-29 — a folder's cover reaches the tracks beside it when it changes, not only when they do (backlog B141)
+
+### The defect
+
+A folder's cover (`cover.jpg`, `folder.jpg`, `cover.png`, `folder.png`) is read
+only when a track in the folder is extracted (`extractLocalArtwork`, the
+per-directory single-flight lookup), and the skip gate extracts an unchanged
+audio file only for an `ExtractorVersion` bump, a missing `local-` cache file
+(`needsLocalArtworkRecovery`) or lyrics sidecar drift (`sidecarLyricsDrifted`).
+Nothing looked at the folder's art. Reproduced with the real scanner on
+`2a72b74f`: two FLACs indexed with no art, a `cover.jpg` written beside them,
+then a full scan and a subtree scan of the album: both left `ArtworkMBID` "".
+The same gap had three more faces, each red on main in the new tests:
+
+- a cover **replaced** (in place, same size, new mtime) kept its tracks on the
+  old art;
+- a cover **removed** kept its art forever: nothing re-extracted, and even the
+  version-stale leg's `mergePostScanFields` copied the old `local-` value over
+  the fresh extraction's "" as if it were the enricher's;
+- a cover whose **read failed** during the indexing scan (chmod 0, an EIO) left
+  the rows without it, and the gate kept them.
+
+Two scanner comments said the opposite: the `folderArt` field doc ("cross-scan
+persistence would create stale 'no folder.jpg' hits when a user adds cover.jpg
+between scans") and `Scan`'s reset ("the scanner re-extracts the track but the
+cache still says absent"). The 2026-07-30 entry on multi-disc folder art
+repeats the first; it was never true for a track whose audio file did not
+change. The comments are corrected; that entry stands as written.
+
+### Alternatives measured or rejected
+
+- **The directory's mtime.** Measured on APFS (the dev Mac) and on Linux
+  (dido): overwriting `cover.jpg` in place (`cp` over it) leaves the
+  directory's mtime unchanged, while creating a `.DS_Store` changes it, as does
+  a rename over the cover. So it misses the ordinary replacement and fires on
+  Finder's, Synology's and a lyrics sidecar's writes. It also needs a stat of
+  every directory, which the walk does not take.
+- **Hashing the cover on every scan** and comparing with the row's
+  `ArtworkMBID`: reads every cover every scan (about a MB each, per album, per
+  6 h, over a NAS), and cannot tell a changed cover from a track whose embedded
+  picture wins without knowing which one the row's art came from.
+- **One key per folder** (a table keyed by directory): it may move only once
+  every track of the folder is written, which spans workers, writer batches and
+  unread files. A key per row converges by construction: each row records what
+  it was given.
+- **An art-only write** (set `artworkMBID` without re-reading the audio): a new
+  `enriched_at` writer outside the closed set, and the upsert assumes a fresh
+  extraction (a Track rebuilt from `GetTrack` would erase `audio_md5` and delete
+  the lyrics row). The version-stale leg's diff-guard already does the job, at a
+  tag read per track of the one folder that changed.
+
+### The change
+
+- `tracks.folder_art_key` (v49, column-only, `addColumnsIfMissing` in post()):
+  the identity of the folder art a row was extracted against. `folderArtKey`
+  builds it from the folder's per-scan state (`folderArtDirStateOf`): each
+  candidate the listing holds, `name:size:mtimeNS`, in listing order, joined by
+  ','; for a disc folder the lookup climbs from (`discArtParent`, shared with
+  `extractLocalArtwork` so the key covers exactly what the lookup reads), the
+  parent's after a '|' when it holds any. `ExtractWithContext` records it on
+  every extraction when local art is on (`recordFolderArtKey`), a refused file
+  included; both upserts and the stamp write it, and `GetTrackStat` reads it.
+- `folderArtDrifted` joins the skip gate: a row whose folder's key changed goes
+  through `reExtractUnchanged`, so only rows whose art changes reach the delta.
+  The stamp leg writes the key, or a cover beside an embedded picture would be
+  re-read every scan (NC2).
+- **One listing per directory per scan.** The lyrics sidecar index was per
+  worker (`new(sync.Map)` in `runScanWorker`), so an album's directory was read
+  once per worker that took one of its tracks. It is the scanner's
+  `dirListings` now, shared like `folderArt` and reset at the start and the end
+  of each scan, and it carries the folder-art candidates and their stats too.
+  `scanFolderArtwork` reads the state's candidates rather than listing again.
+- **The state is taken before the cover is read** (`folderArtFor` asks for it
+  first), so a row never records an identity newer than its bytes: with the
+  order swapped (NC9), a cover replaced as the lookup read it was recorded under
+  the new identity beside the old bytes, and no later scan read it.
+- **A removed cover takes its art away.** `mergePostScanFields` copies an old
+  `local-` value only when the fresh extraction's pipeline did not settle: a
+  `local-` value is the scanner's (the enricher writes MusicBrainz ids only,
+  guarded by `!HasPrefix(local-)`; checked by grep, 2026-09-30), so when the
+  pipeline ran, read every candidate and found none, the old value describes a
+  cover that is gone. The upsert then resets `enriched_at`, and the enricher
+  gives the row a network cover, as for any changed file.
+- **A cover that could not be seen or read (B134's rule for covers).** The
+  extraction records `localArtUnsettled` for a stat or read of a candidate
+  that did not complete (`folderArtReadIncomplete`: anything but gone or not a
+  file). The row keeps the art it had (`keepArtOfUnsettledRead`, on the full
+  path as on the version-stale one, also over a partial answer from another
+  candidate: taking it would change the row twice), records
+  `folderArtUnsettledKey` ("?"), and the gate retries only the cover's read
+  (`folderArtUnreadable`, the scan's own lookup, which the extraction then
+  reuses), so a cover that stays unreadable costs one failed read per folder a
+  scan, never a tag read of its album. One Warn a scan counts the tracks
+  (`msgUnreadFolderArt`, library-relative example, `walkErrReason`); the
+  per-candidate "folder-art stat" / "folder-art read" Warns for such failures,
+  which named absolute paths, are gone. A folder whose listing or a candidate's
+  stat fails keeps its rows untouched (the gate answers no): read as "no cover",
+  an unstat-able cover dropped the album's art (NC12).
+- **A cover whose cache file could not be written is no verdict either**
+  (`stampLocalArtworkCached` answers `errLocalArtworkCacheWrite`; the failure
+  is logged by its caller). A folder cover's makes the lookup unsettled, like
+  a failed read: the rows keep their art, record "?", and the gate tries the
+  cover again on every scan (one read and write per folder), with the
+  write's Error folded into the scan's one line. An embedded picture's is
+  logged once per extraction as before and sets `localArtWriteFailed`: the
+  gate cannot retry it without a tag read, so the merge copies the row's old
+  `local-` value for `needsLocalArtworkRecovery` to retry. Both were found
+  late. The first: reading the merge rule against the recovery after the
+  first round of tests, a wiped artwork cache whose rewrite failed (a full or
+  read-only data directory) dropped the rows' art, and with the art "" and
+  the folder unchanged nothing sent the gate back, so it was lost for good
+  where main's copy kept it for the recovery (NC13). The second, CodeRabbit
+  on review round 2: a failed write was then settled, with the rows kept on
+  their old art, so a cover REPLACED while the cache could not be written was
+  recorded under the new cover's identity and never stored (red on the
+  reviewed head, NC15).
+- **A file its extractor refuses** (read whole, not its format, written by name)
+  never reaches the pipeline, records `folderArtNotLookedKey` ("-"), and the
+  gate never re-checks it. One the gate re-reads anyway (an upgraded row with
+  an empty key) records it through `SetFolderArtKey` (a narrow write: no
+  indexed_at, no enriched_at); without it that file was re-read every scan
+  (NC7). A junk `.flac` is not such a file: its format parse failure is
+  non-fatal and dhowden runs, so it gets the folder's cover like any other.
+
+### No ExtractorVersion bump; the upgrade
+
+What extraction produces for a file and its folder is unchanged; the new
+column is filled by the gate itself. Existing rows read an empty key, which is
+also the key of a folder without a cover, so the first scan after the upgrade
+re-reads, once, only the tracks in folders that hold one: through the
+diff-guard, so unchanged rows take the stamp leg and only the rows B141 left
+wrong (a cover added or replaced after indexing, or unread) reach the delta.
+Measured on dido, 3,000 FLACs in 300 album folders with covers: that scan took
+544 ms against an unchanged scan's 544 ± 24 ms (tiny fixture files; real ones
+cost a tag read each, once). Residual: a `local-` value whose cover was
+removed BEFORE the upgrade keys to "" like its row and stays until the next
+`ExtractorVersion` bump re-reads it (the merge rule then drops it).
+
+### Cost, measured
+
+dido (16 cores, local disk), 3,000 FLACs in 300 albums each with a
+`cover.jpg`, indexed once, then five unchanged full scans, main (`2a72b74f`)
+against the branch, twice each: main 528.2 ± 14.3 and 532.4 ± 23.2 ms a scan,
+the branch 522.2 ± 25.6 and 525.7 ± 30.6 ms. Under `strace -f -c`, per
+unchanged scan (five scans less the index, divided by five):
+
+| syscall | main | branch |
+|---|---|---|
+| getdents64 | 6,360 | 1,262 |
+| openat | 3,180 | 631 |
+| newfstatat | 6,332 | 6,632 |
+| all traced (getdents64, newfstatat, statx, fstat, openat, lstat, stat) | 41,011 | 34,141 |
+
+The walk accounts for 662 getdents64 (331 directories); main's other ~5,700
+were the per-worker sidecar listings, about ten per album. The branch adds one
+stat per cover per scan (+300). The index scan fell from 7,925 to 1,937
+getdents64 for the same reason.
+
+### Tests
+
+Red on main (`2a72b74f`, the seam-free ones copied into an export of it), green
+on the branch, `-count=1`: `TestScanner_ACoverAddedAfterIndexingReachesItsTracks`
+(full and subtree scan), `TestScanner_AReplacedCoverReplacesItsArt`,
+`TestScanner_ARemovedCoverTakesItsArtAway`,
+`TestScanner_ACoverAtTheAlbumRootReachesItsDiscFolders` (full and subtree),
+`TestScanner_AFolderCoverOutranksTheEnrichersAndItsRemovalHandsItBack`,
+`TestScanner_ACoverThisUserCannotReadIsReadOnceItCan` (unix, chmod 0, skipped as
+root) and `TestScanner_AFolderWhoseCoverCannotBeSeenKeepsItsRows` (unix, a
+self-link cover, then a link to nothing). Green on both:
+`TestScanner_ACoverBesideAnEmbeddedPictureChangesNothing` (the embedded
+picture keeps winning) and `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`
+(unix, the artwork directory made read-only after the cache files of a
+folder cover and an embedded picture were wiped): both pin what the fix
+must not change. Red on the reviewed head of round 2, green after:
+`TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater` (unix, a
+cover replaced while the artwork directory is read-only). Through the
+per-scanner cover-reader seam (`Scanner.readArt`), on every platform:
+`TestScanner_ACoverThatCouldNotBeReadIsReadOnALaterScan`,
+`TestScanner_AReplacedCoverThatCouldNotBeReadKeepsTheOldArt` (with and without
+a readable `folder.jpg` beside it), `TestScanner_AChangedFileWhoseCoverCouldNotBeReadKeepsItsArt`,
+`TestScanner_ACoverReplacedWhileItIsReadIsReadAgain`. And
+`TestScanner_AnUnchangedLibraryIsNotReRead` (covers, none, embedded pictures,
+disc folders; the upgrade re-reads only the covered folders' tracks, once),
+`TestScanner_AFileItsExtractorRefusesIsNotReReadForItsFolder`, and the key's
+unit tests (`TestFolderArtKeyNamesWhatTheLookupReads`,
+`TestFolderArtKeyIsTakenOncePerDirectoryPerScan`,
+`TestFolderArtKeyOfAFolderThatCannotBeListed`). Every scanner test counts the
+audio opens a scan makes through the per-scanner `openAudio` seam, one per
+extraction, and `requireSettled` asserts that the scan after re-reads nothing
+and moves no row.
+
+Negative controls on the committed fix, each restored and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `folderArtDrifted` always no | 13 tests: every add, replace, remove, disc, retry, upgrade and refusal case |
+| NC2: the stamp keeps the old key | the embedded-picture, changed-file and unchanged-library tests (re-read every scan) |
+| NC3: the merge copies an old `local-` value always | the two removal tests |
+| NC4: `keepArtOfUnsettledRead` does nothing | the changed-file test, and the replaced-cover test with a readable `folder.jpg` beside it |
+| NC5: an unsettled row is re-extracted without retrying the cover first | the retry test: "a scan whose cover still cannot be read re-read 2 audio files, want 0" |
+| NC6: an unsettled extraction records the folder's key, not "?" | every failed-read test, the chmod one included |
+| NC7: a refused file's key is not recorded | the refusal test: re-read on the scan after |
+| NC8: a refused file records the folder's key, not "-" | the refusal test's key assertions |
+| NC9: the state taken after the cover is read | the state-before-cover test (its first draft drove a track the gate saw first, which took the state early, and stayed green; it drives a new track now) |
+| NC10: the gate's failed retry is not counted | the retry test's second line |
+| NC11: an extraction's unsettled read is not counted | the retry test's first line |
+| NC12: a candidate that cannot be stat'ed reads as absent | the unseen-cover test: the album's art dropped, both rows moved |
+| NC13: an embedded picture's failed cache write is a verdict (the merge ignores `localArtWriteFailed`) | the wiped-cache test's embedded track: the art "" after the read-only scan, still "" and its cache file never restored once it was writable |
+| NC15: a folder cover's failed cache write is settled (not noted as a failure) | the wiped-cache test's folder tracks (art dropped for good) and `TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater` (the old art "" and never the new cover) |
+| NC14: a candidate that is not a file stays in the key | `TestFolderArtKeyLeavesOutWhatIsNotAFile`: the key named the directory link and the named pipe |
+
+Review round 1 (Gemini): leave a candidate that is not a regular file out of
+the state. Taken by `fsutil.NotAFile`'s list of kinds (a directory or a link
+to one, a named pipe, a socket, a device), not by the suggested
+`!info.Mode().IsRegular()`: a Windows cloud placeholder stats as
+`ModeIrregular` and opens as a file (CLAUDE.md's "the refusal is a list of
+kinds" rule), so the suggestion would have dropped every OneDrive
+files-on-demand cover. And out of the KEY only: kept in the key, a link to a
+directory called `cover.jpg` re-read its album whenever the linked directory
+changed, but the lookup must still be handed such a candidate, which it
+refuses by its stat and names (B62). The first form dropped it from both,
+and B62's `TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped` went red
+in the full package run (no "folder-art read" line named the pipes, the
+device link or the socket); the subset run after the change had not included
+it.
+
+### Platforms
+
+The new tests and the lyrics sidecar tests (whose listing is now shared)
+passed on Windows 11 (nomos, go1.26.6) and on the dev Mac; the whole
+`internal/manifest` suite passed on the dev Mac, and under `-race` on Linux
+(dido, `golang:1.26.6`, uid 1000, where the chmod test runs).
+
+### Not covered, filed
+
+- B144: the iOS app's own scanner (SMB and on-device sources) reads an album's
+  folder cover only while one of its tracks is parsed, and never over a cached
+  cover (`tryApplyAlbumSidecar`; read, not run). Bridge sources are fixed here:
+  their `artworkMBID` changes and the delta carries it. No wire change, no
+  Mirror-PR.
+- B145: a file its extractor refuses is re-read, and logged at ERROR, on every
+  scan after an `ExtractorVersion` bump, forever (measured with a junk `.dsf`:
+  three scans, three re-reads, the version stayed 0). Pre-existing; this change
+  makes only its folder-art half converge.
+- B146: an SACD ISO's virtual rows never carry the cover beside the image
+  (measured: both rows of a two-track ISO had "").
