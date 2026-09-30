@@ -33653,3 +33653,244 @@ UPnP and harvest closures, whose features are wired at boot and not part of
 - B156: the analysis and fingerprint cards of a switched-off feature say
   "Next sweep: in 5h", for a pass that will stand down (seen in the
   browser).
+
+
+## 2026-09-29 — the variant watcher's mount-loss skip goes through its refusal latch and both of its refusals reach the Jobs card; a card whose gate is closed says no next sweep (backlog B131, B156)
+
+Two display-and-journal leftovers in one PR: B131, filed by the B65 session
+(#1109), and B156, filed by the B113 session (#1119). Each was reproduced on
+main (6c8ae841) with the real binary before any code changed: a throwaway
+loopback install (`bridge init --yes --no-service`) over four tagged FLACs
+made with sox, `integrity.variantSweepIntervalSec: 2`, `smartPlaylists.enabled:
+false`, the other features at their defaults, and four `track_variants` rows
+seeded through `manifest.Store` by a throwaway helper under a `_`-prefixed
+directory, recorded under a variants directory that holds no file.
+
+### B131 (1): the mount-loss skip WARNed on every tick
+
+`VariantWatcher.tick`'s mount-loss guard logged `integrity variant sweep:
+skipping sweep, variants dir unhealthy with rows in catalog` at WARN on every
+tick, and no summary. Measured on main: nine WARN lines in the first 16 s, 114
+in 3 min 42 s (one per 2 s tick; 24 a day at the default hour), all identical
+but for the time. B65 had latched the relocation refusal alone and recorded
+this as a decision to make: an unmounted variants volume is more urgent than a
+relocation, so an hourly WARN might be right.
+
+- Decided: latch it, as a second kind of the watcher's one latch
+  (`VariantRefusalVariantsDir`, key `variantsDirUnavailable`, beside
+  `VariantRefusalRelocation`; the type is exported now, with
+  `VariantRefusalKinds`). What made the hourly WARN unnecessary is measured:
+  every rendition download the unmount breaks logs a WARN of its own and
+  answers 410 (`variant sidecar missing, but the variants directory is
+  unavailable; keeping the row`, twice for two GETs on main), so the requests
+  that fail still say so as they fail; and the Jobs card says it now (2,
+  below), for as long as it lasts.
+- A skipped tick logs its summary at Info (`skipped=true`, the rows it saw),
+  as a refused relocation's does; the WARN carries a hint (mount the volume, or
+  point the variants directory at where the renditions are; a download of
+  a rendition stored there answers 410 meanwhile; no override; once a day).
+- What ends the streak: a tick that passes both guards (the lifted Info line,
+  which names the kind that ended now, `ended=`, on the orphan sweep's too), an
+  empty catalog (as for a relocation), and a tick refused as the other kind,
+  which starts a streak of its own and WARNs at once. A mount-loss tick is no
+  longer a tick that decided nothing: B65's test kept a relocation streak
+  through one, and now a relocation, an unmount and the volume back with the
+  relocation still there are three streaks and three WARNs.
+
+### B131 (2): the Jobs card said "on" while the watcher refused
+
+The "Variant integrity" line read `mt.variantIntegrityActive` alone: "on"
+whenever the interval was positive. On main, over the reproduction above,
+`/api/jobs` `maintenance` was `{"variantIntegrityActive": true,
+"orphanSidecarGC": false, "artworkCacheLRU": false}` and the page (the browser
+pane, read through the DOM) said "Variant integrity: on", while every tick
+skipped; the same for a relocation streak (B65).
+
+- The latch publishes itself (`refusalLatch.status`, a `RefusalStatus[K]`
+  behind an atomic pointer, stored whenever a streak starts or ends). The
+  orphan sweep published by hand (`publishStatus` beside each move of its
+  latch), and a second sweep doing the same by hand is a second place to
+  forget; `OrphanSweepStatus` and the new `VariantSweepStatus` are aliases of
+  `RefusalStatus[K]`, and `refuse` / `lift` return what their callers read (a
+  log verdict, the kind that ended).
+- `VariantWatcher.Status` → `admin.Deps.VariantSweepStatus` (runServe) →
+  `/api/jobs` `maintenance.variantIntegrityRefusal` (the key) and
+  `variantIntegrityRefusingSince`, omitted while the watcher is not refusing
+  or its interval is off; one helper fills both chips (`refusalOf`). The
+  console words the key (`describeVariantIntegrityRefusal`) and paints the
+  line through the renderer the orphan GC's line now shares
+  (`renderMaintenanceLine`): a "refusing" badge and when the streak started,
+  the reason in a `hint warn` under the list (`job-maint-integrity-refusal`).
+
+### B156: a switched-off card said when its next sweep was due
+
+Every sweeper loop runs on every bridge whatever its gate says (#781), and
+`runSweepLoop` arms the next pass from the interval alone, so the recorders
+hold a time for passes the gate refuses. On main, over the same install, three
+minutes after boot `/api/jobs` carried `nextDueAt` six hours out for the
+analysis, fingerprint and CarPlay cards, each `enabled: false, active: false`,
+and the smart mixes card's `run.nextDueAt` 24 hours out beside `enabled:
+false`; the page said "off" beside "Next sweep: in 5h" on the first three and
+"Next run: in 23h" on the fourth. B156 named the analysis and fingerprint cards
+and said the CarPlay card read "—" because its interval was 0: it read "—"
+only for its first three minutes, its settle delay (`autoOptimizeSettleDelay`);
+its interval inherits the scan interval. The smart mixes card is the same
+defect, which the entry did not name.
+
+- Decided: the payload leaves a gated card's `nextDueAt` out while the card's
+  gate is closed (`nextSweepWhileOpen`, handlers_jobs.go), #1119's shape (the
+  handler leaves a field out by the gate the snapshot read once; the console
+  renders the absence as "—"). The gate is the card's own: `active` for the
+  analysis (in `/api/jobs` and in the SSE `analysis` frame, which paints the
+  same line), fingerprint and CarPlay cards, the switch for smart mixes (its
+  regenerator's whole gate). The recorder keeps the time.
+- A card switched on over a missing tool reads closed too: its next pass runs
+  only if the tool is back by then, the degraded note already says the next
+  sweep takes up the work once it is, and the card turns active, time and all,
+  within a minute of the tool coming back. "Say it will stand down" was the
+  other option; "—" is what #1119 and the upscale tile say for a live field of
+  a closed gate.
+- Rejected: doing it in the console alone. The payload would go on carrying a
+  time for a pass that stands down, and the rule would sit in five JS sites
+  instead of one Go helper.
+- The population is guarded: `TestEveryNextRunOnTheJobsCardsIsClassified`
+  walks `jobsSnapshotResponse` for every `next*` field (seven) and requires
+  `nextSweepPaths` to classify each, gated by which gate or ungated and why
+  (the scanner's next scan, the backups' next snapshot, the duplicates pass),
+  so a card added with a next-run field fails until someone decides.
+
+### Tests
+
+integrity (driving `tick`): `TestVariantWatcherLatchesItsVariantsDirRefusal`,
+`TestVariantWatcherSaysEachKindOfRefusalWhenItStarts`,
+`TestVariantWatcherSaysOnceWhenTheVariantsDirectoryComesBack`,
+`TestVariantWatcherStatusFollowsTheRefusalLatch`,
+`TestVariantWatcherStatusIsReadableBesideTheRunningLoop` (the publication
+under -race), `TestEveryVariantRefusalKindIsListed` (over the helper
+`requireEveryKindIsListed`, which the orphan kinds' test now shares).
+Adapted: `TestRefusalLatch` (the new returns, and the status each step
+publishes), `TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing`
+(the mount-loss tick left it for the kind test), the lifted-line assertions of
+`TestVariantWatcherSaysOnceWhenItStopsRefusing` and two orphan-sweep tests
+(`ended=`).
+
+admin: `TestMaintenanceChipSaysTheVariantWatcherIsRefusing` (over
+`requireTheChipCarriesTheRefusal`, which the orphan chip's test now shares),
+`TestEveryVariantRefusalKindIsWorded` (over `requireEveryRefusalKindIsWorded`,
+likewise), `TestTheMaintenanceLinesSayWhenASweepRefuses` (the shipped
+renderJobCards under node over the served payloads: both lines off, on,
+refusing as each kind, both at once, and the watcher off with its latch left
+refusing), `TestEveryNextRunOnTheJobsCardsIsClassified`,
+`TestAJobsCardSendsItsNextSweepOnlyWhileItsGateIsOpen` and
+`TestTheJobsCardsSayNoNextSweepWhileTheirGateIsClosed` (the shipped
+renderJobCards and applyAnalysisStats under node over the served payloads,
+with each switch moved apart from its gate). The node harness takes its stubs
+and entry points as parameters now (`consoleCardsHarness`).
+
+cmd/bridge: `TestServeReportsTheVariantWatcherRefusalOnTheJobsCard` (the real
+serve over an unmounted variants directory and a relocation), beside the
+orphan sweep's, both over `requireServeReportsARefusal`.
+
+Red first on main (6c8ae841): the B156 tests, copied into a worktree of main,
+went red at both closed steps of all four cards and of the SSE frame (the
+open step green); the B131 latch tests, written against main's API in a
+scratch file there, logged three WARNs and no summary for three skipped ticks,
+and one relocation WARN where there are two streaks. The status, chip and node
+tests need the new API, so they are red by construction.
+
+### Negative controls, on the committed tree, each restored from memory
+
+Each applied to the committed tree (ac6950b8) by a runner that replaces one
+exact string, refuses a mutation that does not match exactly once, runs the
+tests with `-count=1` (the integrity package whole, the admin tests whose
+names match the refusal, maintenance, next-run and jobs-field ones, and the
+two serve tests under `-timeout 150s`) and writes the file back. Every one
+went red; none failed to build.
+
+- NC1, the mount-loss skip WARNs directly and never reaches the latch:
+  `TestVariantWatcherLatchesItsVariantsDirRefusal`,
+  `…SaysEachKindOfRefusalWhenItStarts`,
+  `…SaysOnceWhenTheVariantsDirectoryComesBack`,
+  `…StatusFollowsTheRefusalLatch`, `…StatusIsReadableBesideTheRunningLoop`
+  and the watcher's serve test (its unmounted case; the relocation case went
+  red with it for want of time, since both wait until the test binary's
+  deadline less 30 s and the first used it up).
+- NC2, the skip logs no summary: `TestVariantWatcherLatchesItsVariantsDirRefusal`
+  alone.
+- NC3, one kind for both refusals: the five watcher tests above and the
+  serve test's unmounted case.
+- NC4, the latch publishes nothing when a streak starts: `TestRefusalLatch`,
+  both sweeps' `…StatusFollowsTheRefusalLatch` and
+  `…StatusIsReadableBesideTheRunningLoop`, the orphan sweep's empty-catalog
+  tests (every case of
+  `TestOrphanSidecarSweeperEndsAnEmptyCatalogStreakOverNothingItWouldRemove`,
+  and `…LatchesTheEmptyCatalogRefusal`) and both serve tests, every case.
+- NC5, nothing published when a streak ends: `TestRefusalLatch`, both
+  `…StatusFollowsTheRefusalLatch` and the orphan sweep's empty-catalog tests.
+- NC6, the handler never fills the watcher's refusal:
+  `TestMaintenanceChipSaysTheVariantWatcherIsRefusing`,
+  `TestTheMaintenanceLinesSayWhenASweepRefuses` and the watcher's serve test,
+  both cases.
+- NC7, runServe wires a status that never refuses: the watcher's serve test,
+  both cases, and nothing else (it is the one test that sees the wiring line).
+- NC8, the handler reports a refusal with the watcher's interval off:
+  `TestMaintenanceChipSaysTheVariantWatcherIsRefusing`.
+- NC9, the console loses the mount-loss wording:
+  `TestEveryVariantRefusalKindIsWorded`,
+  `TestTheMaintenanceLinesSayWhenASweepRefuses`.
+- NC10, the kinds list leaves out the mount-loss kind:
+  `TestEveryVariantRefusalKindIsListed`, `TestEveryVariantRefusalKindIsWorded`
+  (its floor of two kinds) and `TestMaintenanceChipSaysTheVariantWatcherIsRefusing`.
+- NC11, the console reads no watcher refusal:
+  `TestEveryJobsFieldIsRenderedSomewhere` (the leaf guard),
+  `TestTheMaintenanceLinesSayWhenASweepRefuses`.
+- NC12, `nextSweepWhileOpen` returns the time whatever the gate says;
+  NC13, the analysis card keyed on its switch rather than its gate; NC14, the
+  SSE `analysis` frame keeps the time; NC15, the smart mixes card keeps its
+  own: each turned `TestAJobsCardSendsItsNextSweepOnlyWhileItsGateIsOpen` and
+  `TestTheJobsCardsSayNoNextSweepWhileTheirGateIsClosed` red.
+- NC16, the watcher's lifted line names no kind:
+  `TestVariantWatcherSaysOnceWhenItStopsRefusing`,
+  `…SaysOnceWhenTheVariantsDirectoryComesBack`.
+- NC17, the orphan sweep's lifted line names no kind:
+  `TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal`,
+  `…SaysOnceWhenItStopsRefusing`.
+- NC18, an empty catalog leaves a mount-loss streak running:
+  `TestVariantWatcherEndsItsStreakOnAnEmptyCatalog`,
+  `TestVariantWatcherStatusFollowsTheRefusalLatch`.
+
+### With the fix, the same install
+
+The branch binary (ac6950b8) over the same install, which held twelve rows
+by then (three renditions a track), the variants directory empty: one WARN
+when the streak started, with its hint, and an Info summary on every tick
+after it (`skipped=true`, `rows=12`). Over 3 min 42 s from the moment the
+directory was emptied: 1 WARN and 111 summaries, where main logged 114 WARNs
+over the same span. `/api/jobs` `maintenance` carried
+`variantIntegrityRefusal: "variantsDirUnavailable"` and the streak's start,
+and the page (the browser pane, read through the DOM) said "refusing since
+…" on the Variant integrity line with the mount-loss wording under the list;
+at 375 px the hint was 149 px tall in a 293 px column and the document no
+wider than the viewport.
+
+- One rendition file copied in under another album's path: the next tick
+  WARNed the relocation refusal at once (a new streak, `refused=12`), and the
+  card carried `relocation` and, after a reload (the page pauses its polls in
+  a hidden tab), the relocation wording.
+- Every rendition written back at its place: one Info line, `no longer
+  refusing … ended=relocation`, and no refusal on the card. The directory
+  emptied again: one WARN at once, a new streak; filled again:
+  `ended=variantsDirUnavailable`.
+- B156, over the same boot: the analysis, fingerprint, CarPlay and smart
+  mixes cards carried no `nextDueAt`, and the page said "—" on all four, while
+  the scanner's next scan and the backups' next snapshot stayed ("in 5h",
+  "in 23h"). `PATCH {"analysisEnabled": true}` answered `live` and the analysis
+  card read active with its next sweep ("in 5h"); `false` took it back to "—".
+
+### Out of scope
+
+- The CarPlay card's last sweep reads "turned off" for a pass its gate
+  refused (the sweeper records it, `Disabled`), where the analysis and
+  fingerprint cards keep their last real breakdown (their sweepers record
+  nothing for such a pass). Both say what ran, and B156 changes neither. Not
+  filed.
