@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/authredirect"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
@@ -197,7 +198,13 @@ func (c *Client) log() *slog.Logger {
 // Each leg sets its own context.WithTimeout instead, sized to its payload —
 // requestTimeout for the bounded JSON exchanges, bulkTimeout for the two large
 // ones. Mirrors internal/updater's timeout-free download client.
-var defaultHarvestHTTPClient = &http.Client{Timeout: 0}
+//
+// It is built over authredirect.Guard, as every client httpClient hands out
+// is: each request sets the bearer token as an explicit Authorization header,
+// and net/http copies that onto a redirect to the same host whatever the
+// scheme, so an https Atlas answering with a redirect to http on its own host
+// had the token sent in the clear (backlog B133).
+var defaultHarvestHTTPClient = authredirect.Guard(&http.Client{Timeout: 0})
 
 const (
 	// defaultHarvestRequestTimeout bounds one small JSON exchange (a submit
@@ -211,9 +218,12 @@ const (
 	defaultHarvestBulkTimeout = 15 * time.Minute
 )
 
+// httpClient is the client every harvest request goes through: the default
+// one, or a copy of the caller's built over authredirect.Guard (the caller's
+// client is never written to, and its own redirect policy is still asked).
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
-		return c.HTTP
+		return authredirect.Guard(c.HTTP)
 	}
 	return defaultHarvestHTTPClient
 }
