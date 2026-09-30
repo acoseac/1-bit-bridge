@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"strings"
 
 	tag "github.com/dhowden/tag"
-
-	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // readIFFChunkBody reads exactly `size` bytes of an IFF/RIFF chunk body from r.
@@ -62,7 +59,7 @@ func readIFFChunkBody(r io.Reader, size uint32, format, chunk, absPath string) (
 func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "AIFF"
 
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -329,7 +326,7 @@ func parseAIFFExtended(b []byte) float64 {
 func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "WAV"
 
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -516,7 +513,7 @@ type iffPayloadSpan struct {
 // CURRENT position (the walker has just consumed the 8-byte chunk
 // header). A failed position read leaves the span unseen — no duration
 // rather than one the fit check could not verify.
-func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
+func iffPayloadSpanAt(f extractSource, size uint32) iffPayloadSpan {
 	pos, err := f.Seek(0, io.SeekCurrent)
 	if err != nil || pos < 0 {
 		return iffPayloadSpan{}
@@ -557,7 +554,7 @@ func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
 // all stamped the ten minutes. v12 claimed this rule for both IFF
 // walkers and it held until v13 gave AIFF a narrowing step in front of
 // it; WAV, which does not narrow, was never affected.
-func ssndSoundSpan(f *os.File, size uint32) iffPayloadSpan {
+func ssndSoundSpan(f extractSource, size uint32) iffPayloadSpan {
 	if uint64(size) == iffUnknownPayloadSize {
 		return iffPayloadSpan{}
 	}
@@ -584,7 +581,7 @@ func ssndSoundSpan(f *os.File, size uint32) iffPayloadSpan {
 // unknown bound fails OPEN in iffPayloadFits (typing and duration land),
 // parity with the DFF walker and the iOS `fileSizeBound: nil` rule. In
 // practice Stat on an open handle does not fail.
-func physicalFileSize(f *os.File) uint64 {
+func physicalFileSize(f extractSource) uint64 {
 	if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
 		return uint64(fi.Size())
 	}
@@ -850,7 +847,7 @@ func applyEmbeddedID3(body []byte, t *Track, existing tag.Metadata, absPath, log
 // one pad byte when size is odd (IFF / RIFF alignment rule).
 // Centralised so AIFF and WAV walkers stay consistent on the
 // odd-payload alignment behaviour.
-func seekPastChunk(f *os.File, size int64) error {
+func seekPastChunk(f extractSource, size int64) error {
 	skip := size
 	if skip%2 == 1 {
 		skip++

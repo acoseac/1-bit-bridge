@@ -32498,6 +32498,217 @@ with `-count=1`, the file restored and the tree checked clean after each.
 | NC2: `defaultHarvestHTTPClient` built without the guard | the default-client test only |
 | NC3: the shared guard strips nothing | the harvest legs and the default-client test, both `internal/authredirect` tests (the leave-https rows), and enrich's `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop` and `TestTheCredentialGuardKeepsACallersRedirectPolicy` for all three enrich clients, which shows they run over the shared guard |
 
+## 2026-09-29 — a file the scan could not read whole keeps its row, and a new one gets none (backlog B134)
+
+B62 (#1111) made a scan worker write no row for a path that is no longer a
+file, and left every other failed open as it was: the full path wrote the
+track whatever `ExtractWithContext` returned, over `fillFromPath`'s guess
+(the file name as the title, the parent folder as the album, the grandparent
+as the artist), under the walk's size and mtime, and the skip gate compares
+exactly those with the file's on every later scan.
+
+### What was measured
+
+On main (6f914ef4), with this change's tests committed first and run before
+the fix, on the dev Mac and in `golang:1.26.6` on dido as uid 1000:
+
+- **A real failed open** (`TestScanner_AFileThatCannotBeOpenedIsNotWrittenFromItsPath`,
+  4fa516ec). A FLAC indexed titled "Before", rewritten titled "After" (a new
+  mtime), and a new FLAC titled "New", both locked out with chmod 0 for a
+  scan: the changed file's row became title "01" and the new file got a row
+  titled "02", each under its file's new size and mtime, with one ERROR
+  `extract` line per file naming its absolute path. With both readable again
+  the next scan kept "01" and "02": the stored size and mtime equalled the
+  files', so the gate skipped them.
+- **Through the opener seam** (65a60c6b routes every extractor's open through
+  `openAudioFile` and changes nothing else; the rest of the package passed),
+  for eight extractor families (FLAC, MP3, DSF, M4A, Ogg FLAC, AIFF, WAV, DFF)
+  and four faults (the open failing with EIO, with ESTALE, every seek failing
+  with ESTALE, the read of the bytes holding the title failing with EIO, each
+  in the shape `*os.File` returns, an `*fs.PathError` around the errno):
+  - the full path replaced the changed file's row in all 32 cases with the
+    path's title ("01" to "08"; with no format facts at all where the open
+    failed), and made a new file a row by its name in all 32;
+  - the version-stale leg (`reExtractUnchanged`, which an `ExtractorVersion`
+    bump sends every row down) kept the row, its missing count not reset,
+    wherever the extractor RETURNED the failure: every failed open, the
+    failed seek for FLAC, MP3, M4A, AIFF, WAV and DFF, the failed title read
+    for AIFF, WAV and DFF. In the other 7 of the 32 it REPLACED the row with
+    the path's title, moved its `indexed_at` (a delta to every paired device)
+    and stamped it with the current `ExtractorVersion`, which no later scan
+    re-reads: the title read for FLAC, MP3, DSF, M4A and Ogg FLAC, and the
+    seek for DSF and Ogg FLAC. Every one is a failure the parser dropped.
+- Where each family drops a failed read (read from the code, and matching
+  which cases replaced the row): dhowden answers any read error as a tag it
+  cannot parse (`readDhowdenTags`: "Corrupt/partial tag — skip"),
+  `readDSFTags` answers a failed seek or read as no tag, the Ogg FLAC join
+  declines on a page it cannot read, and the FLAC format read, the MP3 frame
+  parse and the MP4 walks log theirs at Warn and read on. The DSF, DFF, AIFF
+  and WAV chunk walks return theirs.
+
+### The decision: keep the row, mint none
+
+The entry named three answers. For a file with a row, **keep it untouched and
+let the next scan retry**: its stored stat (a changed file's) or its stored
+version (a version-stale row's) is exactly what makes the next scan read the
+file again, with nothing to invent in the meantime. For a new file, **write
+nothing**: it gets a row once a scan reads it whole. **Stamping a placeholder
+the gate re-reads** was rejected: for a known file it replaces good tags with
+the path's guess until the next scan (a delta to every device, and the
+upsert's `enriched_at = 0` sends the enricher to search MusicBrainz for the
+folder names), then a second delta; for a new file it shows the phones a track
+titled by its file name whose download fails the same way (a permission the
+service user lacks answers the download's open too); and it needs a sentinel
+stamp (a zero mtime or version) that every other reader of the row (the
+lyrics drift check, the analysis and auto-optimize candidate queries, the
+duplicate tiering) would have to learn means "not read". Keep-and-mint-none is
+the scanner's own rule three times over: "we could not see this path"
+dominates in the deletion pass, a link whose target cannot be stat'ed keeps
+its row and mints none (#1070), and `processSACDISO` writes and retires
+nothing on a read that did not complete (2026-09-28). `reExtractUnchanged`'s
+docblock already said it: "clobbering a good row with a partial extract would
+be strictly worse". It kept that promise only for errors that reached it.
+
+The cost, accepted: a file that never reads whole (a permission the service
+user lacks, a bad sector under its tags) never gets a row, or keeps the one it
+had, with one Warn per scan naming it, where it used to appear by name with a
+download that failed. And a kept row of a changed file keeps its old size, so
+the app's exact size check fails a download of it until a scan reads it: the
+state the library was in before that scan, which a scan that could not read
+the file does not improve.
+
+### The change
+
+- `openAudioFile` (internal/manifest/extract_source.go) is the one open of an
+  extractor's audio file: all eight sites that opened with
+  `fsutil.OpenAsFile` call it, and the four IFF helpers typed `*os.File` take
+  the `extractSource` interface both satisfy. Under `ExtractWithContext` it
+  returns a `faultNotingSource`, which forwards every call and notes, in the
+  call's `readFaults`, the first open, read, seek or stat that did not
+  complete; `ExtractWithContext` works on its own copy of the context for
+  that record and answers `readIncompleteError` (`readFault`) when one was
+  noted, ahead of any error the parser returned. The `Extract` docblock's
+  "Only read/open errors propagate" was false both ways (a dhowden read error
+  never propagated; a DSF, DFF, AIFF or WAV format refusal does) and now says
+  what is an error.
+- What completes a read though it errs: the end of the file (`io.EOF`,
+  `io.ErrUnexpectedEOF`: a truncated file), and an offset the OS refuses
+  before reading (`seekOffsetRefused`: EINVAL, and on Windows
+  ERROR_NEGATIVE_SEEK, in two build-tagged files; a ReadAt at a negative
+  offset), which a malformed file's own bytes ask for. A refusal because the
+  path is not a file is not noted: that is B62's answer, and the scanner asks
+  `notAFileNow` first (a socket, which no open reaches, is still named there).
+- `runScanWorker`'s full path and `reExtractUnchanged` answer `readFault` with
+  `keepUnread`: nothing written, a row's missing count reset as the skip gate
+  resets an unchanged file's (the walk saw the file), and the file noted in
+  the scanner's `unreadTally`, which `Scan` and `ScanSubtree` reset at their
+  start and report once their workers are done: one Warn,
+  `audio files the scan could not read; their rows are kept as they were, and
+  a new one gets no row until a scan reads it`, with `count`, a
+  library-relative `example` and the failure as `err` (`walkErrReason`: the
+  operation and cause, no absolute path), e.g. `err=open: permission denied`.
+- `Scanner.openAudio` is a per-scanner test seam, the twin of `openSACD`.
+- `TestEveryAudioFileReadGoesThroughOpenAudioFile` fails on a function of
+  `internal/manifest` that opens or reads a file through fsutil and is not
+  one of the readers of other files it names (`openSACDContainer` and
+  `ExpandSACDISO` for an `.iso`, `readFolderArt`, `readSidecarCandidate` and
+  the artwork cache's three), so a new extractor cannot open around
+  `faultNotingSource`; `extractFLACFormat`, the path-based STREAMINFO shim,
+  opens through `openAudioFile` for that reason. With the DSF extractor put
+  back on `fsutil.OpenAsFile`, the sweep names `extractDSFWithContext` and
+  the DSF cases of the matrix tests go red.
+- `TestEveryLibraryReadOpensAsAFile`'s floor on reads through fsutil went
+  from 20 to 15: the eight opens became one, so the tree now holds 21.
+
+Cost: one small allocation for the wrapper, one for the record and a copy of
+the four-field context per extracted file, and an indirect call per read.
+
+### No ExtractorVersion bump
+
+A file read whole extracts byte-identically; only a file that was not read
+answers differently, with nothing where it had a guess. The first scan after
+the change rewrites nothing the gate skips
+(`TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead`: of four files, the
+one changed and read is rewritten, the one left alone and the two unread keep
+their rows byte for byte, nothing is journaled). The guesses the defect
+already wrote carry a stat that matches, so they stay until their file
+changes, or until a later bump re-reads every row (its diff then sees the
+file's tags and writes them). A bump now would re-read every file of every
+library and re-upsert every SACD virtual row (that leg has no diff-guard) to
+heal rows nothing can tell from a genuinely tagless file, of a count nobody
+knows. One can be healed by hand by zeroing its `mtime_ns` (CLAUDE.md,
+"Local test fixture").
+
+### Tests
+
+Red on main or on the seam commit, green after (`-count=1`):
+`TestScanner_AFileThatCannotBeOpenedIsNotWrittenFromItsPath` (unix, chmod 0,
+skipped as root), `TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow`,
+`TestScanner_ANewFileWhoseReadDidNotCompleteGetsNoRow` and
+`TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow` (each eight
+families by four faults, asserting the row byte for byte, the missing count,
+one line, and the file's own tags once read whole),
+`TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead` and
+`TestScanSubtree_AChangedFileWhoseReadDidNotCompleteKeepsItsRow`. The positive
+control, `TestScanner_AFileReadWholeIsWrittenAsItAlwaysWas`, passes before
+and after: an MP3 shorter than dhowden's 128-byte ID3v1 look, a DSF whose
+metadata pointer has its top bit set, a DSF the walk refuses as not its
+format and a FLAC cut short inside its comment block are all written as they
+always were, with no unread line.
+
+Negative controls on the committed fix (8d3cebf5), each restored and re-run
+green:
+
+| mutation | goes red |
+|---|---|
+| NC1: a failed open is not noted | every open-fault case (48 subtests), the chmod test, the rewrite-only test |
+| NC2: `Read` notes nothing | the title-read case for AIFF, DFF, DSF, M4A, MP3 and WAV (18) |
+| NC3: `ReadAt` notes nothing | the title-read case for Ogg FLAC alone (3): its join reads by offset |
+| NC4: every seek error is a fault | the two seek-offset controls (the short MP3, the DSF pointer) |
+| NC5: the end of the file is a fault | dozens of tests across the package, every well-formed extraction that reads to the end |
+| NC6: the full path writes what it read | the changed and new-file tests (32 each), the chmod, rewrite-only and subtree tests |
+| NC7: `reExtractUnchanged` ignores `readFault` | the version-stale test (32): the row is no longer replaced, since `ExtractWithContext` now errs, but its missing count stays and no line is logged |
+| NC8: `keepUnread` resets no missing count | the changed and version-stale tests (32 each) |
+| NC9: `keepUnread` notes nothing | every test that asserts the line |
+| NC10: `Scan` does not reset the tally | the changed, new and version-stale tests: the scan that read the file re-logs the old count |
+| NC11: `ScanSubtree` does not report | the subtree test alone |
+| NC12: `ExtractWithContext` answers the parser's error first | every case whose extractor also returned an error (all open faults; the seek for FLAC, MP3, M4A, AIFF, WAV, DFF; the title read for AIFF, WAV, DFF): the raw error reads as a parse error, and the row is written by name |
+
+FLAC's title read stays green under NC2 and NC3 alone: the picture guard reads
+the bytes by offset and dhowden reads them in order, and either failing
+notes it.
+
+Platforms: on Linux (`golang:1.26.6` on dido, uid 1000) the B134 tests (the
+chmod test ran, not skipped), B62's worker tests and the whole
+`internal/manifest` and `cmd/bridge` suites passed, and the B134 tests under
+`-race`; on the dev Mac `internal/manifest` passed under `-race` (650 s). On
+Windows 11 (nomos, go1.26.6) the B134 tests passed, and with
+ERROR_NEGATIVE_SEEK dropped from `seekOffsetRefused` on that host exactly the
+two seek-offset controls went red, their line reading `err=seek: An attempt
+was made to move the file pointer before the beginning of the file.`: Windows
+answers a seek before the start with ERROR_NEGATIVE_SEEK, never EINVAL. The
+first run there found the new portable tests using a helper from the
+unix-only chmod test file, so the package's Windows test binary did not
+compile (the trap `scanner_fixture_test.go`'s header records); the helper
+moved there.
+
+### Not covered
+
+- A DFF's DIIN title, artist and album never reach a scanned row:
+  `fillFromPath` fills them first and `parseDIINChunks` fills only empty
+  fields (the DFF cases above store title "08" when read whole, which is why
+  that fixture's versions differ by sample rate). Pre-existing: backlog B140.
+- A folder's `cover.jpg`: a read that failed leaves the album's rows without
+  local art, as does a cover added after they were indexed (a throwaway test:
+  a `cover.jpg` added beside an indexed FLAC was read by neither a full scan
+  nor a subtree scan), because the gate re-reads no unchanged file for its
+  folder's art: backlog B141. A lyrics sidecar heals: the gate's drift check
+  re-reads a sidecar that would win (read, not run).
+- The iOS app has no twin: its scanner keeps a tag state (`needsParsing`,
+  `parsed`, `failed`) and a Retry (`LibraryHealthView`), so a source that
+  dropped out mid-parse leaves a failed row, never a guess its gate trusts
+  (read, not run). No wire change, no Mirror-PR.
+
 ## 2026-09-29 — autocert.domain is served as the host it names, a custom endpoint is published without its path, and a manual upstream's URL reaches no log line whole (backlog B66)
 
 B54 (#1085) kept a `customEndpoints` entry's user name, password, query and

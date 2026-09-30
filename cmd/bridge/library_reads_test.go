@@ -79,9 +79,12 @@ func TestEveryLibraryReadOpensAsAFile(t *testing.T) {
 	t.Logf("read %d production .go files in %d packages, holding %d reads through fsutil", files, len(pkgs), asFile)
 	// A scan that reads nothing reports nothing. The five packages held 129
 	// production files and 28 reads through fsutil when these floors were
-	// set.
-	if files < 100 || asFile < 20 {
-		t.Fatalf("read %d production .go files holding %d reads through fsutil, want >=100 and >=20: "+
+	// set, and 21 reads once the extractors' eight opens of their audio file
+	// became one (internal/manifest's openAudioFile, backlog B134): a floor
+	// is for a scan that sees nothing, not a census, so it sits well under
+	// the count.
+	if files < 100 || asFile < 15 {
+		t.Fatalf("read %d production .go files holding %d reads through fsutil, want >=100 and >=15: "+
 			"the scan is not seeing the packages", files, asFile)
 	}
 	for _, f := range findings {
