@@ -1382,11 +1382,14 @@ func libraryHasDSD(ctx context.Context, d Deps) (bool, error) {
 // checkFingerprintToolchain verifies the acoustic-fingerprinting fallback can
 // actually run when it is switched on.
 //
-// Two prerequisites, and BOTH are silent failures without this check: fpcalc
-// on PATH, and an AcoustID application key. Missing either degrades the
-// feature to off at startup with a single stderr line that scrolls away, so
-// `bridge doctor` is where an operator finds out why fingerprinting never
-// resolved anything.
+// Two prerequisites, and BOTH are quiet failures without this check: fpcalc
+// on PATH, and an AcoustID application key. Missing either keeps the feature
+// inactive (the gate is live, probed on a 30 s cache, so fixing it needs no
+// restart) with one stderr line per process that scrolls away, and the Jobs
+// card's degraded note, so `bridge doctor` is where an operator running the
+// CLI finds out why fingerprinting never resolved anything. This said the
+// feature degraded to off at startup until 2026-09-29, a startup verdict
+// the live gate retired.
 //
 // Mirrors checkAudioToolchain's shape, including the no-op when the feature is
 // off — a host that will never fingerprint should not be nagged about a binary

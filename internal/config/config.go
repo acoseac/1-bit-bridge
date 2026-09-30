@@ -1832,7 +1832,8 @@ type UpscaleConfig struct {
 	OptimizeEnabled *bool `yaml:"optimizeEnabled,omitempty"`
 
 	// Workers is the size of the long-lived transcode worker pool
-	// instantiated by `bridge serve` when Enabled. Zero (the default)
+	// `bridge serve` builds on every bridge (the live gate decides
+	// whether it is given work, #781). Zero (the default)
 	// resolves to min(NumCPU-1, 4) at startup. Operators with beefy
 	// hosts can raise; small-box deployments (Pi) should leave at
 	// the default to avoid starving downloads / pairing requests.

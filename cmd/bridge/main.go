@@ -3786,40 +3786,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	stopBroker := apiSrv.StartEventBroker()
 	defer stopBroker()
 
-	// Phase 2.5: long-lived transcode worker pool inside `bridge
-	// serve`. Only instantiated when the feature is fully active
-	// — saves goroutines + a manifest store reference when the
-	// operator hasn't opted in, and matches the "off means
-	// completely off" guarantee the iOS gating relies on.
-	//
-	// Constructed AFTER apiSrv so the adapter can borrow the
-	// api server's Resolver instance via `apiSrv.Resolver()`
-	// instead of building a snapshot from cfg.LibraryRoots.
-	// Critical: the api Resolver hot-reloads via SetRoots when
-	// the admin removes/adds a library root at runtime; a
-	// snapshot resolver would silently keep routing to the old
-	// root set and the upscale endpoint would either resolve
-	// stale paths or 404 on freshly-added ones (Qodo bug 2 on
-	// PR #109).
-	//
-	// Pool lives for the rest of serveCmd's lifetime; deferred
-	// Stop() drains in-flight sox processes during graceful
-	// shutdown (SIGTERM from the service manager → cancellable
-	// via `transcode.Pool.stopCtx`). The defer fires AFTER
-	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
-	// can't race the pool teardown.
-	// Auto-analysis: when the feature is active, run a long-lived
-	// analyze pool + a background sweeper that enqueues tracks missing a
-	// fresh waveform on a settle-delay-then-scan-interval cadence.
-	// Generation also stays available via `bridge analyze`. The pool's
-	// deferred Stop drains in-flight decodes during graceful shutdown
-	// (shares scanCtx with the other periodic workers). apiSrv.Resolver()
-	// is the hot-reloading resolver so a runtime root add/remove is
-	// reflected without restart (same rationale as the upscale enqueuer).
-	// analysisPool + the sweeper's nudge/status live in runServe scope so
-	// the admin Deps closures (wired further down) can read them; all stay
-	// nil when the feature is off, and the closures are only installed
-	// when analysisActive.
 	// postScanNudges collects every buffered-1 nudge channel that wants a
 	// non-blocking poke after each successful scan. ONE SetPostScanHook
 	// registration (below, once every sweeper has appended) fans out to
@@ -3841,6 +3807,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	catalogNudge := make(chan struct{}, 1)
 	postScanNudges = append(postScanNudges, catalogNudge)
 
+	// Auto-analysis: a long-lived analyze pool + a background sweeper that
+	// enqueues tracks missing a fresh waveform on a settle-delay-then-
+	// scan-interval cadence, whenever the live analysis gate is open (a
+	// pass the gate refuses stands down). Generation also stays available
+	// via `bridge analyze`. The pool's deferred Stop drains in-flight
+	// decodes during graceful shutdown (shares scanCtx with the other
+	// periodic workers). apiSrv.Resolver() is the hot-reloading resolver so
+	// a runtime root add/remove is reflected without restart (same
+	// rationale as the upscale enqueuer). analysisPool + the sweeper's
+	// nudge/status live in runServe scope so the admin Deps closures (wired
+	// further down) can read them. All are set on every bridge, and the
+	// closures installed on every bridge: this said until 2026-09-29 that
+	// they stayed nil with the feature off and the closures were installed
+	// only when analysisActive, which #781 ended.
 	var analysisPool *analyze.Pool
 	var analysisNudge chan struct{}
 	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
@@ -3957,6 +3937,29 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			smartMixRearm, smartMixRunState)
 	}()
 
+	// Phase 2.5: long-lived transcode worker pool inside `bridge serve`,
+	// constructed on every bridge (the block below) whatever
+	// `upscale.enabled` says. What keeps work away from it with the
+	// feature off is the live upscale gate, read at every enqueue path.
+	// Until #781 it was instantiated only when the feature was fully
+	// active, and this comment said so until 2026-09-29.
+	//
+	// Constructed AFTER apiSrv so the adapter can borrow the
+	// api server's Resolver instance via `apiSrv.Resolver()`
+	// instead of building a snapshot from cfg.LibraryRoots.
+	// Critical: the api Resolver hot-reloads via SetRoots when
+	// the admin removes/adds a library root at runtime; a
+	// snapshot resolver would silently keep routing to the old
+	// root set and the upscale endpoint would either resolve
+	// stale paths or 404 on freshly-added ones (Qodo bug 2 on
+	// PR #109).
+	//
+	// Pool lives for the rest of serveCmd's lifetime; deferred
+	// Stop() drains in-flight sox processes during graceful
+	// shutdown (SIGTERM from the service manager → cancellable
+	// via `transcode.Pool.stopCtx`). The defer fires AFTER
+	// httpSrv.Shutdown completes, so accepting POST /v1/upscale
+	// can't race the pool teardown.
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
 	// The album-level gain's decider (internal/albumgain), in runServe
@@ -4325,12 +4328,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		})
 	}
 
-	// /v1/upscale/stats wiring. Always registered so paired iOS
-	// clients can render a clean "feature off" state on bridges where
-	// the operator hasn't enabled upscaling — same nil-safe contract
-	// the admin tile uses. The closure mirrors the admin
-	// /api/upscale/stats handler exactly so the operator's Settings
-	// page and the iOS management section show the same numbers.
+	// /v1/upscale/stats wiring. Always registered so a client can
+	// read a clean "feature off" state on bridges where the operator
+	// hasn't enabled upscaling — the contract the admin tile keeps.
+	// The adapter mirrors the admin /api/upscale/stats handler so the
+	// operator's Settings page and a bearer-token client read the same
+	// numbers (the app's upscaling section that polled it is gone).
 	//
 	// Three sources combined:
 	//   1. Live pool counters — only while the live upscale gate is
@@ -4800,8 +4803,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// call), so the admin tile's `enabled` matches /v1/health's
 		// `waveform` flag rather than the persisted config flag.
 		AnalysisActive: analysisActiveFn,
-		// Analysis pool + sweeper surfaces (nil when the feature is off —
-		// the admin then omits the fields, mirroring the upscale tile).
+		// Analysis pool + sweeper surfaces, wired on every bridge: the
+		// pool and the sweeper run whatever the gate says (#781). The
+		// console leaves the pool's counters out while the gate is
+		// closed, as the upscale tile does, and keeps the sweeper's
+		// last-run lines.
 		AnalysisPoolStats: analysisPoolStatsClosure(analysisPool),
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
@@ -4886,8 +4892,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// persisted no-match verdict and this cache suppress the same
 		// candidates, and the sweeper reads the cache first, so a retry that
 		// cleared only the database would not re-open a file answered this
-		// session. nil cache (fingerprinting disabled) reports nothing
-		// dropped, which is accurate — there is no sweeper to re-open it for.
+		// session. The cache is built on every bridge, whatever the switch
+		// says (fingerprintCache above), so the nil arm is only defensive.
 		FingerprintForget: func(prefix string) int {
 			if fingerprintCache == nil {
 				return 0

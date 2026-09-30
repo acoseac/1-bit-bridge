@@ -61,10 +61,12 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	// Upscale in-flight + completed: read through the existing
 	// `UpscaleStatsProvider` interface so we don't replicate the
 	// pool-snapshot indirection the /v1/upscale/stats handler
-	// already routes through. The provider is nil on bridges that
-	// disabled upscale; degrade to zeros rather than 5xxing —
-	// diagnostics MUST stay reliable even when individual subsystems
-	// are off.
+	// already routes through. Serve wires the provider on every
+	// bridge, and its snapshot carries no pool while the upscale gate
+	// is closed (the pool itself runs on every bridge); degrade to
+	// zeros then, and with no provider (a harness), rather than
+	// 5xxing — diagnostics MUST stay reliable even when individual
+	// subsystems are off.
 	if s.upscaleStatsProvider != nil {
 		if snap, err := s.upscaleStatsProvider.UpscaleStatsSnapshot(r.Context()); err == nil && snap.Pool != nil {
 			resp.UpscaleJobsInFlight = snap.Pool.Inflight

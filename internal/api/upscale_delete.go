@@ -191,7 +191,9 @@ type VariantSidecarLocation struct {
 // progress are NOT cancelled (no per-job cancellation primitive);
 // the unlink race is documented honestly.
 //
-// Nil-safe — when no pool is wired the handler skips the drop.
+// Nil-safe — when no dropper is wired (a test harness; serve wires one
+// on every bridge, the pool being built on every bridge since #781) the
+// handler skips the drop.
 type InflightDropper interface {
 	DropInflight(matches func(sourcePath string) bool) int
 }
@@ -207,9 +209,8 @@ func (s *Server) WithVariantDeleter(d VariantDeleter) *Server {
 }
 
 // WithInflightDropper attaches the transcode pool's dedup-drop
-// primitive. Optional — bridges without an upscale pool wired
-// (test harnesses, pure-manifest builds) skip the dedup-drop
-// step entirely.
+// primitive. Optional — serve wires it on every bridge; a server
+// without it (a test harness) skips the dedup-drop step entirely.
 func (s *Server) WithInflightDropper(d InflightDropper) *Server {
 	s.inflightDropper = d
 	return s

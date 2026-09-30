@@ -46,8 +46,10 @@
 // than on a static property of the field. Two shapes qualify:
 //
 //   - The status itself could have been different elsewhere.
+//     `tailscaleMode` naming which transition this was;
 //     `autoOptimizeEnabled` answering `restart` because no sweeper is
-//     wired here; `tailscaleMode` naming which transition this was.
+//     wired here (a harness's case: serve wires the sweeper on every
+//     bridge since #781).
 //   - The status is `live` and the change genuinely applied, but the
 //     feature is inert for a reason the operator can act on.
 //     `fingerprintEnabled` on a host without fpcalc: a restart would
