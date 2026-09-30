@@ -99,8 +99,8 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 	}
 
 	// AlbumArtist pass: FS minority unified to the dominant; routed untouched.
-	if _, err := s.runAlbumArtistReconciliation(ctx, routedSet); err != nil {
-		t.Fatalf("runAlbumArtistReconciliation: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, albumArtistStep); err != nil {
+		t.Fatalf("albumArtistStep: %v", err)
 	}
 	if got := albumArtistOf("Aspiration/Live/03. Take.flac"); got != "Aspiration" {
 		t.Errorf("fs minority AlbumArtist = %q, want unified %q", got, "Aspiration")
@@ -110,8 +110,8 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 	}
 
 	// Year fill pass: FS missing year filled from siblings; routed stays missing.
-	if _, err := s.runYearReconciliation(ctx, routedSet); err != nil {
-		t.Fatalf("runYearReconciliation: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, yearStep); err != nil {
+		t.Fatalf("yearStep: %v", err)
 	}
 	if got := yearOf("Aspiration/Live/03. Take.flac"); got == nil || *got != 2005 {
 		t.Errorf("fs missing year = %v, want filled 2005", got)
@@ -122,17 +122,17 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 
 	// AlbumTitle + YearByMBID passes use the same routedExclusionSet guard;
 	// run them and re-confirm the routed row is still untouched end-to-end.
-	if _, err := s.runAlbumTitleReconciliation(ctx, routedSet); err != nil {
-		t.Fatalf("runAlbumTitleReconciliation: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, albumTitleStep); err != nil {
+		t.Fatalf("albumTitleStep: %v", err)
 	}
-	if _, err := s.runYearReconciliationByMBID(ctx, routedSet); err != nil {
-		t.Fatalf("runYearReconciliationByMBID: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, yearByMBIDStep); err != nil {
+		t.Fatalf("yearByMBIDStep: %v", err)
 	}
 
 	// TrackNumber pass: FS missing track number filled from the filename's
 	// leading "NN"; routed row spared (its numbers belong to the upstream DIDL).
-	if _, err := s.runTrackNumberReconciliation(ctx, routedSet); err != nil {
-		t.Fatalf("runTrackNumberReconciliation: %v", err)
+	if _, err := s.runReconcileStep(ctx, routedSet, trackNumberStep); err != nil {
+		t.Fatalf("trackNumberStep: %v", err)
 	}
 	if got := trackNumberOf("Aspiration/Live/03. Take.flac"); got == nil || *got != 3 {
 		t.Errorf("fs missing track number = %v, want filled 3", got)

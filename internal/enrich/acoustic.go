@@ -347,7 +347,12 @@ func (e *Enricher) applyAcousticFallback(ctx context.Context, t *manifest.Track)
 	if t.ArtistMBID == "" {
 		t.ArtistMBID = m.ArtistMBID
 	}
-	if m.RecordingMBID != "" && isValidMBID(m.RecordingMBID) {
+	// Nor a recording id the file carries: the file names its own recording
+	// (the version-stale merge keeps a file's valid id over any post-scan
+	// value, so an overwrite here was undone, and the row re-enriched, on
+	// every ExtractorVersion bump: backlog B188). One that is no MBID is no
+	// id, as the merge reads it.
+	if isValidMBID(m.RecordingMBID) && !isValidMBID(t.MusicBrainzTrackID) {
 		t.MusicBrainzTrackID = m.RecordingMBID
 	}
 	logger.Info("artist recovered by acoustic fingerprint",

@@ -95,8 +95,9 @@ func TestRefetchPremiumAcceptsAWellFormedReleaseMBID(t *testing.T) {
 // against each other by BEHAVIOUR.
 //
 // There are three copies in the tree — api.mbidPattern,
-// enrich.mbidValidPattern and atlasharvest's — each separate because the
-// dependency direction forbids sharing, and each saying so. Three copies
+// manifest.mbidPattern (enrich.isValidMBID answers through it since backlog
+// B188) and atlasharvest's — each separate because the dependency direction
+// forbids sharing, and each saying so. Three copies
 // of a security predicate is two chances to drift, and cmd/bridge is the
 // one package that imports both of the two that guard this chain, so the
 // guard lives here.

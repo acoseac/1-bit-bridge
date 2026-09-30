@@ -302,7 +302,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Fourteen claims in this list have been wrong and been corrected** — the
+**Fifteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -316,8 +316,9 @@ giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 `Consider` requires `.1bwf`", (2026-09-28) "`mtime_ns = 0` does not
 force a re-extraction", (2026-09-29) "the app's SSDP path has no
 LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
-listener to the group address", and (2026-09-29) "`isLossyCodec` gates every
-`BitsPerSample` write site". The first five cost a later session real
+listener to the group address", (2026-09-29) "`isLossyCodec` gates every
+`BitsPerSample` write site", and (2026-09-29) "reconciliation never
+crosses directories". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -348,6 +349,9 @@ already replaced (a denylist that failed open on an empty codec, for the
 allowlist `canSetBitsPerSample`), and the comment beside the wire field said
 the same; both were found while naming the compressed AIFF-C and WAV encodings
 (B124).
+The fifteenth sat in the Scanner bullet on the reconciliation passes, true of
+four passes and not of the fifth, the year fill by release id, which crosses
+folders by design; it was found while replaying the passes in memory (B188).
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -1013,7 +1017,60 @@ lost my library."
   the dominant EXISTING value (never MusicBrainz — MB's classical credits favour
   performers over composers and would shatter composer-sorted libraries), and
   **leaves `enriched_at` untouched**. Year reconciliation is FILL-MISSING ONLY;
-  a present-but-different year is left alone.
+  a present-but-different year is left alone. The one pass that crosses
+  folders is the year fill by release id (`reconcileYearsByMBID`), bounded to
+  strays (at most three year-0 tracks under one release); this bullet said
+  none did until 2026-09-29.
+- **A version-stale re-read that a reconciliation pass would rewrite is
+  judged by the passes, at the scan's tail, with every such re-read in
+  place** (2026-09-29, backlog B188). The passes REWRITE values a file
+  sets (an album that is its folder's name, a minority album artist, a
+  year of 0), and `mergePostScanFields` keeps a stored value only where
+  the fresh one is empty, so the diff guard called every reconciled row
+  changed on every ExtractorVersion bump: the upsert served the file's
+  value and reset `enriched_at`, and the tail reconciled it back (a second
+  `indexed_at` bump). Measured on main 99f3353e: a bump over 11 rows moved
+  and re-enriched exactly the 3 a pass had rewritten, and after a
+  `cover.jpg` touch (B141's re-read) a subtree scan, which runs no pass,
+  served "Some Folder" for "Real Album" until the next full scan. The
+  v0.2.1 upgrade scan (ExtractorVersion 21) would have done it to every
+  reconciled row of a library. `reExtractUnchanged` now HOLDS a re-read
+  that still differs from its row in one of the four fields after the
+  merge (`reconciledFieldsDiffer`, `Track.awaitsReconcile`, unmerged; at
+  most `maxHeldReconciles`, 10,000, past which it is decided as before);
+  the scan's writer collects it, and `settleHeldReconciles`, at the
+  reconciliation head (after the deletion pass, before the passes, with the
+  one routed set), merges each with its row as stored now, runs the passes
+  IN MEMORY over the library with every held re-read's values in place of
+  its row's (`runReconcileStepsInMemory`), and stamps a re-read that then
+  marshals as its row, or writes it whole with the passes' values, so the
+  passes after it find nothing. A subtree scan settles its held re-reads
+  the same way (`settleSubtreeHeldReconciles`), and one that returns before
+  either writes them as they stand (`settleHeldUnreconciled`, a shutdown
+  nothing). **The tail and the settle run one table**, `reconcileSteps`, in
+  one order: the five `run*Reconciliation` functions went into it.
+  **Judge with every held re-read in place, never against the stored
+  siblings**: a bump that reads a whole album's tag differently leaves no
+  outlier, while a re-read judged against its siblings' stored rows is
+  voted back to the old reading and the change never applied (with the
+  overlay dropped, `TestScanner_ABumpStillAppliesAnExtractorChangeAcrossAWholeAlbum`
+  keeps "Old Reading" on all three rows and moves none). **Not a record of
+  the value each pass replaced** (the review's first suggestion): rows
+  reconciled before the upgrade carry none, so the upgrade scan would
+  churn as before. **Not the passes in ScanSubtree's tail** (its second):
+  measured, a subtree scan followed by the passes wrote the file's value
+  (a bump and an `enriched_at` reset) and then the reconciled one (a second
+  bump), and a bump's full scan runs the passes already. **The enricher's
+  two replacements of a file's id meet the same guard**: a file's release
+  or recording id that is no MBID reads as no id in the merge
+  (`manifest.IsValidMBID`, the one shape the enricher's `isValidMBID` now
+  answers through), and the acoustic fallback fills a recording id only
+  where the file carries no valid one, as the merge's docblock said it
+  did. `TestScanner_ABumpOverReconciledRowsOnlyStampsThem`,
+  `TestScanner_ASubtreeScanAfterACoverTouchKeepsAReconciledAlbumTitle`,
+  `TestScanner_ABumpOverAnIDTheEnricherReplacedOnlyStampsIt`,
+  `TestScanner_ReReadsPastTheHoldLimitAreWrittenAsBefore`,
+  `TestApplyAcousticFallbackKeepsARecordingIDTheFileCarries`.
 - **`Scan`'s duplicate-restamp tail runs from a `defer`, and `ScanSubtree` has
   the same tail.** Three exits reach `return count, nil` *after* the deletion
   pass has committed; reached inline, a reaped winner left its twin
@@ -1168,7 +1225,8 @@ lost my library."
   once; the **version-stale diff-guard** (`reExtractUnchanged`) is what keeps the
   client delta bounded to rows that actually changed, and it stamps a file its
   extractor refuses too, or that file is re-read every scan after the bump
-  (the B145 bullet above). **Derive that guard's
+  (the B145 bullet above), and a re-read a reconciliation pass would rewrite
+  when the passes leave it as it is stored (the B188 bullet above). **Derive that guard's
   merge set by grepping the actual `tags_json` writers, not from what a field
   "looks like"** — `MusicBrainzTrackID` was omitted on the belief it was
   extractor-owned when the acoustic fallback writes it.
