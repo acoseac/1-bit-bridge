@@ -60,14 +60,18 @@ const watchWaitReserve = 30 * time.Second
 const watchDrainReserve = 10 * time.Second
 
 // watchGiveUp fires when a wait on the watcher gives up: the test binary's
-// deadline less reserve, at once if that has passed, and never when the
-// test binary runs with no deadline.
+// deadline less reserve, or less half of what is left when that is less, so
+// a short -timeout still leaves the wait time to wait (CodeRabbit on #1115:
+// under -timeout 30s a whole reserve put every give-up in the past). It
+// fires at once if the deadline has passed, and never when the test binary
+// runs with no deadline.
 func watchGiveUp(t *testing.T, reserve time.Duration) <-chan time.Time {
 	deadline, ok := t.Deadline()
 	if !ok {
 		return nil
 	}
-	return time.After(time.Until(deadline.Add(-reserve)))
+	left := time.Until(deadline)
+	return time.After(left - min(reserve, left/2))
 }
 
 // watchWaitUntil polls ready until it holds, and fails the test with msg
@@ -77,6 +81,8 @@ func watchGiveUp(t *testing.T, reserve time.Duration) <-chan time.Time {
 func watchWaitUntil(t *testing.T, ready func() bool, stop func() string, msg string) {
 	t.Helper()
 	giveUp := watchGiveUp(t, watchWaitReserve)
+	poll := time.NewTicker(20 * time.Millisecond)
+	defer poll.Stop()
 	for !ready() {
 		if stop != nil {
 			if why := stop(); why != "" {
@@ -86,7 +92,7 @@ func watchWaitUntil(t *testing.T, ready func() bool, stop func() string, msg str
 		select {
 		case <-giveUp:
 			t.Fatal(msg)
-		case <-time.After(20 * time.Millisecond):
+		case <-poll.C:
 		}
 	}
 }

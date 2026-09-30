@@ -110,10 +110,32 @@ type lsofAccountCase struct {
 	ruledOut bool
 }
 
+// otherPID and anotherPID are the pids a scripted lsof lists as processes
+// other than the recorded bridge: 1305 and 1400, each moved up one where it
+// is the stand-in. The child run of
+// TestStandInTestsHoldWhenTheStandInIsThisProcess records its own pid, which
+// can be either, and a fixed "other" pid equal to it would name the recorded
+// bridge after all (CodeRabbit on #1115).
+var (
+	otherPID   = otherThanStandIn(1305)
+	anotherPID = otherThanStandIn(1400)
+)
+
+// otherThanStandIn is pid, or the next one up when pid is standInPID.
+func otherThanStandIn(pid int) int {
+	if pid == standInPID {
+		return pid + 1
+	}
+	return pid
+}
+
 var lsofAccountCases = []lsofAccountCase{
 	{"lsof lists nothing", "", 1, "lsof lists no process listening on this port", false},
-	{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", false},
-	{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", false},
+	{"lsof lists another pid", fmt.Sprintf("%d\n", otherPID), 0,
+		fmt.Sprintf("lsof lists pid %d listening on this port", otherPID), false},
+	// Listed out of order: the account sorts them.
+	{"lsof lists other pids", fmt.Sprintf("%d\n%d\n", anotherPID, otherPID), 0,
+		fmt.Sprintf("lsof lists pids %d, %d listening on this port", otherPID, anotherPID), false},
 	// busybox's applet ignores -t and the rest, and lists every open file
 	// it can read.
 	{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, fmt.Sprintf("lsof's output does not name pid %d", standInPID), false},
@@ -246,7 +268,7 @@ var lsofAnswers = []lsofAnswer{
 	{"probe failed", "", 2},
 	{"recorded pid listed", strconv.Itoa(standInPID) + "\n", 0},
 	{"nothing listed", "", 1},
-	{"another pid listed", "1305\n", 0},
+	{"another pid listed", fmt.Sprintf("%d\n", otherPID), 0},
 	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
 }
 

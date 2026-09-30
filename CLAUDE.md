@@ -5164,7 +5164,11 @@ what it claimed**, and none of it had a failing test.
   `TestStandInTestsHoldWhenTheStandInIsThisProcess` finds every test that
   reaches `standInPID` in the source, runs them in a child whose stand-in
   is its own pid, the collision on every run, and refuses a
-  `writePIDFile` given a pid literal.
+  `writePIDFile` given a pid literal. **A pid a scripted lsof lists as
+  ANOTHER process dodges the stand-in too** (`otherThanStandIn`): that
+  child can be pid 1305, and with the stand-in at 1305 the fixed "other"
+  pid named the recorded bridge, failing the lsof-account tests
+  (CodeRabbit on #1115).
 - **…and a bridge no probe can read is ruled out by the port's OTHER
   holders, and the uid arm answers only for a listener no readable
   process holds** (#1030). Row L6, #1029's open shape: a bridge granted
@@ -7836,7 +7840,10 @@ its twin.** The top list is older, shorter, and read first.
   watch is registered (per instance, set before Run, as
   `afterDispatchHookForTests` is), and `watchWaitUntil` waits for a row or
   a folder's watch until the test binary's deadline less
-  `watchWaitReserve`. **A wait that can end on a failure event does**:
+  `watchWaitReserve`, or less half of what is left when that is less: a
+  whole reserve under `-timeout 20s` put every give-up in the past, and
+  each wait failed at once (CodeRabbit on #1115; B63's serve helpers keep
+  the whole reserve). **A wait that can end on a failure event does**:
   the link-chain test stops on a subtree scan outside the root (#1090's
   defect, red in 0.09 s), and the dot-named and linked-root tests read the
   watch list once the walk is done. An absence has no event of its own, so

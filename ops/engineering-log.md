@@ -32869,6 +32869,29 @@ refuses a `writePIDFile` given a pid literal.
 | B106 NC3: the no-lsof row's /proc left to the host | the guard, on Linux |
 | B106 NC4: a `writePIDFile` given 4242 | the guard, naming the call |
 
+### Review round 1
+
+- **CodeRabbit: the lsof fixtures' "other" pids could be the child's.** The
+  guard's child records its own pid, and `lsofAccountCases` and
+  `lsofAnswers` scripted lsof listing 1305 (and 1400) as ANOTHER process.
+  With the stand-in forced to 1305, 2 subtests of
+  `TestLivenessArmGivesLsofsAccount` and 8 of
+  `TestPortVerdictsDoNotDependOnTheAccount` failed on those fixtures, and
+  none with them built from `otherThanStandIn` (1305 and 1400, each moved
+  up one where it is the stand-in).
+- **CodeRabbit: a short -timeout left the waits no time.** A whole 30 s
+  reserve under `-timeout 20s` gave up at once: the link-chain and debounce
+  tests failed at 0.02 s, "the watcher's initial walk never finished".
+  `watchGiveUp` reserves at most half of what is left; both pass there.
+- **Gemini: a timer per poll.** `watchWaitUntil` polls on one ticker.
+- **Gemini: a grouped var or const block lent every member the names of
+  the others.** `standInTests` reads each spec on its own
+  (`topLevelDecls`); the suggested code assigned where it compared (`if
+  refs[top] = nil`), which does not compile.
+- **Gemini (three comments): `soxToolchainCache` "has no mutex".** Declined:
+  the struct declares `mu sync.Mutex` and `snapshot` takes it before it
+  reads the TTL, unchanged here; the hunk showed only the new field.
+
 ### Out of scope
 
 - A sox probe that times out closes the live gates for 30 s on a host

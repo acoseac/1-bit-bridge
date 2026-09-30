@@ -79,7 +79,8 @@ func TestStandInTestsHoldWhenTheStandInIsThisProcess(t *testing.T) {
 // this build compiles them, that reach standInPID, and every call that hands
 // writePIDFile a pid literal. A name is matched by its spelling, so a local
 // spelled like a declaration that reaches the stand-in selects a test too
-// many, which the child then runs for nothing, and never one too few.
+// many, which the child then runs for nothing, and never one too few; one
+// spec of a grouped var or const block names only what it names.
 func standInTests(t *testing.T) (names, literals []string) {
 	t.Helper()
 	entries, err := os.ReadDir(".")
@@ -106,11 +107,11 @@ func standInTests(t *testing.T) (names, literals []string) {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		for _, decl := range f.Decls {
-			for _, top := range topLevelNames(decl) {
+			for top, node := range topLevelDecls(decl) {
 				if refs[top] == nil {
 					refs[top] = map[string]bool{}
 				}
-				ast.Inspect(decl, func(n ast.Node) bool {
+				ast.Inspect(node, func(n ast.Node) bool {
 					if id, ok := n.(*ast.Ident); ok && id.Name != top {
 						refs[top][id.Name] = true
 					}
@@ -158,24 +159,26 @@ func standInTests(t *testing.T) (names, literals []string) {
 	return names, literals
 }
 
-// topLevelNames is the names a top-level declaration declares: a function's
-// (not a method's), or each variable's and constant's.
-func topLevelNames(decl ast.Decl) []string {
+// topLevelDecls maps each name a top-level declaration declares, a
+// function's (not a method's) or each variable's and constant's, to the node
+// that says what it names: the function, or the one spec of a grouped block
+// that declares it, so a block's other members do not lend it their names
+// (Gemini on #1115).
+func topLevelDecls(decl ast.Decl) map[string]ast.Node {
+	out := map[string]ast.Node{}
 	switch d := decl.(type) {
 	case *ast.FuncDecl:
 		if d.Recv == nil {
-			return []string{d.Name.Name}
+			out[d.Name.Name] = d
 		}
 	case *ast.GenDecl:
-		var out []string
 		for _, spec := range d.Specs {
 			if vs, ok := spec.(*ast.ValueSpec); ok {
 				for _, n := range vs.Names {
-					out = append(out, n.Name)
+					out[n.Name] = vs
 				}
 			}
 		}
-		return out
 	}
-	return nil
+	return out
 }
