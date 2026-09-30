@@ -135,31 +135,35 @@ func TestExtractDFF_OddMaxInt64ChunkRejected(t *testing.T) {
 	}
 }
 
-// buildDIINSubChunk constructs one DSDIFF DIIN sub-chunk (DITI / DIAR /
-// DIAL / DIGN) carrying a pstring payload. Layout:
+// buildDIINSubChunk constructs one DSDIFF DIIN text sub-chunk (DITI or DIAR)
+// as the DSDIFF 1.5 specification lays it out and TagLib writes it
+// (testdata/dff/taglib_diin.dff):
 //
-//	[4 bytes FOURCC][8 bytes BE size][1 byte length][N bytes text][pad if (1+N) odd]
+//	[4 bytes FOURCC][8 bytes BE size][4 bytes BE count][count bytes text][pad if the size is odd]
 //
-// `size` in the chunk header is `1 + N` (length byte + data) — the
-// pad byte is OUTSIDE the chunk's declared size and belongs to the
-// outer walker's alignment rule.
+// The size is 4 + count; the pad byte is outside it, the outer walker's to
+// skip. Until ExtractorVersion 20 this built a 1-byte length in place of the
+// count, which is the layout the bridge read and no writer produces (backlog
+// B140).
 func buildDIINSubChunk(fourcc, text string) []byte {
 	if len(fourcc) != 4 {
 		panic("DIIN sub-chunk FOURCC must be 4 bytes")
 	}
-	n := len(text)
-	if n > 255 {
-		panic("DIIN pstring length exceeds 1-byte max (255)")
+	body := make([]byte, 4, 4+len(text))
+	binary.BigEndian.PutUint32(body, uint32(len(text)))
+	return dffChunk(fourcc, append(body, text...))
+}
+
+// dffChunk is one DSDIFF chunk: its FOURCC, an 8-byte big-endian size, the
+// body, and a pad byte when the size is odd.
+func dffChunk(fourcc string, body []byte) []byte {
+	if len(fourcc) != 4 {
+		panic("DSDIFF chunk FOURCC must be 4 bytes")
 	}
-	out := []byte{}
-	out = append(out, []byte(fourcc)...)
-	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], uint64(1+n)) // length byte + data
-	out = append(out, size[:]...)
-	out = append(out, byte(n))
-	out = append(out, []byte(text)...)
-	// Pad byte if total chunk payload (1 + n) is odd.
-	if (1+n)%2 == 1 {
+	out := append([]byte(fourcc), make([]byte, 8)...)
+	binary.BigEndian.PutUint64(out[4:12], uint64(len(body)))
+	out = append(out, body...)
+	if len(body)%2 == 1 {
 		out = append(out, 0x00)
 	}
 	return out
@@ -168,17 +172,7 @@ func buildDIINSubChunk(fourcc, text string) []byte {
 // buildDIINContainer wraps a slice of DIIN sub-chunks in the outer
 // DIIN container chunk header.
 func buildDIINContainer(subChunks []byte) []byte {
-	out := []byte{}
-	out = append(out, []byte("DIIN")...)
-	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], uint64(len(subChunks)))
-	out = append(out, size[:]...)
-	out = append(out, subChunks...)
-	// Pad byte if DIIN container payload is odd.
-	if len(subChunks)%2 == 1 {
-		out = append(out, 0x00)
-	}
-	return out
+	return dffChunk("DIIN", subChunks)
 }
 
 // buildDFFWithDIIN extends buildDFF to embed a DIIN container chunk
@@ -246,12 +240,20 @@ func buildDFFWithDIIN(t *testing.T, sampleRate uint32, compression string, diinS
 	return out
 }
 
-func TestExtractDFF_DIIN_PopulatesTitleArtistAlbumGenre(t *testing.T) {
+// TestExtractDFF_DIIN_PopulatesTitleAndArtist: a DIIN chunk's title (DITI)
+// and artist (DIAR) reach the track, beside the format stamps. They are the
+// only text the DSDIFF 1.5 specification gives the chunk, beside the edited
+// master's id (EMID) and its markers (MARK), and all that ffmpeg, TagLib 2 and
+// MediaInfo read from it. A DIAL or DIGN chunk, which PR #223 read as an album
+// and a genre, is in no specification and made by no writer: it is skipped as
+// any chunk the walk does not know is (backlog B140).
+func TestExtractDFF_DIIN_PopulatesTitleAndArtist(t *testing.T) {
 	sub := []byte{}
-	sub = append(sub, buildDIINSubChunk("DITI", "Symphony No. 5 in C Minor")...) // even length (25): chunk payload = 26 even, no pad
-	sub = append(sub, buildDIINSubChunk("DIAR", "Ludwig van Beethoven")...)      // 20 chars: 1+20=21 odd → pad
-	sub = append(sub, buildDIINSubChunk("DIAL", "Beethoven Symphonies")...)      // 20 chars: 1+20=21 odd → pad
-	sub = append(sub, buildDIINSubChunk("DIGN", "Classical")...)                 // 9 chars: 1+9=10 even, no pad
+	sub = append(sub, dffChunk("EMID", []byte("an edited master's id"))...) // 21 bytes: odd, padded
+	sub = append(sub, buildDIINSubChunk("DITI", "Symphony No. 5 in C Minor")...) // 4+25 = 29: odd, padded
+	sub = append(sub, buildDIINSubChunk("DIAR", "Ludwig van Beethoven")...)      // 4+20 = 24: even
+	sub = append(sub, buildDIINSubChunk("DIAL", "Beethoven Symphonies")...)
+	sub = append(sub, buildDIINSubChunk("DIGN", "Classical")...)
 	path := writeTempDFF(t, buildDFFWithDIIN(t, 2_822_400, "DSD ", sub))
 
 	track := &Track{}
@@ -264,11 +266,9 @@ func TestExtractDFF_DIIN_PopulatesTitleArtistAlbumGenre(t *testing.T) {
 	if track.Artist != "Ludwig van Beethoven" {
 		t.Errorf("Artist = %q, want %q", track.Artist, "Ludwig van Beethoven")
 	}
-	if track.Album != "Beethoven Symphonies" {
-		t.Errorf("Album = %q, want %q", track.Album, "Beethoven Symphonies")
-	}
-	if track.Genre != "Classical" {
-		t.Errorf("Genre = %q, want %q", track.Genre, "Classical")
+	if track.Album != "" || track.Genre != "" {
+		t.Errorf("Album = %q, Genre = %q: DSDIFF has no album or genre chunk, and no writer makes a DIAL or DIGN",
+			track.Album, track.Genre)
 	}
 	// Existing PROP fields must still populate alongside DIIN.
 	if track.IsDSD == nil || !*track.IsDSD {
@@ -279,52 +279,33 @@ func TestExtractDFF_DIIN_PopulatesTitleArtistAlbumGenre(t *testing.T) {
 	}
 }
 
-// TestExtractDFF_DIIN_OddLengthPStringPadHandling locks the pad-byte
-// rule for a pstring whose `1 + length` is odd. Without proper pad
-// handling, the next sub-chunk would mis-align and read garbage.
-func TestExtractDFF_DIIN_OddLengthPStringPadHandling(t *testing.T) {
-	// "AB" is 2 bytes; 1+2 = 3 odd → one pad byte follows the
-	// pstring. Then DIAR "CD" (1+2=3 odd → pad). If the walker
-	// loses alignment, DIAR's FOURCC would be misread.
-	sub := []byte{}
-	sub = append(sub, buildDIINSubChunk("DITI", "AB")...)
-	sub = append(sub, buildDIINSubChunk("DIAR", "CD")...)
+// TestExtractDFF_DIIN_OddCountPadHandling locks the pad-byte rule: a DITI of
+// an odd count has an odd size (4 + count), so one pad byte follows it, and a
+// walk that lost it would misread the DIAR after it.
+func TestExtractDFF_DIIN_OddCountPadHandling(t *testing.T) {
+	sub := append(buildDIINSubChunk("DITI", "ABC"), buildDIINSubChunk("DIAR", "CD")...)
 	path := writeTempDFF(t, buildDFFWithDIIN(t, 2_822_400, "DSD ", sub))
 
 	track := &Track{}
 	if err := extractDFFWithContext(path, track, nil); err != nil {
 		t.Fatalf("extractDFFWithContext: %v", err)
 	}
-	if track.Title != "AB" {
-		t.Errorf("Title = %q, want %q (pstring pad mishandled?)", track.Title, "AB")
+	if track.Title != "ABC" {
+		t.Errorf("Title = %q, want %q (pad mishandled?)", track.Title, "ABC")
 	}
 	if track.Artist != "CD" {
-		t.Errorf("Artist = %q, want %q (pstring pad mishandled?)", track.Artist, "CD")
+		t.Errorf("Artist = %q, want %q (pad mishandled?)", track.Artist, "CD")
 	}
 }
 
-// TestExtractDFF_DIIN_OverrunPStringSkipsField verifies the
-// defensive bounds check: a pstring declaring length > available
-// bytes must be skipped (field stays empty) rather than crashing or
-// over-reading.
-func TestExtractDFF_DIIN_OverrunPStringSkipsField(t *testing.T) {
-	// Manually craft a malformed DITI sub-chunk: header declares
-	// payload-size = 5 bytes (1 length + 4 data), but the length
-	// byte inside the payload declares 100. parseDIINChunks's
-	// bounds check should refuse the overrun and leave Title empty,
-	// while the walker advances past the declared 5-byte payload
-	// and resumes scanning. 12-byte header + 5-byte payload = 17
-	// bytes total; 17 is odd so one pad byte follows before DIAR.
-	sub := []byte{}
-	sub = append(sub, []byte("DITI")...)
-	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], 5)
-	sub = append(sub, size[:]...)
-	sub = append(sub, byte(100))              // declared length 100 — overrun
-	sub = append(sub, 0x41, 0x42, 0x43, 0x44) // 4 bytes of data (size==5 total with length byte)
-	sub = append(sub, 0x00)                   // pad: (12+5)=17 odd → 1 pad byte
-	sub = append(sub, buildDIINSubChunk("DIAR", "OK")...)
-
+// TestExtractDFF_DIIN_OverrunCountSkipsField: a text chunk whose count claims
+// more than its size holds is read as no text (the field keeps what it had,
+// as TagLib reads it), and the walk goes on to the chunk after it.
+func TestExtractDFF_DIIN_OverrunCountSkipsField(t *testing.T) {
+	body := make([]byte, 4, 8)
+	binary.BigEndian.PutUint32(body, 100) // a count of 100
+	body = append(body, "ABCD"...)         // and 4 bytes of it
+	sub := append(dffChunk("DITI", body), buildDIINSubChunk("DIAR", "OK")...)
 	path := writeTempDFF(t, buildDFFWithDIIN(t, 2_822_400, "DSD ", sub))
 
 	track := &Track{}
@@ -332,7 +313,7 @@ func TestExtractDFF_DIIN_OverrunPStringSkipsField(t *testing.T) {
 		t.Fatalf("extractDFFWithContext: %v", err)
 	}
 	if track.Title != "" {
-		t.Errorf("Title = %q, want empty (overrun pstring should be skipped)", track.Title)
+		t.Errorf("Title = %q, want empty (a count past the chunk's size is no text)", track.Title)
 	}
 	if track.Artist != "OK" {
 		t.Errorf("Artist = %q, want %q (next sub-chunk should still parse)", track.Artist, "OK")
