@@ -35504,4 +35504,4 @@ if the folder holds junk too, until the first rendition is written there.
 
 ### Left open
 
-- `upscale --gc` re-checks health, not identity (B224).
+- Backlog B224.
