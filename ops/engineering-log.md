@@ -34407,3 +34407,36 @@ new seed: an extensible header naming IMA ADPCM at 96 kHz).
   `numSampleFrames` over its rate; an IMA4 AIFF-C counts packets there, and its
   duration is that count times 64. Left as written: the field and its meaning
   are unchanged, and the paragraph is mirrored byte for byte in the app's repo.
+
+### Review round 1 (CodeRabbit's on-demand review of 3224f632)
+
+Two findings, both true.
+
+- A WAV or AIFF-C carrying two format chunks: the walkers parsed every `fmt `
+  or `COMM` they could read, each over the last, and a later chunk sets only
+  what it knows, so its codec landed beside the first one's depth (PCM
+  96 kHz/24 then IMA ADPCM read "ADPCM" with 24 bits, a lossy name with a
+  lossless claim; twos then ulaw read "ULAW", 16 bits). CodeRabbit proposed
+  clearing the rate and depth before each parse (the last chunk wins). Taken
+  the other way: the FIRST chunk the walk can read names the file and a later
+  one is skipped whole, which is how ffmpeg reads a WAV (`wav_read_header`
+  parses the first `fmt ` and warns of more), how TagLib reads a WAV and an
+  AIFF (the first chunk, a duplicate logged), what the audio a player decodes
+  follows, and how the same walkers already read their first `data` and `SSND`
+  chunk. Malformed files only; the spec allows one of each.
+- A WAV of code 0x0050 (WAVE_FORMAT_MPEG) was "MP2" whatever its layer, and
+  MPEG1WAVEFORMAT's `fwHeadLayer` ([18:20], after a `cbSize` of at least 2)
+  can name layer III (mmreg.h: 1, 2, 4). It is "MP3" now where it does, "MP2"
+  otherwise, a header without the extension included; ffmpeg writes 2 for its
+  mp2 encoder (the fixture). Read under that tag alone: an extensible header's
+  subformat of 0x0050 has `wValidBitsPerSample` there.
+- Tests: `TestTheFirstFormatChunkNamesTheFile` (four files, both orders of
+  each pair) and `TestAnMPEGWAVIsNamedByTheLayerItsHeaderDeclares` (six
+  headers). Controls on the committed tree: the WAV walk back to last-wins
+  turns both WAV cases red, the AIFF walk both AIFF cases, no layer read the
+  layer III case, and the layer read under the subformat the extensible case.
+- Fuzzed on dido, three minutes a target, no crasher: FuzzExtractAIFF
+  1,280,506 executions, FuzzExtractWAV 1,472,710, FuzzParseWAVFmtChunk
+  2,492,677 (a new seed: the layer III header).
+
+Gemini was over its daily quota on this PR.
