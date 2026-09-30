@@ -57,22 +57,33 @@ func TestScanner_AFolderWhoseCoverCannotBeSeenKeepsItsRows(t *testing.T) {
 	f.scan(t, "index")
 	f.requireArt(t, expectedLocalMBID(data), rels...)
 
-	// A folder.jpg that links to itself: its stat fails with ELOOP.
-	loop := f.path("Artist/Album/folder.jpg")
-	if err := os.Symlink("folder.jpg", loop); err != nil {
+	// The cover.jpg the rows were given, replaced by a link to itself: its
+	// stat fails with ELOOP, as an EIO would. Read as "no cover", the rows
+	// would lose their art over a stat that did not complete.
+	loop := f.path("Artist/Album/cover.jpg")
+	saved, err := os.ReadFile(loop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("cover.jpg", loop); err != nil {
 		t.Skipf("symlinks unsupported here: %v", err)
 	}
 	before := f.indexedAts(t, rels...)
-	if n := f.scan(t, "a candidate that cannot be stat'ed"); n != 0 {
+	if n := f.scan(t, "the cover cannot be stat'ed"); n != 0 {
 		t.Errorf("the scan re-read %d audio files, want 0 (a folder it could not see keeps its rows)", n)
 	}
 	f.requireArt(t, expectedLocalMBID(data), rels...)
 	f.requireStill(t, before)
 
-	// A cover.png that links to nothing is no cover: the key is unchanged.
+	// The cover back as it was, and a cover.png that links to nothing,
+	// which is no cover: the key is unchanged.
 	if err := os.Remove(loop); err != nil {
 		t.Fatal(err)
 	}
+	f.cover(t, "Artist/Album/cover.jpg", saved, t0)
 	if err := os.Symlink(filepath.Join(f.root, "nowhere.png"), f.path("Artist/Album/cover.png")); err != nil {
 		t.Fatal(err)
 	}
