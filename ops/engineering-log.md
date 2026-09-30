@@ -34885,21 +34885,16 @@ record now that the fix ships.
 
 ### What was measured on the old code
 
-main at 24523cff, go1.27.1 on macOS, a public fixture (`bridge init --public
---domain localhost --admin-tls-proxy`, the console on plain HTTP at
-127.0.0.1:27791, no `metrics.allowCidrs`), requests from 127.0.0.1 shaped as a
-TLS-terminating reverse proxy on the same host relays them (forwarding
-headers, the public name in `Host`), without a session: `/metrics` answered
-with the exposition while `/api/stats` answered 401. The request details are
-kept out of this public record, per SECURITY.md.
+main at 24523cff, go1.27.1 on macOS, a public fixture with no
+`metrics.allowCidrs`: the old gate's verdict was measured with the real
+binary before the fix and after it (below). The requests and what they
+returned are kept out of this public record, per SECURITY.md.
 
-The cause: #472 put `/metrics` on `isAuthBypassPath` and behind its own
-`metricsGate`, which admitted any loopback source or an address in
-`metrics.allowCidrs`, so a same-host scraper needed no session. A proxy on
-the bridge's own host connects from 127.0.0.1 for every client it relays, so
-in public mode the gate's one question, the source address, was answered by
-the proxy. No scraper this project runs depended on the old answer (checked,
-2026-09-30).
+The cause, which the rule has to state to be kept: #472 put `/metrics` on
+`isAuthBypassPath` and behind its own `metricsGate`, which judged a scrape
+by its source address alone, and in public mode a source address cannot
+vouch for a scrape. No scraper this project runs depended on the old answer
+(checked, 2026-09-30).
 
 ### What was decided
 
@@ -34948,13 +34943,13 @@ the proxy. No scraper this project runs depended on the old answer (checked,
 
 ### Measured on the fix
 
-The same fixture and curl, the fixed binary: the proxy-shaped `/metrics` 403
-(165 bytes, no `Location`), `/api/stats` 401, `/metrics` straight from
-loopback 403 with one `a /metrics scrape without a session was refused` Warn
-in the journal; with a session minted through `bridge admin login-link` and
-the proxy-shaped request, 200. With `metrics.allowCidrs: [127.0.0.1/32]`:
-straight from loopback 200 (the exposition), proxy-shaped 403. On main the
-session request answered 200 as well, through the bypass.
+The same fixture, the fixed binary: a request shaped as a same-host proxy
+relays it, without a session, 403 (165 bytes, no `Location`); `/metrics`
+straight from loopback 403, with one `a /metrics scrape without a session
+was refused` Warn in the journal; with a session minted through `bridge
+admin login-link`, 200. With `metrics.allowCidrs: [127.0.0.1/32]`: straight
+from loopback 200 (the exposition), the proxy-shaped request still 403.
+The build with B170 merged in answers the same.
 
 ### Tests
 
@@ -34974,11 +34969,9 @@ too). The two `metricsGate` unit tests in `ops_hardening_test.go` went with
 the gate; their cases are in the table test. `…MetricsLoopbackBypassesSessionInPublicMode`,
 which pinned the bypass, and its twin are replaced by the tests above.
 
-Red on main (the tests first, the fix after): the proxy test (200 twice),
-the table test (the unlisted loopback source, `[::1]`, every forwarding
-header), the session test (the LAN and internet sessions got 403 from
-`metricsGate`; the cookie naming no session got 200), the logging test (no
-line) and the diagnostics test.
+Red on main (the tests first, the fix after): the proxy, table, session,
+logging and diagnostics tests; the loopback-mode test is a pin and passed
+on both.
 
 ### Negative controls
 
