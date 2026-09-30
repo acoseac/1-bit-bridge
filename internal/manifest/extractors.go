@@ -838,7 +838,9 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 // what the file holds (dhowden_picture_guard.go), or whose ID3v2 tag would
 // make it rename repeated frames, or store frames, past what it does in
 // bounded time (dhowden_id3v2_guard.go), is not handed to it, and ends as a
-// file whose tags dhowden could not read.
+// file whose tags dhowden could not read. What passes is read through a
+// dhowdenReadBuffer, a page at a time (dhowden_read_buffer.go, backlog B117),
+// which leaves f where dhowden's reading got to.
 func readDhowdenTags(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	if ok, refusal := dhowdenPicturesWithinBudget(f); !ok {
 		scanLogger.Warn("embedded picture declares more than the file could hold; skipping tag read",
@@ -856,7 +858,9 @@ func readDhowdenTags(f io.ReadSeeker, absPath string, t *Track, ec *ExtractConte
 		}
 		return nil
 	}
-	m, err := tag.ReadFrom(f)
+	buffered, release := newDhowdenReadBuffer(f)
+	m, err := tag.ReadFrom(buffered)
+	release()
 	if errors.Is(err, tag.ErrNoTagsFound) {
 		// No embedded tags — but a folder.jpg next to the file is
 		// still possible. Run extractLocalArtwork with m=nil so the
@@ -2112,13 +2116,19 @@ func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *Extract
 			return nil
 		}
 		// The ID3v2 guard (dhowden_id3v2_guard.go) walks the tag from here,
-		// where ReadID3v2Tags will read it.
+		// where ReadID3v2Tags will read it, through a dhowdenReadBuffer (a
+		// page at a time: backlog B117).
 		if ok, refusal := id3v2TagWithinBudget(f); !ok {
 			warnID3v2Refused(absPath, t, refusal)
-		} else if m, err := tag.ReadID3v2Tags(f); err == nil && m != nil {
-			populateFromTagMetadata(m, t)
-			applyEmbeddedLyricsFromTag(m, t)
-			dsfMeta = m
+		} else {
+			buffered, release := newDhowdenReadBuffer(f)
+			m, err := tag.ReadID3v2Tags(buffered)
+			release()
+			if err == nil && m != nil {
+				populateFromTagMetadata(m, t)
+				applyEmbeddedLyricsFromTag(m, t)
+				dsfMeta = m
+			}
 		}
 	}
 	if ec != nil && ec.ArtworkCacheDir != "" {
