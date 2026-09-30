@@ -13,8 +13,8 @@ import (
 // pool snapshot the admin handler consumes — the two surfaces stay
 // in lockstep.
 //
-// Nil-safe: when WithUpscaleStats wasn't called (test harness, or
-// builds without the upscale wiring), the handler returns the
+// Nil-safe: when WithUpscaleStats wasn't called (a test harness; serve
+// calls it on every bridge), the handler returns the
 // zero-value UpscaleStats — `enabled=false, cachedVariants=0,
 // cachedBytes=0, pool=nil, soxAvailable=nil`. iOS renders that as
 // "feature off" without distinguishing a missing endpoint from a
@@ -38,20 +38,21 @@ type UpscaleStatsProvider interface {
 // payload — the JSON shapes intentionally match so an operator
 // inspecting the bridge with `curl -k https://…/v1/upscale/stats`
 // (with bearer token) sees the same body the Settings tile is
-// already showing them. iOS uses it for the "Upscaling" management
-// section inside BridgeEditorView (counts of cached / in-flight /
-// failed jobs).
+// already showing them. It was built for the iOS app's "Upscaling"
+// management section, which went when upscaling became operator-driven;
+// today it serves operators and third-party tooling (PROTOCOL.md).
 //
-//   - Enabled mirrors live runtime state, NOT the persisted
-//     `cfg.Upscale.Enabled` flag. The two diverge when the flag is
-//     on and sox is unusable, and when the operator has just
-//     PATCHed the flag off while the long-lived Pool stays alive
-//     (it lives until shutdown). The cmd/bridge adapter reads the
-//     same live gate as /v1/health.upscaleEnabled (the flag AND a
-//     usable sox), so the two agree about what "active" means; it
-//     read the flag alone until 2026-09-28, and a bridge without
-//     sox answered `enabled: true` beside `soxAvailable: false`.
-//   - Pool is omitted when the feature is off (no pool to query).
+//   - Enabled is the live upscale gate, NOT the persisted
+//     `cfg.Upscale.Enabled` flag alone: the flag AND a usable sox,
+//     the gate /v1/health.upscaleEnabled reads, so the two agree about
+//     what "active" means. It differs from the flag only while the flag
+//     is on and sox is unusable; a settings PATCH moves both at once.
+//     The adapter read the flag alone until 2026-09-28, and a bridge
+//     without sox answered `enabled: true` beside `soxAvailable: false`.
+//   - Pool is omitted while Enabled is false: the adapter leaves it out
+//     by the same gate, although the pool itself lives for the whole
+//     run (built on every bridge since #781). This said "no pool to
+//     query" until 2026-09-29 (backlog B113).
 //   - SoxAvailable is omitted when the test harness didn't wire a
 //     precheck closure.
 type UpscaleStats struct {
@@ -81,14 +82,14 @@ type UpscalePoolStats struct {
 //
 // Authenticated read-only snapshot of the upscale feature's
 // runtime + on-disk state. Mirrors the admin /api/upscale/stats
-// tile but exposed on the public protocol so paired iOS clients
-// can render an "Upscaling" management section without needing
-// admin auth. The wire shape is documented in docs/BridgeProtocol.md.
+// tile but exposed on the public protocol, so a bearer token reads it
+// without admin auth. The wire shape is documented in PROTOCOL.md.
 //
 // Cheap (single SQL COUNT + a mutex-protected pool snapshot + a
 // TTL-cached sox precheck — the closure dedupes against the same
 // admin-side cache by sharing the precheck function reference).
-// iOS calls every 5 s while the management page is foregrounded.
+// No iOS surface polls it any more (PROTOCOL.md: its 5 s poller went
+// with the app's upscaling section), so the cadence is a caller's own.
 func (s *Server) upscaleStats(w http.ResponseWriter, r *http.Request) {
 	var resp UpscaleStats
 	if s.upscaleStatsProvider != nil {

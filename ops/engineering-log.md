@@ -33495,6 +33495,165 @@ passed on Windows 11 (nomos, go1.26.6) and on the dev Mac; the whole
 - B146: an SACD ISO's virtual rows never carry the cover beside the image
   (measured: both rows of a two-track ISO had "").
 
+## 2026-09-29 — the console's analysis pool line follows the live gate, and the comments that described a pool as absent with its feature off say what #781 made true (backlog B113)
+
+Backlog B113, carried forward from B108 (#1102), which by the owner's
+decision changed no code.
+
+### The console
+
+`GET /api/analysis/stats`, the payload of the SSE `analysis` event and the
+source of the Jobs card's Queue line, set `pool` whenever
+`admin.Deps.AnalysisPoolStats` was wired. `runServe` wires it on every
+bridge (`analysisPoolStatsClosure`): the pool is built whatever the gate
+says since #781. So with analysis off the card showed the pool's counters
+beside its "off" badge. Measured on a real `bridge serve` (main at
+5d81dfe0, a throwaway loopback install over four tagged FLACs): at boot,
+analysis at its default, `pool` was `{workers: 6, queueCap: 5000, queueLen:
+0, inflight: 0, enqueued: 0, done: 0, failed: 0}` beside `enabled: false`,
+while `/api/upscale/stats` left its pool out. After switching analysis on,
+letting it analyse the four tracks and switching it off, the Jobs page (the
+browser pane, read through the DOM) said "off", "Queue: 0 queued · 0 in
+flight · 4 done · 0 failed (6 workers)", "Next sweep: in 5h".
+
+The upscale tile's rule (the Deps closure answers nil while the gate is
+closed, and the handler reports `enabled = pool != nil`) says why: counters
+beside an off badge read as a feature that is on and idle, and its live
+fields show "—" then. The analysis card now follows it:
+`getAnalysisStatsSnapshot` sets `pool` only while `enabled` is true, from
+the one read of `AnalysisActive` that sets `enabled`. The closure still
+answers whatever the gate says; a gate read inside it, as the upscale
+closure does, would be a second read that could land on the other side of
+a flip within one snapshot. The sweeper's lines (last swept, last run,
+next sweep) stay: they are the last run's, and a pass the gate refuses
+records nothing. The coverage bar beside them already followed the gate
+(`/api/jobs` computes it only while active). The branch's binary over the
+same files: off, `pool` absent and the card "Queue: —"; switched on, the
+counters (SSE-updated, the badge "active" at the next `/api/jobs` read);
+switched off, "—" again, live.
+
+"Label them as the last run's" was the other option. The pool's `done` and
+`failed` are lifetime counts since the process started, not a run's, and
+the card's "Last run" line already carries the sweeper's last breakdown, so
+labelling would have described the counters as something they are not.
+
+### Tests and controls
+
+- `TestTheAnalysisPoolLineFollowsTheGate` (internal/admin): the closure
+  wired as serve wires it, answering counters that are not zero, over four
+  steps that move the flag and the gate apart (off; on; the flag on over a
+  missing sox, the degraded card; off again). Red on main at steps 0, 2
+  and 3.
+- `TestServeAnalysisPoolLineFollowsTheLiveGate` (cmd/bridge): the real
+  serve, its sox probe answered by the test (`withUsableSox`, and one
+  answering `transcode.ErrSoxMissing`): off, on, off through `PATCH
+  /api/settings`, and booted with the flag on over a missing sox, each step
+  against `/v1/health`'s `waveform` flag. Red on main at the off steps.
+- Controls, each on the committed fix: the gate taken out of the handler
+  turned both tests red at every closed step, the boot test's degraded
+  case included; gating on
+  `cfg.Analysis.Enabled` instead of the live gate turned the unit test red
+  at the degraded step alone, and the boot test's degraded case red (its
+  first case stays green there, since its stand-in probe makes the flag and
+  the gate one).
+
+### The comments, the whole class
+
+B113 named four comments; the class was about thirty sites, in Go, JS,
+templates and one ops doc, each describing a pool, a sweeper, a trigger or
+a card as ABSENT with its feature off, which #770 (the wired-vs-active split
+for smart mixes, optimize and fingerprint) and #781 (both pools) ended. The
+four named:
+
+- the `/v1/health` gating comment: no `upscale.complete` event "ever
+  arrives" because a disabled bridge "has no transcode pool and
+  `SetOnJobComplete` was never called". Both exist on every bridge; the
+  flag goes with the feature because every enqueue path reads the same
+  gate, so no job can be asked for, and a job queued before the gate
+  closed still completes and publishes an event;
+- the `api.AnalysisStats` docblock ("Enabled mirrors LIVE runtime state
+  (pool != nil)", "Pool is omitted when the feature is off"). Nothing ever
+  set that `pool`: the /v1 adapter has none, and PROTOCOL.md says "There is
+  no live `pool` field". The field and the `AnalysisPoolStats` type that
+  only it used were removed; `omitempty` had left it out of every answer,
+  so no byte on the wire changed and there is no Mirror-PR;
+- the `api.UpscaleStats` docblock ("no pool to query"), in the same block
+  as two stale claims about the app ("iOS uses it for the Upscaling
+  management section", "iOS calls every 5 s"), which PROTOCOL.md says went
+  with operator-driven upscaling; all three corrected, and the handler doc
+  names PROTOCOL.md rather than the app repo's `docs/BridgeProtocol.md`;
+- `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled`'s docblock, and
+  the test with it: it wired no `WithUpscale` at all, a state serve never
+  produces. Measured: with the health handler advertising the flag on the
+  gate's WIRING (`s.upscaleEnabled != nil`) instead of its answer, the old
+  test passed and the new one (a gate answering false, flipped on and off
+  per request, plus the unwired harness case) failed at both off steps.
+
+The rest, found by grepping for the shape rather than the four:
+`WithUpscaleEnqueuer` ("Wired … IFF `cfg.Upscale.Enabled && sox-on-PATH
+probe passed`") and the `UpscaleEnqueuer` docblock ("called with nil
+because the feature gate / sox probe failed"); the diagnostics handler
+("the provider is nil on bridges that disabled upscale"); the inflight
+dropper's two docblocks; `WithUpscaleStats` ("the same closure the admin
+tile consumes": the same sources); the console's `upscaleStatsResponse.Pool`
+("no pool to query") and `analysisStatsResponse` ("both omitted when the
+feature is off (closures nil)", "absent ≠ idle"); the settings PATCH's
+auto-optimize branch, whose REASON STRING, shown to an operator, named "the
+upscale pool is absent, or the optimize kind is off" (serve wires the
+sweeper on every bridge whatever the switches say, so the branch is a
+harness's, and the reason now says only that no sweeper is wired);
+`jobsAnalysis` ("omitted when the feature machinery is off"), the Jobs
+snapshot's `AutoOptimize` field and `apiAutoOptimizeSweep` ("no upscale
+pool"), `TestJobsAutoOptimizeCard`'s and two admin tests' docblocks;
+`Deps.AutoOptimizeState` ("wired for every serve where an upscale pool
+exists"), `Deps.TriggerAutoOptimizeSweep`,
+and `Deps.FingerprintForget` with its wiring in `runServe` ("wired only when
+fingerprinting is enabled", "nil cache (fingerprinting disabled)": the cache
+is built on every bridge); `Deps.AnalysisSweep`, whose doc sat at the top
+of `DoctorRun`'s with none of its own; `settings_apply.go`'s example of a
+conditional restart and CLAUDE.md's twin of it ("no sweeper wired", a
+harness's case now; the Tailscale mode's transition is the real one);
+`app.js`'s three ("no live pool", "no pool → no workers", the auto-optimize
+card hidden when "no upscale pool on this bridge") and the Workers panel's
+template comment; the Settings page's auto-optimize hint, which told
+operators that with either switch off "the Jobs card stays hidden" (seen in
+the browser: the card shows, badged "off"); `autoOptimizeStateClosure`
+("what a bridge with no upscale pool should render"); `runServe`'s "Phase
+2.5" paragraph ("Only instantiated when the feature is fully active",
+glued, with the auto-analysis paragraph, onto `postScanNudges` two blocks
+above the pool it described; both moved above their own declarations and
+corrected: "all stay nil when the feature is off, and the closures are only
+installed when analysisActive"); `UpscaleConfig.Workers` ("instantiated by
+`bridge serve` when Enabled"); and the `analysisEnabled` row of
+ops/settings-apply-semantics.md, which says now what the console does.
+Beside them, the doctor's fingerprint check and its test said the feature
+"degrades to off at startup", a startup verdict the live gate retired (the
+B44 class, one feature over).
+
+`Deps.AnalysisPoolStats`' doc was right about the code it described (B44
+had corrected it to say the field was served with the feature off) and
+says now that the handler leaves it out.
+
+Left as they are, being true: comments about a TEST harness with nothing
+wired (`handlers_diagnostics_test.go`), the CLI's own pool in
+`cmd/bridge/upscale.go`, `batch.go`'s direct-construction tests,
+`Deps.OptimizeActive`'s "the upscale pool exists on this bridge", and the
+UPnP and harvest closures, whose features are wired at boot and not part of
+#770 or #781.
+
+### Found and filed
+
+- B155: with analysis or upscaling switched off, both pools run every job
+  already queued, and since this change neither console tile shows it.
+  Measured with main's binary, `analysis.workers: 1`, 40 five-minute FLACs:
+  after three analyses the switch-off answered `live`, and over the next
+  114 s `enabled` read false while `queueLen` went 36 → 0 and the cached
+  waveforms 7 → 44, 37 `indexed_at` bumps. A decision for the owner: stop
+  queued work at the switch-off, or show the drain.
+- B156: the analysis and fingerprint cards of a switched-off feature say
+  "Next sweep: in 5h", for a pass that will stand down (seen in the
+  browser).
+
 ## 2026-09-29 — a DFF's DIIN and ID3 chunk and a WAV's LIST/INFO reach its row; ExtractorVersion 20 (backlog B140)
 
 B140 read: `parseDIINChunks` fills a DFF's DITI / DIAR / DIAL only into an

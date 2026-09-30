@@ -188,37 +188,33 @@ type AnalysisStatsProvider interface {
 	AnalysisStatsSnapshot(ctx context.Context) (AnalysisStats, error)
 }
 
-// AnalysisStats is the wire shape GET /v1/analysis/stats returns —
-// field-for-field compatible with the admin tile, same as UpscaleStats.
-//   - Enabled mirrors LIVE runtime state (pool != nil), not the
-//     persisted config flag.
-//   - Pool is omitted when the feature is off.
+// AnalysisStats is the wire shape GET /v1/analysis/stats returns: the
+// admin tile's cached totals and gate, and no live pool field, which
+// PROTOCOL.md documents ("There is no live `pool` field").
+//   - Enabled is the LIVE analysis gate (the config flag AND a usable
+//     sox, read per snapshot), the closure /v1/health's analysis flags
+//     read, not the persisted config flag.
 //   - SoxAvailable is omitted when no precheck closure was wired.
+//
+// Until 2026-09-29 this struct also carried an optional `pool`, and its
+// doc said Enabled mirrored "pool != nil" and that the pool was omitted
+// with the feature off. Nothing ever set it: the adapter in cmd/bridge
+// has no pool, and the analysis pool runs on every bridge since #781
+// whatever the gate says. It went, with the unused type that mirrored
+// analyze.PoolStats, so no future change reads it as a documented field
+// (backlog B113). No byte on the wire changed: `omitempty` left it out
+// of every answer.
 type AnalysisStats struct {
-	Enabled         bool               `json:"enabled"`
-	SoxAvailable    *bool              `json:"soxAvailable,omitempty"`
-	Pool            *AnalysisPoolStats `json:"pool,omitempty"`
-	CachedWaveforms int                `json:"cachedWaveforms"`
-	CachedBytes     int64              `json:"cachedBytes"`
-}
-
-// AnalysisPoolStats mirrors `analyze.PoolStats` field-for-field but
-// lives here so the api package compiles without importing
-// internal/analyze. The wiring closure in cmd/bridge translates.
-type AnalysisPoolStats struct {
-	Workers  int    `json:"workers"`
-	QueueCap int    `json:"queueCap"`
-	QueueLen int    `json:"queueLen"`
-	Inflight int    `json:"inflight"`
-	Enqueued uint64 `json:"enqueued"`
-	Done     uint64 `json:"done"`
-	Failed   uint64 `json:"failed"`
+	Enabled         bool  `json:"enabled"`
+	SoxAvailable    *bool `json:"soxAvailable,omitempty"`
+	CachedWaveforms int   `json:"cachedWaveforms"`
+	CachedBytes     int64 `json:"cachedBytes"`
 }
 
 // analysisStats: GET /v1/analysis/stats — authenticated read-only
 // snapshot of the analysis feature's runtime + on-disk state. Cheap
-// (single SQL COUNT + a mutex-protected pool snapshot + a TTL-cached
-// sox precheck). Mirrors upscaleStats.
+// (single SQL COUNT + the TTL-cached sox precheck; it reads no pool).
+// Mirrors upscaleStats.
 func (s *Server) analysisStats(w http.ResponseWriter, r *http.Request) {
 	var resp AnalysisStats
 	if s.analysisStatsProvider != nil {

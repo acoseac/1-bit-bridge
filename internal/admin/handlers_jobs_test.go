@@ -282,9 +282,9 @@ func TestApiFingerprintSweep(t *testing.T) {
 }
 
 // TestJobsAutoOptimizeCard pins the card's presence contract: absent when
-// the sweeper isn't wired (no upscale pool on this bridge, so a card
-// explaining a feature that can't run would be noise), present with the
-// live state when it is.
+// no AutoOptimizeState closure is wired (a harness: serve wires it on every
+// bridge, since the sweeper runs whatever the switches say), present with
+// the live state when it is.
 func TestJobsAutoOptimizeCard(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
