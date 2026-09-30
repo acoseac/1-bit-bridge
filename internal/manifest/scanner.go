@@ -276,11 +276,15 @@ func (s *Scanner) effectiveDeleteThreshold() int {
 // state could not be seen: the answer is then not one, and the tracks
 // given it keep the art they had (localArtUnsettled) until a scan reads
 // the cover. Settled refusals (a candidate too large, not an image, not
-// a file) carry none.
+// a file) carry none. `cacheWriteFailed` says a candidate read whole could
+// not be stored in the artwork cache (errLocalArtworkCacheWrite): the
+// tracks keep the art they had, and nothing retries it but a later
+// extraction.
 type folderArtResult struct {
-	found   bool
-	mbid    string
-	failure error
+	found            bool
+	mbid             string
+	failure          error
+	cacheWriteFailed bool
 }
 
 // folderArtPromise serializes per-directory read + hash + atomic
@@ -1790,11 +1794,15 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // B141). A pipeline that did not complete (localArtUnsettled: a cover
 // it could not read) keeps the old value whatever it found
 // (keepArtOfUnsettledRead), and one that did not run
-// (localArtNotLooked) says nothing, so the old value is copied.
+// (localArtNotLooked), or could not store what it read in the artwork
+// cache (localArtWriteFailed), says nothing, so the old value is copied:
+// dropped there, a wiped cache whose rewrite failed lost its cover for
+// good, where the copy keeps it for needsLocalArtworkRecovery to retry.
 func mergePostScanFields(fresh, old *Track) {
 	keepArtOfUnsettledRead(fresh, old.ArtworkMBID)
 	if fresh.ArtworkMBID == "" &&
-		!(fresh.localArt == localArtSettled && isLocalArtworkMBID(old.ArtworkMBID)) {
+		!(fresh.localArt == localArtSettled && !fresh.localArtWriteFailed &&
+			isLocalArtworkMBID(old.ArtworkMBID)) {
 		fresh.ArtworkMBID = old.ArtworkMBID
 	}
 	if fresh.ArtistMBID == "" {

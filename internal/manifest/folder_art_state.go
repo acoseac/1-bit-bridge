@@ -34,7 +34,9 @@ type localArtOutcome uint8
 
 const (
 	// localArtNotLooked: the pipeline did not run (no artwork cache
-	// directory), so an empty ArtworkMBID says nothing about the file's art.
+	// directory, or an extraction that stopped before it: a file its
+	// extractor refused), so an empty ArtworkMBID says nothing about the
+	// file's art.
 	localArtNotLooked localArtOutcome = iota
 	// localArtSettled: every picture and cover the pipeline looked at was
 	// read and judged, so what it answered, a cover or none, is a verdict.

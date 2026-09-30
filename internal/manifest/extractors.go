@@ -2919,9 +2919,13 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 				scanLogger.Warn("embedded artwork is neither JPEG nor PNG; skipping",
 					"path", absPath, "mime", pic.MIMEType)
 			default:
-				if mbid, ok := stampLocalArtwork(pic.Data, ec.ArtworkCacheDir); ok {
+				mbid, err := stampLocalArtworkCached(pic.Data, ec.ArtworkCacheDir)
+				if err == nil {
 					t.ArtworkMBID = mbid
 					return
+				}
+				if errors.Is(err, errLocalArtworkCacheWrite) {
+					t.localArtWriteFailed = true
 				}
 			}
 		}
@@ -2981,8 +2985,12 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 
 // notePendingFolderArt marks t unsettled when a folder-art lookup it was
 // given did not complete (folderArtResult.failure), keeping the first
-// failure for the scan's line.
+// failure for the scan's line, and notes a cover whose cache file could not
+// be written (localArtWriteFailed).
 func notePendingFolderArt(t *Track, res folderArtResult) {
+	if res.cacheWriteFailed {
+		t.localArtWriteFailed = true
+	}
 	if res.failure == nil {
 		return
 	}
@@ -3117,15 +3125,21 @@ func scanFolderArtwork(dir string, names []string, cacheDir string, read folderA
 				"path", full, "first", fmt.Sprintf("%x", data[:min(len(data), 4)]))
 			continue
 		}
-		if mbid, ok := stampLocalArtwork(data, cacheDir); ok {
+		mbid, err := stampLocalArtworkCached(data, cacheDir)
+		if err == nil {
 			res.found, res.mbid = true, mbid
 			return res
 		}
-		// stampLocalArtwork already logged the failure; fall through
-		// in case the directory has another candidate (rare). A cache
-		// file that could not be written is not retried: that is the
-		// bridge's own directory failing for every cover alike, and
-		// retrying would re-read the library every scan.
+		// stampLocalArtworkCached already logged the failure; fall
+		// through in case the directory has another candidate (rare). A
+		// cache file that could not be written is not a failed read of
+		// the cover, and the folder-art gate does not retry it (the
+		// bridge's own directory, failing for every cover alike); the
+		// rows given this answer keep the art they had
+		// (cacheWriteFailed, localArtWriteFailed).
+		if errors.Is(err, errLocalArtworkCacheWrite) {
+			res.cacheWriteFailed = true
+		}
 	}
 	return res
 }
@@ -3178,6 +3192,28 @@ func readFolderArt(full string, info os.FileInfo) ([]byte, error) {
 // pre-scaling name); post-scaling the content is ≤ 1200 px and the
 // /v1/artwork size ladder serves it for any requested size.
 func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
+	mbid, err := stampLocalArtworkCached(data, cacheDir)
+	return mbid, err == nil
+}
+
+// errLocalArtworkCacheWrite marks a stamp whose cache file could not be
+// written (stampLocalArtworkCached): a failure of the bridge's own artwork
+// directory (full, read-only), which says nothing about the picture.
+var errLocalArtworkCacheWrite = errors.New("the artwork cache file could not be written")
+
+// stampLocalArtworkCached is stampLocalArtwork answering why a stamp failed:
+// errLocalArtworkCacheWrite when the cache file could not be written, another
+// error when the bytes could not be scaled (a verdict about the picture).
+// Each is logged here, as it always was.
+//
+// The artwork pipeline tells the two apart for the row's sake: a picture
+// that cannot be scaled is no picture, while one whose cache write failed is
+// one this extraction could not store, so a row's old art is kept
+// (localArtWriteFailed; mergePostScanFields copies it) and the recovery of a
+// wiped cache (needsLocalArtworkRecovery) still retries it on the next scan.
+// A cache write that fails is not retried by the folder-art gate: that is
+// the bridge's own directory failing for every cover alike.
+func stampLocalArtworkCached(data []byte, cacheDir string) (string, error) {
 	sum := sha256.Sum256(data)
 	mbid := "local-" + hex.EncodeToString(sum[:])
 	path := filepath.Join(cacheDir, mbid+"-500.jpg")
@@ -3185,18 +3221,18 @@ func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 		// Already on disk — no-op write, return the mbid so the
 		// track gets stamped. Stat-before-write also recovers
 		// transparently from a wiped cache-dir on the next scan.
-		return mbid, true
+		return mbid, nil
 	}
 	scaled, err := scaleLocalArtwork(data)
 	if err != nil {
 		scanLogger.Warn("scale local artwork; skipping", "err", err)
-		return "", false
+		return "", err
 	}
 	if err := writeArtworkAtomicScan(path, scaled); err != nil {
 		scanLogger.Error("write local artwork", "path", path, "err", err)
-		return "", false
+		return "", fmt.Errorf("%w: %w", errLocalArtworkCacheWrite, err)
 	}
-	return mbid, true
+	return mbid, nil
 }
 
 // writeArtworkAtomicScan writes data to path via tmp-file + rename

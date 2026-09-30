@@ -42,6 +42,50 @@ func TestScanner_ACoverThisUserCannotReadIsReadOnceItCan(t *testing.T) {
 	f.requireSettled(t, rels...)
 }
 
+// TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt pins the recovery
+// of a wiped artwork cache (needsLocalArtworkRecovery) against the merge
+// rule that drops a removed cover's art: a cover read whole whose cache file
+// cannot be written (the artwork directory made read-only) is no verdict, so
+// the rows keep their `local-` value, and the first scan that can write the
+// cache restores it. Dropped there, the rows lost the cover for good: nothing
+// sends the gate back to a row whose art is "" and whose folder is unchanged.
+func TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	f := newArtFixture(t)
+	rels := []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
+	for _, rel := range rels {
+		f.flac(t, rel)
+	}
+	data := coverBytes("cached")
+	f.cover(t, "Artist/Album/cover.jpg", data, t0)
+	f.scan(t, "index")
+	want := expectedLocalMBID(data)
+	f.requireArt(t, want, rels...)
+
+	cached := filepath.Join(f.sc.artDir, want+"-500.jpg")
+	if err := os.Remove(cached); err != nil {
+		t.Fatalf("wipe the cache: %v", err)
+	}
+	if err := os.Chmod(f.sc.artDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.sc.artDir, 0o755) })
+	f.scan(t, "the cache wiped and unwritable")
+	f.requireArt(t, want, rels...)
+
+	if err := os.Chmod(f.sc.artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.scan(t, "the cache writable again")
+	f.requireArt(t, want, rels...)
+	if _, err := os.Stat(cached); err != nil {
+		t.Errorf("the cache file was not restored: %v", err)
+	}
+	f.requireSettled(t, rels...)
+}
+
 // TestScanner_AFolderWhoseCoverCannotBeSeenKeepsItsRows pins "we could not
 // see it": a cover replaced by one whose stat fails (a link that loops) says
 // nothing about the folder's art, so the rows keep the art they had and the

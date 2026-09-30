@@ -376,9 +376,13 @@ type Track struct {
 	// (the versionStampOnly shape): the scanner reads it to decide whether a
 	// stored `local-` value is stale (mergePostScanFields) or must be kept
 	// (keepArtOfUnsettledRead). localArtFailure is the read that did not
-	// complete, for the scan's one line about them.
-	localArt        localArtOutcome
-	localArtFailure error
+	// complete, for the scan's one line about them. localArtWriteFailed
+	// says a picture or cover read whole could not be stored in the artwork
+	// cache (errLocalArtworkCacheWrite): an empty ArtworkMBID is then no
+	// verdict either, and the merge keeps a row's old value.
+	localArt            localArtOutcome
+	localArtFailure     error
+	localArtWriteFailed bool
 
 	// folderArtKey is the identity of the folder art this extraction was
 	// given (folderArtKey: each cover candidate's name, size and mtime, the
