@@ -32906,6 +32906,17 @@ Negative controls on the committed fix, each restored and re-run green:
 | NC11: an extraction's unsettled read is not counted | the retry test's first line |
 | NC12: a candidate that cannot be stat'ed reads as absent | the unseen-cover test: the album's art dropped, both rows moved |
 | NC13: a failed cache write is a verdict (the merge drops an old `local-` value) | the wiped-cache test: the art "" after the read-only scan, still "" and the cache file never restored once it was writable |
+| NC14: a candidate that is not a file stays in the key | `TestFolderArtKeyLeavesOutWhatIsNotAFile`: the key named the directory link and the named pipe |
+
+Review round 1 (Gemini): leave a candidate that is not a regular file out of
+the state. Taken by `fsutil.NotAFile`'s list of kinds (a directory or a link
+to one, a named pipe, a socket, a device), not by the suggested
+`!info.Mode().IsRegular()`: a Windows cloud placeholder stats as
+`ModeIrregular` and opens as a file (CLAUDE.md's "the refusal is a list of
+kinds" rule), so the suggestion would have dropped every OneDrive
+files-on-demand cover. Kept in the key, a link to a directory called
+`cover.jpg` re-read its album whenever the linked directory changed; the
+lookup refused to read such a candidate anyway.
 
 ### Platforms
 
