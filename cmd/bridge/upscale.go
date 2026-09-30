@@ -841,9 +841,16 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 }
 
 // runGCForwardSweep unlinks every file the inventory classified as an
-// orphan. Returns `(removed, kept, failed, exitCode)` — `exitCode != 0`
-// signals a SIGINT, or an inventory it refused, and runGC bails
-// immediately.
+// orphan. Returns `(removed, kept, failed, exitCode, renditionsUnlinked)` —
+// `exitCode != 0` signals a SIGINT, or an inventory it refused, and runGC
+// bails immediately. renditionsUnlinked counts the renditions by name
+// (SidecarInventory.OrphanIsRendition) this run's own os.Remove unlinked:
+// never one whose unlink failed, and never one already gone (ENOENT, a
+// success to the exit code), since a volume unmounted between the
+// inventory and the unlinks makes every unlink under the mountpoint
+// ENOENT. It is what the reverse guard reads as this run having emptied
+// the directory (gcCheckOutputDirBeforeReverseSweep; CodeRabbit on
+// #1129, backlog B223).
 //
 // It does NOT walk. The walk happens once, earlier, in
 // gcTakeInventory, because the mass-orphan guard has to see the whole
@@ -859,11 +866,11 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // counted. An inventory whose two lists do not pair up is refused before
 // anything is removed (integrity.SidecarInventory.CheckPaired), never
 // indexed past its end nor unlinked by the configured spelling.
-func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int) {
-	var removed, failed int
+func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int, int) {
+	var removed, failed, renditionsUnlinked int
 	if err := inv.CheckPaired(); err != nil {
 		fmt.Fprintf(stderr, "GC forward sweep: refusing to run — %v. Nothing was removed.\n", err)
-		return 0, inv.Known, 0, 1
+		return 0, inv.Known, 0, 1, 0
 	}
 	for i, path := range inv.OrphanPaths {
 		// Stop the forward sweep promptly on SIGINT. Without the check,
@@ -871,22 +878,26 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integr
 		// it finished the list. CodeRabbit Major on PR #217.
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return removed, inv.Known, failed, 1
+			return removed, inv.Known, failed, 1, renditionsUnlinked
 		}
 		// ENOENT is a success: the inventory and the unlink are separate
 		// steps now, so a file another process removed in between is gone,
 		// which is the outcome asked for. Counting it as a failure would
 		// exit 1 and report a cron'd --gc as failed for doing its job.
 		// `analyze --gc` has always read it this way.
-		if err := os.Remove(inv.OrphanWalkedPaths[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		err := os.Remove(inv.OrphanWalkedPaths[i])
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
 			failed++
 			continue
 		}
 		removed++
+		if err == nil && inv.OrphanIsRendition(i) {
+			renditionsUnlinked++
+		}
 	}
 	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, inv.Known, failed)
-	return removed, inv.Known, failed, 0
+	return removed, inv.Known, failed, 0, renditionsUnlinked
 }
 
 // gcTakeInventory is the forward sweep's read-only half: one walk of
@@ -1160,8 +1171,12 @@ func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv
 //
 // Since backlog B223 "empty" is "holds no rendition" (the probe counts
 // renditions, not entries), and forwardRemoved counts the RENDITIONS the
-// forward sweep unlinked (SidecarInventory.OrphanRenditions), never every
-// file: `--gc`'s nil Consider unlinks a .DS_Store as an orphan, and a run
+// forward sweep's own os.Remove unlinked (runGCForwardSweep's
+// renditionsUnlinked), never every file, never one whose unlink failed,
+// and never one it found already gone: a volume unmounted between the
+// inventory and the unlinks makes every unlink ENOENT, and the listed
+// renditions, counted instead, read that as this run's work (CodeRabbit on
+// #1129). `--gc`'s nil Consider unlinks a .DS_Store as an orphan, and a run
 // that removed only that found the directory holding no rendition
 // already. Read as its own work, it deleted every row of an unmounted
 // volume whose mountpoint held a .DS_Store (measured, 40 of 40). The
@@ -1557,16 +1572,16 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		}
 	}
 
-	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
+	_, _, failed, exitCode, renditionsUnlinked := runGCForwardSweep(ctx, stdout, stderr, inv)
 	if exitCode != 0 {
 		return exitCode
 	}
 
-	// The reverse guard is told which renditions the forward sweep just
+	// The reverse guard is told how many renditions the forward sweep just
 	// unlinked: a variants directory this run emptied of renditions is
 	// explained, an unmounted one is not. See
 	// gcCheckOutputDirBeforeReverseSweep.
-	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), inv.OrphanRenditions(), opts.allowMassDelete); exitCode != 0 {
+	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), renditionsUnlinked, opts.allowMassDelete); exitCode != 0 {
 		return exitCode
 	}
 

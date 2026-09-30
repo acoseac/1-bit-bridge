@@ -164,20 +164,24 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 	}
 }
 
-// TestOrphanRenditionsCountsOnlyRenditions — `upscale --gc`'s reverse
-// guard explains a directory that holds no rendition after its forward
-// sweep only by the renditions that sweep unlinked (backlog B223): with
-// every orphan counted, a run that unlinked a .DS_Store from under an
-// unmounted mountpoint read the emptiness as its own work.
-func TestOrphanRenditionsCountsOnlyRenditions(t *testing.T) {
+// TestOrphanIsRenditionReadsTheName — `upscale --gc`'s reverse guard
+// explains a directory that holds no rendition after its forward sweep
+// only by the renditions that sweep unlinked (backlog B223), and asks
+// OrphanIsRendition of each: with every orphan counted, a run that
+// unlinked a .DS_Store from under an unmounted mountpoint read the
+// emptiness as its own work.
+func TestOrphanIsRenditionReadsTheName(t *testing.T) {
 	inv := SidecarInventory{OrphanPaths: []string{
 		filepath.Join("v", ".DS_Store"),
 		filepath.Join("v", "Artist", "Album", "01.flac"),
 		filepath.Join("v", "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac"),
 		filepath.Join("v", "abc123-optimized-v1-44100-16.flac"),
 	}}
-	if got := inv.OrphanRenditions(); got != 2 {
-		t.Errorf("OrphanRenditions = %d, want 2: the two files named as renditions", got)
+	want := []bool{false, false, true, true}
+	for i, w := range want {
+		if got := inv.OrphanIsRendition(i); got != w {
+			t.Errorf("OrphanIsRendition(%d) (%s) = %v, want %v", i, inv.OrphanPaths[i], got, w)
+		}
 	}
 }
 

@@ -144,22 +144,17 @@ func (inv SidecarInventory) CheckPaired() error {
 	return nil
 }
 
-// OrphanRenditions counts the orphans the inventory listed that are
-// renditions by name, the rule the mount-loss probe counts by
-// (looksLikeVariantSidecar): the files whose removal by a forward sweep
-// can leave a variants directory holding no rendition. It is what
-// `upscale --gc`'s reverse guard asks before it reads such a directory as
-// one this run emptied (backlog B223): a run that removed only files that
-// are not renditions, a .DS_Store say, found the directory holding none
-// already, which is what an unmounted volume looks like.
-func (inv SidecarInventory) OrphanRenditions() int {
-	n := 0
-	for _, p := range inv.OrphanPaths {
-		if looksLikeVariantSidecar(filepath.Base(p)) {
-			n++
-		}
-	}
-	return n
+// OrphanIsRendition reports whether the i-th orphan the inventory listed
+// is a rendition by name, the rule the mount-loss probe counts by
+// (looksLikeVariantSidecar): a file whose removal by a forward sweep can
+// leave a variants directory holding no rendition. `upscale --gc`'s
+// forward sweep counts the ones it unlinks, which its reverse guard asks
+// before it reads such a directory as one this run emptied (backlog
+// B223): a run that removed only files that are not renditions, a
+// .DS_Store say, found the directory holding none already, which is what
+// an unmounted volume looks like.
+func (inv SidecarInventory) OrphanIsRendition(i int) bool {
+	return looksLikeVariantSidecar(filepath.Base(inv.OrphanPaths[i]))
 }
 
 // SidecarInventoryOptions configures one inventory pass.
