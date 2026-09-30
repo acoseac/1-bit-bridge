@@ -226,6 +226,12 @@ type SSDPDiscoveryClient struct {
 	// for tests. Default: time.Now.
 	nowFunc func() time.Time
 
+	// link says what a packet's source approves on the link this client's
+	// M-SEARCHes go out on: a link-local source approves itself only on a
+	// zero-configuration IPv4 link (backlog B49). Read when the client is
+	// built and refreshed before every M-SEARCH, by runTickLoop.
+	link *AnnouncementLink
+
 	// sendErrs reports failed M-SEARCH sends, streak-suppressed, so a
 	// persistently unsendable socket costs O(1) log lines per outage
 	// instead of one per tick forever. SendFailureLog is the policy, shared
@@ -348,6 +354,13 @@ type DiscoveryConfig struct {
 	// Tests inject a fixed clock so eviction timing is
 	// deterministic.
 	NowFunc func() time.Time
+
+	// InterfaceAddrs reads Interface's addresses, from which the client
+	// judges whether its link is a zero-configuration IPv4 link, the one
+	// kind where a packet's link-local source approves itself
+	// (AnnouncementLink; backlog B49). Nil reads Interface.Addrs. Tests
+	// set it to model a link.
+	InterfaceAddrs func() ([]net.Addr, error)
 }
 
 // DefaultDiscoveryConfig returns a config seeded with the doc'd
@@ -390,9 +403,10 @@ func NewSSDPDiscoveryClient(
 		// Location headers (a LAN device, possibly rogue or spoofed), so
 		// the client relays a 3xx verbatim rather than following it
 		// toward loopback or a link-local metadata address, and refuses
-		// to connect to either unless the packet came from that address
-		// (NewDeviceFetchClient). Mirrors internal/upnpproxy's
-		// CheckRedirect guard.
+		// to connect to either unless the packet came from that address,
+		// and to a link-local one unless this client's link is a
+		// zero-configuration one (NewDeviceFetchClient, under the approval
+		// c.link gives). Mirrors internal/upnpproxy's CheckRedirect guard.
 		cfg.Dispatcher = &HTTPClientDispatcher{Client: NewDeviceFetchClient(cfg.DetailFetchTimeout)}
 	}
 	nowFunc := cfg.NowFunc
@@ -407,6 +421,7 @@ func NewSSDPDiscoveryClient(
 		nowFunc:        nowFunc,
 		lastLocations:  make(map[string][]locationRecord),
 		inFlight:       make(DetailFetchClaims),
+		link:           NewAnnouncementLink(packageLogger, "renderer discovery", cfg.Interface, cfg.InterfaceAddrs),
 		sendErrs:       NewSendFailureLog(packageLogger, "M-SEARCH", cfg.Interface.Name, "renderer discovery", cfg.MSearchInterval),
 		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
@@ -597,7 +612,10 @@ func (c *SSDPDiscoveryClient) runLoop(ctx context.Context) {
 // the full interval before the first M-SEARCH.
 func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
 	defer c.wg.Done()
-	// Initial M-SEARCH + eviction pass.
+	// Initial M-SEARCH + eviction pass. The link is read again before every
+	// search, so the answers to it are judged by the link as it was when it
+	// went out (AnnouncementLink).
+	c.link.Refresh()
 	c.sendMSearch()
 	c.evictStaleEntries()
 	ticker := time.NewTicker(c.cfg.MSearchInterval)
@@ -607,6 +625,7 @@ func (c *SSDPDiscoveryClient) runTickLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			c.link.Refresh()
 			c.sendMSearch()
 			c.evictStaleEntries()
 		}
@@ -703,9 +722,10 @@ func buildMSearchRequest(searchTarget string) []byte {
 //
 // `src` is the address the packet came from. A LOCATION may lead the
 // bridge to this machine or a link-local address only when it is that
-// address (LocationFromSource here, and the default client's dial check
-// on every fetch the packet causes); tests pass nil, which matches no
-// address.
+// address, and to a link-local one only when this client's link is a
+// zero-configuration one (c.link.Location here, and the default client's
+// dial check on every fetch the packet causes, under the approval it
+// returns); tests pass nil, which matches no address.
 func (c *SSDPDiscoveryClient) handlePacket(
 	ctx context.Context,
 	packet []byte,
@@ -748,8 +768,10 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// A LOCATION this packet may not send the bridge to reads as absent,
 	// exactly as ParseSSDPHeaders' own refusals do: a known UDN is still
 	// refreshed, an unknown one skipped, and the move detector below
-	// never sees it (backlog B14).
-	location := LocationFromSource(hdr.Location, src)
+	// never sees it (backlog B14). approval is what every request the
+	// packet causes runs under (backlog B49: a link-local source approves
+	// itself only on a zero-configuration link).
+	location, approval := c.link.Location(hdr.Location, src)
 	if location == "" && hdr.Location != "" {
 		packageLogger.Debug("SSDP LOCATION refused: its host may lead to this machine or a link-local "+
 			"address, and the packet did not come from there", "udn", udn, "location", hdr.Location,
@@ -794,7 +816,7 @@ func (c *SSDPDiscoveryClient) handlePacket(
 		if c.locationMoved(udn, location, existing.ControlURL, now) {
 			packageLogger.Debug("renderer moved; re-fetching description",
 				"udn", udn, "from", existing.ControlURL, "to", location)
-			c.spawnDetailFetch(ctx, udn, location, src, now)
+			c.spawnDetailFetch(ctx, udn, location, approval, now)
 			return
 		}
 		// Incomplete stub (no AVTransport ControlURL) = residue of a
@@ -823,7 +845,7 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	if location == "" {
 		return // no location → can't fetch description; skip
 	}
-	c.spawnDetailFetch(ctx, udn, location, src, now)
+	c.spawnDetailFetch(ctx, udn, location, approval, now)
 }
 
 // sameURLHost reports whether two URLs share the same host:port.
@@ -1037,14 +1059,14 @@ func (c *SSDPDiscoveryClient) releaseFetch(udn string) {
 func (c *SSDPDiscoveryClient) spawnDetailFetch(
 	ctx context.Context,
 	udn, location string,
-	src *net.UDPAddr,
+	approval DialApproval,
 	now time.Time,
 ) {
 	if !c.claimFetch(udn) {
 		return
 	}
 	c.wg.Add(1)
-	go c.fetchAndCacheDetails(ctx, udn, location, src, now)
+	go c.fetchAndCacheDetails(ctx, udn, location, approval, now)
 }
 
 // fetchAndCacheDetails dispatches the description + GetProtocolInfo
@@ -1057,13 +1079,14 @@ func (c *SSDPDiscoveryClient) spawnDetailFetch(
 // cancels it, in-flight detail fetches return early without
 // touching the cache. Per Gemini HIGH round-1 on PR #305.
 //
-// `src` is the address of the packet that named location. Both fetches
-// carry it in their context (WithAnnouncementSource), so the default
-// client connects to this machine or a link-local address only when that
-// is where the packet came from.
+// `approval` is what the packet that named location approves on this
+// client's link (c.link.Location). Both fetches carry it in their context
+// (WithDialApproval), so the default client connects to this machine or a
+// link-local address only when that is where the packet came from, and to
+// a link-local one only on a zero-configuration link.
 func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 	runCtx context.Context,
-	udn, location string, src *net.UDPAddr, lastSeenAt time.Time,
+	udn, location string, approval DialApproval, lastSeenAt time.Time,
 ) {
 	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very
 	// top so it fires on EVERY return path (including the semaphore-acquire
@@ -1088,7 +1111,7 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		return
 	}
 
-	announced := WithAnnouncementSource(runCtx, src)
+	announced := WithDialApproval(runCtx, approval)
 	ctx, cancel := context.WithTimeout(announced, c.cfg.DetailFetchTimeout)
 	defer cancel()
 	desc, err := FetchDeviceDescription(ctx, c.dispatcher, location)

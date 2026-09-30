@@ -278,6 +278,12 @@ every Mac, and every account on a Mac reads the same file. A backlog entry holds
 WORK, not rules: a rule a follow-up teaches still goes in this file, and its record
 in `ops/engineering-log.md`.
 
+**When the follow-up is an unfixed weakness, the public record names the entry
+and nothing more**: not this file, the log, a PR body, a PR comment or a commit
+message describes it or how to reproduce it before its fix ships (SECURITY.md).
+The B97 session wrote one up in this file, the log and its PR body, and a review
+caught it (#1110's log entry).
+
 ## Things that have bitten before
 
 Every rule here was paid for by a real defect, most of them silent. They are
@@ -2019,14 +2025,80 @@ no failing test — which is the shape to expect in this area.
   The Atlas premium
   cover fetch builds its request the same way and sends the bearer token
   alone, which the guard withholds from a hop that leaves https as well: its
-  stored base cannot carry user information
-  (`config.CanonicalHTTPSBase` refuses it when it is provisioned), and a
-  hand-edited state file can. iTunes and Deezer take no operator URL.
+  stored base carries no user information (`baseurl.CredentialBase` refuses
+  it when it is provisioned, and the harvest state store drops one a hand
+  edit left in its file: the next bullet), and the fetch goes through the
+  parser all the same, for any other credential source. iTunes and Deezer
+  take no operator URL.
   `TestNoRequestErrorNamesABaseURLsCredential` drives every request either
   client makes against three ways for a mirror to fail and five ways to write a
   credential, and `TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` runs
   the real enricher and searches every line it logs, at every level, without
   regard to case.
+- **…and the harvest credential's stored base is `scheme://host` or
+  nothing, decided at the STORE** (backlog B97, and the stored half of B49).
+  `atlasharvest.StateStore` kept whatever `atlas-harvest.json` held, and the
+  harvest client's submit and poll, the booklet check and fetch, and the
+  lyrics tier build every request URL from it. Measured on main with the
+  real `serve` over a hand-edited file: `WARN atlasharvest.tick_error
+  phase=poll error="Get \"https://s3cret-Pw@127.0.0.1:1/v1/atlas/harvest/results?…\":
+  … connection refused"`, a token written as the user name, whole, on every
+  tick. A path, a query or a fragment reached the same errors; a base
+  written without a scheme (`user:pw@host`) failed `unsupported protocol
+  scheme` with the URL quoted whole and lowercased (search without regard to
+  case); plain http sent `Authorization: Bearer <token>` in the clear; and a
+  port with no host, stored before #1074's check, was dialled on this
+  machine (a TCP connect; the TLS handshake then fails for want of a server
+  name, so the token never left). **Fix it at the store, never per
+  consumer**: #1091's `parseBaseEndpoint` covered the premium fetch alone,
+  and two readers of one stored value disagreed about what they tolerate.
+  `OpenStateStore` reduces a loaded base with `baseurl.CredentialBase`, the
+  reduction `POST /v1/atlas-harvest/credential` stores; a base with no such
+  form is DROPPED with the credential held against it (token and expiry;
+  the sync position stays, as `Clear` keeps it), the drop is WRITTEN BACK so
+  neither stays on disk (a harvest-off revoke must not answer 204 over a
+  credential still in the file), and one `atlasharvest.state.base_refused`
+  Warn names the file and no part of the value. A write-back that fails
+  fails the open, and `serve` runs without the harvest, as for any state
+  file it cannot open. `SetCredential` refuses such a base with an error
+  naming none of it, BEFORE it touches anything (a changed base resets the
+  cursor). A base that reduces (a trailing slash, `:443` or an empty port,
+  an uppercase scheme, space) is held reduced and keeps its credential.
+  **One reduction,
+  in `internal/baseurl`**: `CanonicalHTTPS` (the pin's), `NamesHost` and
+  `CredentialBase` (the canonical form, when it names a host and any port it
+  names is 1-65535: `url.Parse` checks a port's digits, not its range, so
+  `https://atlas.example:99999` was stored and failed every dial), imported
+  by config, the handler and the store, since `internal/atlasharvest`
+  imports neither config nor enrich; `config.CanonicalHTTPSBase` and
+  `BaseURLNamesHost` are gone, so there is no second copy to drift. **Keep
+  the host and port tests in `CredentialBase`, out of `CanonicalHTTPS`**:
+  the pin goes through the latter, `Validate` refuses a pin that reduces to
+  "", and a config that loaded must keep loading (B36's reasoning); such a
+  pin keeps its canonical form and matches no credential. **The
+  reduction is a fixed point** (`TestTheReductions` reduces every answer
+  again): the pin is reduced twice, by config and again by
+  `WithAtlasHarvest`, and the store reduces at every open. `https://:443`
+  reduced to `https://` and then to "", so a pin written that way left a
+  non-demo bridge UNPINNED (measured with main's binary: a paired device's
+  credential for `https://attacker.example` answered 200 and was stored);
+  it stays itself now and matches nothing, as a port and no host should.
+  **The harvest tests' fake Atlases are TLS servers** (`httptest.NewTLSServer`,
+  the client given `srv.Client()`), since the store holds an https base or
+  none: one that seeds an http base fails at `SetCredential`, and one that
+  ignored that error would pass having shown nothing
+  (`TestClientTokenRejectedClearsCredential` did, `_ = state.SetCredential`).
+  `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (eleven shapes, each
+  searched for the secret without regard to case in every line at every
+  level, and a positive control over a base in the stored form that must
+  connect and log),
+  `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost`,
+  `TestTheStoreHoldsABaseInItsCanonicalForm`,
+  `TestARevokeLeavesNoStoredBaseBehind`,
+  `TestOpeningAStoreThatCannotDropItsBaseFails` and
+  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. A follow-up found
+  beside it is backlog B133, which is private: an unfixed weakness is not
+  described in this public repo before its fix ships (SECURITY.md).
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
@@ -3442,9 +3514,10 @@ no failing test — which is the shape to expect in this area.
   so **measure before tightening further**. **Not covered**: a LOCATION on a
   tailnet or public address is still fetched, by the app as by the bridge.
   **The app makes this check too since iOS #1998** (2026-09-29):
-  `UPnPURLPolicy.location(_:announcedFrom:)` is `LocationFromSource` rule for
-  rule, with no dial check behind it (`URLSession` offers no hook between
-  resolving a name and connecting). This bullet said the app had no such
+  `UPnPURLPolicy.location(_:announcedFrom:)` is `LocationPermittedBy` rule
+  for rule but for B49's link rule (three bullets down), which the app does
+  not have (backlog B138), with no dial check behind it (`URLSession` offers
+  no hook between resolving a name and connecting). This bullet said the app had no such
   check until that day, and `resolveServiceURL`'s docblock that the app had
   no host-kind rule: a claim about the other repo goes stale the day that
   repo merges, so a session that changes one side also updates, or files,
@@ -3489,8 +3562,10 @@ no failing test — which is the shape to expect in this area.
   source is not authenticated, and a peer on the same L2 segment can send a
   packet FROM a link-local address; the same-address exception then
   approves exactly that address, for the description fetch and the later
-  dials, and never a cloud metadata one (the next bullet). A loopback source
-  is what RFC 1122 has a host discard from any other interface.
+  dials, never a cloud metadata one (the next bullet), and since B49 only
+  where the packet arrived on a zero-configuration link (the bullet after
+  it). A loopback source is what RFC 1122 has a host discard from any other
+  interface.
 - **…and no device's say-so and no approval reaches a cloud metadata
   address** (CodeRabbit on #1074, 2026-09-28). The residual above said
   169.254.169.254 was included: a packet spoofed from it approved it for the
@@ -3501,7 +3576,7 @@ no failing test — which is the shape to expect in this area.
   addresses in both families; the IPv6 metadata addresses of Google Cloud,
   Oracle, Linode, OpenStack and Scaleway; Scaleway's and Tencent's IPv4
   ones; Alibaba's 100.100.100.200; Azure's 168.63.129.16). `addrKind` names
-  them first (`hostMetadata`), so the string check (`LocationFromSource`),
+  them first (`hostMetadata`), so the string check (`LocationPermittedBy`),
   the service-URL rule (`resolveServiceURL`, for every source) and the dial
   check (`DialApproval.Permits`) refuse them whatever approved the request.
   **Exact addresses, never a range**: a direct-cable device self-assigns
@@ -3537,16 +3612,82 @@ no failing test — which is the shape to expect in this area.
   `TestManualPollerNeverFetchesACloudMetadataDescription` holds both
   refusals and both controls (a direct-cable literal, a name answering
   127.0.0.1).
+- **…and a packet's LINK-LOCAL source approves itself only when the packet
+  arrived on a zero-configuration IPv4 link** (backlog B49, 2026-09-29). The
+  metadata list closed the costly case; the rest of the residual was any
+  link-local neighbour: a peer on the segment answering an M-SEARCH "from"
+  169.254.x.y, with a LOCATION on it, made the bridge GET that neighbour at
+  a port and path the peer chose, and (by rebinding a LOCATION name) dial
+  it for the ingest's SOAP and the proxy's byte fetches, whose answers the
+  unauthenticated DLNA listener relays. Measured on main: the renderer
+  client sent its GET and GetProtocolInfo POST to 169.254.7.7, and through
+  the real ingest and proxy the proxy dialled it (`connect: host is down`,
+  the ARP on the Mac's LAN). **What a direct-cable device needs is the link
+  the exception exists for**: a zero-configuration link, where THIS host
+  holds an IPv4 link-local address and no other IPv4 address
+  (`discovery.ZeroConfIPv4Link`). That is what macOS and Windows self-assign
+  when DHCP does not answer and what a Linux link-local connection holds,
+  measured with the real `net.Interface.Addrs` on each (the dev Mac's USB
+  link to an iPhone, Windows' APIPA adapters, a Linux namespace interface);
+  every DHCP'd interface measured reads configured. **What the rule costs is
+  measured too, and it is where the forgery lands**: a device stuck on
+  169.254 on a configured LAN (failed DHCP, which UPnP requires it to keep
+  retrying) is not fetched, and from such a LAN a connect to 169.254.7.7 is
+  refused at once on Windows (`WSAENETUNREACH`: no 169.254 route) and on
+  the Linux host measured (no 169.254 route: routed to the gateway), and
+  leaves through the primary interface's 169.254 route onto the LAN on
+  macOS (and on any host configured with such a route). A MediaServer
+  there can still be configured by a manual URL (`OperatorChose`); a
+  renderer has no such hatch. **Judged from the client's OWN interface** (the one its M-SEARCH
+  goes out on), read when the client is built and again before every
+  M-SEARCH (`discovery.AnnouncementLink.Refresh`, in both tick loops): not
+  per packet (`Addrs` is a syscall, GetAdaptersAddresses on Windows), and
+  not from the interface a packet arrived on, which x/net/ipv4 cannot
+  report on Windows. **Declined**: "only for the interface the packet
+  arrived on" alone, which leaves the reported shape open (peer and
+  neighbour share the configured LAN); and a link that merely HOLDS a
+  link-local address beside a routable one (RFC 3927 says a host SHOULD NOT
+  have both; such a link is a DHCP LAN). **One approval, both checks**:
+  `LocationPermittedBy` (the string check, which `LocationFromSource` now
+  wraps) asks `DialApproval.Permits`, as the GENA guard does, so they
+  cannot disagree; `AnnouncedOn(src, zeroConfLink)` is the approval and
+  `AnnouncedFrom(src)` its configured-link form. An IPv6 link-local SSDP
+  source approves nothing (both clients are udp4; IPv6 SSDP announces from
+  fe80 on every link, so a rule of its own would be needed). **A GENA
+  subscriber keeps its link-local address on any link** (`SubscribedFrom`):
+  the SUBSCRIBE came over TCP, whose handshake shows the address to be the
+  peer's own. A refusal only the link decided is one Warn per source,
+  bounded at 64, naming the interface and this host's IPv4 there.
+  **Residual**: a forged answer on a zero-configuration link itself, and
+  one sent from a configured link to the ephemeral port of the client on
+  another, zero-configuration interface, from the address of a device on
+  that link (neither is visible from the sender's link). No SSDP client
+  runs in public mode (config refuses `upnpUpstream.enabled`, DLNA and its
+  renderer discovery are gated off; measured with the real binary), so the
+  cloud-VM case was never reachable there. The app's mirror has no link
+  rule (backlog B138). `TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink`,
+  `TestServerLinkLocalSourceIsApprovedOnlyOnAZeroConfLink`,
+  `TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere`
+  (cmd/bridge, the chain), the per-link columns of
+  `TestDefaultClientDialCheck` and `TestLocationPermittedBy`,
+  `TestTheRendererClientReadsItsLinkBeforeEverySearch` and
+  `TestTheServerClientReadsItsLinkBeforeEverySearch`.
 - **A URL that names a port and no host (`https://:8443`) is not a URL of any
   host, and Go dials it on THIS machine**, so every validator reads
   `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
   to every phone); the harvest credential endpoint answers 400
-  (`config.BaseURLNamesHost`); a configured enrich or harvest base URL of that
+  (`baseurl.CredentialBase`, which asks `baseurl.NamesHost`), and the
+  harvest state store drops such a base, with the credential held against
+  it, whenever it opens its file (backlog B97), so one stored before the
+  endpoint checked is gone at the next start instead of dialled on every
+  tick, as it was until then; a configured enrich or harvest base URL of that
   shape is WARNED about in `Normalize`, never refused, because it loaded
   before and a refusal stops a bridge from starting after an update. **Don't
-  move the host test into `CanonicalHTTPSBase`'s reduction**: a hostless pin
+  move the host test into `baseurl.CanonicalHTTPS`'s reduction**: a hostless pin
   would reduce to "" (unpinned) or, through `Validate`, refuse to load; as it
-  stands it pins to a value no accepted credential can carry. **A warning
+  stands it pins to a value no accepted credential can carry (`https://:443`
+  too, since B97: it reduced to `https://`, which the handler's second
+  reduction made "", unpinned). **A warning
   about a configured URL logs its scheme and host alone**
   (`urlOriginForLog`), never the value (review round 1 on #1074): an enrich
   base accepts userinfo, so `http://user:password@:5000` reached the journal
@@ -6364,8 +6505,11 @@ its twin.** The top list is older, shorter, and read first.
   carries the base URL, so whoever sets it chooses where bios come from, and
   those render as an attacker-chosen "Read more on …" link. A pin binds in every
   mode; unpinned is refused in demo and still allowed off-demo. Both sides of
-  the comparison must go through `CanonicalHTTPSBase`, or a one-sided reduction
-  turns a correct pin into a mismatch that fails closed.
+  the comparison must go through `baseurl.CanonicalHTTPS` (the wire side
+  through `baseurl.CredentialBase`, which the harvest state store holds too),
+  or a one-sided reduction turns a correct pin into a mismatch that fails
+  closed. The reduction must be a fixed point, since the pin is reduced twice
+  (backlog B97, under **Enrichment**).
 - **`fs.Resolve`'s final containment check is the PRIMARY defense on Windows**,
   not belt-and-braces: both guards above it are slash-based, so a backslash
   traversal passes them untouched and only `filepath.Join` + the prefix check

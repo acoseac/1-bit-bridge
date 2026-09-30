@@ -51,7 +51,7 @@ func TestATickStoppedByShutdownReportsNothingAndStopsThere(t *testing.T) {
 		holdUntilAbandoned(r)
 	})
 	booklets := &stoppingBooklets{fakeBookletSink: newFakeBookletSink()}
-	c := dueClient(t, srv.URL)
+	c := dueClient(t, srv)
 	c.Booklets = booklets
 	c.BookletFiles = newFakeBookletFiles()
 	// The booklet leg is due, so an untouched universe listing below means
@@ -81,7 +81,7 @@ func TestATickWhoseRequestTimesOutStillReportsIt(t *testing.T) {
 		}
 		holdUntilAbandoned(r) // the submit, until its own deadline
 	})
-	c := dueClient(t, srv.URL)
+	c := dueClient(t, srv)
 	c.RequestTimeout = 50 * time.Millisecond
 
 	rec := loggingtest.Record(t)
@@ -166,7 +166,7 @@ var bookletCases = []struct {
 		msgs: []string{msgGCFailed}, twinMsgs: []string{msgGCFailed},
 		sink: newFakeBookletSink,
 		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
-			bookletClient(t, "", s).gcBooklets(ctx, []string{cancelRelease})
+			bookletClient(t, nil, s).gcBooklets(ctx, []string{cancelRelease})
 		},
 	},
 	{
@@ -174,7 +174,7 @@ var bookletCases = []struct {
 		msgs: []string{msgFetchList}, twinMsgs: []string{msgFetchList},
 		sink: newFakeBookletSink,
 		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
-			_ = bookletClient(t, "", s).fetchBooklets(ctx)
+			_ = bookletClient(t, nil, s).fetchBooklets(ctx)
 		},
 	},
 	{
@@ -186,7 +186,7 @@ var bookletCases = []struct {
 		sink: withOneToFetch,
 		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
 			srv := atlasFake(t, http.NotFound)
-			_ = bookletClient(t, srv.URL, s).fetchBooklets(ctx)
+			_ = bookletClient(t, srv, s).fetchBooklets(ctx)
 		},
 	},
 	{
@@ -196,7 +196,7 @@ var bookletCases = []struct {
 		sink: withOneToFetch,
 		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
 			srv := atlasFake(t, http.NotFound)
-			_ = bookletClient(t, srv.URL, s).fetchBooklets(ctx)
+			_ = bookletClient(t, srv, s).fetchBooklets(ctx)
 		},
 	},
 	{
@@ -208,7 +208,7 @@ var bookletCases = []struct {
 				w.Header().Set("Content-Type", "application/pdf")
 				_, _ = w.Write([]byte("%PDF-1.4 booklet"))
 			})
-			_ = bookletClient(t, srv.URL, s).fetchBooklets(ctx)
+			_ = bookletClient(t, srv, s).fetchBooklets(ctx)
 		},
 	},
 }
@@ -342,7 +342,7 @@ func withOneToFetch() *fakeBookletSink {
 // atlasFake is an Atlas whose every request h answers.
 func atlasFake(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	srv := httptest.NewTLSServer(h)
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -360,21 +360,22 @@ func holdUntilAbandoned(r *http.Request) {
 	}
 }
 
-// dueClient is a client against atlasURL whose submit and booklet check are
+// dueClient is a client against atlas whose submit and booklet check are
 // both due, with one artist to submit and an empty results page to poll.
-func dueClient(t *testing.T, atlasURL string) *Client {
+func dueClient(t *testing.T, atlas *httptest.Server) *Client {
 	t.Helper()
 	state := mustOpenState(t, filepath.Join(t.TempDir(), "state.json"))
-	if err := state.SetCredential("test-token", atlasURL, time.Now().Add(time.Hour)); err != nil {
+	if err := state.SetCredential("test-token", atlas.URL, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	return &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{cancelArtistMBID}}, Sink: &fakeSink{}}
+	return &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{cancelArtistMBID}}, Sink: &fakeSink{}, HTTP: atlas.Client()}
 }
 
-// bookletClient is bookletTestClient over a store that stops.
-func bookletClient(t *testing.T, atlasURL string, s *stoppingBooklets) *Client {
+// bookletClient is bookletTestClient over a store that stops. atlas is nil
+// for a step that makes no request.
+func bookletClient(t *testing.T, atlas *httptest.Server, s *stoppingBooklets) *Client {
 	t.Helper()
-	c := bookletTestClient(t, atlasURL, s.fakeBookletSink, newFakeBookletFiles())
+	c := bookletTestClient(t, atlas, s.fakeBookletSink, newFakeBookletFiles())
 	c.Booklets = s
 	return c
 }

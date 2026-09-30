@@ -31,7 +31,7 @@ import (
 // fetchOneBooklet's default branch and this test fails.
 func TestBookletFetchFailureIsRecorded(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -45,7 +45,7 @@ func TestBookletFetchFailureIsRecorded(t *testing.T) {
 
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 
 	c.tick(context.Background())
 
@@ -75,7 +75,7 @@ func TestBookletFetchFailureIsRecorded(t *testing.T) {
 // be meaningless bookkeeping on a row that has left the fetch queue.
 func TestBookletFetch404DoesNotRecordAFetchAttempt(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -89,7 +89,7 @@ func TestBookletFetch404DoesNotRecordAFetchAttempt(t *testing.T) {
 
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 
 	c.tick(context.Background())
 
@@ -108,7 +108,7 @@ func TestBookletFetch404DoesNotRecordAFetchAttempt(t *testing.T) {
 // pending booklet.
 func TestBookletOversizedPDFRecordsAFetchFailure(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -129,7 +129,7 @@ func TestBookletOversizedPDFRecordsAFetchFailure(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 
 	c.tick(context.Background())
 
@@ -151,7 +151,7 @@ func TestBookletOversizedPDFRecordsAFetchFailure(t *testing.T) {
 // endpoint with an empty verdict list.
 func failingBookletServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -195,7 +195,7 @@ func TestBookletFetchFailureOnShutdownIsQuietButStillStamps(t *testing.T) {
 	srv := failingBookletServer(t)
 
 	sink := newFakeBookletSink()
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 	logs := captureLogs(c)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,7 +229,7 @@ func TestBookletFetchFailureUnderLiveCtxStillLogs(t *testing.T) {
 
 	sink := newFakeBookletSink()
 	sink.markFetchFailedErr = errors.New("disk full")
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 	logs := captureLogs(c)
 
 	if _, err := c.fetchOneBooklet(context.Background(), c.State.Snapshot(), rel, map[string]struct{}{}); err != nil {

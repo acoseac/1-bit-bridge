@@ -660,10 +660,12 @@ func TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath(t *testing.T) {
 
 // TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL guards
 // the third client built from a configured URL. The Atlas credential's base
-// is reduced to scheme://host before it is stored (config.CanonicalHTTPSBase
-// refuses user information), so none can arrive that way; a state file edited
-// by hand can still hold one, and the bearer token is the only credential the
-// request sends, so its URL and its errors name no user information.
+// is reduced to scheme://host before it is stored (baseurl.CredentialBase
+// refuses user information), and the harvest state store drops a base a hand
+// edit left in its file (backlog B97), so none can arrive from that store;
+// the fetch takes any credential source, and the bearer token is the only
+// credential the request sends, so its URL and its errors name no user
+// information whatever the source hands it.
 func TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL(t *testing.T) {
 	const secret = "s3cret-Pw"
 	const mbid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"

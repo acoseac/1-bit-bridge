@@ -74,7 +74,7 @@ type atlasStub struct {
 
 func (a *atlasStub) server(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -367,7 +367,7 @@ func TestACachedResolutionIsPreferred(t *testing.T) {
 // thirty days — the same classification rule internal/enrich follows.
 func TestATransientFailureWritesNoVerdict(t *testing.T) {
 	sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
@@ -389,7 +389,7 @@ func TestATransientFailureWritesNoVerdict(t *testing.T) {
 // wiped rather than hammered — the defect the booklet fetch leg once had.
 func TestARejectedTokenStopsTheSweep(t *testing.T) {
 	sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -534,7 +534,7 @@ func TestFetchReleaseTracksPagesOnOffset(t *testing.T) {
 		all[i] = rt(1, i+1, "T", 1000, "rec")
 	}
 	var offsets []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		off := r.URL.Query().Get("offset")
 		offsets = append(offsets, off)
 		start := 0
@@ -710,7 +710,7 @@ func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
 				LyricsCandidate{Path: "b/y.flac", AlbumMBID: "other", Title: "Other", DiscNumber: 1, TrackNumber: 1},
 			)
 			var otherHits int
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "other") {
 					otherHits++
 					w.WriteHeader(http.StatusNotFound)
@@ -751,7 +751,7 @@ func TestAnUnansweredReleaseIsNotReaskedNextTick(t *testing.T) {
 		Path: "a/x.flac", AlbumMBID: "alb", Title: "Song", DiscNumber: 1, TrackNumber: 1,
 	})
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
 		w.WriteHeader(http.StatusBadGateway)
 	}))
@@ -881,7 +881,7 @@ func TestADurableRecordingFailureWritesAVerdict(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()

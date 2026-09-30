@@ -34,7 +34,7 @@ func TestDefaultHarvestHTTPClientHasNoOverallTimeout(t *testing.T) {
 // out. It answers the booklet-fetch path only.
 func trickleServer(t *testing.T, body []byte, chunks int, gap time.Duration) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/pdf")
 		size := (len(body) + chunks - 1) / chunks
 		for off := 0; off < len(body); off += size {
@@ -68,7 +68,7 @@ func TestBookletFetchDeadlineIsSizedForThePDFNotTheAck(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 	// An ack-sized deadline that the transfer above comfortably exceeds.
 	c.RequestTimeout = 50 * time.Millisecond
 	c.BulkTimeout = 30 * time.Second
@@ -101,12 +101,12 @@ func TestBookletFetchDeadlineIsSizedForThePDFNotTheAck(t *testing.T) {
 // on the outer ceiling instead of returning.
 func TestRequestTimeoutStillBoundsASmallJSONLeg(t *testing.T) {
 	hang := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-hang // never responds
 	}))
 	t.Cleanup(func() { close(hang); srv.Close() })
 
-	c := bookletTestClient(t, srv.URL, newFakeBookletSink(), nil)
+	c := bookletTestClient(t, srv, newFakeBookletSink(), nil)
 	c.RequestTimeout = 100 * time.Millisecond
 
 	done := make(chan error, 1)

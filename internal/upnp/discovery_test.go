@@ -174,14 +174,25 @@ func (d *recordingDispatcher) fetchCount() int {
 }
 
 // newServerDiscoveryTestClient builds a client whose M-SEARCH sends go
-// nowhere. The zero interface pins a real send to the OS default, the LAN, so
-// a test that started this client multicast a search every server there
-// answered until 2026-09-28 (backlog B38).
+// nowhere, on a configured LAN link (configuredServerLink). The zero
+// interface pins a real send to the OS default, the LAN, so a test that
+// started this client multicast a search every server there answered until
+// 2026-09-28 (backlog B38).
 func newServerDiscoveryTestClient(t *testing.T, disp discovery.SOAPDispatcher, cache *ServerCache) *MediaServerDiscoveryClient {
 	t.Helper()
+	return newServerDiscoveryTestClientOn(t, disp, cache, configuredServerLink)
+}
+
+// newServerDiscoveryTestClientOn is newServerDiscoveryTestClient on the link
+// addrs describes. The zero interface's own addresses are no model of a
+// link: net.Interface.Addrs of index 0 lists every address of the host on
+// macOS and none on Linux.
+func newServerDiscoveryTestClientOn(t *testing.T, disp discovery.SOAPDispatcher, cache *ServerCache, addrs func() ([]net.Addr, error)) *MediaServerDiscoveryClient {
+	t.Helper()
 	cfg := DiscoveryConfig{
-		Interface:  &net.Interface{},
-		Dispatcher: disp,
+		Interface:      &net.Interface{},
+		InterfaceAddrs: addrs,
+		Dispatcher:     disp,
 	}
 	c, err := NewMediaServerDiscoveryClient(cfg, cache)
 	if err != nil {
@@ -189,6 +200,27 @@ func newServerDiscoveryTestClient(t *testing.T, disp discovery.SOAPDispatcher, c
 	}
 	c.writeMSearch = func(_ *net.UDPConn, b []byte, _ *net.UDPAddr) (int, error) { return len(b), nil }
 	return c
+}
+
+// configuredServerLink is the addresses of an interface on a LAN with a DHCP
+// server: a private IPv4 address and fe80. A link-local source approves
+// nothing there (backlog B49).
+func configuredServerLink() ([]net.Addr, error) {
+	return []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(192, 0, 2, 1), Mask: net.CIDRMask(24, 32)},
+	}, nil
+}
+
+// zeroConfServerLink is the addresses of an interface on a
+// zero-configuration link, a direct cable with no DHCP server: a
+// self-assigned IPv4 link-local address and fe80. A link-local source
+// approves itself there.
+func zeroConfServerLink() ([]net.Addr, error) {
+	return []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::2"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(169, 254, 3, 4), Mask: net.CIDRMask(16, 32)},
+	}, nil
 }
 
 func alivePacket(udn, location string) []byte {

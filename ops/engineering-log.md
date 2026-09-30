@@ -31989,6 +31989,443 @@ Negative controls on the committed fix, each restored and re-run green:
   data dir (the enricher's cache hashing, `hashFileShort`, backup): a named
   pipe there needs write access to the data or variants directory.
 
+## 2026-09-29 — a link-local SSDP source approves itself only when the packet arrived on a zero-configuration IPv4 link (backlog B49)
+
+#1069 let an SSDP LOCATION reach this machine or a link-local address when
+the packet came from that very address, and #1074 carried the same approval
+to every later dial of the URL it led to (the ingest's SOAP Browse and the
+proxy's byte fetches). An SSDP source is a UDP source and is not
+authenticated. #1074's review round 1 refused the cloud metadata addresses
+whatever the source (`cloudMetadataAddrs`); the rest of the residual, which
+#1074's log entry recorded under "Out of scope", was any other link-local
+neighbour. B97 takes the entry's other half (the harvest client's stored
+base URL, `internal/atlasharvest`).
+
+### Reproduced on main (6f914ef4), with main's own API
+
+A scratch test in an export of main:
+
+- `LocationFromSource("http://169.254.7.7:8080/d.xml", udpFrom("169.254.7.7"))`
+  kept the LOCATION, and `AnnouncedFrom(169.254.7.7)` permitted a connect to
+  169.254.7.7, whatever link the packet arrived on (main has no notion of
+  one).
+- The renderer client, handed an M-SEARCH answer from 169.254.7.7 with its
+  LOCATION on that address, sent `GET http://169.254.7.7:8080/description.xml`
+  and `POST http://169.254.7.7:8080/cm/control` (GetProtocolInfo), and
+  logged "renderer discovered".
+- Through the real ingest and proxy (the harness of
+  `TestAPacketFromAMetadataAddressApprovesNoLaterDialThere`), a server cached
+  under `AnnouncedFrom(169.254.7.7)` whose control URL's name then answered
+  169.254.7.7: the proxy's byte fetch failed with `dial tcp
+  169.254.7.7:60879: connect: host is down` (the dev Mac ARPed for it on its
+  LAN) and the ingest's SOAP POST ran into its timeout (6.0 s for the test).
+  Both connects were attempted. With the fix both are refused at the dial
+  check before any packet leaves (0.7 s for the test).
+
+### What the exception is for, measured
+
+The exception exists for a device on a direct cable, or on a switch with no
+DHCP server, which self-assigns 169.254.x.y and has no other address to
+announce from. On such a link THIS host has only a self-assigned IPv4
+address too. `discovery.ZeroConfIPv4Link` (an IPv4 link-local address and no
+other IPv4 address) was run against the real `net.Interface.Addrs` of every
+interface on three hosts, by a throwaway program calling the package:
+
+- macOS (the dev Mac): the Wi-Fi/Ethernet interface with a DHCP address reads
+  configured; the USB link to a connected iPhone, which carried only a
+  self-assigned 169.254/16 address and fe80 (macOS gave up on DHCP there),
+  reads zero-configuration. A real zero-configuration link.
+- Windows 11 (the test host): the DHCP'd Ethernet and the Tailscale adapter
+  read configured; the (disconnected) Wi-Fi and Bluetooth adapters, which
+  Windows keeps with APIPA addresses, read zero-configuration.
+- Linux (dido, Ubuntu 26.04): every host interface (Ethernet, docker0, a
+  user bridge, tailscale0) reads configured; a dummy interface in a
+  throwaway network namespace holding only 169.254.3.4/16 reads
+  zero-configuration, and adding 10.49.0.1/24 to it makes it configured.
+
+An SSDP probe (M-SEARCH ssdp:all, pinned per interface) on the Mac found two
+devices on its LAN, 60 answers, every one from the device's own routable
+address with the LOCATION on it (#1069's three devices had the same shape),
+and nothing on the USB link. No link-local UPnP device was available to
+measure; the shape above is what the OSes give one.
+
+### What the rule costs, measured
+
+A device stuck on 169.254 on a configured LAN (DHCP failed; UPnP requires
+it to keep asking and move to the address it gets) is no longer fetched.
+From a host whose LAN interface has a DHCP address, a connect to 169.254.7.7:
+
+- Windows: no 169.254 route at all; `Find-NetRoute` answers
+  ERROR_NETWORK_UNREACHABLE, and a real `TcpClient` connect fails with
+  WSAENETUNREACH in 78 ms. Such a device was unreachable anyway.
+- Linux (systemd-networkd): no 169.254 route; `ip route get` sends it to the
+  default gateway, and curl fails at once. Unreachable anyway.
+- macOS: `route get 169.254.7.7` answers the primary interface (macOS keeps
+  a `169.254 link#N UCS` route there), so the connect ARPs on the LAN. This
+  is the one platform where such a device was reachable, and where the
+  forgery lands. After ARP learned a device on a secondary interface (the
+  iPhone on the USB link), `route get` gave a cloned host route on that
+  interface and an unscoped connect reached it, which is how a direct-cable
+  device on a secondary interface is reached.
+
+A MediaServer on such a LAN can still be configured by a manual URL
+(`OperatorChose` approves every link-local address when the operator's URL
+names one); a renderer has no such hatch on the bridge.
+
+### Public mode
+
+"Check what upstream discovery does on a public-mode host" (the entry's
+priority note): nothing. With the real binary, a public-mode install with
+`upnpUpstream.enabled: true` does not load (`upnpUpstream.enabled: must be
+false in public mode`, exit 2), and with `dlna.enabled` and
+`dlna.discovery.enabled` it logs `DLNA refused reason="public deployment
+mode"` and `DLNA renderer discovery refused — MediaServer is not enabled`.
+No SSDP client runs in public mode, so the cloud-VM case the entry worried
+about was never reachable there. Both gates were already pinned
+(`TestValidate_PublicModeRefusesUPnPUpstream`, `internal/dlna/config_gate_test.go`).
+
+### Decisions
+
+- **The rule**: an SSDP packet's IPv4 link-local source approves its own
+  address only when the discovery client that read it runs on a
+  zero-configuration IPv4 link. `discovery.AnnouncedOn(src, zeroConfLink)` is
+  the approval (a new `linkLocalSource` field in `DialApproval`, which
+  `Permits` requires for a link-local address), `AnnouncedFrom(src)` its
+  configured-link form. Loopback sources keep their exception (RFC 1122).
+- **Judged from the client's own interface.** Each client runs on one
+  LAN-eligible interface and pins its M-SEARCH there, so genuine answers
+  come from that link. `discovery.AnnouncementLink` reads the interface's
+  addresses when the client is built and again before every M-SEARCH (both
+  tick loops call `Refresh`), not per packet: `Addrs` is a syscall per call
+  (8.7 µs on the Mac, and GetAdaptersAddresses on Windows is a heavier
+  call), and a flood of forged packets would pay it each time. An interface
+  whose addresses cannot be read is not a zero-configuration link.
+- **Not the receiving interface.** x/net/ipv4 reports the interface a packet
+  arrived on through control messages (IP_PKTINFO / IP_RECVIF) on Linux and
+  macOS and not at all on Windows (`ctlOpts` is empty in its
+  `sys_windows.go`, v0.59.0). The cost of judging the client's interface
+  instead is the cross-link residual below.
+- **Declined: "only for the interface the packet arrived on" alone.** It
+  leaves the reported shape open: the forging peer and the neighbour it
+  names share the configured LAN, so the packet arrives on the very
+  interface the neighbour is reached through.
+- **Declined: any interface that HOLDS a link-local IPv4 address**, beside a
+  routable one. RFC 3927 §1.9 says a host SHOULD NOT have both; such an
+  interface is a DHCP LAN with IPv4LL also running, where a forged source is
+  the likelier reading. The predicate's table pins the mixed rows.
+- **One approval, both checks.** `LocationPermittedBy(location, approval)`
+  is the string check (`LocationFromSource` now wraps it), and it asks
+  `approval.Permits` of a LOCATION's literal, as the GENA callback guard
+  asks it of a callback, so the string check and the dial check cannot
+  disagree. The clients compute the approval once per packet
+  (`AnnouncementLink.Location`) and carry it to every request the packet
+  causes and to the cache (the upstream client's `ServerInfo.DialApproval`).
+- **IPv6 link-local SSDP sources approve nothing.** Both clients are udp4
+  sockets, so none arrives; IPv6 SSDP devices announce from fe80 on every
+  link (ff02::c is link-scoped), so the zero-configuration rule would not
+  carry over. Two existing rows asserted the IPv6 same-address approval
+  (`TestDefaultClientDialCheck`, the old `…LocationFromSource`); they now
+  assert its refusal.
+- **GENA subscribers keep theirs** (`SubscribedFrom` sets `linkLocalSource`):
+  the SUBSCRIBE arrives over TCP, and the handshake shows the address to be
+  the peer's own, which a UDP source never shows.
+- **Said once.** A LOCATION refused only because the link is configured (it
+  names the packet's own link-local address) is one Warn per source,
+  bounded at 64 sources, naming the client, the interface and this host's
+  IPv4 address there: a real device stuck on 169.254 otherwise leaves
+  discovery without a word, and a peer sending from a new address every
+  packet reaches the bound.
+- **Gemini consult**: refused by the API (the project's monthly spending
+  cap). The questions (the predicate on each OS, the client versus the
+  receiving interface, IPv6) were settled by the measurements above.
+
+### Tests
+
+- `internal/dlna/discovery`: `TestZeroConfIPv4Link` (15 shapes, the 4- and
+  16-byte IPv4 forms, the mixed rows); `TestAnnouncementLinkFollowsItsInterface`;
+  `TestAnnouncementLinkLogsALinkRefusalOncePerSourceAndBounded`;
+  `TestAnnouncedOnApprovesALinkLocalSourceOnlyOnAZeroConfLink`;
+  `TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink`;
+  a link-local row in `TestHandlePacket_AKnownRendererCannotMoveOntoAHostLocalLocation`;
+  `TestHandlePacket_TheFetchRunsUnderTheLinksApproval` (the approval each
+  request is dispatched under, read from its context);
+  `TestTheRendererClientReadsItsLinkBeforeEverySearch` (the running tick
+  loop); a link column in `TestDefaultClientDialCheck` and in
+  `TestLocationPermittedBy` (was `…LocationFromSource`), which also pins
+  `WithAnnouncementSource` and `LocationFromSource` to the configured
+  link's answer. `TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress`
+  runs its direct-cable rows on a zero-configuration link.
+- `internal/upnp`: `TestServerLinkLocalSourceIsApprovedOnlyOnAZeroConfLink`
+  (a LOCATION on the link-local literal, and one on a name, on each link),
+  a link-local row in `TestAKnownServerCannotMoveOntoAHostLocalLocation`,
+  `TestTheServerClientReadsItsLinkBeforeEverySearch`;
+  `TestServerCloudMetadataLocationIsNeverFetched`'s direct-cable tail runs
+  on a zero-configuration link.
+- `cmd/bridge`: `TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere`,
+  the chain above through the real ingest and proxy.
+- The test clients model their link (`configuredLink`, `zeroConfLink`)
+  instead of reading the zero `net.Interface`'s addresses, which are every
+  address of the host on macOS and none on Linux.
+
+### Negative controls, on the committed tree (ee64e60b), each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| NC1: `AnnouncedOn` ignores the link (main's exception on every link) | 8 discovery tests, 2 upnp tests, the cmd/bridge chain |
+| NC2: the string check compares addresses itself (not `Permits`) | the string-check tests only (4 discovery, 2 upnp); the dial-check table, the approval test and the chain stay green: the dial check holds alone |
+| NC3: `Permits` drops the link condition | as NC1 (the string check asks `Permits`) |
+| NC4: the renderer client bypasses its link (always zero-conf) | its 3 configured-link tests (the link-local move row among them) |
+| NC5: the upstream client bypasses its link | its 2 configured-link tests (the table and the move row) |
+| NC6: both clients always read a configured link | the direct-cable positives (3 renderer, 2 upstream) |
+| NC7: the tick loops stop refreshing the link | `TestTheRendererClientReadsItsLinkBeforeEverySearch` / `TestTheServerClientReadsItsLinkBeforeEverySearch`, each alone |
+| NC8: the predicate admits a mixed link | the two mixed rows of `TestZeroConfIPv4Link` only |
+| NC9a: the refusal log without its once-per-source rule | the log test and the renderer's warning count |
+| NC9b: the refusal log without its bound | the log test's bound row |
+| NC10: `SubscribedFrom` loses its link-local arm | the approval test, `TestSubscribedFromApprovesTheSubscribersOwnAddress`, `Test_callbackHostMatchesSource`, `Test_callbackHostAllowed` |
+
+### Out of scope
+
+- **The residual.** A forged answer on a zero-configuration link itself (the
+  exception exists for that link, and there is no way to authenticate a UDP
+  source); and one sent from a configured link to the ephemeral port of the
+  client on ANOTHER interface that is zero-configuration, from the address
+  of a device on that link. Neither the port nor the address is visible
+  from the sender's link.
+- The app's mirror (`UPnPURLPolicy.location(_:announcedFrom:)`, iOS #1998)
+  has no link rule: backlog B138, a decision first.
+
+## 2026-09-29 — the harvest state store holds its Atlas base as scheme://host or not at all, and the base reduction is a fixed point (backlog B97, and the stored half of B49)
+
+B69 (#1091) kept a configured base URL's user information out of the
+enricher's request URLs, and out of the Atlas premium cover fetch's, which
+builds its request from the harvest credential's stored base. It left the
+harvest client itself, which reads the same stored base (B97): the
+credential endpoint stores `config.CanonicalHTTPSBase`'s `scheme://host`,
+while `atlasharvest.StateStore` kept whatever `atlas-harvest.json` held. B49
+added that a base naming a port and no host, stored before #1074's check, was
+never re-checked.
+
+### What was measured on the old code
+
+main at abac4b54, go1.27.1 on macOS.
+
+- **The real `serve`**, harvest on, over a hand-edited state file (an empty
+  library, so the poll was the leg that asked; every tick after too):
+  `https://s3cret-Pw@127.0.0.1:1` gave `WARN atlasharvest.tick_error
+  phase=poll error="Get \"https://s3cret-Pw@127.0.0.1:1/v1/atlas/harvest/results?limit=200&since=0\":
+  dial tcp 127.0.0.1:1: connect: connection refused"`, the token written as
+  the user name, whole. `https://:1` gave `Get "https://:1/…": dial tcp :1:
+  connect: connection refused`, a dial on this machine.
+- **What a port and no host reaches** (a listener on 127.0.0.1 and a client
+  given `https://:PORT` with a bearer header, go1.26.6 and go1.27.1): the
+  listener accepted a connection and read 0 bytes, and the client failed with
+  `tls: either ServerName or InsecureSkipVerify must be specified`. A TCP
+  connect to this machine's port, and nothing sent: there is no server name
+  to verify against, so the token never leaves.
+- **The new tests, red first** (stored_base_test.go beside no production
+  change): for each of ten shapes in the file, the store offered
+  `AtlasCredential` to the premium fetch, kept the credential, and a tick
+  connected to the base's address. A token as the user name reached both
+  `tick_error` lines (submit and poll); a user name and a password, or a
+  password alone, were masked by net/http (`***`) but still dialled; a base
+  written without a scheme, `s3cret-Pw:pw@host`, failed `unsupported protocol
+  scheme "s3cret-pw"` with the URL quoted whole and LOWERCASED, which a
+  case-sensitive search passes over (B54's lesson); a path, a query or a
+  fragment put the secret in both request URLs
+  (`…?key=s3cret-Pw/v1/atlas/harvest/submit`); plain http put
+  `Authorization: Bearer bh-harvest-token` on the wire in the clear (the
+  listener read the whole request); a port and no host connected and sent
+  nothing; `https://` alone was offered as a credential. `SetCredential`
+  stored all ten and an empty base, and kept `:443`, an uppercase scheme and
+  surrounding space verbatim. The harvest-off revoke (`ClearStoredCredential`)
+  cleared the token and left the base, secret included, in the file. The
+  positive control (a base in the stored form on the same listener) passed, as
+  it should.
+- **The pin, found by the new reduction table's fixed-point check.**
+  `CanonicalHTTPSBase("https://:443")` was `https://`; `WithAtlasHarvest`
+  reduces the pin it is handed again (it does not trust its caller), and
+  `CanonicalHTTPSBase("https://")` is "": unpinned. With main's binary, a
+  config pinning `atlas.harvestBaseUrl: https://:443`, a device paired with
+  `bridge pair`, and `POST /v1/atlas-harvest/credential` naming
+  `https://attacker.example`: `200 {"ok":true}`, and the state file held the
+  planted credential. The config warning about that pin named it as
+  `value=""`. `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` on main: 200
+  and the sink called once for `:443`, 403 for the `:8443` twin; the config pin
+  row `CanonicalHarvestBaseURL() = "https://"`.
+
+### What was decided
+
+- **At the store, as B97's constraint says**: `OpenStateStore` and
+  `SetCredential` are the two ways a base gets in, and every reader goes
+  through the store (the tick's snapshot for every leg, `pollResults`' and
+  `fetchBooklets`' own snapshots, `AtlasCredential` for the premium fetch).
+- **One reduction, moved to `internal/baseurl`**: `CanonicalHTTPS` (was
+  `config.CanonicalHTTPSBase`), `NamesHost` (was `config.BaseURLNamesHost`),
+  and `CredentialBase`, the two together, which the handler spelled out as
+  `canonicalBase == "" || !BaseURLNamesHost(canonicalBase)`. config, the
+  handler and the store import it; `internal/atlasharvest` still imports
+  neither config nor enrich. The config functions are REMOVED, not wrapped:
+  every caller moved in this change, and a wrapper is a second name for the
+  next reader to wonder about.
+- **Drop, not repair.** The store could have cut the user information out and
+  kept the rest (a URL's user information was never sent: the client sets
+  `Authorization: Bearer` itself, and net/http builds Basic auth from a URL
+  only when no Authorization header is set). It does not: `CanonicalHTTPS`
+  refuses user information rather than strip it, the endpoint has always
+  refused such a base, and a store that repaired what the endpoint refuses
+  would be a second rule. What is dropped is the credential: the token, the
+  base and the expiry. The sync position, the last submit and booklet check,
+  and the pending covers stay, as `Clear` keeps them; a re-provision resets
+  the cursor anyway, since its base differs from "".
+- **The drop is written back at the open.** `ClearStoredCredential` writes
+  only when the store holds a credential, so a drop held in memory alone would
+  have the harvest-off revoke answer 204 while the token and the base stayed
+  in the file. **A write-back that fails fails the open**, naming the file and
+  no part of the base: `serve` then reports `atlas harvest: open state: …
+  (feature disabled)` and runs without the harvest, as for a file it cannot
+  read, and the harvest-off DELETE answers 500, which the app reports as not
+  revoked, which is true. A harvest whose state file cannot be written could
+  not keep its cursor either.
+- **A base that reduces keeps its credential** (a trailing slash, `:443`, an
+  empty port, an uppercase scheme, surrounding space): held reduced in memory
+  and written at the next write, not at the open, since nothing is lost and an
+  open should not fail over a trailing slash. A pre-#724 file holding `:443`
+  therefore no longer reads as a new Atlas at the next re-provision.
+- **One Warn, `atlasharvest.state.base_refused`**, naming the file and the
+  field and none of the value (B54's rule for a configured URL, applied to the
+  state file); the open rewrites the file, so it is said once.
+- **`SetCredential` refuses before it touches anything**: a changed base
+  resets the cursor and the last submit, and a refusal must not.
+- **The reduction is a fixed point, and an empty port is the default port.**
+  `CanonicalHTTPS` strips `:443`, and a bare `:` (`https://host:` names no
+  port, which net/http dials on the default), only from a host it leaves
+  something of. So `https://:443` and `https://:` stay themselves, a port and
+  no host that pins to nothing (B36's stated behaviour), and the config
+  warning about such a pin now names it. The endpoint's answers do not change:
+  both were refused with 400 before and still are. No wire change, no
+  PROTOCOL.md change, no Mirror-PR.
+- **The harvest tests' fake Atlases are TLS servers.** 23 tests (31 leaves
+  with their subtests) seeded an http `httptest.NewServer` URL, or in four
+  leaves an empty base, through `SetCredential`, and failed at it on the
+  fixed store; `TestClientTokenRejectedClearsCredential` ignored that error
+  (`_ = state.SetCredential(…)`) and passed having shown nothing: no token was
+  ever stored, so "the token is cleared" held. They use
+  `httptest.NewTLSServer` and give the client `srv.Client()`; the helpers take
+  the server (`bookletTestClient`, `dueClient`, `bookletClient`), with nil for a
+  step that makes no request (a credential against `https://atlas.invalid`,
+  where those steps passed an empty base the store now refuses). The tests
+  that hand a client method a `State` built by hand never went through the
+  store, and were converted with the rest so that no fixture describes an
+  http Atlas.
+
+### Tests
+
+New: `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (eleven shapes in the
+file against a `connRecorder` listener: the credential is not offered, the
+store and the file hold neither the token nor the secret, the sync position
+stays, the drop is logged once, and a tick connects nowhere and logs no line,
+at any level, carrying the secret or the token, searched without regard to
+case; plus a positive control, a base in the stored form on the same listener,
+which must connect for each due leg and log a `tick_error` naming the
+address), `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost` (the eleven
+shapes and an empty base: an error naming none of it, the held credential,
+expiry and cursor unchanged, the file not rewritten, by `os.SameFile`),
+`TestTheStoreHoldsABaseInItsCanonicalForm` (five spellings, through
+`SetCredential` and through the file, which keeps its token and cursor),
+`TestARevokeLeavesNoStoredBaseBehind`,
+`TestOpeningAStoreThatCannotDropItsBaseFails` (a read-only directory; skipped
+where the write goes through anyway), `TestTheReductions` (the three
+functions over 35 shapes, each answer reduced again), and
+`TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` (the pin handed over as
+serve hands it); a row in `TestAtlasHarvestBaseURLValidation`.
+
+### Negative controls
+
+Each mutation applied to the committed tree (with the ten shapes the tests
+had then; review round 3 below added an eleventh), the named tests run with
+`-count=1`, the file restored and the tree checked clean after each. None
+failed to build.
+
+| mutation | goes red |
+|---|---|
+| NC1: the open skips the reduction | all ten shapes of the main test, the revoke test, the four file spellings of the canonical test, the read-only-directory test |
+| NC2: the drop keeps the token | the ten shapes of the main test (the store and the file still hold it); the revoke test stays green, since the revoke clears a token itself |
+| NC3: the drop is not written back | the ten shapes (the file), the revoke test, the read-only-directory test |
+| NC4: a failed write-back is ignored | the read-only-directory test only |
+| NC5: `SetCredential` stores the base as given | its eleven refusal subtests, its four canonical spellings, and both reworked `TestStateStore_AtlasCredential` subtests |
+| NC6: `SetCredential` refuses after resetting the cursor | its ten shape subtests (the cursor moved); the empty-base one stays green, having nothing to reset |
+| NC7: `CredentialBase` skips the host test | the two port-and-no-host reduction rows, that shape in both store tests, and the endpoint's `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost` |
+| NC8: a port is stripped when it leaves nothing | the `https://:443` and `https://:` reduction rows, the config pin row, and the pin-as-serve-wires-it test |
+| NC9: the drop is logged under another message | the ten shapes of the main test |
+| NC10: the drop's Warn carries the base | the seven shapes whose base carries the secret |
+| NC11: the refusal quotes the base | the eight shapes whose base carries the secret or the host |
+| NC12: the client never asks the store (`credentialUsable` always false) | the positive control only: the ten shapes pass without it, which is why it is there |
+| NC13: the endpoint takes `CanonicalHTTPS` without the host test | `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost` only |
+| NC14: an empty port is kept | the two empty-port reduction rows and both `https://atlas.example:` spellings of the canonical test |
+
+### After the fix, with the real binary
+
+The same `serve` over the same edited file logged one
+`WARN atlasharvest.state.base_refused path=…/atlas-harvest.json detail="the
+atlasBaseUrl this file holds is not a plain https base URL naming a host
+(https://host[:port]); it is dropped with the credential held against it, and
+the app provisions a new one"`, no `tick_error`, and left the file as
+`{"token":"","atlasBaseUrl":"",…,"resultCursor":42,…}`, mode 0600. With the
+`https://:443` pin the same POST answered `403 harvest_base_url_not_allowed`,
+wrote no state file, and the config warning named `https://:443`.
+
+### Out of scope
+
+- A further finding, outside this change, is filed privately as backlog B133:
+  an unfixed weakness is not described in this public repo before its fix
+  ships (SECURITY.md).
+- B49's other half, a spoofed link-local SSDP source that is not a cloud
+  metadata address, is untouched and stays open there.
+
+### Review rounds (#1110)
+
+Gemini was over its daily quota on every head. CodeRabbit ran on-demand:
+
+- **Round 1 (704004bf)**: no actionable comments.
+- **Round 2 (23c0b962, the merge with main)**: one comment, asking for this
+  entry's CLAUDE.md bullet to be pushed to `main` on its own, quoting the
+  "committed direct to `main`" wording `AGENTS.md` retired after #1079 and
+  #1087. Declined on the thread with `CLAUDE.md`'s "a rule that describes code
+  lands in the PR that changes the code"; CodeRabbit withdrew it. Its prompt
+  was right about one thing, taken in 1a1b8476: the B36 bullet's parenthesis
+  "(a base stored before this check was never re-checked)" read as though it
+  were still true.
+- **Round 3 (1a1b8476)**, outside the diff: `https://atlas.example:99999`
+  passed `CredentialBase`, was stored by the endpoint, and failed every dial.
+  Verified before it was taken: `url.Parse` checks that a port is digits, not
+  its range, and the endpoint answered 200 and stored it
+  (`TestAtlasHarvestCredentialRefusesAPortNoConnectionCanBeMadeTo`, red on
+  1a1b8476 for `:99999` and `:0`; the store tests' new shape and three
+  reduction rows red the same way). **Taken, in a different place than the
+  suggested fix**: CodeRabbit put the range check in `CanonicalHTTPS`, which
+  the configured pin goes through, and config's `Validate` refuses a pin that
+  reduces to "", so a config pinning such a host, which loaded before, would
+  stop the bridge from starting after an update, B36's reason for keeping
+  the host test out of that reduction. `CredentialBase` refuses a port
+  outside 1-65535 beside the host test (`dialablePort`); such a pin keeps its
+  canonical form and matches no credential (a new row in
+  `TestAtlasHarvestBaseURLValidation`). A port with leading zeros
+  (`:08443`) dials the port it spells and is kept as written.
+
+| mutation | goes red |
+|---|---|
+| NC15: `CredentialBase` stops checking the port | the three undialable-port reduction rows, that shape in both store tests, and the endpoint's port test; the config pin row stays green |
+| NC16: the port check moves into `CanonicalHTTPS` | the three undialable-port reduction rows (their canonical form) and the config pin row (`Validate` refuses it) |
+
+- **Round 4 (cbd6fcd2, the merge with main at 6f914ef4)**: one comment, Major,
+  taken. This entry's Out of scope first described the follow-up it filed as
+  B133 in enough detail to act on, and so did the CLAUDE.md bullet and the PR
+  body. SECURITY.md keeps a weakness out of public until its fix ships, and
+  the backlog lives outside the repo for exactly that reason, so all three
+  now name the backlog entry and nothing more. **A follow-up that is an
+  unfixed weakness goes into the private backlog with its evidence, and the
+  public record says only that one was filed.**
+
 ## 2026-09-29 — a file the scan could not read whole keeps its row, and a new one gets none (backlog B134)
 
 B62 (#1111) made a scan worker write no row for a path that is no longer a
