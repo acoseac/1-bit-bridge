@@ -34440,3 +34440,174 @@ Two findings, both true.
   2,492,677 (a new seed: the layer III header).
 
 Gemini was over its daily quota on this PR.
+
+## 2026-09-29 — the servers' error log takes a client's address out of a socket error's "->" and out of a Windows zone with a space (backlog B172)
+
+Found by the pre-v0.2.1 review: its probe, a real TLS server over
+`handshakelog.Wrap` and a client that stalls, kept this line in the log:
+
+```
+http: TLS handshake error from <client address>: read tcp 127.0.0.1:51784->127.0.0.1:51786: i/o timeout
+```
+
+#1055 redacted the address after the words net/http puts before a peer
+("from ", "client ", "serving "). A kept line's REASON can name the peer
+again: a handshake that times out or is reset logs net's `*net.OpError`,
+whose text names both ends of the socket, and nothing redacted the second.
+
+### What was measured on the old code
+
+main at d16d1aba, go1.26.6, the same seven client shapes against a server
+with a nil `ErrorLog` (net/http's own line, the oracle) and one through
+`Wrap`, on macOS (the dev Mac), Linux (`golang:1.26.6` on dido) and Windows
+11 (nomos):
+
+| client | the reason net/http logs (macOS / Linux / Windows) |
+|---|---|
+| sends nothing until the handshake times out | `read tcp L->P: i/o timeout` on all three |
+| resets once accepted, before its ClientHello | `read tcp L->P: read: connection reset by peer`; Windows `wsarecv: An existing connection was forcibly closed by the remote host.` |
+| resets as the ServerHello arrives | the same, a read |
+| resets right after its ClientHello | the server's WRITE fails: `write tcp L->P: write: broken pipe` (macOS), `…: write: connection reset by peer` (Linux), `…: wsasend: …` (Windows) |
+| negotiates h2, then resets before its preface | `http2: server: error reading preface from client P: read tcp L->P: read: connection reset by peer` on macOS and Linux; nothing on Windows |
+
+Every one read `<local>-><peer>`, for a read and a write alike, and through
+`Wrap` the peer after the arrow survived in all of them. net's `OpError`
+takes its Source from the socket's local address and its Addr from the
+remote one for every conn operation; gVisor's gonet, under the tailnet
+listener, builds it the same way (`newOpError`: `Source: c.LocalAddr(),
+Addr: c.RemoteAddr()`), so the tailnet server's `ErrorLog()`, which runs
+the same `RedactPeers`, kept the peer too. Windows' bundled h2 server
+counts a `wsarecv` WSAECONNRESET as a closed connection
+(`http2isClosedConnError`) and sends that preface error to its verbose log
+only, which the bridge never enables.
+
+**A second gap, on Windows alone**: net names an IPv6 zone after the
+interface, and Windows' interface name is the adapter's friendly name
+(`interface_windows.go`, `FriendlyName`), spaces and parentheses included.
+Measured on nomos over a link-local address on the adapter "Wi-Fi 4": the
+line through `Wrap` kept the peer even after "from ",
+
+```
+http: TLS handshake error from [fe80::61ab:1199:29bd:fb24%Wi-Fi 4]:51195: read tcp [fe80::61ab:1199:29bd:fb24%Wi-Fi 4]:51194->[fe80::61ab:1199:29bd:fb24%Wi-Fi 4]:51195: i/o timeout
+```
+
+because #1055's bracket pattern, `\[[^\]\s]+\]`, admits no whitespace. A
+phone that reaches a Windows bridge over its link-local address (an mDNS
+answer can give one) is that shape.
+
+**Why the suite passed**: `TestEveryOtherHandshakeFailureIsLoggedAsBefore`
+has driven the stalled client since #986, and its leak check, `linesFrom`,
+looked for lines that BEGIN with `http: TLS handshake error from <peer>: `.
+It checked the one place #1055 put the redaction, and the table's shape
+comparison blanks every address, so the second occurrence was invisible to
+both.
+
+### The fix
+
+`RedactPeers` (internal/handshakelog):
+
+- the anchor takes `->` beside the three words, so the address after a
+  socket error's arrow is redacted and the local address before it stays;
+- every other place the line repeats an address a word or an arrow named
+  is redacted too (`redactRepeats`), and only where it stands alone: not
+  after a digit or a dot (`10.0.0.2:5000` inside `110.0.0.2:5000`), not
+  before a digit (inside `10.0.0.2:50001`). This is for the one shape where
+  the text cannot say which end a lone address is: net's accept ignores a
+  failed getsockname (`lsa, _ := syscall.Getsockname(...)` in fd_unix.go,
+  `lrsa.Sockaddr()` in fd_windows.go), which leaves the local address nil,
+  and an OpError with no Source prints its Addr, the peer, alone after a
+  space. The words earlier in the same line name it, so the repeat pass
+  takes it. gVisor's socket has the opposite shape after a reset (its
+  `GetRemoteAddress` fails outside the connected states, so Addr is nil and
+  the lone address is the LOCAL one), and there no word names it and it
+  stays. Redacting every lone address after `read tcp` was the other
+  option, and it would have labelled the tailnet node's own address
+  `<client address>`;
+- the bracket of an IPv6 address runs to the `]` before the port whatever
+  the zone holds, and the part before `%` must be an IPv6 literal
+  (`\[[0-9A-Fa-f:.]+(?:%[^\n]*?)?\]`). The first draft allowed anything in
+  the bracket, and a panic value `from [x] happened at [y]:7` read as one
+  address.
+
+The silent-probe filter is untouched: `isSilentProbe` reads the line as
+net/http wrote it, before the redaction, and the probe's reason (`: EOF`)
+carries no arrow. Idempotent: a second pass finds no address after a
+placeholder. With the fix the Windows line above reads
+`from <client address>: read tcp [fe80::61ab:1199:29bd:fb24%Wi-Fi 4]:55081-><client address>: i/o timeout`
+(measured on nomos).
+
+### Tests and controls
+
+- `TestEveryOtherHandshakeFailureIsLoggedAsBefore`: its leak check now
+  reads every address in what the wrapped server logged and allows only
+  the server's own (`addressesOtherThan`; a loopback client shares the
+  server's IP, so the port is what tells them apart). Two cases joined it,
+  a reset once accepted (`resetOnceAccepted`, which waits for `StateNew`:
+  macOS answers `ECONNABORTED` for a connection reset in the backlog and
+  net retries the accept, so the server would have nothing to log) and a
+  reset as the ServerHello arrives. The reasons are matched by pattern
+  (`socketError`), since their text past the addresses differs by platform.
+  The reset right after the ClientHello is not a case: it is a write on
+  macOS, Linux and Windows today, but a read if the reset lands after the
+  server's flush, and the table compares the oracle's line with the
+  wrapped server's.
+- `TestAnHTTP2PrefaceErrorKeepsNoClientAddress`: a client negotiates h2,
+  reads a byte of the server's SETTINGS frame (written before the preface
+  is read, so the server is then waiting for it), and resets. Skipped on
+  Windows, which logs nothing there.
+- `TestRedactPeersInASocketError`: every measured reason, with rows built
+  from `net.OpError` and `net.TCPAddr` values rather than typed, so a row
+  cannot hold a shape net never prints (the Windows zone row is a
+  `TCPAddr` with Zone "Wi-Fi 4"). Two rows keep a lone LOCAL address (the
+  tailnet shape, and one that ends with the peer's text).
+  `TestRedactPeers` gained the two zone rows and a bracket that is not an
+  address; `TestErrorLogRedactsAndDropsNothing` a timeout line.
+- On the old `handshakelog.go` with the new tests, five tests failed: the
+  table's three socket cases, the h2 test, `TestRedactPeers`' two zone
+  rows, 12 of the 14 socket rows (the two that keep a local address pass
+  there too) and the ErrorLog test.
+- Controls, each on the committed fix and each turning exactly its
+  predicted tests red: the `->` anchor taken out (only the row whose line
+  names no peer by a word: the repeat pass covers an arrow in a line that
+  does); the repeat pass taken out (the lone-peer row); the old bracket
+  pattern (the three zone rows); the looser bracket (the panic-value row);
+  the repeat boundaries taken out (the two rows with a local address
+  holding the peer's text); the redaction moved ahead of the probe check
+  (the three probe tests, #1055's control D).
+- 40 runs under `-race` of the real-server tests on macOS and on Linux,
+  and 20 on Windows (no race detector there), clean; the h2 test ran on
+  macOS and Linux and skipped on Windows.
+
+### The other ErrorLogs
+
+The tree has four `http.Server`s outside tests. The LAN API (`Wrap`) and
+the tailnet server (`ErrorLog()`) are pinned by
+`TestEveryServeHTTPServerRedactsPeerAddresses`, and the console's TLS
+branch (`Wrap`) by `TestTLSConsoleDoesNotLogALocalProbe`, whose rejecting
+client's address must not reach the log. Two keep net/http's own logger,
+knowingly: the DLNA listener (`internal/dlna/server.go`), whose only line
+that names a peer is a handler panic's, a renderer's LAN address, which is
+the privacy page's disclosed DLNA exception; and the console's plain-HTTP
+modes, which see only loopback peers (loopback mode), or the local proxy's
+address (public mode behind a TLS-terminating proxy). HTTP/3's
+`http3.Server` logs a failed connection only at Debug and only through a
+`Logger` the bridge never sets, and its panic line names no address.
+
+### Review rounds (#1123)
+
+Gemini was over its daily quota on every head.
+
+- **SonarCloud, 4.2% duplication on new code** (the gate allows 3%): the
+  socket table's rows, each a `fmt.Sprintf` of a `sockErr` beside a
+  hand-built want of the same shape, read as two duplicated 11-line blocks
+  (SonarCloud's `api/duplications/show`). The handshake rows are data now
+  (the op, the reason, the local address as the line keeps it), and one
+  loop builds both lines; same 14 rows, same texts, and the old redaction
+  still fails every row it failed before. The gate passed on 1c874783.
+- **CodeRabbit (on-demand, 1c874783)**: no actionable comments. Its
+  merge-risk note says malformed IPv6-looking text in a panic message can
+  remove diagnostic content. That is the residual, accepted: after a word
+  or an arrow, a bracket opening an IPv6 literal with a `%` is read up to
+  the next `]:<digits>` on its line, since a zone may hold anything a
+  Windows adapter's name holds, so a panic value holding such text loses
+  it. It is replaced, never kept, so it costs text and never an address.

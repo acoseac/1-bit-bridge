@@ -6510,7 +6510,8 @@ mentions across the four `ops/audit-*.md` files.
   the phone-facing API: a phone with a stale pin, a cancelled endpoint probe
   and a scanner each left one in the journal. `handshakelog.Wrap`'s logger
   redacts every line it keeps (`RedactPeers`, anchored on the words net/http
-  prints before a PEER, so a listen address in an accept error stays), and
+  prints before a PEER and on the `->` of a socket error, the next bullet,
+  so a listen address in an accept error stays), and
   AFTER the silent-probe check, which recognises the probe by that address.
   The tailnet server, whose listener yields `*tls.Conn`, takes
   `handshakelog.ErrorLog()`. `TestEveryServeHTTPServerRedactsPeerAddresses`
@@ -6518,6 +6519,54 @@ mentions across the four `ops/audit-*.md` files.
   handshakelog, and an assigned one before the server is first served. **A test that finds a log line by its peer address passes
   vacuously once the address is redacted**: the probe tests find the
   filtered server's line by the placeholder as well.
+- **…and a kept line's REASON names the peer again, after the `->` of a
+  socket error, which is redacted too** (2026-09-29, backlog B172). A
+  handshake that times out or is reset, the commonest failure a phone
+  produces, logs net's `*net.OpError` as its reason, and that names both
+  ends of the socket: `http: TLS handshake error from <client address>:
+  read tcp 127.0.0.1:7788->127.0.0.1:51786: i/o timeout`. Measured on
+  macOS, Linux and Windows 11 over a stalled client, a reset before the
+  ClientHello and after the ServerHello, a reset right after the
+  ClientHello (the server's WRITE fails: `broken pipe` on macOS,
+  `connection reset by peer` on Linux, `wsasend` on Windows) and the
+  HTTP/2 preface of a reset h2 connection (the phone's own shape; logged
+  on Linux and macOS, while Windows' h2 server counts `WSAECONNRESET` as a
+  closed connection and logs it only verbosely): every one was
+  `<local>-><peer>`, for a read and a write alike, since the OpError's
+  Source is the local end and its Addr the remote, and gVisor's gonet (the
+  tailnet listener's sockets) builds it the same way. So the tailnet
+  server's `ErrorLog()`, which runs the same function, leaked it too.
+  `RedactPeers` now also takes the address after `->`, and **every other
+  place the line repeats an address a word or an arrow named as a peer**
+  (`redactRepeats`, never inside a longer address): net's accept ignores a
+  failed getsockname (fd_unix.go, fd_windows.go), and a socket error with
+  no local end names the peer alone, `read tcp <peer>: …`, where only the
+  words earlier in the line say what it is. **A lone address can also be
+  the LOCAL end**: gVisor's socket has no remote address left after a
+  reset, nothing names it, and it stays. **Don't redact every lone
+  address after `read tcp`**, which labels the tailnet node's own address
+  `<client address>`. **And an IPv6 zone runs to the `]` before the port
+  whatever it holds**: Windows names a link-local zone after the adapter,
+  spaces and parentheses included (`[fe80::…%Wi-Fi 4]:51195`, measured),
+  and #1055's `\[[^\]\s]+\]` matched no such address even after "from ",
+  so the whole line kept the peer. The part before `%` must be an IPv6
+  literal, so a bracket in a panic value is not taken for one (a looser
+  bracket swallowed `[x] happened at [y]:7`). The listen address before
+  the arrow stays, and `isSilentProbe` still reads the raw line (its
+  `: EOF` carries no arrow). **A leak check reads every address in the
+  output, never only the place the fix put the redaction**:
+  `TestEveryOtherHandshakeFailureIsLoggedAsBefore` drove the stalled shape
+  since #986 and passed through #1055, because it looked for the peer only
+  right after "from ". It now requires every address the wrapped server
+  logged to be the server's own (a loopback client shares its IP, so the
+  port tells them apart). `TestAnHTTP2PrefaceErrorKeepsNoClientAddress`
+  (skipped on Windows, which logs nothing there) and
+  `TestRedactPeersInASocketError`, whose rows are built from `net.OpError`
+  and `net.TCPAddr` values so none holds a shape net never prints. The
+  other `http.Server`s bypass handshakelog knowingly: DLNA's nil
+  `ErrorLog` names a renderer in a panic line (the privacy page's
+  disclosed DLNA exception), and the console's plain-HTTP modes see only
+  loopback peers (a proxy's, in public mode).
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as
