@@ -1203,7 +1203,7 @@ lost my library."
   ID3v2 tag carrying the unsynchronisation flag was a read(2): measured on the dev Mac, a
   10 MB such tag took 3.8 s to extract (6.5 s in a Linux container), and the 512 MiB
   the size field admits would hold a scan worker for minutes while `Scan` holds the
-  scanner's mutex. Now 62 ms. Each call (`tag.ReadFrom` in `readDhowdenTags`,
+  scanner's mutex. Now 62 ms (72 ms there). Each call (`tag.ReadFrom` in `readDhowdenTags`,
   `tag.ReadID3v2Tags` in the DSF extractor and in `applyEmbeddedID3`) reads the stream
   `newDhowdenReadBuffer` returns and calls its release after. **The buffer is the stream,
   read ahead**: it holds the stream's bytes from where the stream was, answers a Seek

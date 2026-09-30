@@ -31241,9 +31241,9 @@ and a DSF around an ID3v2.4 tag with the flag set and one TXXX frame of n bytes
 
 | tag | dev Mac | dido (golang:1.26.6 container) |
 |---|---|---|
-| 1 MB, flag set | 381 ms (MP3), 382 ms (DSF) | 647 ms, 650 ms |
-| 10 MB, flag set | 3,811 ms, 3,815 ms | 6,455 ms, 6,551 ms |
-| 10 MB, no flag | 2.3 ms, 2.2 ms | 3.9 ms, 2.7 ms |
+| 1 MB, flag set | 381 ms (MP3), 382 ms (DSF) | 644 ms, 648 ms |
+| 10 MB, flag set | 3,811 ms, 3,815 ms | 6,459 ms, 6,521 ms |
+| 10 MB, no flag | 2.3 ms, 2.2 ms | 3.7 ms, 2.8 ms |
 
 About 380 ns a byte on the Mac. The size field admits 512 MiB (B101's unmasked
 synchsafe read), minutes of one scan worker while `Scan` holds the scanner's
@@ -31286,9 +31286,12 @@ route.
 ### Measured after
 
 The same probe on the fix: a 10 MB flagged tag in 62.4 ms (MP3) and 62.5 ms
-(DSF), a 1 MB one in 8.1 ms and 6.7 ms, 257 reads for 1 MiB; without the flag
-2.2 ms and 2.1 ms. The remaining cost is dhowden's own filter calling Read once
-per byte, now on memory.
+(DSF) on the dev Mac and 72.1 ms and 72.2 ms on dido (main's tree beside it:
+6,459 and 6,521 ms), a 1 MB one in 8.1 and 6.7 ms (dido 7.8 and 7.5), 257
+reads for 1 MiB. Without the flag nothing moved: 2.2 and 2.1 ms on the Mac, and
+on dido, best of fifteen, 2.8–2.9 and 2.6 ms against main's 2.8–3.1 and 2.6. The
+remaining cost is dhowden's own filter calling Read once per byte, now on
+memory.
 
 The common path, the reads dhowden's `tag.ReadFrom` makes on a file (a counting
 wrapper over the `*os.File`), unbuffered and through the buffer:
@@ -31347,7 +31350,15 @@ its own now.
 
 ### Fuzzed
 
-FUZZ-RESULTS
+dido, golang:1.26.6, one container per target with 3 CPUs and a 5 GB cgroup,
+under the nightly job's 5 GiB address-space limit (`-exec "prlimit
+--as=5368709120 --"`), `-fuzzminimizetime 1s`, from the committed seeds:
+FuzzDhowdenReadBufferReadsAsItsStreamDoes, 10 minutes, 5,577,021 executions;
+every whole-file target whose route reaches dhowden, which now reads through the
+buffer: FuzzExtractMP3 10 minutes, 3,851,799; FuzzExtractFLAC, FuzzExtractM4A,
+FuzzExtractOGG, FuzzExtractDSF, FuzzExtractAIFF and FuzzExtractWAV, 5 minutes
+each, 1,145,812, 1,813,132, 1,143,452, 1,590,573, 1,596,716 and 1,672,037. All
+passed, nothing saved.
 
 ### Left open
 
