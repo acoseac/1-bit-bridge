@@ -30779,6 +30779,221 @@ two picture-bomb seeds allocate 1 GiB against a 67 MB limit, and
   app classes as lossy. The STREAMINFO is the join's first block, so the facts
   are in hand; the codec is a decision to make with the app.
 
+## 2026-09-29 — each SSDP advertiser answers only its own interface's multicast M-SEARCHes, and announces from its own interface's address (backlog B71)
+
+Backlog B71, from the B38/B47 session, which had measured the mechanism in one
+network namespace and reasoned the consequence. This session measured the
+consequence, found the entry's premise wrong in one respect, and found the
+NOTIFY sender's defects beside it. Main at 7a4f66a9; the branch's commits
+c97be435 (the red tests), a1b66205 (the fix), 645ae5d7 (two docblocks).
+
+### The premise, corrected
+
+The entry, the B38 bullet in CLAUDE.md and the B38 entry above said
+`net.ListenMulticastUDP` binds the socket to the group address. It binds the
+WILDCARD: `listenMulticastUDP` hands the group to `internetSocket` as the
+local address, and `listenDatagram` (net/sock_posix.go, the same in go1.26.6
+and go1.27.1) sets `SO_REUSEADDR` (and `SO_REUSEPORT` on the BSDs) and then
+rewrites a multicast address to `0.0.0.0` before the bind. So the advertiser's
+listener is `0.0.0.0:1900`: it also takes unicast to port 1900 (below), and
+with Linux's `IP_MULTICAST_ALL = 1` any group's datagrams for that port. The
+renderer discovery client's docblock chose its socket on the same premise ("a
+multicast-bound socket on Linux delivers ONLY packets whose destination IP
+matches the bound multicast address"); its conclusion stands on other grounds
+and the docblock now gives them.
+
+### The mechanism, per platform
+
+A probe (a scratch program, never committed): two listeners opened with
+`ListenMulticastUDP`, the advertiser's constructor, one joined on each of two
+interfaces, and a datagram sent out of each interface at TTL 0 with loopback
+on, so the kernel loops it back as one that arrived on that interface and
+transmits nothing.
+
+| host | interfaces | each listener heard |
+|---|---|---|
+| Linux 7.0.0-34 (a container on dido) | lo, eth0 | both datagrams |
+| the same, `IP_MULTICAST_ALL = 0` on both | lo, eth0 | its own interface's only |
+| macOS (the dev Mac) | lo0, en0 | its own only |
+| Windows 11 (nomos), receive loop turned back on | Loopback Pseudo-Interface 1, Ethernet | its own only |
+
+Windows needed the loop turned back on to show anything: `ListenMulticastUDP`
+clears `IP_MULTICAST_LOOP` on the listener, and Winsock applies that option to
+what a socket RECEIVES, so a listener made that way took no datagram sent from
+its own host, at TTL 0 or 1, through either interface (B120).
+
+A unicast datagram to the port the two listeners share went to ONE of them:
+the last bound on Linux, the first bound on macOS and on Windows, whatever
+address it was sent to.
+
+### The consequence, with the real binary
+
+A privileged `golang:1.26.6` container on dido, three network namespaces: `br`
+with va0 10.71.1.1/24 and vb0 10.71.2.1/24, `lana` with va1 10.71.1.2 and
+`lanb` with vb1 10.71.2.2, each renderer namespace on its own veth pair.
+`bridge init --yes --no-service`, `dlna.enabled: true`, `bridge serve` in
+`br`, whose advertise set was va0 and vb0 (`ssdpInterfaces=2`). A scratch
+prober sent `M-SEARCH` (ST MediaServer:1, MX 1) out of va1 or vb1 and read
+answers for 2 s; NOTIFY listeners in `lana` and `lanb` were up before the
+bridge started. `br` got a route `224.0.0.0/4 dev va0` (a real host's default
+route has the same effect) except in the no-route rows.
+
+| | main | branch |
+|---|---|---|
+| multicast M-SEARCH from lana, ×3 | 2 answers each, 10.71.1.1 and 10.71.2.1 | 1 each, 10.71.1.1 |
+| from lanb, ×3 | 2 answers each | 1 each, 10.71.2.1 |
+| which came first (main) | the other subnet's in 3 of 6 | |
+| NOTIFYs heard in lanb, a route back to 10.71.1.0/24 | 5, from 10.71.1.1, LOCATION 10.71.2.1 | 5, from 10.71.2.1 |
+| NOTIFYs heard in lanb, no route back (rp_filter 2) | 0 | 5, from 10.71.2.1 |
+| NOTIFYs heard in lana | 5, from 10.71.1.1 | the same |
+| unicast M-SEARCH to 10.71.1.1:1900 | 1 answer, LOCATION 10.71.2.1 | the same (B119) |
+| unicast to 10.71.2.1:1900 | 1 answer, 10.71.2.1 | the same |
+| a search looped back inside `br`, out of va0 and out of vb0 (the upstream client's shape) | 2 answers each, both LOCATIONs | 1 each, its own |
+| no route to 239.255.255.250 in `br` | "DLNA disabled — Start failed": both advertisers `dial udp4 239.255.255.250:1900: connect: network is unreachable` | DLNA starts; every row above the same |
+
+Main's M-SEARCH answers carried the right SOURCE address (each answer is
+dialled to the searcher, along its route); only their LOCATION was wrong. The
+NOTIFYs are the other way round: the right LOCATION from the wrong address.
+
+### The sender, per platform
+
+A second probe: main's form (`net.DialUDP` to the group, then
+`SetMulticastInterface`, `Write`) against the fix's (a wildcard
+`net.ListenUDP` socket pinned before any send, `WriteToUDP` to the group), a
+listener joined on the pinned interface (receive loop on, for Windows)
+reporting each datagram's source.
+
+| host, pinned to | main's form | the fix's form |
+|---|---|---|
+| macOS, lo0 | local address fixed at en0's; heard on lo0 from en0's address | from 127.0.0.1 |
+| macOS, en0 | from en0's address | the same |
+| Linux container, lo | from eth0's address | from eth0's address too |
+| Linux container, eth0 | from eth0's address | the same |
+| Windows (nomos: Ethernet and Tailscale; Windows' SSDP service holds 239.255.255.250:1900 on every interface), the real SSDP group, loopback | local address fixed at the Tailscale address (a 100.64/10 one); not heard on loopback | from 127.0.0.1 |
+| the same, Ethernet, with dido listening on the LAN | fixed at the Tailscale address; 0 of 2 heard on the LAN | 2 of 2, from the Ethernet address |
+
+Linux gives a multicast pinned to lo another interface's address in either
+form: 127.0.0.1 is host-scoped, and `inet_select_addr` passes over it for a
+universe-scoped route. On a test group no service had joined, Windows' choice
+of source for main's form moved with what the host had last sent to that
+group: the Ethernet address, or 127.0.0.1 after a run pinned to loopback; and a
+socket connected that way and pinned to loopback, with no loopback membership
+on the host, sent its datagram out of Ethernet (dido heard it). So on Windows
+a connected multicast socket keeps the route and source its connect found, and
+a later `IP_MULTICAST_IF` moves neither. On a Windows bridge with Tailscale,
+home-pc's shape, main's advertiser therefore announced nothing to its LAN;
+renderers found it only through their own M-SEARCHes, whose answers are
+dialled per searcher.
+
+B38 left "what leaves a Windows host" unmeasured. Main's advertiser tests (the
+loopback source test, the sender test, `Test_SSDPAdvertiser_StartStopRaceFree`,
+`Test_Server_StartStop_LifecycleBindsLoopbackPort`) run on nomos while dido
+listened on the SSDP group on the LAN: 0 NOTIFYs from nomos, and the red
+loopback source test heard none of its advertiser's NOTIFYs on loopback
+either. The branch's runs: 0 on the LAN, 5 of 5 on loopback from 127.0.0.1.
+
+### Design
+
+- The listener, Linux only (ssdp_listen_linux.go): `ListenConfig{Control}`
+  sets `IP_MULTICAST_ALL = 0` before the bind, `ListenPacket` on the group
+  gets the same wildcard bind and `SO_REUSEADDR` as `ListenMulticastUDP`, and
+  x/net's `JoinGroup` joins by interface index. Before the bind because a
+  wildcard socket takes other interfaces' group datagrams from the bind on,
+  so an option set after `ListenMulticastUDP` returns leaves a window in which
+  a foreign M-SEARCH can be queued. `IP_MULTICAST_IF` and the cleared
+  `IP_MULTICAST_LOOP` that `ListenMulticastUDP` also sets are left out: on
+  Linux both govern what a socket sends, and the listener sends nothing. A
+  refused option (Linux has it since 2.6.31; a sandbox emulating the socket
+  API may not) keeps the listener as before with one Warn. macOS and Windows
+  keep `net.ListenMulticastUDP`.
+- Rejected for the listener: a user-space filter on the arrival interface
+  (`ipv4.PacketConn` with `FlagInterface`). The kernel does it on Linux,
+  macOS and Windows filter already, x/net has no control messages on Windows,
+  and dropping a datagram that arrived elsewhere would drop a unicast
+  M-SEARCH outright, since only one socket gets each (B119). And
+  `SO_BINDTODEVICE`: it needs `CAP_NET_RAW` before Linux 5.7, and a socket
+  bound to eth0 no longer takes a unicast this host sends to eth0's address
+  (that arrives on lo), which would change a single-interface host.
+- The sender (`openNotifySender`): an unconnected wildcard socket, pinned
+  before any send, `WriteToUDP` to the group, which is what the discovery
+  clients' M-SEARCH sockets always were. `WriteToUDP` on a closed socket still
+  answers `net.ErrClosed`, so the B47 stop rule holds unchanged
+  (`Test_SSDPAdvertiser_NotifyAliveReportsOnlyFailuresItsStopDidNotCause`
+  drives it with a closed unconnected sender).
+- A single-interface host: its advertiser's one membership is where every
+  search arrives, including a same-host control point's (a search sent along
+  the default route is looped back as arriving on that interface), and its
+  NOTIFY source is that interface's address in either form.
+
+### Tests and negative controls
+
+| test | runs on | main | branch |
+|---|---|---|---|
+| `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` | Linux, macOS (skips where the host refuses its send) | red on Linux (each listener heard both), green on macOS | green |
+| `TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface` | Linux | red (`IP_MULTICAST_ALL = 1`) | green |
+| `TestAListenerTheKernelWillNotConfineStillListensAndSaysSo` | Linux | (new code) | green |
+| `TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket` | all | red on Linux, macOS, Windows | green |
+| `TestAnAdvertiserOnLoopbackNotifiesFromALoopbackAddress` | macOS, Windows | red: from en0's address (macOS); heard none (Windows) | green |
+| `TestSSDPAdvertisersKeepToTheirOwnInterfaces` | Linux, root or a user namespace | red: no start without a route; 5 NOTIFYs of b71b0 from 10.71.1.1; each M-SEARCH answered with both LOCATIONs | green |
+
+The namespace test builds its interfaces with rtnetlink (a veth pair per side,
+an address, links up, and later the route), so it needs no iproute2; in a
+plain container Docker's seccomp refuses the user namespace and it skips, so
+it runs as root on a host like dido and skips in CI. It sends its M-SEARCH out
+of the interface at TTL 0, and the kernel's decision about the loop copy is
+the one it makes for a datagram off the wire (`ip_mc_sf_allow` with the
+arrival device), so one namespace serves.
+
+| control, on the branch | red | green |
+|---|---|---|
+| NC1: Linux `listenSSDP` back to `ListenMulticastUDP` | the listener test (Linux), the listener wiring test, the namespace test's M-SEARCH check in both subtests | the sender tests, the refused-option test |
+| NC2: the sender back to `DialUDP` and `Write` | the sender wiring test, the loopback source test (macOS), the namespace test's start without a route and its NOTIFY sources | the listener tests |
+| NC3a: no Warn for a refused option | the refused subtest (0 Warns) | the accepted subtest |
+| NC3b: a refused option refuses the listener | the refused subtest | the accepted subtest |
+
+On Windows the red commit is NC2's shape (main's sender with the new tests):
+the sender test red, the loopback source test red with none heard.
+
+The PR's first macOS CI leg failed the listener test at its own send:
+GitHub's macOS runner answers a TTL-0 multicast out of en0 with `sendto: no
+route to host`, where the dev Mac sends it. The send is how the test delivers
+a datagram, not what it measures, so a refused send skips the test (4b426b12).
+The same commit split the namespace test's check into helpers (SonarCloud's
+cognitive complexity), and NC1 and NC2 were run again on it, as root and as a
+user on dido: the same tests red and green as in the table above.
+
+### What the discovery clients are exposed to
+
+- `IP_MULTICAST_ALL`: nothing. Both clients' sockets sit on an ephemeral port
+  and join no group, so no group datagram is addressed to them; what reaches
+  them is unicast, which the option does not govern.
+- The upstream client searches ST MediaServer:1, which the bridge's own
+  advertisers answer (its search is looped back on the host). Before, both
+  advertisers answered each search, one per LOCATION (the looped-back rows
+  above); now the searched interface's alone. The ingest walks configured
+  servers only, so the answer sits in the discovery cache; a client hearing
+  two LOCATIONs for one UDN is what the move detector reads as a server
+  moving between two addresses (B47's "dual-homed upstream server", two
+  description GETs per cycle). Not measured in a running bridge with the
+  upstream feature on. On Windows the advertiser's listener takes no search
+  sent from its own host (B120), so none of this happens there.
+- The renderer client searches ST MediaRenderer:1, which the advertisers do
+  not answer.
+- The upstream client's docblock said it received NOTIFY ssdp:alive/byebye,
+  which a socket on an ephemeral port that joins no group cannot; corrected.
+
+### Left open
+
+- B119: a unicast M-SEARCH to port 1900 reaches one advertiser's socket and is
+  answered with that advertiser's LOCATION, whatever address it was sent to
+  (measured above on Linux; the probe's unicast rows on macOS and Windows).
+- B120: on Windows the advertiser takes no M-SEARCH sent from its own host
+  (the listener's receive loop is off), so a control point on the bridge's own
+  host finds it only by its NOTIFYs.
+- B121: with a pinned `dlna.listenAddress` the one advertiser takes the
+  picker's interface (`PickLANEligibleInterface`), which need not be the one
+  holding that address. Read from the code, not measured.
+
 ## 2026-09-29 — bridge init warns about or refuses a posture flag it would not write, asks "Overwrite?" before its preflight, and names a kept endpoint on a moved port; doctor grades init's data dir before init (backlog B61)
 
 The four leftovers #1081's entry recorded under Out of scope. Every run

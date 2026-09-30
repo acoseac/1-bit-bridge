@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -130,8 +131,14 @@ type SSDPAdvertiser struct {
 	// read on `s.listener`/`s.sender` from any goroutine.
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
-	listener *net.UDPConn // multicast listener for incoming M-SEARCH
-	sender   *net.UDPConn // unicast sender for outgoing NOTIFY
+	listener *net.UDPConn // multicast listener for incoming M-SEARCH (listenSSDP)
+	sender   *net.UDPConn // unconnected socket the NOTIFYs are written from (openNotifySender)
+
+	// notifyTo is where every NOTIFY is written: the SSDP group. The
+	// constructor sets it and nothing changes it after, so the goroutines
+	// read it without the lock. A test may point it at a socket of its own
+	// before it drives a burst.
+	notifyTo *net.UDPAddr
 
 	// searchSem bounds concurrent M-SEARCH responder goroutines (see
 	// `maxConcurrentMSearchResponders`). Allocated once in the
@@ -165,6 +172,7 @@ func NewSSDPAdvertiser(cfg SSDPConfig) *SSDPAdvertiser {
 		cfg:       cfg,
 		targets:   NotifyTargetsFor(cfg.UDN),
 		searchSem: make(chan struct{}, maxConcurrentMSearchResponders),
+		notifyTo:  net.UDPAddrFromAddrPort(netip.MustParseAddrPort(SSDPMulticastAddr)),
 	}
 }
 
@@ -203,34 +211,26 @@ func (s *SSDPAdvertiser) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Multicast listener (joined to the SSDP group)
-	listener, err := net.ListenMulticastUDP("udp4", s.cfg.Interface, addr)
+	// M-SEARCH listener, joined to the SSDP group on this advertiser's
+	// interface. On Linux it hears only the datagrams that arrive on that
+	// interface; macOS and Windows deliver so anyway (listenSSDP).
+	listener, err := listenSSDP(ctx, s.cfg.Interface, addr, s.log)
 	if err != nil {
 		return err
 	}
 
-	// Unicast sender (dials the multicast address for outgoing NOTIFY).
-	// `net.DialUDP` alone doesn't bind the outgoing multicast interface —
-	// the OS routes via its default multicast interface, which may differ
-	// from `s.cfg.Interface` on a multi-homed host (LAN + Tailscale +
-	// Ethernet). When `s.cfg.Interface` is non-nil, we wrap the sender
-	// in `ipv4.PacketConn` and explicitly set the multicast interface
-	// so the NOTIFY ssdp:alive bursts land on the LAN where renderers
-	// live. Per Gemini Medium on PR #303.
-	sender, err := net.DialUDP("udp4", nil, addr)
+	// NOTIFY sender: an unconnected socket, pinned to this advertiser's
+	// interface before anything is sent, that writes each NOTIFY to the
+	// group (openNotifySender says why it must not be connected).
+	sender, err := openNotifySender()
 	if err != nil {
 		listener.Close()
 		return err
 	}
 	if s.cfg.Interface != nil {
-		// Pin outgoing multicast to the operator-chosen interface.
-		// `SetMulticastInterface` is a connection-level option set
-		// before any packets are sent; it applies to subsequent
-		// `WriteTo` / `Write` calls on the underlying socket. The
-		// `ipv4.NewPacketConn` wrap is non-destructive — the
-		// underlying `*net.UDPConn` continues to function for
-		// direct Write calls, which is how `sendAlive` / `sendByebye`
-		// use it.
+		// Pin outgoing multicast to the operator-chosen interface, so the
+		// NOTIFY bursts land on the LAN where renderers live and leave
+		// from its address (Gemini Medium on PR #303 asked for the pin).
 		if err := pinMulticastInterface(sender, s.cfg.Interface); err != nil {
 			// Soft-fail: log + continue. A failure here means
 			// multicast goes via the OS default — degraded but
@@ -526,7 +526,7 @@ func (s *SSDPAdvertiser) sendAliveAll(sender *net.UDPConn) error {
 	var first error
 	for _, target := range s.targets {
 		pkt := BuildNotifyAlive(s.cfg.Location, s.cfg.ServerToken, target)
-		if _, err := sender.Write(pkt); err != nil {
+		if _, err := sender.WriteToUDP(pkt, s.notifyTo); err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return err
 			}
@@ -550,7 +550,7 @@ func (s *SSDPAdvertiser) sendByebyeAll(sender *net.UDPConn) {
 	}
 	for _, target := range s.targets {
 		pkt := BuildNotifyByeBye(s.cfg.Location, s.cfg.ServerToken, target)
-		_, _ = sender.Write(pkt) // best-effort; we're shutting down
+		_, _ = sender.WriteToUDP(pkt, s.notifyTo) // best-effort; we're shutting down
 	}
 }
 
@@ -571,4 +571,30 @@ func interfaceName(iface *net.Interface) string {
 // would reach the LAN (loopbackInterface, backlog B38).
 func pinMulticastInterface(conn *net.UDPConn, iface *net.Interface) error {
 	return ipv4.NewPacketConn(conn).SetMulticastInterface(iface)
+}
+
+// openNotifySender opens the socket an advertiser writes its NOTIFYs from:
+// UNCONNECTED, on the wildcard address and a port of the kernel's choosing.
+// Start pins it to the advertiser's interface before anything is sent, and
+// every NOTIFY is written to the group with WriteToUDP, so the kernel picks
+// the datagram's route and source address from the pinned interface on each
+// send, as the discovery clients' M-SEARCH sockets have always had it.
+//
+// It was net.DialUDP to the group, pinned afterwards, and a connect fixes
+// the socket's route and source address at that moment, along the group's
+// route (backlog B71, measured 2026-09-29). On Linux and macOS the pin still
+// steered each datagram out of its own interface, with the source address
+// the connect had fixed: in three network namespaces the NOTIFYs pinned to the
+// second interface came from the FIRST interface's address, and a renderer
+// with no route back to that subnet dropped every one; on macOS an
+// advertiser pinned to lo0 announced from en0's address. On Windows the pin
+// did not even steer: a socket connected that way and pinned to the loopback
+// interface sent its datagram out of Ethernet. And on a host with no route
+// to the group (no default route), the connect failed with "network is
+// unreachable", no advertiser could start, and DLNA did not start at all;
+// an unconnected socket needs no route to open, and a pinned send needs
+// none either. On a host whose only interface carries the group's route
+// nothing moves: the source is that interface's address either way.
+func openNotifySender() (*net.UDPConn, error) {
+	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 }
