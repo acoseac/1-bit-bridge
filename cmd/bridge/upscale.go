@@ -961,13 +961,13 @@ func gcRefusePartialWalk(stderr io.Writer, label, outputDir string, inv integrit
 // twin of gcRefuseRelocationInProgress on the file side —
 // integrity.MassOrphanRefusal, shared with `analyze --gc`.
 //
-// gcRefuseEmptyKnownSetOverPopulatedDir covers only a catalog that is
-// ENTIRELY empty, and the 2026-09-20 aftermath was not: the auto-optimize
-// sweeper had written 200 fresh rows over a tree of 10,248 stranded
-// files, so the known set was populated, every one of those rows was
-// PRESENT, and both existing guards passed while the sweep unlinked
-// 254 GiB. A catalog far smaller than the tree it is supposed to describe
-// is the signal neither of them can see.
+// gcRefuseEmptyCatalog covers only a catalog that is ENTIRELY empty, and
+// the 2026-09-20 aftermath was not: the auto-optimize sweeper had written
+// 200 fresh rows over a tree of 10,248 stranded files, so the known set
+// was populated, every one of those rows was PRESENT, and both existing
+// guards passed while the sweep unlinked 254 GiB. A catalog far smaller
+// than the tree it is supposed to describe is the signal neither of them
+// can see.
 //
 // Override, not refusal-forever: there is an operator at the terminal,
 // which is the same reason --allow-empty exists and the background
@@ -1012,50 +1012,91 @@ const gcAllowPartialWalkUsage = "with --gc: take the mass-orphan check over the 
 // many that a 10,000-file refusal scrolls the reason off the screen.
 const gcOrphanExamples = 5
 
-// gcRefuseEmptyKnownSetOverPopulatedDir is the FORWARD sweep's twin of
-// gcCheckOutputDirBeforeReverseSweep, and the direction that was missing.
+// gcSweep names one `--gc` sweep in its empty-catalog refusal: label opens
+// the refusal's first line, rowNoun names the rows of its catalog and
+// dirNoun the directory it sweeps. Named rather than genericised to
+// "database row": a refusal that says "no variant row references any
+// sidecar" during a waveform GC sends the operator to the wrong table, at
+// the moment they are deciding whether to pass --allow-empty, and which
+// catalog is empty is the fact that decision turns on (Gemini on #895).
+type gcSweep struct {
+	label, rowNoun, dirNoun string
+}
+
+// The two `--gc` sweeps with an empty-catalog refusal: `upscale --gc`
+// (which `optimize --gc` and `render --gc` reach through runGC) and
+// `analyze --gc`.
+var (
+	upscaleGCSweep = gcSweep{label: "GC forward sweep", rowNoun: "variant row", dirNoun: "variants directory"}
+	analyzeGCSweep = gcSweep{label: "analyze --gc", rowNoun: "analysis row", dirNoun: "waveform directory"}
+)
+
+// gcRefuseEmptyCatalog is the forward sweeps' empty-catalog refusal: with
+// no row naming a sidecar, every file the sweep would remove reads as an
+// orphan, so it refuses whenever the walk found one, prints why and
+// returns 1; 0 when there is nothing to refuse. The caller waives it for
+// --allow-empty. The decision is integrity.EmptyCatalogOrphans, the one
+// the background sweep makes, taken from the sweep's own inventory, after
+// the walk and before anything is unlinked.
 //
-// The reverse guard refuses to mass-delete ROWS when the directory reads empty.
-// Nothing refused to mass-delete FILES when the rows read empty — and the
-// forward sweep runs FIRST, so by the time the reverse guard fires the sidecars
-// are already gone. `bridge upscale --gc` has no `--confirm` gate either
-// (unlike `artwork --gc`'s typed phrase), so a single mistyped `--config` is
-// the whole distance.
+// It is the FORWARD sweep's twin of gcCheckOutputDirBeforeReverseSweep,
+// and the direction that was missing. The reverse guard refuses to
+// mass-delete ROWS when the directory reads empty. Nothing refused to
+// mass-delete FILES when the rows read empty — and the forward sweep runs
+// FIRST, so by the time the reverse guard fires the sidecars are already
+// gone. `bridge upscale --gc` has no `--confirm` gate either (unlike
+// `artwork --gc`'s typed phrase), so a single mistyped `--config` is the
+// whole distance.
 //
-// The routes to an empty catalog with a populated directory are ordinary: a
-// `--config` naming a different install, a DB restored from a snapshot older
-// than the renditions, or a run between a root flip's WipeFilesystemTracks and
-// the rescan that refills it.
+// The routes to an empty catalog over a tree of sidecars are ordinary: a
+// `--config` naming a different install, a DB restored from a snapshot
+// older than the renditions, or a run between a root flip's
+// WipeFilesystemTracks and the rescan that refills it.
 //
 // Unlike the background sweeper, there IS an operator here — someone who
-// really did empty their library is standing at the terminal — so this one has
-// an override. Intent is expressed by the person who has it, and the refusal
-// names the flag.
+// really did empty their library is standing at the terminal — so this
+// one has an override. Intent is expressed by the person who has it, and
+// the refusal names the flag, with --allow-mass-orphans beside it when
+// massOrphansToo says the mass-orphan check would refuse the same run
+// (with no rows, ten files or more are more than the catalog holds), so
+// the operator is not refused a second time. It names up to
+// gcOrphanExamples of the files, so that operator can see what would go.
 //
-// An empty set over an empty directory exits 0 as before: nothing to protect,
-// nothing to do.
-// `rowNoun` and `dirNoun` name what THIS command manages. The helper is shared
-// by `upscale --gc` (variant rows, the variants directory) and `analyze --gc`
-// (analysis rows, the waveform directory), and a refusal that says "no variant
-// row references any sidecar" during a waveform GC sends the operator to the
-// wrong table. Parameterised rather than genericised to "database row": the
-// operator is standing at a terminal deciding whether to pass --allow-empty,
-// and which catalog is empty is the fact that decision turns on.
-// (Gemini on #895.)
-func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir, rowNoun, dirNoun string, knownCount int, allowEmpty bool) int {
-	if knownCount > 0 || allowEmpty {
+// Over nothing the sweep would remove — an empty or missing directory,
+// empty folders, a file its Consider rejects, the filesystem's lost+found
+// — an empty catalog proceeds, as the background sweep's has since #1084.
+// Until 2026-09-29 this asked VariantsDirSweepBlockReason whether the
+// directory held any entry at all, so each of those needed --allow-empty
+// for a run with nothing to do (backlog B65). What the sweep would remove
+// is its own Consider's: `upscale --gc` removes every file, so a
+// `.DS_Store` still refuses there, where `analyze --gc` removes waveforms
+// only and passes over it.
+func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv integrity.SidecarInventory, known int, massOrphansToo bool) int {
+	orphans, unstatted := integrity.EmptyCatalogOrphans(inv, known)
+	if orphans == 0 {
 		return 0
 	}
-	// The probe asks "missing, empty, or unreadable?", which is not
-	// variant-specific despite the name — there is nothing to lose either way.
-	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
-		return 0
+	weighed := ""
+	if unstatted > 0 {
+		weighed = fmt.Sprintf(", counting the %d entr(y/ies) the walk could not stat as such files", unstatted)
 	}
-	fmt.Fprintf(stderr, "GC forward sweep: no %s references any sidecar, but %q holds files.\n", rowNoun, outputDir)
-	fmt.Fprintln(stderr, "  Every file there would be treated as an orphan and removed.")
-	fmt.Fprintf(stderr, "  This usually means the wrong config/database: check that --config names the\n"+
-		"  install whose %s you meant, and that a scan has run.\n", dirNoun)
-	fmt.Fprintln(stderr, "  If the library really is empty and you want the sidecars gone, re-run with --allow-empty.")
+	fmt.Fprintf(stderr, "%s: refusing to run — no %s references any sidecar, but %q holds %d file(s) this sweep would remove%s.\n",
+		sweep.label, sweep.rowNoun, outputDir, orphans, weighed)
+	fmt.Fprintln(stderr, "  With no row to match them against, every one of them reads as an orphan. Nothing was unlinked.")
+	for i, p := range inv.OrphanPaths {
+		if i >= gcOrphanExamples {
+			break
+		}
+		fmt.Fprintf(stderr, "    e.g. %s\n", p)
+	}
+	fmt.Fprintf(stderr, "  This usually means the wrong config or database: check that --config names the\n"+
+		"  install whose %s you meant, and that a scan has run.\n", sweep.dirNoun)
+	if massOrphansToo {
+		fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-empty --allow-mass-orphans: with no rows,")
+		fmt.Fprintln(stderr, "  this many files are more than the catalog holds, which the mass-orphan check refuses too.")
+		return 1
+	}
+	fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-empty.")
 	return 1
 }
 
@@ -1329,8 +1370,9 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 // gcOptions carries `--gc`'s operator overrides and the configured
 // relocation threshold into runGC.
 type gcOptions struct {
-	// allowEmpty lets the forward sweep proceed over a populated
-	// directory when no row references any sidecar (--allow-empty).
+	// allowEmpty lets the forward sweep proceed when no row references
+	// any sidecar while the directory holds files it would remove
+	// (--allow-empty; gcRefuseEmptyCatalog).
 	allowEmpty bool
 	// allowMassDelete lets the reverse sweep delete past the relocation
 	// guard (--allow-mass-delete).
@@ -1402,11 +1444,6 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 	// tree as 10,248 orphans and unlink the lot (2026-09-20).
 	known := integrity.KnownSidecarSet(outputDir, integritySnapshotsFromRows(allRows))
 
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir,
-		"variant row", "variants directory", len(allRows), opts.allowEmpty); code != 0 {
-		return code
-	}
-
 	// Classify every row and ask the relocation guard BEFORE the forward
 	// sweep unlinks anything — see gcRowVerdicts for why the order is
 	// load-bearing.
@@ -1415,12 +1452,24 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return code
 	}
 
-	// One walk, before anything is unlinked, so the mass-orphan guard can
-	// see the whole count — the same ordering, and the same reason, as the
-	// relocation pre-flight above.
+	// One walk, before anything is unlinked, so the empty-catalog and
+	// mass-orphan guards can see the whole count — the same ordering, and
+	// the same reason, as the relocation pre-flight above.
 	inv, exitCode := gcTakeInventory(ctx, stderr, outputDir, known)
 	if exitCode != 0 {
 		return exitCode
+	}
+	// An empty catalog first, as in the background sweep: the mass-orphan
+	// check refuses most of the same trees but none under its floor of
+	// ten, and this one says what is actually wrong. Decided from the
+	// inventory, so a directory holding nothing this sweep would remove
+	// (empty folders, the filesystem's lost+found) is no refusal.
+	if !opts.allowEmpty {
+		massOrphansToo := !opts.allowMassOrphans &&
+			integrity.MassOrphanRefusalFor(inv, len(allRows), opts.maxDeletePercent) != ""
+		if code := gcRefuseEmptyCatalog(stderr, upscaleGCSweep, outputDir, inv, len(known), massOrphansToo); code != 0 {
+			return code
+		}
 	}
 	if code := gcRefuseMassOrphans(stderr, outputDir, inv, len(allRows), opts); code != 0 {
 		return code

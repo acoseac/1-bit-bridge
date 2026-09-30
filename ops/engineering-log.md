@@ -31626,6 +31626,196 @@ passed, nothing saved.
 
 Nothing in this change.
 
+## 2026-09-29 — the CLI `--gc` empty-catalog refusal decides from the sweep's inventory, and the variant watcher's refusal goes through the orphan sweep's latch (backlog B65)
+
+Two leftovers #1084 recorded under "Out of scope", in one PR. Each was
+reproduced on main (abac4b54) before any code changed: the real `bridge`
+binary over a throwaway install (`upscale.enabled` and `analysis.enabled`
+on, an empty library root) for the CLI, and a real `bridge serve`
+(`integrity.variantSweepIntervalSec: 2`) for the watcher, over rows a
+throwaway helper under a `_`-prefixed directory seeded through
+`manifest.Store`.
+
+### 1: the CLI empty-catalog refusal asked whether the directory held any entry
+
+`upscale --gc` and `analyze --gc` refused an empty catalog unless
+`VariantsDirSweepBlockReason` read the directory missing, empty or
+unreadable: whenever it held any entry at all. Measured on main, an empty
+catalog over each shape (exit code; what was left):
+
+| the directory holds | `upscale --gc` | `analyze --gc` |
+|---|---|---|
+| a `.DS_Store` | 1, kept | 1, kept |
+| empty folders | 1, kept | 1, kept |
+| the filesystem's `lost+found` (`chmod 000`) | 1, kept | 1, kept |
+| all three | 1 | 1 |
+| one file of its family | 1, kept | 1, kept |
+
+Every refusal said the directory "holds files" and that "every file there
+would be treated as an orphan and removed", about folders and a
+`lost+found` it would remove nothing from. After, the same shapes with the
+fixed binary:
+
+| the directory holds | `upscale --gc` | `analyze --gc` |
+|---|---|---|
+| a `.DS_Store` | 1, "holds 1 file(s) this sweep would remove", names it | 0, kept |
+| empty folders | 0, kept | 0, kept |
+| the filesystem's `lost+found` | 0, kept | 0, kept |
+| all three | 1 (the `.DS_Store`) | 0, all kept |
+| one file of its family | 1, kept | 1, kept |
+
+- Decided: one rule, `integrity.EmptyCatalogOrphans(inv, known)`: with an
+  empty known set, every file the walk classified is an orphan and each
+  entry it could not stat is weighed as one more (`MassOrphanRefusalFor`'s
+  reading). #1084 wrote it into the background sweep's
+  `emptyCatalogRefusal`; it is exported now and all three refusals decide
+  by it. cmd/bridge's `gcRefuseEmptyCatalog` replaces
+  `gcRefuseEmptyKnownSetOverPopulatedDir` and runs after the walk, ahead of
+  the mass-orphan check, as in the background sweep. Its key is the size
+  of the known set, as the background's is (`upscale --gc` passed the row
+  count; the two differ only for a row with no source path or variant id).
+- Decided: what counts is what THE sweep removes, by its own Consider.
+  `upscale --gc` passes a nil Consider and removes every file, so over a
+  lone `.DS_Store` it still refuses, and with `--allow-empty` removes it
+  (measured). **Rejected**: weighing only rendition-shaped files there
+  while the sweep goes on removing every file; the refusal would then wave
+  through a run that removes files it never weighed, where the brief was
+  that the CLI keeps refusing wherever a file it would remove exists.
+  Whether `upscale --gc` should remove only files a rendition can be is
+  its own decision (backlog B132).
+- Decided: a scratch file (`analyze --gc`'s `.waveform.bin.tmp`) is not
+  weighed: the sweep removes it whatever the catalog says, so an empty
+  catalog puts none at risk. Over scratch alone an empty catalog now
+  proceeds and removes it (main refused).
+- Decided: a directory the walk could not list is left to the partial
+  walk's refusal, as in the background sweep. Main refused it with the
+  empty-catalog message, "holds files", about a tree whose files it had not
+  seen.
+- The refusal counts what it saw, names up to five examples, and names
+  `--allow-mass-orphans` beside `--allow-empty` when the mass-orphan check
+  would refuse the same run (ten files or more against no rows), so an
+  operator is not refused twice. Its first line carries the sweep's label:
+  `analyze --gc:` for the waveform GC, which said "GC forward sweep:".
+- Unchanged: a missing directory, an empty one, and any catalog with rows.
+
+### 2: the watcher's relocation refusal WARNed on every tick
+
+`VariantWatcher.tick` logged `refusing to delete rows — this looks like a
+relocation, not a deletion` at WARN on every refused tick, and its summary
+at WARN too (`Refused > 0`). Measured on main: twelve rows recorded under
+a directory that never existed, no file at their canonical places, and
+one sidecar-shaped file in the variants directory that no row names (so
+the tree "still holds sidecar files"). Seven ticks in 13 s, fourteen WARN
+lines; 48 a day at the default hour, for a state that lasts until someone
+acts.
+
+After, the same shape, with the stray sidecar removed 13 s in: one WARN at
+the first tick; seven Info summaries (`refused=12`); then, at the tick after
+the removal, one Info `no longer refusing` (`rows=12 missing=12`), the ten
+sampled row deletions at Info and the tick's WARN summary (`deleted=12`).
+
+- Decided: one latch, `refusalLatch[K comparable]` (internal/integrity/
+  latch.go), taken out of `OrphanSidecarSweeper`, whose `refusing`,
+  `refusingSince` and `lastRefusalLog` fields it replaces
+  (`sweepRefusalRepeat` replaces `orphanRefusalRepeat`). `refuse(now, kind)`
+  says whether to log (a new streak, a new kind, a day since the last WARN)
+  and whether a streak started (the orphan sweep publishes its status
+  then); `lift()` says whether a streak ended. The watcher keeps one of its
+  own kind type, `variantRefusalKind`, one kind today.
+- Decided: a refused tick summarises at Info, with `refused=N`. A tick that
+  deleted still summarises at Warn: a deletion is the line an operator
+  looks for, and it cannot repeat on a row that is gone.
+- Decided: a tick that never asked the relocation question leaves the
+  latch alone: a failed listing, the mount-loss skip, a tick the shutdown
+  stopped in its first pass. What ends a streak: a tick whose check
+  proceeds, and an EMPTY catalog, since the rows the streak withheld are
+  gone and a relocation after it must WARN at once, not a day later.
+- Not in this PR, filed as backlog B131: the mount-loss skip's own WARN,
+  still logged on every tick while the variants volume reads missing,
+  empty or unreadable (an unmounted volume may deserve the hourly line; a
+  decision first), and the Jobs card, whose "Variant integrity sweep" line
+  says "on" while the watcher refuses, the defect #1071 fixed for the orphan
+  sweep.
+
+### Tests
+
+New in cmd/bridge (`gc_empty_catalog_test.go`, over the real `runGC` and
+`runAnalyzeGC`, each with an empty store):
+`TestGCEmptyCatalogProceedsOverNothingItWouldRemove` (an empty directory,
+empty folders and the filesystem's `lost+found` in both sweeps, a
+`.DS_Store` in `analyze --gc`),
+`TestGCEmptyCatalogRemovesAWaveformScratchFileWithoutARefusal`,
+`TestGCEmptyCatalogRefusesOverAFileItWouldRemove` (a file of its family in
+both, a `.DS_Store` in `upscale --gc`, an unstattable link in both; the
+count and an example named), `TestGCEmptyCatalogLeavesAnUnlistedDirectoryToThePartialWalk`
+and `TestGCEmptyCatalogOverrideNamesEveryFlagTheRunNeeds` (three files:
+`--allow-empty` alone, which removes them; twelve: both flags named,
+`--allow-empty` alone met by the mass-orphan refusal, both flags remove
+them). `TestGCRefusalNamesTheCatalogItIsTalkingAbout` now runs both real
+sweeps. Removed with the helper they called:
+`…GCRefusesAnEmptyCatalogOverAPopulatedVariantsDir` and
+`…GCEmptyCatalogGuardLetsTheDeliberateCaseThrough`, whose cases the tests
+above cover.
+
+New in internal/integrity (`variant_refusal_latch_test.go`, driving
+`tick` directly): `TestVariantWatcherLatchesItsMassDeleteRefusal`,
+`TestVariantWatcherSaysOnceWhenItStopsRefusing`,
+`TestVariantWatcherEndsItsStreakOnAnEmptyCatalog`,
+`TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing`,
+`TestVariantWatcherRepeatsItsRefusalOnceADay` and `TestRefusalLatch`; in
+`inventory_test.go`, `TestEmptyCatalogOrphansCountsOnlyWhatAnEmptyCatalogPutsAtRisk`
+(a table, and a real walk over a `.DS_Store`, a cover, a scratch file and
+a Trash). Adapted: `TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars`
+wants the refused tick's summary at Info, the deleting tick's at Warn; the
+two orphan-sweep tests that aged the latch reach it as `s.latch`.
+
+Red first on main (abac4b54), with the tests written against its API: the
+final CLI test file, run in a `git archive` of main, went red in every test
+above but for the empty-directory rows, the three-file override rows and
+the naming test's `upscale` subtest (its `analyze` subtest is red on the
+label); and the four watcher tests main's API can run went red (six WARN
+lines for three refused ticks; no lifted line, twice; two WARNs across a
+streak broken by three ticks that decided nothing).
+
+### Negative controls, on the committed tree (182adb01), each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| NC1: the CLI refusal asks main's question (any entry) | the proceeds test (folders and `lost+found` in both, `analyze`'s `.DS_Store`), the scratch test, the unlisted-directory test |
+| NC2: the CLI refusal never refuses | the refuses test (all five rows), the override test, `TestGCRefusalNamesTheCatalogItIsTalkingAbout` |
+| NC3: an unstattable entry is not weighed | the rule's table (two rows), `TestEmptyCatalogRefusalCountsWhatTheSweepWouldRemove`'s row, the CLI link rows |
+| NC4: an unlisted directory is weighed as a file | the rule's table (two rows), the orphan sweep's unlisted streak case and its pure row, the CLI unlisted-directory test |
+| NC5: `upscale --gc` never names `--allow-mass-orphans` beside `--allow-empty` | the override test's `upscale` subtest, alone |
+| NC5b: the same in `analyze --gc` | the override test's `analyze` subtest, alone |
+| NC6: `upscale --gc` asks the mass-orphan check first | the override test's `upscale` subtest, alone |
+| NC7: the watcher's refusal bypasses the latch (main) | the latch, keeps-streak and once-a-day watcher tests |
+| NC8: a refused tick summarises at Warn again | the latch test and both refused rows of the relocation test |
+| NC9: an empty catalog does not end a streak | `TestVariantWatcherEndsItsStreakOnAnEmptyCatalog`, alone |
+| NC10: the mount-loss skip ends a streak | `TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing`, alone |
+| NC11: a proceeding check does not end a streak | `TestVariantWatcherSaysOnceWhenItStopsRefusing`, alone |
+| NC12: the lifted line is logged outside a streak | the says-once test and `TestVariantWatcher_healthyTickLogsOneInfoLine` |
+| NC13: the latch ignores a change of kind | `TestRefusalLatch` and three orphan-sweep tests (status, partial walk, the unlisted streak case) |
+| NC14: `lift` keeps the streak's start | `TestRefusalLatch` and the orphan sweep's status and empty-catalog latch tests |
+| NC15: the latch never repeats a WARN | `TestRefusalLatch` and both sweeps' once-a-day tests, and the empty-catalog latch test |
+| NC16: the orphan sweep bypasses its latch | seven orphan-sweep tests |
+
+A first run of the control harness read "cannot" in a test's log output
+(the orphan refusal's hint: "they cannot be re-derived from disk") as a
+build failure and called fourteen valid controls invalid; it now looks for
+`[build failed]` and `# ` package headers only, and the fourteen were run
+again.
+
+### Out of scope
+
+- The mount-loss skip's per-tick WARN and the watcher's status on the Jobs
+  card (backlog B131).
+- `upscale --gc` removes every file no row names, a `.DS_Store`, a `.keep`
+  or a README included (backlog B132, a decision).
+- `TakeSidecarInventory` counts an entry it cannot stat as unreadable before
+  asking the Consider, so a link named like no candidate is still weighed as
+  a possible orphan by every sweep. Conservative (it can only refuse more),
+  and a change to what every refusal counts; not touched.
+
 ## 2026-09-29 — what the scanner, the jobs and the listing read opens as a file or a directory, so a named pipe holds none of them (backlog B62)
 
 #1082 left three things open ("Not covered" in its entry): `/v1/list`
