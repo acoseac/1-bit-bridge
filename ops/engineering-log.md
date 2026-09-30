@@ -33009,17 +33009,25 @@ change. The comments are corrected; that entry stands as written.
   per-candidate "folder-art stat" / "folder-art read" Warns for such failures,
   which named absolute paths, are gone. A folder whose listing or a candidate's
   stat fails keeps its rows untouched (the gate answers no): read as "no cover",
-  an unstat-able cover dropped the album's art (NC12). A cache file that could
-  not be written is NOT retried by the gate: that is the bridge's own
-  directory, failing for every cover alike. It is no verdict either
-  (`stampLocalArtworkCached` answers `errLocalArtworkCacheWrite`, the Track
-  carries `localArtWriteFailed`), so the merge copies the row's old `local-`
-  value. That was found after the first round of tests, reading the merge
-  rule against `needsLocalArtworkRecovery`: a wiped artwork cache whose
-  rewrite failed (a full or read-only data directory) dropped the rows'
-  cover, and with the art "" and the folder unchanged nothing sent the gate
-  back, so the cover was lost for good where main's copy kept it for the
-  recovery to retry (NC13).
+  an unstat-able cover dropped the album's art (NC12).
+- **A cover whose cache file could not be written is no verdict either**
+  (`stampLocalArtworkCached` answers `errLocalArtworkCacheWrite`; the failure
+  is logged by its caller). A folder cover's makes the lookup unsettled, like
+  a failed read: the rows keep their art, record "?", and the gate tries the
+  cover again on every scan (one read and write per folder), with the
+  write's Error folded into the scan's one line. An embedded picture's is
+  logged once per extraction as before and sets `localArtWriteFailed`: the
+  gate cannot retry it without a tag read, so the merge copies the row's old
+  `local-` value for `needsLocalArtworkRecovery` to retry. Both were found
+  late. The first: reading the merge rule against the recovery after the
+  first round of tests, a wiped artwork cache whose rewrite failed (a full or
+  read-only data directory) dropped the rows' art, and with the art "" and
+  the folder unchanged nothing sent the gate back, so it was lost for good
+  where main's copy kept it for the recovery (NC13). The second, CodeRabbit
+  on review round 2: a failed write was then settled, with the rows kept on
+  their old art, so a cover REPLACED while the cache could not be written was
+  recorded under the new cover's identity and never stored (red on the
+  reviewed head, NC15).
 - **A file its extractor refuses** (read whole, not its format, written by name)
   never reaches the pipeline, records `folderArtNotLookedKey` ("-"), and the
   gate never re-checks it. One the gate re-reads anyway (an upgraded row with
@@ -33075,8 +33083,11 @@ root) and `TestScanner_AFolderWhoseCoverCannotBeSeenKeepsItsRows` (unix, a
 self-link cover, then a link to nothing). Green on both:
 `TestScanner_ACoverBesideAnEmbeddedPictureChangesNothing` (the embedded
 picture keeps winning) and `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`
-(unix, the artwork directory made read-only after its cache file was
-wiped): both pin what the fix must not change. Through the
+(unix, the artwork directory made read-only after the cache files of a
+folder cover and an embedded picture were wiped): both pin what the fix
+must not change. Red on the reviewed head of round 2, green after:
+`TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater` (unix, a
+cover replaced while the artwork directory is read-only). Through the
 per-scanner cover-reader seam (`Scanner.readArt`), on every platform:
 `TestScanner_ACoverThatCouldNotBeReadIsReadOnALaterScan`,
 `TestScanner_AReplacedCoverThatCouldNotBeReadKeepsTheOldArt` (with and without
@@ -33108,7 +33119,8 @@ Negative controls on the committed fix, each restored and re-run green:
 | NC10: the gate's failed retry is not counted | the retry test's second line |
 | NC11: an extraction's unsettled read is not counted | the retry test's first line |
 | NC12: a candidate that cannot be stat'ed reads as absent | the unseen-cover test: the album's art dropped, both rows moved |
-| NC13: a failed cache write is a verdict (the merge drops an old `local-` value) | the wiped-cache test: the art "" after the read-only scan, still "" and the cache file never restored once it was writable |
+| NC13: an embedded picture's failed cache write is a verdict (the merge ignores `localArtWriteFailed`) | the wiped-cache test's embedded track: the art "" after the read-only scan, still "" and its cache file never restored once it was writable |
+| NC15: a folder cover's failed cache write is settled (not noted as a failure) | the wiped-cache test's folder tracks (art dropped for good) and `TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater` (the old art "" and never the new cover) |
 | NC14: a candidate that is not a file stays in the key | `TestFolderArtKeyLeavesOutWhatIsNotAFile`: the key named the directory link and the named pipe |
 
 Review round 1 (Gemini): leave a candidate that is not a regular file out of

@@ -81,10 +81,12 @@ type folderArtDirState struct {
 	// seen is false when the directory could not be listed, or a candidate
 	// in it could not be stat'ed: nothing can then be said about its art.
 	seen bool
-	// key is "name:size:mtimeNS" for each candidate that was there, in
-	// listing order, joined by ','; "" when the directory holds none.
+	// key is "name:size:mtimeNS" for each candidate that was there and is
+	// a file, in listing order, joined by ','; "" when the directory holds
+	// none.
 	key string
-	// names are the candidates that were there, by their listed names.
+	// names are the candidates that were there, by their listed names,
+	// files or not: the lookup refuses and names what is not one.
 	names []string
 	// failure is the stat or listing that did not complete, when seen is
 	// false.

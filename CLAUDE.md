@@ -676,24 +676,29 @@ lost my library."
   MusicBrainz ids, never over one); the upsert's `enriched_at` reset lets
   the enricher give the row a network cover, as for a changed file. A
   folder cover still outranks the enricher's (fresh non-zero wins).
-  **A cover the scan could not see or read is B134's rule for covers**: a
-  stat or read that did not complete (`folderArtReadIncomplete`; gone, or
-  not a file, is an answer) leaves the extraction `localArtUnsettled`, the
-  row keeps the art it had (`keepArtOfUnsettledRead`, on the full path too,
-  and over a partial answer from another candidate: taking it would change
-  the row twice), records `folderArtUnsettledKey` ("?"), and the gate then
-  retries only the COVER's read (`folderArtUnreadable`) and re-extracts the
-  rows once it reads, so a cover that stays unreadable costs a failed read
-  per folder a scan, never a tag read of its album, and one Warn per scan
-  counts its tracks (`msgUnreadFolderArt`). A folder whose listing or a
-  candidate's stat fails keeps its rows untouched (an ELOOP'd cover read as
-  "no cover" dropped the album's art). **A cover's cache file that could not
-  be written is NOT retried** by the gate (the bridge's own directory,
-  failing for every cover alike), **and is no verdict either**
-  (`localArtWriteFailed`): the merge keeps the row's old `local-` value, so
-  a wiped cache whose rewrite fails is still retried by
-  `needsLocalArtworkRecovery`; read as "no cover", the rows lost it for good
-  (`TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`). **A
+  **A cover the scan could not see, read or store is B134's rule for
+  covers**: a stat or read that did not complete (`folderArtReadIncomplete`;
+  gone, or not a file, is an answer), or a cover whose cache file could not
+  be written (a full or read-only data directory), leaves the extraction
+  `localArtUnsettled`, the row keeps the art it had
+  (`keepArtOfUnsettledRead`, on the full path too, and over a partial answer
+  from another candidate: taking it would change the row twice), records
+  `folderArtUnsettledKey` ("?"), and the gate then retries only the COVER
+  (`folderArtUnreadable`) and re-extracts the rows once it is stored, so a
+  cover that stays unreadable costs one failed attempt per folder a scan,
+  never a tag read of its album, and one Warn per scan counts its tracks
+  (`msgUnreadFolderArt`). A folder whose listing or a candidate's stat fails
+  keeps its rows untouched (an ELOOP'd cover read as "no cover" dropped the
+  album's art). A cache write that failed was first read as settled, and a
+  cover replaced while the data directory was full kept its rows on the old
+  art under the new cover's key, for good (CodeRabbit on #1117,
+  `TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater`). An
+  EMBEDDED picture whose cache file could not be written is no verdict
+  either (`localArtWriteFailed`), and the gate does not retry it, since that
+  retry is a tag read: the merge keeps the row's old `local-` value for
+  `needsLocalArtworkRecovery` to retry (read as "no cover", a wiped cache
+  whose rewrite failed lost its art for good,
+  `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`). **A
   file its extractor refuses** (read whole, not its format, written by
   name) records `folderArtNotLookedKey` ("-"), which the gate never
   re-checks, and one the gate re-reads records it through
