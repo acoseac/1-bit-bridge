@@ -4800,8 +4800,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// call), so the admin tile's `enabled` matches /v1/health's
 		// `waveform` flag rather than the persisted config flag.
 		AnalysisActive: analysisActiveFn,
-		// Analysis pool + sweeper surfaces (nil when the feature is off —
-		// the admin then omits the fields, mirroring the upscale tile).
+		// Analysis pool + sweeper surfaces, wired on every bridge: the
+		// pool and the sweeper run whatever the gate says (#781). The
+		// console leaves the pool's counters out while the gate is
+		// closed, as the upscale tile does, and keeps the sweeper's
+		// last-run lines.
 		AnalysisPoolStats: analysisPoolStatsClosure(analysisPool),
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that

@@ -3222,11 +3222,22 @@ func (s *Server) soxAvailability() *bool {
 // serve-side auto-analysis machinery: the long-lived analyze.Pool's
 // counters (same DTO the upscale pool uses — the field sets match
 // one-for-one, ActiveWorkers stays empty) and the sweeper's lifecycle.
-// Both omitted when the feature is off (closures nil), mirroring the
-// upscale tile's "absent ≠ idle" semantics. Diff-stable on the SSE
-// tick: no field in Pool/Sweep ticks monotonically while idle
-// (NextDueAt moves once per tick arm; countdowns are computed
-// browser-side — the PR #107 UptimeSec lesson).
+//
+// Pool is present only while Enabled is (the live gate), as the upscale
+// tile's is: counters beside an off or degraded badge read as a feature
+// that is on and idle. The pool itself runs on every bridge (#781), so
+// the closure answers whatever the gate says and getAnalysisStatsSnapshot
+// decides, from the read that sets Enabled. Sweep is present whenever
+// its closure is wired, which serve does on every bridge: its lines are
+// the last run's, which a pass the gate refuses leaves as they were.
+// Both closures are nil only in a test harness. This said until
+// 2026-09-29 that both were omitted with the feature off because the
+// closures were nil then, which #781 ended, and the Jobs card showed the
+// pool's counters beside its off badge (backlog B113).
+//
+// Diff-stable on the SSE tick: no field in Pool/Sweep ticks
+// monotonically while idle (NextDueAt moves once per tick arm;
+// countdowns are computed browser-side — the PR #107 UptimeSec lesson).
 type analysisStatsResponse struct {
 	Enabled         bool                `json:"enabled"`
 	SoxAvailable    *bool               `json:"soxAvailable,omitempty"`
@@ -3280,7 +3291,12 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 			resp.CachedBytes = bytes
 		}
 	}
-	if ps := s.deps.AnalysisPoolStats; ps != nil {
+	// The pool's counters only while the gate this snapshot read is open,
+	// so `pool` and `enabled` cannot disagree within one snapshot. The
+	// closure answers whatever the gate says (the pool runs on every
+	// bridge), and a second read of the gate there could land on the
+	// other side of a flip.
+	if ps := s.deps.AnalysisPoolStats; ps != nil && resp.Enabled {
 		resp.Pool = ps()
 	}
 	if sw := s.deps.AnalysisSweep; sw != nil {

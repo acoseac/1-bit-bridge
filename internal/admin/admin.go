@@ -442,18 +442,18 @@ type Deps struct {
 	// analyze.Pool's counters. Reuses the UpscalePoolStats DTO —
 	// analyze.PoolStats' field set matches transcode.PoolStats
 	// one-for-one (ActiveWorkers stays empty; the analysis pool has no
-	// per-worker grid). Unlike UpscaleStats it does not read the gate:
-	// serve builds the pool on every bridge (#781) and wires this
-	// whatever the gate says, so the `pool` field is present with the
-	// feature off too, and only a nil closure (a test harness) omits
-	// it. Wired in cmd/bridge/main.go.
+	// per-worker grid). It answers whatever the gate says: serve builds
+	// the pool on every bridge (#781) and wires this on every bridge.
+	// The HANDLER leaves the `pool` field out while the live gate
+	// (AnalysisActive) is closed, from the read that sets `enabled`, as
+	// the upscale tile leaves its pool out: counters beside an off badge
+	// read as a feature that is on and idle. Until 2026-09-29 the
+	// handler set the field whenever this was wired, so the Jobs card
+	// showed "0 queued · 0 in flight · 4 done" beside its off badge
+	// (backlog B113). Nil (a test harness) omits the field too. Wired in
+	// cmd/bridge/main.go.
 	AnalysisPoolStats func() *UpscalePoolStats
 
-	// AnalysisSweep returns the serve-side auto-analysis sweeper's
-	// lifecycle snapshot (running / last sweep timestamps + counts /
-	// next due). Ephemeral "since process start" state recorded by
-	// cmd/bridge's sweepStatus; nil-safe — absent omits the `sweep`
-	// field.
 	// DoctorRun executes the preflight checks and returns the report,
 	// wired by cmd/bridge so internal/admin needs no dependency on
 	// internal/doctor and the Deps assembly (config paths, roots, ports,
@@ -469,6 +469,13 @@ type Deps struct {
 	// than erroring).
 	DoctorRun func(ctx context.Context) *DoctorReport
 
+	// AnalysisSweep returns the serve-side auto-analysis sweeper's
+	// lifecycle snapshot (running / last sweep timestamps + counts /
+	// next due). Ephemeral "since process start" state recorded by
+	// cmd/bridge's sweepStatus, wired on every bridge, since the sweeper
+	// runs on every bridge (a pass the gate refuses records nothing, so
+	// the counts stay the last run's). Nil-safe — absent omits the
+	// `sweep` field.
 	AnalysisSweep func() *AnalysisSweepState
 
 	// TriggerAnalysisSweep queues an out-of-band auto-analysis sweep by

@@ -100,8 +100,11 @@ func timePtrIfSet(t time.Time) *time.Time {
 
 // analysisPoolStatsClosure adapts analyze.Pool.Stats to the admin's
 // UpscalePoolStats DTO (field sets match one-for-one; ActiveWorkers
-// stays empty — the analysis pool has no per-worker grid). nil pool →
-// nil closure → the admin omits the `pool` field entirely.
+// stays empty — the analysis pool has no per-worker grid). It answers
+// whatever the analysis gate says: serve builds the pool on every
+// bridge (#781), and the console's handler leaves the `pool` field out
+// while the gate is closed (getAnalysisStatsSnapshot). nil pool (a
+// caller with none) → nil closure → the admin omits the field too.
 func analysisPoolStatsClosure(pool *analyze.Pool) func() *admin.UpscalePoolStats {
 	if pool == nil {
 		return nil
