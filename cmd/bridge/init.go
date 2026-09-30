@@ -399,7 +399,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// rewrite keeps its data dir, which the header, the preflight, the
 	// credential store, the TLS pair and the service all use from here on.
 	// With no config, or one init cannot read, the data dir is init's own.
-	prior, priorErr := readPriorInstall(cfgPath)
+	// The read is kept: a config that is no longer as read by the time this
+	// run would write is refused (configChangedSinceRead).
+	asRead := readConfigAsIs(cfgPath)
+	prior, priorErr := priorInstallFrom(cfgPath, asRead)
 	initDataDir := initDataDirFor(cfgDir)
 	dataDir := initDataDir
 	if prior != nil {
@@ -647,6 +650,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
+	}
+
+	// The config must still be the one this run read and decided about: the
+	// preflight and the name prompt ran since, and another process can have
+	// written it meanwhile (configChangedSinceRead).
+	if configChangedSinceRead(stderr, cfgPath, asRead) {
+		return 1
 	}
 
 	// Whether this run may overwrite the config at all, before anything is

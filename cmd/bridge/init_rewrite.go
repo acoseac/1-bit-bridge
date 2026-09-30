@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -97,15 +98,21 @@ type priorInstallFile struct {
 // fallback nobody chose. A config that is not there is no install, and
 // answers nil and no error.
 func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
-	raw, err := os.ReadFile(cfgPath)
-	if errors.Is(err, fs.ErrNotExist) {
+	return priorInstallFrom(cfgPath, readConfigAsIs(cfgPath))
+}
+
+// priorInstallFrom is readPriorInstall over a read of cfgPath already made,
+// so initCmd can check later that the config is still as it read it
+// (configChangedSinceRead).
+func priorInstallFrom(cfgPath string, read configAsRead) (*priorInstallFile, error) {
+	if errors.Is(read.err, fs.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", cfgPath, err)
+	if read.err != nil {
+		return nil, fmt.Errorf("read %s: %w", cfgPath, read.err)
 	}
 	var p priorInstallFile
-	if err := yaml.Unmarshal(raw, &p); err != nil {
+	if err := yaml.Unmarshal(read.raw, &p); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
 	}
 	abs, err := filepath.Abs(cfgPath)
@@ -126,6 +133,57 @@ func readPriorInstall(cfgPath string) (*priorInstallFile, error) {
 		p.LibraryRoots[i] = config.ResolvePath(base, root)
 	}
 	return &p, nil
+}
+
+// configAsRead is the config file at a path as a run read it: its bytes, or
+// the error the read gave, fs.ErrNotExist where there was no file.
+type configAsRead struct {
+	raw []byte
+	err error
+}
+
+// readConfigAsIs reads the config at cfgPath as it is.
+func readConfigAsIs(cfgPath string) configAsRead {
+	raw, err := os.ReadFile(cfgPath)
+	return configAsRead{raw: raw, err: err}
+}
+
+// sameAs says a and b read one config: the same bytes, no file both times,
+// or a file neither read could read, which refuseRewrite refuses either way.
+func (a configAsRead) sameAs(b configAsRead) bool {
+	aAbsent, bAbsent := errors.Is(a.err, fs.ErrNotExist), errors.Is(b.err, fs.ErrNotExist)
+	switch {
+	case a.err == nil && b.err == nil:
+		return bytes.Equal(a.raw, b.raw)
+	case aAbsent || bAbsent:
+		return aAbsent && bAbsent
+	default:
+		return a.err != nil && b.err != nil
+	}
+}
+
+// configChangedSinceRead refuses a run whose config is no longer the one it
+// read at its start, and says so: asRead is that read. initCmd asks it after
+// its last prompt and before it writes anything.
+//
+// A run reads the config (what a rewrite keeps, readPriorInstall) and decides
+// whether to keep or replace it before its preflight and its name prompt,
+// which wait on the operator for as long as they take. A config another
+// process wrote after that read, a second init or an edit or the console's
+// save, is one the run neither read nor asked about, and writing over it
+// drops what that process wrote. Until 2026-09-29 (backlog B61) "Overwrite?"
+// came after both, so a config that appeared while they waited was asked
+// about; moving the question ahead of the preflight widened the window to
+// take them in, which CodeRabbit's security review of #1106 named. The
+// check holds for a first install and a rewrite alike, and for a change the
+// old order let through too (a rewrite keeps what it read at the start).
+func configChangedSinceRead(stderr io.Writer, cfgPath string, asRead configAsRead) bool {
+	if asRead.sameAs(readConfigAsIs(cfgPath)) {
+		return false
+	}
+	fmt.Fprintf(stderr, "the config at %s changed while this init ran, after it read it (another init, or an edit?).\n", cfgPath)
+	fmt.Fprintln(stderr, "run init again to decide about the config as it is now; this run wrote nothing.")
+	return true
 }
 
 // loopback says the file's posture is loopback: deployment.mode unset or
