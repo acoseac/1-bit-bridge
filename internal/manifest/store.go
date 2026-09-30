@@ -2168,6 +2168,34 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		// v50 records, per track, whether the extraction its row was
+		// written or stamped from REFUSED the file (Track.extractRefused:
+		// read whole, and not its format, so the scan indexes it by its
+		// name). The skip gate asks such a row nothing but its stat and its
+		// extractor version (backlog B145): the extraction of a refused
+		// file never reaches its lyrics sidecar or its artwork, so a gate
+		// question about those said yes, and re-read the file, on every
+		// scan, and the version-stale leg stamped nothing for a refusal, so
+		// after an ExtractorVersion bump it did the same. Column-only:
+		// never in tags_json, never on the wire.
+		//
+		// 0 for every existing row, which the gate reads as it read every
+		// row before: a refused row it goes back to (after a version bump,
+		// or for one of those questions) records the refusal then, so each
+		// such file is read at most once more.
+		//
+		// Append-only / idempotent per the ladder contract: the ALTER rides
+		// post(), not `sql` (see the v9 docblock).
+		version: 50,
+		name:    "tracks.extract_refused (the extraction a row was last written from refused the file)",
+		sql:     `-- column added idempotently in post(); see Track.extractRefused`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks",
+				tableColumn{"extract_refused", "ALTER TABLE tracks ADD COLUMN extract_refused INTEGER NOT NULL DEFAULT 0"},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2979,6 +3007,16 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // unexported Track.audioMD5 directly — the field must never be exported
 // or gain a json tag (types.go docblock).
 //
+// A file its extractor REFUSED (Track.extractRefused: read whole, not its
+// format) is stamped here too, with the refusal recorded (extract_refused,
+// v50), which is what lets the skip gate stop re-reading it (backlog
+// B145). Its row is the one it had: the refusal's own Track is the path's
+// guess, never written, and its lyrics row is left as it is, since a
+// refusal never reaches the lyrics (writeLyricsRowTx would read that as a
+// file that holds none and delete a row an older extractor wrote). Every
+// other row is stamped as not refused, so a file that reads again clears
+// the mark.
+//
 // Holds `s.mu` per the writer contract on Store; one transaction with a
 // prepared statement (the applyReconciledTracks template).
 func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) error {
@@ -3001,7 +3039,8 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		SET extractor_version = ?,
 		    missing_count = 0,
 		    audio_md5 = COALESCE(NULLIF(?, ''), audio_md5),
-		    folder_art_key = ?
+		    folder_art_key = ?,
+		    extract_refused = ?
 		WHERE path = ?
 	`)
 	if err != nil {
@@ -3010,8 +3049,13 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 	defer stmt.Close()
 	now := s.now().UnixNano()
 	for _, t := range ts {
-		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey, t.Path); err != nil {
+		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey,
+			boolToInt(t.extractRefused), t.Path); err != nil {
 			return err
+		}
+		if t.extractRefused {
+			// A refusal says nothing about the lyrics: its row stays.
+			continue
 		}
 		// The stamp leg carries the lyrics row too (the v7 backfill lands
 		// here for every byte-identical tag row); indexed_at bumps ONLY
@@ -3022,19 +3066,6 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		}
 	}
 	return tx.Commit()
-}
-
-// SetFolderArtKey records key as the folder-art key of the row at path, and
-// nothing else: no indexed_at (nothing a client sees changes), no
-// enriched_at, no tags_json. The scanner calls it for a file its extractor
-// refused, whose row it keeps as it was, so that the folder-art skip gate
-// (folderArtDrifted) stops going back to it. Holds `s.mu` per the writer
-// contract on Store.
-func (s *Store) SetFolderArtKey(ctx context.Context, path, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET folder_art_key = ? WHERE path = ?`, key, path)
-	return err
 }
 
 // ----- tracks -----
@@ -3070,8 +3101,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3132,9 +3163,14 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			audio_md5 = excluded.audio_md5,
 			-- v49: the folder art this extraction was given, by identity
 			-- (Track.folderArtKey), which the skip gate compares.
-			folder_art_key = excluded.folder_art_key
+			folder_art_key = excluded.folder_art_key,
+			-- v50: whether this extraction refused the file
+			-- (Track.extractRefused), unconditional like the version it
+			-- rides with: a file that reads now clears it.
+			extract_refused = excluded.extract_refused
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
-		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey)
+		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
+		boolToInt(t.extractRefused))
 	if err != nil {
 		return err
 	}
@@ -3189,6 +3225,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		compression any
 		audioMD5    string
 		artKey      string
+		refused     int
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -3209,6 +3246,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			compression: compression,
 			audioMD5:    t.audioMD5,
 			artKey:      t.folderArtKey,
+			refused:     boolToInt(t.extractRefused),
 		}
 	}
 
@@ -3234,8 +3272,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3273,7 +3311,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			-- audio_md5 unconditional on a changed row — mirrors UpsertTrack.
 			audio_md5 = excluded.audio_md5,
 			-- v49 folder-art key — mirrors UpsertTrack.
-			folder_art_key = excluded.folder_art_key
+			folder_art_key = excluded.folder_art_key,
+			-- v50 refusal marker — mirrors UpsertTrack.
+			extract_refused = excluded.extract_refused
 	`)
 	if err != nil {
 		return err
@@ -3282,7 +3322,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
+			r.refused); err != nil {
 			return err
 		}
 	}
@@ -3599,6 +3640,11 @@ type TrackStat struct {
 	// the folder art the row was extracted against, which the skip gate
 	// compares with the folder's now (folderArtDrifted).
 	FolderArtKey string
+	// ExtractRefused is the `extract_refused` column (v50): the extraction
+	// the row was written or stamped from, at its size, mtime and
+	// extractor version, refused the file (Track.extractRefused). The skip
+	// gate asks such a row nothing else while those three hold.
+	ExtractRefused bool
 }
 
 // GetTrackStat is the skip-gate twin of GetTrack: same exact-key
@@ -3632,12 +3678,12 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 	var st TrackStat
 	err := s.db.QueryRowContext(ctx, `
 		SELECT t.size, t.mtime_ns, COALESCE(json_extract(t.tags_json, '$.artworkMBID'), ''),
-		       t.extractor_version, t.folder_art_key,
+		       t.extractor_version, t.folder_art_key, t.extract_refused != 0,
 		       COALESCE(l.source, ''), COALESCE(l.sidecar_name, ''),
 		       COALESCE(l.source_mtime_ns, 0), COALESCE(l.source_size, 0)
 		FROM tracks t LEFT JOIN track_lyrics l ON l.source_path = t.path
 		WHERE t.path = ?`, path).
-		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion, &st.FolderArtKey,
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion, &st.FolderArtKey, &st.ExtractRefused,
 			&st.LyricsSource, &st.LyricsSidecarName, &st.LyricsSourceMTimeNS, &st.LyricsSourceSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
