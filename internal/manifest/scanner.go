@@ -1471,6 +1471,27 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 	}
 }
 
+// keepSACDRowsSeen resets the missing count of every virtual row of the SACD
+// container at pi, which the walk saw, where processSACDISO writes no row:
+// the skip gate's early return, a read that did not complete, and a
+// container that changed during the scan (backlog B217). The deletion pass
+// counts a virtual row seen whenever its container is, and never counts it
+// missing then; nothing reset its count, so a container hidden for one scan
+// on three separate occasions had its rows deleted at threshold 3, with a
+// tombstone each, while it was on disk (measured: the counts went 1, 1, 2,
+// 2, and the third hide deleted them). A plain file seen unchanged has its
+// count reset by the skip gate (ResetTrackMissingCount) and one whose read
+// failed by keepUnread; a re-expansion's rows by the upserts that write
+// them. The rows are every row under the container, by byte range
+// (ResetTrackMissingCountsUnder): nothing but its virtual rows can be.
+func (s *Scanner) keepSACDRowsSeen(ctx context.Context, pi pathInfo) {
+	if err := s.store.ResetTrackMissingCountsUnder(ctx, pi.rel); err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Warn("reset missing_count of an SACD container's rows", "path", pi.rel, "err", failure)
+		}
+	}
+}
+
 // rowIsCurrent is the skip gate's question for a file whose size and mtime
 // are its row's: is the row what extracting the file now would give it? Not
 // when its extractor version is stale. When the row records that this
@@ -1782,9 +1803,11 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 	if existing != nil && existing.Size == pi.info.Size() &&
 		existing.MTimeNS == pi.info.ModTime().UnixNano() &&
 		existing.ExtractorVersion >= ExtractorVersion {
-		// Unchanged + current: the deletion pass's container-seen
-		// membership keeps every virtual row alive without touching
-		// missing_count, so there is nothing to write.
+		// Unchanged + current: nothing to extract, and the rows' missing
+		// count goes back to 0, as the skip gate's does for a plain file
+		// (keepSACDRowsSeen). The deletion pass's container-seen
+		// membership only keeps them from being counted missing.
+		s.keepSACDRowsSeen(ctx, pi)
 		return nil
 	}
 
@@ -1795,11 +1818,16 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 			return nil
 		}
 		scanLogger.Error("sacd expand", "path", pi.rel, "err", sacdLibraryRelative(err.Error(), pi))
+		// A read that did not complete retires nothing, and the walk saw
+		// the container: its rows are seen, as a plain file's are when its
+		// read fails (keepUnread).
+		s.keepSACDRowsSeen(ctx, pi)
 		return nil
 	}
 	if changed != "" {
 		scanLogger.Info("sacd container changed during the scan; left for the next one",
 			"path", pi.rel, "change", changed)
+		s.keepSACDRowsSeen(ctx, pi)
 		return nil
 	}
 
