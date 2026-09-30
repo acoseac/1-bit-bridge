@@ -334,14 +334,6 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		fmt.Fprintf(stdout, "analyze --gc: no waveform dir at %s; nothing to do\n", outputDir)
 		return 0
 	}
-	// Same refusal as `upscale --gc`, for the same reason: every file misses an
-	// empty `known`, so the walk below would classify the whole waveform cache
-	// as orphaned. Cheaper to rebuild than a PCM rendition, which is why this
-	// is the milder of the two — not a different rule.
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir,
-		"analysis row", "waveform directory", len(known), opts.allowEmpty); code != 0 {
-		return code
-	}
 
 	// One classification pass, shared with `upscale --gc` and the doctor's
 	// variants-index check, so the three cannot disagree about what a tree
@@ -376,6 +368,21 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		// this repo keeps paying for.
 		fmt.Fprintf(stderr, "analyze --gc: %d entr(y/ies) under %s could not be read; they were neither counted nor removed.\n",
 			inv.Unreadable, outputDir)
+	}
+	// Same empty-catalog refusal as `upscale --gc`, for the same reason and
+	// in the same place, after the walk: every waveform misses an empty
+	// `known`, so the whole cache would read as orphaned. Cheaper to rebuild
+	// than a PCM rendition, which is why this is the milder of the two, not
+	// a different rule. Decided from the inventory, so it passes over what
+	// this sweep never removes (a .DS_Store, empty folders, the
+	// filesystem's lost+found) and over its own `.tmp` scratch, which it
+	// removes whatever the catalog says.
+	if !opts.allowEmpty {
+		massOrphansToo := !opts.allowMassOrphans &&
+			integrity.MassOrphanRefusalFor(inv, len(rows), analysisGCMaxOrphanPercent) != ""
+		if code := gcRefuseEmptyCatalog(stderr, analyzeGCSweep, outputDir, inv, len(known), massOrphansToo); code != 0 {
+			return code
+		}
 	}
 	if !opts.allowMassOrphans {
 		// The same two refusals as `upscale --gc`, in the same order: the

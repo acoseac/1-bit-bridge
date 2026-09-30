@@ -19,10 +19,10 @@ import (
 
 // The 2026-09-20 aftermath, which neither existing forward guard can see.
 //
-// gcRefuseEmptyKnownSetOverPopulatedDir asks "is the catalog EMPTY?" and
-// the answer was no: three minutes after the sweep dropped 10,248 rows,
-// the auto-optimize sweeper (candidate query: "no fresh variant row
-// exists") had written 200 fresh ones. gcRefuseRelocationInProgress asks
+// gcRefuseEmptyCatalog asks "is the catalog EMPTY?" and the answer was
+// no: three minutes after the sweep dropped 10,248 rows, the
+// auto-optimize sweeper (candidate query: "no fresh variant row exists")
+// had written 200 fresh ones. gcRefuseRelocationInProgress asks
 // "how many ROWS have lost their file?" and the answer was none — every
 // one of those 200 rows had its file exactly where it said. So
 // `bridge upscale --gc` would have matched 200 files, called the other

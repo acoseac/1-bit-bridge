@@ -714,7 +714,9 @@ type IntegrityConfig struct {
 	// still holds sidecar files. Default 20. A sweep that would reap
 	// more than this share of the catalog — after first adopting every
 	// row whose file sits at its canonical place under the CURRENT
-	// directory — is refused with a WARN instead of applied, because
+	// directory — is refused instead of applied, with a WARN when a
+	// streak of refused sweeps starts and once a day while it lasts
+	// (the watcher's log latch, since 2026-09-29), because
 	// that shape is a relocation in progress (a copy still running, a
 	// tree in a layout the probe does not recognise), not a library
 	// whose sidecars were individually deleted. `bridge upscale --gc
