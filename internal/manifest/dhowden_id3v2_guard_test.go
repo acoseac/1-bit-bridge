@@ -679,6 +679,9 @@ func TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime(t *testing.T) {
 // reader in this package's production code sits in a function that asks the
 // guards for what that reader reads, and a reader with no guard is not called
 // at all. A new call site that skipped them would hand dhowden a crafted tag.
+// And every such call reads the stream a newDhowdenReadBuffer call in the same
+// function returned (backlog B117): handed the file itself, dhowden reads an
+// unsynchronised tag a read(2) per byte.
 func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 	guardsFor := map[string][]string{
 		"ReadFrom":      {"dhowdenPicturesWithinBudget", "dhowdenID3v2WithinBudget"},
@@ -725,7 +728,8 @@ func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 				continue
 			}
 			called := map[string]bool{}
-			var reads []*ast.SelectorExpr
+			buffered := bufferedStreamsIn(fn.Body)
+			var reads []*ast.CallExpr
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -736,13 +740,14 @@ func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 					called[fun.Name] = true
 				case *ast.SelectorExpr:
 					if x, ok := fun.X.(*ast.Ident); ok && x.Name == pkg && strings.HasPrefix(fun.Sel.Name, "Read") {
-						reads = append(reads, fun)
+						reads = append(reads, call)
 					}
 				}
 				return true
 			})
-			for _, r := range reads {
+			for _, call := range reads {
 				checked++
+				r := call.Fun.(*ast.SelectorExpr)
 				guards, known := guardsFor[r.Sel.Name]
 				if !known {
 					t.Errorf("%s: %s calls %s.%s, which no dhowden guard walks", fset.Position(r.Pos()), fn.Name.Name, pkg, r.Sel.Name)
@@ -753,12 +758,51 @@ func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 						t.Errorf("%s: %s calls %s.%s without %s", fset.Position(r.Pos()), fn.Name.Name, pkg, r.Sel.Name, g)
 					}
 				}
+				if arg, ok := firstArgIdent(call); !ok || !buffered[arg] {
+					t.Errorf("%s: %s calls %s.%s on a stream no newDhowdenReadBuffer in it returned", fset.Position(r.Pos()), fn.Name.Name, pkg, r.Sel.Name)
+				}
 			}
 		}
 	}
 	if checked < 3 {
 		t.Fatalf("found %d dhowden reads, want the 3 this package makes: the sweep is not reading what it should", checked)
 	}
+}
+
+// bufferedStreamsIn names the variables body assigns the stream a
+// newDhowdenReadBuffer call returns to (the first of its two results).
+func bufferedStreamsIn(body *ast.BlockStmt) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if fun, ok := call.Fun.(*ast.Ident); ok && fun.Name == "newDhowdenReadBuffer" {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+				out[id.Name] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// firstArgIdent is the name of call's first argument when it is a plain
+// variable.
+func firstArgIdent(call *ast.CallExpr) (string, bool) {
+	if len(call.Args) == 0 {
+		return "", false
+	}
+	id, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return id.Name, true
 }
 
 // FuzzID3v2WalkAgreesWithDhowden fuzzes the walk against dhowden itself:

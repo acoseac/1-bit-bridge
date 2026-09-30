@@ -830,7 +830,11 @@ func applyEmbeddedID3(body []byte, t *Track, existing tag.Metadata, absPath, log
 		warnID3v2Refused(absPath, t, refusal)
 		return existing
 	}
-	m, err := tag.ReadID3v2Tags(r)
+	// The chunk is in memory already, so the buffer saves no read(2) here; it
+	// keeps every dhowden read of the package on one path (backlog B117).
+	buffered, release := newDhowdenReadBuffer(r)
+	m, err := tag.ReadID3v2Tags(buffered)
+	release()
 	if err != nil {
 		scanLogger.Warn(logPrefix+": embedded ID3v2 parse failed",
 			"path", absPath, "err", err)
