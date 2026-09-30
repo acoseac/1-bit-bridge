@@ -650,12 +650,12 @@ func TestScanner_AChangedFileWhoseCoverCouldNotBeReadKeepsItsArt(t *testing.T) {
 // cover replaced just after the lookup read it is recorded under the old
 // identity, and the next scan, seeing the new one, reads it. Taken the other
 // way round, the row records the new identity beside the old cover, and no
-// scan reads the cover again.
+// scan reads the cover again. The track is new to the scan, so no skip-gate
+// question takes the identity before the lookup does.
 func TestScanner_ACoverReplacedWhileItIsReadIsReadAgain(t *testing.T) {
 	f := newArtFixture(t)
 	const rel = "Artist/Album/01.flac"
 	f.flac(t, rel)
-	f.scan(t, "index")
 
 	old := coverBytes("while")
 	replacement := coverBytes("after!!")
