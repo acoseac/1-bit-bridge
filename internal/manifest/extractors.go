@@ -489,7 +489,11 @@ var Ext = map[string]bool{
 // not know keeps "WAV", the app's name for it, and loses its rate, as a DFF of
 // an unknown compression does, so the lossless name claims no quality tier.
 // The linear AIFF-C types the old depth list lacked (42ni, FL32, FL64) gain
-// their depth.
+// their depth. A WAV of code 0x0050 is "MP3" where its MPEG1WAVEFORMAT header
+// names layer III. And the first COMM or fmt chunk the walk can read names the
+// file, a later one skipped whole, as TagLib (and ffmpeg, for a WAV) reads it:
+// parsed one on top of the other, a second chunk's codec landed beside the
+// first one's depth.
 //
 // Only those files change: they take the full-upsert leg (their enrichment is
 // re-queued once) and are the iOS delta, where the app already files ULAW,

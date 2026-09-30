@@ -1530,7 +1530,13 @@ lost my library."
   and no duration; **a WAV of a format code it does not name keeps "WAV" and loses
   its rate** (default-deny, as for a DFF of an unknown compression: with the rate,
   the lossless name claims a tier). **An IMA4 COMM counts 64-frame packets**: the
-  duration was 64 times too short (a 30 s file read 0.4688 s). **The six names are
+  duration was 64 times too short (a 30 s file read 0.4688 s). **The first COMM
+  and fmt chunk the walk can read names the file**, a later one skipped whole, as
+  TagLib (and ffmpeg, for a WAV) reads it and as the walkers read their first SSND
+  and data chunk: parsed one on top of the other, a second chunk's codec landed
+  beside the first one's depth (CodeRabbit on #1122). A WAV of code 0x0050 is
+  "MP3" where its MPEG1WAVEFORMAT `fwHeadLayer` names layer III, read under that
+  tag alone (an extensible header's subformat has other fields there). **The six names are
   one vocabulary in four places**, `manifest.IsLossyCodec`, its SQL mirror in
   `upscaleEligibleSQL` (the admin lockstep matrix pins the pair), librarycat's
   `lossyCodecs` and the dupes ranking set; a new compressed name joins all four.

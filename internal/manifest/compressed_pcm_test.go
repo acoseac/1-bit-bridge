@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
 	"path/filepath"
@@ -195,5 +196,114 @@ func TestScanner_V21_ACompressedAIFCOrWAVJoinsTheDelta_ALinearOneOnlyStamps(t *t
 		if v := trackColumn(t, store, rel, "enriched_at"); v != 1 {
 			t.Errorf("%s: enriched_at = %d: v21 must not re-enrich a linear file", name, v)
 		}
+	}
+}
+
+// aifcWithChunks is a FORM/AIFC file holding chunks, in order.
+func aifcWithChunks(chunks ...[]byte) []byte {
+	body := []byte("AIFC")
+	for _, c := range chunks {
+		body = append(body, c...)
+	}
+	out := append([]byte("FORM"), make([]byte, 4)...)
+	binary.BigEndian.PutUint32(out[4:8], uint32(len(body)))
+	return append(out, body...)
+}
+
+// TestTheFirstFormatChunkNamesTheFile: a WAV or AIFF-C carrying two format
+// chunks is read from the first, whole, as ffmpeg and TagLib read a WAV and
+// TagLib an AIFF, and as the walkers already read their first data and SSND
+// chunk (CodeRabbit on #1122). Parsed one on top of the other, the second
+// chunk's codec landed beside the first one's depth: an "ADPCM" row with 24
+// bits, a "ULAW" row with 16, a lossy name with a lossless claim.
+func TestTheFirstFormatChunkNamesTheFile(t *testing.T) {
+	pcm := buildWAVFmtChunk(1, 2, 96000, 24)
+	adpcm := buildWAVFmtChunkRaw(wavFormatIMAADPCM, 2, 96000, 96000, 2048, 4)
+	twos := buildAIFFCOMMChunk(2, 4410, 16, 44100, []byte("twos\x00\x00")...)
+	ulaw := buildAIFFCOMMChunk(2, 4410, 16, 44100, []byte("ulaw\x00\x00")...)
+	cases := []struct {
+		name, file string
+		data       []byte
+		codec      string
+		rate       float64
+		bits       int
+	}{
+		{"PCM, then ADPCM", "x.wav", buildWAVWithID3(t, nil, pcm, adpcm), "WAV", 96000, 24},
+		{"ADPCM, then PCM", "x.wav", buildWAVWithID3(t, nil, adpcm, pcm), "ADPCM", 96000, 0},
+		{"twos, then ulaw", "x.aifc", aifcWithChunks(twos, ulaw), "AIFF", 44100, 16},
+		{"ulaw, then twos", "x.aifc", aifcWithChunks(ulaw, twos), "ULAW", 44100, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var tr Track
+			if err := ExtractWithContext(path, &tr, nil); err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			requireCompressedFixture(t, compressedFixture{codec: tc.codec, rate: tc.rate, bits: tc.bits}, &tr)
+			if IsLossyCodec(tr.Codec) && tr.BitsPerSample != nil {
+				t.Errorf("a lossy %q row carries a depth of %d", tr.Codec, *tr.BitsPerSample)
+			}
+		})
+	}
+}
+
+// mpegFmtChunk is a WAVE_FORMAT_MPEG fmt chunk: a WAVEFORMATEX whose cbSize
+// is cb, followed by MPEG1WAVEFORMAT's extension (22 bytes, fwHeadLayer
+// first) when cb is 22, or by nothing.
+func mpegFmtChunk(cb, layer uint16) []byte {
+	payload := make([]byte, 18+int(cb))
+	binary.LittleEndian.PutUint16(payload[0:2], wavFormatMPEG)
+	binary.LittleEndian.PutUint16(payload[2:4], 2)
+	binary.LittleEndian.PutUint32(payload[4:8], 44100)
+	binary.LittleEndian.PutUint32(payload[8:12], 24000)
+	binary.LittleEndian.PutUint16(payload[12:14], 1)
+	binary.LittleEndian.PutUint16(payload[16:18], cb)
+	if cb >= 2 {
+		binary.LittleEndian.PutUint16(payload[18:20], layer)
+	}
+	return wrapChunkLE("fmt ", payload)
+}
+
+// TestAnMPEGWAVIsNamedByTheLayerItsHeaderDeclares: format code 0x0050 is
+// MPEG audio, and MPEG1WAVEFORMAT's fwHeadLayer says which layer (mmreg.h:
+// 1, 2 and 4 for layers I, II and III). Layer III is "MP3", as under its own
+// tag, 0x0055; anything else, a header without the extension included, is
+// "MP2" (ffmpeg writes layer II as 2: testdata/wav/mp2.wav). An extensible
+// header's subformat of 0x0050 has WAVEFORMATEXTENSIBLE's fields at those
+// offsets, so its "layer" is never read (CodeRabbit on #1122).
+func TestAnMPEGWAVIsNamedByTheLayerItsHeaderDeclares(t *testing.T) {
+	cases := []struct {
+		name  string
+		fmt   []byte
+		codec string
+	}{
+		{"layer III", mpegFmtChunk(22, 4), "MP3"},
+		{"layer II", mpegFmtChunk(22, 2), "MP2"},
+		{"layer I", mpegFmtChunk(22, 1), "MP2"},
+		{"no extension (cbSize 0)", mpegFmtChunk(0, 0), "MP2"},
+		{"a bare 16-byte header", buildWAVFmtChunkRaw(wavFormatMPEG, 2, 44100, 24000, 1, 0), "MP2"},
+		// validBits 4 sits where fwHeadLayer would: the subformat is not
+		// MPEG1WAVEFORMAT, so it names no layer.
+		{"extensible, subformat 0x0050", buildWAVFmtChunkExtensible(2, 44100, 16, 4, wavFormatMPEG), "MP2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempWAV(t, buildWAVWithID3(t, nil, tc.fmt, buildWAVDataChunk(4)))
+			var tr Track
+			if err := ExtractWithContext(path, &tr, nil); err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			if tr.Codec != tc.codec {
+				t.Errorf("Codec = %q, want %q", tr.Codec, tc.codec)
+			}
+			if !IsLossyCodec(tr.Codec) || tr.BitsPerSample != nil {
+				t.Errorf("Codec %q lossy = %v, BitsPerSample = %v: want lossy, no depth",
+					tr.Codec, IsLossyCodec(tr.Codec), tr.BitsPerSample)
+			}
+		})
 	}
 }

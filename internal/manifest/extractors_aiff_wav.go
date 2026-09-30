@@ -98,6 +98,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 	var (
 		numSampleFrames uint64
 		ssnd            iffPayloadSpan
+		commSeen        bool
 	)
 	physicalSize := physicalFileSize(f)
 
@@ -155,9 +156,16 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 			// sampleRate, but the leading 18 bytes are identical, so
 			// the same parse serves both form types. 1 KiB cap — a
 			// real COMM is 18 bytes (AIFF) or a few dozen (AIFC).
+			//
+			// The first COMM the walk can read names the file, and a
+			// later one is skipped whole (the spec allows exactly one;
+			// TagLib reads the first too): parsed on top of the first,
+			// a second one's codec landed beside the first one's depth
+			// or rate wherever it lacked its own (backlog B124,
+			// CodeRabbit on #1122).
 			const minCOMMSize = 18
 			const maxCOMMSize = 1 << 10
-			if size < minCOMMSize || size > maxCOMMSize {
+			if commSeen || size < minCOMMSize || size > maxCOMMSize {
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -176,6 +184,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 				}
 			}
 			numSampleFrames = parseAIFFCOMMChunk(body, t, formType)
+			commSeen = true
 			continue
 		}
 		if fourcc == "SSND" {
@@ -386,6 +395,7 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	var (
 		bytesPerSecond uint64
 		data           iffPayloadSpan
+		fmtSeen        bool
 	)
 	physicalSize := physicalFileSize(f)
 
@@ -481,9 +491,16 @@ chunkLoop:
 			// (WAVEFORMATEX), or 40 (WAVE_FORMAT_EXTENSIBLE) bytes; a
 			// declared size below 16 can't hold WAVEFORMAT and a wildly
 			// large one is corruption — skip both rather than allocate.
+			//
+			// The first fmt chunk the walk can read names the file, and a
+			// later one is skipped whole, as ffmpeg and TagLib read a WAV
+			// (the spec allows one): parsed on top of the first, a second
+			// one of a code the bridge does not name kept the first one's
+			// rate and depth under its own name (backlog B124, CodeRabbit
+			// on #1122).
 			const minFmtSize = 16
 			const maxFmtSize = 1 << 10
-			if size < minFmtSize || size > maxFmtSize {
+			if fmtSeen || size < minFmtSize || size > maxFmtSize {
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -502,6 +519,7 @@ chunkLoop:
 				}
 			}
 			bytesPerSecond = parseWAVFmtChunk(body, t)
+			fmtSeen = true
 		case fourcc == "data":
 			// The audio payload itself is never read — only WHERE it
 			// sits and how much it declares, for the duration + the
@@ -793,6 +811,28 @@ const (
 	wavFormatExtensible = 0xFFFE
 )
 
+// acmMPEGLayer3 is MPEG1WAVEFORMAT's fwHeadLayer for layer III (mmreg.h:
+// ACM_MPEG_LAYER1 is 1, LAYER2 2, LAYER3 4).
+const acmMPEGLayer3 = 0x0004
+
+// wavMPEGCodec names a WAV of format code 0x0050 (WAVE_FORMAT_MPEG) by the
+// layer its MPEG1WAVEFORMAT extension declares: "MP3" for layer III, "MP2"
+// otherwise. The extension follows the 18-byte WAVEFORMATEX, fwHeadLayer
+// first ([18:20], with cbSize at [16:18] counting it), and ffmpeg writes it
+// for layer II (fwHeadLayer 2). A header without it, or naming layer I or II,
+// is "MP2": 0x0050 is the tag for MPEG-1 audio, and layer III has a tag of
+// its own (0x0055), but the extension may name layer III under 0x0050
+// (CodeRabbit on #1122). Only the tag itself says the extension is there: an
+// extensible header's subformat of 0x0050 carries WAVEFORMATEXTENSIBLE's
+// fields at those offsets, so it stays "MP2".
+func wavMPEGCodec(body []byte) string {
+	if len(body) >= 20 && binary.LittleEndian.Uint16(body[16:18]) >= 2 &&
+		binary.LittleEndian.Uint16(body[18:20]) == acmMPEGLayer3 {
+		return "MP3"
+	}
+	return "MP2"
+}
+
 // wavEncodingOf names a WAV by its format code (the fmt chunk's tag, or an
 // extensible header's subformat), as the iOS app names the same file
 // (Track.canonicalCodec, #2028: backlog B139 there, B154 here), and says
@@ -802,8 +842,9 @@ const (
 // Linear PCM and IEEE float keep "WAV". The compressed codes are named: IMA
 // and MS ADPCM both "ADPCM" (4-bit ADPCM either way, the app's reasoning),
 // GSM 6.10 "GSM", G.711 A-law and µ-law "ALAW" and "ULAW" (the AIFF-C names
-// for the same encodings), MPEG layer III "MP3", and MPEG layers I and II
-// "MP2" (the one name here the app's lossy set lacks: backlog B158). A code
+// for the same encodings), MPEG layer III "MP3", and MPEG audio (0x0050)
+// "MP2", the one name here the app's lossy set lacks (backlog B158), or "MP3"
+// where its header names layer III (parseWAVFmtChunk asks wavMPEGCodec). A code
 // the bridge does not know is default-denied, as a DFF with an unknown
 // compression is: its container's name, no rate and no depth, which is also
 // how the app presents a WAV it cannot decode. Until ExtractorVersion 21
@@ -869,6 +910,9 @@ func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 	}
 
 	codec, isPCMLike, known := wavEncodingOf(effectiveFormat)
+	if formatTag == wavFormatMPEG {
+		codec = wavMPEGCodec(body)
+	}
 	t.Codec = codec
 	if known && sampleRate > 0 {
 		sr := float64(sampleRate)
