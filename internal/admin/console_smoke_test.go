@@ -30,6 +30,7 @@ func smokeRequest(t *testing.T, h http.Handler, path string) *httptest.ResponseR
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr

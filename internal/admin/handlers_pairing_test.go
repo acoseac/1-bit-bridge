@@ -106,6 +106,7 @@ func pairingPost(t *testing.T, h http.Handler, path string, out any) int {
 	t.Helper()
 	req := httptest.NewRequest("POST", path, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if out != nil && rw.Body.Len() > 0 {
@@ -118,6 +119,7 @@ func pairingGet(t *testing.T, h http.Handler, path string, out any) int {
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if out != nil && rw.Body.Len() > 0 {

@@ -19,6 +19,7 @@ func playerGet(t *testing.T, srv *Server, target string) (*httptest.ResponseReco
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	var body map[string]any
@@ -249,6 +250,7 @@ func TestPlayerAudioRejectsTraversal(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/api/player/audio?path="+strings.ReplaceAll(bad, " ", "%20"), nil)
 		req.RemoteAddr = "127.0.0.1:1"
+		req.Host = testConsoleHost
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code == http.StatusOK {
 			t.Errorf("path %q was served — traversal guard failed", bad)
@@ -280,6 +282,7 @@ func TestPlayerAudioServesRangeAndBrowserMIME(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/player/audio?path="+rel, nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -295,6 +298,7 @@ func TestPlayerAudioServesRangeAndBrowserMIME(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/api/player/audio?path="+rel, nil)
 	req.Header.Set("Range", "bytes=100-199")
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusPartialContent {
@@ -313,6 +317,7 @@ func TestPlayerAudioServesRangeAndBrowserMIME(t *testing.T) {
 	// this asserts.
 	req = httptest.NewRequest(http.MethodHead, "/api/player/audio?path="+rel, nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -340,6 +345,7 @@ func TestPlayerDownloadSetsAttachment(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/player/download?path="+
 		strings.ReplaceAll(rel, " ", "%20"), nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -423,6 +429,7 @@ func TestPlayerAudioRefusesSidecarOutsideVariantsDir(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/player/audio?path="+rel+"&variant=optimized-v2-44100-16", nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code == http.StatusOK {
@@ -545,6 +552,7 @@ func TestPlayerAudioAdoptsARelocatedSidecar(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/player/audio?path="+rel+"&variant="+variantID, nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -573,6 +581,7 @@ func TestPlayerAudioAdoptsARelocatedSidecar(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet,
 		"/api/player/audio?path="+rel+"&variant="+variantID, nil)
 	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = testConsoleHost
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusGone {
 		t.Errorf("status over a partial copy = %d, want 410", w.Code)

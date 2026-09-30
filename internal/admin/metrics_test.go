@@ -16,6 +16,7 @@ func TestMetricsLoopbackBypassesSessionInPublicMode(t *testing.T) {
 	srv, _, _ := newPublicTestServer(t, "test-password-123")
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusOK {

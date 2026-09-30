@@ -17,11 +17,16 @@ import (
 // adminauth-backed session middleware takes over as the trust
 // boundary).
 //
+// The loopback gate is two checks: the request comes FROM loopback
+// (loopbackOnly, 403) and it names loopback in its Host
+// (loopbackHostOnly, 421, backlog B170). The first alone admits a
+// browser that a page has pointed at 127.0.0.1 under a name of its own.
+//
 // Per-request dispatch (not Server-construction-time) so a config
 // hot-reload of `deployment.mode` takes effect on the next
 // request without a Handler rebuild.
 func (s *Server) boundaryMiddleware(next http.Handler) http.Handler {
-	guarded := loopbackOnly(next)
+	guarded := loopbackOnly(s.loopbackHostOnly(next))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.deps.CfgHolder.Load()
 		if cfg != nil && cfg.IsPublic() {

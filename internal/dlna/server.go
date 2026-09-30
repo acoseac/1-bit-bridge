@@ -205,6 +205,17 @@ type Server struct {
 	callbackDivergeMu   sync.Mutex
 	callbackDivergeSeen map[string]struct{}
 	callbackRefusedSeen map[string]struct{}
+
+	// interfaceAddrs lists this host's addresses for ownHostOnly; nil is
+	// net.InterfaceAddrs. A per-server seam, set before Start by a test
+	// that stands in a host of its own.
+	interfaceAddrs func() ([]net.Addr, error)
+
+	// hostRefusedSeen holds the Host names ownHostOnly has refused, so
+	// each is logged once (noteForeignHost), bounded by
+	// hostRefusedSeenCap.
+	hostRefusedMu   sync.Mutex
+	hostRefusedSeen map[string]struct{}
 }
 
 // callbackDivergeSeenCap bounds each observation set. A LAN has a handful
@@ -279,13 +290,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	s.mux = http.NewServeMux()
-	s.mountHandlers()
-
-	// Telemetry middleware wraps the entire mux. nil-store passes
-	// through transparently, so this works whether telemetry is
-	// enabled or not.
-	handler := TelemetryMiddleware(s.cfg.TelemetryStore, s.mux)
+	handler := s.handler()
 
 	s.httpServer = &http.Server{
 		Addr:              s.cfg.ListenAddress,
@@ -442,6 +447,17 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.notifyWG.Wait()
 	s.log.Info("DLNA server stopped")
 	return err
+}
+
+// handler builds the handler tree Start serves: the route map
+// (mountHandlers), behind the Host check (ownHostOnly), inside the
+// telemetry middleware, which a nil store makes a pass-through. The
+// check sits inside telemetry so a refused request is recorded with its
+// 421, which is what a report of "the renderer cannot play" needs to see.
+func (s *Server) handler() http.Handler {
+	s.mux = http.NewServeMux()
+	s.mountHandlers()
+	return TelemetryMiddleware(s.cfg.TelemetryStore, s.ownHostOnly(s.mux))
 }
 
 // mountHandlers wires up the HTTP route map. Each route corresponds

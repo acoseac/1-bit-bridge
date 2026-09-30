@@ -74,6 +74,7 @@ func TestExportCarriesNoCredentials(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/export", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
+	r.Host = testConsoleHost
 	srv.Handler().ServeHTTP(rec, r)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("export = %d: %s", rec.Code, rec.Body)
@@ -100,6 +101,7 @@ func TestExportIsADownloadAndSelfDescribing(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/export", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
+	r.Host = testConsoleHost
 	srv.Handler().ServeHTTP(rec, r)
 
 	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") ||
@@ -150,6 +152,7 @@ func TestExportEmptyCollectionsAreArrays(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/export", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
+	r.Host = testConsoleHost
 	srv.Handler().ServeHTTP(rec, r)
 
 	var raw map[string]json.RawMessage

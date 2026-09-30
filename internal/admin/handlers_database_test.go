@@ -25,6 +25,7 @@ func postCompact(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "/api/database/compact", nil)
 	req.Header.Set("content-type", "application/json")
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -110,6 +111,7 @@ func TestDiagnosticsCarriesDatabaseSize(t *testing.T) {
 
 	dreq := httptest.NewRequest("GET", "/api/diagnostics", nil)
 	dreq.RemoteAddr = "127.0.0.1:54321"
+	dreq.Host = testConsoleHost
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, dreq)
 	if rr.Code != http.StatusOK {
@@ -238,6 +240,7 @@ func TestDiagnosticsCarriesRetentionCounts(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/diagnostics", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -282,6 +285,7 @@ func TestDiagnosticsOmitsTheOldestEventWhenHistoryIsEmpty(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/diagnostics", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 

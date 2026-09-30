@@ -27,6 +27,7 @@ func loopbackReq(method, path, body string) *http.Request {
 		r.Header.Set("Content-Type", "application/json")
 	}
 	r.RemoteAddr = "127.0.0.1:54321"
+	r.Host = testConsoleHost
 	return r
 }
 
