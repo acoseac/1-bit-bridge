@@ -35229,3 +35229,11 @@ path was.
   Backlog B223.
 - `upscale --gc` classifies its rows with no probe before, and re-checks
   health, not identity, before its reverse sweep. Backlog B224.
+- A remount between one row's missing read and the identity check after it
+  (two system calls apart) is not seen: the row reaches pass two with its
+  sidecar back on the volume. The checks see a change they observe and
+  record nothing between them; the claim in CLAUDE.md and `classify`'s
+  docblock says so since CodeRabbit's review of the merged head (27bad388).
+  Its other finding there, to count the row whose check saw the change
+  among the refused, was declined: that row's missing verdict is about the
+  directory the path named then, not the one the tick began on.

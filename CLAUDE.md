@@ -3535,7 +3535,8 @@ no failing test — which is the shape to expect in this area.
   `variantsDirChanged` as each row reads as missing (`classify`: the one
   verdict that leads to a deletion, so a tick whose rows are where they
   belong pays nothing, and a volume that goes and comes back inside the
-  pass is seen), and once more after `MassDeleteRefusal` and before pass
+  pass is seen if it is still gone when a missing read's check runs), and
+  once more after `MassDeleteRefusal` and before pass
   two, since that check walks the tree after the last row is classified
   and a volume gone in between lets a relocation's deletions through. A
   change refuses the tick as the mount-loss kind (`variantsDirUnavailable`),
@@ -3568,7 +3569,11 @@ no failing test — which is the shape to expect in this area.
   mountpoint that already holds any entry when a tick STARTS (a
   `.DS_Store`, a folder a failed render left) reads as a healthy variants
   directory, and that tick deletes every row (measured, 40 of 40; B223),
-  and `upscale --gc` re-checks health but not identity (B224).
+  and `upscale --gc` re-checks health but not identity (B224). Residual: a
+  remount between one row's missing read and the check after it (two
+  system calls apart) is not seen, and that row's entry is deleted in pass
+  two with its sidecar back on the volume; nothing records a change the
+  checks did not observe (CodeRabbit on #1127).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
