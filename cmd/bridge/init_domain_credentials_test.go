@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestInitRefusesADomainCarryingACredential: `bridge init --public --domain`
@@ -15,11 +18,11 @@ import (
 // QR publish that list (backlog B54). A domain carrying a user name, a
 // password, a query or a fragment is refused before anything is written,
 // exit 2, as any other bad flag is, and the refusal does not echo it. So is
-// one that does not parse (a password with a space in it), whose parts no
-// predicate can read, while public mode still builds the autocert host's URL
-// from the string. A config that already holds such an endpoint is
-// published without the part instead (config.ValidateCustomEndpoints): the
-// operator typed this one.
+// one that does not parse (a password with a space in it). And since backlog
+// B66 so is any domain that is not a host name alone (a path, a scheme, a
+// port, no host at all): Normalize serves a stored one as the host it names
+// (config.AutocertHost), and init refuses what the operator TYPED rather
+// than write a value they did not.
 func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 	const secret = "s3cret-Pw"
 	for _, tc := range []struct{ name, domain string }{
@@ -27,10 +30,14 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 		{"a token as the user name", secret + "@bridge.example.test"},
 		{"a query", "bridge.example.test?token=" + secret},
 		{"a fragment", "bridge.example.test#" + secret},
-		// url.Parse refuses a space in the userinfo, so HasCredentialParts
-		// answers false for it: the value is refused for not parsing.
+		// url.Parse refuses a space in the userinfo, so no host can be read
+		// from it (config.AutocertHost answers ""), and it is refused.
 		{"a password that does not parse", "user:" + secret + " x@bridge.example.test"},
 		{"a password behind a space", " user:" + secret + "@bridge.example.test"},
+		{"a path", "bridge.example.test/" + secret},
+		{"a scheme", "https://bridge.example.test"},
+		{"a port", "bridge.example.test:8443"},
+		{"no host", "user:" + secret + "@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
@@ -60,7 +67,10 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 	// The controls: a plain domain is taken, and so is one padded with
 	// whitespace, as it was before the check, which reads the domain
 	// trimmed (Normalize trims the autocert host the same way). Untrimmed,
-	// the padded one does not parse and would be refused.
+	// the padded one does not parse and would be refused. Both are saved
+	// with the endpoint init builds from the domain: until backlog B66 init
+	// built it from the untrimmed flag, `https:// bridge.example.test `,
+	// which the prune dropped, so a padded domain saved no custom endpoint.
 	for _, domain := range []string{"bridge.example.test", " bridge.example.test "} {
 		t.Run("accepts "+strings.TrimSpace(domain)+" as given "+strconv.Quote(domain), func(t *testing.T) {
 			cfgDir := filepath.Join(t.TempDir(), "cfg")
@@ -73,9 +83,32 @@ func TestInitRefusesADomainCarryingACredential(t *testing.T) {
 			if code != 0 {
 				t.Errorf("init exited %d for --domain %q, want 0:\n%s", code, domain, stripANSI(out.String()+errOut.String()))
 			}
-			if _, err := os.Stat(filepath.Join(cfgDir, "bridge.yaml")); err != nil {
-				t.Errorf("init wrote no config for --domain %q: %v", domain, err)
+			cfg, err := config.Load(filepath.Join(cfgDir, "bridge.yaml"))
+			if err != nil {
+				t.Fatalf("init wrote no config that loads for --domain %q: %v", domain, err)
+			}
+			if cfg.Autocert.Domain != "bridge.example.test" ||
+				!slices.Equal(cfg.CustomEndpoints, []string{"https://bridge.example.test"}) {
+				t.Errorf("--domain %q saved autocert.domain %q and customEndpoints %q, want bridge.example.test and [https://bridge.example.test]",
+					domain, cfg.Autocert.Domain, cfg.CustomEndpoints)
 			}
 		})
+	}
+
+	// A domain that is only whitespace is no domain, refused as one that
+	// was not given is, before anything is written.
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
+	var out, errOut bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--no-service", "--skip-doctor",
+		"--dir", cfgDir, "--library", testLibrary(t),
+		"--public", "--domain", "   ", "--admin-tls-proxy",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 2 || !strings.Contains(errOut.String(), "--public requires --domain") {
+		t.Errorf("init exited %d for a blank --domain, want 2 and the missing-domain refusal:\n%s",
+			code, stripANSI(out.String()+errOut.String()))
+	}
+	if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
+		t.Errorf("the refused init made its config dir (stat: %v)", err)
 	}
 }
