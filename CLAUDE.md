@@ -1623,7 +1623,8 @@ lost my library."
   that health and the QR build a URL from, as a string. It asked
   `HasCredentialParts` until B66, which let a path, a scheme and a port
   through; and it wrote the untrimmed flag, so a padded domain's endpoint
-  (`https:// host `) did not parse and the install was saved with none.
+  (`https://` joined to the spaces) did not parse and the install was saved
+  with none.
   **Don't drop such an entry**: its host and port still reach the bridge,
   and a loaded config must not lose a route over a part nothing reads.
   **Don't strip at the publish sites**: every enumeration

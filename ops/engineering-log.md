@@ -32760,8 +32760,9 @@ case.
   written as the user name, the query and the fragment reach it whole).
 - **Beside it.** `bridge init --public --domain " bridge.example.test "`
   exited 0 and saved no custom endpoint: init checked the trimmed domain and
-  wrote the untrimmed flag, `https:// bridge.example.test `, which does not
-  parse, so the prune dropped it (`WARN dropped invalid custom endpoint`).
+  wrote the untrimmed flag, so the endpoint it built was `https://` joined
+  to the padded domain, spaces and all, which does not parse, and the prune
+  dropped it (`WARN dropped invalid custom endpoint`).
   B54 measured the padded control's exit code and domain, not its endpoint.
 
 Every consumer of the domain wants a host and matched none of these

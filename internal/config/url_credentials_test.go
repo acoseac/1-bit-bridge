@@ -314,32 +314,27 @@ func TestCheckCustomEndpointsRefusesATypedCredential(t *testing.T) {
 // asked it too until backlog B66; it asks AutocertHost now, which removes
 // every part this reads and a scheme and a port besides.
 func TestHasCredentialPartsReadsEveryPartThatCanCarryOne(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want bool
-	}{
-		{"https://host:7788", false},
-		{"https://host:7788/", false},
-		{"https://host:7788/path/", true},
-		{"https://host:7788//", true},
-		{"https://host:7788/%2F", true},
-		// A path is an endpoint's only after an authority: these are no
-		// URL of any host, and the prune drops them for that.
-		{"not a url", false},
-		{"/a/path/alone", false},
-		{"https://[fe80::1%25en0]:7788", false},
-		{"https://user@host", true},
-		{"https://user:pw@host", true},
-		{"https://:pw@host", true},
-		{"https://@host", true},
-		{"https://host?", true},
-		{"https://host/?a=b", true},
-		{"https://host/#frag", true},
-		{"https://user:pw x@host", false}, // does not parse; the prune drops it
-		{"", false},
-	} {
-		if got := HasCredentialParts(tc.in); got != tc.want {
-			t.Errorf("HasCredentialParts(%q) = %v, want %v", tc.in, got, tc.want)
+	carrying := []string{
+		"https://user@host", "https://user:pw@host", "https://:pw@host", "https://@host",
+		"https://host:7788/path/", "https://host:7788//", "https://host:7788/%2F",
+		"https://host?", "https://host/?a=b", "https://host/#frag",
+	}
+	clean := []string{
+		"https://host:7788", "https://host:7788/", "https://[fe80::1%25en0]:7788", "",
+		// A path is an endpoint's only after an authority: these are no URL
+		// of any host, and the prune drops them for that.
+		"not a url", "/a/path/alone",
+		// Does not parse; the prune drops it.
+		"https://user:pw x@host",
+	}
+	for _, in := range carrying {
+		if !HasCredentialParts(in) {
+			t.Errorf("HasCredentialParts(%q) = false; it carries a part that can carry a credential", in)
+		}
+	}
+	for _, in := range clean {
+		if HasCredentialParts(in) {
+			t.Errorf("HasCredentialParts(%q) = true; it carries no such part", in)
 		}
 	}
 }

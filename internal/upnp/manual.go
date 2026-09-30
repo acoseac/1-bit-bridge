@@ -31,6 +31,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -195,32 +197,46 @@ func descriptionHostForLog(raw string) string {
 	return u.Host
 }
 
+// manualURLNamesNoHost is what fetchErrorForLog logs in place of the fetch's
+// error for a manual URL that names no host it can read.
+const manualURLNamesNoHost = "the manual URL is not a URL with a host"
+
 // fetchErrorForLog renders err, the description fetch's error for the manual
 // URL raw, for a log line: each rendering of the URL in its text is replaced
 // by the URL's host (descriptionHostForLog), so the line keeps the reason
 // the fetch failed and loses the URL (backlog B66). The fetch names the URL
-// in two renderings. Discovery's own wrapping quotes it as the poller passed
-// it (`GET <url>: …`, `parse description <url>: …`), and net/http's
+// in three renderings. Discovery's own wrapping writes it as the poller
+// passed it (`GET <url>: …`, `parse description <url>: …`). net/http's
 // *url.Error quotes the request URL as the client re-serialized it, masking
 // a password and nothing else, so a token written as the user name, a query
-// and a fragment reach it whole. The *url.Error's own URL field is that
-// rendering exactly, so neither form is guessed. The longer is replaced
-// first, so a rendering that contains the other is not left half replaced.
+// and a fragment reach it whole; and it quotes it with %q, so a URL holding
+// a `"`, a `\` or a rune that is not printable appears escaped, which a
+// search for the URL as written does not find. The *url.Error's own URL
+// field is its rendering exactly, so no form is guessed, and each form is
+// replaced longest first, so one that contains another is not left half
+// replaced.
+//
+// A URL that names no host it can read (one that does not parse, or
+// `user:password@host` written without a scheme) gets manualURLNamesNoHost
+// in place of the error, never the error with the URL taken out: it could
+// have reached nothing, and its error can quote any part of it, net/http's
+// "unsupported protocol scheme" the scheme a hostless value parses with,
+// which is its user name (the lesson under B54).
 func fetchErrorForLog(err error, raw string) string {
-	msg := err.Error()
-	forms := []string{raw}
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		forms = append(forms, ue.URL)
-	}
-	if len(forms) == 2 && len(forms[1]) > len(forms[0]) {
-		forms[0], forms[1] = forms[1], forms[0]
-	}
 	host := descriptionHostForLog(raw)
+	if host == "" {
+		return manualURLNamesNoHost
+	}
+	type form struct{ old, new string }
+	forms := []form{{raw, host}}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		forms = append(forms, form{strconv.Quote(ue.URL), strconv.Quote(host)}, form{ue.URL, host})
+	}
+	sort.SliceStable(forms, func(i, j int) bool { return len(forms[i].old) > len(forms[j].old) })
+	msg := err.Error()
 	for _, f := range forms {
-		if f != "" {
-			msg = strings.ReplaceAll(msg, f, host)
-		}
+		msg = strings.ReplaceAll(msg, f.old, f.new)
 	}
 	return msg
 }

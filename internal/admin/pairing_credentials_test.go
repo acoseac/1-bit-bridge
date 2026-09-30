@@ -7,6 +7,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
+// pairingCredentialSecret is the value every URL in these tests hides
+// somewhere.
+const pairingCredentialSecret = "s3cret-Pw"
+
 // TestPublicPairingCarriesNoCustomEndpointCredential builds a public
 // bridge's pairing QR, the primary url= and the urls= alternates, from
 // customEndpoints that carry a secret in each part of a URL that can carry
@@ -18,7 +22,7 @@ import (
 // QR may carry the secret. A loopback QR reads /v1/health's enumeration,
 // which serve's boot test covers.
 func TestPublicPairingCarriesNoCustomEndpointCredential(t *testing.T) {
-	const secret = "s3cret-Pw"
+	const secret = pairingCredentialSecret
 	for _, tc := range []struct{ name, declared, primary string }{
 		{"a password", "https://user:" + secret + "@tenant.example.test:8443", "https://tenant.example.test:8443"},
 		{"a token as the user name", "https://" + secret + "@tenant.example.test", "https://tenant.example.test:443"},
@@ -30,31 +34,9 @@ func TestPublicPairingCarriesNoCustomEndpointCredential(t *testing.T) {
 		{"a path", "https://tenant.example.test:8443/" + secret + "/", "https://tenant.example.test:8443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{
-				ListenAddress: "127.0.0.1:20001",
-				Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
-				Autocert:      config.AutocertConfig{Domain: "tenant.example.test"},
-				CustomEndpoints: []string{
-					tc.declared,
-					"https://user:" + secret + "@alt.example.test:9443/?k=" + secret,
-				},
-			}
-			if err := cfg.Normalize(); err != nil {
-				t.Fatal(err)
-			}
-			primary := defaultBridgeURL(cfg)
-			if primary != tc.primary {
-				t.Errorf("pairing primary = %q, want %q: the declared endpoint, without its credential", primary, tc.primary)
-			}
-			qr := append([]string{primary}, pairAlternates(primary, cfg, nil)...)
-			for _, u := range qr {
-				if strings.Contains(strings.ToLower(u), strings.ToLower(secret)) {
-					t.Errorf("the pairing QR carries the secret in %q (all: %q)", u, qr)
-				}
-			}
-			if !containsURL(qr, "https://alt.example.test:9443/") {
-				t.Errorf("the QR lost the alternate endpoint instead of its credential: %q", qr)
-			}
+			qr := publicPairingQR(t, "tenant.example.test",
+				tc.declared, "https://user:"+secret+"@alt.example.test:9443/?k="+secret)
+			requirePublicPairingQR(t, qr, tc.primary, "https://alt.example.test:9443/")
 		})
 	}
 }
@@ -68,7 +50,7 @@ func TestPublicPairingCarriesNoCustomEndpointCredential(t *testing.T) {
 // `user:password@` whole until B66. The primary is the host it names now,
 // and the placeholder, which resolves nowhere, for a domain that names none.
 func TestPublicPairingCarriesNoAutocertDomainCredential(t *testing.T) {
-	const secret = "s3cret-Pw"
+	const secret = pairingCredentialSecret
 	for _, tc := range []struct{ name, domain, primary string }{
 		{"a password", "user:" + secret + "@tenant.example.test", "https://tenant.example.test:20001"},
 		{"a token as the user name and a port", secret + "@tenant.example.test:8443", "https://tenant.example.test:20001"},
@@ -76,28 +58,45 @@ func TestPublicPairingCarriesNoAutocertDomainCredential(t *testing.T) {
 		{"no host", "user:" + secret + "@", "https://" + config.InvalidAutocertDomain + ":20001"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{
-				ListenAddress:   "127.0.0.1:20001",
-				Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
-				Autocert:        config.AutocertConfig{Domain: tc.domain},
-				CustomEndpoints: []string{"https://alt.example.test:9443"},
-			}
-			if err := cfg.Normalize(); err != nil {
-				t.Fatal(err)
-			}
-			primary := defaultBridgeURL(cfg)
-			if primary != tc.primary {
-				t.Errorf("pairing primary = %q, want %q", primary, tc.primary)
-			}
-			qr := append([]string{primary}, pairAlternates(primary, cfg, nil)...)
-			for _, u := range qr {
-				if strings.Contains(strings.ToLower(u), strings.ToLower(secret)) {
-					t.Errorf("the pairing QR carries the secret in %q (all: %q)", u, qr)
-				}
-			}
-			if !containsURL(qr, "https://alt.example.test:9443") {
-				t.Errorf("the QR lost the declared endpoint: %q", qr)
-			}
+			qr := publicPairingQR(t, tc.domain, "https://alt.example.test:9443")
+			requirePublicPairingQR(t, qr, tc.primary, "https://alt.example.test:9443")
 		})
+	}
+}
+
+// publicPairingQR builds the pairing QR of a public bridge on listen port
+// 20001 serving domain with endpoints, after the Normalize every served
+// config goes through: the primary url= (defaultBridgeURL) first, then the
+// urls= alternates (pairAlternates).
+func publicPairingQR(t *testing.T, domain string, endpoints ...string) []string {
+	t.Helper()
+	cfg := &config.Config{
+		ListenAddress:   "127.0.0.1:20001",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: domain},
+		CustomEndpoints: endpoints,
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	primary := defaultBridgeURL(cfg)
+	return append([]string{primary}, pairAlternates(primary, cfg, nil)...)
+}
+
+// requirePublicPairingQR fails unless qr's primary is primary, it still
+// carries the alternate endpoint alt, and no URL in it carries
+// pairingCredentialSecret, in any case.
+func requirePublicPairingQR(t *testing.T, qr []string, primary, alt string) {
+	t.Helper()
+	if qr[0] != primary {
+		t.Errorf("pairing primary = %q, want %q", qr[0], primary)
+	}
+	for _, u := range qr {
+		if strings.Contains(strings.ToLower(u), strings.ToLower(pairingCredentialSecret)) {
+			t.Errorf("the pairing QR carries the secret in %q (all: %q)", u, qr)
+		}
+	}
+	if !containsURL(qr, alt) {
+		t.Errorf("the QR lost the endpoint %s: %q", alt, qr)
 	}
 }
