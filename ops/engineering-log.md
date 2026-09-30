@@ -30992,30 +30992,40 @@ the script writes the config):
 | r8b | a rewrite answered y; the config edited while the name prompt waits | (main asks in the other order, so the answers do not map) | exit 0, the edit gone | exit 1, the edit kept |
 
 The fix keeps the bytes the run read at its start (`configAsRead`, the read
-`readPriorInstall` parses, now `priorInstallFrom` over it) and, after the
-last prompt and before anything is written, compares a fresh read
-(`configChangedSinceRead`): the same bytes, no file both times, or two reads
-that both failed (an unreadable config, which `refuseRewrite` refuses) pass;
-anything else is refused, exit 1, "this run wrote nothing". It also closes
-a change the old order let through, read from the code and not measured: a
-`--yes --force` rewrite keeps what it read before its preflight, so an edit
-made during the preflight was written over.
-Bytes, not a stat: they are what the rewrite keeps from, and a write in the
-same mtime tick passes a stat (#1043).
+`readPriorInstall` parses, now `priorInstallFrom` over it) and compares a
+fresh read (`configChangedSinceRead`) in the statement directly before
+`cfg.Save`: the same bytes, or no file both times, pass; anything else is
+refused, exit 1, "this run did not write it". The first version compared
+after the last prompt, before `refuseRewrite` and before anything was
+written, and CodeRabbit's next round (on 8618a636) found the second port
+pass and the TLS load after it: a change during them was still written
+over. Right before Save, a refusal can follow a first install's TLS mint,
+which the next run loads, as it loads the pair a failed Save leaves, and
+what remains is Save's own staging and rename, which only an interprocess
+lock would close (#1043 declined one for `tokens.json`). A read that failed
+any other way than "no file" is a change there: the case the first version
+passed, a config unreadable at both reads, is refused by `refuseRewrite`
+before the check. It also closes a change the old order let through, read
+from the code and not measured: a `--yes --force` rewrite keeps what it read
+before its preflight, so an edit made during the preflight was written
+over. Bytes, not a stat: they are what the rewrite keeps from, and a write
+in the same mtime tick passes a stat (#1043).
 
 `TestInitRefusesAConfigThatChangedWhileItRan` (`init_config_changed_test.go`)
 drives it through a stdin that returns one line per read and runs a hook
 before the name prompt's read (`linesWithAHook`): a first install and a
 rewrite, each with nothing written meanwhile (exit 0) and with a config
-written meanwhile (exit 1, the config as that writer left it). Red first on
-1ace151f in a throwaway worktree: both "meanwhile" rows (exit 0, want 1),
-the two controls green. Controls on the committed tree (31c66803): the check
-never made turns both "meanwhile" rows red; two readable reads comparing
-equal whatever their bytes, the rewrite row alone; an absent file comparing
-equal to a present one, the first-install row alone; two failed reads
-comparing unequal, `TestInitRefusesToRewriteAConfigThisUserCannotRead`
-alone (the run says "changed" where it should say who cannot read the
-file).
+written meanwhile (exit 1, the config as that writer left it). A change made
+during the port pass or the TLS load cannot be timed from a test without a
+seam, so `TestTheChangedConfigCheckIsTheStepBeforeSave` pins the order: in
+initCmd the statement asking the check comes directly before the one calling
+`cfg.Save`. Red first on 1ace151f in a throwaway worktree: both "meanwhile"
+rows (exit 0, want 1), the two controls green. Controls on the committed
+tree (484dc0fd): the check never made turns both "meanwhile" rows red; two
+readable reads comparing equal whatever their bytes, the rewrite row alone;
+an absent file comparing equal to a present one, the first-install row
+alone; the check moved back before `refuseRewrite`, its first place, the
+order test alone.
 
 ### Out of scope
 

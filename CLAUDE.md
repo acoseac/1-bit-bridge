@@ -4439,20 +4439,27 @@ what it claimed**, and none of it had a failing test.
   config and installs the service on nobody's say-so (a public run asks
   for no library, and reached that keep on a closed stdin before this
   change too). **And the run refuses a config that changed after it read
-  it** (`configChangedSinceRead`, exit 1, nothing written): moving the
-  question ahead of the preflight and the name prompt, which wait on the
-  operator, put both between the decision and the write. Measured with the
-  real binary: a config another init wrote while the name prompt waited
-  was written over (exit 0, its name gone), where main had asked
+  it** (`configChangedSinceRead`, exit 1, the config not written): moving
+  the question ahead of the preflight and the name prompt, which wait on
+  the operator, put both between the decision and the write. Measured with
+  the real binary: a config another init wrote while the name prompt
+  waited was written over (exit 0, its name gone), where main had asked
   "Overwrite?" after that prompt, and a rewrite answered yes lost an edit
   made meanwhile (CodeRabbit's security review of #1106 named the window).
   The run keeps the bytes it read at its start (`configAsRead`, the read
-  `readPriorInstall` parses) and compares them after its last prompt,
-  before anything is written, so the check also closes the change the old
-  order let through: a rewrite keeps what it read, and a config written
-  since would lose what its writer wrote. **Don't compare a stat**: bytes
-  are what the rewrite keeps from, and a write in the same mtime tick
-  passes a stat (#1043's rule for `tokens.json`).
+  `readPriorInstall` parses) and compares them in the statement directly
+  before `cfg.Save`, which `TestTheChangedConfigCheckIsTheStepBeforeSave`
+  pins: its first place, before `refuseRewrite`, left the second port pass
+  and the TLS load after it, and a change during them was still written
+  over (CodeRabbit's next round). A refusal there can follow a first
+  install's TLS mint, which the next run loads, as it loads the pair a
+  failed Save leaves. What remains is Save's own staging and rename, which
+  only an interprocess lock would close (#1043 declined one for
+  `tokens.json`). The check also closes the change the old order let
+  through: a rewrite keeps what it read, and a config written since would
+  lose what its writer wrote. **Don't compare a stat**: bytes are what the
+  rewrite keeps from, and a write in the same mtime tick passes a stat
+  (#1043's rule for `tokens.json`).
 - **The "is it us?" fallback must NOT reach a port the run is choosing.**
   `checkPort` answers ok or warn — never fail — whenever the pid in
   `OwnPIDFile` is alive and the owner probe could not rule it out (one it
