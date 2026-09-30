@@ -34592,3 +34592,22 @@ modes, which see only loopback peers (loopback mode), or the local proxy's
 address (public mode behind a TLS-terminating proxy). HTTP/3's
 `http3.Server` logs a failed connection only at Debug and only through a
 `Logger` the bridge never sets, and its panic line names no address.
+
+### Review rounds (#1123)
+
+Gemini was over its daily quota on every head.
+
+- **SonarCloud, 4.2% duplication on new code** (the gate allows 3%): the
+  socket table's rows, each a `fmt.Sprintf` of a `sockErr` beside a
+  hand-built want of the same shape, read as two duplicated 11-line blocks
+  (SonarCloud's `api/duplications/show`). The handshake rows are data now
+  (the op, the reason, the local address as the line keeps it), and one
+  loop builds both lines; same 14 rows, same texts, and the old redaction
+  still fails every row it failed before. The gate passed on 1c874783.
+- **CodeRabbit (on-demand, 1c874783)**: no actionable comments. Its
+  merge-risk note says malformed IPv6-looking text in a panic message can
+  remove diagnostic content. That is the residual, accepted: after a word
+  or an arrow, a bracket opening an IPv6 literal with a `%` is read up to
+  the next `]:<digits>` on its line, since a zone may hold anything a
+  Windows adapter's name holds, so a panic value holding such text loses
+  it. It is replaced, never kept, so it costs text and never an address.
