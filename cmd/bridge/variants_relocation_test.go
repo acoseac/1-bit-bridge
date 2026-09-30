@@ -689,7 +689,11 @@ func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
 // compare as the one it kept. It did on Windows until backlog B203: the
 // identity came from os.Stat, which there reads it only when SameFile asks,
 // from whatever the path names then (fsutil.DirIdentity). Red there alone:
-// on POSIX an os.Stat reads the device and inode at the call.
+// on POSIX an os.Stat reads the device and inode at the call. The kept
+// identity is compared with nothing before the directory is replaced, as
+// in the handler, whose first comparison is at the first missing sidecar:
+// a comparison before it would read, and fix, the identity at that moment,
+// which passed this test with os.Stat on Windows.
 func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "variants")
 	if err := os.MkdirAll(filepath.Join(dir, "Artist"), 0o755); err != nil {
@@ -699,9 +703,6 @@ func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
 	kept := a.SidecarStoreState()
 	if !kept.Available || kept.Store == nil {
 		t.Fatalf("a variants directory holding a folder: state %+v, want available with its identity", kept)
-	}
-	if again := a.SidecarStoreState(); again.Store == nil || !again.Store.Same(kept.Store) {
-		t.Fatal("the same directory, asked twice, is not the same directory")
 	}
 	if err := os.Rename(dir, dir+".volume"); err != nil {
 		t.Fatal(err)
@@ -715,6 +716,9 @@ func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
 	}
 	if now.Store == nil || now.Store.Same(kept.Store) {
 		t.Error("an empty directory made at the path compares as the directory the handler kept, so an unmount reads as its own unlinks")
+	}
+	if again := a.SidecarStoreState(); again.Store == nil || !again.Store.Same(now.Store) {
+		t.Error("the same directory, asked twice, is not the same directory")
 	}
 }
 

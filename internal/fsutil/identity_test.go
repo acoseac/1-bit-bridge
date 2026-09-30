@@ -33,21 +33,17 @@ func newDir(t *testing.T) string {
 }
 
 // TestDirIdentitySeesAnotherDirectoryAtThePath — an identity taken with
-// DirIdentity is the directory's, not the path's: the directory taken twice
-// is the same file, another directory made at its path is not, and the
-// first one, moved, still is. On every platform.
+// DirIdentity is the directory's, not the path's: another directory made
+// at its path is not the same file, the first one, moved, still is, and a
+// directory taken twice is the same file. On every platform. The identity
+// taken first is compared with nothing before the replacement: on Windows a
+// comparison reads an os.Stat's identity, and fixes it, at that moment, so
+// an earlier one would let an os.Stat pass here.
 func TestDirIdentitySeesAnotherDirectoryAtThePath(t *testing.T) {
 	dir := newDir(t)
 	before, err := DirIdentity(dir)
 	if err != nil {
 		t.Fatal(err)
-	}
-	again, err := DirIdentity(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(before, again) {
-		t.Fatal("DirIdentity of one directory, taken twice, is not the same file")
 	}
 	moved := replaceDir(t, dir)
 	after, err := DirIdentity(dir)
@@ -63,6 +59,13 @@ func TestDirIdentitySeesAnotherDirectoryAtThePath(t *testing.T) {
 	}
 	if !os.SameFile(before, elsewhere) {
 		t.Error("the directory that was at the path, moved, no longer compares as itself")
+	}
+	again, err := DirIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(after, again) {
+		t.Error("DirIdentity of one directory, taken twice, is not the same file")
 	}
 }
 
