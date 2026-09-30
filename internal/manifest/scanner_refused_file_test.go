@@ -47,19 +47,31 @@ func refusalLines(rec *loggingtest.Recorder, base string) []string {
 	return out
 }
 
+// refusedFormats are the files of each extractor that refuses a file it
+// read whole as not its format: the DSF, DFF, AIFF and WAV walks, each over
+// bytes whose header is not one (writeJunkDSF's). Every other extractor
+// reads what it can of a file that is not its format and refuses nothing.
+var refusedFormats = []string{"Artist/Album/bad.dsf", "Artist/Album/bad.dff", "Artist/Album/bad.aiff", "Artist/Album/bad.wav"}
+
 // indexRefused writes the refused file into f's library and indexes it, and
 // returns what the scan logged from then on.
 func indexRefused(t *testing.T, f *artFixture) *loggingtest.Recorder {
 	t.Helper()
-	f.dir(t, filepath.Dir(refusedRel))
-	writeJunkDSF(t, f.path(refusedRel))
-	setMTime(t, f.path(refusedRel), t0)
+	return indexRefusedAs(t, f, refusedRel)
+}
+
+// indexRefusedAs is indexRefused for the refused file at rel.
+func indexRefusedAs(t *testing.T, f *artFixture, rel string) *loggingtest.Recorder {
+	t.Helper()
+	f.dir(t, filepath.Dir(rel))
+	writeJunkDSF(t, f.path(rel))
+	setMTime(t, f.path(rel), t0)
 	rec := loggingtest.Record(t)
 	if n := f.scan(t, "index"); n != 1 {
 		t.Fatalf("fixture: the index read %d audio files, want 1", n)
 	}
-	mustIndexed(t, f.store, refusedRel)
-	if lines := refusalLines(rec, "bad.dsf"); len(lines) != 1 {
+	mustIndexed(t, f.store, rel)
+	if lines := refusalLines(rec, filepath.Base(rel)); len(lines) != 1 {
 		t.Fatalf("fixture: the index logged %q, want the one line a refusal has always had", lines)
 	}
 	return rec
@@ -100,24 +112,29 @@ func requireStamped(t *testing.T, store *Store, rel string, before storedRow) {
 // measurement: after an ExtractorVersion bump the refused file is read once,
 // its row stamped current and otherwise left as it was, and the scans after
 // read it no more. Nothing more is logged: the refusal of this file, at this
-// size and mtime, was logged when it was indexed.
+// size and mtime, was logged when it was indexed. For each extractor that
+// refuses.
 func TestScanner_ARefusedFileIsReadOnceAfterAVersionBump(t *testing.T) {
-	f := newArtFixture(t)
-	rec := indexRefused(t, f)
-	bumpVersion(t, f.store, refusedRel)
-	before, _ := storedRowAt(t, f.store, refusedRel)
+	for _, rel := range refusedFormats {
+		t.Run(filepath.Ext(rel), func(t *testing.T) {
+			f := newArtFixture(t)
+			rec := indexRefusedAs(t, f, rel)
+			bumpVersion(t, f.store, rel)
+			before, _ := storedRowAt(t, f.store, rel)
 
-	if n := f.scan(t, "the first scan after the bump"); n != 1 {
-		t.Errorf("the refused file was read %d times, want once", n)
-	}
-	requireStamped(t, f.store, refusedRel, before)
-	for _, label := range []string{"the second scan", "the third scan"} {
-		if n := f.scan(t, label); n != 0 {
-			t.Errorf("%s re-read the refused file %d times, want never: nothing stamps it current", label, n)
-		}
-	}
-	if lines := refusalLines(rec, "bad.dsf"); len(lines) != 1 {
-		t.Errorf("refusal lines %q, want only the index's: a refusal is logged once per path, size and mtime", lines)
+			if n := f.scan(t, "the first scan after the bump"); n != 1 {
+				t.Errorf("the refused file was read %d times, want once", n)
+			}
+			requireStamped(t, f.store, rel, before)
+			for _, label := range []string{"the second scan", "the third scan"} {
+				if n := f.scan(t, label); n != 0 {
+					t.Errorf("%s re-read the refused file %d times, want never: nothing stamps it current", label, n)
+				}
+			}
+			if lines := refusalLines(rec, filepath.Base(rel)); len(lines) != 1 {
+				t.Errorf("refusal lines %q, want only the index's: a refusal is logged once per path, size and mtime", lines)
+			}
+		})
 	}
 }
 
@@ -222,8 +239,10 @@ func TestScanner_ARefusedFileWhoseReadDidNotCompleteIsReadAgain(t *testing.T) {
 // gate's other questions, asked of a refused row, said yes forever, since
 // the extraction of a refused file never reaches the lyrics or the artwork:
 // a lyrics sidecar beside it (no version bump needed), and a local-art cache
-// file its row names that is missing. The file is read at most once more,
-// and never logged again.
+// file its row names that is missing. A row the scan wrote records the
+// refusal, so the file is never read for them. A row from before the mark
+// (v50 leaves it 0) is read once, which records it, and logged once more:
+// that row never recorded its refusal.
 func TestScanner_ARefusedFileIsNotReadForWhatItsExtractionNeverReaches(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -239,26 +258,39 @@ func TestScanner_ARefusedFileIsNotReadForWhatItsExtractionNeverReaches(t *testin
 			}
 		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newArtFixture(t)
-			rec := indexRefused(t, f)
-			tc.setup(t, f)
-			before, _ := storedRowAt(t, f.store, refusedRel)
+		for _, upgraded := range []bool{false, true} {
+			name := tc.name
+			wantReads, wantLines := 0, 1
+			if upgraded {
+				name += ", a row from before the mark"
+				wantReads, wantLines = 1, 2
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newArtFixture(t)
+				rec := indexRefused(t, f)
+				tc.setup(t, f)
+				if upgraded {
+					if _, err := f.store.db.Exec(`UPDATE tracks SET extract_refused = 0`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, _ := storedRowAt(t, f.store, refusedRel)
 
-			reads := 0
-			for i := 0; i < 3; i++ {
-				reads += f.scan(t, "a scan")
-			}
-			if reads > 1 {
-				t.Errorf("three scans read the refused file %d times, want at most once: the gate keeps asking what its extraction never answers", reads)
-			}
-			if after, _ := storedRowAt(t, f.store, refusedRel); after.tags != before.tags || after.indexedAt != before.indexedAt {
-				t.Errorf("the row is %+v, want it as it was (%+v)", after, before)
-			}
-			if lines := refusalLines(rec, "bad.dsf"); len(lines) != 1 {
-				t.Errorf("refusal lines %q, want only the index's", lines)
-			}
-		})
+				reads := 0
+				for i := 0; i < 3; i++ {
+					reads += f.scan(t, "a scan")
+				}
+				if reads != wantReads {
+					t.Errorf("three scans read the refused file %d times, want %d: the gate keeps asking what its extraction never answers", reads, wantReads)
+				}
+				if after, _ := storedRowAt(t, f.store, refusedRel); after.tags != before.tags || after.indexedAt != before.indexedAt {
+					t.Errorf("the row is %+v, want it as it was (%+v)", after, before)
+				}
+				if lines := refusalLines(rec, "bad.dsf"); len(lines) != wantLines {
+					t.Errorf("refusal lines %q, want %d", lines, wantLines)
+				}
+			})
+		}
 	}
 }
 
