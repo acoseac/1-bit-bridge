@@ -138,7 +138,7 @@ func requireMaintenanceLine(t *testing.T, what string, line maintenanceLine, not
 		t.Errorf("%s: the line reads %q, want %q", what, line.Text, wantText)
 	}
 	refusing := strings.HasPrefix(wantText, "refusing")
-	if got := line.Badge == "badge warn"; got != refusing {
+	if (line.Badge == "badge warn") != refusing {
 		t.Errorf("%s: the line's badge is %q, want a warn badge: %v", what, line.Badge, refusing)
 	}
 	switch {

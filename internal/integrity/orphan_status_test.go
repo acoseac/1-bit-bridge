@@ -173,12 +173,10 @@ func declaredConstantsOfType(t *testing.T, typeName string) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
-			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		if !isPackageSource(e) {
 			continue
 		}
-		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		f, err := parser.ParseFile(token.NewFileSet(), e.Name(), nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -187,21 +185,36 @@ func declaredConstantsOfType(t *testing.T, typeName string) map[string]bool {
 			if !ok {
 				return true
 			}
-			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != typeName {
-				return false
-			}
-			for _, v := range vs.Values {
-				lit, ok := v.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					t.Errorf("%s: a %s constant whose value is not a string literal; this test cannot read it", name, typeName)
-					continue
-				}
-				if s, err := strconv.Unquote(lit.Value); err == nil {
-					out[s] = true
-				}
+			if id, ok := vs.Type.(*ast.Ident); ok && id.Name == typeName {
+				addStringLiterals(t, e.Name(), typeName, vs.Values, out)
 			}
 			return false
 		})
 	}
 	return out
+}
+
+// isPackageSource reports, from the entry's name alone, whether it is a Go
+// file the package's build compiles and not a test.
+func isPackageSource(e os.DirEntry) bool {
+	name := e.Name()
+	return !e.IsDir() && strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") &&
+		!strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
+}
+
+// addStringLiterals adds to out the value of each of a typeName constant's
+// values, and reports one that is not a string literal, which this test
+// cannot read.
+func addStringLiterals(t *testing.T, file, typeName string, values []ast.Expr, out map[string]bool) {
+	t.Helper()
+	for _, v := range values {
+		lit, ok := v.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			t.Errorf("%s: a %s constant whose value is not a string literal; this test cannot read it", file, typeName)
+			continue
+		}
+		if s, err := strconv.Unquote(lit.Value); err == nil {
+			out[s] = true
+		}
+	}
 }

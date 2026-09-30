@@ -39,7 +39,7 @@ var nextSweepPaths = map[string]string{
 // JSON path of every field whose name starts with "next": the next-run
 // times a card can show.
 func nextRunPaths(rt reflect.Type, prefix string) []string {
-	for rt.Kind() == reflect.Ptr {
+	for rt.Kind() == reflect.Pointer {
 		rt = rt.Elem()
 	}
 	if rt.Kind() != reflect.Struct || rt == reflect.TypeOf(time.Time{}) {
@@ -171,41 +171,57 @@ func TestAJobsCardSendsItsNextSweepOnlyWhileItsGateIsOpen(t *testing.T) {
 	h := srv.Handler()
 	g := &nextSweepGates{}
 	wireNextSweepCards(srv, time.Now().Add(5*time.Hour), g)
-	gateOf := map[string]func() bool{
-		"analysis.sweep.nextDueAt": func() bool { return g.analysis },
-		"fingerprint.nextDueAt":    func() bool { return g.fp },
-		"autoOptimize.nextDueAt":   func() bool { return g.ao },
-		"smartMixes.run.nextDueAt": func() bool { return g.smartMixes },
-	}
 	for _, step := range nextSweepSteps {
 		*g = step.g
 		applyNextSweepGates(srv, g)
-		var jobs map[string]any
-		if code := doJSON(t, h, "GET", "/api/jobs", nil, &jobs); code != http.StatusOK {
-			t.Fatalf("%s: /api/jobs answered %d", step.name, code)
+		var jobs, stats map[string]any
+		getJSONOK(t, h, step.name, "/api/jobs", &jobs)
+		getJSONOK(t, h, step.name, "/api/analysis/stats", &stats)
+		requireJobsNextRuns(t, step.name, jobs, step.g)
+		if got := jsonPathPresent(stats, "sweep.nextDueAt"); got != step.g.analysis {
+			t.Errorf("%s: /api/analysis/stats carries sweep.nextDueAt: %v, want %v", step.name, got, step.g.analysis)
 		}
-		for path, open := range gateOf {
-			if got := jsonPathPresent(jobs, path); got != open() {
-				t.Errorf("%s: /api/jobs carries %s: %v, want %v, with the gate %s",
-					step.name, path, got, open(), map[bool]string{true: "open", false: "closed"}[open()])
-			}
-		}
-		for _, path := range []string{"backups.run.nextDueAt", "duplicates.run.nextDueAt"} {
-			if !jsonPathPresent(jobs, path) {
-				t.Errorf("%s: /api/jobs dropped the ungated %s", step.name, path)
-			}
-		}
-		if !jsonPathPresent(jobs, "analysis.sweep.lastFinishedAt") {
-			t.Errorf("%s: the analysis card lost its last sweep, which stays whatever the gate says", step.name)
-		}
+	}
+}
 
-		var stats map[string]any
-		if code := doJSON(t, h, "GET", "/api/analysis/stats", nil, &stats); code != http.StatusOK {
-			t.Fatalf("%s: /api/analysis/stats answered %d", step.name, code)
+// getJSONOK serves a GET of path and decodes the body into v, and fails the
+// test on any answer but 200.
+func getJSONOK(t *testing.T, h http.Handler, step, path string, v any) {
+	t.Helper()
+	if code := doJSON(t, h, "GET", path, nil, v); code != http.StatusOK {
+		t.Fatalf("%s: %s answered %d", step, path, code)
+	}
+}
+
+// gatedNextRuns maps the JSON path of each gated next run on /api/jobs to
+// whether g opens its card's gate.
+func gatedNextRuns(g nextSweepGates) map[string]bool {
+	return map[string]bool{
+		"analysis.sweep.nextDueAt": g.analysis,
+		"fingerprint.nextDueAt":    g.fp,
+		"autoOptimize.nextDueAt":   g.ao,
+		"smartMixes.run.nextDueAt": g.smartMixes,
+	}
+}
+
+// requireJobsNextRuns checks one /api/jobs snapshot: each gated next run is
+// there exactly while its gate is open, each ungated one always, and the
+// analysis card's last sweep whatever the gate says.
+func requireJobsNextRuns(t *testing.T, step string, jobs map[string]any, g nextSweepGates) {
+	t.Helper()
+	for path, open := range gatedNextRuns(g) {
+		if got := jsonPathPresent(jobs, path); got != open {
+			t.Errorf("%s: /api/jobs carries %s: %v, want %v, with the gate %s",
+				step, path, got, open, map[bool]string{true: "open", false: "closed"}[open])
 		}
-		if got := jsonPathPresent(stats, "sweep.nextDueAt"); got != g.analysis {
-			t.Errorf("%s: /api/analysis/stats carries sweep.nextDueAt: %v, want %v", step.name, got, g.analysis)
+	}
+	for _, path := range []string{"backups.run.nextDueAt", "duplicates.run.nextDueAt"} {
+		if !jsonPathPresent(jobs, path) {
+			t.Errorf("%s: /api/jobs dropped the ungated %s", step, path)
 		}
+	}
+	if !jsonPathPresent(jobs, "analysis.sweep.lastFinishedAt") {
+		t.Errorf("%s: the analysis card lost its last sweep, which stays whatever the gate says", step)
 	}
 }
 
@@ -241,24 +257,9 @@ func TestTheJobsCardsSayNoNextSweepWhileTheirGateIsClosed(t *testing.T) {
 		t.Skip("node not installed; this test executes the shipped console source")
 	}
 	srv, _, _ := newTestServer(t)
-	h := srv.Handler()
-	g := &nextSweepGates{}
 	// Five and a half hours, so the rendered hour is 5 however long node
 	// takes to start.
-	wireNextSweepCards(srv, time.Now().Add(5*time.Hour+30*time.Minute), g)
-	var steps []map[string]json.RawMessage
-	for _, step := range nextSweepSteps {
-		*g = step.g
-		applyNextSweepGates(srv, g)
-		var jobs, stats json.RawMessage
-		if code := doJSON(t, h, "GET", "/api/jobs", nil, &jobs); code != http.StatusOK {
-			t.Fatalf("%s: /api/jobs answered %d", step.name, code)
-		}
-		if code := doJSON(t, h, "GET", "/api/analysis/stats", nil, &stats); code != http.StatusOK {
-			t.Fatalf("%s: /api/analysis/stats answered %d", step.name, code)
-		}
-		steps = append(steps, map[string]json.RawMessage{"jobs": jobs, "stats": stats})
-	}
+	steps := servedNextSweepPayloads(t, srv, time.Now().Add(5*time.Hour+30*time.Minute))
 	stubs := map[string]string{
 		"renderAnalysisCoverage": `function renderAnalysisCoverage() {}`,
 		"describeAnalysisSweep":  `function describeAnalysisSweep() { return "—"; }`,
@@ -270,23 +271,51 @@ func TestTheJobsCardsSayNoNextSweepWhileTheirGateIsClosed(t *testing.T) {
 		t.Fatalf("the harness printed %q (err %v), want %d steps", out, err, len(nextSweepSteps))
 	}
 	for i, step := range nextSweepSteps {
-		open := map[string]bool{
-			"job-analysis-next": step.g.analysis, "sse:job-analysis-next": step.g.analysis,
-			"job-fp-next": step.g.fp, "job-ao-next": step.g.ao, "job-mix-next": step.g.smartMixes,
+		requireNextSweepLines(t, step.name, step.g, got[i])
+	}
+}
+
+// servedNextSweepPayloads wires every card with its next run at `next` and
+// returns, for each of nextSweepSteps, the /api/jobs and
+// /api/analysis/stats bodies the handlers serve with its gates.
+func servedNextSweepPayloads(t *testing.T, srv *Server, next time.Time) []map[string]json.RawMessage {
+	t.Helper()
+	h := srv.Handler()
+	g := &nextSweepGates{}
+	wireNextSweepCards(srv, next, g)
+	var steps []map[string]json.RawMessage
+	for _, step := range nextSweepSteps {
+		*g = step.g
+		applyNextSweepGates(srv, g)
+		var jobs, stats json.RawMessage
+		getJSONOK(t, h, step.name, "/api/jobs", &jobs)
+		getJSONOK(t, h, step.name, "/api/analysis/stats", &stats)
+		steps = append(steps, map[string]json.RawMessage{"jobs": jobs, "stats": stats})
+	}
+	return steps
+}
+
+// requireNextSweepLines checks what one step's four next-run lines, and the
+// SSE frame's analysis line, read: "in 5h" while the card's gate is open,
+// "—" while it is closed.
+func requireNextSweepLines(t *testing.T, step string, g nextSweepGates, lines map[string]string) {
+	t.Helper()
+	open := map[string]bool{
+		"job-analysis-next": g.analysis, "sse:job-analysis-next": g.analysis,
+		"job-fp-next": g.fp, "job-ao-next": g.ao, "job-mix-next": g.smartMixes,
+	}
+	ids := make([]string, 0, len(open))
+	for id := range open {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		want := "—"
+		if open[id] {
+			want = "in 5h"
 		}
-		ids := make([]string, 0, len(open))
-		for id := range open {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			want := "—"
-			if open[id] {
-				want = "in 5h"
-			}
-			if got[i][id] != want {
-				t.Errorf("%s: %s reads %q, want %q", step.name, id, got[i][id], want)
-			}
+		if lines[id] != want {
+			t.Errorf("%s: %s reads %q, want %q", step, id, lines[id], want)
 		}
 	}
 }
