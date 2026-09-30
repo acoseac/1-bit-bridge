@@ -3710,18 +3710,25 @@ no failing test — which is the shape to expect in this area.
   fetch failed", "carries no ContentDirectory service") named the URL
   whole; they name the host (`descriptionHostForLog`), as its warnings do,
   and the fetch's error goes through `fetchErrorForLog`, which replaces the
-  URL in BOTH its renderings: discovery's own (`GET <url>: …`, as passed)
-  and net/http's `*url.Error` (as re-serialized, a password masked `***`,
-  a token as the user name, a query and a fragment whole), read from the
-  error's own `URL` field, never guessed. The bridge prints no Debug line
-  today (`logging.Init` fixes the level at Info), so that half would have
-  bitten only the day one is added. A byte fetch through `upnpproxy`
-  sends no such credential at all (backlog B143).
-  `TestAControlURLsUserInformationTravelsAsBasicAuth`
-  (net/http's header taken on every run),
-  `TestAWalkErrorNamesNoControlURLUserInformation` (the ingest's
-  per-server error) and `TestManualPollerDebugLinesNameTheHostAlone` (five
-  ways the fetch fails, two URL shapes, every line searched).
+  URL in each of its renderings: discovery's own (`GET <url>: …`, as
+  passed) and net/http's `*url.Error` (as re-serialized, a password masked
+  `***`, a token as the user name, a query and a fragment whole), read from
+  the error's own `URL` field, never guessed, and **quoted as `%q` quotes
+  it**: `url.Error.Error` is `%s %q: %s`, so a URL holding a `"`, a `\` or
+  an unprintable rune appears escaped, and a search for it as written
+  misses (measured; found checking a review's suggestion on #1116). A
+  manual URL with no host `descriptionHostForLog` can read (it does not
+  parse, or `user:pw@host` was written without a scheme) logs a fixed
+  reason, never its error: net/http's `unsupported protocol scheme` names
+  the scheme such a value parses with, its user name. The bridge prints no
+  Debug line today (`logging.Init` fixes the level at Info), so that half
+  would have bitten only the day one is added. A byte fetch through
+  `upnpproxy` sends no such credential at all (backlog B143).
+  `TestAControlURLsUserInformationTravelsAsBasicAuth` (net/http's header
+  taken on every run), `TestAWalkErrorNamesNoControlURLUserInformation`
+  (the ingest's per-server error) and
+  `TestManualPollerDebugLinesNameTheHostAlone` (five ways the fetch fails,
+  three URL shapes, a scheme-less one, every line searched).
 - **…and a packet's LINK-LOCAL source approves itself only when the packet
   arrived on a zero-configuration IPv4 link** (backlog B49, 2026-09-29). The
   metadata list closed the costly case; the rest of the residual was any

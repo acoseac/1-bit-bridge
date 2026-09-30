@@ -32855,13 +32855,15 @@ currently reachable at"), no Mirror-PR.
   `TestCheckCustomEndpointsRefusesATypedCredential` caught it).
 - **The manual poller's Debug lines name the host** (`descriptionHostForLog`,
   which its warnings used since B54), and the fetch's error goes through
-  `fetchErrorForLog`, which replaces both renderings of the URL with the
-  host: the one discovery quotes (the URL as passed) and the one in the
+  `fetchErrorForLog`, which replaces each rendering of the URL with the
+  host: the one discovery writes (the URL as passed) and the one in the
   `*url.Error` (read from the error's own `URL` field, so neither is
-  guessed), the longer first. Rejected: logging no error (it is the only
-  reason a Debug reader gets), and sending the description fetch's user
-  information as a header (B69's shape) instead: the query must stay in the
-  request URL, so its errors would still carry that.
+  guessed), both as written and as `%q` quotes it (review round 1, below).
+  A URL with no host it can read logs a fixed reason instead of its error.
+  Rejected: logging no error (it is the only reason a Debug reader gets),
+  and sending the description fetch's user information as a header (B69's
+  shape) instead: the query must stay in the request URL, so its errors
+  would still carry that.
 - **A control URL's user information travels as the Authorization header
   alone** (`splitControlURL` in internal/upnp/client.go): `invoke` builds the
   request from the URL without it and calls `SetBasicAuth`, the header
@@ -32905,9 +32907,11 @@ currently reachable at"), no Mirror-PR.
 - `internal/upnp`: `TestManualPollerDebugLinesNameTheHostAlone` (five ways
   the fetch fails, a refused connection, a 404, a body that is no
   description, a hang past the timeout and a description with no
-  ContentDirectory, each over the real client against a password and query
-  and against a token as the user name and a fragment; the line must be
-  there, name the host, and no line at any level carry the secret) and
+  ContentDirectory, each over the real client against a password and query,
+  a token as the user name and a fragment, and a query `%q` escapes; the
+  line must be there, name the host, and no line at any level carry the
+  secret; and a URL written without a scheme, whose line gives the fixed
+  reason) and
   `TestAControlURLsUserInformationTravelsAsBasicAuth` (the production
   dispatcher under the manual poller's approval: net/http's own header is
   what the server receives, for a password, a token as the user name and an
@@ -32946,13 +32950,46 @@ restored from HEAD and the tree checked clean after each (22 of 22 clean).
 | NC13 | init writes the untrimmed flag | the init test's padded control (no custom endpoint saved) |
 | NC14 | a blank `--domain` not refused up front | the init test's blank-domain check |
 | NC15 | the Debug lines log the URL | `TestManualPollerDebugLinesNameTheHostAlone` |
-| NC16 | the fetch's error logged as it is | the same |
-| NC17 | the `*url.Error` rendering not replaced | its refused-connection and timeout rows with a password and a query (for a token as the user name the two renderings are the same string, so the other replacement covers them) |
-| NC18 | the rendering as passed not replaced | its 404 and not-a-description rows for both shapes, and its refused-connection and timeout rows with a password |
+| NC16 | the fetch's error logged as it is | the same test, every fetch-failed row (rerun on round 1's code) |
+| NC17 | neither `*url.Error` rendering replaced | its refused-connection and timeout rows with a password and with a `%q` query (for a token as the user name the rendering is the URL as passed, which the other replacement covers) |
+| NC18 | the rendering as passed not replaced | its 404 and not-a-description rows for every shape, and its refused-connection and timeout rows with a password |
 | NC19 | the control URL keeps its user information | `TestAControlURLsUserInformationTravelsAsBasicAuth`, `TestAWalkErrorNamesNoControlURLUserInformation` |
 | NC20 | the user information dropped, no header | `TestAControlURLsUserInformationTravelsAsBasicAuth` (the server receives no header) |
 | NC21 | the status error names the URL as configured | the SOAP and ingest tests |
 | NC22 | the transport error names the URL as configured | the SOAP test's failed-connection half |
+| NC23 | the `%q` rendering not replaced (round 1) | the refused-connection and timeout rows of the `%q` shape alone: for the others the quoted form holds the URL verbatim |
+| NC24 | a hostless URL's error logged with the URL taken out (round 1) | the scheme-less row |
+
+### Review round 1
+
+- **Gemini**: `fetchErrorForLog` replaced the URL with an empty host when
+  `descriptionHostForLog` could read none, which can mangle the message;
+  its fix returned the error unchanged in that case, and added a
+  `strings.Contains` fast path. The first half would have put the whole URL
+  in the line (a URL that does not parse is quoted by its own parse error),
+  so it was declined; the fast path was too, since `strings.Replace` counts
+  first and returns its input without allocating when nothing matches. The
+  observation stood, and checking it found two holes: a manual URL written
+  without a scheme (`user:pw@host`) names no host, and net/http's error for
+  it is `unsupported protocol scheme "<the user name>"`, which no
+  replacement of the URL removes; and `url.Error.Error` is `%s %q: %s`, so
+  a URL holding a `"`, a `\` or an unprintable rune is rendered escaped and
+  a search for it as written misses (measured with go1.26.6: `Get
+  "http://user:***@…?token=\"s3cret-Pw\""`). The helper now logs a fixed
+  reason for a URL with no host it can read, and replaces the quoted form
+  too; the test gained both shapes, and NC23 and NC24 show each is needed.
+  The ordering the first version applied (longest form first) was dropped:
+  where one form holds another verbatim, replacing either first gives the
+  same line, and no test could tell it apart.
+- **CodeRabbit**: an MD038 code span with a trailing space (the padded
+  domain's endpoint) in this entry; CLAUDE.md had the same span. Both
+  rephrased.
+- **SonarCloud** failed its gate on 4.6% duplicated new lines: the api and
+  admin tests' new functions repeated their B54 neighbours' setup, and the
+  predicate's table read like `internal/api/gzip_test.go`'s. Both test files
+  share one helper per surface now (`healthOfNormalized`,
+  `publicPairingQR`), and the predicate lists the URLs that carry a part and
+  those that do not.
 
 ### With the fix, the same binary runs
 
