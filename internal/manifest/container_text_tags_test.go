@@ -36,7 +36,8 @@ type dffTags struct {
 // dffFixtures is each fixture and what its writers put in it, as TagLib 2.0.2
 // reads it back: its DSDIFF tag answers from the ID3 chunk first and from the
 // DIIN where that has nothing, in either chunk order. A DIIN holds a title and
-// an artist and nothing else.
+// an artist and nothing else. An ID3 chunk nested in PROP is read as a root
+// one is, unless the file also holds a root one, which then answers whole.
 var dffFixtures = []struct {
 	name string
 	want dffTags
@@ -46,6 +47,8 @@ var dffFixtures = []struct {
 		genre: "Picard Genre", track: 3, year: 2019}},
 	{"diin_then_id3.dff", dffTags{title: "ID3 Title", artist: "DIIN Artist", album: "ID3 Album"}},
 	{"id3_then_diin.dff", dffTags{title: "ID3 Title", artist: "DIIN Artist", album: "ID3 Album"}},
+	{"prop_id3.dff", dffTags{title: "PROP Title", artist: "DIIN Artist", album: "PROP Album"}},
+	{"prop_and_root_id3.dff", dffTags{title: "Root Title", artist: "Root Artist", album: "Root Album"}},
 }
 
 // requireTags fails unless tr carries want.
@@ -68,11 +71,20 @@ func requireTags(t *testing.T, tr *Track, want dffTags) {
 // chunks, the FRM8 size counting them.
 func dffWithChunks(t testing.TB, rate uint32, chunks ...[]byte) []byte {
 	t.Helper()
+	return dffWithPropAndChunks(t, rate, nil, chunks...)
+}
+
+// dffWithPropAndChunks is dffWithChunks with nested appended to PROP's
+// children, after CMPR: where TagLib reads (and keeps) an ID3 chunk it found
+// there.
+func dffWithPropAndChunks(t testing.TB, rate uint32, nested []byte, chunks ...[]byte) []byte {
+	t.Helper()
 	fs := make([]byte, 4)
 	binary.BigEndian.PutUint32(fs, rate)
 	prop := append([]byte("SND "), dffChunk("FS  ", fs)...)
 	prop = append(prop, dffChunk("CHNL", []byte("\x00\x02SLFTSRGT"))...)
 	prop = append(prop, dffChunk("CMPR", []byte("DSD \x00"))...) // an empty compression name
+	prop = append(prop, nested...)
 	form := append([]byte("DSD "), dffChunk("PROP", prop)...)
 	form = append(form, dffChunk("DSD ", []byte{0x69, 0x69, 0x69, 0x69})...)
 	for _, c := range chunks {
@@ -397,5 +409,63 @@ func rewindToV19(t *testing.T, store *Store, rel string, lostItsTags bool) {
 	}
 	if _, err := store.db.Exec(q, args...); err != nil {
 		t.Fatalf("rewind %s to v19: %v", rel, err)
+	}
+}
+
+// TestScanner_AnID3TagNestedInPROPGivesTheRowItsTextAndCover: an ID3 chunk
+// nested in PROP, the placement TagLib reads beside a root one (and keeps when
+// it rewrites a tag it found there), gives a scanned row its text over the
+// path's guess and its picture as the cover, as a root ID3 chunk does.
+// CodeRabbit found the placement on #1118; the walk read root chunks alone.
+func TestScanner_AnID3TagNestedInPROPGivesTheRowItsTextAndCover(t *testing.T) {
+	root := t.TempDir()
+	id3 := buildID3v2_3WithAPIC(map[string]string{"title": "Nested Title"}, "image/jpeg", encodeSolidImage(t, 64, 64, 80))
+	rel := writeAlone(t, root, "nested.dff", dffWithPropAndChunks(t, 2822400, dffChunk("ID3 ", id3)))
+	store, sc := newDiscArtScanFixture(t, root)
+	scanOnce(t, sc, "scan")
+	got := storedTrack(t, store, rel)
+	requireTags(t, got, dffTags{title: "Nested Title", artist: "Guess Artist", album: "Guess Album"})
+	if !strings.HasPrefix(got.ArtworkMBID, "local-") {
+		t.Errorf("ArtworkMBID = %q, want the local cover the nested tag's picture makes", got.ArtworkMBID)
+	}
+}
+
+// TestExtractDFF_APROPHoldingALargeID3TagIsRead: a nested ID3 tag makes PROP as
+// large as its picture, and a PROP past the 1 MiB its property chunks alone
+// would never reach refused the whole file (no sample rate, no DSD flag, the
+// file indexed by name). PROP is read up to the ID3 cap beside that, once the
+// file is known to hold it.
+func TestExtractDFF_APROPHoldingALargeID3TagIsRead(t *testing.T) {
+	junk := bytes.Repeat([]byte{0x5A}, 3<<19) // 1.5 MiB, no image signature: no cover
+	id3 := buildID3v2_3WithAPIC(map[string]string{"title": "Large"}, "image/jpeg", junk)
+	path := writeTempDFF(t, dffWithPropAndChunks(t, 2822400, dffChunk("ID3 ", id3)))
+	var tr Track
+	if err := ExtractWithContext(path, &tr, nil); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if tr.SampleRate == nil || *tr.SampleRate != 2822400 || tr.IsDSD == nil || !*tr.IsDSD {
+		t.Errorf("the format is not stamped: SampleRate %v, IsDSD %v", tr.SampleRate, tr.IsDSD)
+	}
+	if tr.Title != "Large" {
+		t.Errorf("Title = %q, want the nested tag's %q", tr.Title, "Large")
+	}
+}
+
+// TestExtractDFF_APROPPastTheEndOfTheFileAllocatesNothing: a PROP declaring
+// more than the file holds is refused before its body is allocated. Its cap
+// is the ID3 cap and a mebibyte now, so an allocation the file cannot back
+// would be tens of MiB.
+func TestExtractDFF_APROPPastTheEndOfTheFileAllocatesNothing(t *testing.T) {
+	const declared = 30 << 20
+	data := append([]byte("FRM8\x00\x00\x00\x00\x00\x00\x00\x40DSD PROP"), make([]byte, 8)...)
+	binary.BigEndian.PutUint64(data[20:28], declared)
+	data = append(data, []byte("SND FS  \x00\x00\x00\x00\x00\x00\x00\x04\x00\x2B\x11\x00")...)
+	path := writeTempDFF(t, data)
+	var tr Track
+	before := heapAllocated()
+	_ = ExtractWithContext(path, &tr, nil)
+	if allocated := heapAllocated() - before; allocated >= declared {
+		t.Errorf("extracting a %d-byte file allocated %d bytes: the PROP chunk's declared %d-byte body was allocated",
+			len(data), allocated, declared)
 	}
 }
