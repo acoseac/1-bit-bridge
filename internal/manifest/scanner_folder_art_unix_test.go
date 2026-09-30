@@ -5,6 +5,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -39,6 +40,43 @@ func TestScanner_ACoverThisUserCannotReadIsReadOnceItCan(t *testing.T) {
 	}
 	f.scan(t, "the cover readable")
 	f.requireArt(t, expectedLocalMBID(data), rels...)
+	f.requireSettled(t, rels...)
+}
+
+// TestFolderArtKeyLeavesOutWhatIsNotAFile pins the key's list of kinds: a
+// link to a directory called cover.png and a named pipe called folder.png
+// are no covers (the lookup refuses to read them), so neither is in the key,
+// and the album is not re-read when the linked directory changes.
+func TestFolderArtKeyLeavesOutWhatIsNotAFile(t *testing.T) {
+	f := newArtFixture(t)
+	rels := []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
+	for _, rel := range rels {
+		f.flac(t, rel)
+	}
+	data := coverBytes("real")
+	f.cover(t, "Artist/Album/cover.jpg", data, t0)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, f.path("Artist/Album/cover.png")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	if err := syscall.Mkfifo(f.path("Artist/Album/folder.png"), 0o644); err != nil {
+		t.Skipf("named pipes unsupported here: %v", err)
+	}
+	key, seen := folderArtKey(f.path(rels[0]), &ExtractContext{})
+	if want := statKey(t, f.path("Artist/Album/cover.jpg")); !seen || key != want {
+		t.Fatalf("folderArtKey = %q (seen %v), want only the file's %q", key, seen, want)
+	}
+	f.scan(t, "index")
+	f.requireArt(t, expectedLocalMBID(data), rels...)
+	f.requireSettled(t, rels...)
+
+	// The linked directory changes: nothing the album is given changes.
+	if err := os.WriteFile(filepath.Join(elsewhere, "new"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(elsewhere, t0.Add(2*time.Hour), t0.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	f.requireSettled(t, rels...)
 }
 
