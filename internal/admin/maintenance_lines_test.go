@@ -93,7 +93,7 @@ func TestTheMaintenanceLinesSayWhenASweepRefuses(t *testing.T) {
 		{name: "the watcher skips an unmounted variants directory", integritySec: 3600, gcSec: 0,
 			variant:       integrity.VariantSweepStatus{Refusing: integrity.VariantRefusalVariantsDir, Since: since},
 			wantIntegrity: "refusing since 2h ago", wantGC: "off (default)",
-			integrityWhy: "Variant integrity is refusing. The variants directory is missing, empty or cannot be read"},
+			integrityWhy: "Variant integrity is refusing. The variants directory is missing, holds no rendition or cannot be read"},
 		{name: "both refuse", integritySec: 3600, gcSec: 3600,
 			variant:       integrity.VariantSweepStatus{Refusing: integrity.VariantRefusalVariantsDir, Since: since},
 			orphan:        integrity.OrphanSweepStatus{Refusing: integrity.OrphanRefusalMassOrphans, Since: since},

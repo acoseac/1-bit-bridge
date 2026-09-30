@@ -6099,10 +6099,11 @@ function describeVariantIntegrityRefusal(kind) {
         "they were moved, put them back at their places under the variants directory; if they really are " +
         "gone, bridge upscale --gc --allow-mass-delete removes the rows.";
     case "variantsDirUnavailable":
-      return "The variants directory is missing, empty or cannot be read while the catalog lists renditions: " +
-        "that is what an unmounted volume looks like, so nothing is swept and no row is deleted. Until it is " +
-        "back, the renditions stored there cannot be downloaded. Mount the volume, or point the variants " +
-        "directory at where the renditions are.";
+      return "The variants directory is missing, holds no rendition or cannot be read while the catalog lists " +
+        "renditions: that is what an unmounted volume looks like, so nothing is swept and no row is deleted. " +
+        "Until it is back, the renditions stored there cannot be downloaded. Mount the volume, or point the " +
+        "variants directory at where the renditions are; if every rendition was deleted on purpose, " +
+        "bridge upscale --gc --allow-mass-delete removes the rows.";
     default:
       return `No row is deleted (${kind}).`;
   }

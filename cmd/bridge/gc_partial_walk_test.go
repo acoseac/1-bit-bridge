@@ -194,7 +194,16 @@ func TestRunGCProceedsPastTheFilesystemsLostFound(t *testing.T) {
 // permission error: `--gc` refused to reap the rows ("the variants
 // directory could not be read"), advised a relocation, and only
 // --allow-mass-delete got past it. The probe reads that directory as the
-// inventory does now (integrity.IsFilesystemLostFound), so the rows go.
+// inventory does now (integrity.IsFilesystemLostFound), evidence neither
+// way.
+//
+// And since backlog B223 a directory holding no rendition is what an
+// unmounted volume looks like, whatever else it holds, a lost+found
+// included: the mount-loss pre-flight refuses the run, saying the
+// directory holds no rendition (never that it "could not be read"), and
+// --allow-mass-delete is the operator's word that the renditions really
+// went, after which the rows go. This test reaped them without the flag
+// until then.
 func TestRunGCReapsTheRowsOfAFreshVolume(t *testing.T) {
 	skipUnlessModeBitsDeny(t, "root lists lost+found, so there would be nothing to exempt")
 	dir := t.TempDir()
@@ -205,7 +214,18 @@ func TestRunGCReapsTheRowsOfAFreshVolume(t *testing.T) {
 	}
 	lockDir(t, filepath.Join(dir, "lost+found"))
 
-	runGCExpectingSuccess(t, store, dir, "--gc refused to reap the rows of a fresh volume")
+	var stdout, stderr bytes.Buffer
+	if rc := runGC(context.Background(), &stdout, &stderr, store, dir, t.TempDir(), gcOptions{maxDeletePercent: 20}); rc == 0 ||
+		!strings.Contains(stderr.String(), "holds no rendition") || strings.Contains(stderr.String(), "could not be read") {
+		t.Fatalf("--gc over a fresh volume without --allow-mass-delete: rc=%d, want the mount-loss refusal naming no read error\nstderr: %s",
+			rc, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if rc := runGC(context.Background(), &stdout, &stderr, store, dir, t.TempDir(), gcOptions{maxDeletePercent: 20, allowMassDelete: true}); rc != 0 {
+		t.Fatalf("--gc --allow-mass-delete refused to reap the rows of a fresh volume: rc=%d\nstdout: %s\nstderr: %s",
+			rc, stdout.String(), stderr.String())
+	}
 	rows, err := store.AllVariants(context.Background())
 	if err != nil {
 		t.Fatal(err)

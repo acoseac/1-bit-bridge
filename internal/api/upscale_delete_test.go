@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1129,4 +1130,46 @@ func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithNoIdentity(t *testing.T) {
 	// reports no identity at all.
 	deleteAllAndDecode(t, hs, raw)
 	requireSecondRowKept(t, deleter, "a probe with no identity satisfied the empty-store exception")
+}
+
+// TestUpscaleDeleteAsksAnUnavailableStoreOnceUntilItUnlinksFromIt — the
+// probe looks for a rendition since backlog B223, and a tree holding none
+// is read whole: a whole-library delete over a tree whose renditions were
+// deleted by hand, leaving its folders, read that tree once per row that
+// unlinked nothing. A refusal is kept for the rest of the request, since it
+// can only keep rows, until the request unlinks a file inside the store,
+// which says the store held one and asks again at the next missing row.
+func TestUpscaleDeleteAsksAnUnavailableStoreOnceUntilItUnlinksFromIt(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	dir := t.TempDir()
+	gone := func(i int) VariantSummary {
+		return VariantSummary{SourcePath: fmt.Sprintf("Music/Album/%02d.flac", i), VariantID: "v1",
+			SidecarPath: filepath.Join(dir, fmt.Sprintf("%02d-v1.flac", i)), SizeBytes: 10}
+	}
+	for i := 0; i < 20; i++ {
+		deleter.all = append(deleter.all, gone(i))
+	}
+	present := filepath.Join(dir, "20-v1.flac")
+	if err := os.WriteFile(present, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.all = append(deleter.all,
+		VariantSummary{SourcePath: "Music/Album/20.flac", VariantID: "v1", SidecarPath: present, SizeBytes: 10},
+		gone(21), gone(22))
+	deleter.mu.Lock()
+	deleter.storeUnavailable = true
+	deleter.mu.Unlock()
+
+	dr := deleteAllAndDecode(t, hs, raw)
+	if dr.DeletedCount != 1 {
+		t.Errorf("deletedCount = %d, want the one row whose file was unlinked", dr.DeletedCount)
+	}
+	deleter.mu.Lock()
+	probes := deleter.storeProbes
+	deleter.mu.Unlock()
+	// One for the twenty missing rows before the unlink, one for the
+	// unlink's identity, and one for the two missing rows after it.
+	if probes != 3 {
+		t.Errorf("SidecarStoreState asked %d times, want 3: once per refusal, again after an unlink inside the store", probes)
+	}
 }

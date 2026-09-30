@@ -38,15 +38,14 @@ var libraryRootWalks = map[string]string{
 // otherTreeWalks names every other function that walks a directory tree,
 // with what it walks: none of them is ever handed a library root.
 var otherTreeWalks = map[string]string{
-	"internal/doctor/cgroup.go findCgroups":                 "the cgroup2 mount",
-	"internal/trash/restore.go (*Manager).pruneEmptyStamp":  "one stamp directory of a root's trash, below the root",
-	"internal/trash/restore.go (*Manager).Sweep":            "one stamp directory of a root's trash, below the root",
-	"internal/trash/trash.go (*Manager).List":               "one stamp directory of a root's trash, below the root",
-	"internal/integrity/locate.go TreeHoldsVariantSidecars": "the variants directory, which resolveSidecarRoot resolves",
-	"internal/integrity/inventory.go TakeSidecarInventory":  "the variants directory, which resolveSidecarRoot resolves",
-	"cmd/bridge/artwork.go artworkCacheHasOrphans":          "the artwork cache, which artworkWalkRoot resolves",
-	"cmd/bridge/artwork.go runArtworkGC":                    "the artwork cache, which artworkWalkRoot resolves",
-	"cmd/bridge/artwork.go sweepArtworkCache":               "the artwork cache, which artworkWalkRoot resolves",
+	"internal/doctor/cgroup.go findCgroups":                "the cgroup2 mount",
+	"internal/trash/restore.go (*Manager).pruneEmptyStamp": "one stamp directory of a root's trash, below the root",
+	"internal/trash/restore.go (*Manager).Sweep":           "one stamp directory of a root's trash, below the root",
+	"internal/trash/trash.go (*Manager).List":              "one stamp directory of a root's trash, below the root",
+	"internal/integrity/inventory.go TakeSidecarInventory": "the variants directory, which resolveSidecarRoot resolves",
+	"cmd/bridge/artwork.go artworkCacheHasOrphans":         "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go runArtworkGC":                   "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go sweepArtworkCache":              "the artwork cache, which artworkWalkRoot resolves",
 }
 
 // TestEveryWalkOfALibraryRootStartsFromWalkableRoot sweeps the bridge's

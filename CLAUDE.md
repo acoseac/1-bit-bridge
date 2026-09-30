@@ -3565,11 +3565,8 @@ no failing test — which is the shape to expect in this area.
   `TestVariantWatcherRefusesATickWhoseVolumeGoesAfterItsLastMissingRow`,
   `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
   `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
-  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**: a
-  mountpoint that already holds any entry when a tick STARTS (a
-  `.DS_Store`, a folder a failed render left) reads as a healthy variants
-  directory, and that tick deletes every row (measured, 40 of 40; B223),
-  and `upscale --gc` re-checks health but not identity (B224). **Pass two
+  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
+  `upscale --gc` re-checks health but not identity (B224). **Pass two
   asks `LocateSidecar` again just before each delete** (`classifyRow`, the
   one per-row verdict both passes use) and deletes only a row still at
   neither location: the checks see a change they observe and nothing
@@ -3578,7 +3575,63 @@ no failing test — which is the shape to expect in this area.
   volume (CodeRabbit on #1127;
   `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete`). A row
   kept there is counted as pass one would have counted it. What stays open
-  is a volume that is gone again at that recheck.
+  is a volume that is gone again at that recheck. A mountpoint that already
+  held an entry when a tick STARTED was open here too, until the next
+  bullet.
+- **…and the probe counts RENDITIONS, not entries: a variants directory
+  holding none is what an unmounted volume looks like, whatever else it
+  holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a
+  directory healthy when it held any entry, and the local directory an
+  unmount leaves holds what was written there while the volume was away
+  (a Finder `.DS_Store`, a README, the folders a render makes before sox
+  writes, which a failed render leaves): one watcher tick deleted all 40
+  rows (measured, five shapes), and `upscale --gc` deleted all 40 after
+  unlinking the `.DS_Store` as an orphan and reading the emptiness as its
+  own work. The serve reap and the delete handler read the same probe.
+  **One walk behind the probe and `TreeHoldsVariantSidecars`**,
+  `scanForRenditions`: a rendition is a file `looksLikeVariantSidecar`
+  names (regular, or a link to one) outside a dot-directory; the
+  filesystem's lost+found counts as nothing; a link to a directory, which
+  it does not follow, keeps the directory healthy (it cannot say what is
+  behind it); it reads each directory a batch at a time and stops at the
+  first rendition (never `filepath.WalkDir`: a whole sorted listing per
+  call, and the delete handler asks once per row that unlinked nothing);
+  and it is ORDER-INDEPENDENT, a directory it cannot list noted and the
+  walk going on, a rendition anywhere answering yes (the WalkDir form
+  stopped at its first error). No rendition is Empty ("is empty" for no
+  entry, "holds no rendition" otherwise); an error with no rendition
+  refuses as unreadable. **The directory cannot tell a lost volume from a
+  tree whose every rendition was deleted by hand, or from a fresh volume**,
+  so all three are refused, and `bridge upscale --gc --allow-mass-delete`
+  is the operator's way past (the background watcher has none): so the
+  watcher mass-deletes only over a tree that still holds a rendition with
+  the relocation guard disabled (`integrity.variantSweepMaxDeletePercent:
+  100`), since a mass that leaves renditions is otherwise the relocation
+  refusal and one that leaves none is this one, at any threshold. **Don't
+  take a lost+found as proof the volume is mounted** (ext-only, stacked
+  mounts, and the rule below makes it evidence neither way), so a fresh
+  ext4 volume, which the sweeps reaped from 2026-09-28, needs the flag.
+  **`upscale --gc` asks the probe BEFORE anything is classified or
+  unlinked** (`gcRefuseUnavailableVariantsDir`), and its reverse guard's
+  Empty exception counts the RENDITIONS the forward sweep's own unlink
+  removed (`runGCForwardSweep`'s `renditionsUnlinked`): never every file,
+  or a removed `.DS_Store` explains an unmounted volume, and never one
+  whose unlink failed or found it already gone, since a volume unmounted
+  between the inventory and the unlinks makes every unlink ENOENT
+  (CodeRabbit on #1129); `--allow-mass-delete` waives
+  the Empty refusal in both and nothing else. **The delete handler keeps a
+  refusal for the rest of its request** until it next unlinks inside the
+  store (`storeRefused`; a refusal only keeps rows), since a tree holding
+  no rendition is read whole on every ask. Tests in eight files asserted the
+  defect (a "healthy" directory holding `sidecar.flac`, a lone folder, the
+  watcher fixtures' `decoy.flac`, a streak ended by removing the last
+  sidecar); fixtures that stand for a mounted volume hold a rendition-named
+  file. `TestVariantWatcherRefusesAMountpointHoldingNoRendition`,
+  `TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`,
+  `TestRunGCReapsATreeWhoseRenditionsWereDeletedByHandWhenAllowed`,
+  `TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable`,
+  `TestTheVariantsDirProbeReadsLinksAndDirectoriesItCannotList`,
+  `TestUpscaleDeleteAsksAnUnavailableStoreOnceUntilItUnlinksFromIt`.
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -3798,6 +3851,9 @@ no failing test — which is the shape to expect in this area.
   read"), and it refused a tree whose sidecars sort after it for the
   error rather than for the sidecars. It is evidence neither way there
   now; any other directory the probe cannot list still fails it closed.
+  Since backlog B223 a fresh volume holding only its lost+found holds no
+  rendition, which the mount-loss probe refuses before `MassDeleteRefusal`
+  is asked (the B223 bullet above): its rows go with `--allow-mass-delete`.
   A Gemini consult was attempted for the `lost+found` trade-off and
   refused by the API's spending cap; the rule is the narrow one, decided
   here.
@@ -3887,7 +3943,10 @@ no failing test — which is the shape to expect in this area.
   serve-time `VariantWatcher` has the same shape one layer over —
   `OrphanSidecarSweeper` can empty a flat directory under it — and is
   deliberately left: it removes nothing itself, so it has no count to be told,
-  and the CLI is the repair tool. (#941)
+  and the CLI is the repair tool. (#941) **Since backlog B223 the count is of
+  RENDITIONS unlinked, and `--allow-mass-delete` reaches this refusal**:
+  "empty" means holds no rendition, and a count of every file let a removed
+  `.DS_Store` explain an unmounted volume (the B223 bullet above).
 
 ### DLNA, UPnP and discovery
 

@@ -59,7 +59,8 @@ var stopGrace = 5 * time.Second
 // Two guards sit between "missing" and "deleted", and each is a kind of
 // refusal (VariantRefusalKind). The mount-loss guard
 // (VariantsDirSweepBlockReason) skips the whole tick when the
-// directory is gone, empty or unreadable while the catalog has rows.
+// directory is gone, holds no rendition (empty, or only what is not a
+// rendition; backlog B223) or is unreadable while the catalog has rows.
 // The relocation guard (MassDeleteRefusal) skips the DELETIONS of a
 // tick that would reap more than
 // cfg.Integrity.VariantSweepMaxDeletePercent of the catalog while
@@ -235,8 +236,8 @@ type SweepReport struct {
 // (`cfg.Upscale.EffectiveVariantsDir`) the sidecar paths live
 // under. Before every sweep the watcher probes it via
 // VariantsDirSweepBlock and skips the whole tick when the
-// directory is missing or empty while rows exist — the signature
-// of a cleanly-unmounted variants volume, where every per-row
+// directory is missing or holds no rendition while rows exist — the
+// signature of a cleanly-unmounted variants volume, where every per-row
 // stat would report ENOENT and an unguarded sweep would
 // mass-delete the catalog (2026-07-21 review H4). It asks again,
 // by identity, as rows read as missing and before it deletes, so a
@@ -388,7 +389,7 @@ func (w *VariantWatcher) currentVariantsDir() string {
 // tick that saw rows; and a refusal through the latch (noteRefusal,
 // noteProceeding). Skips wholesale (nothing touched, a refusal of
 // the mount-loss kind) when the variants dir probe reports missing,
-// empty or unreadable with rows in the catalog — see
+// holding no rendition or unreadable with rows in the catalog — see
 // NewVariantWatcher and VariantsDirSweepBlockReason. Refuses as the
 // same kind, deleting nothing, when the path stops naming the
 // directory that probe saw before the tick deletes: a volume
@@ -422,9 +423,11 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		return SweepReport{}
 	}
 	// Mount-loss guard: rows exist but the whole variants dir is
-	// missing or empty → the volume is almost certainly unmounted
-	// (a clean unmount reverts the mountpoint to an empty local
-	// dir), NOT a library whose every sidecar was individually
+	// missing or holds no rendition → the volume is almost certainly
+	// unmounted (a clean unmount reverts the mountpoint to a local
+	// dir, holding nothing or what was written there while the volume
+	// was away, a .DS_Store or the folders a failed render left:
+	// backlog B223), NOT a library whose every sidecar was individually
 	// deleted. Skip the sweep rather than mass-deleting the
 	// catalog on per-row ENOENTs. Probed per tick so a later
 	// unmount is caught even after healthy ticks. Shares the
@@ -756,8 +759,9 @@ const (
 	// directory still holds sidecar files (MassDeleteRefusal). The tick
 	// adopts what it found and deletes nothing.
 	VariantRefusalRelocation VariantRefusalKind = "relocation"
-	// VariantRefusalVariantsDir: the variants directory is missing, empty,
-	// not a directory or unreadable while the catalog has rows, which is
+	// VariantRefusalVariantsDir: the variants directory is missing, holds
+	// no rendition, is not a directory or is unreadable while the catalog
+	// has rows, which is
 	// what an unmounted volume looks like (VariantsDirSweepBlockReason).
 	// The tick sweeps nothing.
 	VariantRefusalVariantsDir VariantRefusalKind = "variantsDirUnavailable"
@@ -838,12 +842,13 @@ const variantRefusalHint = "if the sidecars really are gone: `bridge upscale --g
 	"starts refusing and once a day while it keeps refusing."
 
 // variantsDirUnavailableHint is the mount-loss refusal's advice.
-const variantsDirUnavailableHint = "no row was deleted. A variants directory that is missing, empty or " +
-	"unreadable while the catalog lists renditions, or that stops being the same directory during a sweep, is " +
-	"what an unmounted volume looks like, and every row would read as a rendition that is gone. Mount the " +
-	"volume, or point the variants directory " +
-	"at where the renditions are; until then a download of a rendition stored there answers 410. This sweep " +
-	"has no override; it logs this when it starts skipping and once a day while it keeps skipping."
+const variantsDirUnavailableHint = "no row was deleted. A variants directory that is missing, holds no " +
+	"rendition (nothing at all, or only files and folders that are not renditions) or is unreadable while the " +
+	"catalog lists renditions, or that stops being the same directory during a sweep, is what an unmounted " +
+	"volume looks like, and every row would read as a rendition that is gone. Mount the volume, or point the " +
+	"variants directory at where the renditions are; until then a download of a rendition stored there answers " +
+	"410. If every rendition was deleted on purpose: `bridge upscale --gc --allow-mass-delete`. This sweep has " +
+	"no override; it logs this when it starts skipping and once a day while it keeps skipping."
 
 // The watcher's lines: the latched WARN of each refusal, the Info line a
 // tick logs when it passes both guards after a streak of either, and the

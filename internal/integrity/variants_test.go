@@ -173,13 +173,20 @@ func TestVariantWatcher_probesTheVariantsDirLivePerTick(t *testing.T) {
 	}
 }
 
-// writeDecoySidecar drops one unreferenced file into dir so the
-// mount-loss guard sees a non-empty variants dir and lets the
-// sweep run — the guard skips sweeps over an empty dir while rows
-// exist (TestVariantWatcher_variantsDirGuard covers the skip side).
+// decoyRendition is the name writeDecoySidecar gives its file: a
+// rendition's, as looksLikeVariantSidecar reads one.
+const decoyRendition = "decoy.flac.upscaled-v2-176400-24.flac"
+
+// writeDecoySidecar drops one unreferenced rendition into dir so the
+// mount-loss guard sees a variants dir that holds one and lets the
+// sweep run — the guard skips sweeps over a dir that holds none while
+// rows exist (TestVariantWatcher_variantsDirGuard covers the skip
+// side). It wrote "decoy.flac" until backlog B223, when a file that is
+// not a rendition stopped keeping the guard out: that is what the local
+// directory under an unmounted mountpoint can hold.
 func writeDecoySidecar(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "decoy.flac"), []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, decoyRendition), []byte("ok"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
@@ -219,7 +226,7 @@ func TestVariantWatcher_missingSidecarTriggersDeleteAndPublish(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// One sidecar exists, one doesn't.
-	presentPath := filepath.Join(tmpDir, "present.flac")
+	presentPath := filepath.Join(tmpDir, "present.flac.upscaled-v2-176400-24.flac")
 	missingPath := filepath.Join(tmpDir, "missing.flac")
 	if err := os.WriteFile(presentPath, []byte("ok"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -374,11 +381,9 @@ func TestVariantWatcher_intervalZeroDisables(t *testing.T) {
 // must NOT abort the loop. The next tick proceeds normally.
 func TestVariantWatcher_listerErrorDoesNotAbortLoop(t *testing.T) {
 	tmpDir := t.TempDir()
-	// Decoy entry so the variants dir is non-empty — the
-	// mount-loss guard skips sweeps over an empty dir.
-	if err := os.WriteFile(filepath.Join(tmpDir, "decoy.flac"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	// A decoy rendition so the variants dir holds one — the
+	// mount-loss guard skips sweeps over a dir that holds none.
+	writeDecoySidecar(t, tmpDir)
 	missingPath := filepath.Join(tmpDir, "missing.flac")
 
 	// While err is set the first call returns the error WITHOUT
@@ -514,7 +519,7 @@ func TestVariantWatcher_variantsDirGuard(t *testing.T) {
 			wantEvts: 0,
 		},
 		{
-			name: "non-empty dir with rows proceeds",
+			name: "a dir holding a rendition, with rows, proceeds",
 			setupDir: func(t *testing.T) string {
 				dir := t.TempDir()
 				writeDecoySidecar(t, dir)
@@ -523,6 +528,22 @@ func TestVariantWatcher_variantsDirGuard(t *testing.T) {
 			rows:     3,
 			wantDel:  3,
 			wantEvts: 1,
+		},
+		{
+			// Backlog B223: what the local directory under an unmounted
+			// mountpoint can hold. This case proceeded, deleting the rows,
+			// until the probe counted renditions rather than entries.
+			name: "a dir holding only a file that is not a rendition, with rows, skips sweep",
+			setupDir: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "decoy.flac"), []byte("ok"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			rows:     3,
+			wantDel:  0,
+			wantEvts: 0,
 		},
 		{
 			name: "zero rows proceeds regardless of missing dir",
