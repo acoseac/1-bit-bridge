@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -209,14 +208,9 @@ type OrphanSidecarSweeper struct {
 	// stopped) leaves it alone: it is evidence of nothing, so it neither
 	// ends a streak nor says the catalog recovered. Owned by the run
 	// goroutine; the tests drive tick directly, never beside a running
-	// loop. A reader on another goroutine reads status instead.
+	// loop. A reader on another goroutine reads Status, which is the
+	// latch's own publication (refusalLatch.status).
 	latch refusalLatch[OrphanRefusalKind]
-
-	// status is the latch as Status reports it: written by the run
-	// goroutine whenever the latch moves, read by the console's /api/jobs
-	// handler. An immutable snapshot behind an atomic pointer, so the
-	// reader takes no lock the tick holds.
-	status atomic.Pointer[OrphanSweepStatus]
 
 	// onTickComplete is a test-only seam — same convention as
 	// VariantWatcher.SetOnTickComplete. Fires AFTER the per-tick
@@ -765,11 +759,7 @@ type orphanTally struct {
 // the ROWS, and in the lost-index and empty-catalog shapes there are none
 // to move (#940).
 func (s *OrphanSidecarSweeper) noteRefusal(now time.Time, root string, r orphanRefusal, orphans []string) {
-	logIt, started := s.latch.refuse(now, r.kind)
-	if started {
-		s.publishStatus()
-	}
-	if !logIt {
+	if !s.latch.refuse(now, r.kind) {
 		return
 	}
 	attrs := []any{slog.String("reason", r.reason), slog.String("variants_dir", root)}
@@ -853,14 +843,7 @@ func OrphanRefusalKinds() []OrphanRefusalKind {
 // says, for a reader on another goroutine: until 2026-09-28 the console's
 // Jobs card said "on" while every tick refused, and only the journal said
 // otherwise.
-type OrphanSweepStatus struct {
-	// Refusing is the kind of refusal the current streak is; empty when
-	// the sweep is not refusing.
-	Refusing OrphanRefusalKind
-	// Since is when the streak started: the first refused tick of it.
-	// Zero when Refusing is empty.
-	Since time.Time
-}
+type OrphanSweepStatus = RefusalStatus[OrphanRefusalKind]
 
 // Status reports the refusal latch as the run goroutine last left it. Safe
 // from any goroutine; the zero value (not refusing) before the first tick
@@ -869,22 +852,13 @@ func (s *OrphanSidecarSweeper) Status() OrphanSweepStatus {
 	if s == nil {
 		return OrphanSweepStatus{}
 	}
-	if p := s.status.Load(); p != nil {
-		return *p
-	}
-	return OrphanSweepStatus{}
-}
-
-// publishStatus stores the latch for Status, as a fresh value each time so
-// a reader never sees one being written.
-func (s *OrphanSidecarSweeper) publishStatus() {
-	s.status.Store(&OrphanSweepStatus{Refusing: s.latch.kind, Since: s.latch.since})
+	return s.latch.status()
 }
 
 // noteProceeding ends a refusal streak: the first tick whose walk finished
 // and whose verdict proceeds says so, once, with the counts it proceeded
-// on, an empty catalog's over a tree with nothing to remove included.
-// Outside a streak it says nothing.
+// on, an empty catalog's over a tree with nothing to remove included, and
+// the kind of refusal that ended. Outside a streak it says nothing.
 //
 // The line claims only that the check passed, because the counts it passed
 // on need not be a recovered catalog: a variants volume unmounted during a
@@ -893,14 +867,15 @@ func (s *OrphanSidecarSweeper) publishStatus() {
 // counts say which it was, and a tree that comes back still stranded
 // starts a new streak with a WARN of its own rather than waiting out a day.
 func (s *OrphanSidecarSweeper) noteProceeding(root string, inv SidecarInventory, rows int) {
-	if !s.latch.lift() {
+	ended := s.latch.lift()
+	if ended == "" {
 		return
 	}
-	s.publishStatus()
 	logger.Info(msgOrphanRefusalLifted,
 		slog.Int("files", inv.Files),
 		slog.Int("orphans", inv.Orphans),
 		slog.Int("rows", rows),
+		slog.String("ended", string(ended)),
 		slog.String("variants_dir", root),
 	)
 }

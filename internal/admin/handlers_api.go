@@ -3303,8 +3303,15 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 	if ps := s.deps.AnalysisPoolStats; ps != nil && resp.Enabled {
 		resp.Pool = ps()
 	}
+	// The sweeper's last-run lines stay whatever the gate says; its next
+	// sweep only while the gate is open, the /api/jobs card's rule
+	// (nextSweepWhileOpen), since this frame paints the same line.
 	if sw := s.deps.AnalysisSweep; sw != nil {
-		resp.Sweep = sw()
+		if st := sw(); st != nil {
+			sweep := *st
+			sweep.NextDueAt = nextSweepWhileOpen(resp.Enabled, sweep.NextDueAt)
+			resp.Sweep = &sweep
+		}
 	}
 	return resp
 }

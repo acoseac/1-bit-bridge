@@ -287,6 +287,12 @@ Concretely:
 - A disabled pass records **no status**. Reporting one puts a "last run"
   timestamp on the Jobs card for work that never happened, which is worse than
   looking stale: it says the feature is doing something.
+- A card sends **no next run** while its gate is closed (`nextSweepWhileOpen`).
+  The loop is armed from the interval whatever the gate says, so the recorder
+  holds a time for a pass that will stand down, and until 2026-09-29 the
+  analysis, fingerprint, CarPlay and smart mixes cards said "off" beside
+  "Next sweep: in 5h" (backlog B156): the same claim as a phantom last run,
+  about the future.
 
 `fingerprint`'s prerequisite probe is **lazy and TTL-cached**, not a boot
 snapshot. `fpcalc -version` is a fork-exec, and charging every bridge for it to

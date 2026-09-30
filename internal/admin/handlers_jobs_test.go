@@ -58,15 +58,60 @@ func TestMaintenanceChipsFollowTheIntervalsNotTheUpscaleFlag(t *testing.T) {
 // words) and when the streak started, and nothing at all while the sweep is
 // not refusing or not running (key absence, not a zero value).
 func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
+	requireTheChipCarriesTheRefusal(t, refusingChip[integrity.OrphanRefusalKind]{
+		wire: func(srv *Server, st func() integrity.OrphanSweepStatus) { srv.deps.OrphanSweepStatus = st },
+		interval: func(c *config.Config, sec *int) {
+			c.Integrity.OrphanSidecarSweepIntervalSec = sec
+		},
+		runningKey: "orphanSidecarGC", kindKey: "orphanSidecarGCRefusal", sinceKey: "orphanSidecarGCRefusingSince",
+		kinds: integrity.OrphanRefusalKinds(),
+	})
+}
+
+// TestMaintenanceChipSaysTheVariantWatcherIsRefusing — the variant
+// integrity watcher refuses, with no override, to delete rows that look
+// relocated, and skips every tick over a variants directory that reads as
+// unmounted; the "Variant integrity" chip said "on" throughout (backlog
+// B131). The same contract as the orphan sweep's chip.
+func TestMaintenanceChipSaysTheVariantWatcherIsRefusing(t *testing.T) {
+	requireTheChipCarriesTheRefusal(t, refusingChip[integrity.VariantRefusalKind]{
+		wire: func(srv *Server, st func() integrity.VariantSweepStatus) { srv.deps.VariantSweepStatus = st },
+		interval: func(c *config.Config, sec *int) {
+			c.Integrity.VariantSweepIntervalSec = sec
+		},
+		runningKey: "variantIntegrityActive", kindKey: "variantIntegrityRefusal", sinceKey: "variantIntegrityRefusingSince",
+		kinds: integrity.VariantRefusalKinds(),
+	})
+}
+
+// refusingChip is one maintenance chip whose sweep can refuse, as a test
+// drives it: how its status closure is wired and its interval moved, the
+// keys /api/jobs sends it under, and every kind its latch can hold.
+type refusingChip[K ~string] struct {
+	wire                          func(*Server, func() integrity.RefusalStatus[K])
+	interval                      func(c *config.Config, sec *int)
+	runningKey, kindKey, sinceKey string
+	kinds                         []K
+}
+
+// requireTheChipCarriesTheRefusal serves /api/jobs over a sweep refusing
+// as each of chip's kinds, not refusing, and refusing with its interval
+// off, and requires the chip to carry the kind and its start only in the
+// first case.
+func requireTheChipCarriesTheRefusal[K ~string](t *testing.T, chip refusingChip[K]) {
+	t.Helper()
+	if len(chip.kinds) < 2 {
+		t.Fatalf("only %d kind(s) to drive; the list is broken, so this test proves nothing", len(chip.kinds))
+	}
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
 	since := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
-	status := integrity.OrphanSweepStatus{Refusing: integrity.OrphanRefusalMassOrphans, Since: since}
-	srv.deps.OrphanSweepStatus = func() integrity.OrphanSweepStatus { return status }
+	status := integrity.RefusalStatus[K]{Refusing: chip.kinds[0], Since: since}
+	chip.wire(srv, func() integrity.RefusalStatus[K] { return status })
 	on, off := 3600, 0
 	setInterval := func(sec *int) {
 		next := config.Clone(srv.deps.CfgHolder.Load())
-		next.Integrity.OrphanSidecarSweepIntervalSec = sec
+		chip.interval(next, sec)
 		srv.deps.CfgHolder.Store(next)
 	}
 	raw := func() map[string]any {
@@ -82,24 +127,25 @@ func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
 
 	setInterval(&on)
 	mt := raw()
-	if mt["orphanSidecarGC"] != true || mt["orphanSidecarGCRefusal"] != "massOrphans" {
-		t.Errorf("a refusing sweep: %v, want orphanSidecarGC true and the massOrphans key", mt)
+	if mt[chip.runningKey] != true || mt[chip.kindKey] != string(chip.kinds[0]) {
+		t.Errorf("a refusing sweep: %v, want %s true and the %s key", mt, chip.runningKey, chip.kinds[0])
 	}
-	if got, _ := mt["orphanSidecarGCRefusingSince"].(string); got != since.Format(time.RFC3339) {
-		t.Errorf("orphanSidecarGCRefusingSince = %q, want %q", got, since.Format(time.RFC3339))
+	if got, _ := mt[chip.sinceKey].(string); got != since.Format(time.RFC3339) {
+		t.Errorf("%s = %q, want %q", chip.sinceKey, got, since.Format(time.RFC3339))
 	}
 
 	// Every kind reaches the payload as its key: the console words it
-	// (TestEveryOrphanRefusalKindIsWorded), and the key is what it switches on.
-	for _, k := range integrity.OrphanRefusalKinds() {
+	// (TestEveryOrphanRefusalKindIsWorded, TestEveryVariantRefusalKindIsWorded),
+	// and the key is what it switches on.
+	for _, k := range chip.kinds {
 		status.Refusing = k
-		if got := raw()["orphanSidecarGCRefusal"]; got != string(k) {
+		if got := raw()[chip.kindKey]; got != string(k) {
 			t.Errorf("the %s refusal reads %v, want its key", k, got)
 		}
 	}
 
-	status = integrity.OrphanSweepStatus{}
-	for _, key := range []string{"orphanSidecarGCRefusal", "orphanSidecarGCRefusingSince"} {
+	status = integrity.RefusalStatus[K]{}
+	for _, key := range []string{chip.kindKey, chip.sinceKey} {
 		if v, present := raw()[key]; present {
 			t.Errorf("a sweep that is not refusing still sends %s = %v", key, v)
 		}
@@ -107,11 +153,11 @@ func TestMaintenanceChipSaysTheOrphanSweepIsRefusing(t *testing.T) {
 
 	// A latch the interval now says is off describes a sweep that is not
 	// there: the chip reads the interval, and nothing about a refusal.
-	status = integrity.OrphanSweepStatus{Refusing: integrity.OrphanRefusalMassOrphans, Since: since}
+	status = integrity.RefusalStatus[K]{Refusing: chip.kinds[0], Since: since}
 	setInterval(&off)
 	mt = raw()
-	if _, present := mt["orphanSidecarGCRefusal"]; present || mt["orphanSidecarGC"] != false {
-		t.Errorf("an orphan GC turned off: %v, want it off with no refusal", mt)
+	if _, present := mt[chip.kindKey]; present || mt[chip.runningKey] != false {
+		t.Errorf("a sweep turned off: %v, want it off with no refusal", mt)
 	}
 }
 

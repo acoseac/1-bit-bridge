@@ -133,30 +133,39 @@ func TestOrphanSidecarSweeperStatusIsReadableBesideTheRunningLoop(t *testing.T) 
 // reads the package's source for every constant of type OrphanRefusalKind
 // and requires the list to hold exactly those.
 func TestEveryOrphanRefusalKindIsListed(t *testing.T) {
-	declared := declaredOrphanRefusalKinds(t)
-	if len(declared) < 3 {
-		t.Fatalf("found %d OrphanRefusalKind constant(s); the scan has drifted, so this test proves nothing", len(declared))
+	requireEveryKindIsListed(t, "OrphanRefusalKind", "OrphanRefusalKinds", 3, OrphanRefusalKinds())
+}
+
+// requireEveryKindIsListed requires listed, what the function named
+// listFn returns, to hold exactly the values of the constants this
+// package's non-test source declares with type typeName, of which there
+// are at least floor: fewer means the scan has drifted and proves nothing.
+func requireEveryKindIsListed[K ~string](t *testing.T, typeName, listFn string, floor int, listed []K) {
+	t.Helper()
+	declared := declaredConstantsOfType(t, typeName)
+	if len(declared) < floor {
+		t.Fatalf("found %d %s constant(s); the scan has drifted, so this test proves nothing", len(declared), typeName)
 	}
-	listed := map[string]bool{}
-	for _, k := range OrphanRefusalKinds() {
-		listed[string(k)] = true
+	inList := map[string]bool{}
+	for _, k := range listed {
+		inList[string(k)] = true
 		if !declared[string(k)] {
-			t.Errorf("OrphanRefusalKinds lists %q, which no constant declares", k)
+			t.Errorf("%s lists %q, which no constant declares", listFn, k)
 		}
 	}
 	for k := range declared {
-		if !listed[k] {
-			t.Errorf("the kind %q is declared and not in OrphanRefusalKinds: the console's wording test cannot see it", k)
+		if !inList[k] {
+			t.Errorf("the kind %q is declared and not in %s: the console's wording test cannot see it", k, listFn)
 		}
 	}
 }
 
-// declaredOrphanRefusalKinds returns the value of every constant this
-// package's non-test source declares with type OrphanRefusalKind. A file is
-// chosen by its name before it is opened: the go tool compiles no `.`- or
+// declaredConstantsOfType returns the value of every constant this
+// package's non-test source declares with type typeName. A file is chosen
+// by its name before it is opened: the go tool compiles no `.`- or
 // `_`-prefixed file, and an editor's `.#name.go` lock can be a dangling
 // symlink.
-func declaredOrphanRefusalKinds(t *testing.T) map[string]bool {
+func declaredConstantsOfType(t *testing.T, typeName string) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -164,12 +173,10 @@ func declaredOrphanRefusalKinds(t *testing.T) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
-			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		if !isPackageSource(e) {
 			continue
 		}
-		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		f, err := parser.ParseFile(token.NewFileSet(), e.Name(), nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,21 +185,36 @@ func declaredOrphanRefusalKinds(t *testing.T) map[string]bool {
 			if !ok {
 				return true
 			}
-			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "OrphanRefusalKind" {
-				return false
-			}
-			for _, v := range vs.Values {
-				lit, ok := v.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					t.Errorf("%s: an OrphanRefusalKind constant whose value is not a string literal; this test cannot read it", name)
-					continue
-				}
-				if s, err := strconv.Unquote(lit.Value); err == nil {
-					out[s] = true
-				}
+			if id, ok := vs.Type.(*ast.Ident); ok && id.Name == typeName {
+				addStringLiterals(t, e.Name(), typeName, vs.Values, out)
 			}
 			return false
 		})
 	}
 	return out
+}
+
+// isPackageSource reports, from the entry's name alone, whether it is a Go
+// file the package's build compiles and not a test.
+func isPackageSource(e os.DirEntry) bool {
+	name := e.Name()
+	return !e.IsDir() && strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") &&
+		!strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
+}
+
+// addStringLiterals adds to out the value of each of a typeName constant's
+// values, and reports one that is not a string literal, which this test
+// cannot read.
+func addStringLiterals(t *testing.T, file, typeName string, values []ast.Expr, out map[string]bool) {
+	t.Helper()
+	for _, v := range values {
+		lit, ok := v.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			t.Errorf("%s: a %s constant whose value is not a string literal; this test cannot read it", file, typeName)
+			continue
+		}
+		if s, err := strconv.Unquote(lit.Value); err == nil {
+			out[s] = true
+		}
+	}
 }
