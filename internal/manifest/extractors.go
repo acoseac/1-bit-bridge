@@ -130,6 +130,15 @@ type ExtractContext struct {
 	// test callers that have no root set; only the scanner's workers
 	// need the boundary.
 	LibraryRootDirs map[string]struct{}
+
+	// openAudio, when set, opens the audio file in place of
+	// fsutil.OpenAsFile (openAudioFile). The scan worker copies it from
+	// Scanner.openAudio, a TEST seam; nil in production.
+	openAudio func(abs string) (extractSource, error)
+
+	// reads records the reads of the audio file that did not complete. Set
+	// by ExtractWithContext, on its own copy of the context, for one call.
+	reads *readFaults
 }
 
 // isLibraryRoot reports whether dir (cleaned) is one of the configured
@@ -433,8 +442,10 @@ const ExtractorVersion = 19
 // the scanner; Extract only fills tag/format fields.
 //
 // Missing or unparseable tags are NOT an error — a file with no metadata
-// still gets indexed (we fall back to path-derived heuristics later). Only
-// read/open errors propagate.
+// still gets indexed (we fall back to path-derived heuristics later). What
+// is an error: a file that could not be read whole (ExtractWithContext),
+// and a file the DSF, DFF, AIFF or WAV walk refuses as not its format, which
+// the scanner indexes by name all the same.
 //
 // Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
 // callers (existing tests, anyone with a one-shot tag read) that don't
@@ -464,8 +475,30 @@ func trackLogPath(absPath string, t *Track) string {
 // absent — it never overrides a real tag — and parseLeadingTrackNumber's
 // bounded, punctuation-anchored pattern keeps a year/title prefix from being
 // misread. Bit-exact: a manifest-level fill, not a file edit.
+//
+// A file it could not read whole is an error, readIncompleteError
+// (readFault answers it), whatever the extractor made of it: the open failed,
+// or a read, seek or stat of the file failed with anything but an answer
+// about what the file holds (faultNotingSource says which those are). A
+// parser that drops such a failure and reads on (dhowden answers any read
+// error as a tag it cannot parse, the MP4 walks and the FLAC format read log
+// theirs) leaves a Track built from part of the file, or from nothing of it
+// but the path's guess; the scanner must not write it (backlog B134). What
+// the extractors made of it is left in t, which the caller discards.
 func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	if err := extractByFormat(absPath, t, ec); err != nil {
+	// Every open and read of the audio file goes through openAudioFile,
+	// which notes, in this call's own copy of the context, the first that
+	// did not complete.
+	var run ExtractContext
+	if ec != nil {
+		run = *ec
+	}
+	run.reads = &readFaults{}
+	err := extractByFormat(absPath, t, &run)
+	if run.reads.first != nil {
+		return &readIncompleteError{err: run.reads.first}
+	}
+	if err != nil {
 		return err
 	}
 	fillTrackNumberFromFilename(absPath, t)
@@ -542,7 +575,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// ALAC FileType constant). Open the file once for the codec
 	// walk + tag read; rewind in between. Per Gemini A1 / iOS
 	// bug review #1.
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -684,7 +717,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// wrote one, else the first frame's bitrate against the audio
 		// byte span (exact for CBR, the classic estimate for a
 		// header-less VBR file) — see extractMP3Format.
-		f, _, err := fsutil.OpenAsFile(absPath)
+		f, err := openAudioFile(absPath, ec)
 		if err != nil {
 			return err
 		}
@@ -731,7 +764,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// disk this is a no-op (kernel page cache absorbed the second
 		// open before too); on a NAS mount it halves the per-track
 		// network read.
-		f, _, err := fsutil.OpenAsFile(absPath)
+		f, err := openAudioFile(absPath, ec)
 		if err != nil {
 			return err
 		}
@@ -794,7 +827,7 @@ func extractViaDhowden(absPath string, t *Track) error {
 // extractViaDhowdenFromReader directly — see ExtractWithContext for
 // the single-open-then-rewind pattern.
 func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -1852,7 +1885,7 @@ func parseYearPrefix(s string) (int, error) {
 // hands it to extractFLACFormatFromReader. Used by anything outside
 // ExtractWithContext (e.g. tests calling Extract directly).
 func extractFLACFormat(absPath string, t *Track) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, nil)
 	if err != nil {
 		return err
 	}
@@ -2020,7 +2053,7 @@ func extractDSF(absPath string, t *Track) error {
 // cached the same way as MP3 / FLAC / M4A. Folder-level cover.jpg
 // fallback fires whether or not the DSF carried embedded tags.
 func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -2173,7 +2206,7 @@ func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Tra
 func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "DFF"
 
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}

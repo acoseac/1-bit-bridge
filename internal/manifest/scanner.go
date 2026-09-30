@@ -178,6 +178,20 @@ type Scanner struct {
 	// of other tests never see it. Nil in production. Set it before Scan,
 	// never while one runs.
 	openSACD func(abs string) (sacdContainer, error)
+
+	// openAudio, when set, opens an audio file for the extractors in place
+	// of fsutil.OpenAsFile (openAudioFile), the way openSACD opens a
+	// container: a TEST seam, per scanner, through which a test fails an
+	// open or a read where it says, which no file on disk can be made to do
+	// on every platform. Nil in production. Set it before Scan, never while
+	// one runs.
+	openAudio func(abs string) (extractSource, error)
+
+	// unread counts the audio files a scan's workers could not read whole
+	// (keepUnread), for the one line the scan logs about them. Reset at the
+	// start of each Scan and ScanSubtree, which hold mu for their run, and
+	// reported once their workers are done.
+	unread unreadTally
 }
 
 // sacdContainer is what processSACDISO reads an `.iso` container through:
@@ -460,6 +474,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// adds cover.jpg between scans (the scanner re-extracts the track
 	// but the cache still says "absent").
 	s.folderArt = sync.Map{}
+	s.unread.reset()
 	defer s.scanning.Store(false)
 	// Zeroing the clock alongside the flag keeps ScanStalledFor's "no
 	// scan running" answer honest without depending on read ordering
@@ -704,6 +719,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		return count, walkErr
 	}
 	tallies.report()
+	s.unread.report()
 
 	// Deletion pass: anything in the "before" snapshot that we didn't
 	// see in this walk gets its missing_count bumped; rows whose
@@ -1294,6 +1310,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		ArtworkCacheDir: s.artDir,
 		FolderArtCache:  &s.folderArt,
 		LibraryRootDirs: rootDirs,
+		openAudio:       s.openAudio,
 	}
 	for pi := range paths {
 		if ctx.Err() != nil {
@@ -1440,6 +1457,16 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					warnNoLongerAFile(pi.rel, kind)
 					return
 				}
+				if fault := readFault(err); fault != nil {
+					// The file is there and was not read whole: t
+					// is the path's guess, or part of the file,
+					// under the file's own size and mtime, which the
+					// skip gate would trust from the next scan on.
+					s.keepUnread(ctx, pi, existing != nil, fault)
+					return
+				}
+				// A file read whole that its extractor refused (not
+				// its format): indexed by name, as it always was.
 				scanLogger.Error("extract", "path", pi.abs, "err", err)
 			}
 			// Capture-then-call so a concurrent test that nils the
@@ -1507,6 +1534,33 @@ func warnNoLongerAFile(rel, kind string) {
 		"path", rel, "kind", kind)
 }
 
+// keepUnread answers a file the worker could not read whole (readFault: its
+// open, or a read, seek or stat of it, failed with an EIO, an ESTALE, a
+// permission, a file gone since the walk, ...): nothing is written for it.
+// "We could not see this file" dominates, as it does in the deletion pass: a
+// failed read says nothing about what the file holds. So a row it has is kept
+// as it was, stat included, which is what makes the next scan read it again
+// (a changed file's row still carries the old size and mtime; a version-stale
+// one its old version), and a new file gets no row until a scan reads it
+// whole. The row the worker would have written carried the file's own size
+// and mtime with the path's guess at its tags, or part of them, and the skip
+// gate kept it until the file changed again.
+//
+// The row's missing count is reset, as the skip gate resets an unchanged
+// file's: the walk saw the file, and a row the walk sees ends the scan at
+// zero. The scan's one line counts the file (unreadTally).
+func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, fault error) {
+	s.unread.note(pi.rel, fault)
+	if !hasRow {
+		return
+	}
+	if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			scanLogger.Warn("reset missing_count of an unread file", "path", pi.rel, "err", failure)
+		}
+	}
+}
+
 // needsLocalArtworkRecovery reports whether an unchanged-eligible
 // track must still be re-extracted because its locally-curated
 // artwork cache file went missing. Takes the bare ArtworkMBID rather
@@ -1570,7 +1624,12 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 //
 // Failure posture: an EXTRACT error returns nil (skip write AND stamp —
 // the next scan retries; clobbering a good row with a partial extract
-// would be strictly worse, and a transient NAS flap heals itself). A
+// would be strictly worse, and a transient NAS flap heals itself). That
+// includes a read the extractor itself dropped (dhowden answers a failed
+// read as a tag it cannot parse): ExtractWithContext says the file was not
+// read whole (readFault), and until 2026-09-29, when it did not, such a
+// partial extract reached the diff below as a changed row, replaced the
+// stored one and was stamped current, which no later scan re-read. A
 // stored-row LOOKUP failure fails OPEN to the full upsert (today's
 // pre-guard behaviour — churn plus the same bounded post-scan re-fill
 // window the mergePostScanFields maintenance note describes).
@@ -1584,6 +1643,10 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 	if err := ExtractWithContext(pi.abs, t, ec); err != nil {
 		if kind := notAFileNow(pi.abs, err); kind != "" {
 			warnNoLongerAFile(pi.rel, kind)
+			return nil
+		}
+		if fault := readFault(err); fault != nil {
+			s.keepUnread(ctx, pi, true, fault)
 			return nil
 		}
 		scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
@@ -2013,8 +2076,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Same per-scan reset rationale as Scan(): each subtree scan starts
-	// with a fresh folder-art single-flight cache.
+	// with a fresh folder-art single-flight cache, and counts its own
+	// unread files.
 	s.folderArt = sync.Map{}
+	s.unread.reset()
 
 	// Marks a scan in flight for the duplicates sweeper's commit-time
 	// guard. ScanSubtree deliberately does NOT set `scanning` (that is
@@ -2314,6 +2379,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return int(committed.Load()), walkErr
 	}
 	tallies.report()
+	s.unread.report()
 
 	// FUSE drop mode (b), the guard Scan runs after each root's walk, for a
 	// subtree scan of the root: a root that holds nothing, over a store
@@ -3449,6 +3515,42 @@ func (w *walkTallies) noteNotAFile(rel string, m fs.FileMode) {
 func (w *walkTallies) report() {
 	w.unreadable.report("links whose target could not be read; their rows are kept", "err")
 	w.notFiles.report("audio-named entries that are not files; nothing is indexed for them", "kind")
+}
+
+// msgUnreadAudio is the line a scan logs, once, for the audio files its
+// workers could not read whole (keepUnread).
+const msgUnreadAudio = "audio files the scan could not read; their rows are kept as they were, and a new one gets no row until a scan reads it"
+
+// unreadTally is walkTally for the scan's workers, which note concurrently:
+// the audio files they could not read whole, for one line a scan. One line,
+// not one per file: a mount that drops mid-scan fails every open after it,
+// and a file this user may not read fails on every scan until it can.
+type unreadTally struct {
+	mu    sync.Mutex
+	files walkTally
+}
+
+// reset empties the tally, at the start of a scan.
+func (u *unreadTally) reset() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.files = walkTally{}
+}
+
+// note records the file at rel, and the failure that kept it from being
+// read, by its operation and cause (walkErrReason), without the absolute
+// path it names.
+func (u *unreadTally) note(rel string, fault error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.files.note(rel, walkErrReason(fault))
+}
+
+// report logs msgUnreadAudio, once, when the scan noted a file.
+func (u *unreadTally) report() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.files.report(msgUnreadAudio, "err")
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
