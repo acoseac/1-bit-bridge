@@ -51,6 +51,12 @@ func FuzzParseWAVFmtChunk(f *testing.F) {
 		22, 0, 4, 0, 3, 0, 0, 0,
 		0x11, 0x00, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71,
 	})
+	// WAVE_FORMAT_MPEG with MPEG1WAVEFORMAT's extension naming layer III
+	// (fwHeadLayer 4 at [18:20]; CodeRabbit on #1122).
+	f.Add([]byte{
+		0x50, 0x00, 2, 0, 0x44, 0xAC, 0, 0, 0xC0, 0x5D, 0, 0, 1, 0, 0, 0,
+		22, 0, 4, 0, 0, 0xF4, 1, 0, 1, 0, 1, 0, 1, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		var tr Track
 		parseWAVFmtChunk(b, &tr)
