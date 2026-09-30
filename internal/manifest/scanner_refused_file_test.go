@@ -197,6 +197,43 @@ func TestScanner_ARefusedFileIsReadAgainWhenItChanges(t *testing.T) {
 	}
 }
 
+// TestScanner_AFileTheExtractorNowReadsLosesItsRefusal: a row that recorded
+// a refusal whose file the current extractor reads (one that learned to read
+// it, after a version bump) is read once, and stamped as read, its row
+// unmoved since the extraction gives it what it holds, and goes back to the
+// gate every other file takes: a lyrics sidecar added beside it then reaches
+// it.
+func TestScanner_AFileTheExtractorNowReadsLosesItsRefusal(t *testing.T) {
+	f := newArtFixture(t)
+	f.dir(t, filepath.Dir(refusedRel))
+	p := f.path(refusedRel)
+	writeMinimalDSF(t, p, 2822400, map[string]string{"title": "Readable"})
+	setMTime(t, p, t0)
+	f.scan(t, "index")
+	if _, err := f.store.db.Exec(`UPDATE tracks SET extract_refused = 1, extractor_version = ? WHERE path = ?`,
+		ExtractorVersion-1, refusedRel); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := storedRowAt(t, f.store, refusedRel)
+
+	if n := f.scan(t, "the first scan after the bump"); n != 1 {
+		t.Errorf("the file was read %d times, want once", n)
+	}
+	if after, _ := storedRowAt(t, f.store, refusedRel); after.tags != before.tags || after.indexedAt != before.indexedAt || after.extractorVersion != ExtractorVersion {
+		t.Errorf("the row is %+v, want it stamped current and otherwise as it was (%+v)", after, before)
+	}
+	if refusedMark(t, f.store, refusedRel) {
+		t.Error("a file the extractor reads kept the refusal mark")
+	}
+	writeFixtureBytes(t, filepath.Join(filepath.Dir(p), "bad.lrc"), []byte(syncedLRC))
+	if n := f.scan(t, "a lyrics sidecar added"); n != 1 {
+		t.Errorf("the file was read %d times for its new lyrics sidecar, want once", n)
+	}
+	if l, err := f.store.GetLyrics(context.Background(), refusedRel); err != nil || l == nil || l.Source != string(lyrics.SourceSidecarLRC) {
+		t.Errorf("lyrics %+v (%v), want the sidecar's", l, err)
+	}
+}
+
 // syncedLRC is a lyrics sidecar the extraction accepts as a synced document.
 const syncedLRC = "[00:01.00]The first line\n[00:02.00]The second line\n[00:03.00]The third line\n"
 
