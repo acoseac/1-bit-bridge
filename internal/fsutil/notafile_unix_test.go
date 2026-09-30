@@ -13,22 +13,24 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil/fsutiltest"
 )
 
-// openBounded runs fsutil.OpenAsFile(p) within fsutiltest.ServeBound,
-// playing the writer on fifos if it is still waiting then, so a test of the
-// defect neither hangs nor leaves the open behind.
-func openBounded(t *testing.T, p string, fifos ...string) (*os.File, os.FileInfo, error) {
+// within runs fn within fsutiltest.ServeBound, playing the writer on fifos
+// if it is still running then, so a test of the defect neither hangs nor
+// leaves the call behind.
+func within(t *testing.T, label string, fn func(), fifos ...string) {
 	t.Helper()
-	var (
-		f    *os.File
-		info os.FileInfo
-		err  error
-	)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f, info, err = fsutil.OpenAsFile(p)
+		fn()
 	}()
-	fsutiltest.AwaitPastFIFOs(t, "OpenAsFile("+filepath.Base(p)+")", fsutiltest.ServeBound, done, fifos...)
+	fsutiltest.AwaitPastFIFOs(t, label, fsutiltest.ServeBound, done, fifos...)
+}
+
+// openBounded runs fsutil.OpenAsFile(p) within fsutiltest.ServeBound
+// (within).
+func openBounded(t *testing.T, p string, fifos ...string) (f *os.File, info os.FileInfo, err error) {
+	t.Helper()
+	within(t, "OpenAsFile("+filepath.Base(p)+")", func() { f, info, err = fsutil.OpenAsFile(p) }, fifos...)
 	return f, info, err
 }
 
@@ -113,12 +115,7 @@ func TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting(t *testing.T) {
 				body []byte
 				err  error
 			)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				body, err = fsutil.ReadAsFile(filepath.Join(dir, name))
-			}()
-			fsutiltest.AwaitPastFIFOs(t, "ReadAsFile("+name+")", fsutiltest.ServeBound, done, pipe)
+			within(t, "ReadAsFile("+name+")", func() { body, err = fsutil.ReadAsFile(filepath.Join(dir, name)) }, pipe)
 			if body != nil || fsutil.NotAFileKind(err) != kind {
 				t.Errorf("read %d bytes, %v; want the %s refused", len(body), err, kind)
 			}

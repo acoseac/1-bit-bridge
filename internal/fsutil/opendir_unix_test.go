@@ -32,12 +32,7 @@ func TestOpenDirRefusesWhatIsNotADirectoryWithoutWaiting(t *testing.T) {
 				f   *os.File
 				err error
 			)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				f, err = fsutil.OpenDir(filepath.Join(dir, name))
-			}()
-			fsutiltest.AwaitPastFIFOs(t, "OpenDir("+name+")", fsutiltest.ServeBound, done, pipe)
+			within(t, "OpenDir("+name+")", func() { f, err = fsutil.OpenDir(filepath.Join(dir, name)) }, pipe)
 			if f != nil {
 				_ = f.Close()
 				t.Fatalf("opened a %s as a directory", kind)
