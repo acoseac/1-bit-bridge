@@ -14,7 +14,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **43** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **44** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
@@ -24,15 +24,16 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `FuzzTextCandidateClassification`; 39 until 2026-09-28, when
   `internal/manifest` gained `FuzzSACDExpandUnderAReadFault`; 40 until
   2026-09-29, when it gained `FuzzExtractOGG`, 41 until later that day,
-  when it gained `FuzzID3v2WalkAgreesWithDhowden`, and 42 until later still, when
-  it gained `FuzzOggFLACReadsBackTheMetadataItCarries`.) They cover
+  when it gained `FuzzID3v2WalkAgreesWithDhowden`, 42 until later still, when
+  it gained `FuzzOggFLACReadsBackTheMetadataItCarries`, and 43 until backlog B117 added
+  `FuzzDhowdenReadBufferReadsAsItsStreamDoes`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** to get 43 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 42, because
+  **Count them by file:name pair** to get 44 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 43, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -42,7 +43,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Twenty-four carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Twenty-five carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -66,11 +67,15 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   `fuzzExtractOnce`: one extraction allocates no more than `extractionAllocLimit`, 64 MiB
   plus 64 bytes per input byte; the rule is under **Scanner**),
   `FuzzID3v2WalkAgreesWithDhowden` (wherever dhowden reads an ID3v2 tag, the ID3v2 guard's
-  walk counts what dhowden stores, per frame id; the rule is under **Scanner** too) and
+  walk counts what dhowden stores, per frame id; the rule is under **Scanner** too),
   `FuzzOggFLACReadsBackTheMetadataItCarries` (a FLAC stream's metadata laid out as Ogg FLAC
-  pages of any size reads back byte for byte as a .flac file's; also under **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
+  pages of any size reads back byte for byte as a .flac file's; also under **Scanner**) and
+  `FuzzDhowdenReadBufferReadsAsItsStreamDoes` (the page buffer dhowden reads through holds
+  the bytes its stream holds, where it holds them, over any tape of reads and seeks; under
+  **Scanner**). This said "Four" until 2026-09-28, while eight more were added beside
   them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
-  2026-09-29, "Twenty-two" until later that day, and "Twenty-three" until later still: **count them
+  2026-09-29, "Twenty-two" until later that day, "Twenty-three" until later still, and
+  "Twenty-four" until backlog B117: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of
@@ -1192,6 +1197,36 @@ lost my library."
   containers, and ffmpeg); `TestPicardsID3v2IdsAndReplayGainReachTheirFields`,
   `TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes` (each case twenty times: a map-order
   winner flaps) and `TestScanner_V19_ATagNamingItsIDsJoinsTheDelta_APlainID3RowOnlyStamps`.
+- **Every dhowden read goes through `dhowdenReadBuffer`, a page at a time**
+  (2026-09-29, backlog B117). dhowden's `unsynchroniser.Read` reads its stream ONE BYTE
+  per Read call, and the extractors handed dhowden the `*os.File`, so every byte of an
+  ID3v2 tag carrying the unsynchronisation flag was a read(2): measured on the dev Mac, a
+  10 MB such tag took 3.8 s to extract (6.5 s in a Linux container), and the 512 MiB
+  the size field admits would hold a scan worker for minutes while `Scan` holds the
+  scanner's mutex. Now 62 ms. Each call (`tag.ReadFrom` in `readDhowdenTags`,
+  `tag.ReadID3v2Tags` in the DSF extractor and in `applyEmbeddedID3`) reads the stream
+  `newDhowdenReadBuffer` returns and calls its release after. **The buffer is the stream,
+  read ahead**: it holds the stream's bytes from where the stream was, answers a Seek
+  landing within them without touching the stream (ReadFrom's `Seek(-11,
+  io.SeekCurrent)`, dhowden's short skips), hands any other Seek to the stream with its
+  result and error, and hands a Read of a page or more, once drained, straight to the
+  stream (a cover is not copied twice), an empty Read too. **release is load-bearing**:
+  it puts the stream where dhowden's reading got to, so what reads the file after (the
+  FLAC multi-value pass, the MP4 genre walk) finds it as before. **The guards still walk
+  the bare stream**, before the buffer exists, and `TestDhowdenReadsTheSameThroughTheBuffer`
+  is what keeps them seeing what dhowden reads: over every kind of stream dhowden reads
+  (the committed Picard, ffmpeg, iTunes and Ogg FLAC fixtures, the B101 shapes, a FLAC,
+  an ID3v1-only file, a DSF, unsynchronised tags) it answers through the buffer exactly as
+  bare: error, raw map, picture and final offset. **The common path got faster, not
+  slower**: dhowden reads a frame's id, size and flags a read each, and those now come
+  from memory (through dhowden alone, 50 reads to 1 on a Picard MP3, 104 to 3 on an M4A;
+  through `ExtractWithContext`, 95 to 80 µs and 144 to 108 µs), for 4 KB more allocated and
+  up to a page more read after a far seek. `TestEveryDhowdenReadIsGuarded` requires each
+  dhowden read to take the stream a `newDhowdenReadBuffer` in its function returned, the
+  in-memory AIFF/WAV chunk included (one rule, and a buffer costs it nothing), and
+  `FuzzDhowdenReadBufferReadsAsItsStreamDoes` holds the buffer to a bare `bytes.Reader`
+  over a tape of reads and seeks (a seek window one byte too wide, a control, fell to it
+  in 4 s; that input is a seed). No `ExtractorVersion` bump: dhowden reads the same bytes.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
