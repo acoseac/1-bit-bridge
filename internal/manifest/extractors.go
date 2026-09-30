@@ -21,6 +21,7 @@ import (
 	"github.com/mewkiz/flac/meta"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // maxArtworkBytes caps the per-image bytes the local-artwork extractor
@@ -541,7 +542,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// ALAC FileType constant). Open the file once for the codec
 	// walk + tag read; rewind in between. Per Gemini A1 / iOS
 	// bug review #1.
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -683,7 +684,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// wrote one, else the first frame's bitrate against the audio
 		// byte span (exact for CBR, the classic estimate for a
 		// header-less VBR file) — see extractMP3Format.
-		f, err := os.Open(absPath)
+		f, _, err := fsutil.OpenAsFile(absPath)
 		if err != nil {
 			return err
 		}
@@ -730,7 +731,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// disk this is a no-op (kernel page cache absorbed the second
 		// open before too); on a NAS mount it halves the per-track
 		// network read.
-		f, err := os.Open(absPath)
+		f, _, err := fsutil.OpenAsFile(absPath)
 		if err != nil {
 			return err
 		}
@@ -793,7 +794,7 @@ func extractViaDhowden(absPath string, t *Track) error {
 // extractViaDhowdenFromReader directly — see ExtractWithContext for
 // the single-open-then-rewind pattern.
 func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -1851,7 +1852,7 @@ func parseYearPrefix(s string) (int, error) {
 // hands it to extractFLACFormatFromReader. Used by anything outside
 // ExtractWithContext (e.g. tests calling Extract directly).
 func extractFLACFormat(absPath string, t *Track) error {
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -2019,7 +2020,7 @@ func extractDSF(absPath string, t *Track) error {
 // cached the same way as MP3 / FLAC / M4A. Folder-level cover.jpg
 // fallback fires whether or not the DSF carried embedded tags.
 func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -2172,7 +2173,7 @@ func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Tra
 func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "DFF"
 
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -3038,7 +3039,7 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 				"path", full, "bytes", info.Size(), "cap", maxArtworkBytes)
 			continue
 		}
-		data, err := os.ReadFile(full)
+		data, err := readFolderArt(full, info)
 		if err != nil {
 			scanLogger.Warn("folder-art read", "path", full, "err", err)
 			continue
@@ -3061,6 +3062,25 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 		// in case the directory has another candidate (rare).
 	}
 	return folderArtResult{}
+}
+
+// readFolderArt reads a folder-art candidate whose stat is info, and refuses
+// one that does not open as a file (fsutil.NotAFile) on that stat, so a
+// device named cover.jpg is never opened, and on the opened file's own stat
+// (fsutil.ReadAsFile), so one replaced since the stat is judged as what it
+// is now.
+//
+// The walk judges only audio-named entries, so nothing else stood between a
+// candidate's name and its read: until 2026-09-29 a named pipe called
+// cover.jpg held the scan worker that read it, and with it the scan, until
+// something wrote to the pipe, and a link to /dev/zero called cover.jpg (its
+// stat says 0 bytes, under the cap) was read until the process ran out of
+// memory.
+func readFolderArt(full string, info os.FileInfo) ([]byte, error) {
+	if kind := fsutil.NotAFile(info.Mode()); kind != "" {
+		return nil, &os.PathError{Op: "open", Path: full, Err: &fsutil.NotAFileError{Kind: kind}}
+	}
+	return fsutil.ReadAsFile(full)
 }
 
 // stampLocalArtwork hashes data, computes the local-<hash> sentinel,
