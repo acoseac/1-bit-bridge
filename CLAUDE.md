@@ -701,8 +701,9 @@ lost my library."
   `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`). **A
   file its extractor refuses** (read whole, not its format, written by
   name) records `folderArtNotLookedKey` ("-"), which the gate never
-  re-checks, and one the gate re-reads records it through
-  `SetFolderArtKey`, without which it was re-read every scan. **The
+  re-checks, and one the gate re-reads records it through the stamp of
+  its refusal (the next bullet), without which it was re-read every
+  scan (`SetFolderArtKey`, which recorded it alone, went with B145). **The
   upgrade**: existing rows' key is '', which is also the key of a folder
   with no cover, so the first scan re-reads, once, the tracks in folders
   that hold one. **No `ExtractorVersion` bump**: what extraction produces
@@ -714,6 +715,51 @@ lost my library."
   place at the same size inside one mtime tick (the audio gate's own), and
   a stale `local-` value from a cover removed BEFORE the upgrade (its folder
   keys to '' like its row; the next `ExtractorVersion` bump drops it).
+- **…and a file its extractor REFUSES records the refusal, and the skip
+  gate asks its row nothing more until the file or the extractor changes**
+  (2026-09-29, backlog B145). A refusal is a read that completed and was
+  refused as not its format (the DSF, DFF, AIFF and WAV walks, for a header
+  that is not one; every other extractor reads what it can and refuses
+  nothing), indexed by its name as it always was. Such a file was re-read,
+  with an ERROR line, on every scan, forever: after any `ExtractorVersion`
+  bump, since `reExtractUnchanged` answered a refusal with nil and stamped
+  nothing; and with no bump at all beside a lyrics sidecar (`bad.dsf` +
+  `bad.lrc`) or when its row names a `local-` cache file that is gone,
+  since those gate questions ask about what the extraction of a refused file
+  never reaches (measured with the real scanner, all red on main). **Every
+  row records whether the extraction it was written or stamped from refused
+  the file** (`tracks.extract_refused`, v50, column-only,
+  `Track.extractRefused`), and `rowIsCurrent` answers yes for a refused row
+  at the current version without asking the lyrics, art-recovery or
+  folder-art question. **A refusal on the version-stale leg is stamped,
+  never written**: `reExtractUnchanged` hands the writer a
+  `versionStampOnly` Track with `extractRefused`, and
+  `StampExtractorVersionBatch` records the version, the mark, the
+  missing-count reset and the refusal's folder-art key ("-"), and SKIPS
+  the lyrics write, which reads a refusal as a file with no lyrics and
+  deletes a row an older extractor wrote. Tags, `indexed_at` and
+  `enriched_at` are untouched, so nothing reaches a paired device. **Don't
+  rewrite the row**: it may hold tags an older extractor read before a
+  stricter one refused the file
+  (`TestScanner_ARefusalKeepsTheRowAnOlderExtractorWrote`). **Every other
+  write clears the mark** (both upserts from the Track, the stamp from a
+  Track that read), so a file that reads again, changed or under an
+  extractor that learned to read it, goes back to the gate every file takes
+  (`TestScanner_AFileTheExtractorNowReadsLosesItsRefusal`). **B134's line
+  holds**: only a completed read can refuse, `readFault` is asked FIRST, and
+  a read fault keeps the row at its stale version for the next scan
+  (`TestScanner_ARefusedFileWhoseReadDidNotCompleteIsReadAgain`). **A
+  refusal is logged once per path, size and mtime**, the analysis strike's
+  dedup: the full path logs each refusal it writes (it reads only a file no
+  row describes), and the version-stale leg only when the row had not
+  recorded one, so a later bump re-reads a refused file once, silently.
+  **No `ExtractorVersion` bump**: extraction is unchanged. v50 leaves
+  existing rows unmarked, so a refused file the gate goes back to (after a
+  bump, or for one of those questions) is read, and logged, once more, and
+  marked then. Residual: a refused row holding a `local-` value an older
+  extractor gave it, whose cache file is gone, keeps it (a refusal cannot
+  recover it, and the row is not rewritten); it no longer costs a read per
+  scan.
 - **A library ROOT that is itself a link to a directory is walked THROUGH,
   and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
   backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
@@ -1066,7 +1112,9 @@ lost my library."
   must stay ≥ 1 — at 0 the `stored >= current` gate never re-extracts), and keep
   `= excluded.extractor_version` in both upserts. A bump re-extracts the library
   once; the **version-stale diff-guard** (`reExtractUnchanged`) is what keeps the
-  client delta bounded to rows that actually changed. **Derive that guard's
+  client delta bounded to rows that actually changed, and it stamps a file its
+  extractor refuses too, or that file is re-read every scan after the bump
+  (the B145 bullet above). **Derive that guard's
   merge set by grepping the actual `tags_json` writers, not from what a field
   "looks like"** — `MusicBrainzTrackID` was omitted on the belief it was
   extractor-owned when the acoustic fallback writes it.
