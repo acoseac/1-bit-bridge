@@ -35229,3 +35229,11 @@ back down after "Install & restart" or an auto-install. Run
 `bridge restart` once after that update. From v0.2.1 on a restart from the
 console relaunches the bridge (and a Windows service installed by v0.2.0
 gains its recovery actions at its first start under v0.2.1).
+
+### Review
+
+SonarCloud failed the PR's quality gate (Security Rating on New Code B) on
+one `go:S4036` in `runLaunchctl`: `exec.Command("launchctl", …)` by its bare
+name, in a function this change added. Every launchctl the file runs now
+names `launchctlBin`, `/bin/launchctl`, where macOS keeps it on the sealed
+system volume. CodeRabbit's first pass had no actionable comments.

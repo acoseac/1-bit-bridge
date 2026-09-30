@@ -7826,6 +7826,14 @@ its twin.** The top list is older, shorter, and read first.
   prefix (`target+r.URL.Path`, `"/moved"+r.URL.Path`) is not. A loop server
   redirects to a fixed path. It is test code and a false positive by
   construction, and a red gate on a PR still buries a real finding.
+- **A new exec site names its binary by an absolute path, or by
+  `exec.LookPath`'s absolute answer, never a bare name.** SonarCloud's
+  `go:S4036` ("Make sure the PATH variable only contains fixed, unwriteable
+  directories") flags `exec.Command("name", …)` as a VULNERABILITY, and one
+  on new code takes Security Rating on New Code to B, which fails the gate:
+  B201's `runLaunchctl` did (#1130), where `launchctlBin` (`/bin/launchctl`,
+  on the sealed system volume) now names it, as `resolveBin` does for the
+  audio tools. Moving an old bare call into a new function counts as new.
 - **A `needs` entry only makes a job WAIT; something has to READ its
   result.** `gate`'s `needs` listed six jobs and its verification step
   checked five, so with `if: always()` a failing `dsd-measure` produced a

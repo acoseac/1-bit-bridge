@@ -29,7 +29,7 @@ func runSystemctlUser(verb string) error {
 // SonarCloud per-PR duplication gate caught it on PR #253 after the
 // first refactor pass).
 func runLaunchctlBootout(plistPath string) error {
-	out, err := exec.Command("launchctl", "bootout", "gui/"+uidString(), plistPath).CombinedOutput()
+	out, err := exec.Command(launchctlBin, "bootout", "gui/"+uidString(), plistPath).CombinedOutput()
 	if err != nil && !bytes.Contains(out, []byte("Could not find")) && !bytes.Contains(out, []byte("not currently loaded")) {
 		return fmt.Errorf("launchctl bootout: %v: %s", err, string(out))
 	}
@@ -82,9 +82,15 @@ func startForOS(kind ServiceKind) error {
 // output: runLaunchctl in production, a stand-in in tests.
 type launchctlRunner func(args ...string) ([]byte, error)
 
+// launchctlBin is where macOS keeps launchctl, on the sealed system
+// volume, so every launchctl this package runs names it absolutely and no
+// PATH entry can stand in for it. That also keeps these exec sites clear
+// of SonarCloud's go:S4036, which flagged the bare name on B201's new one.
+const launchctlBin = "/bin/launchctl"
+
 // runLaunchctl is the launchctlRunner that runs the real launchctl.
 func runLaunchctl(args ...string) ([]byte, error) {
-	return exec.Command("launchctl", args...).CombinedOutput()
+	return exec.Command(launchctlBin, args...).CombinedOutput()
 }
 
 // startLaunchdAgent loads the agent at plistPath into the user's GUI
@@ -132,7 +138,7 @@ func restartForOS(kind ServiceKind) error {
 		if err := runLaunchctlBootout(path); err != nil {
 			return err
 		}
-		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uidString(), path).CombinedOutput()
+		out, err := exec.Command(launchctlBin, "bootstrap", "gui/"+uidString(), path).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("launchctl bootstrap: %v: %s", err, string(out))
 		}
