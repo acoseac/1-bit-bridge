@@ -32,20 +32,22 @@ import (
 
 var logger = logging.Component("enricher")
 
-// mbidValidPattern matches a MusicBrainz UUID. An embedded
-// MUSICBRAINZ_ALBUMID tag is attacker-influenceable — it comes straight
-// from the file's tags via stringOf (which only trims) and flows into the
-// artwork-cache FILE PATH (ArtworkCachePath -> filepath.Join) and outbound
-// CAA/Atlas URLs, so it MUST be validated before use. The /v1/artwork read
-// handler already guards the identical value with the same UUID shape
-// (api/artwork.go mbidPattern) "to prevent traversal and filesystem abuse";
-// this mirrors that guard on the enricher write side. Kept independent of
-// the api package on purpose — the dependency direction is api -> enrich,
-// so enrich must not import api.
-var mbidValidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-
-// isValidMBID reports whether s is a well-formed MusicBrainz UUID.
-func isValidMBID(s string) bool { return mbidValidPattern.MatchString(s) }
+// isValidMBID reports whether s is a well-formed MusicBrainz UUID. An
+// embedded MUSICBRAINZ_ALBUMID tag is attacker-influenceable — it comes
+// straight from the file's tags via stringOf (which only trims) and flows
+// into the artwork-cache FILE PATH (ArtworkCachePath -> filepath.Join) and
+// outbound CAA/Atlas URLs, so it MUST be validated before use. The
+// /v1/artwork read handler already guards the identical value with the same
+// UUID shape (api/artwork.go mbidPattern) "to prevent traversal and
+// filesystem abuse"; this mirrors that guard on the enricher write side.
+// Kept independent of the api package on purpose — the dependency direction
+// is api -> enrich, so enrich must not import api.
+//
+// The shape is manifest.IsValidMBID's, the one the version-stale merge reads
+// a file's id by: what this refuses and replaces, the merge reads as no id,
+// so it keeps the replacement (backlog B188). It was a copy of the pattern
+// until then.
+func isValidMBID(s string) bool { return manifest.IsValidMBID(s) }
 
 // IsValidMBID is isValidMBID exported for the WRITE sides outside this
 // package, the same reason api.IsValidBookletMBID is exported: the value
@@ -369,7 +371,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// MkdirAll+renames. Treating it as ABSENT lets the track fall through to the
 	// normal name-based search path below — identical to a file that carried no
 	// MBID tag at all, so there is no new match-quality risk (that path already
-	// exists). See mbidValidPattern.
+	// exists). See isValidMBID.
 	if t.MusicBrainzAlbumID != "" && !isValidMBID(t.MusicBrainzAlbumID) {
 		// Bound the untrusted tag value before logging: the length cap defends
 		// against log flooding from a hostile tag, and slog's text + JSON
