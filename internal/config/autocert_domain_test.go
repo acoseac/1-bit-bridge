@@ -54,6 +54,11 @@ var autocertHostCases = []struct{ name, in, want string }{
 	{"all of them", "https://user:" + credentialSecret + "@bridge.example.test:8443/" + credentialSecret +
 		"?k=" + credentialSecret + "#" + credentialSecret, "bridge.example.test"},
 	{"a token as the user name of an IPv6 address", credentialSecret + "@[2001:db8::1]:8443", "[2001:db8::1]"},
+	// An address without brackets after user information, or before a
+	// path, is kept as written too: url.Parse misreads it there as well.
+	{"a password and an IPv6 address without brackets", "user:" + credentialSecret + "@2001:db8::1", "2001:db8::1"},
+	{"a scheme, an IPv6 address without brackets and a path", "https://2001:db8::1/" + credentialSecret, "2001:db8::1"},
+	{"a password and an IPv4 address", "user:" + credentialSecret + "@192.0.2.10", "192.0.2.10"},
 
 	// A value that names no host that can be read.
 	{"a password and no host", "user:" + credentialSecret + "@", ""},
@@ -148,9 +153,13 @@ func TestNormalizeServesAutocertDomainAsItsHost(t *testing.T) {
 					t.Errorf("want one %q line and no other: %q", autocertDomainNamesNoHost, rec.Failures())
 				}
 			case tc.want != strings.TrimSpace(tc.in):
+				origin := urlOriginForLog("https://" + hostForURL(want))
+				if origin == "" {
+					t.Fatalf("no scheme and host can be read from https://%s; the warning could name only the field", hostForURL(want))
+				}
 				if len(reduced) != 1 || len(noHost) != 0 {
 					t.Errorf("want one %q line and no other: %q", autocertDomainServedAsItsHost, rec.Failures())
-				} else if field := "autocert.domain (" + urlOriginForLog("https://"+want) + ")"; !strings.Contains(reduced[0], field) {
+				} else if field := "autocert.domain (" + origin + ")"; !strings.Contains(reduced[0], field) {
 					t.Errorf("the warning does not name the field by scheme and host as %q: %s", field, reduced[0])
 				}
 			default:

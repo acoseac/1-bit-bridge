@@ -1473,10 +1473,14 @@ const (
 // user name and password, a port, a path, a query or a fragment.
 //
 // Three rules keep what it returns clean:
-//   - An IP address written alone is returned as written: url.Parse reads
-//     one written without brackets wrongly (2001:db8::1 as the host
-//     2001:db8: and the port 1), and the console's Origin allowlist
-//     compares it with a browser's Origin as written.
+//   - An IP address, once a scheme, user information, a path, a query and
+//     a fragment are removed, is returned as written: url.Parse reads one
+//     written without brackets wrongly (2001:db8::1, alone or after
+//     `user@`, as the host 2001:db8: and the port 1). Not bracketed
+//     either: the console's Origin allowlist compares the domain with a
+//     browser's Origin hostname, which carries no brackets, so an
+//     unbracketed address is the one it can match. The URL public mode
+//     builds from such a domain is not a valid one; that is backlog B144.
 //   - Nothing that precedes an "@" is ever returned. An "@" after the first
 //     "/", "?" or "#" could as well end user information a hand edit left
 //     unescaped (url.Parse reads user:12/34@host as the host "user" and the
@@ -1493,15 +1497,22 @@ func AutocertHost(value string) string {
 	if v == "" {
 		return ""
 	}
-	if _, err := netip.ParseAddr(v); err == nil {
-		return v
-	}
 	rest := v
 	if i := strings.Index(v, "://"); i > 0 && isURLScheme(v[:i]) {
 		rest = v[i+len("://"):]
 	}
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 && strings.Contains(rest[i:], "@") {
-		return ""
+	authority := rest
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		if strings.Contains(rest[i:], "@") {
+			return ""
+		}
+		authority = rest[:i]
+	}
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+	if _, err := netip.ParseAddr(authority); err == nil {
+		return authority
 	}
 	u, err := url.Parse("//" + rest)
 	if err != nil {
@@ -1526,6 +1537,18 @@ func isURLScheme(s string) bool {
 		}
 	}
 	return s != ""
+}
+
+// hostForURL writes host, a host AutocertHost returned, as a URL's
+// authority writes one: an IPv6 address written without brackets in
+// brackets, its zone escaped, and anything else as it is. Only for naming the
+// field in Normalize's warning (urlFieldForLog cannot read
+// `https://2001:db8::1`); the stored domain keeps its own spelling.
+func hostForURL(host string) string {
+	if ip, err := netip.ParseAddr(host); err == nil && ip.Is6() {
+		return "[" + strings.ReplaceAll(host, "%", "%25") + "]"
+	}
+	return host
 }
 
 // listenAddrIsPort443 reports whether the configured ListenAddress
@@ -3006,7 +3029,7 @@ func (c *Config) Normalize() error {
 				d = InvalidAutocertDomain
 			case host != d:
 				validateLogger.Warn(autocertDomainServedAsItsHost,
-					"field", urlFieldForLog("autocert.domain", "https://"+host))
+					"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(host)))
 				d = host
 			}
 		}
