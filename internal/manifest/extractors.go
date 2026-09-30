@@ -135,6 +135,10 @@ type ExtractContext struct {
 	// fsutil.OpenAsFile (openAudioFile). The scan worker copies it from
 	// Scanner.openAudio, a TEST seam; nil in production.
 	openAudio func(abs string) (extractSource, error)
+
+	// reads records the reads of the audio file that did not complete. Set
+	// by ExtractWithContext, on its own copy of the context, for one call.
+	reads *readFaults
 }
 
 // isLibraryRoot reports whether dir (cleaned) is one of the configured
@@ -438,8 +442,10 @@ const ExtractorVersion = 19
 // the scanner; Extract only fills tag/format fields.
 //
 // Missing or unparseable tags are NOT an error — a file with no metadata
-// still gets indexed (we fall back to path-derived heuristics later). Only
-// read/open errors propagate.
+// still gets indexed (we fall back to path-derived heuristics later). What
+// is an error: a file that could not be read whole (ExtractWithContext),
+// and a file the DSF, DFF, AIFF or WAV walk refuses as not its format, which
+// the scanner indexes by name all the same.
 //
 // Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
 // callers (existing tests, anyone with a one-shot tag read) that don't
@@ -469,8 +475,30 @@ func trackLogPath(absPath string, t *Track) string {
 // absent — it never overrides a real tag — and parseLeadingTrackNumber's
 // bounded, punctuation-anchored pattern keeps a year/title prefix from being
 // misread. Bit-exact: a manifest-level fill, not a file edit.
+//
+// A file it could not read whole is an error, readIncompleteError
+// (readFault answers it), whatever the extractor made of it: the open failed,
+// or a read, seek or stat of the file failed with anything but an answer
+// about what the file holds (faultNotingSource says which those are). A
+// parser that drops such a failure and reads on (dhowden answers any read
+// error as a tag it cannot parse, the MP4 walks and the FLAC format read log
+// theirs) leaves a Track built from part of the file, or from nothing of it
+// but the path's guess; the scanner must not write it (backlog B134). What
+// the extractors made of it is left in t, which the caller discards.
 func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	if err := extractByFormat(absPath, t, ec); err != nil {
+	// Every open and read of the audio file goes through openAudioFile,
+	// which notes, in this call's own copy of the context, the first that
+	// did not complete.
+	var run ExtractContext
+	if ec != nil {
+		run = *ec
+	}
+	run.reads = &readFaults{}
+	err := extractByFormat(absPath, t, &run)
+	if run.reads.first != nil {
+		return &readIncompleteError{err: run.reads.first}
+	}
+	if err != nil {
 		return err
 	}
 	fillTrackNumberFromFilename(absPath, t)

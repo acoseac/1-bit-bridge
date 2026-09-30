@@ -16,8 +16,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // lockOut makes each path unreadable to this process (chmod 0) and puts the
@@ -77,6 +80,7 @@ func TestScanner_AFileThatCannotBeOpenedIsNotWrittenFromItsPath(t *testing.T) {
 	writeMinimalFLAC(t, changed, 44100, 16, map[string]string{"TITLE": "After"})
 	writeMinimalFLAC(t, fresh, 44100, 16, map[string]string{"TITLE": "New"})
 	lockOut(t, changed, fresh)
+	rec := loggingtest.Record(t)
 	scanOnce(t, f.sc, "the files locked out")
 
 	if title, ok := rowTitle(t, f.store, "Music/Album/01.flac"); !ok || title != "Before" {
@@ -84,6 +88,10 @@ func TestScanner_AFileThatCannotBeOpenedIsNotWrittenFromItsPath(t *testing.T) {
 	}
 	if title, ok := rowTitle(t, f.store, "Music/Album/02.flac"); ok {
 		t.Errorf("the new file got a row it was never read for: title %q", title)
+	}
+	lines := rec.Lines(msgUnreadAudio)
+	if len(lines) != 1 || !strings.Contains(lines[0], "count=2") || !strings.Contains(lines[0], "err=open: permission denied") {
+		t.Errorf("lines %q, want one counting both files, their open refused", lines)
 	}
 
 	letIn(t, changed, fresh)
