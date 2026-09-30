@@ -178,6 +178,14 @@ type Scanner struct {
 	// of other tests never see it. Nil in production. Set it before Scan,
 	// never while one runs.
 	openSACD func(abs string) (sacdContainer, error)
+
+	// openAudio, when set, opens an audio file for the extractors in place
+	// of fsutil.OpenAsFile (openAudioFile), the way openSACD opens a
+	// container: a TEST seam, per scanner, through which a test fails an
+	// open or a read where it says, which no file on disk can be made to do
+	// on every platform. Nil in production. Set it before Scan, never while
+	// one runs.
+	openAudio func(abs string) (extractSource, error)
 }
 
 // sacdContainer is what processSACDISO reads an `.iso` container through:
@@ -1294,6 +1302,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		ArtworkCacheDir: s.artDir,
 		FolderArtCache:  &s.folderArt,
 		LibraryRootDirs: rootDirs,
+		openAudio:       s.openAudio,
 	}
 	for pi := range paths {
 		if ctx.Err() != nil {

@@ -130,6 +130,11 @@ type ExtractContext struct {
 	// test callers that have no root set; only the scanner's workers
 	// need the boundary.
 	LibraryRootDirs map[string]struct{}
+
+	// openAudio, when set, opens the audio file in place of
+	// fsutil.OpenAsFile (openAudioFile). The scan worker copies it from
+	// Scanner.openAudio, a TEST seam; nil in production.
+	openAudio func(abs string) (extractSource, error)
 }
 
 // isLibraryRoot reports whether dir (cleaned) is one of the configured
@@ -542,7 +547,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// ALAC FileType constant). Open the file once for the codec
 	// walk + tag read; rewind in between. Per Gemini A1 / iOS
 	// bug review #1.
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -684,7 +689,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// wrote one, else the first frame's bitrate against the audio
 		// byte span (exact for CBR, the classic estimate for a
 		// header-less VBR file) — see extractMP3Format.
-		f, _, err := fsutil.OpenAsFile(absPath)
+		f, err := openAudioFile(absPath, ec)
 		if err != nil {
 			return err
 		}
@@ -731,7 +736,7 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// disk this is a no-op (kernel page cache absorbed the second
 		// open before too); on a NAS mount it halves the per-track
 		// network read.
-		f, _, err := fsutil.OpenAsFile(absPath)
+		f, err := openAudioFile(absPath, ec)
 		if err != nil {
 			return err
 		}
@@ -794,7 +799,7 @@ func extractViaDhowden(absPath string, t *Track) error {
 // extractViaDhowdenFromReader directly — see ExtractWithContext for
 // the single-open-then-rewind pattern.
 func extractViaDhowdenWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -2020,7 +2025,7 @@ func extractDSF(absPath string, t *Track) error {
 // cached the same way as MP3 / FLAC / M4A. Folder-level cover.jpg
 // fallback fires whether or not the DSF carried embedded tags.
 func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
@@ -2173,7 +2178,7 @@ func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Tra
 func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "DFF"
 
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, ec)
 	if err != nil {
 		return err
 	}
