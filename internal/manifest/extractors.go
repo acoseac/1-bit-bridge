@@ -3071,7 +3071,7 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 // is now.
 //
 // The walk judges only audio-named entries, so nothing else stood between a
-// candidate's name and its read: until 2026-09-30 a named pipe called
+// candidate's name and its read: until 2026-09-29 a named pipe called
 // cover.jpg held the scan worker that read it, and with it the scan, until
 // something wrote to the pipe, and a link to /dev/zero called cover.jpg (its
 // stat says 0 bytes, under the cap) was read until the process ran out of

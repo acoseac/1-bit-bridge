@@ -29,7 +29,7 @@ func listWithin(t *testing.T, srv *Server, tok, rel string, fifos ...string) *ht
 // named pipe between that stat and the open (renamed away, a pipe made at its
 // path) is refused at once, as a directory that could not be opened.
 //
-// Until 2026-09-30 the listing opened it with os.Open, which waits for a
+// Until 2026-09-29 the listing opened it with os.Open, which waits for a
 // writer on a named pipe with nothing that can cancel the wait, so the
 // request stayed until something wrote to the pipe. The window is between two
 // system calls, so the test replaces the directory through the listing's own

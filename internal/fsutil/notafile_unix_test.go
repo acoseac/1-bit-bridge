@@ -98,7 +98,7 @@ func TestOpenAsFileLeavesTheFileItOpensBlocking(t *testing.T) {
 // named by its kind, as OpenAsFile refuses them. os.ReadFile of the pipe
 // waited for a writer, and of a link to /dev/zero read until the process ran
 // out of memory: what the scanner's folder-art and lyrics-sidecar reads did
-// until 2026-09-30.
+// until 2026-09-29.
 func TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting(t *testing.T) {
 	dir := t.TempDir()
 	kinds, pipe := fsutiltest.PlantNotAFiles(t, dir)

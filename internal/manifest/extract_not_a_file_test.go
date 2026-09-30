@@ -307,7 +307,7 @@ func removeOrFatal(t *testing.T, p string) {
 // by what it is, the socket by its stat, since no open reaches one. A real
 // cover beside another album is still stamped, so the lookup did run.
 //
-// Until 2026-09-30 the lookup read a candidate with os.ReadFile after a stat
+// Until 2026-09-29 the lookup read a candidate with os.ReadFile after a stat
 // that judged only its size, so a named pipe called cover.jpg held the scan
 // until something wrote to it, and a link to /dev/zero called cover.jpg was
 // read until the process ran out of memory (measured, ops/engineering-log.md).

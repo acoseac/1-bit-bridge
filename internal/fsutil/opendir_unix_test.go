@@ -18,7 +18,7 @@ import (
 // ENOTDIR at once, and a link to a directory opens, as a linked album
 // directory in a library does. A plain os.Open of the pipe waits for a
 // writer, and nothing can cancel the wait: /v1/list opened the directory it
-// lists that way until 2026-09-30.
+// lists that way until 2026-09-29.
 func TestOpenDirRefusesWhatIsNotADirectoryWithoutWaiting(t *testing.T) {
 	dir := t.TempDir()
 	parked := t.TempDir()

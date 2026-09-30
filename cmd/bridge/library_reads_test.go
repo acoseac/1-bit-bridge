@@ -35,7 +35,7 @@ var libraryReaders = map[string]string{
 //
 // A plain open of a named pipe waits for a writer, and nothing can cancel the
 // wait. The byte routes stopped making one in #1082
-// (TestEveryServedFileIsOpenedAsAFile), and until 2026-09-30 the scanner's
+// (TestEveryServedFileIsOpenedAsAFile), and until 2026-09-29 the scanner's
 // extractors, its folder-art and sidecar reads, the listing's directory open
 // and the analysis and fingerprint reads still did: a file replaced by a named
 // pipe after the walk, or a named pipe called cover.jpg, held a scan worker

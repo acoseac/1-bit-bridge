@@ -12,7 +12,7 @@ import "os"
 // the wait (OpenAsFile's docblock). /v1/list opened the directory it lists,
 // which the resolver's stat had just called one, with os.Open, so a
 // directory replaced by a named pipe between that stat and the open held the
-// request until something wrote to the pipe (until 2026-09-30).
+// request until something wrote to the pipe (until 2026-09-29).
 //
 // On unix the open asks for O_DIRECTORY, which the kernel checks before it
 // opens anything, so a named pipe, a device, a socket or a file is refused
