@@ -35,7 +35,9 @@ import (
 //
 // The default port is stripped so `https://host:443` and `https://host` are
 // the same pin — they address the same endpoint, and an operator may write
-// either (gemini-code-assist on PR #724).
+// either (gemini-code-assist on PR #724). So is an empty one: `https://host:`
+// names no port, which net/http dials on the default, and it was a third
+// spelling of the same endpoint until backlog B97.
 //
 // "Host-less" here means an empty url.URL.Host. A base naming a port and no
 // host (`https://:8443`) reduces to itself, and deliberately so: reducing it
@@ -49,9 +51,9 @@ import (
 // pin is reduced twice on its way to the comparison (config's
 // CanonicalHarvestBaseURL, then the handler's WithAtlasHarvest, which does
 // not trust its caller), and the harvest state store reduces what it loads
-// at every open. So the default port is stripped only from a host it leaves
-// something of: `https://:443` stays itself, a port and no host like
-// `https://:8443`. Stripped, it was `https://`, which reduces to "", so a pin
+// at every open. So a port is stripped only from a host it leaves something
+// of: `https://:443` stays itself, a port and no host like `https://:8443`.
+// Stripped, it was `https://`, which reduces to "", so a pin
 // written `https://:443` reached the handler as "" and left a non-demo
 // bridge unpinned, taking a credential for any host (found by the
 // fixed-point check in TestTheReductions, backlog B97).
@@ -66,7 +68,7 @@ func CanonicalHTTPS(raw string) string {
 		(u.Path != "" && u.Path != "/") {
 		return ""
 	}
-	host := strings.TrimSuffix(u.Host, ":443")
+	host := strings.TrimSuffix(strings.TrimSuffix(u.Host, ":"), ":443")
 	if host == "" {
 		host = u.Host
 	}

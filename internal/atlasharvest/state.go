@@ -111,8 +111,9 @@ func OpenStateStore(path string) (*StateStore, error) {
 // reports true. The sync position stays, as Clear keeps it; a re-provision
 // resets the cursor anyway, since its base differs from "".
 //
-// A base that reduces to the form (a trailing slash, the default port, an
-// uppercase scheme, surrounding space) addresses the same endpoint, so it
+// A base that reduces to the form (a trailing slash, the default port or an
+// empty one, an uppercase scheme, surrounding space) addresses the same
+// endpoint, so it
 // keeps its credential, and is written in the reduced form at the next
 // write. A re-provision of the same host is then not taken for a new Atlas.
 //

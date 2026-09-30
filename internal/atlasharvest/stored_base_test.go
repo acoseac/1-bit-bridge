@@ -322,7 +322,8 @@ func TestSetCredentialRefusesABaseThatIsNotSchemeAndHost(t *testing.T) {
 
 // TestTheStoreHoldsABaseInItsCanonicalForm pins the other half of "one
 // value": a base that reduces to scheme://host (a trailing slash, the default
-// port, an uppercase scheme, surrounding space) is held in that reduced form,
+// port or an empty one, an uppercase scheme, surrounding space) is held in
+// that reduced form,
 // through SetCredential and through a file that holds the long form, which
 // keeps its credential and its sync position. So a re-provision of the same
 // host, which the endpoint sends in the reduced form, is not taken for a new
@@ -332,6 +333,7 @@ func TestTheStoreHoldsABaseInItsCanonicalForm(t *testing.T) {
 	for _, in := range []string{
 		"https://atlas.example/",
 		"https://atlas.example:443",
+		"https://atlas.example:",
 		"HTTPS://atlas.example:443/",
 		" https://atlas.example ",
 	} {

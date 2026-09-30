@@ -21,6 +21,8 @@ func TestTheReductions(t *testing.T) {
 		{"trailing slash", "https://atlas.example/", "https://atlas.example", "https://atlas.example", true},
 		{"the default port", "https://atlas.example:443", "https://atlas.example", "https://atlas.example", true},
 		{"the default port and a slash", "https://atlas.example:443/", "https://atlas.example", "https://atlas.example", true},
+		{"an empty port", "https://atlas.example:", "https://atlas.example", "https://atlas.example", true},
+		{"an empty port on an IPv6 literal", "https://[::1]:", "https://[::1]", "https://[::1]", true},
 		{"another port", "https://atlas.example:8443", "https://atlas.example:8443", "https://atlas.example:8443", true},
 		{"an uppercase scheme", "HTTPS://atlas.example", "https://atlas.example", "https://atlas.example", true},
 		{"surrounding space", " https://atlas.example ", "https://atlas.example", "https://atlas.example", true},
@@ -35,6 +37,7 @@ func TestTheReductions(t *testing.T) {
 		// And the default port is not stripped from it: stripped, it was
 		// `https://`, which reduces to "", unpinned.
 		{"the default port and no host", "https://:443", "https://:443", "", false},
+		{"an empty port and no host", "https://:", "https://:", "", false},
 		{"no host at all", "https://", "", "", false},
 		{"a token as the user name", "https://tok@atlas.example", "", "", true},
 		{"a user name and a password", "https://user:pw@atlas.example", "", "", true},

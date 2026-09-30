@@ -1870,14 +1870,75 @@ no failing test — which is the shape to expect in this area.
   The Atlas premium
   cover fetch builds its request the same way and sends the bearer token
   alone, which the guard withholds from a hop that leaves https as well: its
-  stored base cannot carry user information
-  (`config.CanonicalHTTPSBase` refuses it when it is provisioned), and a
-  hand-edited state file can. iTunes and Deezer take no operator URL.
+  stored base carries no user information (`baseurl.CredentialBase` refuses
+  it when it is provisioned, and the harvest state store drops one a hand
+  edit left in its file: the next bullet), and the fetch goes through the
+  parser all the same, for any other credential source. iTunes and Deezer
+  take no operator URL.
   `TestNoRequestErrorNamesABaseURLsCredential` drives every request either
   client makes against three ways for a mirror to fail and five ways to write a
   credential, and `TestNoLogLineOrSkipDetailCarriesABaseURLsCredential` runs
   the real enricher and searches every line it logs, at every level, without
   regard to case.
+- **…and the harvest credential's stored base is `scheme://host` or
+  nothing, decided at the STORE** (backlog B97, and the stored half of B49).
+  `atlasharvest.StateStore` kept whatever `atlas-harvest.json` held, and the
+  harvest client's submit and poll, the booklet check and fetch, and the
+  lyrics tier build every request URL from it. Measured on main with the
+  real `serve` over a hand-edited file: `WARN atlasharvest.tick_error
+  phase=poll error="Get \"https://s3cret-Pw@127.0.0.1:1/v1/atlas/harvest/results?…\":
+  … connection refused"`, a token written as the user name, whole, on every
+  tick. A path, a query or a fragment reached the same errors; a base
+  written without a scheme (`user:pw@host`) failed `unsupported protocol
+  scheme` with the URL quoted whole and lowercased (search without regard to
+  case); plain http sent `Authorization: Bearer <token>` in the clear; and a
+  port with no host, stored before #1074's check, was dialled on this
+  machine (a TCP connect; the TLS handshake then fails for want of a server
+  name, so the token never left). **Fix it at the store, never per
+  consumer**: #1091's `parseBaseEndpoint` covered the premium fetch alone,
+  and two readers of one stored value disagreed about what they tolerate.
+  `OpenStateStore` reduces a loaded base with `baseurl.CredentialBase`, the
+  reduction `POST /v1/atlas-harvest/credential` stores; a base with no such
+  form is DROPPED with the credential held against it (token and expiry;
+  the sync position stays, as `Clear` keeps it), the drop is WRITTEN BACK so
+  neither stays on disk (a harvest-off revoke must not answer 204 over a
+  credential still in the file), and one `atlasharvest.state.base_refused`
+  Warn names the file and no part of the value. A write-back that fails
+  fails the open, and `serve` runs without the harvest, as for any state
+  file it cannot open. `SetCredential` refuses such a base with an error
+  naming none of it, BEFORE it touches anything (a changed base resets the
+  cursor). A base that reduces (a trailing slash, `:443` or an empty port,
+  an uppercase scheme, space) is held reduced and keeps its credential.
+  **One reduction,
+  in `internal/baseurl`**: `CanonicalHTTPS` (the pin's), `NamesHost` and
+  `CredentialBase` (the canonical form, when it names a host), imported by
+  config, the handler and the store, since `internal/atlasharvest` imports
+  neither config nor enrich; `config.CanonicalHTTPSBase` and
+  `BaseURLNamesHost` are gone, so there is no second copy to drift. **The
+  reduction is a fixed point** (`TestTheReductions` reduces every answer
+  again): the pin is reduced twice, by config and again by
+  `WithAtlasHarvest`, and the store reduces at every open. `https://:443`
+  reduced to `https://` and then to "", so a pin written that way left a
+  non-demo bridge UNPINNED (measured with main's binary: a paired device's
+  credential for `https://attacker.example` answered 200 and was stored);
+  it stays itself now and matches nothing, as a port and no host should.
+  **The harvest tests' fake Atlases are TLS servers** (`httptest.NewTLSServer`,
+  the client given `srv.Client()`), since the store holds an https base or
+  none: one that seeds an http base fails at `SetCredential`, and one that
+  ignored that error would pass having shown nothing
+  (`TestClientTokenRejectedClearsCredential` did, `_ = state.SetCredential`).
+  `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (ten shapes, each
+  searched for the secret without regard to case in every line at every
+  level, and a positive control over a base in the stored form that must
+  connect and log),
+  `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost`,
+  `TestTheStoreHoldsABaseInItsCanonicalForm`,
+  `TestARevokeLeavesNoStoredBaseBehind`,
+  `TestOpeningAStoreThatCannotDropItsBaseFails` and
+  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. Still open: the harvest
+  client's bearer token follows a redirect from https to plain http on the
+  same host, which `guardRedirects` fixed for the enrich clients only
+  (backlog B131).
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
@@ -3355,12 +3416,17 @@ no failing test — which is the shape to expect in this area.
   host, and Go dials it on THIS machine**, so every validator reads
   `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
   to every phone); the harvest credential endpoint answers 400
-  (`config.BaseURLNamesHost`); a configured enrich or harvest base URL of that
+  (`baseurl.CredentialBase`, which asks `baseurl.NamesHost`), and since
+  backlog B97 the harvest state store drops such a base when it opens its
+  file (a base stored before this check was never re-checked); a configured
+  enrich or harvest base URL of that
   shape is WARNED about in `Normalize`, never refused, because it loaded
   before and a refusal stops a bridge from starting after an update. **Don't
-  move the host test into `CanonicalHTTPSBase`'s reduction**: a hostless pin
+  move the host test into `baseurl.CanonicalHTTPS`'s reduction**: a hostless pin
   would reduce to "" (unpinned) or, through `Validate`, refuse to load; as it
-  stands it pins to a value no accepted credential can carry. **A warning
+  stands it pins to a value no accepted credential can carry (`https://:443`
+  too, since B97: it reduced to `https://`, which the handler's second
+  reduction made "", unpinned). **A warning
   about a configured URL logs its scheme and host alone**
   (`urlOriginForLog`), never the value (review round 1 on #1074): an enrich
   base accepts userinfo, so `http://user:password@:5000` reached the journal
@@ -6178,8 +6244,11 @@ its twin.** The top list is older, shorter, and read first.
   carries the base URL, so whoever sets it chooses where bios come from, and
   those render as an attacker-chosen "Read more on …" link. A pin binds in every
   mode; unpinned is refused in demo and still allowed off-demo. Both sides of
-  the comparison must go through `CanonicalHTTPSBase`, or a one-sided reduction
-  turns a correct pin into a mismatch that fails closed.
+  the comparison must go through `baseurl.CanonicalHTTPS` (the wire side
+  through `baseurl.CredentialBase`, which the harvest state store holds too),
+  or a one-sided reduction turns a correct pin into a mismatch that fails
+  closed. The reduction must be a fixed point, since the pin is reduced twice
+  (backlog B97, under **Enrichment**).
 - **`fs.Resolve`'s final containment check is the PRIMARY defense on Windows**,
   not belt-and-braces: both guards above it are slash-based, so a backslash
   traversal passes them untouched and only `filepath.Join` + the prefix check
