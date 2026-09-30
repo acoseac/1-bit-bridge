@@ -300,6 +300,9 @@ func TestLooksLikeAudioItem_AcceptsByClassMimeOrExtension(t *testing.T) {
 		{"by class", Object{Class: "object.item.audioItem.musicTrack", Res: "http://h/x"}, true},
 		{"by proto MIME", Object{Class: "", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/x-dsf:*"}, true},
 		{"by extension", Object{Class: "", Res: "http://h/x.flac"}, true},
+		// An AIFF-C by its own extension (backlog B124), which the allowlist
+		// lacked while it held .aif and .aiff.
+		{"aifc by extension", Object{Class: "", Res: "http://h/x.aifc"}, true},
 		{"image rejected", Object{Class: "object.item.imageItem", Res: "http://h/x.jpg", ProtocolInfo: "http-get:*:image/jpeg:*"}, false},
 		{"no res rejected", Object{Class: "object.item.audioItem"}, false},
 	}

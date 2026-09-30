@@ -36,7 +36,7 @@ func TestPlayerMIMEDivergesFromDLNA(t *testing.T) {
 	// failure mode; octet-stream is the honest "no browser decodes this".
 	for _, ext := range []string{
 		".flac", ".mp3", ".m4a", ".mp4", ".m4b", ".wav", ".wave",
-		".aif", ".aiff", ".ogg", ".oga", ".opus", ".dsf", ".dff", ".iso",
+		".aif", ".aiff", ".aifc", ".ogg", ".oga", ".opus", ".dsf", ".dff", ".iso",
 	} {
 		got := playerContentType(ext)
 		if strings.HasPrefix(got, "audio/x-") {
@@ -89,5 +89,34 @@ func TestPlayerMIMEDivergesFromDLNA(t *testing.T) {
 				"the DLNA table maps .flac to audio/x-flac, which browsers refuse",
 				path, name)
 		}
+	}
+}
+
+// TestPlayabilityOfCompressedPCM: a WAV the extractor names by a compressed
+// encoding (backlog B154: "ADPCM", "GSM", "ULAW", "ALAW", "MP2") is
+// engine-dependent, never universal, since universal means every current
+// engine decodes it and linear PCM is the WAV every engine decodes; the client
+// then tries it and takes the engine's refusal as the answer. A linear or an
+// unread WAV stays universal. An AIFF-C is an AIFF (backlog B124): the
+// audio/aiff type where it fell to octet-stream, and engine-dependent as .aif
+// and .aiff are, whatever its compression.
+func TestPlayabilityOfCompressedPCM(t *testing.T) {
+	for _, codec := range []string{"ADPCM", "GSM", "ULAW", "ALAW", "MP2", "MP3", "adpcm"} {
+		if got := playabilityKind(codec, ".wav", false); got != playEngineDependent {
+			t.Errorf("playabilityKind(%q, .wav) = %q, want %q", codec, got, playEngineDependent)
+		}
+	}
+	for _, codec := range []string{"WAV", ""} {
+		if got := playabilityKind(codec, ".wav", false); got != playUniversal {
+			t.Errorf("playabilityKind(%q, .wav) = %q, want %q", codec, got, playUniversal)
+		}
+	}
+	for _, codec := range []string{"AIFF", "AIFC", "IMA4", "ULAW"} {
+		if got := playabilityKind(codec, ".aifc", false); got != playEngineDependent {
+			t.Errorf("playabilityKind(%q, .aifc) = %q, want %q", codec, got, playEngineDependent)
+		}
+	}
+	if got := playerContentType(".aifc"); got != "audio/aiff" {
+		t.Errorf("playerContentType(.aifc) = %q, want audio/aiff", got)
 	}
 }

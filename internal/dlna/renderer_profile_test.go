@@ -182,6 +182,9 @@ func TestDefaultMIMEForExtension(t *testing.T) {
 		{".wav", "audio/wav"},
 		{".aiff", "audio/aiff"},
 		{".aif", "audio/aiff"},
+		// An AIFF-C is an AIFF FORM (backlog B124): the MIME the iOS app
+		// expects for its "AIFC" codec, where it fell to octet-stream.
+		{".aifc", "audio/aiff"},
 		{".mp3", "audio/mpeg"},
 		{".ogg", "audio/ogg"},
 		{".xyz", "application/octet-stream"},

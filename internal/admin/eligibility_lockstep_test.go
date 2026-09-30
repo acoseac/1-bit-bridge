@@ -83,6 +83,21 @@ var eligibilityMatrix = []eligibilityCase{
 	{name: "sacd-virtual", codec: "DFF", ext: ".dff", rate: 2822400, bits: 1, isDSD: true, path: "Album.iso/st/01.dff"},
 	{name: "mp3-forged-isdsd", codec: "MP3", ext: ".mp3", rate: 44100, bits: 16, isDSD: true},
 	{name: "codec-empty-dsf-ext", codec: "", ext: ".dsf", rate: 2822400, bits: 1, isDSD: true},
+	// The compressed AIFF-C and WAV encodings (backlog B124, B154). The
+	// extractor stamps no depth for them; each row carries one anyway, so
+	// the upscale mirrors disagree on the LOSSY term alone when one side's
+	// set lacks the name. "AIFC" (a compression the bridge does not know)
+	// is not lossy, and the codec-empty .aifc row keeps .aifc out of both
+	// optimize mirrors' extension fallback: the extension cannot say
+	// whether an AIFF-C is compressed.
+	{name: "ulaw-aifc", codec: "ULAW", ext: ".aifc", rate: 44100, bits: 16, isDSD: false},
+	{name: "alaw-wav", codec: "ALAW", ext: ".wav", rate: 44100, bits: 16, isDSD: false},
+	{name: "ima4-aifc-hires", codec: "IMA4", ext: ".aifc", rate: 96000, bits: 16, isDSD: false},
+	{name: "adpcm-wav-hires", codec: "ADPCM", ext: ".wav", rate: 96000, bits: 16, isDSD: false},
+	{name: "gsm-wav", codec: "GSM", ext: ".wav", rate: 8000, bits: 16, isDSD: false},
+	{name: "mp2-wav", codec: "MP2", ext: ".wav", rate: 44100, bits: 16, isDSD: false},
+	{name: "aifc-unknown-compression", codec: "AIFC", ext: ".aifc", rate: 96000, bits: 16, isDSD: false},
+	{name: "codec-empty-aifc-ext", codec: "", ext: ".aifc", rate: 96000, bits: 24, isDSD: false},
 }
 
 // dsdRenderStates are the three capability states the DSD-aware

@@ -176,3 +176,25 @@ func TestQualityBucketStrings(t *testing.T) {
 		t.Error("IsDSD misclassifies")
 	}
 }
+
+// TestClassifyCountsTheCompressedPCMCodecsLossy: the names a compressed
+// AIFF-C or WAV gets from the extractor since ExtractorVersion 21 (backlog
+// B124, B154), as the iOS app names them, are lossy at any rate, where "AIFF"
+// and "WAV" put a 44.1 kHz mu-law file with no depth in CD Quality and a 96 kHz
+// ADPCM one in Hi-Res. "AIFC" (a compression the bridge does not know) and a
+// "WAV" with no rate (a format tag it does not name) reach no quality tier.
+func TestClassifyCountsTheCompressedPCMCodecsLossy(t *testing.T) {
+	for _, c := range []string{"ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2"} {
+		for _, rate := range []int{8000, 44100, 96000} {
+			if got := Classify(c, rate, 0, false); got != QualityLossy {
+				t.Errorf("Classify(%q, %d, 0) = %v, want %v", c, rate, got, QualityLossy)
+			}
+		}
+	}
+	if got := Classify("AIFC", 96000, 0, false); got != QualityUnknown {
+		t.Errorf("Classify(AIFC, 96000) = %v, want %v", got, QualityUnknown)
+	}
+	if got := Classify("WAV", 0, 0, false); got != QualityUnknown {
+		t.Errorf("Classify(WAV, no rate) = %v, want %v", got, QualityUnknown)
+	}
+}
