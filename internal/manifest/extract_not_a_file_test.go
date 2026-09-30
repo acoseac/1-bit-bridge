@@ -18,6 +18,7 @@ package manifest
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -354,23 +355,40 @@ func TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped(t *testing.T) {
 	// Each candidate is refused as what it is, and named: three named
 	// pipes (one reached through a link), a link to a character device,
 	// and a socket, which only a stat names (no open reaches one).
-	counts := map[string]int{}
-	for _, line := range rec.Lines("folder-art read") {
-		for _, kind := range []string{"named pipe", "character device", "socket"} {
+	requireRefusalsByKind(t, rec.Lines("folder-art read"),
+		map[string]int{"named pipe": 3, "character device": 1, "socket": 1})
+	requireTitledWithNoCover(t, store, map[string]string{
+		"Music/Album/01.flac":        "Album track",
+		"Music/Boxed/Disc 1/01.flac": "Disc track",
+	})
+	if tr, err := store.GetTrack(context.Background(), "Music/Covered/01.flac"); err != nil || tr == nil ||
+		!strings.HasPrefix(tr.ArtworkMBID, "local-") {
+		t.Errorf("the album with a real cover: %+v (%v); want its cover stamped", tr, err)
+	}
+}
+
+// requireRefusalsByKind asserts that lines name each kind of refusal (an
+// fsutil.NotAFileError's "<kind> is not a file") as many times as want says.
+func requireRefusalsByKind(t *testing.T, lines []string, want map[string]int) {
+	t.Helper()
+	got := map[string]int{}
+	for _, line := range lines {
+		for kind := range want {
 			if strings.Contains(line, kind+" is not a file") {
-				counts[kind]++
+				got[kind]++
 			}
 		}
 	}
-	if counts["named pipe"] != 3 || counts["character device"] != 1 || counts["socket"] != 1 {
-		t.Errorf("folder-art refusals by kind %v, want 3 named pipes, 1 character device and 1 socket; lines %q",
-			counts, rec.Lines("folder-art read"))
+	if !maps.Equal(got, want) {
+		t.Errorf("refusals by kind %v, want %v; lines %q", got, want, lines)
 	}
+}
 
-	for rel, title := range map[string]string{
-		"Music/Album/01.flac":        "Album track",
-		"Music/Boxed/Disc 1/01.flac": "Disc track",
-	} {
+// requireTitledWithNoCover asserts that each row in want is indexed with its
+// title and no cover.
+func requireTitledWithNoCover(t *testing.T, store *Store, want map[string]string) {
+	t.Helper()
+	for rel, title := range want {
 		tr, err := store.GetTrack(context.Background(), rel)
 		if err != nil || tr == nil {
 			t.Errorf("%s: no row (%v)", rel, err)
@@ -379,9 +397,5 @@ func TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped(t *testing.T) {
 		if tr.Title != title || tr.ArtworkMBID != "" {
 			t.Errorf("%s: title %q, artwork %q; want %q and no cover", rel, tr.Title, tr.ArtworkMBID, title)
 		}
-	}
-	if tr, err := store.GetTrack(context.Background(), "Music/Covered/01.flac"); err != nil || tr == nil ||
-		!strings.HasPrefix(tr.ArtworkMBID, "local-") {
-		t.Errorf("the album with a real cover: %+v (%v); want its cover stamped", tr, err)
 	}
 }

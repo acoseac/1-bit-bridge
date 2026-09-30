@@ -100,45 +100,62 @@ func libraryReadOpensIn(rel, src string) (findings []string, asFile int, err err
 	if err != nil {
 		return nil, 0, err
 	}
-	osName := localNameOf(f, "os")
-	ioutilName := localNameOf(f, "io/ioutil")
-	fsutilName := localNameOf(f, "github.com/acoseac/1-bit-bridge/internal/fsutil")
+	names := libraryReadImports{
+		os:     localNameOf(f, "os"),
+		ioutil: localNameOf(f, "io/ioutil"),
+		fsutil: localNameOf(f, "github.com/acoseac/1-bit-bridge/internal/fsutil"),
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		read := false
-		switch {
-		case pkg.Name == fsutilName:
-			switch sel.Sel.Name {
-			case "OpenAsFile", "ReadAsFile", "OpenDir":
-				asFile++
-			}
-		case pkg.Name == osName:
-			switch sel.Sel.Name {
-			case "Open", "ReadFile":
-				read = true
-			case "OpenFile":
-				read = len(call.Args) < 2 || !namesAWriteFlag(call.Args[1])
-			}
-		case pkg.Name == ioutilName:
-			read = sel.Sel.Name == "ReadFile"
-		}
-		if read {
-			findings = append(findings, fmt.Sprintf("%s:%d: %s.%s", rel, fset.Position(call.Pos()).Line, pkg.Name, sel.Sel.Name))
+		switch pkg, fn, kind := names.classify(call); kind {
+		case readThroughFsutil:
+			asFile++
+		case plainReadOpen:
+			findings = append(findings, fmt.Sprintf("%s:%d: %s.%s", rel, fset.Position(call.Pos()).Line, pkg, fn))
 		}
 		return true
 	})
 	return findings, asFile, nil
+}
+
+// libraryReadImports are the names a file imports os, io/ioutil and
+// internal/fsutil under ("" for one it does not import).
+type libraryReadImports struct{ os, ioutil, fsutil string }
+
+// A libraryRead is what classify makes of a call.
+type libraryRead int
+
+const (
+	notARead libraryRead = iota
+	plainReadOpen
+	readThroughFsutil
+)
+
+// classify names the package and the function call calls, and whether it is
+// a plain read-open (os.Open, os.ReadFile, ioutil.ReadFile, an os.OpenFile
+// whose flags do not write) or a read through fsutil.
+func (in libraryReadImports) classify(call *ast.CallExpr) (pkg, fn string, kind libraryRead) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", "", notARead
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return "", "", notARead
+	}
+	pkg, fn = id.Name, sel.Sel.Name
+	switch {
+	case pkg == in.fsutil && (fn == "OpenAsFile" || fn == "ReadAsFile" || fn == "OpenDir"):
+		return pkg, fn, readThroughFsutil
+	case pkg == in.os && (fn == "Open" || fn == "ReadFile"),
+		pkg == in.os && fn == "OpenFile" && (len(call.Args) < 2 || !namesAWriteFlag(call.Args[1])),
+		pkg == in.ioutil && fn == "ReadFile":
+		return pkg, fn, plainReadOpen
+	}
+	return pkg, fn, notARead
 }
 
 // namesAWriteFlag reports whether an os.OpenFile flag expression names
