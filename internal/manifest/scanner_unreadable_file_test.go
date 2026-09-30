@@ -13,7 +13,6 @@ package manifest
 // honours, and only for a user other than root.
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,20 +47,6 @@ func letIn(t *testing.T, paths ...string) {
 			t.Fatal(err)
 		}
 	}
-}
-
-// rowTitle returns the title of the row at rel, and "" with ok false when
-// there is no row.
-func rowTitle(t *testing.T, store *Store, rel string) (title string, ok bool) {
-	t.Helper()
-	tr, err := store.GetTrack(context.Background(), rel)
-	if err != nil {
-		t.Fatalf("GetTrack(%s): %v", rel, err)
-	}
-	if tr == nil {
-		return "", false
-	}
-	return tr.Title, true
 }
 
 // TestScanner_AFileThatCannotBeOpenedIsNotWrittenFromItsPath is the defect

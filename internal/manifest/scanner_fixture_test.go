@@ -98,3 +98,17 @@ func caseSensitiveFS(t *testing.T, dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "caseprobe"))
 	return os.IsNotExist(err)
 }
+
+// rowTitle returns the title of the row at rel, and "" with ok false when
+// there is no row.
+func rowTitle(t *testing.T, store *Store, rel string) (title string, ok bool) {
+	t.Helper()
+	tr, err := store.GetTrack(context.Background(), rel)
+	if err != nil {
+		t.Fatalf("GetTrack(%s): %v", rel, err)
+	}
+	if tr == nil {
+		return "", false
+	}
+	return tr.Title, true
+}
