@@ -35135,3 +35135,76 @@ CodeRabbit on 6ca0cda2: `remoteIP` handed a link-local source's zone
 listed `fe80::/10` was refused, as `metricsGate` refused it before B171.
 The zone is dropped before the match (a CIDR names no zone); the table
 test's zoned row was red before the change.
+
+## 2026-09-30 — an SACD container the walk sees keeps its virtual rows' missing count at 0 (backlog B217)
+
+From the pre-v0.2.1 data review (2026-09-30, read-only): SACD virtual rows
+were deleted while their `.iso` was on disk. Since v0.2.0.
+
+### The defect
+
+A virtual row (`<container>/st/NN.dff`) is in no disk walk. Both deletion
+passes (`Scan`'s and `ScanSubtree`'s) count it seen whenever its container
+is, through the container-seen branch, so it is never counted missing then.
+Nothing reset its count either: a plain file seen unchanged has its count
+reset by the skip gate (`ResetTrackMissingCount`) and one whose read fails
+by `keepUnread`, while `processSACDISO`'s early return for an unchanged
+container wrote nothing, and its two other exits that write no row (a read
+that did not complete, a container that changed during the scan) wrote
+nothing either. Only a re-expansion reset the rows, through its upserts. So
+"missing on `threshold` consecutive scans" was "missing on `threshold`
+scans, ever".
+
+The review measured it at threshold 3 with the container hidden for one
+scan on three separate occasions: a FLAC beside it went back to 0 each
+time; the virtual rows went 1, 1, 2, 2 and were deleted on the third miss,
+a tombstone each to every paired device, and the next scan re-created
+them unenriched.
+
+### Reproduced red-first
+
+`TestScanner_SACDRowsCountOnlyConsecutiveMisses`, through the real scanner
+over a real `.iso` fixture (the SACD builders), the review's shape: on
+main, "round 1, restored: the virtual row's missing count is 1, want 0, as
+the plain file's is". `TestScanner_SACDRowsAreSeenWhereTheScanWritesNone`
+drives the two other exits (a read that did not complete, through the
+`openSACD` seam's failing reader; a container written after the walk,
+through `sacdTouchLater`) and a subtree scan through the skip gate, each
+from rows a scan left at 1: all three red on main.
+
+### The fix
+
+- `Store.ResetTrackMissingCountsUnder(ctx, base)`: `missing_count = 0` on
+  every row under a directory-shaped prefix, by byte range with the
+  trailing slash trimmed (`subtreeRangeBase`), an error on an empty prefix,
+  never LIKE, a no-op on rows already at 0, under `s.mu`.
+- `Scanner.keepSACDRowsSeen`, called at each of `processSACDISO`'s exits
+  that write no row: the skip gate's, a read that did not complete (which
+  still retires nothing: the rows keep what they hold) and a container that
+  changed during the scan (still left for the next one). A failure logs one
+  Warn, and a shutdown's cancel logs nothing (`ctxerr.WithoutCancellation`).
+- Not changed: a container read whole as junk still retires its rows at
+  threshold 1, journaled, and a re-expansion's rows are reset by their
+  upserts as before.
+
+Declined: resetting from the container-seen branch of the deletion passes.
+There are two (`Scan`'s and `ScanSubtree`'s), while `processSACDISO`, which
+both reach, is where the container is read, as the worker's skip gate and
+`keepUnread` are where a plain file's count is reset.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: no reset at the skip gate's early return | the consecutive-miss test (round 1), the subtree case |
+| NC2: none after a read that did not complete | that case |
+| NC3: none after a container that changed during the scan | that case |
+| NC4: the reset by LIKE | the byte-range test (the case-twin container's rows) |
+| NC5: the range starting at the container, not below it | the byte-range test (the row named like the container, and `Album.iso-x`) |
+
+### iOS
+
+No twin: the app's scanner reaps a vanished row at once, with its circuit
+breaker, and keeps no missing count (`LibraryScanner.reapVanishedTracks`,
+`reapRowIsSeen`). No wire change and no `ExtractorVersion` bump: nothing
+extraction produces moves.

@@ -440,6 +440,32 @@ lost my library."
   dropped again it found the violation within half a second from the other
   seeds (on the first harness and on the final one), and not in 90 s
   (468,005 inputs) from one seed whose fault touched no read.
+- **…and a container the walk SEES keeps its virtual rows' missing count
+  at 0, whatever the scan writes for it** (2026-09-30, backlog B217). A
+  virtual row (`<container>/st/NN.dff`) is in no walk: the deletion pass
+  counts it seen whenever its container is (the container-seen branch),
+  and never counts it missing then, but nothing reset its count, since the
+  skip gate's early return for an unchanged container wrote nothing. So
+  "missing on `threshold` consecutive scans" was "missing on `threshold`
+  scans, ever": measured by the pre-v0.2.1 review at threshold 3, a
+  container hidden for one scan on three separate occasions had its rows'
+  count go 1, 1, 2, 2, and the third hide deleted them, a tombstone each
+  to every paired device, while the `.iso` was back on disk the scan after
+  (which re-created them unenriched); a plain file beside it went back to
+  0 each time. Since v0.2.0. `keepSACDRowsSeen` resets the count of every
+  row under the container at each exit of processSACDISO that writes no
+  row, as the skip gate and `keepUnread` do for a plain file: the skip
+  gate's, a read that did not complete (which still retires nothing) and a
+  container that changed during the scan (still left for the next one). A
+  re-expansion's rows are reset by the upserts that write them, and a
+  container read whole as junk still retires its rows, journaled. The
+  reset is `ResetTrackMissingCountsUnder`: a byte range, the trailing
+  slash trimmed, an error on an empty prefix, never LIKE (a case-twin
+  container keeps its count). **A subtree scan resets them too**, through
+  the same exits. No `ExtractorVersion` bump and no wire change
+  (`TestScanner_SACDRowsCountOnlyConsecutiveMisses`,
+  `TestScanner_SACDRowsAreSeenWhereTheScanWritesNone`,
+  `TestResetTrackMissingCountsUnderIsAByteRange`).
 - **A file the walk reaches through a link is indexed under its TARGET's
   stat** (2026-09-28). `filepath.WalkDir` hands an entry its lstat, so a
   symlinked audio file was indexed under the LINK's size (the length of the

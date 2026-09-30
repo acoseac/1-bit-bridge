@@ -1481,8 +1481,8 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 // tombstone each, while it was on disk (measured: the counts went 1, 1, 2,
 // 2, and the third hide deleted them). A plain file seen unchanged has its
 // count reset by the skip gate (ResetTrackMissingCount) and one whose read
-// failed by keepUnread; a re-expansion's rows by their upsert or stamp.
-// The rows are every row under the container, by byte range
+// failed by keepUnread; a re-expansion's rows by the upserts that write
+// them. The rows are every row under the container, by byte range
 // (ResetTrackMissingCountsUnder): nothing but its virtual rows can be.
 func (s *Scanner) keepSACDRowsSeen(ctx context.Context, pi pathInfo) {
 	if err := s.store.ResetTrackMissingCountsUnder(ctx, pi.rel); err != nil {
