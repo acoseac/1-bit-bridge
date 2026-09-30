@@ -20,6 +20,10 @@ func FuzzParseAIFFCOMMChunk(f *testing.F) {
 	// A real 18-byte COMM: 2 channels, 0x1000 frames, 24-bit, 44100 Hz as an
 	// 80-bit IEEE-754 extended.
 	f.Add([]byte{0, 2, 0, 0, 0x10, 0x00, 0, 24, 0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0})
+	// An AIFC COMM naming ima4, whose frame count is in 64-frame packets
+	// (backlog B124), at the count's largest value: the scaled count must
+	// not wrap.
+	f.Add([]byte{0, 2, 0xFF, 0xFF, 0xFF, 0xFF, 0, 16, 0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0, 'i', 'm', 'a', '4', 0, 0})
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		var tr Track
@@ -40,6 +44,19 @@ func FuzzParseAIFFExtended(f *testing.F) {
 func FuzzParseWAVFmtChunk(f *testing.F) {
 	// PCM, 2ch, 44100, 16-bit.
 	f.Add([]byte{1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0, 0, 0, 0, 4, 0, 0x10, 0})
+	// WAVE_FORMAT_EXTENSIBLE naming IMA ADPCM (0x0011) in its subformat at
+	// 96 kHz, as ffmpeg writes one (backlog B154), with no average rate.
+	f.Add([]byte{
+		0xFE, 0xFF, 2, 0, 0x00, 0x77, 0x01, 0x00, 0, 0, 0, 0, 0, 8, 4, 0,
+		22, 0, 4, 0, 3, 0, 0, 0,
+		0x11, 0x00, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71,
+	})
+	// WAVE_FORMAT_MPEG with MPEG1WAVEFORMAT's extension naming layer III
+	// (fwHeadLayer 4 at [18:20]; CodeRabbit on #1122).
+	f.Add([]byte{
+		0x50, 0x00, 2, 0, 0x44, 0xAC, 0, 0, 0xC0, 0x5D, 0, 0, 1, 0, 0, 0,
+		22, 0, 4, 0, 0, 0xF4, 1, 0, 1, 0, 1, 0, 1, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		var tr Track
 		parseWAVFmtChunk(b, &tr)

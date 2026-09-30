@@ -55,7 +55,7 @@ func playerContentType(ext string) string {
 		return "audio/mp4"
 	case ".wav", ".wave":
 		return "audio/wav"
-	case ".aif", ".aiff":
+	case ".aif", ".aiff", ".aifc":
 		return "audio/aiff"
 	case ".ogg", ".oga":
 		return "audio/ogg"
@@ -101,8 +101,17 @@ func playabilityKind(codec, ext string, isDSD bool) string {
 		return playNone
 	}
 	switch strings.ToLower(ext) {
-	case ".flac", ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave":
+	case ".flac", ".mp3", ".ogg", ".oga", ".opus":
 		return playUniversal
+	case ".wav", ".wave":
+		// Linear PCM is the WAV every engine decodes; a WAV the extractor
+		// names by a compressed encoding ("ADPCM", "GSM", "ULAW", "ALAW",
+		// "MP3", "MP2": backlog B154) is not, so the client tries it and
+		// takes the engine's refusal as the answer.
+		if c := strings.ToUpper(strings.TrimSpace(codec)); c == "" || c == "WAV" {
+			return playUniversal
+		}
+		return playEngineDependent
 	case ".m4a", ".mp4", ".m4b":
 		// AAC in MP4 is universal; ALAC in MP4 is Safari-only, and the
 		// container extension can't tell them apart — the codec can.
@@ -110,7 +119,7 @@ func playabilityKind(codec, ext string, isDSD bool) string {
 			return playEngineDependent
 		}
 		return playUniversal
-	case ".aif", ".aiff":
+	case ".aif", ".aiff", ".aifc":
 		return playEngineDependent
 	case ".dsf", ".dff":
 		return playNone

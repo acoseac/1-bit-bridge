@@ -313,14 +313,30 @@ func TestDupeSummaryRoundTrip(t *testing.T) {
 // internal/dupes' ranking vocabulary and manifest.IsLossyCodec (the
 // single source of truth from PR #507). dupes can't import manifest
 // (manifest imports dupes), so this package — the only one that sees
-// both — holds the tripwire.
+// both — holds the tripwire. Both directions, over every codec name the
+// extractors stamp: it checked only that each dupes name is lossy, so
+// ExtractorVersion 21's six new names (backlog B124, B154) would have
+// reached IsLossyCodec alone and the ranking gone on calling a µ-law or
+// ADPCM copy lossless without a failure.
 func TestDupesLossyCodecsMirrorIsLossyCodec(t *testing.T) {
+	ranked := map[string]bool{}
 	for _, c := range dupes.LossyCodecNames() {
+		ranked[c] = true
 		if !IsLossyCodec(c) {
 			t.Errorf("dupes ranks %q lossy but manifest.IsLossyCodec disagrees", c)
 		}
 	}
-	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "DSF", "DFF"} {
+	stamped := []string{
+		"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF",
+		"MP3", "AAC", "OGG", "OPUS", "WMA",
+		"ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2",
+	}
+	for _, c := range stamped {
+		if IsLossyCodec(c) && !ranked[c] {
+			t.Errorf("manifest.IsLossyCodec(%q) is true but dupes does not rank it lossy", c)
+		}
+	}
+	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF"} {
 		if IsLossyCodec(c) {
 			t.Errorf("sanity: manifest.IsLossyCodec(%q) unexpectedly true", c)
 		}

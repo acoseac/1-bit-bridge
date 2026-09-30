@@ -61,9 +61,15 @@ func (q QualityBucket) IsDSD() bool {
 
 // lossyCodecs mirrors iOS's lossy set. "M4A" is included for the
 // legacy reason the Swift side documents: the scanner historically
-// stamped M4A for AAC content, and ALAC is stamped ALAC.
+// stamped M4A for AAC content, and ALAC is stamped ALAC. The compressed
+// AIFF-C and WAV encodings (ULAW, ALAW, IMA4, ADPCM, GSM, MP2) joined with
+// ExtractorVersion 21 (backlog B124, B154); until then the extractor named
+// every AIFF-C "AIFF" and every WAV "WAV", so a µ-law file with no depth
+// was counted CD Quality and an ADPCM one at 96 kHz Hi-Res. "AIFC" (a
+// compression the bridge does not know) is in neither set: Unknown.
 var lossyCodecs = map[string]struct{}{
 	"MP3": {}, "AAC": {}, "M4A": {}, "OGG": {}, "OPUS": {}, "WMA": {}, "VORBIS": {},
+	"ULAW": {}, "ALAW": {}, "IMA4": {}, "ADPCM": {}, "GSM": {}, "MP2": {},
 }
 
 // losslessPCMCodecs is the allowlist for the CD / hi-res tiers. An

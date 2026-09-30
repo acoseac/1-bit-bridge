@@ -120,12 +120,16 @@ func TestBuildTrackAndRouting_DSF_IsDSDStampedTrue(t *testing.T) {
 
 func TestCodecFromExtension_KnownAndUnknown(t *testing.T) {
 	cases := map[string]string{
-		"x.flac":  "FLAC",
-		"x.dsf":   "DSF",
-		"x.dff":   "DFF",
-		"x.wav":   "WAV",
-		"x.aiff":  "AIFF",
-		"x.aif":   "AIFF",
+		"x.flac": "FLAC",
+		"x.dsf":  "DSF",
+		"x.dff":  "DFF",
+		"x.wav":  "WAV",
+		"x.aiff": "AIFF",
+		"x.aif":  "AIFF",
+		// The iOS app's name for an AIFF-C nothing has read (backlog B124):
+		// the DIDL cannot say whether it is linear or compressed, and no
+		// lossless set holds "AIFC".
+		"x.aifc":  "AIFC",
 		"x.mp3":   "MP3",
 		"x.ogg":   "OGG",
 		"x.opus":  "OPUS",
