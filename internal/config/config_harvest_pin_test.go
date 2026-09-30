@@ -26,6 +26,10 @@ func TestAtlasHarvestBaseURLValidation(t *testing.T) {
 		// never a load error that stops a bridge that loaded it before
 		// (backlog B36; Normalize warns about it).
 		{"a port with no host pins to nothing", "https://:8443", "https://:8443", false},
+		// The default port is not stripped from it: stripped, it was
+		// `https://`, which the handler's own reduction turns into ""
+		// (unpinned), so this pin left a non-demo bridge open (backlog B97).
+		{"the default port with no host pins to nothing", "https://:443", "https://:443", false},
 		{"no scheme is refused", "atlas.example", "", true},
 		{"garbage is refused", "://nope", "", true},
 	} {

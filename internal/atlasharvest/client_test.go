@@ -70,7 +70,7 @@ const (
 
 func TestClientSubmitAndPoll(t *testing.T) {
 	var gotSubmit []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -111,7 +111,7 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	}
 
 	sink := &fakeSink{}
-	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1", "a2"}}, Sink: sink}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1", "a2"}}, Sink: sink, HTTP: srv.Client()}
 	c.tick(context.Background())
 
 	if len(gotSubmit) != 2 {
@@ -164,7 +164,7 @@ func TestClientSubmitAndPoll(t *testing.T) {
 // re-requested the same oversized page → permanent stall).
 func TestPollResultsAcceptsLargeResultsPage(t *testing.T) {
 	bigBio := strings.Repeat("x", 5<<20) // 5 MiB — over the 4 MiB default, under the 32 MiB results cap
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/atlas/harvest/results" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -182,7 +182,7 @@ func TestPollResultsAcceptsLargeResultsPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := &fakeSink{}
-	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: sink}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: sink, HTTP: srv.Client()}
 
 	if err := c.pollResults(context.Background()); err != nil {
 		t.Fatalf("pollResults with a >4 MiB page: %v", err)
@@ -197,14 +197,18 @@ func TestPollResultsAcceptsLargeResultsPage(t *testing.T) {
 
 // Atlas rejecting the token wipes the credential so the app re-provisions.
 func TestClientTokenRejectedClearsCredential(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
 	state := mustOpenState(t, filepath.Join(t.TempDir(), "s.json"))
-	_ = state.SetCredential("dead-token", srv.URL, time.Now().Add(time.Hour))
-	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1"}}, Sink: &fakeSink{}}
+	// Checked: a credential the store refused would leave the token empty
+	// before the tick, and this test would pass having shown nothing.
+	if err := state.SetCredential("dead-token", srv.URL, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{ids: []string{"a1"}}, Sink: &fakeSink{}, HTTP: srv.Client()}
 
 	c.tick(context.Background())
 

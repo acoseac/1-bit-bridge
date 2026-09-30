@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 )
 
 // AtlasHarvestCredentialSink stores the iOS-provisioned bulk_harvest credential
@@ -45,7 +45,7 @@ func (s *Server) WithAtlasHarvest(sink AtlasHarvestCredentialSink, pinnedBaseURL
 	// operator's own bootstrap, which reads as a broken feature rather than a
 	// broken comparison. Idempotent: cmd/bridge already passes
 	// cfg.Atlas.CanonicalHarvestBaseURL().
-	s.atlasHarvestPinnedBase = config.CanonicalHTTPSBase(pinnedBaseURL)
+	s.atlasHarvestPinnedBase = baseurl.CanonicalHTTPS(pinnedBaseURL)
 	return s
 }
 
@@ -143,15 +143,17 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 	// userinfo/query/fragment/path avoids persisting a credential that would
 	// always dial the wrong endpoint. The canonical scheme://host form is stored
 	// so equivalent inputs (trailing slash) don't churn the sync state.
-	// Same reduction the configured pin goes through — config.CanonicalHTTPSBase
-	// is shared deliberately: these two values are compared for EQUALITY, so a
+	// baseurl.CredentialBase is shared deliberately, with the state store
+	// that holds the result and (through baseurl.CanonicalHTTPS) with the
+	// configured pin: the pin and this value are compared for EQUALITY, so a
 	// reduction applied to one and not the other turns a correct pin into a
-	// mismatch that fails closed and reads as a broken feature.
-	// A base naming a port and no host (`https://:8443`) survives that
-	// reduction, and the harvest client would dial it, with the token, on
-	// this machine (backlog B36), so it is refused here too.
-	canonicalBase := config.CanonicalHTTPSBase(req.AtlasBaseURL)
-	if canonicalBase == "" || !config.BaseURLNamesHost(canonicalBase) {
+	// mismatch that fails closed and reads as a broken feature, and the store
+	// holds no base in any other form, whatever the file says (backlog B97).
+	// A base naming a port and no host (`https://:8443`) survives the
+	// canonical reduction, and the harvest client would dial it, with the
+	// token, on this machine (backlog B36), so CredentialBase refuses it too.
+	canonicalBase := baseurl.CredentialBase(req.AtlasBaseURL)
+	if canonicalBase == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "atlasBaseUrl must be a plain https base URL (https://host[:port])")
 		return
 	}

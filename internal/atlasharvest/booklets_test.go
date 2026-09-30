@@ -136,16 +136,25 @@ func (f *fakeBookletFiles) RemoveBooklet(mbid string) error {
 
 // bookletTestClient builds a Client whose harvest legs are quiet (recent
 // submit, drained results) so ticks exercise only the booklet loops.
-func bookletTestClient(t *testing.T, atlasURL string, sink *fakeBookletSink, files *fakeBookletFiles) *Client {
+//
+// atlas is the fake Atlas, a TLS server as the real one is (the store holds
+// an https base or none), and the client trusts its certificate. Nil for a
+// test that makes no request: the credential then names a host no request
+// is ever sent to.
+func bookletTestClient(t *testing.T, atlas *httptest.Server, sink *fakeBookletSink, files *fakeBookletFiles) *Client {
 	t.Helper()
 	state := mustOpenState(t, filepath.Join(t.TempDir(), "state.json"))
-	if err := state.SetCredential("test-token", atlasURL, time.Now().Add(time.Hour)); err != nil {
+	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: &fakeSink{}, Booklets: sink}
+	base := "https://atlas.invalid"
+	if atlas != nil {
+		base, c.HTTP = atlas.URL, atlas.Client()
+	}
+	if err := state.SetCredential("test-token", base, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.SetLastSubmit(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: &fakeSink{}, Booklets: sink}
 	if files != nil {
 		c.BookletFiles = files
 	}
@@ -167,7 +176,7 @@ func TestBookletCheckCycleRecordsVerdictsAndStampsTags(t *testing.T) {
 		relMiss  = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	pdf := append([]byte("%PDF-1.4\n"), bytes.Repeat([]byte("x"), 64)...)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -191,7 +200,7 @@ func TestBookletCheckCycleRecordsVerdictsAndStampsTags(t *testing.T) {
 	sink.universe = []string{relAvail, relMiss}
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: relAvail, Etag: "etag-1"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 
 	c.tick(context.Background())
 
@@ -225,7 +234,7 @@ func TestBookletCheckCycleRecordsVerdictsAndStampsTags(t *testing.T) {
 }
 
 func TestBookletCheckToleratesPreBookletAtlas(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -235,7 +244,7 @@ func TestBookletCheckToleratesPreBookletAtlas(t *testing.T) {
 
 	sink := newFakeBookletSink()
 	sink.universe = []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
-	c := bookletTestClient(t, srv.URL, sink, nil)
+	c := bookletTestClient(t, srv, sink, nil)
 	c.tick(context.Background())
 
 	// No verdicts, no credential wipe, and the stamp advanced so the next
@@ -254,7 +263,7 @@ func TestBookletCheckToleratesPreBookletAtlas(t *testing.T) {
 
 func TestBookletFetch404FlipsUnavailableAndClearsTag(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -269,7 +278,7 @@ func TestBookletFetch404FlipsUnavailableAndClearsTag(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "etag-1"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 	c.tick(context.Background())
 
 	if len(sink.unavail) != 1 || sink.unavail[0] != rel {
@@ -285,7 +294,7 @@ func TestBookletFetch404FlipsUnavailableAndClearsTag(t *testing.T) {
 
 func TestBookletFetchRefusesOversizedPDF(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -309,7 +318,7 @@ func TestBookletFetchRefusesOversizedPDF(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 	c.tick(context.Background())
 
 	if len(sink.fetched) != 0 {
@@ -360,7 +369,7 @@ func TestBookletGCSkippedWhileScanInProgress(t *testing.T) {
 // caller swallowed it, so the credential-wipe never fired from the fetch path.
 func TestBookletFetch401WipesCredential(t *testing.T) {
 	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -376,7 +385,7 @@ func TestBookletFetch401WipesCredential(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: rel, Etag: "e"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 	c.tick(context.Background())
 
 	if tok := c.State.Snapshot().Token; tok != "" {
@@ -393,7 +402,7 @@ func TestNudgeBookletFetchPrioritizes(t *testing.T) {
 		relQueued = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	var served []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -414,7 +423,7 @@ func TestNudgeBookletFetchPrioritizes(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.toFetch = []BookletFetchItem{{ReleaseMBID: relQueued, Etag: "e"}}
 	files := newFakeBookletFiles()
-	c := bookletTestClient(t, srv.URL, sink, files)
+	c := bookletTestClient(t, srv, sink, files)
 	c.NudgeBookletFetch(relTapped)
 	c.tick(context.Background())
 
@@ -428,7 +437,7 @@ func TestNudgeBookletFetchPrioritizes(t *testing.T) {
 // through the hit branch.
 func bookletCheckOnlyServer(t *testing.T, mbid, etag string) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if quietResults(w, r) {
 			return
 		}
@@ -457,7 +466,7 @@ func TestBookletCheck_StampsTagBeforeMarkingAvailable(t *testing.T) {
 
 	sink := newFakeBookletSink()
 	sink.universe = []string{rel}
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 
 	c.tick(context.Background())
 
@@ -478,7 +487,7 @@ func TestBookletCheck_TagStampFailureLeavesReleaseUnavailable(t *testing.T) {
 	sink := newFakeBookletSink()
 	sink.universe = []string{rel}
 	sink.failTagStamp = true
-	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	c := bookletTestClient(t, srv, sink, newFakeBookletFiles())
 
 	c.tick(context.Background())
 

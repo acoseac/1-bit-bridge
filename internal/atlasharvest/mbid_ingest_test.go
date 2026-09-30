@@ -27,7 +27,7 @@ func TestPollResultsDoesNotQueueAMalformedReleaseMBID(t *testing.T) {
 	const traversal = "../../../../tmp/pwned"
 	const good = "9f9e9d9c-9b9a-4998-9796-959493929190"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/atlas/harvest/results" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -46,7 +46,7 @@ func TestPollResultsDoesNotQueueAMalformedReleaseMBID(t *testing.T) {
 	if err := state.SetCredential("test-token", srv.URL, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: &fakeSink{}}
+	c := &Client{State: state, MBIDs: &fakeMBIDs{}, Sink: &fakeSink{}, HTTP: srv.Client()}
 
 	if err := c.pollResults(context.Background()); err != nil {
 		t.Fatalf("pollResults: %v", err)

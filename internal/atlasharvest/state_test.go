@@ -34,10 +34,10 @@ func TestStateStore_AtlasCredential(t *testing.T) {
 
 	t.Run("token without base URL → ok=false", func(t *testing.T) {
 		s := newStore(t)
-		// SetCredential normalizes, so set the base empty directly via the
-		// public path: a blank baseURL must not produce a usable credential.
-		if err := s.SetCredential("tok", "", time.Time{}); err != nil {
-			t.Fatalf("SetCredential: %v", err)
+		// A blank baseURL must not produce a usable credential: SetCredential
+		// refuses it (backlog B97), and a token left alone is not one.
+		if err := s.SetCredential("tok", "", time.Time{}); err == nil {
+			t.Fatal("SetCredential stored a credential with a blank base URL")
 		}
 		if _, _, ok := s.AtlasCredential(); ok {
 			t.Error("ok=true with an empty base URL")

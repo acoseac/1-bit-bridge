@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // POST /v1/atlas-harvest/credential lets its caller choose `atlasBaseUrl`, and
@@ -140,7 +142,7 @@ func TestAtlasHarvestCredentialUnpinnedStillWorksOffDemo(t *testing.T) {
 // `https://host:443` and `https://host` address the same endpoint, and an
 // operator may write either in config while the client sends the other. The
 // pin compares for EQUALITY, so both sides must go through the same reduction
-// — config.CanonicalHTTPSBase — or a correct pin silently fails closed and
+// — baseurl.CanonicalHTTPS — or a correct pin silently fails closed and
 // reads as a broken feature rather than a broken comparison.
 // (gemini-code-assist on PR #724; the duplication that hid it is now gone.)
 func TestAtlasHarvestCredentialPinIgnoresDefaultHTTPSPort(t *testing.T) {
@@ -166,7 +168,7 @@ func TestAtlasHarvestCredentialPinIgnoresDefaultHTTPSPort(t *testing.T) {
 }
 
 // TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost: a base naming a
-// port and no host survives config.CanonicalHTTPSBase, and the harvest
+// port and no host survives baseurl.CanonicalHTTPS, and the harvest
 // client would dial it, carrying the token, on THIS machine (backlog B36).
 // It is refused on an unpinned, non-demo bridge, the widest acceptance
 // there is, and a pin written that way matches nothing, its own spelling
@@ -184,6 +186,28 @@ func TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest || sink.called != 0 {
 			t.Errorf("pin %q, sent %q: status %d, sink called %d times; want 400 and none",
 				tc.pin, tc.sent, resp.StatusCode, sink.called)
+		}
+	}
+}
+
+// TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt drives the pin the way
+// serve hands it over, already reduced (cfg.Atlas.CanonicalHarvestBaseURL())
+// and reduced again by WithAtlasHarvest. A pin written as a port and no host
+// pins to nothing, so the bridge takes no credential at all, where an
+// unpinned non-demo bridge takes one for any host. `https://:443` was the
+// shape that broke it: the default port was stripped to `https://`, whose
+// own reduction is "", so the second reduction unpinned the bridge (backlog
+// B97's fixed-point check found it).
+func TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt(t *testing.T) {
+	for _, pin := range []string{"https://:443", "https://:8443"} {
+		sink := &fakeHarvestCred{}
+		wired := config.AtlasConfig{HarvestBaseURL: pin}.CanonicalHarvestBaseURL()
+		token, srv := newHarvestCredTestServerPinned(t, sink, wired, false)
+		resp := postCredential(t, srv, token, "https://atlas.example")
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || sink.called != 0 {
+			t.Errorf("pin %q (wired as %q): a credential for another host answered %d, sink called %d times; want 403 and none",
+				pin, wired, resp.StatusCode, sink.called)
 		}
 	}
 }
