@@ -644,6 +644,76 @@ lost my library."
   the file's tags); a bump now re-reads the library and re-upserts every
   SACD virtual row to heal rows nothing can tell from a tagless file. To
   heal one by hand, zero its `mtime_ns` (`## Local test fixture`).
+- **…and a folder's cover reaches the tracks beside it when IT changes,
+  not only when they do** (2026-09-29, backlog B141). A cover is read only
+  when a track is extracted, and the skip gate extracts an unchanged audio
+  file only for a version bump, a missing `local-` cache file or lyrics
+  drift, so a `cover.jpg` added after its tracks were indexed never reached
+  them (measured: a full scan and a subtree scan both left the rows
+  without it), nor did a replaced one, and a removed one's art stayed
+  forever. **Every row records the identity of the folder art it was
+  extracted against** (`tracks.folder_art_key`, v49, column-only: each
+  candidate's name, size and mtime, a disc folder's parent's after a '|';
+  `folderArtKey`; a candidate that is not a file is left out of the key by
+  `fsutil.NotAFile`'s list of kinds, **never by "is a regular file"**, which
+  would drop a OneDrive placeholder cover, and is still handed to the lookup,
+  which refuses and names it as B62 made it), and `folderArtDrifted` re-extracts a row whose folder's
+  identity changed, through `reExtractUnchanged`'s diff-guard, so only rows
+  whose art changes reach the delta: a cover beside an embedded picture
+  takes the stamp leg, which records the new key (**the stamp must write
+  the key**, or the gate goes back to the row every scan). **The gate and
+  the extraction read ONE per-scan state** (`folderArtDirStateOf`: the
+  directory listing the lyrics check reads, now one per directory per scan
+  shared by every worker, `dirListings`, plus a stat of each candidate),
+  **taken BEFORE the lookup reads the cover** (`folderArtFor`), so no row
+  records an identity newer than its cover: taken after, a cover replaced
+  as it was read was recorded under the new identity beside the old bytes,
+  and never read again (`TestScanner_ACoverReplacedWhileItIsReadIsReadAgain`,
+  red with the order swapped). **A removed cover takes its art away**:
+  `mergePostScanFields` no longer copies an old `local-` value onto a fresh
+  extraction whose pipeline ran and completed (`localArtSettled`) and found
+  none, since `local-` is the scanner's own value (the enricher writes
+  MusicBrainz ids, never over one); the upsert's `enriched_at` reset lets
+  the enricher give the row a network cover, as for a changed file. A
+  folder cover still outranks the enricher's (fresh non-zero wins).
+  **A cover the scan could not see, read or store is B134's rule for
+  covers**: a stat or read that did not complete (`folderArtReadIncomplete`;
+  gone, or not a file, is an answer), or a cover whose cache file could not
+  be written (a full or read-only data directory), leaves the extraction
+  `localArtUnsettled`, the row keeps the art it had
+  (`keepArtOfUnsettledRead`, on the full path too, and over a partial answer
+  from another candidate: taking it would change the row twice), records
+  `folderArtUnsettledKey` ("?"), and the gate then retries only the COVER
+  (`folderArtUnreadable`) and re-extracts the rows once it is stored, so a
+  cover that stays unreadable costs one failed attempt per folder a scan,
+  never a tag read of its album, and one Warn per scan counts its tracks
+  (`msgUnreadFolderArt`). A folder whose listing or a candidate's stat fails
+  keeps its rows untouched (an ELOOP'd cover read as "no cover" dropped the
+  album's art). A cache write that failed was first read as settled, and a
+  cover replaced while the data directory was full kept its rows on the old
+  art under the new cover's key, for good (CodeRabbit on #1117,
+  `TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater`). An
+  EMBEDDED picture whose cache file could not be written is no verdict
+  either (`localArtWriteFailed`), and the gate does not retry it, since that
+  retry is a tag read: the merge keeps the row's old `local-` value for
+  `needsLocalArtworkRecovery` to retry (read as "no cover", a wiped cache
+  whose rewrite failed lost its art for good,
+  `TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt`). **A
+  file its extractor refuses** (read whole, not its format, written by
+  name) records `folderArtNotLookedKey` ("-"), which the gate never
+  re-checks, and one the gate re-reads records it through
+  `SetFolderArtKey`, without which it was re-read every scan. **The
+  upgrade**: existing rows' key is '', which is also the key of a folder
+  with no cover, so the first scan re-reads, once, the tracks in folders
+  that hold one. **No `ExtractorVersion` bump**: what extraction produces
+  for a file and its folder is unchanged. **Cost, measured** on dido (3,000
+  FLACs in 300 albums with covers): an unchanged scan takes the same time
+  (522 ± 26 against main's 528 ± 14 ms) and makes 1,262 directory reads
+  (getdents64) where main made 6,360, since the listing is no longer read
+  once per worker, plus one stat per cover. Residuals: a cover rewritten in
+  place at the same size inside one mtime tick (the audio gate's own), and
+  a stale `local-` value from a cover removed BEFORE the upgrade (its folder
+  keys to '' like its row; the next `ExtractorVersion` bump drops it).
 - **A library ROOT that is itself a link to a directory is walked THROUGH,
   and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
   backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
@@ -2294,7 +2364,9 @@ no failing test — which is the shape to expect in this area.
   side; the warn line is what stops that staying invisible. Folder-art
   lookup is single-flighted per directory (a `sync.Once` promise stored with
   `LoadOrStore` — **never compute-then-`LoadOrStore`**, which runs N concurrent
-  ReadDir+hash per album under contention) and reset per scan. The disc-subfolder
+  ReadDir+hash per album under contention) and reset per scan; a reset alone
+  never brought a new cover to tracks already indexed, which the folder-art
+  key does (the B141 bullet under Scanner). The disc-subfolder
   parent fallback climbs EXACTLY ONE level, gated on an anchored disc-folder
   name and bounded by the absolute library roots.
 - **iTunes is a fallback, not a primary source**; artwork cache keys stay

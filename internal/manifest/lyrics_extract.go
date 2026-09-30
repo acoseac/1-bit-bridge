@@ -41,37 +41,74 @@ type sidecarStat struct {
 // so the single file we read is the one that would win the pick.
 var sidecarLyricsExts = []string{".ttml", ".lrc", ".txt"}
 
+// sidecarListing is one directory's listing for one scan: the lyrics
+// sidecars in it, and the folder-art candidates (folderArtCandidates) with
+// what their stats say (folderArtDirStateOf). One os.ReadDir answers both,
+// once per directory per scan (ExtractContext.SidecarIndex).
 type sidecarListing struct {
-	once  sync.Once
-	names map[string]string // lowercased file name → actual name
+	once   sync.Once
+	listed bool              // the directory was read
+	names  map[string]string // lowercased file name → actual name
+	// artNames are the folder-art candidates in the directory, by their
+	// listed names, in listing order (os.ReadDir sorts by name).
+	artNames []string
+
+	artOnce sync.Once
+	art     folderArtDirState
 }
 
-func loadSidecarNames(dir string) map[string]string {
+// loadDirListing reads dir once for everything the scan looks for beside an
+// audio file: its lyrics sidecars and its folder-art candidates. A directory
+// that could not be read lists nothing, and says so (listed false).
+func loadDirListing(dir string) *sidecarListing {
+	l := &sidecarListing{}
+	l.fill(dir)
+	return l
+}
+
+// fill reads dir into l (loadDirListing).
+func (l *sidecarListing) fill(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return
 	}
-	m := map[string]string{}
+	l.listed = true
+	l.names = map[string]string{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		switch strings.ToLower(filepath.Ext(e.Name())) {
+		name := e.Name()
+		switch strings.ToLower(filepath.Ext(name)) {
 		case ".lrc", ".ttml", ".txt":
-			m[strings.ToLower(e.Name())] = e.Name()
+			l.names[strings.ToLower(name)] = name
+		}
+		if isFolderArtCandidate(name) {
+			l.artNames = append(l.artNames, name)
 		}
 	}
-	return m
+}
+
+// dirListingFor is dir's listing for this scan: read once per directory and
+// shared by every worker when ec carries the scan's index (SidecarIndex),
+// read on every call when it does not.
+func dirListingFor(ec *ExtractContext, dir string) *sidecarListing {
+	if ec == nil || ec.SidecarIndex == nil {
+		return loadDirListing(dir)
+	}
+	// Load first: the skip gate asks for a listing of every unchanged
+	// track, and all but the first ask of a folder find one.
+	pI, ok := ec.SidecarIndex.Load(dir)
+	if !ok {
+		pI, _ = ec.SidecarIndex.LoadOrStore(dir, &sidecarListing{})
+	}
+	p := pI.(*sidecarListing)
+	p.once.Do(func() { p.fill(dir) })
+	return p
 }
 
 func sidecarNamesForDir(ec *ExtractContext, dir string) map[string]string {
-	if ec == nil || ec.SidecarIndex == nil {
-		return loadSidecarNames(dir)
-	}
-	pI, _ := ec.SidecarIndex.LoadOrStore(dir, &sidecarListing{})
-	p := pI.(*sidecarListing)
-	p.once.Do(func() { p.names = loadSidecarNames(dir) })
-	return p.names
+	return dirListingFor(ec, dir).names
 }
 
 // sidecarLyricsFile finds THE sidecar for an audio file: same stem

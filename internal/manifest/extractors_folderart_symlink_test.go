@@ -44,7 +44,11 @@ func TestScanFolderArtwork_SymlinkOversizedTargetSkipped(t *testing.T) {
 		t.Skipf("symlinks unsupported here: %v", err)
 	}
 
-	res := scanFolderArtwork(scanDir, t.TempDir())
+	st := folderArtDirStateOf(nil, scanDir)
+	if len(st.names) != 1 {
+		t.Fatalf("the folder-art state names %v, want the one link", st.names)
+	}
+	res := scanFolderArtwork(scanDir, st.names, t.TempDir(), nil)
 	if res.found {
 		t.Errorf("scanFolderArtwork found=true for a symlinked oversized cover; "+
 			"the %d-byte target exceeds the %d-byte cap and must be skipped", maxArtworkBytes+1, maxArtworkBytes)

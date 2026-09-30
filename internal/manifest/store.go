@@ -2142,6 +2142,32 @@ var migrations = []migration{
 		name:    "expire every transcode-failure suppression once (a missing tool used to strike the file)",
 		sql:     `UPDATE tracks SET variant_fail_at = 0 WHERE variant_fail_count != 0;`,
 	},
+	{
+		// v49 records, per track, the identity of the folder art its row
+		// was extracted against (Track.folderArtKey: each cover
+		// candidate's name, size and mtime), which the skip gate compares
+		// with the folder's now (folderArtDrifted), so a cover added,
+		// replaced or removed beside an unchanged audio file reaches its
+		// row (backlog B141). Column-only: never in tags_json, never on
+		// the wire.
+		//
+		// '' for every existing row, which is also the key of a folder
+		// with no cover: the first scan after the upgrade re-reads, once,
+		// only the tracks in a folder that holds one (through the
+		// version-stale diff-guard, so only rows whose art changes reach
+		// the delta), and leaves every other row alone.
+		//
+		// Append-only / idempotent per the ladder contract: the ALTER rides
+		// post(), not `sql` (see the v9 docblock).
+		version: 49,
+		name:    "tracks.folder_art_key (the folder art a row was extracted against)",
+		sql:     `-- column added idempotently in post(); see Track.folderArtKey`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks",
+				tableColumn{"folder_art_key", "ALTER TABLE tracks ADD COLUMN folder_art_key TEXT NOT NULL DEFAULT ''"},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2966,11 +2992,16 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// folder_art_key is the fresh extraction's, unconditionally: a cover
+	// changed beside a track whose art did not (its embedded picture wins,
+	// or the new cover is the old one's bytes) lands here, and a stamp that
+	// kept the old key would send the skip gate back to it on every scan.
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET extractor_version = ?,
 		    missing_count = 0,
-		    audio_md5 = COALESCE(NULLIF(?, ''), audio_md5)
+		    audio_md5 = COALESCE(NULLIF(?, ''), audio_md5),
+		    folder_art_key = ?
 		WHERE path = ?
 	`)
 	if err != nil {
@@ -2979,7 +3010,7 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 	defer stmt.Close()
 	now := s.now().UnixNano()
 	for _, t := range ts {
-		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.Path); err != nil {
+		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey, t.Path); err != nil {
 			return err
 		}
 		// The stamp leg carries the lyrics row too (the v7 backfill lands
@@ -2991,6 +3022,19 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		}
 	}
 	return tx.Commit()
+}
+
+// SetFolderArtKey records key as the folder-art key of the row at path, and
+// nothing else: no indexed_at (nothing a client sees changes), no
+// enriched_at, no tags_json. The scanner calls it for a file its extractor
+// refused, whose row it keeps as it was, so that the folder-art skip gate
+// (folderArtDrifted) stops going back to it. Holds `s.mu` per the writer
+// contract on Store.
+func (s *Store) SetFolderArtKey(ctx context.Context, path, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET folder_art_key = ? WHERE path = ?`, key, path)
+	return err
 }
 
 // ----- tracks -----
@@ -3025,8 +3069,9 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5, compression)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5, compression,
+		                   folder_art_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3084,9 +3129,12 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- semantics — keep-if-fresh-empty — belong to the
 			-- version-stale stamp leg (StampExtractorVersionBatch), which
 			-- only runs when the row was proved byte-identical.
-			audio_md5 = excluded.audio_md5
+			audio_md5 = excluded.audio_md5,
+			-- v49: the folder art this extraction was given, by identity
+			-- (Track.folderArtKey), which the skip gate compares.
+			folder_art_key = excluded.folder_art_key
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
-		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression)
+		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey)
 	if err != nil {
 		return err
 	}
@@ -3140,6 +3188,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		codec       any
 		compression any
 		audioMD5    string
+		artKey      string
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -3159,6 +3208,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			codec:       codec,
 			compression: compression,
 			audioMD5:    t.audioMD5,
+			artKey:      t.folderArtKey,
 		}
 	}
 
@@ -3183,8 +3233,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5, compression)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5, compression,
+		                   folder_art_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3220,7 +3271,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			-- v31 dupe stamps deliberately untouched — mirrors UpsertTrack.
 			extractor_version = excluded.extractor_version,
 			-- audio_md5 unconditional on a changed row — mirrors UpsertTrack.
-			audio_md5 = excluded.audio_md5
+			audio_md5 = excluded.audio_md5,
+			-- v49 folder-art key — mirrors UpsertTrack.
+			folder_art_key = excluded.folder_art_key
 	`)
 	if err != nil {
 		return err
@@ -3229,7 +3282,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey); err != nil {
 			return err
 		}
 	}
@@ -3542,6 +3595,10 @@ type TrackStat struct {
 	// constant. NOT NULL DEFAULT 0, so it scans into a plain int (a
 	// pre-stamp row reads 0).
 	ExtractorVersion int
+	// FolderArtKey is the `folder_art_key` column (v49): the identity of
+	// the folder art the row was extracted against, which the skip gate
+	// compares with the folder's now (folderArtDrifted).
+	FolderArtKey string
 }
 
 // GetTrackStat is the skip-gate twin of GetTrack: same exact-key
@@ -3575,12 +3632,12 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 	var st TrackStat
 	err := s.db.QueryRowContext(ctx, `
 		SELECT t.size, t.mtime_ns, COALESCE(json_extract(t.tags_json, '$.artworkMBID'), ''),
-		       t.extractor_version,
+		       t.extractor_version, t.folder_art_key,
 		       COALESCE(l.source, ''), COALESCE(l.sidecar_name, ''),
 		       COALESCE(l.source_mtime_ns, 0), COALESCE(l.source_size, 0)
 		FROM tracks t LEFT JOIN track_lyrics l ON l.source_path = t.path
 		WHERE t.path = ?`, path).
-		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion,
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion, &st.FolderArtKey,
 			&st.LyricsSource, &st.LyricsSidecarName, &st.LyricsSourceMTimeNS, &st.LyricsSourceSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
