@@ -494,30 +494,39 @@ func TestScanner_ACoverThatCouldNotBeReadIsReadOnALaterScan(t *testing.T) {
 // TestScanner_AReplacedCoverThatCouldNotBeReadKeepsTheOldArt pins the failed
 // read of a cover that replaced another: the rows keep the art they had (an
 // answer given without the cover is not one, and taking it would change the
-// rows twice), and take the new cover once it reads.
+// rows twice), even when another candidate beside it reads (folder.jpg, which
+// cover.jpg outranks by the listing's order), and take the new cover once it
+// reads.
 func TestScanner_AReplacedCoverThatCouldNotBeReadKeepsTheOldArt(t *testing.T) {
-	f := newArtFixture(t)
-	rels := []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
-	for _, rel := range rels {
-		f.flac(t, rel)
+	for _, beside := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a readable folder.jpg beside it: %v", beside), func(t *testing.T) {
+			f := newArtFixture(t)
+			rels := []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
+			for _, rel := range rels {
+				f.flac(t, rel)
+			}
+			old := coverBytes("before")
+			f.cover(t, "Artist/Album/cover.jpg", old, t0)
+			f.scan(t, "index")
+
+			replacement := coverBytes("after!")
+			f.cover(t, "Artist/Album/cover.jpg", replacement, t0.Add(time.Hour))
+			if beside {
+				f.cover(t, "Artist/Album/folder.jpg", coverBytes("second"), t0)
+			}
+			f.sc.readArt = failingArtRead("cover.jpg")
+			before := f.indexedAts(t, rels...)
+			f.scan(t, "the new cover's read failing")
+			f.requireArt(t, expectedLocalMBID(old), rels...)
+			f.requireStill(t, before)
+
+			f.sc.readArt = nil
+			f.scan(t, "the new cover readable")
+			f.requireArt(t, expectedLocalMBID(replacement), rels...)
+			f.requireMoved(t, before)
+			f.requireSettled(t, rels...)
+		})
 	}
-	old := coverBytes("before")
-	f.cover(t, "Artist/Album/cover.jpg", old, t0)
-	f.scan(t, "index")
-
-	replacement := coverBytes("after!")
-	f.cover(t, "Artist/Album/cover.jpg", replacement, t0.Add(time.Hour))
-	f.sc.readArt = failingArtRead("cover.jpg")
-	before := f.indexedAts(t, rels...)
-	f.scan(t, "the new cover's read failing")
-	f.requireArt(t, expectedLocalMBID(old), rels...)
-	f.requireStill(t, before)
-
-	f.sc.readArt = nil
-	f.scan(t, "the new cover readable")
-	f.requireArt(t, expectedLocalMBID(replacement), rels...)
-	f.requireMoved(t, before)
-	f.requireSettled(t, rels...)
 }
 
 // TestScanner_AnUnchangedLibraryIsNotReRead pins the steady state: over
