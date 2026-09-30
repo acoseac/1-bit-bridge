@@ -302,7 +302,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Thirteen claims in this list have been wrong and been corrected** — the
+**Fourteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -315,8 +315,9 @@ the old value survives the rewrite", (2026-09-27) "`Load` serves a config
 giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 `Consider` requires `.1bwf`", (2026-09-28) "`mtime_ns = 0` does not
 force a re-extraction", (2026-09-29) "the app's SSDP path has no
-LOCATION-versus-source check", and (2026-09-29) "Go binds a multicast
-listener to the group address". The first five cost a later session real
+LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
+listener to the group address", and (2026-09-29) "`isLossyCodec` gates every
+`BitsPerSample` write site". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -342,7 +343,11 @@ the bridge's doc change as a backlog entry (B78). The thirteenth was the
 premise of a backlog entry (B71) and, in another form, of a code comment
 that chose a socket by it (the renderer discovery client's); measuring the
 consequence the entry predicted is what found the premise false, from the
-toolchain's own source.
+toolchain's own source. The fourteenth named a function #225's review had
+already replaced (a denylist that failed open on an empty codec, for the
+allowlist `canSetBitsPerSample`), and the comment beside the wire field said
+the same; both were found while naming the compressed AIFF-C and WAV encodings
+(B124).
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -1508,11 +1513,52 @@ lost my library."
   (`MetadataExtractionRoute` gives `.dff` no extractor and `DFFHeadScan` types the
   file only), so there is no Mirror-PR; an app reader added later takes this
   precedence (backlog B149). v20 changes only rows of files carrying such text.
+- **A compressed AIFF-C or WAV is named by its encoding, and counted lossy**
+  (ExtractorVersion 21, 2026-09-29, backlog B124, B154). The AIFF walker named
+  every AIFF-C "AIFF" and the RIFF walker every WAV "WAV", names on every lossless
+  list (librarycat's quality sets, the CarPlay optimize gate, the app's), so a
+  µ-law AIFF-C at 44.1 kHz with no depth was filed CD Quality and an ADPCM WAV or
+  IMA4 AIFF-C at 96 kHz Hi-Res and a CarPlay render candidate (measured on
+  afconvert's, ffmpeg's and sox's files). `aifcEncodingOf` names an AIFF-C by its
+  COMM compression type and `wavEncodingOf` a WAV by its fmt format code (or an
+  extensible header's subformat: ffmpeg writes one for every ADPCM WAV above
+  48 kHz), as the app names them since its #2014 and #2028: the linear types keep
+  "AIFF" or "WAV" and their depth; the compressed ones are "ULAW", "ALAW" and
+  "IMA4" in an AIFF-C and "ADPCM", "GSM", "ALAW", "ULAW", "MP3" and "MP2" in a
+  WAV, with no depth. **An AIFF-C the bridge cannot read is "AIFC"** (an unknown
+  compression, or no COMM), the app's name for it, on neither list, with no depth
+  and no duration; **a WAV of a format code it does not name keeps "WAV" and loses
+  its rate** (default-deny, as for a DFF of an unknown compression: with the rate,
+  the lossless name claims a tier). **An IMA4 COMM counts 64-frame packets**: the
+  duration was 64 times too short (a 30 s file read 0.4688 s). **The first COMM
+  and fmt chunk the walk can read names the file**, a later one skipped whole, as
+  TagLib (and ffmpeg, for a WAV) reads it and as the walkers read their first SSND
+  and data chunk: parsed one on top of the other, a second chunk's codec landed
+  beside the first one's depth (CodeRabbit on #1122). A WAV of code 0x0050 is
+  "MP3" where its MPEG1WAVEFORMAT `fwHeadLayer` names layer III, read under that
+  tag alone (an extensible header's subformat has other fields there). **The six names are
+  one vocabulary in four places**, `manifest.IsLossyCodec`, its SQL mirror in
+  `upscaleEligibleSQL` (the admin lockstep matrix pins the pair), librarycat's
+  `lossyCodecs` and the dupes ranking set; a new compressed name joins all four.
+  The dupes lockstep test checked one direction until then, so a name reaching
+  `IsLossyCodec` alone passed it. The app's lossy list lacks "MP2" (backlog B158).
+  `.aifc` is in the DLNA MIME table, the UPnP walker's audio set, the ingest's
+  codec table ("AIFC": a DIDL cannot say what one holds) and the console player's
+  MIME and playability tables (a compressed WAV plays engine-dependent there).
+  **The optimize gate's codec-empty extension fallback leaves `.aifc` out on
+  purpose**, in Go and SQL alike: the extension cannot say whether one is
+  compressed. v21 changes those rows, and a linear AIFF-C of a type the old depth
+  list lacked (42ni, FL32, FL64), which gains its depth.
+  `TestACompressedAIFCOrWAVIsNamedByItsEncoding` (twenty real files,
+  `testdata/gen/compressed_pcm_fixtures.sh`), `TestAIFCEncodingOf`,
+  `TestScanner_V21_ACompressedAIFCOrWAVJoinsTheDelta_ALinearOneOnlyStamps`.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
-  keep `Some(0)` distinguishable from `nil`. `isLossyCodec` gates every
-  `BitsPerSample` write site structurally. `Year()==0` falls back to
+  keep `Some(0)` distinguishable from `nil`. `canSetBitsPerSample`, an allowlist
+  of the lossless names, gates every extractor's `BitsPerSample` write
+  structurally (this said `isLossyCodec`, a denylist #225's review replaced
+  because it failed open on an empty codec, until 2026-09-29). `Year()==0` falls back to
   `parseYearPrefix` over the raw date tags — a valid ISO `2023-06-09` otherwise
   indexes as year 0. `stringOf` iterates the REQUESTED aliases in priority order,
   never `range raw` (Go map order is randomised, so a file carrying two matching

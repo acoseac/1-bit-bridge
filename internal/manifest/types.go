@@ -46,15 +46,16 @@ type Track struct {
 	Duration    *float64  `json:"duration,omitempty"`   // seconds
 	SampleRate  *float64  `json:"sampleRate,omitempty"` // Hz (e.g. 96000, 2822400)
 	// BitsPerSample MUST remain nil for lossy formats (AAC / MP3 /
-	// OGG / OPUS / WMA) — the value would be the decoder's container
-	// width (e.g. 32 for AAC's Float32 output), not a meaningful
+	// OGG / OPUS / WMA, and the compressed AIFF-C and WAV encodings) —
+	// the value would be the decoder's container width (e.g. 32 for
+	// AAC's Float32 output) or, for a compressed AIFF-C or WAV, the
+	// width of the signal before it was compressed, not a meaningful
 	// integer bit depth of the encoded signal. Surfacing it would
 	// re-introduce the iOS PR #371 "M4A 32-bit" Now Playing chip
-	// regression. Every site in `extractors.go` that writes this
-	// field is gated by `!isLossyCodec(t.Codec)` (see PR-A2).
-	// Today FLAC + DSF + DFF + ALAC-via-M4A are the only formats
-	// that ACTUALLY populate this — the gate is structural insurance
-	// against a future enricher addition.
+	// regression. Every extractor site that writes this field is gated by
+	// `canSetBitsPerSample(t.Codec)`, an allowlist of the lossless
+	// names (FLAC, ALAC, DSF, DFF, WAV, AIFF), and the WAV and AIFF
+	// walkers write it only for linear PCM.
 	BitsPerSample      *int     `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
 	IsDSD              *bool    `json:"isDSD,omitempty"`
 	ReplayGainTrackDB  *float64 `json:"replayGainTrackDB,omitempty"`
@@ -142,7 +143,14 @@ type Track struct {
 	//   - "ALAC", "AAC"   — captured via internal MP4 sample-description
 	//                       walk (`extractMP4Codec`)
 	//   - "FLAC"           — set by extractFLACFormatFromReader
-	//   - "DSF"            — set by extractDSFWithContext
+	//   - "DSF", "DFF"     — set by their extractors
+	//   - "WAV", "AIFF"    — linear PCM, from the RIFF and AIFF walkers;
+	//                       since ExtractorVersion 21 a compressed one is
+	//                       named by its encoding ("ULAW", "ALAW", "IMA4"
+	//                       for AIFF-C; "ADPCM", "GSM", "ULAW", "ALAW",
+	//                       "MP3", "MP2" for WAV) and an AIFF-C whose
+	//                       compression the bridge does not know is
+	//                       "AIFC" (backlog B124, B154)
 	//   - "MP3", "OGG"     — set from `tag.FileType()` for those formats
 	//                       where dhowden's detection IS reliable
 	//   - "" (empty)       — unknown / undetected; iOS falls back to

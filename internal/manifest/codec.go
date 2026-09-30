@@ -1,15 +1,22 @@
 // Codec vocabulary helpers shared across packages. Track.Codec is the
 // scanner-stamped canonical upper-case codec string (FLAC / ALAC / WAV
-// / AIFF / AAC / MP3 / OGG / OPUS / WMA / DSF / DFF; "" for legacy
-// pre-codec rows and unreadable containers) — this file owns the
-// predicates over that vocabulary so consumers can't drift.
+// / AIFF / AAC / MP3 / OGG / OPUS / WMA / DSF / DFF; the compressed
+// AIFF-C and WAV encodings ULAW / ALAW / IMA4 / ADPCM / GSM / MP2 and
+// "AIFC", an AIFF-C whose compression the bridge does not know, since
+// ExtractorVersion 21; "" for legacy pre-codec rows and unreadable
+// containers) — this file owns the predicates over that vocabulary so
+// consumers can't drift.
 package manifest
 
 import "strings"
 
 // IsLossyCodec reports whether codec identifies a LOSSY encode
-// (MP3 / AAC / OGG / OPUS / WMA). Case-insensitive and whitespace-
-// tolerant, matching the scanner's stamping conventions.
+// (MP3 / AAC / OGG / OPUS / WMA, and since ExtractorVersion 21 the
+// compressed AIFF-C and WAV encodings: G.711 ULAW / ALAW, IMA4 and
+// ADPCM, GSM, MP2; backlog B124, B154). Case-insensitive and whitespace-
+// tolerant, matching the scanner's stamping conventions. "AIFC" (a
+// compression the bridge does not know) is not in it: the extractor
+// gives such a row no depth, which keeps it out of upscaling anyway.
 //
 // This is the single source of truth for the upscale lossy gate —
 // transcode.Coordinator.Submit's candidate walk, the cmd/bridge
@@ -30,7 +37,7 @@ import "strings"
 // behavior; the rate/bits geometry gate still protects them).
 func IsLossyCodec(codec string) bool {
 	switch strings.ToUpper(strings.TrimSpace(codec)) {
-	case "MP3", "AAC", "OGG", "OPUS", "WMA":
+	case "MP3", "AAC", "OGG", "OPUS", "WMA", "ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2":
 		return true
 	}
 	return false
