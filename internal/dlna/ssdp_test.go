@@ -146,8 +146,9 @@ func Test_SSDPAdvertiser_MSearchListenerWakesOnContextCancel(t *testing.T) {
 // where multicast cannot be pinned to it. Start only warns when that pin
 // fails, and sends on the OS default interface instead, so a test whose
 // Start succeeded would multicast onto the LAN there; the skip decides with
-// the call Start makes (pinMulticastInterface), on a socket dialed the way
-// Start dials its sender, before any advertiser starts (CodeRabbit on #1086).
+// the call Start makes (pinMulticastInterface), on a socket opened the way
+// Start opens its sender (openNotifySender), before any advertiser starts
+// (CodeRabbit on #1086).
 func loopbackInterface(t *testing.T) *net.Interface {
 	t.Helper()
 	ifaces, err := net.Interfaces()
@@ -168,13 +169,9 @@ func loopbackInterface(t *testing.T) *net.Interface {
 // pinned to iface.
 func skipUnlessMulticastPins(t *testing.T, iface *net.Interface) {
 	t.Helper()
-	addr, err := net.ResolveUDPAddr("udp4", SSDPMulticastAddr)
+	probe, err := openNotifySender()
 	if err != nil {
-		t.Fatalf("resolve %s: %v", SSDPMulticastAddr, err)
-	}
-	probe, err := net.DialUDP("udp4", nil, addr)
-	if err != nil {
-		t.Skipf("cannot open a UDP socket to the SSDP group: %v", err)
+		t.Skipf("cannot open a UDP socket: %v", err)
 	}
 	defer probe.Close()
 	if err := pinMulticastInterface(probe, iface); err != nil {
