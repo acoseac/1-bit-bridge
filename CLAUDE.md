@@ -3531,7 +3531,7 @@ no failing test — which is the shape to expect in this area.
   renderer discovery are gated off; measured with the real binary), so the
   cloud-VM case was never reachable there. The app's mirror has no link
   rule (backlog B138). `TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink`,
-  `TestServerLinkLocalLocationIsFetchedOnlyOnAZeroConfLink`,
+  `TestServerLinkLocalSourceIsApprovedOnlyOnAZeroConfLink`,
   `TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere`
   (cmd/bridge, the chain), the per-link columns of
   `TestDefaultClientDialCheck` and `TestLocationPermittedBy`,

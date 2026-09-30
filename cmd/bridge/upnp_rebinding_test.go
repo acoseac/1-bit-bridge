@@ -295,6 +295,28 @@ func TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine(t *testing.T
 	}
 }
 
+// requireRefusedAtTheDialCheck routes a server under approval, as the
+// discovery client would have cached it, makes its control URL's name answer
+// answer, and requires the ingest's SOAP Browse and the proxy's byte fetch to
+// both be refused by the dial check with refusal, before any stand-in sees a
+// request.
+func requireRefusedAtTheDialCheck(t *testing.T, srv config.UPnPUpstreamServerConfig, approval discovery.DialApproval, answer, refusal string) {
+	t.Helper()
+	h := newRebindingHosts(t)
+	server := newRoutedServer(t, srv, "http://"+rebindingName+":"+h.port+"/ctl", approval)
+	h.dns.Answer(netip.MustParseAddr(answer))
+	ingestErr, proxyErr := server.fetchBoth(t)
+	if ingestErr == nil || !strings.Contains(ingestErr.Error(), refusal) {
+		t.Errorf("ingest error = %v, want the dial check's refusal (%q)", ingestErr, refusal)
+	}
+	if proxyErr == nil || proxyErr.Code != "upnp_upstream_unreachable" || !strings.Contains(proxyErr.Error(), refusal) {
+		t.Errorf("proxy error = %v, want upnp_upstream_unreachable with the dial check's refusal (%q)", proxyErr, refusal)
+	}
+	if h.console.take() != nil || (h.lanHost != nil && h.lanHost.take() != nil) {
+		t.Error("a stand-in saw a request, which no case here sends")
+	}
+}
+
 // TestAPacketFromAMetadataAddressApprovesNoLaterDialThere is the chain the
 // cloud metadata rule closes (CodeRabbit on #1074), on a cloud VM. A peer on
 // the link spoofs an SSDP packet from 169.254.169.254 whose LOCATION names
@@ -307,22 +329,9 @@ func TestARebindingNameCannotTakeTheIngestOrAByteFetchToThisMachine(t *testing.T
 // connect there now, and both are refused at the dial check, before any
 // packet leaves.
 func TestAPacketFromAMetadataAddressApprovesNoLaterDialThere(t *testing.T) {
-	h := newRebindingHosts(t)
 	spoofed := &net.UDPAddr{IP: net.ParseIP("169.254.169.254"), Port: 1900}
-	server := newRoutedServer(t, config.UPnPUpstreamServerConfig{Name: "Spoofed", UDN: "uuid:rebind-metadata"},
-		"http://"+rebindingName+":"+h.port+"/ctl", discovery.AnnouncedFrom(spoofed))
-	h.dns.Answer(netip.MustParseAddr("169.254.169.254"))
-	ingestErr, proxyErr := server.fetchBoth(t)
-	const refusal = "refusing to connect to a cloud metadata address"
-	if ingestErr == nil || !strings.Contains(ingestErr.Error(), refusal) {
-		t.Errorf("ingest error = %v, want the dial check's refusal (%q)", ingestErr, refusal)
-	}
-	if proxyErr == nil || proxyErr.Code != "upnp_upstream_unreachable" || !strings.Contains(proxyErr.Error(), refusal) {
-		t.Errorf("proxy error = %v, want upnp_upstream_unreachable with the dial check's refusal (%q)", proxyErr, refusal)
-	}
-	if h.console.take() != nil || (h.lanHost != nil && h.lanHost.take() != nil) {
-		t.Error("a stand-in saw a request, which no case here sends")
-	}
+	requireRefusedAtTheDialCheck(t, config.UPnPUpstreamServerConfig{Name: "Spoofed", UDN: "uuid:rebind-metadata"},
+		discovery.AnnouncedFrom(spoofed), "169.254.169.254", "refusing to connect to a cloud metadata address")
 }
 
 // TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere
@@ -340,24 +349,11 @@ func TestAPacketFromAMetadataAddressApprovesNoLaterDialThere(t *testing.T) {
 // packet's own address stays approved: that is the direct-cable device the
 // exception is for, and internal/upnp's tests pin it.)
 func TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere(t *testing.T) {
-	h := newRebindingHosts(t)
 	from := &net.UDPAddr{IP: net.ParseIP("169.254.7.7"), Port: 1900}
 	approval := discovery.AnnouncedOn(from, false)
 	if approval != discovery.AnnouncedFrom(from) {
 		t.Fatalf("AnnouncedOn(src, false) = %v, AnnouncedFrom(src) = %v: the two spellings of a configured link's approval differ", approval, discovery.AnnouncedFrom(from))
 	}
-	server := newRoutedServer(t, config.UPnPUpstreamServerConfig{Name: "Neighbour", UDN: "uuid:rebind-link-local"},
-		"http://"+rebindingName+":"+h.port+"/ctl", approval)
-	h.dns.Answer(netip.MustParseAddr("169.254.7.7"))
-	ingestErr, proxyErr := server.fetchBoth(t)
-	const refusal = "refusing to connect to this machine or a link-local address"
-	if ingestErr == nil || !strings.Contains(ingestErr.Error(), refusal) {
-		t.Errorf("ingest error = %v, want the dial check's refusal (%q)", ingestErr, refusal)
-	}
-	if proxyErr == nil || proxyErr.Code != "upnp_upstream_unreachable" || !strings.Contains(proxyErr.Error(), refusal) {
-		t.Errorf("proxy error = %v, want upnp_upstream_unreachable with the dial check's refusal (%q)", proxyErr, refusal)
-	}
-	if h.console.take() != nil || (h.lanHost != nil && h.lanHost.take() != nil) {
-		t.Error("a stand-in saw a request, which no case here sends")
-	}
+	requireRefusedAtTheDialCheck(t, config.UPnPUpstreamServerConfig{Name: "Neighbour", UDN: "uuid:rebind-link-local"},
+		approval, "169.254.7.7", "refusing to connect to this machine or a link-local address")
 }

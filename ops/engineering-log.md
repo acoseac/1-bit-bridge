@@ -32146,7 +32146,7 @@ about was never reachable there. Both gates were already pinned
   `TestAnnouncementLinkLogsALinkRefusalOncePerSourceAndBounded`;
   `TestAnnouncedOnApprovesALinkLocalSourceOnlyOnAZeroConfLink`;
   `TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink`;
-  `TestHandlePacket_AKnownRendererCannotMoveOntoALinkLocalLocationOffAZeroConfLink`;
+  a link-local row in `TestHandlePacket_AKnownRendererCannotMoveOntoAHostLocalLocation`;
   `TestHandlePacket_TheFetchRunsUnderTheLinksApproval` (the approval each
   request is dispatched under, read from its context);
   `TestTheRendererClientReadsItsLinkBeforeEverySearch` (the running tick
@@ -32155,9 +32155,9 @@ about was never reachable there. Both gates were already pinned
   `WithAnnouncementSource` and `LocationFromSource` to the configured
   link's answer. `TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress`
   runs its direct-cable rows on a zero-configuration link.
-- `internal/upnp`: `TestServerLinkLocalLocationIsFetchedOnlyOnAZeroConfLink`,
-  `TestAServerAnnouncedFromALinkLocalAddressOffAZeroConfLinkCarriesNoApprovalForIt`,
-  `TestAKnownServerCannotMoveOntoALinkLocalLocationOffAZeroConfLink`,
+- `internal/upnp`: `TestServerLinkLocalSourceIsApprovedOnlyOnAZeroConfLink`
+  (a LOCATION on the link-local literal, and one on a name, on each link),
+  a link-local row in `TestAKnownServerCannotMoveOntoAHostLocalLocation`,
   `TestTheServerClientReadsItsLinkBeforeEverySearch`;
   `TestServerCloudMetadataLocationIsNeverFetched`'s direct-cable tail runs
   on a zero-configuration link.

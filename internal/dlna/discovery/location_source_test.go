@@ -83,6 +83,23 @@ func TestHandlePacket_NeverFetchesAHostLocalLocationFromAnotherAddress(t *testin
 	}
 }
 
+// serveChordRenderer answers as a renderer does both fetches a first sighting
+// makes: chordDeviceXML to the description GET, chordGetProtocolInfoResponse
+// to the GetProtocolInfo POST.
+func serveChordRenderer(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodPost {
+		_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
+		return
+	}
+	_, _ = w.Write([]byte(chordDeviceXML))
+}
+
+// chordRenderer is a requestLog that answers as serveChordRenderer does.
+func chordRenderer() *requestLog {
+	return &requestLog{handler: serveChordRenderer}
+}
+
 // TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress is the other
 // side of the rule: a device on a zero-configuration link (a direct cable,
 // no DHCP server) announces from its link-local address with a LOCATION on
@@ -102,14 +119,7 @@ func TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress(t *testing.T)
 		{"configured", configuredLink, "127.0.0.1", "http://127.0.0.1:8080/description.xml", "http://127.0.0.1:8080/avtransport/control"},
 		{"zero-conf", zeroConfLink, "127.0.0.1", "http://127.0.0.1:8080/description.xml", "http://127.0.0.1:8080/avtransport/control"},
 	} {
-		disp := &requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if r.Method == http.MethodPost {
-				_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
-				return
-			}
-			_, _ = w.Write([]byte(chordDeviceXML))
-		}}
+		disp := chordRenderer()
 		c := newTestClientOn(t, disp, tc.addrs)
 		c.handlePacket(context.Background(), rendererAnnouncement("uuid:same-address", tc.location), udpFrom(tc.source))
 		c.wg.Wait()
@@ -144,14 +154,7 @@ func TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink(t *testing.
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			logs := captureLogs(t)
-			disp := &requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				if r.Method == http.MethodPost {
-					_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
-					return
-				}
-				_, _ = w.Write([]byte(chordDeviceXML))
-			}}
+			disp := chordRenderer()
 			c := newTestClientOn(t, disp, tc.addrs)
 			// Twice, as a device's answers to two searches arrive: one line.
 			for range 2 {
@@ -170,39 +173,6 @@ func TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink(t *testing.
 				t.Errorf("link refusal warnings = %d, want %d; log:\n%s", got, tc.wantWarn, logs.String())
 			}
 		})
-	}
-}
-
-// TestHandlePacket_AKnownRendererCannotMoveOntoALinkLocalLocationOffAZeroConfLink
-// is B49's move-detector route: a renderer known at a LAN address is
-// re-announced from a link-local address, with a LOCATION on it, on a link
-// where this host holds a routable address. The detector must not follow it.
-func TestHandlePacket_AKnownRendererCannotMoveOntoALinkLocalLocationOffAZeroConfLink(t *testing.T) {
-	disp := &requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
-			return
-		}
-		_, _ = w.Write([]byte(chordDeviceXML))
-	}}
-	c := newTestClient(t, disp)
-	const udn = "uuid:known-lan-renderer"
-	c.handlePacket(context.Background(), alivePacket(udn, "http://192.0.2.7:8080/description.xml"), udpFrom("192.0.2.7"))
-	c.wg.Wait()
-	const honest = "http://192.0.2.7:8080/avtransport/control"
-	if info, _ := c.cache.Get(udn); info.ControlURL != honest {
-		t.Fatalf("first discovery cached ControlURL %q, want %q", info.ControlURL, honest)
-	}
-	before := len(disp.requests())
-
-	c.handlePacket(context.Background(), alivePacket(udn, "http://169.254.7.7:8080/description.xml"), udpFrom("169.254.7.7"))
-	c.wg.Wait()
-	if reqs := disp.requests(); len(reqs) != before {
-		t.Errorf("requests after the re-announcement = %q, want nothing more", reqs[before:])
-	}
-	if info, _ := c.cache.Get(udn); info.ControlURL != honest {
-		t.Errorf("ControlURL = %q after the re-announcement, want %q kept", info.ControlURL, honest)
 	}
 }
 
@@ -244,14 +214,7 @@ func TestHandlePacket_TheFetchRunsUnderTheLinksApproval(t *testing.T) {
 		{"configured", configuredLink, false},
 		{"zero-conf", zeroConfLink, true},
 	} {
-		disp := &approvalLog{requestLog: requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if r.Method == http.MethodPost {
-				_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
-				return
-			}
-			_, _ = w.Write([]byte(chordDeviceXML))
-		}}}
+		disp := &approvalLog{requestLog: requestLog{handler: serveChordRenderer}}
 		c := newTestClientOn(t, disp, tc.addrs)
 		c.handlePacket(context.Background(), rendererAnnouncement("uuid:named", "http://renderer.local:8080/description.xml"), udpFrom("169.254.7.7"))
 		c.wg.Wait()
@@ -269,36 +232,37 @@ func TestHandlePacket_TheFetchRunsUnderTheLinksApproval(t *testing.T) {
 
 // TestHandlePacket_AKnownRendererCannotMoveOntoAHostLocalLocation is the
 // move-detector route: a renderer known at a LAN address is re-announced
-// from another LAN address with a LOCATION on the bridge's console. Before
-// this rule the detector read it as a move and fetched the console; now the
-// LOCATION reads as absent, so the known entry is refreshed and kept.
+// with a LOCATION the detector must not follow. Before these rules it read
+// each as a move and fetched there; now the LOCATION reads as absent, so the
+// known entry is refreshed and kept. Two re-announcements: one on the
+// bridge's console from another LAN address (backlog B14), and one on a
+// link-local address from that very address, on a link where this host holds
+// a routable address (backlog B49).
 func TestHandlePacket_AKnownRendererCannotMoveOntoAHostLocalLocation(t *testing.T) {
-	disp := &requestLog{handler: func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(chordGetProtocolInfoResponse))
-			return
+	for _, move := range []struct{ location, source string }{
+		{"http://127.0.0.1:7789/api/stats", "192.0.2.99"},
+		{"http://169.254.7.7:8080/description.xml", "169.254.7.7"},
+	} {
+		disp := chordRenderer()
+		c := newTestClient(t, disp)
+		const udn = "uuid:known-renderer"
+		c.handlePacket(context.Background(), alivePacket(udn, "http://192.0.2.7:8080/description.xml"), udpFrom("192.0.2.7"))
+		c.wg.Wait()
+		const honest = "http://192.0.2.7:8080/avtransport/control"
+		if info, _ := c.cache.Get(udn); info.ControlURL != honest {
+			t.Fatalf("first discovery cached ControlURL %q, want %q", info.ControlURL, honest)
 		}
-		_, _ = w.Write([]byte(chordDeviceXML))
-	}}
-	c := newTestClient(t, disp)
-	const udn = "uuid:known-renderer"
-	c.handlePacket(context.Background(), alivePacket(udn, "http://192.0.2.7:8080/description.xml"), udpFrom("192.0.2.7"))
-	c.wg.Wait()
-	const honest = "http://192.0.2.7:8080/avtransport/control"
-	if info, _ := c.cache.Get(udn); info.ControlURL != honest {
-		t.Fatalf("first discovery cached ControlURL %q, want %q", info.ControlURL, honest)
-	}
-	before := len(disp.requests())
+		before := len(disp.requests())
 
-	c.handlePacket(context.Background(), alivePacket(udn, "http://127.0.0.1:7789/api/stats"), udpFrom("192.0.2.99"))
-	c.wg.Wait()
-	if reqs := disp.requests(); len(reqs) != before {
-		t.Errorf("requests after the re-announcement = %q, want nothing more: "+
-			"the move detector must not follow a LOCATION on this host", reqs[before:])
-	}
-	if info, _ := c.cache.Get(udn); info.ControlURL != honest {
-		t.Errorf("ControlURL = %q after the re-announcement, want %q kept", info.ControlURL, honest)
+		c.handlePacket(context.Background(), alivePacket(udn, move.location), udpFrom(move.source))
+		c.wg.Wait()
+		if reqs := disp.requests(); len(reqs) != before {
+			t.Errorf("re-announced at %s from %s: requests %q, want nothing more: "+
+				"the move detector must not follow it", move.location, move.source, reqs[before:])
+		}
+		if info, _ := c.cache.Get(udn); info.ControlURL != honest {
+			t.Errorf("re-announced at %s from %s: ControlURL = %q, want %q kept", move.location, move.source, info.ControlURL, honest)
+		}
 	}
 }
 
