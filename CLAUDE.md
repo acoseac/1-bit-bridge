@@ -1586,8 +1586,8 @@ lost my library."
   Host comparison, not URL comparison — the two differ in exactly the part that
   is wrong, so the existing string dedupe cannot see it. `autocert.domain` cannot
   simply be omitted: public mode refuses to start without it.
-- **An endpoint the bridge advertises carries no user name, password, query
-  or fragment** (backlog B54). A `customEndpoints` entry was kept as
+- **An endpoint the bridge advertises carries no user name, password, path,
+  query or fragment** (backlog B54; the path since B66). A `customEndpoints` entry was kept as
   written, so `/v1/health`, which answers without a token, published
   `https://user:password@host:7788` (a token as the user name, a `?token=`,
   a `#…` alike) to any caller, and the pairing QR's `urls=` carried it
@@ -1599,7 +1599,18 @@ lost my library."
   path, and the query of every request that carries one (the file routes),
   so no proxy that needed one of those parts could have served the app's
   file routes (read in `BridgeSourceClient`, `BridgePairingURL` and
-  `SMBStore`, 2026-09-28).
+  `SMBStore`, 2026-09-28). **A path is not the root's to keep either**
+  (B66): `buildRequest` sets every data request's path over the endpoint's,
+  and the requests that APPEND to it instead (`appendingPathComponent`: the
+  pairing join and the redeem, the first-contact `/v1/health` probe, the
+  `/v1/events` stream) reach a path the bridge does not serve, which answers
+  404, and a redeem that meets one fails pairing outright ("doesn't accept
+  pairing codes", no fallback). So no deployment used one, every request
+  reaches the bridge without it, and a token in it reached every caller of
+  health for nothing (read in `BridgePairingClient`, `BridgeEventStream`
+  and `BridgePairingPersistence`, 2026-09-30). A bare `/` is the root and
+  is kept; a path counts only after an authority, so `not a url` is still
+  the prune's to drop, not a refusal naming a path.
   **Repair what is stored, refuse what is typed**
   (the library name's rule, under Config): `ValidateCustomEndpoints`, which
   `Normalize` runs for `Load` and every writer, keeps such an entry WITHOUT
@@ -1607,10 +1618,13 @@ lost my library."
   and warns once per entry under its own message, never "dropped"; the
   settings PATCH refuses a typed one whole (`config.CheckCustomEndpoints`,
   400 `validate`, nothing written), and `bridge init --public --domain`
-  refuses a domain carrying one, or one that does not parse (a password
-  with a space in it, which the predicate cannot read; exit 2, nothing
-  written), since the domain is also the autocert host that health and the
-  QR build a URL from, as a string.
+  refuses any domain `config.AutocertHost` would change (exit 2, nothing
+  written; the next bullet), since the domain is also the autocert host
+  that health and the QR build a URL from, as a string. It asked
+  `HasCredentialParts` until B66, which let a path, a scheme and a port
+  through; and it wrote the untrimmed flag, so a padded domain's endpoint
+  (`https://` joined to the spaces) did not parse and the install was saved
+  with none.
   **Don't drop such an entry**: its host and port still reach the bridge,
   and a loaded config must not lose a route over a part nothing reads.
   **Don't strip at the publish sites**: every enumeration
@@ -1632,6 +1646,58 @@ lost my library."
   as it gave it, query included (a Windows device host's is
   `…/udhisapi.dll?content=uuid:…`), so a rule on its parts would cost those
   devices the hint (`TestHealthDoesNotPublishTheOperatorsManualURL`).
+- **…and `autocert.domain` is a host name alone, served as the host it
+  names** (backlog B66). Public mode builds a URL from it as a string,
+  `https://<domain>:<listen port>`, in `/v1/health` (`publicModeEndpoints`),
+  in the QR's alternates (`pairAlternates`) and as the QR's PRIMARY `url=`
+  (`defaultBridgeURL`), and the banner prints it ("Public mode — domain:",
+  "Admin console:"). A hand edit `user:password@host` was published and
+  printed whole (measured with the real binary: health, both QR fields and
+  both banner lines). Every other consumer wants a host too and matched
+  nothing: the ACME whitelist (`autocert.HostWhitelist` runs IDNA, which
+  refuses the `:` and the `/` such values carry, measured), the SNI route,
+  and the console's Origin allowlist, which compares a browser's Origin
+  hostname with the domain. So `Normalize` serves it as
+  `config.AutocertHost`'s reading (no scheme, user information, port, path,
+  query or fragment), warning once under its own message and naming the
+  field by scheme and host (`urlFieldForLog`), never the value. **Repaired,
+  never refused**: the value loaded before. **Refuse what is typed**:
+  `bridge init --public --domain` refuses any value `AutocertHost` would
+  change (exit 2, nothing written), and trims once and writes what it
+  checked.
+  **A value that names no host that can be read is served as
+  `config.InvalidAutocertDomain`** (`autocert-domain.invalid`, RFC 6761),
+  never blanked: `Validate` refuses an empty public domain, and the phones of
+  such a bridge may still reach it through `customEndpoints`. None of those
+  values ever worked (no certificate, no Origin match, a URL the app cannot
+  parse), so the placeholder breaks nothing. **Three rules keep the
+  reading clean.** An IP address, once a scheme, user information, a path,
+  a query and a fragment are removed, is returned as written:
+  `url.Parse("//2001:db8::1")` reads the host `2001:db8:` and the port 1,
+  after `user@` too. **Never bracketed**: the Origin allowlist compares the
+  domain with an Origin hostname, which has no brackets, so bracketing
+  would lock the console out of a bridge whose unbracketed IPv6 domain
+  passes it today; the URL built from that domain is invalid, which is
+  backlog B152 (both spellings measured, a review's proposal). **Nothing that
+  precedes an `@` is ever returned**: an `@` after the first `/`, `?` or `#`
+  could as well end user information a hand edit left unescaped
+  (`user:12/34@host` parses with the host `user`), so it names no host.
+  And a value `url.Parse` cannot read (a password with a space) names none.
+  **What it returns is a fixed point** (`Normalize` is idempotent, and init
+  takes back what it stores; a bracketed IPv6 keeps its brackets and a zone
+  its `%25`). Read in public mode and wherever `autocert.enabled` (serve
+  starts the ACME manager in either posture and prints the domain); a
+  loopback config with autocert off keeps its value, unwarned.
+  **Don't strip at the publish sites** (the bullet above: they read the
+  normalized value). The Gemini consult on the placeholder was refused by
+  the API's spending cap; decided here.
+  `TestAutocertHostReadsTheHostAValueNames` (a table, every shape, the
+  fixed point),
+  `TestNormalizeServesAutocertDomainAsItsHost`,
+  `TestHealthPublishesNoAutocertDomainCredential`,
+  `TestPublicPairingCarriesNoAutocertDomainCredential` and
+  `TestServePublishesNoAutocertDomainCredential` (the real public serve:
+  health, a minted link, the banner and every log line).
 - **mDNS TXT records carry `host` + `port`.** Without them iOS must
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
@@ -3632,6 +3698,42 @@ no failing test — which is the shape to expect in this area.
   `TestManualPollerNeverFetchesACloudMetadataDescription` holds both
   refusals and both controls (a direct-cable literal, a name answering
   127.0.0.1).
+- **…and a manual URL's user information travels as a header, and no line
+  names the URL** (backlog B66). A ContentDirectory control URL the
+  description names relative to the manual URL INHERITS its user
+  information (`url.ResolveReference` copies the base's), and the SOAP
+  client built its request from it: `upnp: POST
+  http://user:<password>@nas:8200/ctl: status 401` reached the journal at
+  WARN on every failed walk ("UPnP upstream: per-server error", measured
+  with the real binary), and the console shows the same text as the
+  server's last walk error. `splitControlURL` (internal/upnp/client.go)
+  takes it out of the request URL and `invoke` sends it with
+  `SetBasicAuth`, the header net/http built from the URL byte for byte, so
+  a server behind Basic auth keeps working; the dispatcher follows no
+  redirect, so the header reaches no other host. B69's rule for the enrich
+  bases, one package over. The poller's two Debug lines ("description
+  fetch failed", "carries no ContentDirectory service") named the URL
+  whole; they name the host (`descriptionHostForLog`), as its warnings do,
+  and the fetch's error goes through `fetchErrorForLog`, which replaces the
+  URL in each of its renderings: discovery's own (`GET <url>: …`, as
+  passed) and net/http's `*url.Error` (as re-serialized, a password masked
+  `***`, a token as the user name, a query and a fragment whole), read from
+  the error's own `URL` field, never guessed, and **quoted as `%q` quotes
+  it**: `url.Error.Error` is `%s %q: %s`, so a URL holding a `"`, a `\` or
+  an unprintable rune appears escaped, and a search for it as written
+  misses (measured; found checking a review's suggestion on #1116). A
+  manual URL with no host `descriptionHostForLog` can read (it does not
+  parse, or `user:pw@host` was written without a scheme) logs a fixed
+  reason, never its error: net/http's `unsupported protocol scheme` names
+  the scheme such a value parses with, its user name. The bridge prints no
+  Debug line today (`logging.Init` fixes the level at Info), so that half
+  would have bitten only the day one is added. A byte fetch through
+  `upnpproxy` sends no such credential at all (backlog B143).
+  `TestAControlURLsUserInformationTravelsAsBasicAuth` (net/http's header
+  taken on every run), `TestAWalkErrorNamesNoControlURLUserInformation`
+  (the ingest's per-server error) and
+  `TestManualPollerDebugLinesNameTheHostAlone` (five ways the fetch fails,
+  three URL shapes, a scheme-less one, every line searched).
 - **…and a packet's LINK-LOCAL source approves itself only when the packet
   arrived on a zero-configuration IPv4 link** (backlog B49, 2026-09-29). The
   metadata list closed the costly case; the rest of the residual was any
@@ -4334,7 +4436,12 @@ no failing test — which is the shape to expect in this area.
   credential out of every request URL (the bullet on a configured base URL's
   user information under **Enrichment**, backlog B69): net/http's
   `*url.Error` names a request URL with its password masked (`user:***@`)
-  and a token written as the user name whole.
+  and a token written as the user name whole. So are `autocert.domain`'s
+  two warnings (the field, and its scheme and the host it is served as), a
+  manual upstream's control URL, whose user information goes in a header,
+  and the manual poller's Debug lines (backlog B66: the `autocert.domain`
+  bullet under **The wire contract**, and the manual-URL one under **DLNA,
+  UPnP and discovery**).
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
   because a toolchain is missing). NOT for "listeners bind once", which is true

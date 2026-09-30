@@ -32911,3 +32911,339 @@ shape), so it waits until the deadline less `watchDrainReserve`.
   whose sox is merely slow, and the request that runs it waits up to 2 s
   under the cache's lock (backlog B142).
 - The in-process tests' other fixed bounds stay backlog B107's.
+
+## 2026-09-29 — autocert.domain is served as the host it names, a custom endpoint is published without its path, and a manual upstream's URL reaches no log line whole (backlog B66)
+
+B54 (#1085) kept a `customEndpoints` entry's user name, password, query and
+fragment off `/v1/health` and the pairing QR, and named three things it left,
+under "Out of scope": a hand-edited `autocert.domain` carrying a credential
+(public mode turns it into a URL as a string), a path in a custom endpoint
+(published, and the app never uses it), and the manual poller's two Debug
+lines, which name the manual URL whole. This entry closes the three, and a
+fourth found while measuring: the same manual URL's credential reaching the
+journal at Warn through the control URL its description names.
+
+### What was measured on the old code
+
+The real binary, built from main at 60e76acc (#1114's merge), go1.27.1 on
+macOS, each secret spelled `s3cret-Pw` and searched for without regard to
+case.
+
+- **The domain.** A public bridge from `bridge init --public --domain
+  localhost --admin-tls-proxy`, its `autocert.domain` then edited to
+  `user:s3cret-Pw@bridge.example.test`. It started. `GET /v1/health`, with no
+  token, listed `https://user:s3cret-Pw@bridge.example.test:27790`; a link
+  the console minted (`POST /api/tokens` with no `url`) had that as its
+  primary `url=` and among its `urls=`; stdout (the journal, under a
+  service) printed `Public mode — domain: user:s3cret-Pw@bridge.example.test`
+  and `Admin console: https://user:s3cret-Pw@bridge.example.test/`.
+- **The path.** A `customEndpoints` entry `https://c.example.test:7788/s3cret-Pw/`
+  was listed as written in the same health answer and the same link.
+- **The walk error.** A loopback bridge whose
+  `upnpUpstream.servers[].manualDescriptionURL` was
+  `http://user:s3cret-Pw@127.0.0.1:28201/rootDesc.xml?token=s3cret-Pw`,
+  served by a fake MediaServer whose description names the control URL
+  relatively (`/ctl`) and whose Browse answers 401. Fifteen seconds after
+  start, the first ingest: `WARN UPnP upstream: per-server error
+  server="Probe NAS" err="upnp: BrowseAll \"64\": upnp: POST
+  http://user:s3cret-Pw@127.0.0.1:28201/ctl: status 401"`, the password
+  unmasked, at the default level; the console shows the same text as the
+  server's last walk error. Both SOAP POSTs carried an `Authorization`
+  header: `url.ResolveReference` copies the base's user information into a
+  relative reference, so the control URL inherits the manual URL's. With the
+  Browse answering 500, a SOAP fault, the error named no URL (`parse SOAP
+  envelope: EOF`), so it takes another status or a failed connection.
+- **The Debug lines.** The bridge prints none (`logging.Init` fixes the
+  level at Info), so they were read in the code and measured in a test that
+  records every level: `url=http://user:s3cret-Pw@…/rootDesc.xml?token=s3cret-Pw`
+  and `err="GET http://user:s3cret-Pw@…: Get \"http://user:***@…?token=s3cret-Pw\":
+  … connection refused"`. The error names the URL twice: discovery's own
+  wrapping as the poller passed it, and net/http's `*url.Error` as the
+  client re-serialized it, which masks a password and nothing else (a token
+  written as the user name, the query and the fragment reach it whole).
+- **Beside it.** `bridge init --public --domain " bridge.example.test "`
+  exited 0 and saved no custom endpoint: init checked the trimmed domain and
+  wrote the untrimmed flag, so the endpoint it built was `https://` joined
+  to the padded domain, spaces and all, which does not parse, and the prune
+  dropped it (`WARN dropped invalid custom endpoint`).
+  B54 measured the padded control's exit code and domain, not its endpoint.
+
+Every consumer of the domain wants a host and matched none of these
+values: `autocert.HostWhitelist` runs IDNA, which refuses the `:` and `/`
+they carry (measured: `idna: disallowed rune U+003A`), so the bridge could
+not mint a certificate for the name; the TLS SNI route compares a server
+name, which cannot hold them; and the console's Origin allowlist compares a
+browser's Origin hostname with the whole value, so no browser could log in.
+
+### The app, read and not changed
+
+Read-only, in the local checkout.
+
+- `BridgeSourceClient.buildRequest` builds every data request through
+  `URLComponents` and sets `comps.path = path`, replacing the endpoint's.
+- Four other call sites APPEND to the endpoint's path instead
+  (`appendingPathComponent`): `BridgePairingClient` (the join request, its
+  polls and `redeemCode`, to `v1/pairing/redeem`), `BridgeJoinSession`,
+  `BridgePairingPersistence.healthProbeRequest` (the first-contact
+  `/v1/health` probe that captures the fingerprint) and `BridgeEventStream`
+  (`v1/events`, from the share's stored primary `bridgeURL`).
+- `redeemCode` answers a 404 with `codeNotSupported` ("This bridge doesn't
+  accept pairing codes, so this link didn't come from it."), with no
+  fallback to the link's token (#1052's rule).
+
+B54's entry ("the app ignores it anyway") and this entry's backlog text ("the
+app never uses it") read `buildRequest` alone; the four appending call sites
+are the correction. So a path in an endpoint cannot have worked end to end:
+on a bridge served directly, the appending requests reach `/<path>/v1/...`,
+which it does not serve, and a QR whose primary carried one failed pairing
+outright; behind a proxy that strips the path, the data requests, which drop
+it, miss the proxy.
+Without the path, every request reaches the bridge. No wire change, no
+PROTOCOL.md change (`endpoints` is "the full list of URLs the server is
+currently reachable at"), no Mirror-PR.
+
+### Decisions
+
+- **The domain is served as the host it names** (`config.AutocertHost`, in
+  `Normalize`), with a warning under its own message naming the field by
+  scheme and host (`urlFieldForLog`), never the value. Repaired, never
+  refused: the value loaded before (the backlog's constraint). Read in
+  public mode and wherever `autocert.enabled`: serve starts the ACME manager
+  in either posture and prints the domain, while Validate checks autocert's
+  prerequisites only in public mode. A loopback config with autocert off
+  never reads the field and keeps its value, unwarned.
+- **A value that names no host that can be read is served as
+  `autocert-domain.invalid`** (`config.InvalidAutocertDomain`; RFC 6761
+  reserves `.invalid` as never resolving). Considered and rejected:
+  - blanking it: Validate refuses an empty public domain, so a bridge that
+    started before would not start after the update, and its phones may
+    reach it through `customEndpoints`;
+  - keeping it and having the publish sites skip a domain that names no
+    host: B54's "don't strip at the publish sites", five sites (health, the
+    QR's two fields, both banner lines) plus the ACME wiring, whose
+    `tlsacme.New` refuses an empty domain, so the skip there would have been
+    a startup failure or a sixth special case;
+  - keeping it and publishing it: a leak for the one shape left.
+  None of these values ever worked (above), so the placeholder breaks
+  nothing. A Gemini consult on the choice was refused by the API's spending
+  cap; decided here.
+- **The reading.** A value with no `@`, `/`, `?` or `#` never went near a
+  credential; the rest go through `url.Parse` as an authority (`//` + the
+  value, after a scheme if it names one). Three rules, each driven by a row
+  of the table test and a control below: an IP address, once a scheme, user
+  information, a path, a query and a fragment are removed, is returned as
+  written (`url.Parse("//2001:db8::1")` reads the host `2001:db8:` and the
+  port 1, after `user@` too; measured with go1.26.6), and never bracketed
+  (review round 3, below); nothing that precedes an `@` is ever
+  returned, so an `@` after the first `/`, `?` or `#` names no host
+  (`url.Parse` reads `user:12/34@host` as the host `user`, which would have
+  published the user name; a lexical "after the last `@`" reading was
+  rejected too, since it reads `host/?next=a@b` as the host `b`, text from
+  the query); and a value `url.Parse` refuses (a password with a space)
+  names none. What it returns is a fixed point, which keeps `Normalize`
+  idempotent; a bracketed IPv6 keeps its brackets and a zone its `%25` for
+  that.
+- **`bridge init --public --domain` refuses any domain `AutocertHost`
+  would change**, where it asked `HasCredentialParts("https://" + domain)`,
+  which let a scheme, a port and (before this change) a path through into a
+  config `Normalize` would then rewrite: refuse what is typed, repair what
+  is stored. It trims once and writes what it checked, and a domain that is
+  only whitespace is refused as a missing one (exit 2, where it reached
+  Validate and exited 1).
+- **A custom endpoint's path is a part it is published without**, through
+  `config.HasCredentialParts` (the one predicate the prune and the PATCH
+  ask; init asks `AutocertHost` now). A bare `/` is the root and is kept,
+  since it is how endpoints are pasted; a path counts only after an
+  authority, so `not a url`, which parses as a relative reference whose path
+  is the whole value, stays the prune's to drop for its scheme (the first
+  cut counted it, and the PATCH refused it with a message naming a path;
+  `TestCheckCustomEndpointsRefusesATypedCredential` caught it).
+- **The manual poller's Debug lines name the host** (`descriptionHostForLog`,
+  which its warnings used since B54), and the fetch's error goes through
+  `fetchErrorForLog`, which replaces each rendering of the URL with the
+  host: the one discovery writes (the URL as passed) and the one in the
+  `*url.Error` (read from the error's own `URL` field, so neither is
+  guessed), both as written and as `%q` quotes it (review round 1, below).
+  A URL with no host it can read logs a fixed reason instead of its error.
+  Rejected: logging no error (it is the only reason a Debug reader gets),
+  and sending the description fetch's user information as a header (B69's
+  shape) instead: the query must stay in the request URL, so its errors
+  would still carry that.
+- **A control URL's user information travels as the Authorization header
+  alone** (`splitControlURL` in internal/upnp/client.go): `invoke` builds the
+  request from the URL without it and calls `SetBasicAuth`, the header
+  net/http built from the URL byte for byte, taken from net/http itself on
+  every test run. A server behind Basic auth keeps working, and the
+  dispatcher follows no redirect, so the header reaches no other host.
+  Rejected: redacting at the log site (the Warn line and the console's last
+  walk error both read the error; B69's reason), and stripping the user
+  information from the cached control URL (the SOAP requests would lose the
+  credential the operator configured).
+
+### Tests
+
+- `internal/config/autocert_domain_test.go`:
+  `TestAutocertHostReadsTheHostAValueNames` (39 shapes, each a fixed point,
+  none carrying the secret), `TestNormalizeServesAutocertDomainAsItsHost`
+  (every shape through `NormalizeAndValidate`: it loads, the field, one
+  warning of the right kind naming the field by scheme and host, no line
+  with the secret at any level, a second pass silent),
+  `TestAutocertDomainIsReducedWhereItIsUsed` (loopback with autocert off
+  untouched and quiet, with autocert on reduced),
+  `TestALoadedPublicConfigServesItsAutocertDomainAsItsHost` (through `Load`).
+- `internal/config/url_credentials_test.go`: two path shapes in B54's
+  table, one spelled by an escape; B54's "all of them" shape now publishes
+  no path; the predicate's table counts a path after an authority and not a
+  root, `not a url` or a bare path.
+- `internal/api`: `TestHealthPublishesNoAutocertDomainCredential` (four
+  domains, one naming no host); a path in
+  `TestHealthPublishesNoCustomEndpointCredential`.
+- `internal/admin`: `TestPublicPairingCarriesNoAutocertDomainCredential`
+  (the QR's primary and alternates); a path row in
+  `TestPublicPairingCarriesNoCustomEndpointCredential`.
+- `cmd/bridge`: `TestServePublishesNoAutocertDomainCredential` (the real
+  public serve over a hand-edited file: health, a minted link, the banner,
+  every log line, one warning; launched in the test, since `bootServe`
+  waits for the TLS fingerprint a public bridge does not print); a path in
+  `TestServePublishesNoCustomEndpointCredential`; in
+  `TestInitRefusesADomainCarryingACredential` four more refused domains (a
+  path, a scheme, a port, no host), the padded control now required to save
+  its endpoint, and a blank domain refused as a missing one.
+- `internal/upnp`: `TestManualPollerDebugLinesNameTheHostAlone` (five ways
+  the fetch fails, a refused connection, a 404, a body that is no
+  description, a hang past the timeout and a description with no
+  ContentDirectory, each over the real client against a password and query,
+  a token as the user name and a fragment, and a query `%q` escapes; the
+  line must be there, name the host, and no line at any level carry the
+  secret; and a URL written without a scheme, whose line gives the fixed
+  reason) and
+  `TestAControlURLsUserInformationTravelsAsBasicAuth` (the production
+  dispatcher under the manual poller's approval: net/http's own header is
+  what the server receives, for a password, a token as the user name and an
+  empty password, and neither a refused status nor a failed connection
+  names the user information).
+- `internal/upnpingest`: `TestAWalkErrorNamesNoControlURLUserInformation`
+  (the ingest's per-server error, what serve logs at Warn).
+
+Red first over a scaffold that kept main's behaviour (`AutocertHost` only
+trimmed, nothing called it, init unchanged): every new and extended test
+failed on the leak it describes, the two serve tests in under a second
+each. The first public boot waited on `bootServe`'s fingerprint until the
+package's ten-minute deadline and starved the next test, which is why that
+test launches serve itself.
+
+### Negative controls
+
+Each mutation applied once to the committed tree by a script that requires its
+target text exactly once, the named tests run with `-count=1`, the file
+restored from HEAD and the tree checked clean after each. 26 controls: NC1 to
+NC22 on the fix commit (efb8becc), then NC16 to NC18 again and NC23 and NC24
+on review round 1's code (6528653c), where `fetchErrorForLog` had changed, and
+NC25 and NC26 on round 3's (259b4f7e). The tree was clean after every one.
+
+| | mutation | red |
+|---|---|---|
+| NC1 | `AutocertHost` returns the value trimmed | all four config domain tests, the api and admin domain tests, the init test, the public serve test |
+| NC2 | `Normalize` warns and keeps the value | the config domain tests but the table, the api, admin and serve domain tests (init stays green: it asks `AutocertHost` itself) |
+| NC3 | a value naming no host is kept, not replaced | the `Normalize` and `Load` tests, the api and admin `no host` rows |
+| NC4 | no rule for an `@` after the authority | the table's and `Normalize`'s `an @ in the path` and `an @ in the query` rows |
+| NC5 | an IP address alone goes through `url.Parse` | the table and `Normalize` (the unbracketed IPv6 row) |
+| NC6 | a zone loses its `%25` | the table and `Normalize` (the zone row: not a fixed point) |
+| NC7 | the reduction gated on public mode alone | `TestAutocertDomainIsReducedWhereItIsUsed` |
+| NC8 | the warning logs the value too | `TestNormalizeServesAutocertDomainAsItsHost`, the public serve test |
+| NC9 | a path is not counted | the four config path tests, the api, admin and loopback serve path tests |
+| NC10 | a path counted without an authority | `TestCheckCustomEndpointsRefusesATypedCredential` (`not a url` refused), the predicate's table |
+| NC11 | the strip keeps the path | the config, api, admin and loopback serve path tests |
+| NC12 | init asks `HasCredentialParts` again | the init test's `a port` and `a password that does not parse` rows (a path and a scheme still read as a path there) |
+| NC13 | init writes the untrimmed flag | the init test's padded control (no custom endpoint saved) |
+| NC14 | a blank `--domain` not refused up front | the init test's blank-domain check |
+| NC15 | the Debug lines log the URL | `TestManualPollerDebugLinesNameTheHostAlone` |
+| NC16 | the fetch's error logged as it is | the same test, every fetch-failed row (rerun on round 1's code) |
+| NC17 | neither `*url.Error` rendering replaced | its refused-connection and timeout rows with a password and with a `%q` query (for a token as the user name the rendering is the URL as passed, which the other replacement covers) |
+| NC18 | the rendering as passed not replaced | its 404 and not-a-description rows for every shape, and its refused-connection and timeout rows with a password |
+| NC19 | the control URL keeps its user information | `TestAControlURLsUserInformationTravelsAsBasicAuth`, `TestAWalkErrorNamesNoControlURLUserInformation` |
+| NC20 | the user information dropped, no header | `TestAControlURLsUserInformationTravelsAsBasicAuth` (the server receives no header) |
+| NC21 | the status error names the URL as configured | the SOAP and ingest tests |
+| NC22 | the transport error names the URL as configured | the SOAP test's failed-connection half |
+| NC23 | the `%q` rendering not replaced (round 1) | the refused-connection and timeout rows of the `%q` shape alone: for the others the quoted form holds the URL verbatim |
+| NC24 | a hostless URL's error logged with the URL taken out (round 1) | the scheme-less row |
+| NC25 | the IP rule asked of the whole value only (round 2's code) | the table's and `Normalize`'s rows with an unbracketed IPv6 after `user:…@` and before a path (the IPv4 row stays green: `url.Parse` reads IPv4) |
+| NC26 | the warning's IPv6 host not bracketed | `Normalize`'s two unbracketed-IPv6 rows (the warning names the field alone) |
+
+### Review round 1
+
+- **Gemini**: `fetchErrorForLog` replaced the URL with an empty host when
+  `descriptionHostForLog` could read none, which can mangle the message;
+  its fix returned the error unchanged in that case, and added a
+  `strings.Contains` fast path. The first half would have put the whole URL
+  in the line (a URL that does not parse is quoted by its own parse error),
+  so it was declined; the fast path was too, since `strings.Replace` counts
+  first and returns its input without allocating when nothing matches. The
+  observation stood, and checking it found two holes: a manual URL written
+  without a scheme (`user:pw@host`) names no host, and net/http's error for
+  it is `unsupported protocol scheme "<the user name>"`, which no
+  replacement of the URL removes; and `url.Error.Error` is `%s %q: %s`, so
+  a URL holding a `"`, a `\` or an unprintable rune is rendered escaped and
+  a search for it as written misses (measured with go1.26.6: `Get
+  "http://user:***@…?token=\"s3cret-Pw\""`). The helper now logs a fixed
+  reason for a URL with no host it can read, and replaces the quoted form
+  too; the test gained both shapes, and NC23 and NC24 show each is needed.
+  The ordering the first version applied (longest form first) was dropped:
+  where one form holds another verbatim, replacing either first gives the
+  same line, and no test could tell it apart.
+- **CodeRabbit**: an MD038 code span with a trailing space (the padded
+  domain's endpoint) in this entry; CLAUDE.md had the same span. Both
+  rephrased.
+- **SonarCloud** failed its gate on 4.6% duplicated new lines: the api and
+  admin tests' new functions repeated their B54 neighbours' setup, and the
+  predicate's table read like `internal/api/gzip_test.go`'s. Both test files
+  share one helper per surface now (`healthOfNormalized`,
+  `publicPairingQR`), and the predicate lists the URLs that carry a part and
+  those that do not.
+- **Round 2**: CodeRabbit asked the control count to match the table (it
+  said 22 beside 24 rows); it says which ran where now. Gemini had no
+  comments.
+- **Round 3**: Gemini (high) proposed bracketing an IPv6 address kept as
+  written, since `https://2001:db8::1:7788` is no URL. Measured with a
+  throwaway test before answering: the console's Origin allowlist matched an
+  Origin of `https://[2001:db8::1]` for the domain `2001:db8::1` and not for
+  `[2001:db8::1]`, since it compares the domain with `url.URL.Hostname`,
+  which has no brackets. So bracketing would have traded a console that
+  works for a URL that never did, in a change about credentials; declined,
+  and the disagreement between the consumers filed as backlog B152. Checking
+  it found a misread in `AutocertHost`: an IPv6 address after `user@`, or
+  before a path, went to `url.Parse` and came back `[2001:db8:]`; the IP rule
+  is now asked of the authority once the user information and the path are
+  removed (NC25). The warning named such a host by the field alone, since
+  `urlFieldForLog` cannot read `https://2001:db8::1`; `hostForURL` brackets
+  it there only (NC26).
+
+### With the fix, the same binary runs
+
+The branch's binary (at the fix commit), over the same files:
+
+- the public bridge: `/v1/health` lists `https://localhost:27790`,
+  `https://c.example.test:7788` and `https://bridge.example.test:27790`; the
+  minted link's `url=` is `https://bridge.example.test:27790` and its `urls=`
+  hold the three; the banner prints `Public mode — domain:
+  bridge.example.test` and `Admin console: https://bridge.example.test/`;
+  the load warns twice, `autocert.domain is a host name alone; served
+  without … it carries; a save stores it that way field="autocert.domain
+  (https://bridge.example.test)"` and the custom-endpoint line, now naming
+  the path; no line, answer or link carries the secret;
+- the manual upstream: `WARN UPnP upstream: per-server error … err="upnp:
+  BrowseAll \"64\": upnp: POST http://127.0.0.1:28201/ctl: status 401"`,
+  and both SOAP POSTs still carry the Authorization header;
+- the padded domain: exit 0 with `customEndpoints:
+  [https://bridge.example.test:27794]` and no warning.
+
+### Out of scope
+
+- A manual upstream behind Basic auth serves its description and its SOAP
+  answers with the credential the URL carries, and not its bytes:
+  `upnpproxy` builds each byte fetch from the device's own `<res>` URL with
+  the live host and port, never the manual URL's user information. A
+  functional gap for a setup nobody has reported, filed as B143.
+- A public `autocert.domain` written as an IPv6 address builds an invalid
+  advertised URL unbracketed and fails the console's Origin check
+  bracketed (review round 3). It was so before B66 as well: B152.

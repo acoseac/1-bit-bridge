@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -195,6 +196,45 @@ func descriptionHostForLog(raw string) string {
 	return u.Host
 }
 
+// manualURLNamesNoHost is what fetchErrorForLog logs in place of the fetch's
+// error for a manual URL that names no host it can read.
+const manualURLNamesNoHost = "the manual URL is not a URL with a host"
+
+// fetchErrorForLog renders err, the description fetch's error for the manual
+// URL raw, for a log line: each rendering of the URL in its text is replaced
+// by the URL's host (descriptionHostForLog), so the line keeps the reason
+// the fetch failed and loses the URL (backlog B66). The fetch names the URL
+// in three renderings. Discovery's own wrapping writes it as the poller
+// passed it (`GET <url>: …`, `parse description <url>: …`). net/http's
+// *url.Error quotes the request URL as the client re-serialized it, masking
+// a password and nothing else, so a token written as the user name, a query
+// and a fragment reach it whole; and it quotes it with %q, so a URL holding
+// a `"`, a `\` or a rune that is not printable appears escaped, which a
+// search for the URL as written does not find. The *url.Error's own URL
+// field is its rendering exactly, so no form is guessed. Where one form
+// holds another verbatim (`"<url>"` holds the URL when %q escapes nothing),
+// replacing either first gives the same line.
+//
+// A URL that names no host it can read (one that does not parse, or
+// `user:password@host` written without a scheme) gets manualURLNamesNoHost
+// in place of the error, never the error with the URL taken out: it could
+// have reached nothing, and its error can quote any part of it, net/http's
+// "unsupported protocol scheme" the scheme a hostless value parses with,
+// which is its user name (the lesson under B54).
+func fetchErrorForLog(err error, raw string) string {
+	host := descriptionHostForLog(raw)
+	if host == "" {
+		return manualURLNamesNoHost
+	}
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		msg = strings.ReplaceAll(msg, strconv.Quote(ue.URL), strconv.Quote(host))
+		msg = strings.ReplaceAll(msg, ue.URL, host)
+	}
+	return strings.ReplaceAll(msg, raw, host)
+}
+
 func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUDNs map[string]struct{}) {
 	descURL := strings.TrimSpace(srv.DescriptionURL)
 	if descURL == "" || srv.Key == "" {
@@ -232,16 +272,19 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	// populating desc.Services. Tolerate that specific shape and let the
 	// ContentDirectory lookup below be the real verdict. Same allowance
 	// the SSDP path makes.
+	// Both Debug lines name the host alone, as the warnings do, and the
+	// fetch's error goes through fetchErrorForLog, which takes the URL out
+	// of it (backlog B66): they named the URL whole until then.
 	if err != nil && len(desc.Services) == 0 {
 		p.log.Debug("UPnP manual server: description fetch failed",
-			slog.String("server", srv.Name), slog.String("url", descURL),
-			slog.String("err", err.Error()))
+			slog.String("server", srv.Name), slog.String("host", descriptionHostForLog(descURL)),
+			slog.String("err", fetchErrorForLog(err, descURL)))
 		return
 	}
 	ctrlURL := lookupContentDirectoryControlURL(desc.Services)
 	if ctrlURL == "" {
 		p.log.Debug("UPnP manual server: description carries no ContentDirectory service",
-			slog.String("server", srv.Name), slog.String("url", descURL))
+			slog.String("server", srv.Name), slog.String("host", descriptionHostForLog(descURL)))
 		return
 	}
 

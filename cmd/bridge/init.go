@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -328,7 +327,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if *publicMode {
-		if *publicDomain == "" {
+		domain := strings.TrimSpace(*publicDomain)
+		if domain == "" {
 			fmt.Fprintf(stderr, "--public requires --domain <fqdn>\n")
 			return 2
 		}
@@ -337,20 +337,25 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// and /v1/health (answering any caller) and every pairing QR publish
 		// both. So a user name, password, query or fragment in it is
 		// refused here, before anything is written, and not echoed (backlog
-		// B54): the operator typed it, and a stored config that already
-		// holds such an endpoint is published without them instead
-		// (config.ValidateCustomEndpoints). So is a value that does not
-		// parse as a URL's host at all: a password with a space in it is
-		// no less a password, the prune drops such an endpoint without
-		// reading it, and public mode builds the autocert host's URL from
-		// the string itself (api's publicModeEndpoints). Trimmed first, as
-		// Normalize trims the autocert host.
-		typed := "https://" + strings.TrimSpace(*publicDomain)
-		if _, err := url.Parse(typed); err != nil || config.HasCredentialParts(typed) {
-			fmt.Fprintf(stderr, "--domain: must be the host name alone, with no user name, password, query or fragment "+
-				"(/v1/health, which answers any caller, and every pairing QR publish the endpoint init writes from it)\n")
+		// B54): the operator typed it. So is a value that does not parse as
+		// a host at all: a password with a space in it is no less a
+		// password. And since backlog B66, so is anything that is not the
+		// host name alone (a scheme, a port, a path): config.AutocertHost is
+		// the one reading of the field, Normalize serves a stored value as
+		// the host it returns, and init refuses a typed one it would change
+		// rather than write a value the operator did not type. Trimmed
+		// first, as Normalize trims the autocert host.
+		if config.AutocertHost(domain) != domain {
+			fmt.Fprintf(stderr, "--domain: must be the host name alone, with no scheme, user name, password, port, "+
+				"path, query or fragment (/v1/health, which answers any caller, and every pairing QR publish "+
+				"the endpoint init writes from it; the port is --listen-address's)\n")
 			return 2
 		}
+		// Every later use writes the domain as checked. Untrimmed, the
+		// endpoint init builds from a padded one (`https:// host `) did not
+		// parse, and the prune dropped it, so the install was saved with no
+		// custom endpoint at all (measured before backlog B66).
+		*publicDomain = domain
 		if *publicEmail == "" && !*publicProxy {
 			// Email is required ONLY when the bridge will run
 			// autocert itself; reverse-proxy installs let the

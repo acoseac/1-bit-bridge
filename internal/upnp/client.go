@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
@@ -172,13 +173,21 @@ func (c *ContentDirectoryClient) invoke(ctx context.Context, controlURL, action 
 	if strings.TrimSpace(controlURL) == "" {
 		return nil, errors.New("upnp: empty ContentDirectory controlURL")
 	}
+	target, user, err := splitControlURL(controlURL)
+	if err != nil {
+		return nil, err
+	}
 	// NewRequestWithContext so cancellation/deadlines propagate via
 	// req.Context() too — the dispatcher path already passes ctx, but
 	// binding it on the request is the idiomatic Go shape and protects
 	// any downstream middleware that consults req.Context().
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, controlURL, bytes.NewReader(soapBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(soapBody))
 	if err != nil {
 		return nil, fmt.Errorf("upnp: build POST request: %w", err)
+	}
+	if user != nil {
+		password, _ := user.Password()
+		req.SetBasicAuth(user.Username(), password)
 	}
 	req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
 	req.Header.Set("SOAPAction", `"`+ContentDirectoryServiceType+"#"+action+`"`)
@@ -186,7 +195,7 @@ func (c *ContentDirectoryClient) invoke(ctx context.Context, controlURL, action 
 
 	resp, err := c.dispatcher.Do(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("upnp: POST %s: %w", controlURL, err)
+		return nil, fmt.Errorf("upnp: POST %s: %w", target, err)
 	}
 	if resp == nil {
 		return nil, errors.New("upnp: dispatcher returned nil response without error")
@@ -198,13 +207,51 @@ func (c *ContentDirectoryClient) invoke(ctx context.Context, controlURL, action 
 	defer func() { _ = resp.Body.Close() }()
 
 	if !discovery.IsHTTPStatusOK(resp.StatusCode) && resp.StatusCode != http.StatusInternalServerError {
-		return nil, fmt.Errorf("upnp: POST %s: status %d", controlURL, resp.StatusCode)
+		return nil, fmt.Errorf("upnp: POST %s: status %d", target, resp.StatusCode)
 	}
 	body, err := discovery.ReadResponseBodyCapped(resp.Body, browseResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("upnp: read body: %w", err)
 	}
 	return body, nil
+}
+
+// errControlURLNotUsable is what invoke answers for a control URL that does
+// not parse. It names no part of it: the URL may carry user information, and
+// net/url's own error for it (`parse "…": …`) quotes it whole. discovery
+// hands the cache only URLs it parsed, so this is a backstop.
+var errControlURLNotUsable = errors.New("upnp: the ContentDirectory controlURL does not parse")
+
+// splitControlURL cuts a ContentDirectory control URL in two: the URL a
+// request is sent to, without user information, and the user information,
+// which invoke sends as the Authorization header alone (backlog B66).
+//
+// A manual upstream's description URL may carry the operator's credential
+// (`http://user:password@nas:8200/rootDesc.xml`), and a control URL the
+// description names relative to it inherits that user information through
+// url.ResolveReference. net/http sends it as Basic auth, which is the
+// operator's intent, and it also names the request URL in every error it
+// returns, through a stripPassword that masks a password and nothing else.
+// invoke's own errors named the URL whole besides, and the ingest logs them
+// at Warn ("UPnP upstream: per-server error") and the console shows them as
+// a server's last walk error: `upnp: POST http://user:<password>@nas:8200/ctl:
+// status 401` reached the journal on every failed walk (measured with the
+// real binary). SetBasicAuth sends the header net/http built from the URL,
+// byte for byte (the user alone as `user:`). The dispatcher follows no
+// redirect (discovery.NewDeviceFetchClient), so the explicit header never
+// reaches another host. The enrich clients keep a base URL's credential out
+// of their request URLs the same way (backlog B69).
+func splitControlURL(controlURL string) (target string, user *url.Userinfo, err error) {
+	u, err := url.Parse(controlURL)
+	if err != nil {
+		return "", nil, errControlURLNotUsable
+	}
+	if u.User == nil {
+		return controlURL, nil, nil
+	}
+	user = u.User
+	u.User = nil
+	return u.String(), user, nil
 }
 
 // --- SOAP request envelope builders ---
