@@ -155,12 +155,17 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 }
 
 // openListDir opens the directory the listing reads, through s.openDir,
-// which New sets; a Server built without New opens it the same way.
+// which New sets to fsutil.OpenDir; a Server built without New opens it the
+// same way. Never os.Open: the resolver's stat said directory a moment
+// earlier, and a directory replaced by a named pipe in between held the
+// request until something wrote to the pipe (until 2026-09-30). OpenDir
+// refuses whatever is not a directory without waiting, with ENOTDIR, which
+// answers 500 as any other failure to open the directory does.
 func (s *Server) openListDir(abs string) (*os.File, error) {
 	if s.openDir != nil {
 		return s.openDir(abs)
 	}
-	return os.Open(abs)
+	return fsutil.OpenDir(abs)
 }
 
 // stat handles GET /v1/stat?path=<rel>. Returns a single-entry StatResponse.

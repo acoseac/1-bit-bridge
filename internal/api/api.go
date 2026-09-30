@@ -44,6 +44,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
@@ -472,7 +473,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		writeRateLimiter:    newTokenRateLimiter(cfg.Limits.Write.EffectiveRPM(), cfg.Limits.Write.EffectiveBurst()),
 		searchRateLimiter:   newTokenRateLimiter(cfg.Limits.Search.EffectiveRPM(), cfg.Limits.Search.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
-		openDir:             os.Open,
+		openDir:             fsutil.OpenDir,
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
 		endpointsCache:      newEndpointsCache(),

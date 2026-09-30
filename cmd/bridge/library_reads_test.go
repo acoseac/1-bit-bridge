@@ -77,11 +77,11 @@ func TestEveryLibraryReadOpensAsAFile(t *testing.T) {
 		}
 	}
 	t.Logf("read %d production .go files in %d packages, holding %d reads through fsutil", files, len(pkgs), asFile)
-	// A scan that reads nothing reports nothing. The five packages held 205
-	// production files and 22 reads through fsutil when these floors were
+	// A scan that reads nothing reports nothing. The five packages held 129
+	// production files and 28 reads through fsutil when these floors were
 	// set.
-	if files < 100 || asFile < 15 {
-		t.Fatalf("read %d production .go files holding %d reads through fsutil, want >=100 and >=15: "+
+	if files < 100 || asFile < 20 {
+		t.Fatalf("read %d production .go files holding %d reads through fsutil, want >=100 and >=20: "+
 			"the scan is not seeing the packages", files, asFile)
 	}
 	for _, f := range findings {

@@ -31,12 +31,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 const (
@@ -636,7 +637,7 @@ func parseSACDArea(r io.ReaderAt, g sacdGeometry, lsn int64) (sacdArea, bool, er
 // here: processSACDISO opens through its own opener, so it can stat the
 // handle it read.
 func ExpandSACDISO(absPath, relPath string, size int64, mtime time.Time) ([]*Track, error) {
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/dhowden/tag"
 )
@@ -202,7 +203,7 @@ func readSidecarCandidate(abs, name string, info os.FileInfo) (lyrics.Candidate,
 	if info.Size() <= 0 || info.Size() > lyrics.MaxBodyBytes {
 		return lyrics.Candidate{}, false
 	}
-	raw, err := os.ReadFile(abs)
+	raw, err := fsutil.ReadAsFile(abs)
 	if err != nil {
 		return lyrics.Candidate{}, false
 	}

@@ -1432,6 +1432,14 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			}
 			fillFromPath(t, pi.rel, multiRoot) // last-resort heuristics for files with no tags
 			if err := ExtractWithContext(pi.abs, t, ec); err != nil {
+				if kind := notAFileNow(pi.abs, err); kind != "" {
+					// The walk saw a file here; what the worker
+					// found is not one. The row would carry the
+					// walk's stat of a file that is gone and the
+					// path's tags in place of its own.
+					warnNoLongerAFile(pi.rel, kind)
+					return
+				}
 				scanLogger.Error("extract", "path", pi.abs, "err", err)
 			}
 			// Capture-then-call so a concurrent test that nils the
@@ -1458,6 +1466,45 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			}
 		}
 	}
+}
+
+// notAFileNow names what absPath is now when opening it failed with err
+// because it is not a file (fsutil.NotAFile), and answers "" when it failed
+// for another reason.
+//
+// A worker opens a path the walk judged a moment, or on a large library a
+// long while, earlier, and a path can change in between: a file renamed over
+// by a named pipe, a link repointed at a device. fsutil.OpenAsFile refuses
+// such an open at once and names what it found, a named pipe, a device or a
+// directory; a socket no open reaches (the kernel refuses it before there is
+// a file to stat), so a failed open is followed by a stat of the path, as the
+// walk would take one, to name that too.
+func notAFileNow(absPath string, err error) string {
+	if kind := fsutil.NotAFileKind(err); kind != "" {
+		return kind
+	}
+	var pe *fs.PathError
+	if !errors.As(err, &pe) || pe == nil || pe.Op != "open" {
+		return ""
+	}
+	info, serr := os.Stat(absPath)
+	if serr != nil {
+		return ""
+	}
+	return fsutil.NotAFile(info.Mode())
+}
+
+// warnNoLongerAFile logs the path the walk handed a worker as a file that is
+// no longer one when the worker opens it (notAFileNow), library-relative,
+// with what it is now. Nothing is written for it: the row would carry the
+// walk's stat of a file that is gone, and in place of the file's tags the
+// path's (fillFromPath). The next walk sees what is there, and the row goes
+// as a deleted file's does, after the missing-count grace. One line per path:
+// what makes one is a swap inside the window between a walk and a worker,
+// which nothing does to many paths at once.
+func warnNoLongerAFile(rel, kind string) {
+	scanLogger.Warn("audio file replaced after the walk by something that is not a file; nothing is written for it",
+		"path", rel, "kind", kind)
 }
 
 // needsLocalArtworkRecovery reports whether an unchanged-eligible
@@ -1535,6 +1582,10 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 	}
 	fillFromPath(t, pi.rel, multiRoot)
 	if err := ExtractWithContext(pi.abs, t, ec); err != nil {
+		if kind := notAFileNow(pi.abs, err); kind != "" {
+			warnNoLongerAFile(pi.rel, kind)
+			return nil
+		}
 		scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
 		return nil
 	}
@@ -1658,6 +1709,10 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 
 	tracks, changed, err := s.expandSACDContainer(pi)
 	if err != nil {
+		if kind := notAFileNow(pi.abs, err); kind != "" {
+			warnNoLongerAFile(pi.rel, kind)
+			return nil
+		}
 		scanLogger.Error("sacd expand", "path", pi.rel, "err", sacdLibraryRelative(err.Error(), pi))
 		return nil
 	}
@@ -1812,13 +1867,14 @@ func sacdContainerChange(walk, opened, post fs.FileInfo) string {
 	return ""
 }
 
-// openSACDContainer opens the container at abs: os.Open, or the opener a
-// test installed (Scanner.openSACD).
+// openSACDContainer opens the container at abs as a file
+// (fsutil.OpenAsFile), or through the opener a test installed
+// (Scanner.openSACD).
 func (s *Scanner) openSACDContainer(abs string) (sacdContainer, error) {
 	if s.openSACD != nil {
 		return s.openSACD(abs)
 	}
-	f, err := os.Open(abs)
+	f, _, err := fsutil.OpenAsFile(abs)
 	if err != nil {
 		return nil, err // never a nil *os.File inside a non-nil interface
 	}

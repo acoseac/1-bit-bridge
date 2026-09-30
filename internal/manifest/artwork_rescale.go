@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // artworkRescaleMarkerKey is the scan_state run-once gate.
@@ -175,7 +176,7 @@ func rescaleOneArtworkFile(path string, log interface {
 	if !needsRewrite {
 		return rescaleSkippedFine, 0
 	}
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadAsFile(path)
 	if err != nil {
 		log.Warn("rescale read; skipping file", "path", path, "err", err)
 		return rescaleFailed, 0
@@ -209,7 +210,7 @@ func rescaleOneArtworkFile(path string, log interface {
 // returns the pixel dimensions. ok=false when the header can't be
 // parsed — the caller then decides on the size trigger alone.
 func jpegHeaderDimensions(path string) (image.Point, bool) {
-	f, err := os.Open(path)
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		return image.Point{}, false
 	}

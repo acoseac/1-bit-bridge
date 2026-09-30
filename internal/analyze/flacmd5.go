@@ -6,9 +6,10 @@ import (
 	"crypto/md5" // #nosec G501 -- FLAC's embedded audio checksum IS MD5 (spec-mandated); integrity comparison only, not a security primitive.
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // FLAC audio-MD5 verification: decode the file to the EXACT byte stream
@@ -56,7 +57,10 @@ type flacStreamInfo struct {
 // copy exists because analyze cannot import manifest without a cycle, and
 // the parse is 30 lines against a spec-frozen layout).
 func readFLACStreamInfo(path string) (flacStreamInfo, error) {
-	f, err := os.Open(path) // #nosec G304 -- path comes from the scanner's own library walk.
+	// As a file, never a plain open: the path is the manifest's, and one
+	// replaced by a named pipe since its scan would hold the job until
+	// something wrote to the pipe (fsutil.OpenAsFile).
+	f, _, err := fsutil.OpenAsFile(path) // #nosec G304 -- path comes from the scanner's own library walk.
 	if err != nil {
 		return flacStreamInfo{}, err
 	}

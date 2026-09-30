@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -118,4 +119,28 @@ func OpenAsFile(name string) (*os.File, fs.FileInfo, error) {
 		}
 	}
 	return f, info, nil
+}
+
+// ReadAsFile reads the whole file name, as os.ReadFile does, opened as
+// OpenAsFile opens it: what does not open as a file is refused, a named pipe
+// without waiting for a writer. It is for a reader of the library that
+// wants a file's bytes whole: a folder's cover, a lyrics sidecar.
+func ReadAsFile(name string) ([]byte, error) {
+	f, info, err := OpenAsFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var buf bytes.Buffer
+	// The opened file's size is where to start, as for os.ReadFile, and
+	// MinRead more keeps the read that finds the end from growing the
+	// buffer. A size past 1 GiB is left to the reads, where an int is 32
+	// bits.
+	if n := info.Size(); n > 0 && n < 1<<30 {
+		buf.Grow(int(n) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(f); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

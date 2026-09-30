@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
@@ -50,5 +51,35 @@ func TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError(t *testing.T)
 	_, _, err = OpenAsFile(filepath.Join(dir, "missing.flac"))
 	if !os.IsNotExist(err) || NotAFileKind(err) != "" {
 		t.Errorf("OpenAsFile(a missing file): %v; want os.OpenFile's not-exist error, as it was", err)
+	}
+}
+
+// TestReadAsFileReadsAFileWholeAndRefusesADirectory pins ReadAsFile on every
+// platform: a file's bytes come back whole, as os.ReadFile gives them, an
+// empty one and one longer than a read's first grab alike, and a directory
+// is refused as OpenAsFile refuses it.
+func TestReadAsFileReadsAFileWholeAndRefusesADirectory(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string][]byte{
+		"empty.lrc":  nil,
+		"short.lrc":  []byte("[00:01.00]A line\n"),
+		"cover.jpg":  bytes.Repeat([]byte{0xFF, 0xD8, 0xFF, 0x00}, 3000),
+		"exact.txt":  bytes.Repeat([]byte("x"), bytes.MinRead),
+		"odd-12.bin": bytes.Repeat([]byte{1, 2, 3}, 4),
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadAsFile(p)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Errorf("ReadAsFile(%s): %d bytes, %v; want its %d bytes", name, len(got), err, len(body))
+		}
+	}
+	if got, err := ReadAsFile(dir); got != nil || NotAFileKind(err) != "directory" {
+		t.Errorf("ReadAsFile(a directory): %d bytes, %v; want it refused as a directory", len(got), err)
+	}
+	if _, err := ReadAsFile(filepath.Join(dir, "missing.lrc")); !os.IsNotExist(err) {
+		t.Errorf("ReadAsFile(a missing file): %v; want os.OpenFile's not-exist error", err)
 	}
 }

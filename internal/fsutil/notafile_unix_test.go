@@ -92,3 +92,36 @@ func TestOpenAsFileLeavesTheFileItOpensBlocking(t *testing.T) {
 		t.Errorf("the opened file is still O_NONBLOCK (flags %#x)", flags)
 	}
 }
+
+// TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting: ReadAsFile refuses a
+// named pipe, a link to one and a link to a character device at once, each
+// named by its kind, as OpenAsFile refuses them. os.ReadFile of the pipe
+// waited for a writer, and of a link to /dev/zero read until the process ran
+// out of memory: what the scanner's folder-art and lyrics-sidecar reads did
+// until 2026-09-30.
+func TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	kinds, pipe := fsutiltest.PlantNotAFiles(t, dir)
+	for name, kind := range kinds {
+		if kind == "socket" {
+			// Refused by the kernel before there is a file to stat
+			// (TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting).
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			var (
+				body []byte
+				err  error
+			)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				body, err = fsutil.ReadAsFile(filepath.Join(dir, name))
+			}()
+			fsutiltest.AwaitPastFIFOs(t, "ReadAsFile("+name+")", fsutiltest.ServeBound, done, pipe)
+			if body != nil || fsutil.NotAFileKind(err) != kind {
+				t.Errorf("read %d bytes, %v; want the %s refused", len(body), err, kind)
+			}
+		})
+	}
+}
