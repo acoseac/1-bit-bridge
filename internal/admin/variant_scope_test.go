@@ -75,6 +75,7 @@ func postBatch(t *testing.T, srv *Server, body string) *httptest.ResponseRecorde
 	req := httptest.NewRequest(http.MethodPost, "/api/upscale/batch", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	return w

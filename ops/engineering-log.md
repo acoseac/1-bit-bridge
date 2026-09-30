@@ -34733,3 +34733,146 @@ new reading.
 6. `inPredicate` made to answer false: `TestNoHandRolledIndexedAtBump`
    (store.go's two write-backs reported as hand-rolled assignments) and
    `TestTheIndexedAtSweepTellsAnAssignmentFromAComparison` red.
+
+## 2026-09-29 — the loopback console and the DLNA listener answer only to a Host that names this machine (backlog B170)
+
+Found by the pre-v0.2.1 review and filed as B170 while it was unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured on the old code
+
+main at e256d6b7, go1.27.1 on macOS, a loopback fixture (`bridge init --yes
+--no-service`), requests from 127.0.0.1 whose `Host` named another host, as a
+browser's do once a page has pointed its own name at 127.0.0.1: every read
+route tried answered 200 with its content; a POST carrying the page's own
+Origin was refused (403), since `csrfGuard` reads the Origin, which a
+same-origin GET does not carry. `boundaryMiddleware`'s loopback branch was
+`loopbackOnly`, the source address alone. (The exact requests and what each
+returned are kept out of this public record, per SECURITY.md.)
+
+The DLNA listener, main at d16d1aba in a container on dido (its own network
+namespace, so no multicast left the docker bridge): a `Host` naming another
+host got the device description and a Browse (200), whose `<res>` URLs named
+the request's host, since the ContentDirectory builds its URLs from
+`r.Host`.
+
+### What was decided
+
+- **The console: `loopbackHostOnly`, inside `loopbackOnly`, in loopback mode
+  only.** A Host that `loopbackHostname` does not take (the Origin
+  allowlist's rule: `localhost`, a trailing dot, 127.0.0.0/8, `::1`) is a
+  421 Misdirected Request whose body says what a reverse proxy must send.
+  With any port or none, since an `ssh -L` tunnel on another local port
+  names that port. An empty Host passes: every browser sends one. The
+  configured admin host needs no case of its own (`validateLoopbackAddress`
+  admits a loopback literal or `localhost` and nothing else), and a test
+  holds the two rules together. The host is read by `url.URL.Hostname`, the
+  standard library's parse, in both packages.
+- **Not a forwarding header, not the Origin.** A page can set
+  `X-Forwarded-For` on a same-origin request, and a same-origin GET carries
+  no Origin; the name in Host is the one thing the page cannot choose.
+- **Public mode untouched.** A tenant console behind the host's proxy
+  arrives from 127.0.0.1 under the tenant's name and is answered as before
+  (pinned); a rebinding page cannot carry the session cookie, which is
+  scoped to the bridge's own domain.
+- **A refused name is logged once**, at most 16 names, so an operator whose
+  proxy forwards the browser's Host sees what the 421 is about, and a
+  rebinding attempt leaves a line.
+- **The DLNA listener: `ownHostOnly`, inside the telemetry middleware** (a
+  refused request is recorded with its 421). It passes an empty Host (an
+  HTTP/1.0 renderer), `localhost` and loopback literals, the host of every
+  advertised LOCATION, of ServerURL and of a pinned listen address, name or
+  literal, and any other address of this host's interfaces, asked at the
+  request and only for a literal the configuration does not name. A name not
+  in the list is refused, this host's own included: resolving it is what the
+  page controls. `Server.handler` builds the tree Start serves, so the check
+  is testable without the SSDP half.
+- **Weighed and left**: accepting this host's own `.local` name on the DLNA
+  listener. Only a LAN peer can answer mDNS, so it would not reopen the
+  hole, but B170 asked for addresses, the iOS app's primary path is an
+  RFC 1918 literal from `/v1/health.endpoints`, and its hostname fallback is
+  the path its own doc says already fails on renderers such as the Chord
+  2Go.
+
+### After the fix, with the real binary
+
+- The Mac fixture: `Host: evil.example:27789` and `127.0.0.1.nip.io:27789`
+  got 421 on the settings, the download and `/metrics`; `127.0.0.1:27789`,
+  `localhost:27789`, `localhost:17789` and `[::1]:27789` got 200; the
+  journal carried one `console refused a request that names another host`
+  line per name. `bridge status` and `bridge enrichment misses` (which asks
+  the running bridge) worked.
+- The web player in the desktop app's browser pane: the album grid at
+  `http://127.0.0.1:27789/`, a track playing (the audio route 206, the
+  element's clock advancing), and at `http://localhost:27789/stats` the SSE
+  stream 200, `POST /api/scan` 202 and `GET /api/settings` 200.
+- An `ssh -L` tunnel from the Mac to a bridge on dido's host loopback:
+  local port 17789, GETs 200 and `Host: evil.example:17789` 421; the same
+  port on both ends, `POST /api/scan` 202. Through the tunnel on 17789 a
+  POST answered 403, on main as on this branch: the Origin check compares
+  the admin port (backlog B193).
+- The Docker reverse-proxy recipe (docs/docker.md), a loopback bridge in a
+  golang:1.26.6 container and Caddy and nginx sharing its network namespace,
+  `GET /api/stats` through each:
+
+| proxy | main | this branch |
+|---|---|---|
+| Caddy `reverse_proxy`, default (forwards the incoming Host) | 200 | 421 |
+| Caddy with `header_up Host {upstream_hostport}` | 200 | 200 |
+| nginx `proxy_pass`, default (`Host: 127.0.0.1:7789`) | 200 | 200 |
+| nginx with `proxy_set_header Host $host` | 200 | 421 |
+
+- The DLNA listener in the same container: the LOCATION host 200 and a
+  Browse whose `<res>` is on it; `evil.example` 421 and no `<res>`; an
+  HTTP/1.0 request with no Host 200.
+
+### Tests
+
+New in internal/admin: `TestTheLoopbackConsoleRefusesARequestThatNamesAnotherHost`
+(eleven foreign Hosts over eight routes, each 421 and carrying nothing the
+route serves), `TestTheLoopbackConsoleRefusesAStreamThatNamesAnotherHost`,
+`TestTheLoopbackConsoleAnswersEveryLoopbackHost` (thirteen, the empty Host
+and a tunnel's port included), `TestEveryAdminAddressLoopbackModeTakesIsALoopbackHost`,
+`TestPublicModeLeavesTheHostToItsOwnRules`, `TestAForeignHostIsLoggedOncePerName`
+and `TestTheHostCheckHoldsOverARealListener` (net/http's own parse, and a
+raw HTTP/1.0 request with no Host). In internal/dlna:
+`Test_ownHostOnly_RefusesAHostThatIsNotThisHosts`,
+`Test_ownHostOnly_AnswersThisHostsAddresses`,
+`Test_ownHostOnly_AnswersARequestWithNoHost`,
+`Test_ownHostOnly_AsksTheInterfacesOnlyForAnUnnamedLiteral`,
+`Test_ownHostOnly_LogsARefusedNameOnce` and
+`Test_Server_Start_ServesTheHostCheck` (skips where the loopback interface
+cannot take a multicast pin, as the lifecycle test does).
+
+The console's tests built requests with `httptest.NewRequest`, whose Host
+is `example.com`, and a loopback RemoteAddr: 81 of them, and `doJSON`, now
+set `Host` to `testConsoleHost` (127.0.0.1:7789), what a browser at the
+fixture's address sends.
+
+### Negative controls
+
+Each mutation applied to the committed tree (77d353c7), the named tests run
+with `-count=1`, the file restored and the tree checked clean after each.
+
+| mutation | goes red |
+|---|---|
+| NC1: the loopback branch without `loopbackHostOnly` (main's gate) | the refusal, stream, logging and real-listener tests; the accepted-host, admin-address and public-mode tests stay green. 77 of the 88 host×route pairs answered 200 and 55 carried the route's content; the other 11 were the POST's 403 |
+| NC2: an empty Host refused | the accepted-host test (the empty row) and the real listener's HTTP/1.0 request |
+| NC3: the raw `host:port` compared instead of the host | the accepted-host, admin-address and real-listener tests |
+| NC4: every refusal logged, then the cap dropped | the logging test (50 lines for 50 names under the second) |
+| NC5: the DLNA tree without `ownHostOnly` | the refusal, interface-count, logging and Start tests; 14 Browse leaks (seven hosts, the library's title and a `<res>` each) |
+| NC6: no interface lookup | the accepted-address test (10.1.2.3, fe80::1, the IPv4-mapped spelling) and the interface-count test |
+| NC7: LOCATION names not kept | the accepted-address test (the advertised name, both spellings) |
+| NC8: the known addresses skipped, every literal asked of the interfaces | the accepted-address and interface-count tests |
+| NC9: Start building a tree of its own without the check | `Test_Server_Start_ServesTheHostCheck` only |
+
+### Out of scope
+
+- Backlog B193: through a tunnel on another local port, every console POST
+  is refused by the Origin check (pre-existing, measured above). The Host
+  check is what would let that check compare the Origin with the request's
+  own Host.
+- The iOS app's DLNA fallback that names the paired host when no RFC 1918
+  endpoint is published now meets a 421 from the listener. No wire change,
+  so no Mirror-PR.

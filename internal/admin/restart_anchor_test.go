@@ -60,6 +60,7 @@ func TestAppJSSettingsAnchorsExistInTheRenderedPage(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -89,6 +90,7 @@ func TestSettingsPageRendersRestartActionsAnchor(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

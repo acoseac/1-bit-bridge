@@ -139,6 +139,7 @@ func TestSidebarPlayerNavHighlight(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -250,6 +251,7 @@ func TestPartialResponseCarriesPlayerNav(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		req.Header.Set("X-Bridge-Partial", "1")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
@@ -277,6 +279,7 @@ func TestStatsPageCarriesHarmonicCoverage(t *testing.T) {
 	get := func() string {
 		req := httptest.NewRequest(http.MethodGet, "/stats", nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code != http.StatusOK {

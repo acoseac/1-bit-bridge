@@ -238,6 +238,7 @@ func TestPlaylistExportWithoutDeviceParam(t *testing.T) {
 	get := func(target string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		req.RemoteAddr = "127.0.0.1:5000"
+		req.Host = testConsoleHost
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		return w
