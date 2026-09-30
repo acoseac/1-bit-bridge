@@ -23,9 +23,9 @@ import (
 // It also sets what the second look answers after lsof misses
 // (procOwnerFunc) to an answer that adds nothing, so the test grades lsof's
 // answer alone on every unix. Left to the host, /proc on Linux would read
-// the recorded pid, and pid 4242 may be a process of the test's own user,
-// which it rules out; on macOS the second look would run this same
-// stand-in. A test that wants the second opinion sets it after this
+// the recorded pid, and the stand-in (standInPID) may be a process of the
+// test's own user, which it rules out; on macOS the second look would run
+// this same stand-in for lsof. A test that wants the second opinion sets it after this
 // (withProcAnswering).
 func withLsofAnswering(t *testing.T, stdout string, code int) {
 	t.Helper()
@@ -92,7 +92,7 @@ func TestLivenessArmGivesLsofsAccount(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withLsofAnswering(t, tc.stdout, tc.code)
 			withPIDAlive(t, true)
-			pidFile := writePIDFile(t, 4242)
+			pidFile := writePIDFile(t, standInPID)
 			t.Run("listener runs as this user", func(t *testing.T) { requireOwnedPortAccount(t, pidFile, tc) })
 			t.Run("listener not attributable to this user", func(t *testing.T) { requireUnownedPortAccount(t, pidFile, tc) })
 		})
@@ -100,7 +100,7 @@ func TestLivenessArmGivesLsofsAccount(t *testing.T) {
 }
 
 // lsofAccountCase is one answer lsof gives about a port on which it did
-// not name the recorded bridge (pid 4242), and the account the check
+// not name the recorded bridge (standInPID), and the account the check
 // should give.
 type lsofAccountCase struct {
 	name     string
@@ -110,13 +110,35 @@ type lsofAccountCase struct {
 	ruledOut bool
 }
 
+// otherPID and anotherPID are the pids a scripted lsof lists as processes
+// other than the recorded bridge: 1305 and 1400, each moved up one where it
+// is the stand-in. The child run of
+// TestStandInTestsHoldWhenTheStandInIsThisProcess records its own pid, which
+// can be either, and a fixed "other" pid equal to it would name the recorded
+// bridge after all (CodeRabbit on #1115).
+var (
+	otherPID   = otherThanStandIn(1305)
+	anotherPID = otherThanStandIn(1400)
+)
+
+// otherThanStandIn is pid, or the next one up when pid is standInPID.
+func otherThanStandIn(pid int) int {
+	if pid == standInPID {
+		return pid + 1
+	}
+	return pid
+}
+
 var lsofAccountCases = []lsofAccountCase{
 	{"lsof lists nothing", "", 1, "lsof lists no process listening on this port", false},
-	{"lsof lists another pid", "1305\n", 0, "lsof lists pid 1305 listening on this port", false},
-	{"lsof lists other pids", "1400\n1305\n", 0, "lsof lists pids 1305, 1400 listening on this port", false},
+	{"lsof lists another pid", fmt.Sprintf("%d\n", otherPID), 0,
+		fmt.Sprintf("lsof lists pid %d listening on this port", otherPID), false},
+	// Listed out of order: the account sorts them.
+	{"lsof lists other pids", fmt.Sprintf("%d\n%d\n", anotherPID, otherPID), 0,
+		fmt.Sprintf("lsof lists pids %d, %d listening on this port", otherPID, anotherPID), false},
 	// busybox's applet ignores -t and the rest, and lists every open file
 	// it can read.
-	{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, "lsof's output does not name pid 4242", false},
+	{"output not lsof -t's", "1 /usr/local/bin/bridge 0 /dev/null\n", 0, fmt.Sprintf("lsof's output does not name pid %d", standInPID), false},
 }
 
 // requireOwnedPortAccount grades a held port whose listener runs as this
@@ -142,7 +164,7 @@ func requireUnownedPortAccount(t *testing.T, pidFile string, tc lsofAccountCase)
 	if c.Status != Warn {
 		t.Fatalf("got %v (%s / %s), want warn", c.Status, c.Summary, c.Hint)
 	}
-	if !strings.HasPrefix(c.Hint, "our bridge (pid 4242) is still running, but "+tc.account) {
+	if !strings.HasPrefix(c.Hint, fmt.Sprintf("our bridge (pid %d) is still running, but ", standInPID)+tc.account) {
 		t.Errorf("hint does not open with lsof's account %q: %s", tc.account, c.Hint)
 	}
 	requireNoCapabilityClaim(t, c.Hint, tc.ruledOut)
@@ -190,12 +212,12 @@ func TestChosenPortRefusalNamesTheRecordedBridge(t *testing.T) {
 	withLsofAnswering(t, "", 1)
 	withPIDAlive(t, true)
 	withHiddenListener(t, false, nil)
-	pidFile := writePIDFile(t, 4242)
+	pidFile := writePIDFile(t, standInPID)
 	c := checkChosenPort(t.Context(), "port-test", bindPort(t), pidFile)
 	if c.Status != Fail {
 		t.Fatalf("got %v (%s), want fail", c.Status, c.Summary)
 	}
-	for _, want := range []string{pidFile, "pid 4242", "lsof lists no process listening on this port", "stop that bridge"} {
+	for _, want := range []string{pidFile, fmt.Sprintf("pid %d", standInPID), "lsof lists no process listening on this port", "stop that bridge"} {
 		if !strings.Contains(c.Hint, want) {
 			t.Errorf("hint does not say %q: %s", want, c.Hint)
 		}
@@ -235,7 +257,7 @@ func TestPortVerdictsDoNotDependOnTheAccount(t *testing.T) {
 }
 
 // lsofAnswer is one thing lsof can answer about a held port whose recorded
-// bridge is pid 4242.
+// bridge is standInPID.
 type lsofAnswer struct {
 	name   string
 	stdout string
@@ -244,14 +266,14 @@ type lsofAnswer struct {
 
 var lsofAnswers = []lsofAnswer{
 	{"probe failed", "", 2},
-	{"recorded pid listed", "4242\n", 0},
+	{"recorded pid listed", strconv.Itoa(standInPID) + "\n", 0},
 	{"nothing listed", "", 1},
-	{"another pid listed", "1305\n", 0},
+	{"another pid listed", fmt.Sprintf("%d\n", otherPID), 0},
 	{"output not lsof -t's", "1 /bin/sh 0 /dev/null\n", 0},
 }
 
 // procAnswer is one thing the second look (/proc on Linux, lsof's listing
-// of the pid's own listeners on macOS) can answer about pid 4242 after lsof
+// of the pid's own listeners on macOS) can answer about standInPID after lsof
 // did not name it: that pid holds the listener, it was read and holds none
 // on the port, or it cannot tell.
 type procAnswer struct {
@@ -280,7 +302,7 @@ func requireVerdictsBeforeTheAccount(t *testing.T, a lsofAnswer, p procAnswer, a
 	missed := !listed && !failed
 	found := listed || (missed && p.found)
 	port, chosen := ladderVerdicts(found, failed, alive, missed && p.seen.ruledOut, owned)
-	pidFile, held := writePIDFile(t, 4242), bindPort(t)
+	pidFile, held := writePIDFile(t, standInPID), bindPort(t)
 	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
 		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
 	}

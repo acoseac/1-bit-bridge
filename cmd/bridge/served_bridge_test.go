@@ -43,11 +43,12 @@ type consoleBridge struct {
 // startup scan finds them.
 //
 // It launches through launchServe, with runServe and the options `serve
-// --config --addr` builds plus the sweep counter, which no flag carries.
-// launchServe registers the drain after this function's t.TempDir, so the
-// drain runs first, and a cleanup the caller registered before this call
-// runs after serve has returned.
-func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string)) *consoleBridge {
+// --config --addr` builds plus the sweep counter, which no flag carries,
+// and then each of with, for a seam no flag carries either
+// (serveOpts.soxProbe). launchServe registers the drain after this
+// function's t.TempDir, so the drain runs first, and a cleanup the caller
+// registered before this call runs after serve has returned.
+func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string), with ...func(*serveOpts)) *consoleBridge {
 	t.Helper()
 	root := t.TempDir()
 	lib := filepath.Join(root, "Music")
@@ -81,6 +82,9 @@ func startConsoleBridge(t *testing.T, yamlTail string, fill func(lib string)) *c
 		configPath:        configPath,
 		addrOverride:      listenAddr,
 		autoOptimizeSwept: func() { b.autoOptimizeSweeps.Add(1) },
+	}
+	for _, set := range with {
+		set(&opts)
 	}
 	b.servedBridge = launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
 		return runServe(ctx, opts, stdout, stderr)

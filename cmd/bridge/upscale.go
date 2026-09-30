@@ -1569,25 +1569,12 @@ func printSoxFormatHint(w io.Writer) {
 	}
 }
 
-// soxFeatureReady reports whether sox is usable for an offline-decode
-// feature (upscale / analysis) at `bridge serve` startup: present on PATH
-// AND its build has FLAC support (the bridge forces `-t flac`, so a
-// FLAC-less sox would fail every job at runtime). On any disqualifying
-// condition it writes an operator-facing reason to stderr and returns
-// false. Serve calls it for that one line only: the features' gates are
-// live (the flag AND the shared, TTL-cached probe), so a sox installed
-// later is picked up without a restart, and the line says so. An
-// unparseable `sox --help` is treated conservatively as "FLAC present":
-// never disable a working install over a help-output reword. ctx is
-// propagated so a SIGINT during startup aborts the probe; the 2 s cap
-// lives inside ProbeSox regardless.
-func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool {
-	info, err := transcode.ProbeSox(ctx)
-	return soxUsable(info, err, feature, stderr)
-}
-
-// soxUsable is the verdict, split out from the probe so a CACHED probe
-// result can reach the same judgement without re-forking.
+// soxUsable reports whether sox is usable for an offline-decode feature
+// (upscale / analysis), from a probe's answer: present on PATH AND its
+// build has FLAC support (the bridge forces `-t flac`, so a FLAC-less sox
+// would fail every job at runtime). It takes the answer rather than
+// probing, so serve's gates and its boot line judge one CACHED probe
+// (soxToolchainCache) without re-forking.
 //
 // The conservative FormatsKnown gate is the contract: an unparseable
 // `sox --help` is treated as FLAC-present, so a help-output reword can
@@ -1597,7 +1584,8 @@ func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool
 // gates consult this on every request, and a line per consult would be
 // the per-minute spam the SSDP send-suppression exists to prevent. The
 // ONE boot-time caller passes a writer so an operator who enabled the
-// feature without sox still gets told once.
+// feature without sox still gets told once, and the line says the gate
+// is live: a sox installed later is picked up without a restart.
 func soxUsable(info transcode.SoxInfo, err error, feature string, stderr io.Writer) bool {
 	// "Stays off until", never "disabling": the gate is live, and a line
 	// that reads as a demotion sent operators to restart the bridge after
@@ -1751,7 +1739,7 @@ func printFFmpegInstallHint(w io.Writer) {
 // build has FLAC support, printing the appropriate install / format hint to
 // stderr on failure and returning false so the caller can exit. featureNeed
 // completes the sentence "…lacks FLAC support, which <featureNeed>." The
-// conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
+// conservative FormatsKnown gate matches soxUsable. Extracted so the
 // per-subcommand call sites stay one line (and keeps analyzeCmd under the
 // cognitive-complexity budget).
 func soxCLIReady(ctx context.Context, stderr io.Writer, featureNeed string) bool {

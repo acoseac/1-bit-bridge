@@ -1781,6 +1781,9 @@ type soxToolchainCache struct {
 	at   time.Time
 	info transcode.SoxInfo
 	err  error
+	// probe answers in place of transcode.ProbeSox when set: serveOpts'
+	// soxProbe, which only the boot tests give.
+	probe func(context.Context) (transcode.SoxInfo, error)
 }
 
 const adminSoxTTL = 30 * time.Second
@@ -1791,7 +1794,11 @@ func (c *soxToolchainCache) snapshot() (transcode.SoxInfo, error) {
 	if !c.at.IsZero() && time.Since(c.at) < adminSoxTTL {
 		return c.info, c.err
 	}
-	c.info, c.err = transcode.ProbeSox(context.Background())
+	if c.probe != nil {
+		c.info, c.err = c.probe(context.Background())
+	} else {
+		c.info, c.err = transcode.ProbeSox(context.Background())
+	}
 	c.at = time.Now()
 	return c.info, c.err
 }
@@ -2373,6 +2380,15 @@ type serveOpts struct {
 	// after a nudge the test sent. Per invocation for tailscaleCLI's
 	// reason.
 	autoOptimizeSwept func()
+	// soxProbe stands in for transcode.ProbeSox in the one sox probe
+	// serve makes (soxToolchainCache), which the upscale and analysis
+	// gates, the console's tiles, the /v1 stats adapters and the boot line
+	// all read. Nil (the host's sox) everywhere but the boot tests, which
+	// answer the gate's toolchain half themselves: a stand-in sox on PATH
+	// is a process, a starved host ran it past ProbeSox's 2 s timeout, and
+	// the cache kept that "no sox" for its 30 s (backlog B105). Per
+	// invocation for tailscaleCLI's reason.
+	soxProbe func(context.Context) (transcode.SoxInfo, error)
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -3336,10 +3352,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 	// ONE TTL-cached sox probe shared by every consumer: the live feature
 	// gates below, the upscale enqueuer's per-source decodability check,
-	// and the admin tiles (so the Settings page does at most one
-	// fork-exec per 30 s window regardless of tile count). Declared here
-	// rather than beside the admin wiring because the gates need it first.
-	soxCache := &soxToolchainCache{}
+	// the admin tiles (so the Settings page does at most one fork-exec per
+	// 30 s window regardless of tile count) and the boot line. Declared
+	// here rather than beside the admin wiring because the gates need it
+	// first.
+	soxCache := &soxToolchainCache{probe: opts.soxProbe}
 	// soxOK is the LIVE toolchain verdict. Lazy + cached rather than a
 	// boot snapshot: the probe is a fork-exec, and an operator who
 	// installs sox and then enables the feature should not have to bounce
@@ -3402,12 +3419,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	liveRenderTempDir := func() string { return liveCfg().Upscale.TempDir }
 	// Boot-time courtesy log, once: an operator who enabled either
 	// feature without a usable sox gets told at startup rather than
-	// discovering it from a silent no-op.
-	if cfg.Upscale.Enabled {
-		_ = soxFeatureReady(ctx, "upscale", stderr)
-	}
-	if cfg.Analysis.Enabled {
-		_ = soxFeatureReady(ctx, "analysis", stderr)
+	// discovering it from a silent no-op. It reads the shared probe the
+	// gates read, so it cannot say otherwise than they do at boot, and the
+	// gates' first read finds that probe cached: one sox fork at boot,
+	// where there was one per line and another for the gates. Until
+	// 2026-09-29 it probed for itself, the one serve consumer the boot
+	// tests' stand-in (serveOpts.soxProbe) did not reach (backlog B105).
+	// The cache takes no context, so a stop that lands during this probe
+	// waits for it, 2 s at most (ProbeSox's own cap), where it cancelled it.
+	if cfg.Upscale.Enabled || cfg.Analysis.Enabled {
+		info, err := soxCache.snapshot()
+		if cfg.Upscale.Enabled {
+			_ = soxUsable(info, err, "upscale", stderr)
+		}
+		if cfg.Analysis.Enabled {
+			_ = soxUsable(info, err, "analysis", stderr)
+		}
 	}
 	// Live source, not a boot snapshot: the atomic is written once, so
 	// after a settings PATCH the manifest would keep stripping (or keep

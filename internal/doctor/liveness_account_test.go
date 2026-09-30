@@ -272,7 +272,7 @@ func withOwnerProbe(t *testing.T, found bool, seen ownerSighting, err error) {
 }
 
 // probeAnswer is one answer the owner probe can give about a held port
-// whose recorded bridge is pid 4242.
+// whose recorded bridge is the stand-in (standInPID).
 type probeAnswer struct {
 	name  string
 	found bool
@@ -290,7 +290,7 @@ var probeAnswers = []probeAnswer{
 }
 
 // ladderVerdicts is what both port ladders answer for a held port whose
-// recorded bridge is pid 4242, from the probe's found and its error, the
+// recorded bridge is the stand-in, from the probe's found and its error, the
 // pid's liveness, whether the probe's account rules the pid out, and the
 // uid arm. checkPort warns on a failed probe, is ok on a match, FAILs a
 // port no live bridge of ours can hold (the pid dead, or ruled out), and
@@ -341,7 +341,7 @@ func requireLadderVerdicts(t *testing.T, a probeAnswer, alive, owned bool) {
 	withPIDAlive(t, alive)
 	withHiddenListener(t, owned, nil)
 	port, chosen := ladderVerdicts(a.found, a.err != nil, alive, a.seen.ruledOut, owned)
-	pidFile, held := writePIDFile(t, 4242), bindPort(t)
+	pidFile, held := writePIDFile(t, standInPID), bindPort(t)
 	if c := checkPort(t.Context(), "port-test", held, pidFile); c.Status != port {
 		t.Errorf("checkPort: got %v (%s / %s), want %v", c.Status, c.Summary, c.Hint, port)
 	}

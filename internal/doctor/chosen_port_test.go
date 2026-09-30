@@ -35,15 +35,14 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 		{"the recorded bridge seen listening", func(t *testing.T) (int, string) {
 			return bindPort(t), writePIDFile(t, os.Getpid())
 		}, OK, OK},
-		// pid 4242 is not the holder, so no probe names it, and the probe
-		// is forced to a miss that cannot rule it out, as a capability-bound
-		// bridge's is. Alive, with the listener running as this user: the
-		// Linux uid arm's ok.
+		// The stand-in is not the holder, and the probe is forced to a miss
+		// that cannot rule it out, as a capability-bound bridge's is. Alive,
+		// with the listener running as this user: the Linux uid arm's ok.
 		{"recorded bridge alive, listener runs as this user", func(t *testing.T) (int, string) {
 			withUnattributedMiss(t)
 			withPIDAlive(t, true)
 			withHiddenListener(t, true, nil)
-			return bindPort(t), writePIDFile(t, 4242)
+			return bindPort(t), writePIDFile(t, standInPID)
 		}, Fail, OK},
 		// Alive, and nothing can say who holds the port: the liveness
 		// arm's warn.
@@ -51,7 +50,7 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 			withUnattributedMiss(t)
 			withPIDAlive(t, true)
 			withHiddenListener(t, false, nil)
-			return bindPort(t), writePIDFile(t, 4242)
+			return bindPort(t), writePIDFile(t, standInPID)
 		}, Fail, Warn},
 		// Alive, and the probe saw enough to rule it out (/proc read all of
 		// its descriptors, or Windows' table named the holders): the port
@@ -60,11 +59,17 @@ func TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening(t *testing.T) {
 			withOwnerProbe(t, false, ownerSighting{saw: "/proc shows no descriptor of pid 4242 listening on this port", ruledOut: true}, nil)
 			withPIDAlive(t, true)
 			withHiddenListener(t, true, nil)
-			return bindPort(t), writePIDFile(t, 4242)
+			return bindPort(t), writePIDFile(t, standInPID)
 		}, Fail, Fail},
+		// Not running, with the probe's answer the rows above take: a
+		// dead recorded bridge excuses nothing. The probe is forced here
+		// too, since left to the host it names this process as the holder
+		// of the port, which reads as the recorded bridge wherever this
+		// process is the recorded pid (backlog B106).
 		{"recorded bridge not running", func(t *testing.T) (int, string) {
+			withUnattributedMiss(t)
 			withPIDAlive(t, false)
-			return bindPort(t), writePIDFile(t, 4242)
+			return bindPort(t), writePIDFile(t, standInPID)
 		}, Fail, Fail},
 		{"no pid file recorded", func(t *testing.T) (int, string) {
 			return bindPort(t), ""

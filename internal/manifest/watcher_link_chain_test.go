@@ -25,41 +25,29 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
-// runWatcherOn starts a watcher over sc and joins it at cleanup, after the
-// test and before the store it writes to is closed.
+// runWatcherOn starts a watcher over sc (startWatcher: it returns once the
+// initial walk is done, and joins the watcher at cleanup, after the test and
+// before the store it writes to is closed). It slept 150 ms for the walk
+// until 2026-09-29, and on a starved host the walk ended after the drop that
+// followed, so no event came (backlog B104).
 func runWatcherOn(t *testing.T, sc *Scanner) *Watcher {
 	t.Helper()
 	w, err := NewWatcher(sc, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); _ = w.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("the watcher did not stop on cancel")
-		}
-	})
-	// fsnotify's Add is synchronous; this is headroom for the initial walk.
-	time.Sleep(150 * time.Millisecond)
+	startWatcher(t, w)
 	return w
 }
 
-// waitForPath waits for the store to hold rel.
-func waitForPath(t *testing.T, store *Store, rel, msg string) {
+// waitForPath waits for the store to hold rel, or fails with msg when the
+// wait gives up or stop names a failure (watchWaitUntil).
+func waitForPath(t *testing.T, store *Store, rel string, stop func() string, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if st, err := store.GetTrackStat(context.Background(), rel); err == nil && st != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal(msg)
+	watchWaitUntil(t, func() bool {
+		st, err := store.GetTrackStat(context.Background(), rel)
+		return err == nil && st != nil
+	}, stop, msg)
 }
 
 // TestWatcherWatchesARootThatIsALinkToALink: a file dropped into the root
@@ -80,25 +68,38 @@ func TestWatcherWatchesARootThatIsALinkToALink(t *testing.T) {
 	linkDirOrSkip(t, link, chain)
 	store, sc := newScanFixture(t, chain)
 	rec := loggingtest.Record(t)
-	runWatcherOn(t, sc)
+	w := runWatcherOn(t, sc)
+	// What the defect did with each drop: it asked for a scan of the root's
+	// parent, which the scanner refuses. The waits below end on that line
+	// rather than at the test's deadline.
+	strayScan := func() string {
+		for _, line := range rec.Lines("subtree scan") {
+			if strings.Contains(line, "not under any configured library root") {
+				return "the watcher sent a subtree scan outside the configured root: " + line
+			}
+		}
+		return ""
+	}
 
 	writeMinimalFLAC(t, filepath.Join(chain, "dropped.flac"), 44100, 16, map[string]string{"TITLE": "Dropped"})
-	waitForPath(t, store, "dropped.flac", "a file dropped into a root that is a link to a link never reached the manifest through the watcher")
+	waitForPath(t, store, "dropped.flac", strayScan, "a file dropped into a root that is a link to a link never reached the manifest through the watcher")
 
 	// A folder made in the root after the watcher started is watched from
-	// its Create event, which a root watched as a file never had.
+	// its Create event, which a root watched as a file never had. The drop
+	// into it waits for that watch: it waited 300 ms until 2026-09-29, and
+	// a drop that beats the watch reaches the manifest only through the
+	// root's own scan, if at all.
 	fresh := filepath.Join(chain, "New Artist")
 	if err := os.Mkdir(fresh, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	watchWaitUntil(t, func() bool { return watched(w, "New Artist") }, strayScan,
+		"the folder made in the root was never watched")
 	writeMinimalFLAC(t, filepath.Join(fresh, "fresh.flac"), 44100, 16, map[string]string{"TITLE": "Fresh"})
-	waitForPath(t, store, "New Artist/fresh.flac", "a file dropped into a folder made in the root never reached the manifest through the watcher")
+	waitForPath(t, store, "New Artist/fresh.flac", strayScan, "a file dropped into a folder made in the root never reached the manifest through the watcher")
 
-	for _, line := range rec.Lines("subtree scan") {
-		if strings.Contains(line, "not under any configured library root") {
-			t.Errorf("the watcher sent a subtree scan outside the configured root: %s", line)
-		}
+	if why := strayScan(); why != "" {
+		t.Error(why)
 	}
 }
 

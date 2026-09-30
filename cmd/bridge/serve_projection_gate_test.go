@@ -1,17 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // TestServeProjectionFollowsTheLiveUpscaleGate boots the real serve and
@@ -32,9 +32,18 @@ import (
 // upscaleEnabled says, 200 when true and 503 `upscale-disabled` when
 // false. The live gate also needs a usable sox, and on a host without one
 // health reads false after the PATCH that switches the feature on, so the
-// boot-off leg could not tell a live gate from a boot snapshot. A
-// stand-in sox therefore goes first on PATH (POSIX only), and health must
+// boot-off leg could not tell a live gate from a boot snapshot. So the
+// test answers serve's sox probe itself (withUsableSox), and health must
 // then read what was PATCHed, which is checked before the comparison.
+//
+// That answer was a stand-in sox first on PATH until 2026-09-29, and
+// POSIX only. ProbeSox runs it with a 2 s timeout, a timed-out probe reads
+// as no sox, and the shared cache keeps that for 30 s: a stand-in slower
+// than 2 s fails step 1 exactly as the dev Mac did under sibling sessions'
+// load (backlog B105), and on a Linux host starved by a CPU hog, under
+// -race, the health request that ran the probe took up to 2.08 s. A probe
+// that runs no process takes the host's load out of the test, and puts the
+// check on Windows too.
 //
 // The variants-dir readout reads the same AvailableDiskSpace closure, so
 // on a bridge booted with upscaling off the console's "Free on that
@@ -42,19 +51,18 @@ import (
 // about the disk, not about upscaling, so it must be reported in every
 // state.
 func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
-	stubbedSox := putUsableSoxOnPath(t)
 	for _, bootOn := range []bool{false, true} {
 		t.Run(fmt.Sprintf("booted with upscale.enabled=%t", bootOn), func(t *testing.T) {
-			b := startConsoleBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil)
+			b := startConsoleBridge(t, fmt.Sprintf("upscale:\n  enabled: %t\n", bootOn), nil, withUsableSox)
 			for step, on := range []bool{bootOn, !bootOn, bootOn} {
 				if step > 0 {
 					patchUpscaleEnabled(t, b.console, b.adminBase, on, b.stderr)
 				}
 				healthOn := healthUpscaleEnabled(t, b.phone, b.apiBase)
-				if stubbedSox && healthOn != on {
-					t.Fatalf("step %d: /v1/health says upscaleEnabled=%t with the flag at %t and a usable "+
-						"sox on PATH, so the comparison below would not show what it is meant to; stderr=%s",
-						step, healthOn, on, b.stderr.String())
+				if healthOn != on {
+					t.Fatalf("step %d: /v1/health says upscaleEnabled=%t with the flag at %t and serve's "+
+						"sox probe answering a usable sox, so the comparison below would not show what "+
+						"it is meant to; stderr=%s", step, healthOn, on, b.stderr.String())
 				}
 				code, errCode := projectionVerdict(t, b.console, b.adminBase)
 				switch {
@@ -74,24 +82,50 @@ func TestServeProjectionFollowsTheLiveUpscaleGate(t *testing.T) {
 	}
 }
 
-// putUsableSoxOnPath puts a stand-in `sox` first on PATH, one that
-// answers `sox --help` with a format list naming flac, and reports
-// whether it did. Nothing in the test above decodes anything (its library
-// is empty), so the stand-in is asked only the probe's question. Not on
-// Windows, where a shell script is no command; the test runs there with
-// whatever PATH holds.
-func putUsableSoxOnPath(t *testing.T) bool {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		return false
+// TestServeBootLineReadsTheSharedSoxProbe: serve's boot line about a
+// feature switched on without a usable sox reads the probe the gates read
+// (soxToolchainCache), so it says what that probe says, once per feature,
+// and a boot test's stand-in (serveOpts.soxProbe) reaches it. It probed sox
+// for itself until 2026-09-29 (backlog B105), so on a host with a usable
+// sox it printed nothing while the gates read the stand-in, and on a host
+// without one it printed the host's answer.
+func TestServeBootLineReadsTheSharedSoxProbe(t *testing.T) {
+	const said = "the test's stand-in finds no sox"
+	var probes atomic.Int32
+	b := startConsoleBridge(t, "upscale:\n  enabled: true\nanalysis:\n  enabled: true\n", nil, func(o *serveOpts) {
+		o.soxProbe = func(context.Context) (transcode.SoxInfo, error) {
+			probes.Add(1)
+			return transcode.SoxInfo{}, fmt.Errorf("%w: %s", transcode.ErrSoxMissing, said)
+		}
+	})
+	out := b.stderr.String()
+	for _, feature := range []string{"upscale", "analysis"} {
+		lead := feature + ": feature is enabled in bridge.yaml but sox is not available, so it stays off"
+		var lines []string
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, lead) {
+				lines = append(lines, line)
+			}
+		}
+		if len(lines) != 1 || !strings.HasSuffix(lines[0], said) {
+			t.Errorf("the boot lines about %s are %q, want one that gives the shared probe's answer (%q); "+
+				"stderr=%s", feature, lines, said, out)
+		}
 	}
-	bin := t.TempDir()
-	script := "#!/bin/sh\nprintf 'sox:      SoX v14.4.2\\n\\nAUDIO FILE FORMATS: flac wav\\n'\n"
-	if err := os.WriteFile(filepath.Join(bin, "sox"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	if probes.Load() == 0 {
+		t.Error("serve never asked the stand-in probe: its sox answers came from the host's")
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return true
+}
+
+// withUsableSox answers serve's sox probe (serveOpts.soxProbe) with a sox
+// whose build has FLAC, as `sox --help` reports one, without running a
+// process. Nothing in the test above decodes anything (its library is
+// empty), so the probe's question is the only one sox is asked.
+func withUsableSox(o *serveOpts) {
+	o.soxProbe = func(context.Context) (transcode.SoxInfo, error) {
+		return transcode.SoxInfo{Path: "sox", Version: "v14.4.2", Formats: []string{"flac", "wav"},
+			FormatsKnown: true, HasFLAC: true}, nil
+	}
 }
 
 // patchUpscaleEnabled switches upscaling through the console's settings

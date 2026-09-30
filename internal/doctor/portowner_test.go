@@ -30,6 +30,40 @@ func withPIDAlive(t *testing.T, alive bool) {
 	pidAliveFunc = func(int) bool { return alive }
 }
 
+// standInPID is the pid a test records as a bridge of its own choosing, one
+// that is not this test process: 4242, or 4243 when the test binary itself
+// runs as 4242.
+//
+// Every such test binds its port in this process, so an owner probe left to
+// the host names this process as the port's holder, and a recorded pid equal
+// to it reads "bound by our own bridge (pid 4242)": the one answer these
+// tests exist to rule out. A freshly booted macOS CI runner hands pids out
+// low and in sequence, and two tests that left the probe to the host failed
+// there that way on one run (backlog B106). A test that records it still
+// forces what the probe says about it (withUnattributedMiss, withOwnerProbe,
+// withLsofAnswering, withProcAnswering), so the value is inert and this is
+// the second line: TestStandInTestsHoldWhenTheStandInIsThisProcess runs every
+// test that reaches it with the stand-in set to the running test binary.
+var standInPID = pickStandInPID()
+
+// standInIsSelfEnv makes this test binary, run again by
+// TestStandInTestsHoldWhenTheStandInIsThisProcess, record its own pid as the
+// stand-in: the collision B106 met by chance, made on every run.
+const standInIsSelfEnv = "DOCTOR_TEST_STAND_IN_IS_SELF"
+
+// pickStandInPID is standInPID's value: the running binary's own pid in the
+// child run that asks for it, and otherwise 4242 unless that is this
+// process.
+func pickStandInPID() int {
+	if os.Getenv(standInIsSelfEnv) != "" {
+		return os.Getpid()
+	}
+	if os.Getpid() == 4242 {
+		return 4243
+	}
+	return 4242
+}
+
 // writePIDFile drops a pidfile holding `pid` and returns its path.
 func writePIDFile(t *testing.T, pid int) string {
 	t.Helper()
@@ -53,12 +87,13 @@ func bindPort(t *testing.T) int {
 
 // withUnattributedMiss forces the owner probe to the miss a capability-bound
 // bridge produces: it ran cleanly, did not name the recorded pid, and could
-// not rule it out. The tests below record pid 4242 and hold the port
+// not rule it out. The tests below record standInPID and hold the port
 // themselves, and left to the host the probe answers something else there:
-// Windows' listener table names the test process and rules 4242 out, and
-// /proc on Linux rules out a 4242 that is a process of the test's own user.
-// Either is a port the recorded bridge demonstrably does not hold, which
-// FAILs, and not the arm these tests are about.
+// Windows' listener table names the test process and rules the stand-in
+// out, and /proc on Linux rules out a stand-in that is a process of the
+// test's own user. Either is a port the recorded bridge demonstrably does
+// not hold, which FAILs, and not the arm these tests are about. And where
+// the test process is the stand-in, every probe names it as the holder.
 func withUnattributedMiss(t *testing.T) {
 	t.Helper()
 	withOwnerProbe(t, false, ownerSighting{saw: "lsof lists no process listening on this port", blind: "the blind spot"}, nil)
@@ -80,7 +115,7 @@ func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 	withHiddenListener(t, false, nil) // can't tell who owns it
 	port := bindPort(t)
 
-	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, standInPID))
 	if c.Status != Warn {
 		t.Errorf("bound port, recorded pid alive, owner unattributable: got %v (%s / %s), want warn",
 			c.Status, c.Summary, c.Hint)
@@ -92,12 +127,21 @@ func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 // recorded PID being ALIVE, not handed out to every unattributable port.
 // A stale pidfile left by a crashed bridge names a dead PID, and a genuine
 // conflict on that port has to stay a Fail.
+//
+// The probe gives the answer it gives above, so liveness is the one thing
+// the two tests differ in. Left to the host (until 2026-09-29, backlog
+// B106), it failed on a CI run whose test binary was the recorded pid
+// (lsof named it as the port's holder: "bound by our own bridge"), and on
+// Windows, whose listener table rules the recorded pid out, a check that
+// ignored liveness failed this port all the same, so the control could not
+// see the regression it exists for.
 func TestPortCheck_DeadPIDStillFails(t *testing.T) {
+	withUnattributedMiss(t)
 	withPIDAlive(t, false)
 	withHiddenListener(t, false, nil)
 	port := bindPort(t)
 
-	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, standInPID))
 	if c.Status != Fail {
 		t.Errorf("bound port with a STALE pidfile: got %v (%s), want fail — "+
 			"the liveness check is what separates 'probably ours' from a real conflict",
@@ -114,7 +158,7 @@ func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 	withHiddenListener(t, true, nil)
 	port := bindPort(t)
 
-	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, standInPID))
 	if c.Status != OK {
 		t.Errorf("bound port owned by this user: got %v (%s / %s), want ok", c.Status, c.Summary, c.Hint)
 	}
@@ -129,7 +173,7 @@ func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
 	withHiddenListener(t, true, os.ErrPermission) // owned=true but errored
 	port := bindPort(t)
 
-	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, standInPID))
 	if c.Status != Warn {
 		t.Errorf("owner probe errored: got %v (%s), want warn — an errored probe is not a match",
 			c.Status, c.Summary)
