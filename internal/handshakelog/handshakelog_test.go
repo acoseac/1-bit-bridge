@@ -817,33 +817,32 @@ func TestRedactPeers(t *testing.T) {
 // B172). The texts after the addresses are the ones measured on Linux,
 // macOS and Windows.
 func TestRedactPeersInASocketError(t *testing.T) {
-	const hs = "http: TLS handshake error from %s: %v"
 	const p = ClientPlaceholder
 	local4, peer4 := tcpAddr("192.0.2.1", 7788, ""), tcpAddr("192.0.2.7", 51786, "")
 	local6, peer6 := tcpAddr("2001:db8::1", 7788, ""), tcpAddr("2001:db8::7", 51786, "")
 	localWiFi, peerWiFi := tcpAddr("fe80::1", 7788, "Wi-Fi 4"), tcpAddr("fe80::7", 51786, "Wi-Fi 4")
+
+	// A failed handshake whose reason is net's error for the server's end of
+	// the socket. The line keeps the local address, as kept spells it.
+	for _, tc := range []struct {
+		name, op, reason, kept string
+		local, peer            net.Addr
+	}{
+		{"a handshake that times out", "read", "i/o timeout", "192.0.2.1:7788", local4, peer4},
+		{"a reset, Linux and macOS", "read", "read: connection reset by peer", "192.0.2.1:7788", local4, peer4},
+		{"a reset, Windows", "read", "wsarecv: An existing connection was forcibly closed by the remote host.", "[2001:db8::1]:7788", local6, peer6},
+		{"a write to a peer that is gone, macOS", "write", "write: broken pipe", "192.0.2.1:7788", local4, peer4},
+		{"a write to a peer that is gone, Linux", "write", "write: connection reset by peer", "[2001:db8::1]:7788", local6, peer6},
+		{"a write to a peer that is gone, Windows", "write", "wsasend: An existing connection was forcibly closed by the remote host.", "192.0.2.1:7788", local4, peer4},
+		{"a link-local peer on Windows, whose zone is the adapter's name", "read", "i/o timeout", "[fe80::1%Wi-Fi 4]:7788", localWiFi, peerWiFi},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkRedaction(t, handshakeLine(tc.peer, sockErr(tc.op, tc.local, tc.peer, tc.reason)),
+				"http: TLS handshake error from "+p+": "+tc.op+" tcp "+tc.kept+"->"+p+": "+tc.reason)
+		})
+	}
+
 	for _, tc := range []struct{ name, in, want string }{
-		{"a handshake that times out",
-			fmt.Sprintf(hs, peer4, sockErr("read", local4, peer4, "i/o timeout")),
-			"http: TLS handshake error from " + p + ": read tcp 192.0.2.1:7788->" + p + ": i/o timeout"},
-		{"a reset, Linux and macOS",
-			fmt.Sprintf(hs, peer4, sockErr("read", local4, peer4, "read: connection reset by peer")),
-			"http: TLS handshake error from " + p + ": read tcp 192.0.2.1:7788->" + p + ": read: connection reset by peer"},
-		{"a reset, Windows",
-			fmt.Sprintf(hs, peer6, sockErr("read", local6, peer6, "wsarecv: An existing connection was forcibly closed by the remote host.")),
-			"http: TLS handshake error from " + p + ": read tcp [2001:db8::1]:7788->" + p + ": wsarecv: An existing connection was forcibly closed by the remote host."},
-		{"a write to a peer that is gone, macOS",
-			fmt.Sprintf(hs, peer4, sockErr("write", local4, peer4, "write: broken pipe")),
-			"http: TLS handshake error from " + p + ": write tcp 192.0.2.1:7788->" + p + ": write: broken pipe"},
-		{"a write to a peer that is gone, Linux",
-			fmt.Sprintf(hs, peer6, sockErr("write", local6, peer6, "write: connection reset by peer")),
-			"http: TLS handshake error from " + p + ": write tcp [2001:db8::1]:7788->" + p + ": write: connection reset by peer"},
-		{"a write to a peer that is gone, Windows",
-			fmt.Sprintf(hs, peer4, sockErr("write", local4, peer4, "wsasend: An existing connection was forcibly closed by the remote host.")),
-			"http: TLS handshake error from " + p + ": write tcp 192.0.2.1:7788->" + p + ": wsasend: An existing connection was forcibly closed by the remote host."},
-		{"a link-local peer on Windows, whose zone is the adapter's name",
-			fmt.Sprintf(hs, peerWiFi, sockErr("read", localWiFi, peerWiFi, "i/o timeout")),
-			"http: TLS handshake error from " + p + ": read tcp [fe80::1%Wi-Fi 4]:7788->" + p + ": i/o timeout"},
 		{"the HTTP/2 preface",
 			fmt.Sprintf("http2: server: error reading preface from client %v: %v", peer4, sockErr("read", local4, peer4, "read: connection reset by peer")),
 			"http2: server: error reading preface from client " + p + ": read tcp 192.0.2.1:7788->" + p + ": read: connection reset by peer"},
@@ -851,7 +850,7 @@ func TestRedactPeersInASocketError(t *testing.T) {
 			fmt.Sprintf("http: panic serving %v: %v\n%s", peer4, errors.New(sockErr("write", local4, peer4, "write: broken pipe")), "goroutine 7 [running]:"),
 			"http: panic serving " + p + ": write tcp 192.0.2.1:7788->" + p + ": write: broken pipe\ngoroutine 7 [running]:"},
 		{"a socket error needs no word before it",
-			fmt.Sprintf("http2: server closing client connection: %v", sockErr("write", local6, peer6, "write: broken pipe")),
+			"http2: server closing client connection: " + sockErr("write", local6, peer6, "write: broken pipe"),
 			"http2: server closing client connection: write tcp [2001:db8::1]:7788->" + p + ": write: broken pipe"},
 		// net's accept ignores a failed getsockname (fd_unix.go, and
 		// fd_windows.go's GetAcceptExSockaddrs), which leaves the local end
@@ -859,26 +858,33 @@ func TestRedactPeersInASocketError(t *testing.T) {
 		// words before it say it is the peer, so the redaction takes every
 		// place a line repeats an address it knows is one.
 		{"a socket whose local address could not be read",
-			fmt.Sprintf(hs, peer4, sockErr("read", nil, peer4, "read: connection reset by peer")),
+			handshakeLine(peer4, sockErr("read", nil, peer4, "read: connection reset by peer")),
 			"http: TLS handshake error from " + p + ": read tcp " + p + ": read: connection reset by peer"},
 		// ... and the lone address can be the LOCAL end: gVisor's gonet
 		// (the tailnet listener) has no remote address left after a reset,
 		// and net/http then has none to print either. Nothing says it is a
 		// peer, and it is not one.
 		{"the tailnet listener after a reset",
-			fmt.Sprintf(hs, net.Addr(nil), sockErr("read", tcpAddr("100.64.0.1", 443, ""), nil, "connection reset by peer")),
+			handshakeLine(nil, sockErr("read", tcpAddr("100.64.0.1", 443, ""), nil, "connection reset by peer")),
 			"http: TLS handshake error from %!s(<nil>): read tcp 100.64.0.1:443: connection reset by peer"},
 		// A repeat is replaced only where it stands alone: a local address
 		// that begins or ends with the peer's text is a different address.
 		{"a local address that begins with the peer's text",
-			fmt.Sprintf(hs, tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("10.0.0.2", 50001, ""), tcpAddr("10.0.0.2", 5000, ""), "i/o timeout")),
+			handshakeLine(tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("10.0.0.2", 50001, ""), tcpAddr("10.0.0.2", 5000, ""), "i/o timeout")),
 			"http: TLS handshake error from " + p + ": read tcp 10.0.0.2:50001->" + p + ": i/o timeout"},
 		{"a local address that ends with the peer's text",
-			fmt.Sprintf(hs, tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("110.0.0.2", 5000, ""), nil, "connection reset by peer")),
+			handshakeLine(tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("110.0.0.2", 5000, ""), nil, "connection reset by peer")),
 			"http: TLS handshake error from " + p + ": read tcp 110.0.0.2:5000: connection reset by peer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) { checkRedaction(t, tc.in, tc.want) })
 	}
+}
+
+// handshakeLine is net/http's line for a failed handshake, with its own
+// format: the peer's address as net.Addr's %s prints it (a nil one as
+// "%!s(<nil>)"), then the reason.
+func handshakeLine(peer net.Addr, reason string) string {
+	return fmt.Sprintf("http: TLS handshake error from %s: %v", peer, reason)
 }
 
 // checkRedaction requires RedactPeers(in) == want, and a second pass to
