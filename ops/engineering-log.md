@@ -32892,6 +32892,19 @@ refuses a `writePIDFile` given a pid literal.
   the struct declares `mu sync.Mutex` and `snapshot` takes it before it
   reads the TTL, unchanged here; the hunk showed only the new field.
 
+### Review round 2
+
+CodeRabbit's on-demand pass (the plan limit had paused it) covered
+44fe3de3 with no new finding and resolved both threads. Gemini made the
+mutex claim twice more, declined as before, and two new suggestions,
+declined: not caching a failed first sox probe is B142's question, a
+product change to decide on its own (a cached "no sox" is what keeps a
+host without sox, or with a hung one, from probing on every gate read);
+and a fixed 10 s bound on the watcher's join at cleanup is a guess at
+SQLite's writes under starvation, the kind B63 measured past 16 s, and a
+join that gives up lets the store close under a live watcher (the B8
+shape), so it waits until the deadline less `watchDrainReserve`.
+
 ### Out of scope
 
 - A sox probe that times out closes the live gates for 30 s on a host
