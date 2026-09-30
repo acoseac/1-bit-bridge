@@ -462,6 +462,18 @@ proxy (Caddy / Traefik / nginx) with HTTP basic auth in front of
 bridge's CSRF defenses still apply, but the loopback-only
 binding inside the container is what stops anonymous LAN access.
 
+The console answers only to a request whose `Host` names loopback
+(`localhost`, `127.0.0.1`, `[::1]`, any port), so the proxy must send
+that `Host` rather than the name the browser used, or every page is a
+`421 Misdirected Request` saying so:
+
+- **nginx**: `proxy_pass http://127.0.0.1:7789;` already sends
+  `Host: 127.0.0.1:7789`. Leave out `proxy_set_header Host $host;`.
+- **Caddy**: `reverse_proxy` forwards the browser's `Host` unless told
+  otherwise, so add `header_up Host {upstream_hostport}` inside the
+  `reverse_proxy` block.
+- **Traefik**: set the service's `passHostHeader: false`.
+
 ## Public mode (internet-exposed)
 
 By default the container runs in **loopback mode** — the iOS API on

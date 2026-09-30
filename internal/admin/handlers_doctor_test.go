@@ -12,6 +12,7 @@ func getDoctor(t *testing.T, s *Server) doctorResponse {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/doctor", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
+	req.Host = testConsoleHost
 	rec := httptest.NewRecorder()
 	s.apiDoctor(rec, req)
 	if rec.Code != http.StatusOK {

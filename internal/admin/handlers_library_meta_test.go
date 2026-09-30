@@ -225,14 +225,11 @@ func TestApiLibraryEnrichmentRetryScoped(t *testing.T) {
 	// Two enriched-but-incomplete tracks under Gap/, one complete.
 	seed := func(path, artwork, artist string) {
 		t.Helper()
-		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-			Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist,
-		}); err != nil {
+		tr := &manifest.Track{Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist}
+		if err := srv.deps.Manifest.UpsertTrack(ctx, tr); err != nil {
 			t.Fatal(err)
 		}
-		if err := srv.deps.Manifest.MarkEnriched(ctx, &manifest.Track{
-			Path: path, Size: 1, ArtworkMBID: artwork, ArtistMBID: artist,
-		}); err != nil {
+		if err := srv.deps.Manifest.MarkEnriched(ctx, tr); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -474,6 +471,7 @@ func TestApiLibraryArtwork_ServesAndValidates(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", target, nil)
 		req.RemoteAddr = "127.0.0.1:54321" // past the loopback boundary middleware
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rw, req)
 		return rw
@@ -528,6 +526,7 @@ func TestApiLibraryBooklet_PendingNudges(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", target, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rw, req)
 		return rw

@@ -34612,6 +34612,271 @@ Gemini was over its daily quota on every head.
   Windows adapter's name holds, so a panic value holding such text loses
   it. It is replaced, never kept, so it costs text and never an address.
 
+## 2026-09-29 — the enricher's stamp and the reconciliation passes write a row back only while it is the row they read (backlog B187)
+
+Found by the pre-v0.2.1 data-integrity review, a throwaway probe per case.
+`MarkEnriched` (the enricher's `stampEnriched` and `markSkipped`) and
+`applyReconciledTracks` (the post-scan reconciliation passes, through
+`loadAndApplyReconciled`) each write back the WHOLE `tags_json` of a read
+made earlier, with no check that the row is still the one read. Whatever
+another writer did to the row in between was overwritten.
+
+### What was measured on the old code
+
+main at 1f784879, through the real Store and Scanner
+(`internal/manifest/row_version_test.go`, each test red there):
+
+| case | what the row held afterwards |
+|---|---|
+| a FLAC retagged (longer title) between the enricher's read and its stamp; the scanner's upsert lands in between | title "Old" and a `size` of 124 inside `tags_json` against 161 on disk, `enriched_at` set, unchanged through three more scans |
+| a `cover.jpg` added while the enricher works on the album; the scan that reads it lands before the stamp | `ArtworkMBID` "" where the scan had written the cover's `local-` key, while `folder_art_key` recorded the cover as seen |
+| a reconcile pass reads a row, the enricher stamps it, the pass writes | MBIDs "" / "" / "", `enriched_at` still set |
+
+Nothing heals any of these. The skip gate compares the `size` and
+`mtime_ns` COLUMNS (`GetTrackStat`), which neither writer touches, so no
+scan reads the file again; the enricher never revisits a stamped row; and
+B141's folder-art key says the cover was seen. The phone checks a
+download against the size it was told (`validateDownloadedSize`), so
+every offline download of the retagged file fails.
+
+### The change
+
+`indexed_at` is the row's version. There are exactly four `tags_json`
+writers (a grep for `tags_json =`, `SET tags_json` and the json_* mutators
+over non-test Go: `MarkEnriched`, `applyReconciledTrackSQL`, `UpsertTrack`,
+`UpsertTrackBatch`), and every one moves `indexed_at`: the upserts' conflict
+arm is `CASE WHEN tracks.indexed_at >= excluded.indexed_at THEN +1 ELSE
+excluded END`, the other two go through `indexedAtAdvanceSQL`.
+
+- `Track` carries `rowVersion` and `hasRowVersion` (unexported, never
+  marshaled, the `versionStampOnly` shape). Every store reader that returns
+  a Track records the version it read: `UnenrichedTracks`, `GetTrack`,
+  `LookupTrack`'s folded fallback, `listTracks`, `streamTracks`,
+  `listTracksPage` and `ListUPnPTracksByServer`. `UpsertTrack` selects the
+  version it wrote inside its transaction (it has no production caller; the
+  tests upsert and then stamp).
+- `markEnrichedSQL` is `… WHERE path = ? AND indexed_at = ? RETURNING
+  indexed_at`: no row back is `ErrTrackChanged`, and a stamp records the
+  version it wrote. A Track with no version is refused (`errTrackNotRead`)
+  before anything is marshaled.
+- `applyReconciledTrackSQL` is `… WHERE path = ? AND indexed_at = ?`; a
+  row changed since the pass's `GetTrack` is skipped and not counted, and a
+  batch holding a Track with no version is refused before it writes
+  anything.
+- The enricher answers `ErrTrackChanged` in both `stampEnriched` and
+  `markSkipped` with one Debug line (`msgChangedWhileEnriched`) and nothing
+  else: no `done` or skip count, no "enrichment skipped" line. The row
+  stays at `enriched_at = 0` and the next batch reads it again.
+- `TestNoHandRolledIndexedAtBump` read the new `AND indexed_at = ?` as a
+  hand-rolled assignment. It now classifies a match whose last word before
+  it is WHERE, AND or OR as a comparison (`inPredicate`, in a pure
+  `handRolledIndexedAtAssignments` the fixture test drives).
+- Stale docblocks corrected on the way: `GetTrackStat` said the other
+  writers "can't drift" because they round-trip the original ModTime, and
+  named the artwork-version and booklet-tag stampers among the `tags_json`
+  writers (they write columns); `MarkEnriched`'s own comment and
+  `ApplyAlbumArtistReconciliation`'s described the dead "CASE WHEN" bump.
+
+### Rejected
+
+- **Compare the `tags_json` bytes.** Older rows hold TEXT or BLOB, so the
+  compare needs a CAST, and it buys only fewer spurious misses.
+- **`json_set` only the fields each writer owns.** It keeps the new title,
+  and stamps an enrichment found for the OLD tags onto the new ones, with
+  `enriched_at` set: the enricher never runs for the new tags.
+- **Fail open on a Track with no version.** A reader that forgets to record
+  the version would reopen the race without a word.
+
+A writer that moves `indexed_at` without changing `tags_json` (a rendition,
+the lyrics write, a booklet tag) now costs a spurious miss: one more
+enrichment of that row, answered mostly from the enricher's caches. No
+livelock: each such bump is a one-off, and no enricher path bumps the row
+it is enriching (it calls `UnenrichedTracks`, `SetAcoustIDTagVeto`, which
+writes columns only, and `MarkEnriched`). A Gemini consult on the design
+was refused by the API's spending cap (HTTP 429); decided on the
+measurements above.
+
+### Tests
+
+`internal/manifest/row_version_test.go`: the three measured cases
+(`TestAStampOverARowTheScannerRewroteWritesNothing`,
+`TestAStampOverARowWhoseCoverArrivedWritesNothing`,
+`TestAReconcileWriteOverAStampedRowWritesNothing`, the last through
+`beforeApplyReconciledHookForTests`, which stamps in the window between a
+pass's read and its write), and `TestAWriteBackOfATrackTheStoreDidNotHandOutIsRefused`,
+`TestAStampRecordsTheVersionItWrote`, `TestAStampOverADeletedRowWritesNothing`.
+`internal/enrich/stamp_changed_row_test.go`: the real enricher over the
+real store, whose MusicBrainz handler rewrites the row on its first
+request (`TestAStampOverARowThatChangedMidEnrichmentIsNotCounted`,
+`TestASkipOverARowThatChangedMidEnrichmentIsNotCounted`: no done or skip
+count, exactly one Debug line, no line at Warn or above).
+`TestTheIndexedAtSweepTellsAnAssignmentFromAComparison` pins the guard's
+new reading.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+1. `markEnrichedSQL`'s predicate made `(indexed_at = ? OR 1)`: the three
+   stamp tests red; the deleted-row test stays green (an UPDATE of a
+   missing row returns no row either way: it pins the sentinel).
+2. `applyReconciledTrackSQL`'s predicate made `(… OR 1)`:
+   `TestAReconcileWriteOverAStampedRowWritesNothing` red.
+3. The `ErrTrackChanged` branch removed from `stampEnriched`: the stamp
+   test red; from `markSkipped`: the skip test red (each alone).
+4. `MarkEnriched`'s `!t.hasRowVersion` refusal removed: the hand-built test
+   red (it gets `ErrTrackChanged`: version 0 matches no row); the
+   reconcile batch's refusal removed: red, `(1, <nil>)` where `(0,
+   errTrackNotRead)` was wanted (the batch wrote the row that had a
+   version).
+5. `t.rowVersion = wrote` removed from `MarkEnriched`:
+   `TestAStampRecordsTheVersionItWrote` red alone ("a second stamp through
+   the same Track = manifest: track changed since it was read").
+6. `inPredicate` made to answer false: `TestNoHandRolledIndexedAtBump`
+   (store.go's two write-backs reported as hand-rolled assignments) and
+   `TestTheIndexedAtSweepTellsAnAssignmentFromAComparison` red.
+
+## 2026-09-29 — the loopback console and the DLNA listener answer only to a Host that names this machine (backlog B170)
+
+Found by the pre-v0.2.1 review and filed as B170 while it was unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured on the old code
+
+main at e256d6b7, go1.27.1 on macOS, a loopback fixture (`bridge init --yes
+--no-service`), requests from 127.0.0.1 whose `Host` named another host, as a
+browser's do once a page has pointed its own name at 127.0.0.1: every read
+route tried answered 200 with its content; a POST carrying the page's own
+Origin was refused (403), since `csrfGuard` reads the Origin, which a
+same-origin GET does not carry. `boundaryMiddleware`'s loopback branch was
+`loopbackOnly`, the source address alone. (The exact requests and what each
+returned are kept out of this public record, per SECURITY.md.)
+
+The DLNA listener, main at d16d1aba in a container on dido (its own network
+namespace, so no multicast left the docker bridge): a `Host` naming another
+host got the device description and a Browse (200), whose `<res>` URLs named
+the request's host, since the ContentDirectory builds its URLs from
+`r.Host`.
+
+### What was decided
+
+- **The console: `loopbackHostOnly`, inside `loopbackOnly`, in loopback mode
+  only.** A Host that `loopbackHostname` does not take (the Origin
+  allowlist's rule: `localhost`, a trailing dot, 127.0.0.0/8, `::1`) is a
+  421 Misdirected Request whose body says what a reverse proxy must send.
+  With any port or none, since an `ssh -L` tunnel on another local port
+  names that port. An empty Host passes: every browser sends one. The
+  configured admin host needs no case of its own (`validateLoopbackAddress`
+  admits a loopback literal or `localhost` and nothing else), and a test
+  holds the two rules together. The host is read by `url.URL.Hostname`, the
+  standard library's parse, in both packages.
+- **Not a forwarding header, not the Origin.** A page can set
+  `X-Forwarded-For` on a same-origin request, and a same-origin GET carries
+  no Origin; the name in Host is the one thing the page cannot choose.
+- **Public mode untouched.** A tenant console behind the host's proxy
+  arrives from 127.0.0.1 under the tenant's name and is answered as before
+  (pinned); a rebinding page cannot carry the session cookie, which is
+  scoped to the bridge's own domain.
+- **A refused name is logged once**, at most 16 names, so an operator whose
+  proxy forwards the browser's Host sees what the 421 is about, and a
+  rebinding attempt leaves a line.
+- **The DLNA listener: `ownHostOnly`, inside the telemetry middleware** (a
+  refused request is recorded with its 421). It passes an empty Host (an
+  HTTP/1.0 renderer), `localhost` and loopback literals, the host of every
+  advertised LOCATION, of ServerURL and of a pinned listen address, name or
+  literal, and any other address of this host's interfaces, asked at the
+  request and only for a literal the configuration does not name. A name not
+  in the list is refused, this host's own included: resolving it is what the
+  page controls. `Server.handler` builds the tree Start serves, so the check
+  is testable without the SSDP half.
+- **Weighed and left**: accepting this host's own `.local` name on the DLNA
+  listener. Only a LAN peer can answer mDNS, so it would not reopen the
+  hole, but B170 asked for addresses, the iOS app's primary path is an
+  RFC 1918 literal from `/v1/health.endpoints`, and its hostname fallback is
+  the path its own doc says already fails on renderers such as the Chord
+  2Go.
+
+### After the fix, with the real binary
+
+- The Mac fixture: `Host: evil.example:27789` and `127.0.0.1.nip.io:27789`
+  got 421 on the settings, the download and `/metrics`; `127.0.0.1:27789`,
+  `localhost:27789`, `localhost:17789` and `[::1]:27789` got 200; the
+  journal carried one `console refused a request that names another host`
+  line per name. `bridge status` and `bridge enrichment misses` (which asks
+  the running bridge) worked.
+- The web player in the desktop app's browser pane: the album grid at
+  `http://127.0.0.1:27789/`, a track playing (the audio route 206, the
+  element's clock advancing), and at `http://localhost:27789/stats` the SSE
+  stream 200, `POST /api/scan` 202 and `GET /api/settings` 200.
+- An `ssh -L` tunnel from the Mac to a bridge on dido's host loopback:
+  local port 17789, GETs 200 and `Host: evil.example:17789` 421; the same
+  port on both ends, `POST /api/scan` 202. Through the tunnel on 17789 a
+  POST answered 403, on main as on this branch: the Origin check compares
+  the admin port (backlog B193).
+- The Docker reverse-proxy recipe (docs/docker.md), a loopback bridge in a
+  golang:1.26.6 container and Caddy and nginx sharing its network namespace,
+  `GET /api/stats` through each:
+
+| proxy | main | this branch |
+|---|---|---|
+| Caddy `reverse_proxy`, default (forwards the incoming Host) | 200 | 421 |
+| Caddy with `header_up Host {upstream_hostport}` | 200 | 200 |
+| nginx `proxy_pass`, default (`Host: 127.0.0.1:7789`) | 200 | 200 |
+| nginx with `proxy_set_header Host $host` | 200 | 421 |
+
+- The DLNA listener in the same container: the LOCATION host 200 and a
+  Browse whose `<res>` is on it; `evil.example` 421 and no `<res>`; an
+  HTTP/1.0 request with no Host 200.
+
+### Tests
+
+New in internal/admin: `TestTheLoopbackConsoleRefusesARequestThatNamesAnotherHost`
+(eleven foreign Hosts over eight routes, each 421 and carrying nothing the
+route serves), `TestTheLoopbackConsoleRefusesAStreamThatNamesAnotherHost`,
+`TestTheLoopbackConsoleAnswersEveryLoopbackHost` (thirteen, the empty Host
+and a tunnel's port included), `TestEveryAdminAddressLoopbackModeTakesIsALoopbackHost`,
+`TestPublicModeLeavesTheHostToItsOwnRules`, `TestAForeignHostIsLoggedOncePerName`
+and `TestTheHostCheckHoldsOverARealListener` (net/http's own parse, and a
+raw HTTP/1.0 request with no Host). In internal/dlna:
+`Test_ownHostOnly_RefusesAHostThatIsNotThisHosts`,
+`Test_ownHostOnly_AnswersThisHostsAddresses`,
+`Test_ownHostOnly_AnswersARequestWithNoHost`,
+`Test_ownHostOnly_AsksTheInterfacesOnlyForAnUnnamedLiteral`,
+`Test_ownHostOnly_LogsARefusedNameOnce` and
+`Test_Server_Start_ServesTheHostCheck` (skips where the loopback interface
+cannot take a multicast pin, as the lifecycle test does).
+
+The console's tests built requests with `httptest.NewRequest`, whose Host
+is `example.com`, and a loopback RemoteAddr: 81 of them, and `doJSON`, now
+set `Host` to `testConsoleHost` (127.0.0.1:7789), what a browser at the
+fixture's address sends.
+
+### Negative controls
+
+Each mutation applied to the committed tree (77d353c7), the named tests run
+with `-count=1`, the file restored and the tree checked clean after each.
+
+| mutation | goes red |
+|---|---|
+| NC1: the loopback branch without `loopbackHostOnly` (main's gate) | the refusal, stream, logging and real-listener tests; the accepted-host, admin-address and public-mode tests stay green. 77 of the 88 host×route pairs answered 200 and 55 carried the route's content; the other 11 were the POST's 403 |
+| NC2: an empty Host refused | the accepted-host test (the empty row) and the real listener's HTTP/1.0 request |
+| NC3: the raw `host:port` compared instead of the host | the accepted-host, admin-address and real-listener tests |
+| NC4: every refusal logged, then the cap dropped | the logging test (50 lines for 50 names under the second) |
+| NC5: the DLNA tree without `ownHostOnly` | the refusal, interface-count, logging and Start tests; 14 Browse leaks (seven hosts, the library's title and a `<res>` each) |
+| NC6: no interface lookup | the accepted-address test (10.1.2.3, fe80::1, the IPv4-mapped spelling) and the interface-count test |
+| NC7: LOCATION names not kept | the accepted-address test (the advertised name, both spellings) |
+| NC8: the known addresses skipped, every literal asked of the interfaces | the accepted-address and interface-count tests |
+| NC9: Start building a tree of its own without the check | `Test_Server_Start_ServesTheHostCheck` only |
+
+### Out of scope
+
+- Backlog B193: through a tunnel on another local port, every console POST
+  is refused by the Origin check (pre-existing, measured above). The Host
+  check is what would let that check compare the Origin with the request's
+  own Host.
+- The iOS app's DLNA fallback that names the paired host when no RFC 1918
+  endpoint is published now meets a 421 from the listener. No wire change,
+  so no Mirror-PR.
+
 ## 2026-09-29 — in public mode /metrics needs a session unless metrics.allowCidrs vouches for a direct scrape (backlog B171)
 
 Found by the pre-v0.2.1 review and filed as B171 while it was unfixed

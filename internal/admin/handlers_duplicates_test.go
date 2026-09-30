@@ -137,6 +137,7 @@ func TestAPIDuplicatesSweep(t *testing.T) {
 	// Unwired: 503 (test harness has no sweeper).
 	req := httptest.NewRequest("POST", "/api/duplicates/sweep", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("Content-Type", "application/json")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -149,6 +150,7 @@ func TestAPIDuplicatesSweep(t *testing.T) {
 	rw = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/api/duplicates/sweep", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusAccepted || fired != 1 {
@@ -185,6 +187,7 @@ func TestDuplicatesPageRenders(t *testing.T) {
 	h := srv.Handler()
 	req := httptest.NewRequest("GET", "/library/duplicates", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -216,6 +219,7 @@ func TestDuplicatesPageRenders(t *testing.T) {
 	// The Library subnav on a sibling page links here.
 	req = httptest.NewRequest("GET", "/library", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw = httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if !strings.Contains(rw.Body.String(), "/library/duplicates") {

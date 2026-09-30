@@ -57,6 +57,12 @@ import (
 // not parse — the loopback gate's fail-closed answer. (SonarCloud go:S1192.)
 const errMsgBadRemoteAddr = "admin refused: bad remote addr"
 
+// errMsgForeignHost is loopbackHostOnly's refusal body. It names the one
+// case a person reading it can act on: a reverse proxy in front of the
+// console that forwards the name the browser used.
+const errMsgForeignHost = "admin refused: this console answers only to localhost or a loopback address " +
+	"(a reverse proxy in front of it must send Host: 127.0.0.1)"
+
 var logger = logging.Component("admin")
 
 // adminMaxBodyBytes caps the JSON request body size every admin
@@ -1593,6 +1599,13 @@ type Server struct {
 	// is the only one this process logs.
 	refusedScrapeNoted atomic.Bool
 
+	// foreignHostSeen holds the Host names loopbackHostOnly has refused,
+	// so each is logged once (noteForeignHost), bounded by
+	// foreignHostSeenCap: a page that rebinds a fresh name per request
+	// must not grow it, or the journal, without limit.
+	foreignHostMu   sync.Mutex
+	foreignHostSeen map[string]struct{}
+
 	// library catalog snapshot for /api/player/*; see catalog.go
 	catalogState
 
@@ -2362,6 +2375,90 @@ func loopbackOnly(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// loopbackHostOnly refuses, with 421 Misdirected Request, a request whose
+// Host names anything but this machine's loopback (backlog B170). It sits
+// inside loopbackOnly in loopback mode and nowhere in public mode, whose
+// session and autocert-domain rules are its own.
+//
+// The source address cannot answer this question. A page the operator's
+// browser loads from a name its author controls can re-point that name at
+// 127.0.0.1 (DNS rebinding): the browser then sends the page's requests to
+// the console, from 127.0.0.1, and hands the page the answers, because to
+// the browser they are the page's own origin. A GET of that kind carries no
+// Origin, so csrfGuard, which reads only the Origin, lets every read
+// through. The name is what gives it away: the browser sends it in Host,
+// and nothing the page can do changes that.
+//
+// A loopback name or literal is accepted with any port, or none: an
+// `ssh -L 17789:127.0.0.1:7789` tunnel sends `Host: localhost:17789`. That
+// covers every adminAddress loopback mode takes (config's
+// validateLoopbackAddress admits a loopback literal or "localhost" and
+// nothing else), so the configured host always passes. An EMPTY Host is let
+// through: every browser sends one, and only an HTTP/1.0 client can omit
+// it.
+func (s *Server) loopbackHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostIsLoopback(r.Host) {
+			s.noteForeignHost(r.Host)
+			http.Error(w, errMsgForeignHost, http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostIsLoopback reports whether a Host header value (host, host:port,
+// [v6]:port) names this machine's loopback, by loopbackHostname, the rule
+// the Origin allowlist compares with. The host is read by url.URL's own
+// Hostname, which drops the port and an IPv6 literal's brackets.
+func hostIsLoopback(hostport string) bool {
+	if hostport == "" {
+		return true
+	}
+	return loopbackHostname((&url.URL{Host: hostport}).Hostname())
+}
+
+// foreignHostSeenCap bounds noteForeignHost's set. An operator's own
+// misconfigured proxy sends one name; a page that rebinds sends one per
+// domain it owns. Past this, silence is the right failure for a
+// diagnostic.
+const foreignHostSeenCap = 16
+
+// maxLoggedHostLen cuts a refused Host before it reaches the journal: the
+// value is the requester's to choose.
+const maxLoggedHostLen = 100
+
+// noteForeignHost logs a Host loopbackHostOnly refused, once per name. The
+// line is how an operator whose reverse proxy forwards the browser's name
+// learns what the 421 is about, and the record of a page that tried to
+// reach the console under another name.
+func (s *Server) noteForeignHost(hostport string) {
+	name := (&url.URL{Host: hostport}).Hostname()
+	if name == "" {
+		name = hostport
+	}
+	if len(name) > maxLoggedHostLen {
+		name = strings.ToValidUTF8(name[:maxLoggedHostLen], "")
+	}
+	s.foreignHostMu.Lock()
+	if s.foreignHostSeen == nil {
+		s.foreignHostSeen = make(map[string]struct{})
+	}
+	_, seen := s.foreignHostSeen[name]
+	full := len(s.foreignHostSeen) >= foreignHostSeenCap
+	if !seen && !full {
+		s.foreignHostSeen[name] = struct{}{}
+	}
+	s.foreignHostMu.Unlock()
+	if seen || full {
+		return
+	}
+	logger.Warn("console refused a request that names another host",
+		"host", name,
+		"hint", "the loopback console answers only to localhost or a loopback address; "+
+			"a reverse proxy in front of it must send Host: 127.0.0.1")
 }
 
 // metricsPath is the Prometheus route, which public mode's session

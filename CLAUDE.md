@@ -146,7 +146,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the `cmd/bridge` bullet on what a rewrite keeps).
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
-- **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what the public demo and the hosted tenants run, and what `bridge.ars.md` ran as the operator bridge until it moved to a home NUC on 2026-09-22; this bullet omitted public mode until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
+- **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this, and `admin.loopbackHostOnly` holds a request's Host to loopback as well (421 otherwise, backlog B170: the source alone admits a browser a page has rebound to 127.0.0.1). **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what the public demo and the hosted tenants run, and what `bridge.ars.md` ran as the operator bridge until it moved to a home NUC on 2026-09-22; this bullet omitted public mode until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets).
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
@@ -1037,6 +1037,55 @@ lost my library."
   which is how #840 reintroduced the dead `CASE WHEN` form — so
   `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package and
   classifies each assignment against the SQL literal that contains it.
+- **A writer that writes back a row it READ earlier writes it only while the
+  row is still the one it read: `MarkEnriched` and `applyReconciledTracks`
+  compare-and-set on `indexed_at`** (2026-09-29, backlog B187). Both wrote
+  back the WHOLE `tags_json` of an earlier read with no check, so whatever
+  another writer did in between was overwritten for good. Measured through
+  the real Store and Scanner on main 1f784879: a file retagged between the
+  enricher's read (`UnenrichedTracks`) and its stamp kept its old title and
+  a `size` of 124 inside `tags_json` against 161 on disk, `enriched_at` set,
+  through three more scans; a `cover.jpg` added while the enricher worked
+  lost the scanner's `local-` art (`ArtworkMBID` "") while `folder_art_key`
+  recorded the cover as seen; and a reconcile pass that read a row before a
+  stamp and wrote it after took every MBID away, `enriched_at` still set.
+  Nothing healed any of it: the skip gate compares the `size` and
+  `mtime_ns` COLUMNS, which neither writer touches, the enricher never
+  revisits a stamped row, and the phone's exact-size check
+  (`validateDownloadedSize`) fails every offline download of such a file.
+  **`indexed_at` is the row's version**: every `tags_json` writer moves it
+  (the two upserts' conflict arms, the two write-backs through
+  `indexedAtAdvanceSQL`), so a write-back carries the version it read
+  (`Track.rowVersion`, unexported, never marshaled) and writes `WHERE path
+  = ? AND indexed_at = ?`. On a miss it writes nothing. `MarkEnriched`
+  answers `ErrTrackChanged`, and the enricher counts nothing, logs one
+  Debug line (`msgChangedWhileEnriched`) and leaves the row unenriched for
+  its next batch, which reads it again and answers mostly from its caches;
+  the pass skips the row, uncounted, and the next scan reconciles it from
+  what it holds then. A row deleted in between is a miss too. **Every store
+  reader that returns a Track records the version** (`GetTrack`,
+  `LookupTrack`'s folded fallback, `UnenrichedTracks`, the list, stream and
+  page readers, the UPnP baseline), and `UpsertTrack` and `MarkEnriched`
+  the version they wrote. **A Track the store did not hand out is refused**
+  (`errTrackNotRead`), never written unchecked: failing open is how a
+  reader that forgets the version would reopen the race without a word, and
+  a reconcile batch refuses before it writes anything. A writer that bumps
+  `indexed_at` without changing `tags_json` (a rendition, lyrics, a booklet
+  tag) costs at most a spurious miss, one more enrichment from the caches,
+  never a livelock: each bump is a one-off, and no enricher path bumps the
+  row it is enriching. **Don't compare the `tags_json` bytes** (older rows
+  hold TEXT or BLOB, and it buys only fewer spurious misses), **and don't
+  `json_set` only the fields a writer owns**: that stamps an enrichment of
+  the old tags onto new ones and marks them done. `TestNoHandRolledIndexedAtBump`
+  reads a WHERE clause's `indexed_at = ?` as a comparison, not an
+  assignment (`TestTheIndexedAtSweepTellsAnAssignmentFromAComparison`).
+  `TestAStampOverARowTheScannerRewroteWritesNothing`,
+  `TestAStampOverARowWhoseCoverArrivedWritesNothing`,
+  `TestAReconcileWriteOverAStampedRowWritesNothing`,
+  `TestAWriteBackOfATrackTheStoreDidNotHandOutIsRefused`,
+  `TestAStampRecordsTheVersionItWrote`, and the enricher's
+  `TestAStampOverARowThatChangedMidEnrichmentIsNotCounted` and
+  `TestASkipOverARowThatChangedMidEnrichmentIsNotCounted`.
 - **Any path predicate that writes, deletes, or bounds a scope MUST be a byte
   range, never `LIKE`.** Nothing sets `case_sensitive_like`, so `path LIKE
   'p/%'` matches a case-twin sibling — a DIFFERENT directory on a case-sensitive
@@ -2224,6 +2273,9 @@ no failing test — which is the shape to expect in this area.
   `enrichment skipped` line, and the row stays `enriched_at = 0`. The stop is
   at `stampEnriched` / `markSkipped`, never at the fetches that absorb their
   own errors. The rule is under **The CLI and the serve wiring**. (#1001)
+  **Nor does a stamp over a row that changed since the batch read it**
+  (`manifest.ErrTrackChanged`: it writes nothing, and the next batch reads
+  the row again; the compare-and-set bullet under **Scanner**, B187).
 - **Pacing derives from the client's base URL** (`minIntervalForBase`,
   fail-safe to the public interval, dot-anchored suffix match) — public MB is
   1.1s and self-hosted is 150ms — **not zero**, because Atlas's own per-IP tier
@@ -3744,6 +3796,28 @@ no failing test — which is the shape to expect in this area.
   `dlnaArtwork` in `/v1/health` is AND-gated (`dlnaEnabled && artworkDirs`),
   and iOS must gate its own emission on it, not on `dlnaServer`. No demo-mode
   branch is needed: the listener never starts in public mode.
+- **The DLNA listener answers only to a Host that names THIS host, with 421
+  for any other** (2026-09-29, backlog B170). It has no authentication, and
+  what kept it to the LAN is that it is reached on the LAN: a page a LAN
+  browser loads from a name its author controls can re-point that name at
+  this host's address (DNS rebinding), and the ContentDirectory builds every
+  `<res>` and albumArtURI from `r.Host`, so its answers name whatever host the
+  request did (measured with the real binary; the record is in the log).
+  `ownHostOnly` (host_guard.go) passes, with any port
+  or none: an EMPTY Host (an HTTP/1.0 renderer may send none; no browser
+  does), `localhost` and a loopback literal, the host of every advertised
+  LOCATION, of ServerURL and of a pinned listen address, NAME OR LITERAL
+  (`knownOwnHosts`, folded), and any other address of this host's interfaces,
+  asked at the request and only for a literal the configuration does not name
+  (`Server.interfaceAddrs`, a per-server seam, nil is `net.InterfaceAddrs`).
+  **A name not in that list is refused, this host's own included**: resolving
+  it is what the page controls. The cost is a control point pointed at the
+  server by a name by hand, and the iOS app's fallback that builds a renderer
+  URL on the paired host when `/v1/health.endpoints` names no RFC 1918
+  address (`BridgeDLNAURLResolver`, whose own doc says mDNS names already fail
+  on some renderers). The check sits inside the telemetry middleware
+  (`Server.handler`, what Start serves), so a refused request is recorded
+  with its 421, and a refused name is logged once (16 at most).
 - **The folder index is built LAZILY per Browse call** — pre-building it at the
   top of `handleBrowse` puts an O(N) walk on the flat-list hot path.
   `TrackInfo.RelativePath` is the load-bearing source in production; the
@@ -6593,6 +6667,42 @@ its twin.** The top list is older, shorter, and read first.
   host already owns the token store and the DB, so auth on top would be theatre.
   Don't add a layer that bypasses the loopback constraint; SSH-tunnel for remote
   admin. Public mode is the separate, credentialed posture.
+- **…and "loopback" is a fact about the request's HOST as well as its source,
+  so a loopback console refuses a Host that names another host with 421**
+  (2026-09-29, backlog B170). `loopbackOnly` and `csrfGuard` judged a request
+  by its source and its Origin, never its Host. A page served from a name its
+  author controls can re-point that name at 127.0.0.1 (DNS rebinding): the
+  operator's browser then sends the page's requests to the console, from
+  127.0.0.1, and hands the page the answers, since to the browser they are the
+  page's own origin, and a same-origin GET carries no Origin (measured with
+  the real binary on main: a request naming another host was answered on
+  every read route tried, and only a POST's Origin was refused; the record
+  is in the log). `loopbackHostOnly` sits inside
+  `loopbackOnly` in `boundaryMiddleware`'s loopback branch and answers 421 to
+  any Host that `loopbackHostname` (the Origin allowlist's rule: `localhost`,
+  a trailing dot, 127.0.0.0/8, `::1`) does not take, **with any port or none**:
+  an `ssh -L 17789:127.0.0.1:7789` tunnel sends `Host: localhost:17789`. **An
+  empty Host passes**: every browser sends one, and only an HTTP/1.0 client can
+  leave it out. The configured admin host needs no case of its own, since
+  `validateLoopbackAddress` admits nothing the rule refuses
+  (`TestEveryAdminAddressLoopbackModeTakesIsALoopbackHost`); a config that
+  learns another loopback name teaches the rule the same name. A refused name
+  is logged once (`noteForeignHost`, at most 16 names), which is how an
+  operator's own proxy shows up. **The cost is a reverse proxy that forwards
+  the browser's Host**: Caddy's `reverse_proxy` does by default, and so does
+  nginx with `proxy_set_header Host $host` (measured in Docker on dido: 421
+  for those, 200 with Caddy's `header_up Host {upstream_hostport}` and with
+  nginx's default `proxy_pass`), and Traefik by its documentation
+  (`passHostHeader` defaults to true; not measured); `docs/docker.md` says
+  how. Don't
+  accept a forwarding header as the proof instead: a page can set
+  `X-Forwarded-For` on a same-origin request. Public mode is untouched (a
+  tenant console behind the host's proxy arrives from 127.0.0.1 under the
+  tenant's name, and its session cookie is what a rebinding page cannot
+  carry). The DLNA listener takes the same rule on its own addresses (under
+  **DLNA, UPnP and discovery**). A console POST through a tunnel on ANOTHER
+  local port is still refused by the Origin check, which compares the
+  admin port (backlog B193).
 - **`csrfGuard`**: body-bearing mutations must be `application/json`; body
   detection uses `ContentLength != 0 || len(TransferEncoding) > 0` because
   net/http strips the header. **A bodyless POST is deliberately allowed

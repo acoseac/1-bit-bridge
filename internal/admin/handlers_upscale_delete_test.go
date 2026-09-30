@@ -323,6 +323,7 @@ func TestUpscaleVariantsDelete_csrfBlocksWrongContentType(t *testing.T) {
 		"/api/upscale/variants?confirm=true",
 		strings.NewReader(`{"_": true}`))
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("Content-Type", "text/plain")
 
 	rw := httptest.NewRecorder()

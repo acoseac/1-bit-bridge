@@ -14,6 +14,7 @@ func getDiagnostics(t *testing.T, s *Server) (diagnosticsResponse, *httptest.Res
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
+	req.Host = testConsoleHost
 	rec := httptest.NewRecorder()
 	s.apiDiagnostics(rec, req)
 	var out diagnosticsResponse

@@ -494,6 +494,7 @@ func TestSidebarMarksTheScopedUpstream(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	scoped.RemoteAddr = "127.0.0.1:54321"
+	scoped.Host = testConsoleHost
 	srv.Handler().ServeHTTP(w, scoped)
 	body := w.Body.String()
 	if n := strings.Count(body, `aria-current="page"`); n != 1 {

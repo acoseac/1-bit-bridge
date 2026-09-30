@@ -22,6 +22,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/upload"
 )
 
+// testConsoleHost is the Host a request to the loopback console carries in
+// these tests, what a browser at the fixture's adminAddress sends. A request
+// built with httptest.NewRequest carries "example.com" unless told
+// otherwise, and the loopback gate refuses that with 421 (backlog B170).
+const testConsoleHost = "127.0.0.1:7789"
+
 // newTestServer spins up an admin Server over a temp dir with one library
 // root, fresh manifest store, fresh auth store, and no real listener.
 // Tests drive the Handler directly via httptest.
@@ -111,8 +117,10 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 }
 
 // doJSON is a small helper: fires an HTTP request and returns status +
-// JSON-decoded body. RemoteAddr is set to a loopback so the
-// loopbackOnly middleware accepts the request.
+// JSON-decoded body. RemoteAddr and Host are set to loopback so the
+// loopback-mode gate (loopbackOnly, loopbackHostOnly) accepts the request:
+// httptest.NewRequest's default Host is "example.com", which is a request
+// that names another host.
 func doJSON(t *testing.T, h http.Handler, method, path string, body any, out any) int {
 	t.Helper()
 	var rdr io.Reader
@@ -122,6 +130,8 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any, out any
 	}
 	req := httptest.NewRequest(method, path, rdr)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
+	req.Host = testConsoleHost
 	if body != nil {
 		req.Header.Set("content-type", "application/json")
 	}
@@ -1167,6 +1177,7 @@ func TestPagesRenderWithoutError(t *testing.T) {
 	for _, path := range []string{"/", "/library", "/library/duplicates", "/devices", "/upnp", "/settings", "/jobs"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
 		if rw.Code != 200 {
@@ -1194,6 +1205,7 @@ func TestJobsPageRendersBackgroundActivity(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/jobs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -1221,6 +1233,7 @@ func TestJobsPageRendersBackgroundActivity(t *testing.T) {
 	// instruction is gone — analysis runs automatically now.
 	req = httptest.NewRequest("GET", "/settings", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw = httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -1298,6 +1311,7 @@ func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
 	h := srv.Handler()
 	req := httptest.NewRequest("GET", "/upnp", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -1317,6 +1331,7 @@ func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
 	// sub-nav that every operator page renders.
 	req2 := httptest.NewRequest("GET", "/devices", nil)
 	req2.RemoteAddr = "127.0.0.1:54321"
+	req2.Host = testConsoleHost
 	rw2 := httptest.NewRecorder()
 	h.ServeHTTP(rw2, req2)
 	if !strings.Contains(rw2.Body.String(), `href="/upnp"`) {
@@ -1452,6 +1467,7 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	for _, p := range []string{"/static/app.css", "/static/app.js"} {
 		req := httptest.NewRequest("GET", p, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
 		if rw.Code != 200 {
@@ -1493,6 +1509,7 @@ func TestRotateAcceptsEmptyBody(t *testing.T) {
 	// and falls back to the default URL.
 	req := httptest.NewRequest("POST", "/api/tokens/"+mint.ID+"/rotate", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusOK {
@@ -1511,6 +1528,7 @@ func TestSetLifecycleAcceptsEmptyBody(t *testing.T) {
 	// Empty body — handler returns the unchanged row.
 	req := httptest.NewRequest("PATCH", "/api/tokens/"+mint.ID, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusOK {
@@ -1635,6 +1653,7 @@ func TestRetiredSmartMixesPageRedirects(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/smartmixes", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 

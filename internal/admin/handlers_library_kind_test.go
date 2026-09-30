@@ -152,6 +152,7 @@ func TestApiUpscaleBatchSubmit_KindDispatch(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/upscale/batch",
 			strings.NewReader(`{"path":"MusicA","kind":"junk"}`))
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		req.Header.Set("content-type", "application/json")
 		rw := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rw, req)
@@ -294,6 +295,7 @@ func TestApiLibraryBrowseProjection_KindOptimize_503WhenUnwired(t *testing.T) {
 	req := httptest.NewRequest("GET",
 		"/api/library/browse-projection?path=MusicA&kind=optimize", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusServiceUnavailable {
@@ -316,6 +318,7 @@ func TestApiLibraryBrowseProjection_KindInvalid(t *testing.T) {
 	req := httptest.NewRequest("GET",
 		"/api/library/browse-projection?path=MusicA&kind=junk", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
 	if rw.Code != http.StatusBadRequest {

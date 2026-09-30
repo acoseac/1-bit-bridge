@@ -2502,12 +2502,18 @@ func (s *Store) migrate() error {
 // it a bounded index-range scan, but it costs write-amplification on every track
 // write for a gain the path-only subquery already largely captures, so it's left
 // off. (Gemini review on PR #490.)
+//
+// Each Track carries the version of the row it was read from
+// (Track.rowVersion), which MarkEnriched requires the row to still have: the
+// enricher stamps a row seconds or minutes after this read, and a row the
+// scanner or a reconciliation pass rewrote in between is not the row it
+// enriched.
 func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json FROM tracks
+		SELECT tags_json, indexed_at FROM tracks
 		WHERE path IN (
 			SELECT path FROM tracks
 			WHERE enriched_at = 0
@@ -2533,13 +2539,15 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 	out := make([]Track, 0, capHint)
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var version int64
+		if err := rows.Scan(&raw, &version); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		t.rowVersion, t.hasRowVersion = version, true
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -2679,18 +2687,46 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	return json.Marshal(&clone)
 }
 
-// markEnrichedSQL binds (tags_json, enriched_at, clock, path). The
+// ErrTrackChanged answers a write back of a row that is no longer the row
+// the Track was read from (Track.rowVersion): another writer rewrote it in
+// between, or it was deleted. Nothing was written. MarkEnriched returns it,
+// and the enricher then leaves the row as it is, unenriched, for its next
+// batch to read again.
+var ErrTrackChanged = errors.New("manifest: track changed since it was read")
+
+// errTrackNotRead refuses a write back of a Track the store did not hand
+// out (Track.hasRowVersion false): with no version to compare, the write
+// could replace anything written since whatever the Track was built from.
+var errTrackNotRead = errors.New("manifest: track was not read from the store, so there is no version to check the write against")
+
+// markEnrichedSQL binds (tags_json, enriched_at, clock, path, version). The
 // indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock
-// for why it is not concatenated in.
+// for why it is not concatenated in. The version is the row's indexed_at
+// when the Track was read: a row another writer changed since has another,
+// and the statement then updates nothing and returns no row.
 const markEnrichedSQL = `
 		UPDATE tracks
 		   SET tags_json   = ?,
 		       enriched_at = ?,
 		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
-		 WHERE path = ?`
+		 WHERE path = ? AND indexed_at = ?
+		RETURNING indexed_at`
 
 // MarkEnriched updates a Track's stored tags (with enricher additions) and
 // stamps enriched_at so the worker won't re-process it.
+//
+// It writes only while the row is still the one t was read from
+// (t.rowVersion, recorded by UnenrichedTracks or GetTrack), and otherwise
+// writes nothing and returns ErrTrackChanged. It writes back the WHOLE
+// tags_json it read, and until backlog B187 it did so whatever had happened
+// to the row since: a file retagged while the enricher worked on it kept its
+// old title and its old size inside tags_json, and a cover added beside it
+// lost the scanner's local- art, with enriched_at set, so the enricher never
+// came back to it; and the skip gate compares the size and mtime COLUMNS,
+// which this never writes, so no scan did either. Left unenriched, the row is
+// in the enricher's next batch, read again. A Track the store did not hand
+// out has no version to compare, and is refused (errTrackNotRead). On
+// success t records the version it wrote.
 //
 // Holds `s.mu` for the SQL exec so an in-flight enrichment update never
 // races a `UpsertTrackBatch` from the scanner — both are writers and
@@ -2698,6 +2734,9 @@ const markEnrichedSQL = `
 // overlapping in SQLite. JSON marshalling stays outside the lock so
 // the critical section is one statement long.
 func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
+	if !t.hasRowVersion {
+		return fmt.Errorf("MarkEnriched %s: %w", t.Path, errTrackNotRead)
+	}
 	raw, err := marshalForStorage(t)
 	if err != nil {
 		return err
@@ -2712,19 +2751,27 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// enriched tags_json would otherwise never surface until a full
 	// manifest re-pull. Gemini Medium on PR #215 caught this.
 	//
-	// CASE-WHEN strict-advance pattern mirrors UpsertVariant /
-	// DeleteVariant: a same-nanosecond clock (test-injected fakes,
+	// The bump is indexedAtAdvanceSQL's (markEnrichedSQL), which clears the
+	// library-wide max, so a same-nanosecond clock (test-injected fakes,
 	// low-res wall clocks, rapid back-to-back enrichment writes) still
-	// produces a strictly-greater indexed_at, keeping delta-sync's
-	// `> since` boundary semantically correct.
+	// produces a strictly-greater indexed_at. That is also what makes
+	// indexed_at a version: every tags_json writer moves it.
 	//
 	// The v25 format-fact columns are deliberately NOT re-stamped here:
 	// enrichment only adds MBIDs / artwork refs to tags_json — it never
-	// changes sampleRate / bitsPerSample / isDSD / codec, so the columns
-	// stamped at Upsert time can't drift.
+	// changes sampleRate / bitsPerSample / isDSD / codec — and the tags_json
+	// it writes was read at the version it compares, beside those columns.
 	now := s.now().UnixNano()
-	_, err = s.db.ExecContext(ctx, markEnrichedSQL, raw, now, now, t.Path)
-	return err
+	var wrote int64
+	err = s.db.QueryRowContext(ctx, markEnrichedSQL, raw, now, now, t.Path, t.rowVersion).Scan(&wrote)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTrackChanged
+	}
+	if err != nil {
+		return err
+	}
+	t.rowVersion = wrote
+	return nil
 }
 
 // enrichmentMissPredicateSQL is the "this row is missing something the enricher
@@ -2871,11 +2918,12 @@ func (s *Store) ResetEnrichedByArtistMBIDs(ctx context.Context, mbids []string) 
 // unenriched rows done. DB-only; no network.
 //
 // One transaction + one reused prepared statement, mirroring
-// UpsertTrackBatch. Holds s.mu for the writer contract. indexed_at uses
-// the same strict-advance CASE WHEN form as MarkEnriched so a
+// UpsertTrackBatch. Holds s.mu for the writer contract. indexed_at
+// advances through indexedAtAdvanceSQL, as MarkEnriched's does, so a
 // same-nanosecond clock still produces a strictly-greater value, keeping
-// delta-sync's `> since` boundary correct. Returns the number of rows
-// actually updated.
+// delta-sync's `> since` boundary correct. A row another writer changed
+// since the pass read it is not written (applyReconciledTracks). Returns
+// the number of rows actually updated.
 func (s *Store) ApplyAlbumArtistReconciliation(ctx context.Context, changed []Track) (int, error) {
 	return s.applyReconciledTracks(ctx, changed)
 }
@@ -2908,17 +2956,31 @@ func (s *Store) ApplyAlbumTitleReconciliation(ctx context.Context, changed []Tra
 	return s.applyReconciledTracks(ctx, changed)
 }
 
-// applyReconciledTrackSQL binds (tags_json, clock, path). The indexed_at
-// expression is indexedAtAdvanceSQL verbatim — see its docblock.
+// applyReconciledTrackSQL binds (tags_json, clock, path, version). The
+// indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock.
+// The version is the row's indexed_at when the pass read it (GetTrack): a
+// row another writer changed since has another, and the statement updates
+// nothing.
 const applyReconciledTrackSQL = `
 		UPDATE tracks
 		   SET tags_json  = ?,
 		       indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
-		 WHERE path = ?`
+		 WHERE path = ? AND indexed_at = ?`
 
 // applyReconciledTracks is the shared writer behind the post-scan
 // metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
 // ApplyAlbumArtistReconciliation's docblock above for the full invariants.
+//
+// Each row is written only while it is still the one the pass read
+// (Track.rowVersion, from GetTrack), since the write carries the whole
+// tags_json that read returned. The enricher stamps rows while the scan's
+// tail runs, and until backlog B187 a pass that read a row before the stamp
+// and wrote it after put back the pre-stamp tags_json: every MBID gone, with
+// enriched_at set, so the enricher never came back to it. A row changed since
+// its read is skipped (not counted), and the next scan reconciles it from
+// what it holds then. A Track the store did not hand out has no version to
+// compare, and fails the whole batch before anything is written
+// (errTrackNotRead).
 func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int, error) {
 	if len(changed) == 0 {
 		return 0, nil
@@ -2933,16 +2995,20 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	// GetTrack results and isn't shared with the enricher/scanner goroutines,
 	// so reading it unlocked here is safe.
 	type reconciledRow struct {
-		path string
-		raw  []byte
+		path    string
+		raw     []byte
+		version int64
 	}
 	rows := make([]reconciledRow, len(changed))
 	for i := range changed {
+		if !changed[i].hasRowVersion {
+			return 0, fmt.Errorf("reconcile %s: %w", changed[i].Path, errTrackNotRead)
+		}
 		raw, err := marshalForStorage(&changed[i])
 		if err != nil {
 			return 0, err
 		}
-		rows[i] = reconciledRow{path: changed[i].Path, raw: raw}
+		rows[i] = reconciledRow{path: changed[i].Path, raw: raw, version: changed[i].rowVersion}
 	}
 	// A scan cancelled mid-reconcile shouldn't acquire the writer mutex and
 	// open a write transaction after the (now-unlocked) marshal loop.
@@ -2968,7 +3034,7 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	now := s.now().UnixNano()
 	n := 0
 	for _, r := range rows {
-		res, err := stmt.ExecContext(ctx, r.raw, now, r.path)
+		res, err := stmt.ExecContext(ctx, r.raw, now, r.path, r.version)
 		if err != nil {
 			return 0, err
 		}
@@ -3083,6 +3149,11 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 // the second mutation under the `WHERE indexed_at > since` delta-sync
 // filter. The `excluded.indexed_at` reference keeps the bind count at 5
 // (the original UPSERT shape) rather than broadening to 7.
+//
+// On success t records the version of the row it wrote (Track.rowVersion),
+// as a read would: this is the single-row writer whose Track a caller keeps,
+// and one that stamps it next (MarkEnriched) needs that version. The batch
+// writer records none; its Tracks are the scanner's, dropped once written.
 func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
@@ -3185,7 +3256,18 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	if _, err := tx.ExecContext(ctx, clearTombstoneIfServedSQL, t.Path); err != nil {
 		return err
 	}
-	return tx.Commit()
+	// The version the row has once this commits (the lyrics write above can
+	// advance it again), so a caller that upserts a row and then stamps it
+	// with MarkEnriched checks the stamp against the row it wrote.
+	var version int64
+	if err := tx.QueryRowContext(ctx, `SELECT indexed_at FROM tracks WHERE path = ?`, t.Path).Scan(&version); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	t.rowVersion, t.hasRowVersion = version, true
+	return nil
 }
 
 // UpsertTrackBatch writes (or replaces) many tracks inside a single
@@ -3661,10 +3743,14 @@ type TrackStat struct {
 // though `Track.ModTime` also lives inside `tags_json`.** Both
 // UpsertTrack and UpsertTrackBatch bind them from the same `*Track`
 // they marshal (`t.Size`, `t.ModTime.UnixNano()`), so the column and
-// the JSON are written atomically from one source. The other
-// `tags_json` writers (MarkEnriched, applyReconciledTracks, the
-// artwork-version / booklet-tag stampers) round-trip a Track that
-// already carries the original ModTime, so they can't drift either.
+// the JSON are written atomically from one source. The other two
+// `tags_json` writers (MarkEnriched, applyReconciledTracks) write back a
+// Track they read, with the size and mtime of that read, and only while
+// the row is still that one (Track.rowVersion), so they cannot drift
+// either. Until backlog B187 they wrote whatever had happened since, and
+// a file retagged in between kept its old size inside tags_json beside
+// the new columns, for good. (The artwork-version and booklet-tag
+// stampers, which this named among them, write columns, not tags_json.)
 // Verified empirically against a live 15,373-row hybrid library
 // (filesystem + UPnP-routed): zero disagreement on size, and zero on
 // mtime to nanosecond precision.
@@ -3711,9 +3797,14 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 // at the cost of a slower index scan, which is fine for the
 // once-per-request /v1/upscale eligibility gate but wrong for the
 // scanner's hot inner loop. (Qodo on PR #126.)
+//
+// The Track carries the version of the row it was read from
+// (Track.rowVersion): what the reconciliation writer and MarkEnriched
+// require the row to still have when they write it back.
 func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
-	err := s.db.QueryRowContext(ctx, `SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)
+	var version int64
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3724,6 +3815,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, err
 	}
+	t.rowVersion, t.hasRowVersion = version, true
 	return &t, nil
 }
 
@@ -3800,7 +3892,7 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 	// this only reaches the fallback when the iOS-shape genuinely
 	// can't be distinguished.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT tags_json FROM tracks WHERE unicode_lower(path) = unicode_lower(?) LIMIT 2`,
+		`SELECT tags_json, indexed_at FROM tracks WHERE unicode_lower(path) = unicode_lower(?) LIMIT 2`,
 		cleaned,
 	)
 	if err != nil {
@@ -3818,7 +3910,8 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 		return nil, nil
 	}
 	var raw []byte
-	if err := rows.Scan(&raw); err != nil {
+	var version int64
+	if err := rows.Scan(&raw, &version); err != nil {
 		return nil, err
 	}
 	if rows.Next() {
@@ -3832,6 +3925,7 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, err
 	}
+	t.rowVersion, t.hasRowVersion = version, true
 	return &t, nil
 }
 
@@ -4173,7 +4267,7 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 }
 
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -4184,6 +4278,7 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 	out := []Track{}
 	for rows.Next() {
 		var raw []byte
+		var version int64
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
@@ -4192,13 +4287,14 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		t.rowVersion, t.hasRowVersion = version, true
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String
@@ -4248,7 +4344,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
 	where, args := trackReadPredicates(servedOnly, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
@@ -4272,6 +4368,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 	var t Track
 	for rows.Next() {
 		var raw []byte
+		var version int64
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
@@ -4280,13 +4377,14 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return err
 		}
 		t = Track{}
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return err
 		}
+		t.rowVersion, t.hasRowVersion = version, true
 		t.Enriched = boolPtr(enrichedAt != 0)
 		scanTrackVariants(&t, variantsRaw)
 		t.WaveformTag = wfTag.String
@@ -4335,7 +4433,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		limit = 1000
 	}
 	q := `
-		SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks
+		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks
 		WHERE path > ?`
 	if servedOnly {
 		q += ` AND dupe_suppressed = 0`
@@ -4355,6 +4453,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 	out := make([]Track, 0, min(limit, 8192))
 	for rows.Next() {
 		var raw []byte
+		var version int64
 		var enrichedAt int64
 		var variantsRaw []byte
 		var wfTag sql.NullString
@@ -4363,13 +4462,14 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return nil, err
 		}
 		var t Track
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		t.rowVersion, t.hasRowVersion = version, true
 		scanTrackVariants(&t, variantsRaw)
 		t.Enriched = boolPtr(enrichedAt != 0)
 		t.WaveformTag = wfTag.String

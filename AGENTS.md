@@ -246,7 +246,10 @@ mode). iOS never talks to the admin listener.
   the worker.
 - **Admin console is loopback-only with no auth in the default mode** —
   anyone on the host already owns the token store; auth on top would be
-  theatre. Don't expose admin behind Tailscale/reverse-proxy in loopback
+  theatre. Loopback means the request's source AND its `Host`: a Host
+  that names another host is a 421 (`loopbackHostOnly`), since a page that
+  re-points its own name at 127.0.0.1 is otherwise same-origin with the
+  console. Don't expose admin behind Tailscale/reverse-proxy in loopback
   mode; `public` mode (VPS) is the supported non-loopback posture and gates
   everything behind `adminauth`, `/metrics` included: a scraper without a
   session needs its address in `metrics.allowCidrs` and a direct connection,
