@@ -1968,7 +1968,7 @@ no failing test — which is the shape to expect in this area.
   none: one that seeds an http base fails at `SetCredential`, and one that
   ignored that error would pass having shown nothing
   (`TestClientTokenRejectedClearsCredential` did, `_ = state.SetCredential`).
-  `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (ten shapes, each
+  `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (eleven shapes, each
   searched for the secret without regard to case in every line at every
   level, and a positive control over a base in the stored form that must
   connect and log),

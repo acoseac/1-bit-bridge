@@ -31942,14 +31942,14 @@ main at abac4b54, go1.27.1 on macOS.
 
 ### Tests
 
-New: `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (ten shapes in the
+New: `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (eleven shapes in the
 file against a `connRecorder` listener: the credential is not offered, the
 store and the file hold neither the token nor the secret, the sync position
 stays, the drop is logged once, and a tick connects nowhere and logs no line,
 at any level, carrying the secret or the token, searched without regard to
 case; plus a positive control, a base in the stored form on the same listener,
 which must connect for each due leg and log a `tick_error` naming the
-address), `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost` (the ten
+address), `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost` (the eleven
 shapes and an empty base: an error naming none of it, the held credential,
 expiry and cursor unchanged, the file not rewritten, by `os.SameFile`),
 `TestTheStoreHoldsABaseInItsCanonicalForm` (five spellings, through
@@ -31957,13 +31957,14 @@ expiry and cursor unchanged, the file not rewritten, by `os.SameFile`),
 `TestARevokeLeavesNoStoredBaseBehind`,
 `TestOpeningAStoreThatCannotDropItsBaseFails` (a read-only directory; skipped
 where the write goes through anyway), `TestTheReductions` (the three
-functions over 31 shapes, each answer reduced again), and
+functions over 35 shapes, each answer reduced again), and
 `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` (the pin handed over as
 serve hands it); a row in `TestAtlasHarvestBaseURLValidation`.
 
 ### Negative controls
 
-Each mutation applied to the committed tree, the named tests run with
+Each mutation applied to the committed tree (with the ten shapes the tests
+had then; review round 3 below added an eleventh), the named tests run with
 `-count=1`, the file restored and the tree checked clean after each. None
 failed to build.
 
