@@ -33117,9 +33117,14 @@ to one, a named pipe, a socket, a device), not by the suggested
 `!info.Mode().IsRegular()`: a Windows cloud placeholder stats as
 `ModeIrregular` and opens as a file (CLAUDE.md's "the refusal is a list of
 kinds" rule), so the suggestion would have dropped every OneDrive
-files-on-demand cover. Kept in the key, a link to a directory called
-`cover.jpg` re-read its album whenever the linked directory changed; the
-lookup refused to read such a candidate anyway.
+files-on-demand cover. And out of the KEY only: kept in the key, a link to a
+directory called `cover.jpg` re-read its album whenever the linked directory
+changed, but the lookup must still be handed such a candidate, which it
+refuses by its stat and names (B62). The first form dropped it from both,
+and B62's `TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped` went red
+in the full package run (no "folder-art read" line named the pipes, the
+device link or the socket); the subset run after the change had not included
+it.
 
 ### Platforms
 

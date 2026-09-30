@@ -654,9 +654,10 @@ lost my library."
   forever. **Every row records the identity of the folder art it was
   extracted against** (`tracks.folder_art_key`, v49, column-only: each
   candidate's name, size and mtime, a disc folder's parent's after a '|';
-  `folderArtKey`; a candidate that is not a file is left out by
+  `folderArtKey`; a candidate that is not a file is left out of the key by
   `fsutil.NotAFile`'s list of kinds, **never by "is a regular file"**, which
-  would drop a OneDrive placeholder cover), and `folderArtDrifted` re-extracts a row whose folder's
+  would drop a OneDrive placeholder cover, and is still handed to the lookup,
+  which refuses and names it as B62 made it), and `folderArtDrifted` re-extracts a row whose folder's
   identity changed, through `reExtractUnchanged`'s diff-guard, so only rows
   whose art changes reach the delta: a cover beside an embedded picture
   takes the stamp leg, which records the new key (**the stamp must write

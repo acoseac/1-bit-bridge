@@ -107,17 +107,18 @@ func folderArtDirStateOf(ec *ExtractContext, dir string) folderArtDirState {
 // folderArtStateOfListing stats each candidate l lists in dir.
 //
 // A candidate that is gone since the listing, or a link to nothing, is not
-// there (ErrNotExist), as it is not for the lookup. Nor is one that is not a
-// file (fsutil.NotAFile: a directory, or a link to one, a named pipe, a
-// socket, a device), which the lookup would refuse to read anyway
-// (readFolderArt): kept in the key, a link to a directory called cover.jpg
-// re-read its album whenever that directory changed. The test is the list of
-// kinds, never "is a regular file": a Windows cloud placeholder stats as
-// irregular and opens as a file, so a OneDrive cover must stay a cover. Any
-// other failed stat leaves the state unseen: "we could not see this file"
-// says nothing about what it holds, so the skip gate keeps the row as it was
-// and a later scan looks again. The candidates that did stat are still
-// named, so the lookup reads them as it always did.
+// there (ErrNotExist), as it is not for the lookup. One that is not a file
+// (fsutil.NotAFile: a directory, or a link to one, a named pipe, a socket, a
+// device) is no cover and stays out of the key: kept in it, a link to a
+// directory called cover.jpg re-read its album whenever that directory
+// changed. It is still named for the lookup, which refuses it by its stat
+// and says what it is (readFolderArt, B62's rule), as it always did. The
+// test is the list of kinds, never "is a regular file": a Windows cloud
+// placeholder stats as irregular and opens as a file, so a OneDrive cover
+// must stay a cover. Any other failed stat leaves the state unseen: "we
+// could not see this file" says nothing about what it holds, so the skip
+// gate keeps the row as it was and a later scan looks again. The candidates
+// that did stat are still named, so the lookup reads them as it always did.
 func folderArtStateOfListing(dir string, l *sidecarListing) folderArtDirState {
 	if !l.listed {
 		return folderArtDirState{failure: errFolderNotListed}
@@ -135,6 +136,7 @@ func folderArtStateOfListing(dir string, l *sidecarListing) folderArtDirState {
 			}
 			continue
 		}
+		st.names = append(st.names, name)
 		if fsutil.NotAFile(info.Mode()) != "" {
 			continue
 		}
@@ -146,7 +148,6 @@ func folderArtStateOfListing(dir string, l *sidecarListing) folderArtDirState {
 		b.WriteString(strconv.FormatInt(info.Size(), 10))
 		b.WriteByte(':')
 		b.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
-		st.names = append(st.names, name)
 	}
 	st.key = b.String()
 	return st
