@@ -236,7 +236,7 @@ func TestResetEnrichedMissesUnderPrefixIsCaseExact(t *testing.T) {
 	// stamped enriched, so the retry predicate selects them.
 	seedPaths(t, s, ctx, "Jazz/a.flac", "jazz/b.flac")
 	for _, p := range []string{"Jazz/a.flac", "jazz/b.flac"} {
-		if err := s.MarkEnriched(ctx, &Track{Path: p, Size: 100, ModTime: time.Now()}); err != nil {
+		if err := s.MarkEnriched(ctx, readTrack(t, s, p)); err != nil {
 			t.Fatalf("mark enriched %q: %v", p, err)
 		}
 	}

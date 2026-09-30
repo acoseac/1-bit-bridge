@@ -9,11 +9,12 @@ import (
 func seedEnrichedTrack(t *testing.T, s *Store, path string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := s.UpsertTrack(ctx, &Track{Path: path, Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
+	tr := &Track{Path: path, Size: 1, ModTime: time.Unix(1, 0)}
+	if err := s.UpsertTrack(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
 	// UpsertTrack resets enriched_at to 0; MarkEnriched is what stamps it.
-	if err := s.MarkEnriched(ctx, &Track{Path: path, Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
+	if err := s.MarkEnriched(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -202,10 +203,12 @@ func TestAcoustIDMatchSurvivesReEnrichment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.MarkEnriched(ctx, &Track{
-		Path: "a.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtistMBID: "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd",
-	}); err != nil {
+	reread, err := s.GetTrack(ctx, "a.flac")
+	if err != nil || reread == nil {
+		t.Fatalf("GetTrack: %v %v", reread, err)
+	}
+	reread.ArtistMBID = "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd"
+	if err := s.MarkEnriched(ctx, reread); err != nil {
 		t.Fatal(err)
 	}
 
