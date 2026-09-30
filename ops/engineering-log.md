@@ -30933,7 +30933,15 @@ On the first scan after the bump:
   made against, so an earlier verdict is re-asked by construction.
 - A tag ReplayGain now outranks the analysis loudness spliced in for a file
   with none, which PROTOCOL.md's `replayGainTrackDB` section has always promised
-  ("curated tags always win"); these files had not been getting it.
+  ("curated tags always win"); these files had not been getting it. The phone
+  and the console's web player apply it as playback gain, and the smart mixes'
+  mood bands read it (the effective value, tag first), so a mix may place such
+  a track differently once.
+- A row that gains a release id joins `reconcileYearsByMBID`'s groups, so a
+  year-less stray among its album's tracks (three at most) may borrow the
+  album's year: one more bounded reconciliation write. The duplicate key
+  (`internal/dupes`) and the catalog's album identity (`internal/librarycat`)
+  read none of these fields.
 
 ### Cost
 
