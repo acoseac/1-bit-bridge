@@ -383,6 +383,16 @@ func TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.
 	})
 }
 
+// readWholeCase is a file the scan reads whole though its parser fails on
+// what it holds, and what its row holds besides the path's title: the codec
+// and sample rate the parse got to before it failed ("" and 0 for none).
+type readWholeCase struct {
+	name, file string
+	write      func(t *testing.T, p string)
+	codec      string
+	rate       float64
+}
+
 // TestScanner_AFileReadWholeIsWrittenAsItAlwaysWas is the positive control:
 // a file the scan read whole is written as it always was, though its parser
 // failed on what it holds, and the scan logs no unread line. Each case is an
@@ -393,74 +403,81 @@ func TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.
 // set is a negative offset), and a walk that refuses a file as not its
 // format. Counted as failed reads, these files would never be indexed.
 func TestScanner_AFileReadWholeIsWrittenAsItAlwaysWas(t *testing.T) {
-	for _, tc := range []struct {
-		name, file string
-		write      func(t *testing.T, p string)
-		// check asserts what the row holds beyond its being there.
-		check func(t *testing.T, tr *Track)
-	}{
-		{"an MP3 too short for dhowden's ID3v1 look", "09.mp3", func(t *testing.T, p string) {
-			writeFixtureBytes(t, p, []byte("not an MP3 frame or a tag, and shorter than 128 bytes"))
-		}, func(t *testing.T, tr *Track) {
-			if tr.Codec != "MP3" || tr.Title != "09" {
-				t.Errorf("codec %q, title %q; want \"MP3\", \"09\"", tr.Codec, tr.Title)
-			}
-		}},
-		{"a DSF whose metadata pointer is a negative offset", "10.dsf", func(t *testing.T, p string) {
-			writeMinimalDSF(t, p, 2822400, map[string]string{"title": "Tagged"})
-			data, err := os.ReadFile(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			data[27] |= 0x80 // the pointer's top bit (little-endian, bytes 20 to 27)
-			writeFixtureBytes(t, p, data)
-		}, func(t *testing.T, tr *Track) {
-			if tr.SampleRate == nil || *tr.SampleRate != 2822400 || tr.Title != "10" {
-				t.Errorf("rate %v, title %q; want the fmt chunk's 2822400 and the path's \"10\"", tr.SampleRate, tr.Title)
-			}
-		}},
-		{"a DSF the walk refuses as not its format", "11.dsf", func(t *testing.T, p string) {
-			writeFixtureBytes(t, p, bytes.Repeat([]byte("not a DSD stream "), 8))
-		}, func(t *testing.T, tr *Track) {
-			if tr.Title != "11" {
-				t.Errorf("title %q, want the path's \"11\"", tr.Title)
-			}
-		}},
-		{"a FLAC cut short inside its comment block", "12.flac", func(t *testing.T, p string) {
-			writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": "Tagged"})
-			data, err := os.ReadFile(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			at := bytes.Index(data, []byte("TITLE="))
-			if at < 0 {
-				t.Fatal("fixture: no comment")
-			}
-			writeFixtureBytes(t, p, data[:at])
-		}, func(t *testing.T, tr *Track) {
-			if tr.SampleRate == nil || *tr.SampleRate != 44100 || tr.Title != "12" {
-				t.Errorf("rate %v, title %q; want STREAMINFO's 44100 and the path's \"12\"", tr.SampleRate, tr.Title)
-			}
-		}},
+	for _, tc := range []readWholeCase{
+		{"an MP3 too short for dhowden's ID3v1 look", "09.mp3", writeShortJunkMP3, "MP3", 0},
+		{"a DSF whose metadata pointer is a negative offset", "10.dsf", writeDSFPointingBeforeItsStart, "DSF", 2822400},
+		{"a DSF the walk refuses as not its format", "11.dsf", writeJunkDSF, "", 0},
+		{"a FLAC cut short inside its comment block", "12.flac", writeFLACCutInItsComment, "FLAC", 44100},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newLinkedFixture(t)
-			p := filepath.Join(f.album, tc.file)
-			rel := "Music/Album/" + tc.file
-			tc.write(t, p)
-			rec := loggingtest.Record(t)
-			scanOnce(t, f.sc, "the scan")
-
-			tr, err := f.store.GetTrack(context.Background(), rel)
-			if err != nil || tr == nil {
-				t.Fatalf("no row for a file read whole (%v); lines %q", err, rec.Lines(msgUnreadAudio))
-			}
-			tc.check(t, tr)
-			if lines := rec.Lines(msgUnreadAudio); len(lines) != 0 {
-				t.Errorf("a file read whole was counted unread: %q", lines)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { requireWrittenAsItAlwaysWas(t, tc) })
 	}
+}
+
+// requireWrittenAsItAlwaysWas scans a library holding tc's file and asserts
+// its row: the path's title, tc's codec and rate, and no unread line.
+func requireWrittenAsItAlwaysWas(t *testing.T, tc readWholeCase) {
+	t.Helper()
+	f := newLinkedFixture(t)
+	tc.write(t, filepath.Join(f.album, tc.file))
+	rec := loggingtest.Record(t)
+	scanOnce(t, f.sc, "the scan")
+
+	tr, err := f.store.GetTrack(context.Background(), "Music/Album/"+tc.file)
+	if err != nil || tr == nil {
+		t.Fatalf("no row for a file read whole (%v); lines %q", err, rec.Lines(msgUnreadAudio))
+	}
+	title := strings.TrimSuffix(tc.file, filepath.Ext(tc.file))
+	var rate float64
+	if tr.SampleRate != nil {
+		rate = *tr.SampleRate
+	}
+	if tr.Title != title || tr.Codec != tc.codec || rate != tc.rate {
+		t.Errorf("title %q, codec %q, rate %v; want the path's %q, %q, %v", tr.Title, tr.Codec, rate, title, tc.codec, tc.rate)
+	}
+	if lines := rec.Lines(msgUnreadAudio); len(lines) != 0 {
+		t.Errorf("a file read whole was counted unread: %q", lines)
+	}
+}
+
+// writeShortJunkMP3 writes an .mp3 that holds no frame, no tag and fewer than
+// the 128 bytes dhowden seeks back from the end to look for an ID3v1 tag.
+func writeShortJunkMP3(t *testing.T, p string) {
+	writeFixtureBytes(t, p, []byte("not an MP3 frame or a tag, and shorter than 128 bytes"))
+}
+
+// writeDSFPointingBeforeItsStart writes a DSF whose metadata pointer has its
+// top bit set, a negative offset to the seek that reads its tag.
+func writeDSFPointingBeforeItsStart(t *testing.T, p string) {
+	writeMinimalDSF(t, p, 2822400, map[string]string{"title": "Tagged"})
+	data := readFixture(t, p)
+	data[27] |= 0x80 // the pointer's top bit (little-endian, bytes 20 to 27)
+	writeFixtureBytes(t, p, data)
+}
+
+// writeJunkDSF writes a .dsf that is not a DSD stream.
+func writeJunkDSF(t *testing.T, p string) {
+	writeFixtureBytes(t, p, bytes.Repeat([]byte("not a DSD stream "), 8))
+}
+
+// writeFLACCutInItsComment writes a FLAC that ends inside its comment block.
+func writeFLACCutInItsComment(t *testing.T, p string) {
+	writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": "Tagged"})
+	data := readFixture(t, p)
+	at := bytes.Index(data, []byte("TITLE="))
+	if at < 0 {
+		t.Fatal("fixture: no comment")
+	}
+	writeFixtureBytes(t, p, data[:at])
+}
+
+// readFixture reads the fixture at p.
+func readFixture(t *testing.T, p string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead: in one scan of a
@@ -470,22 +487,20 @@ func TestScanner_AFileReadWholeIsWrittenAsItAlwaysWas(t *testing.T) {
 // they were, nothing is deleted or journaled, and one line counts the two.
 func TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead(t *testing.T) {
 	f := newLinkedFixture(t)
-	old := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
-	paths := map[string]string{}
-	for _, name := range []string{"01.flac", "02.flac", "03.flac", "04.flac"} {
+	names := []string{"01.flac", "02.flac", "03.flac", "04.flac"}
+	for _, name := range names {
 		p := filepath.Join(f.album, name)
-		paths[name] = p
 		writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": "Original"})
-		setMTime(t, p, old)
+		setMTime(t, p, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC))
 	}
 	scanOnce(t, f.sc, "the originals")
 	before := map[string]storedRow{}
-	for name := range paths {
+	for _, name := range names {
 		before[name], _ = storedRowAt(t, f.store, "Music/Album/"+name)
 	}
 
-	for _, name := range []string{"02.flac", "03.flac", "04.flac"} {
-		writeMinimalFLAC(t, paths[name], 44100, 16, map[string]string{"TITLE": "Retagged"})
+	for _, name := range names[1:] {
+		writeMinimalFLAC(t, filepath.Join(f.album, name), 44100, 16, map[string]string{"TITLE": "Retagged"})
 	}
 	unread := map[string]bool{"03.flac": true, "04.flac": true}
 	f.sc.openAudio = func(abs string) (extractSource, error) {
@@ -497,33 +512,44 @@ func TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead(t *testing.T) {
 	rec := loggingtest.Record(t)
 	scanOnce(t, f.sc, "two files unreadable")
 
-	for name := range paths {
-		rel := "Music/Album/" + name
-		after, ok := storedRowAt(t, f.store, rel)
-		if !ok {
-			t.Errorf("%s: the row was deleted", rel)
-			continue
-		}
-		switch {
-		case name == "02.flac":
-			if after.indexedAt == before[name].indexedAt || !strings.Contains(after.tags, `"title":"Retagged"`) {
-				t.Errorf("%s: the file read was not rewritten: %+v", rel, after)
-			}
-		case after != before[name]:
-			t.Errorf("%s: the row changed:\n got  %+v\n want %+v", rel, after, before[name])
-		}
+	for _, name := range names {
+		requireRewrittenOnlyIfRead(t, f.store, name, before[name], name == "02.flac")
 	}
-	var journaled int
-	if err := f.store.db.QueryRow(`SELECT COUNT(*) FROM manifest_deletions`).Scan(&journaled); err != nil {
-		t.Fatal(err)
-	}
-	if journaled != 0 {
-		t.Errorf("%d deletions were journaled", journaled)
+	if n := journaledDeletions(t, f.store); n != 0 {
+		t.Errorf("%d deletions were journaled", n)
 	}
 	lines := rec.Lines(msgUnreadAudio)
 	if len(lines) != 1 || !strings.Contains(lines[0], "count=2") {
 		t.Errorf("lines %q, want one counting the two files", lines)
 	}
+}
+
+// requireRewrittenOnlyIfRead asserts that the row of the file name in the
+// fixture's album was rewritten with its retagged title when read is true,
+// its indexed_at moved, and is before, byte for byte, when it is false.
+func requireRewrittenOnlyIfRead(t *testing.T, store *Store, name string, before storedRow, read bool) {
+	t.Helper()
+	rel := "Music/Album/" + name
+	after, ok := storedRowAt(t, store, rel)
+	switch {
+	case !ok:
+		t.Errorf("%s: the row was deleted", rel)
+	case read && (after.indexedAt == before.indexedAt || !strings.Contains(after.tags, `"title":"Retagged"`)):
+		t.Errorf("%s: the file read was not rewritten: %+v", rel, after)
+	case !read && after != before:
+		t.Errorf("%s: the row changed:\n got  %+v\n want %+v", rel, after, before)
+	}
+}
+
+// journaledDeletions counts the deletions the store has journaled for delta
+// clients, tombstones a live row hides from DeletedSince included.
+func journaledDeletions(t *testing.T, store *Store) int {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM manifest_deletions`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // TestScanSubtree_AChangedFileWhoseReadDidNotCompleteKeepsItsRow: the

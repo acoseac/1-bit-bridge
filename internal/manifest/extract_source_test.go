@@ -85,16 +85,8 @@ func fsutilReadersIn(t *testing.T, name string) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := ""
-	for _, imp := range f.Imports {
-		if p, _ := strconv.Unquote(imp.Path.Value); p == "github.com/acoseac/1-bit-bridge/internal/fsutil" {
-			local = "fsutil"
-			if imp.Name != nil {
-				local = imp.Name.Name
-			}
-		}
-	}
 	out := map[string]string{}
+	local := importedAs(f, "github.com/acoseac/1-bit-bridge/internal/fsutil")
 	if local == "" {
 		return out
 	}
@@ -104,22 +96,47 @@ func fsutilReadersIn(t *testing.T, name string) map[string]string {
 			continue
 		}
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			if id, ok := sel.X.(*ast.Ident); ok && id.Name == local &&
-				(sel.Sel.Name == "OpenAsFile" || sel.Sel.Name == "ReadAsFile") {
-				out[fd.Name.Name] = sel.Sel.Name
+			if call := fsutilReadCall(n, local); call != "" {
+				out[fd.Name.Name] = call
 			}
 			return true
 		})
 	}
 	return out
+}
+
+// importedAs is the name the file f imports path under, "" when it does not.
+func importedAs(f *ast.File, path string) string {
+	for _, imp := range f.Imports {
+		if p, _ := strconv.Unquote(imp.Path.Value); p != path {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return filepath.Base(path)
+	}
+	return ""
+}
+
+// fsutilReadCall names the fsutil read n calls (OpenAsFile, ReadAsFile), by
+// the name local its file imports fsutil under, and "" for any other node.
+func fsutilReadCall(n ast.Node, local string) string {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if id, ok := sel.X.(*ast.Ident); !ok || id.Name != local {
+		return ""
+	}
+	if sel.Sel.Name == "OpenAsFile" || sel.Sel.Name == "ReadAsFile" {
+		return sel.Sel.Name
+	}
+	return ""
 }
 
 // TestAudioFileReadSweepSeesAReadAroundOpenAudioFile runs the sweep's parse
