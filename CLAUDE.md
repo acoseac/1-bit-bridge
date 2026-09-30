@@ -1946,10 +1946,16 @@ no failing test — which is the shape to expect in this area.
   an uppercase scheme, space) is held reduced and keeps its credential.
   **One reduction,
   in `internal/baseurl`**: `CanonicalHTTPS` (the pin's), `NamesHost` and
-  `CredentialBase` (the canonical form, when it names a host), imported by
-  config, the handler and the store, since `internal/atlasharvest` imports
-  neither config nor enrich; `config.CanonicalHTTPSBase` and
-  `BaseURLNamesHost` are gone, so there is no second copy to drift. **The
+  `CredentialBase` (the canonical form, when it names a host and any port it
+  names is 1-65535: `url.Parse` checks a port's digits, not its range, so
+  `https://atlas.example:99999` was stored and failed every dial), imported
+  by config, the handler and the store, since `internal/atlasharvest`
+  imports neither config nor enrich; `config.CanonicalHTTPSBase` and
+  `BaseURLNamesHost` are gone, so there is no second copy to drift. **Keep
+  the host and port tests in `CredentialBase`, out of `CanonicalHTTPS`**:
+  the pin goes through the latter, `Validate` refuses a pin that reduces to
+  "", and a config that loaded must keep loading (B36's reasoning); such a
+  pin keeps its canonical form and matches no credential. **The
   reduction is a fixed point** (`TestTheReductions` reduces every answer
   again): the pin is reduced twice, by config and again by
   `WithAtlasHarvest`, and the store reduces at every open. `https://:443`

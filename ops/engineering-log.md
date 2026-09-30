@@ -32005,3 +32005,38 @@ wrote no state file, and the config warning named `https://:443`.
   `internal/enrich`. Filed as backlog B133.
 - B49's other half, a spoofed link-local SSDP source that is not a cloud
   metadata address, is untouched and stays open there.
+
+### Review rounds (#1110)
+
+Gemini was over its daily quota on every head. CodeRabbit ran on-demand:
+
+- **Round 1 (704004bf)**: no actionable comments.
+- **Round 2 (23c0b962, the merge with main)**: one comment, asking for this
+  entry's CLAUDE.md bullet to be pushed to `main` on its own, quoting the
+  "committed direct to `main`" wording `AGENTS.md` retired after #1079 and
+  #1087. Declined on the thread with `CLAUDE.md`'s "a rule that describes code
+  lands in the PR that changes the code"; CodeRabbit withdrew it. Its prompt
+  was right about one thing, taken in 1a1b8476: the B36 bullet's parenthesis
+  "(a base stored before this check was never re-checked)" read as though it
+  were still true.
+- **Round 3 (1a1b8476)**, outside the diff: `https://atlas.example:99999`
+  passed `CredentialBase`, was stored by the endpoint, and failed every dial.
+  Verified before it was taken: `url.Parse` checks that a port is digits, not
+  its range, and the endpoint answered 200 and stored it
+  (`TestAtlasHarvestCredentialRefusesAPortNoConnectionCanBeMadeTo`, red on
+  1a1b8476 for `:99999` and `:0`; the store tests' new shape and three
+  reduction rows red the same way). **Taken, in a different place than the
+  suggested fix**: CodeRabbit put the range check in `CanonicalHTTPS`, which
+  the configured pin goes through, and config's `Validate` refuses a pin that
+  reduces to "", so a config pinning such a host, which loaded before, would
+  stop the bridge from starting after an update, B36's reason for keeping
+  the host test out of that reduction. `CredentialBase` refuses a port
+  outside 1-65535 beside the host test (`dialablePort`); such a pin keeps its
+  canonical form and matches no credential (a new row in
+  `TestAtlasHarvestBaseURLValidation`). A port with leading zeros
+  (`:08443`) dials the port it spells and is kept as written.
+
+| mutation | goes red |
+|---|---|
+| NC15: `CredentialBase` stops checking the port | the three undialable-port reduction rows, that shape in both store tests, and the endpoint's port test; the config pin row stays green |
+| NC16: the port check moves into `CanonicalHTTPS` | the three undialable-port reduction rows (their canonical form) and the config pin row (`Validate` refuses it) |
