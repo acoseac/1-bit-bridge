@@ -31988,3 +31988,208 @@ Negative controls on the committed fix, each restored and re-run green:
   `transcode` and the updater) and reads of files the bridge wrote under its
   data dir (the enricher's cache hashing, `hashFileShort`, backup): a named
   pipe there needs write access to the data or variants directory.
+
+## 2026-09-29 — a link-local SSDP source approves itself only when the packet arrived on a zero-configuration IPv4 link (backlog B49)
+
+#1069 let an SSDP LOCATION reach this machine or a link-local address when
+the packet came from that very address, and #1074 carried the same approval
+to every later dial of the URL it led to (the ingest's SOAP Browse and the
+proxy's byte fetches). An SSDP source is a UDP source and is not
+authenticated. #1074's review round 1 refused the cloud metadata addresses
+whatever the source (`cloudMetadataAddrs`); the rest of the residual, which
+#1074's log entry recorded under "Out of scope", was any other link-local
+neighbour. B97 takes the entry's other half (the harvest client's stored
+base URL, `internal/atlasharvest`).
+
+### Reproduced on main (6f914ef4), with main's own API
+
+A scratch test in an export of main:
+
+- `LocationFromSource("http://169.254.7.7:8080/d.xml", udpFrom("169.254.7.7"))`
+  kept the LOCATION, and `AnnouncedFrom(169.254.7.7)` permitted a connect to
+  169.254.7.7, whatever link the packet arrived on (main has no notion of
+  one).
+- The renderer client, handed an M-SEARCH answer from 169.254.7.7 with its
+  LOCATION on that address, sent `GET http://169.254.7.7:8080/description.xml`
+  and `POST http://169.254.7.7:8080/cm/control` (GetProtocolInfo), and
+  logged "renderer discovered".
+- Through the real ingest and proxy (the harness of
+  `TestAPacketFromAMetadataAddressApprovesNoLaterDialThere`), a server cached
+  under `AnnouncedFrom(169.254.7.7)` whose control URL's name then answered
+  169.254.7.7: the proxy's byte fetch failed with `dial tcp
+  169.254.7.7:60879: connect: host is down` (the dev Mac ARPed for it on its
+  LAN) and the ingest's SOAP POST ran into its timeout (6.0 s for the test).
+  Both connects were attempted. With the fix both are refused at the dial
+  check before any packet leaves (0.7 s for the test).
+
+### What the exception is for, measured
+
+The exception exists for a device on a direct cable, or on a switch with no
+DHCP server, which self-assigns 169.254.x.y and has no other address to
+announce from. On such a link THIS host has only a self-assigned IPv4
+address too. `discovery.ZeroConfIPv4Link` (an IPv4 link-local address and no
+other IPv4 address) was run against the real `net.Interface.Addrs` of every
+interface on three hosts, by a throwaway program calling the package:
+
+- macOS (the dev Mac): the Wi-Fi/Ethernet interface with a DHCP address reads
+  configured; the USB link to a connected iPhone, which carried only a
+  self-assigned 169.254/16 address and fe80 (macOS gave up on DHCP there),
+  reads zero-configuration. A real zero-configuration link.
+- Windows 11 (the test host): the DHCP'd Ethernet and the Tailscale adapter
+  read configured; the (disconnected) Wi-Fi and Bluetooth adapters, which
+  Windows keeps with APIPA addresses, read zero-configuration.
+- Linux (dido, Ubuntu 26.04): every host interface (Ethernet, docker0, a
+  user bridge, tailscale0) reads configured; a dummy interface in a
+  throwaway network namespace holding only 169.254.3.4/16 reads
+  zero-configuration, and adding 10.49.0.1/24 to it makes it configured.
+
+An SSDP probe (M-SEARCH ssdp:all, pinned per interface) on the Mac found two
+devices on its LAN, 60 answers, every one from the device's own routable
+address with the LOCATION on it (#1069's three devices had the same shape),
+and nothing on the USB link. No link-local UPnP device was available to
+measure; the shape above is what the OSes give one.
+
+### What the rule costs, measured
+
+A device stuck on 169.254 on a configured LAN (DHCP failed; UPnP requires
+it to keep asking and move to the address it gets) is no longer fetched.
+From a host whose LAN interface has a DHCP address, a connect to 169.254.7.7:
+
+- Windows: no 169.254 route at all; `Find-NetRoute` answers
+  ERROR_NETWORK_UNREACHABLE, and a real `TcpClient` connect fails with
+  WSAENETUNREACH in 78 ms. Such a device was unreachable anyway.
+- Linux (systemd-networkd): no 169.254 route; `ip route get` sends it to the
+  default gateway, and curl fails at once. Unreachable anyway.
+- macOS: `route get 169.254.7.7` answers the primary interface (macOS keeps
+  a `169.254 link#N UCS` route there), so the connect ARPs on the LAN. This
+  is the one platform where such a device was reachable, and where the
+  forgery lands. After ARP learned a device on a secondary interface (the
+  iPhone on the USB link), `route get` gave a cloned host route on that
+  interface and an unscoped connect reached it, which is how a direct-cable
+  device on a secondary interface is reached.
+
+A MediaServer on such a LAN can still be configured by a manual URL
+(`OperatorChose` approves every link-local address when the operator's URL
+names one); a renderer has no such hatch on the bridge.
+
+### Public mode
+
+"Check what upstream discovery does on a public-mode host" (the entry's
+priority note): nothing. With the real binary, a public-mode install with
+`upnpUpstream.enabled: true` does not load (`upnpUpstream.enabled: must be
+false in public mode`, exit 2), and with `dlna.enabled` and
+`dlna.discovery.enabled` it logs `DLNA refused reason="public deployment
+mode"` and `DLNA renderer discovery refused — MediaServer is not enabled`.
+No SSDP client runs in public mode, so the cloud-VM case the entry worried
+about was never reachable there. Both gates were already pinned
+(`TestValidate_PublicModeRefusesUPnPUpstream`, `internal/dlna/config_gate_test.go`).
+
+### Decisions
+
+- **The rule**: an SSDP packet's IPv4 link-local source approves its own
+  address only when the discovery client that read it runs on a
+  zero-configuration IPv4 link. `discovery.AnnouncedOn(src, zeroConfLink)` is
+  the approval (a new `linkLocalSource` field in `DialApproval`, which
+  `Permits` requires for a link-local address), `AnnouncedFrom(src)` its
+  configured-link form. Loopback sources keep their exception (RFC 1122).
+- **Judged from the client's own interface.** Each client runs on one
+  LAN-eligible interface and pins its M-SEARCH there, so genuine answers
+  come from that link. `discovery.AnnouncementLink` reads the interface's
+  addresses when the client is built and again before every M-SEARCH (both
+  tick loops call `Refresh`), not per packet: `Addrs` is a syscall per call
+  (8.7 µs on the Mac, and GetAdaptersAddresses on Windows is a heavier
+  call), and a flood of forged packets would pay it each time. An interface
+  whose addresses cannot be read is not a zero-configuration link.
+- **Not the receiving interface.** x/net/ipv4 reports the interface a packet
+  arrived on through control messages (IP_PKTINFO / IP_RECVIF) on Linux and
+  macOS and not at all on Windows (`ctlOpts` is empty in its
+  `sys_windows.go`, v0.59.0). The cost of judging the client's interface
+  instead is the cross-link residual below.
+- **Declined: "only for the interface the packet arrived on" alone.** It
+  leaves the reported shape open: the forging peer and the neighbour it
+  names share the configured LAN, so the packet arrives on the very
+  interface the neighbour is reached through.
+- **Declined: any interface that HOLDS a link-local IPv4 address**, beside a
+  routable one. RFC 3927 §1.9 says a host SHOULD NOT have both; such an
+  interface is a DHCP LAN with IPv4LL also running, where a forged source is
+  the likelier reading. The predicate's table pins the mixed rows.
+- **One approval, both checks.** `LocationPermittedBy(location, approval)`
+  is the string check (`LocationFromSource` now wraps it), and it asks
+  `approval.Permits` of a LOCATION's literal, as the GENA callback guard
+  asks it of a callback, so the string check and the dial check cannot
+  disagree. The clients compute the approval once per packet
+  (`AnnouncementLink.Location`) and carry it to every request the packet
+  causes and to the cache (the upstream client's `ServerInfo.DialApproval`).
+- **IPv6 link-local SSDP sources approve nothing.** Both clients are udp4
+  sockets, so none arrives; IPv6 SSDP devices announce from fe80 on every
+  link (ff02::c is link-scoped), so the zero-configuration rule would not
+  carry over. Two existing rows asserted the IPv6 same-address approval
+  (`TestDefaultClientDialCheck`, the old `…LocationFromSource`); they now
+  assert its refusal.
+- **GENA subscribers keep theirs** (`SubscribedFrom` sets `linkLocalSource`):
+  the SUBSCRIBE arrives over TCP, and the handshake shows the address to be
+  the peer's own, which a UDP source never shows.
+- **Said once.** A LOCATION refused only because the link is configured (it
+  names the packet's own link-local address) is one Warn per source,
+  bounded at 64 sources, naming the client, the interface and this host's
+  IPv4 address there: a real device stuck on 169.254 otherwise leaves
+  discovery without a word, and a peer sending from a new address every
+  packet reaches the bound.
+- **Gemini consult**: refused by the API (the project's monthly spending
+  cap). The questions (the predicate on each OS, the client versus the
+  receiving interface, IPv6) were settled by the measurements above.
+
+### Tests
+
+- `internal/dlna/discovery`: `TestZeroConfIPv4Link` (15 shapes, the 4- and
+  16-byte IPv4 forms, the mixed rows); `TestAnnouncementLinkFollowsItsInterface`;
+  `TestAnnouncementLinkLogsALinkRefusalOncePerSourceAndBounded`;
+  `TestAnnouncedOnApprovesALinkLocalSourceOnlyOnAZeroConfLink`;
+  `TestHandlePacket_NeverFetchesALinkLocalLocationOffAZeroConfLink`;
+  a link-local row in `TestHandlePacket_AKnownRendererCannotMoveOntoAHostLocalLocation`;
+  `TestHandlePacket_TheFetchRunsUnderTheLinksApproval` (the approval each
+  request is dispatched under, read from its context);
+  `TestTheRendererClientReadsItsLinkBeforeEverySearch` (the running tick
+  loop); a link column in `TestDefaultClientDialCheck` and in
+  `TestLocationPermittedBy` (was `…LocationFromSource`), which also pins
+  `WithAnnouncementSource` and `LocationFromSource` to the configured
+  link's answer. `TestHandlePacket_FetchesAHostLocalLocationFromThatSameAddress`
+  runs its direct-cable rows on a zero-configuration link.
+- `internal/upnp`: `TestServerLinkLocalSourceIsApprovedOnlyOnAZeroConfLink`
+  (a LOCATION on the link-local literal, and one on a name, on each link),
+  a link-local row in `TestAKnownServerCannotMoveOntoAHostLocalLocation`,
+  `TestTheServerClientReadsItsLinkBeforeEverySearch`;
+  `TestServerCloudMetadataLocationIsNeverFetched`'s direct-cable tail runs
+  on a zero-configuration link.
+- `cmd/bridge`: `TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere`,
+  the chain above through the real ingest and proxy.
+- The test clients model their link (`configuredLink`, `zeroConfLink`)
+  instead of reading the zero `net.Interface`'s addresses, which are every
+  address of the host on macOS and none on Linux.
+
+### Negative controls, on the committed tree (ee64e60b), each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| NC1: `AnnouncedOn` ignores the link (main's exception on every link) | 8 discovery tests, 2 upnp tests, the cmd/bridge chain |
+| NC2: the string check compares addresses itself (not `Permits`) | the string-check tests only (4 discovery, 2 upnp); the dial-check table, the approval test and the chain stay green: the dial check holds alone |
+| NC3: `Permits` drops the link condition | as NC1 (the string check asks `Permits`) |
+| NC4: the renderer client bypasses its link (always zero-conf) | its 3 configured-link tests (the link-local move row among them) |
+| NC5: the upstream client bypasses its link | its 2 configured-link tests (the table and the move row) |
+| NC6: both clients always read a configured link | the direct-cable positives (3 renderer, 2 upstream) |
+| NC7: the tick loops stop refreshing the link | `TestTheRendererClientReadsItsLinkBeforeEverySearch` / `TestTheServerClientReadsItsLinkBeforeEverySearch`, each alone |
+| NC8: the predicate admits a mixed link | the two mixed rows of `TestZeroConfIPv4Link` only |
+| NC9a: the refusal log without its once-per-source rule | the log test and the renderer's warning count |
+| NC9b: the refusal log without its bound | the log test's bound row |
+| NC10: `SubscribedFrom` loses its link-local arm | the approval test, `TestSubscribedFromApprovesTheSubscribersOwnAddress`, `Test_callbackHostMatchesSource`, `Test_callbackHostAllowed` |
+
+### Out of scope
+
+- **The residual.** A forged answer on a zero-configuration link itself (the
+  exception exists for that link, and there is no way to authenticate a UDP
+  source); and one sent from a configured link to the ephemeral port of the
+  client on ANOTHER interface that is zero-configuration, from the address
+  of a device on that link. Neither the port nor the address is visible
+  from the sender's link.
+- The app's mirror (`UPnPURLPolicy.location(_:announcedFrom:)`, iOS #1998)
+  has no link rule: backlog B138, a decision first.

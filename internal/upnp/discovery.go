@@ -62,8 +62,10 @@ type ServerInfo struct {
 	// DialApproval is what lets a request to ContentDirectoryControlURL,
 	// or to the host:port LiveHost derives from it for every byte fetch of
 	// this server's routed tracks, connect to this machine or a link-local
-	// address: the address of the SSDP packet that led to the URL
-	// (discovery.AnnouncedFrom), or the operator's manual URL
+	// address: the address of the SSDP packet that led to the URL, a
+	// link-local one only when the packet arrived on a zero-configuration
+	// link (discovery.AnnouncedOn, as the client's AnnouncementLink gives
+	// it; backlog B49), or the operator's manual URL
 	// (discovery.OperatorChose). The ingest and the proxy carry it in each
 	// request's context, and the dial check judges every connect against
 	// it, so a control URL naming a host by a NAME cannot be steered to the
@@ -296,6 +298,13 @@ type DiscoveryConfig struct {
 	// refuses, so a flood of fake MediaServers cannot keep a server the
 	// ingest walks out of the cache. Nil configures none.
 	Configured func(udn string) bool
+
+	// InterfaceAddrs reads Interface's addresses, from which the client
+	// judges whether its link is a zero-configuration IPv4 link, the one
+	// kind where a packet's link-local source approves itself
+	// (discovery.AnnouncementLink; backlog B49). Nil reads
+	// Interface.Addrs. Tests set it to model a link.
+	InterfaceAddrs func() ([]net.Addr, error)
 }
 
 const (
@@ -330,6 +339,12 @@ type MediaServerDiscoveryClient struct {
 	dispatcher     discovery.SOAPDispatcher
 	nowFunc        func() time.Time
 	detailFetchSem chan struct{}
+
+	// link says what a packet's source approves on the link this client's
+	// M-SEARCHes go out on: a link-local source approves itself only on a
+	// zero-configuration IPv4 link (backlog B49). Read when the client is
+	// built and refreshed before every M-SEARCH, by runTickLoop.
+	link *discovery.AnnouncementLink
 
 	runMu     sync.RWMutex
 	conn      *net.UDPConn
@@ -435,8 +450,10 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		// LAN device, possibly rogue or spoofed), so the client relays a
 		// 3xx verbatim rather than following it toward loopback or a
 		// link-local metadata address, and refuses to connect to either
-		// unless the packet came from that address
-		// (discovery.NewDeviceFetchClient, the renderer client's too).
+		// unless the packet came from that address, and to a link-local one
+		// unless this client's link is a zero-configuration one
+		// (discovery.NewDeviceFetchClient, the renderer client's too, under
+		// the approval c.link gives).
 		cfg.Dispatcher = &discovery.HTTPClientDispatcher{
 			Client: discovery.NewDeviceFetchClient(cfg.DetailFetchTimeout),
 		}
@@ -453,6 +470,7 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		detailFetchSem: make(chan struct{}, 2),
 		lastLocation:   make(map[string]string),
 		inFlight:       make(discovery.DetailFetchClaims),
+		link:           discovery.NewAnnouncementLink(logger, "upstream server discovery", cfg.Interface, cfg.InterfaceAddrs),
 		sendErrs:       discovery.NewSendFailureLog(logger, "M-SEARCH", cfg.Interface.Name, "upstream server discovery", cfg.MSearchInterval),
 		writeMSearch:   (*net.UDPConn).WriteToUDP,
 	}, nil
@@ -599,7 +617,10 @@ func (c *MediaServerDiscoveryClient) runLoop(ctx context.Context) {
 // entries each tick.
 func (c *MediaServerDiscoveryClient) runTickLoop(ctx context.Context) {
 	defer c.wg.Done()
-	// Fire one immediately so the cache populates without waiting.
+	// Fire one immediately so the cache populates without waiting. The link
+	// is read again before every search, so the answers to it are judged by
+	// the link as it was when it went out (discovery.AnnouncementLink).
+	c.link.Refresh()
 	c.sendMSearch()
 	t := time.NewTicker(c.cfg.MSearchInterval)
 	defer t.Stop()
@@ -608,6 +629,7 @@ func (c *MediaServerDiscoveryClient) runTickLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			c.link.Refresh()
 			c.sendMSearch()
 			// Prune the shadow bookkeeping in the SAME step as the cache
 			// eviction so the two can't drift — an entry that ages out
@@ -651,8 +673,10 @@ func buildMSearchPacket(searchTarget string) []byte {
 //
 // `src` is the address the packet came from. A LOCATION may lead the
 // bridge to this machine or a link-local address only when it is that
-// address (discovery.LocationFromSource here, and the default client's
-// dial check on the fetch); tests pass nil, which matches no address.
+// address, and to a link-local one only when this client's link is a
+// zero-configuration one (c.link.Location here, and the default client's
+// dial check on the fetch, under the approval it returns); tests pass nil,
+// which matches no address.
 func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []byte, src *net.UDPAddr) {
 	hdr, err := discovery.ParseSSDPHeaders(packet)
 	if err != nil {
@@ -678,8 +702,11 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 	// as ParseSSDPHeaders' own refusals do: a known UDN is still refreshed
 	// and an unknown one skipped, and the move detector never follows it
 	// (backlog B14: a known server re-announced from elsewhere with a
-	// LOCATION on the console was fetched there).
-	location := discovery.LocationFromSource(hdr.Location, src)
+	// LOCATION on the console was fetched there). approval is what the
+	// fetch runs under and what the cache records beside the control URL
+	// it finds (backlog B49: a link-local source approves itself only on a
+	// zero-configuration link).
+	location, approval := c.link.Location(hdr.Location, src)
 	if location == "" && hdr.Location != "" {
 		logger.Debug("SSDP LOCATION refused: its host may lead to this machine or a link-local "+
 			"address, and the packet did not come from there", "udn", udn, "location", hdr.Location,
@@ -714,7 +741,7 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 				!sameURLHost(location, prev) {
 				logger.Debug("upstream server moved; re-fetching description",
 					"udn", udn, "from", prev, "to", location)
-				c.spawnDetailFetch(ctx, udn, location, src, now)
+				c.spawnDetailFetch(ctx, udn, location, approval, now)
 			}
 		}
 		return
@@ -722,7 +749,7 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 	if location == "" {
 		return
 	}
-	c.spawnDetailFetch(ctx, udn, location, src, now)
+	c.spawnDetailFetch(ctx, udn, location, approval, now)
 }
 
 // sameURLHost reports whether two URLs share the same host:port.
@@ -834,21 +861,23 @@ func (c *MediaServerDiscoveryClient) releaseFetch(udn string) {
 // 0→1 (the only shape that panics under a concurrent Wait). Stop()'s Wait
 // can't return until runLoop returns, by which time no further fetch Adds are
 // issued.
-func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, src *net.UDPAddr, now time.Time) {
+func (c *MediaServerDiscoveryClient) spawnDetailFetch(ctx context.Context, udn, location string, approval discovery.DialApproval, now time.Time) {
 	if !c.claimFetch(udn) {
 		return
 	}
 	c.wg.Add(1)
-	go c.fetchAndCacheDetails(ctx, udn, location, src, now)
+	go c.fetchAndCacheDetails(ctx, udn, location, approval, now)
 }
 
 // fetchAndCacheDetails downloads + parses the device description for a
 // newly-discovered UDN, extracts the ContentDirectory controlURL, and
 // caches it. Bounded by a semaphore so a NOTIFY storm can't fan out
-// unbounded TCP connections. The fetch carries src, the address of the
-// packet that named location, so the default client connects to this
-// machine or a link-local address only when that is where it came from.
-func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context, udn, location string, src *net.UDPAddr, lastSeenAt time.Time) {
+// unbounded TCP connections. The fetch carries approval, what the packet
+// that named location approves on this client's link (c.link.Location), so
+// the default client connects to this machine or a link-local address only
+// when that is where it came from, and to a link-local one only on a
+// zero-configuration link; the cache records it beside the control URL.
+func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context, udn, location string, approval discovery.DialApproval, lastSeenAt time.Time) {
 	// Paired with the wg.Add(1) in spawnDetailFetch. Deferred at the very top
 	// so it fires on EVERY return path (including the semaphore-acquire
 	// ctx.Done bail below), letting Stop()'s Wait() observe completion.
@@ -875,7 +904,7 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(discovery.WithAnnouncementSource(runCtx, src), c.cfg.DetailFetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(discovery.WithDialApproval(runCtx, approval), c.cfg.DetailFetchTimeout)
 	defer cancel()
 	desc, err := discovery.FetchDeviceDescription(fetchCtx, c.dispatcher, location)
 	// FetchDeviceDescription returns a "no AVTransport service" error
@@ -908,7 +937,7 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		DescriptionURL:             location,
 		// The approval this fetch ran under, kept with the URL it found,
 		// so the ingest and the proxy dial that URL under it too.
-		DialApproval: discovery.AnnouncedFrom(src),
+		DialApproval: approval,
 		LastSeenAt:   lastSeenAt,
 	}
 	if c.cfg.Configured != nil && c.cfg.Configured(udn) {
