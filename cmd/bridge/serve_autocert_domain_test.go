@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
@@ -62,9 +63,22 @@ func TestServePublishesNoAutocertDomainCredential(t *testing.T) {
 	// registered before the bridge's drain, so it is put back after serve
 	// has returned.
 	rec := loggingtest.Record(t)
-	b := bootServe(t, "--config", cfgPath)
+	// Launched here rather than through bootServe, which waits for the TLS
+	// fingerprint a public bridge does not print (its phones do not pin the
+	// certificate it serves), as the other public-mode serve tests do.
+	ctx, cancel := context.WithCancel(context.Background())
+	stdout, stderr := &safeBuffer{}, &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- run(ctx, []string{"serve", "--config", cfgPath}, stdout, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	console := newLiveConsole(ports.admin)
-	waitForAdminReady(t, console.addr, b.done, b.stderr)
+	apiAddr := "127.0.0.1:" + strconv.Itoa(ports.api)
+	waitForAdminReady(t, console.addr, done, stderr)
+	waitForAdminReady(t, apiAddr, done, stderr)
 	want := "https://bridge.example.test:" + strconv.Itoa(ports.api)
 
 	// What any caller sees, a token or none.
@@ -72,9 +86,9 @@ func TestServePublishesNoAutocertDomainCredential(t *testing.T) {
 		Timeout:   10 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
-	resp, err := phone.Get("https://" + b.addr + "/v1/health")
+	resp, err := phone.Get("https://" + apiAddr + "/v1/health")
 	if err != nil {
-		t.Fatalf("GET /v1/health: %v; stderr=%s", err, b.stderr.String())
+		t.Fatalf("GET /v1/health: %v; stderr=%s", err, stderr.String())
 	}
 	health, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -93,8 +107,8 @@ func TestServePublishesNoAutocertDomainCredential(t *testing.T) {
 
 	// What the pairing link carries: with no url in the request, its primary
 	// is the one public mode builds from the domain.
-	session := console.login(t, password, http.StatusOK, b.stderr)
-	mintResp := console.do(t, http.MethodPost, "/api/tokens", `{"name":"boot test"}`, session, b.stderr)
+	session := console.login(t, password, http.StatusOK, stderr)
+	mintResp := console.do(t, http.MethodPost, "/api/tokens", `{"name":"boot test"}`, session, stderr)
 	body, err := io.ReadAll(mintResp.Body)
 	mintResp.Body.Close()
 	if err != nil {
@@ -117,10 +131,10 @@ func TestServePublishesNoAutocertDomainCredential(t *testing.T) {
 	}
 
 	// What serve printed and logged.
-	if !strings.Contains(b.stdout.String(), "Public mode — domain: bridge.example.test\n") {
-		t.Errorf("the banner does not name the host the domain names:\n%s", b.stdout.String())
+	if !strings.Contains(stdout.String(), "Public mode — domain: bridge.example.test\n") {
+		t.Errorf("the banner does not name the host the domain names:\n%s", stdout.String())
 	}
-	for name, s := range map[string]string{"stdout": b.stdout.String(), "stderr": b.stderr.String()} {
+	for name, s := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
 		if carries(s) {
 			t.Errorf("serve's %s carries the secret:\n%s", name, s)
 		}

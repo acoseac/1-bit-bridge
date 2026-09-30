@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1388,12 +1389,19 @@ type AutocertConfig struct {
 	// clients (and the operator's browser) dial. Required when
 	// `deployment.mode: public` is set; ignored otherwise.
 	//
+	// A host name alone. Normalize serves any other value as the host it
+	// names (AutocertHost), and one that names none as
+	// InvalidAutocertDomain, with a warning either way (backlog B66).
+	//
 	// Consumed by:
 	//   - Admin Origin allowlist (PR 2)
 	//   - autocert.Manager.HostPolicy (PR 3) — only Domain is
 	//     accepted as a host for cert minting
 	//   - tls.Manager SNI gate (PR 3) — only requests whose SNI
 	//     matches Domain hit the autocert path
+	//   - public mode's advertised endpoint, `https://<domain>:<listen
+	//     port>`, in /v1/health and every pairing QR, and the startup
+	//     banner
 	Domain string `yaml:"domain,omitempty"`
 
 	// Email is the operator's contact address registered with the
@@ -1424,6 +1432,100 @@ type AutocertConfig struct {
 	// True is the operator's promise that the mapping is in
 	// place; Validate cannot probe the WAN side.
 	External443Mapping bool `yaml:"external443Mapping,omitempty"`
+}
+
+// InvalidAutocertDomain is the host name Normalize stores in autocert.domain
+// in place of a value that names no host AutocertHost can read (backlog
+// B66): a name under .invalid, which RFC 6761 reserves as one that never
+// resolves. Every consumer then reads a host that matches nothing and
+// carries nothing the operator wrote, where the value itself was published
+// in /v1/health and the pairing QR and printed in the banner. Such a value
+// never worked: the ACME whitelist refuses it, no browser Origin and no TLS
+// server name can equal it, and the app cannot parse the URL built from it.
+// Blanking it instead would make Validate, which refuses an empty domain in
+// public mode, stop a bridge from starting after an update, and its phones
+// may still reach it through customEndpoints.
+const InvalidAutocertDomain = "autocert-domain.invalid"
+
+// autocertDomainServedAsItsHost and autocertDomainNamesNoHost are what
+// Normalize logs, once per load, when it serves autocert.domain as the host
+// it names, or as InvalidAutocertDomain.
+const (
+	autocertDomainServedAsItsHost = "autocert.domain is a host name alone; served without the scheme, " +
+		"user name, password, port, path, query or fragment it carries; a save stores it that way"
+	autocertDomainNamesNoHost = "autocert.domain names no host that can be read; served as " +
+		InvalidAutocertDomain + ", a name that resolves nowhere, until it is set to the host name " +
+		"clients dial; a save stores it that way"
+)
+
+// AutocertHost returns the host name an autocert.domain value names, or ""
+// when it names none that can be read (backlog B66).
+//
+// The field is a host name alone, and every consumer wants one: public mode
+// builds `https://<domain>:<listen port>` from it as a string, in /v1/health
+// (which answers any caller) and in every pairing QR, the banner prints it,
+// and the ACME host whitelist, the TLS SNI route and the console's Origin
+// allowlist compare against it as a host. A hand edit that left
+// `user:password@host` in it was published whole, and matched nothing any
+// consumer compares, so the bridge could neither mint a certificate for it
+// nor log a browser into its console. So the value is read the way a URL's
+// authority is, and what it returns is the host alone: without a scheme, a
+// user name and password, a port, a path, a query or a fragment.
+//
+// Three rules keep what it returns clean:
+//   - An IP address written alone is returned as written: url.Parse reads
+//     one written without brackets wrongly (2001:db8::1 as the host
+//     2001:db8: and the port 1), and the console's Origin allowlist
+//     compares it with a browser's Origin as written.
+//   - Nothing that precedes an "@" is ever returned. An "@" after the first
+//     "/", "?" or "#" could as well end user information a hand edit left
+//     unescaped (url.Parse reads user:12/34@host as the host "user" and the
+//     port 12), so a value with one there names no host that can be read.
+//   - A value url.Parse cannot read as an authority names none either (a
+//     password with a space in it).
+//
+// What it returns is a fixed point, so Normalize stays idempotent and
+// `bridge init --domain`, which refuses a value this would change, takes
+// back what Normalize stores. An IPv6 address keeps its brackets, and a zone
+// its escape, for the same reason.
+func AutocertHost(value string) string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return ""
+	}
+	if _, err := netip.ParseAddr(v); err == nil {
+		return v
+	}
+	rest := v
+	if i := strings.Index(v, "://"); i > 0 && isURLScheme(v[:i]) {
+		rest = v[i+len("://"):]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 && strings.Contains(rest[i:], "@") {
+		return ""
+	}
+	u, err := url.Parse("//" + rest)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if strings.Contains(host, ":") {
+		host = "[" + strings.ReplaceAll(host, "%", "%25") + "]"
+	}
+	return host
+}
+
+// isURLScheme reports whether s is a URL scheme as RFC 3986 spells one: a
+// letter, then letters, digits, "+", "-" or ".".
+func isURLScheme(s string) bool {
+	for i, r := range s {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z':
+		case i > 0 && ('0' <= r && r <= '9' || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // listenAddrIsPort443 reports whether the configured ListenAddress
@@ -2811,10 +2913,11 @@ func RepairLibraryName(name string) string {
 
 // Normalize rewrites the fields whose canonical on-disk form differs from
 // what an operator might reasonably type: the two enrich base URLs (trim
-// whitespace + trailing slash), the public-mode autocert domain (trim),
+// whitespace + trailing slash), the autocert domain (the host it names,
+// AutocertHost, in public mode and wherever autocert is enabled),
 // customEndpoints (prune-and-warn to the entries that survive
-// ValidateCustomEndpoints, each without a user name, password, query or
-// fragment it carried), and the library name (RepairLibraryName, and
+// ValidateCustomEndpoints, each without a user name, password, path, query
+// or fragment it carried), and the library name (RepairLibraryName, and
 // DefaultLibraryName for a blank one). Idempotent — running it twice
 // produces the same Config as running it once.
 //
@@ -2878,14 +2981,36 @@ func (c *Config) Normalize() error {
 		}
 	}
 
-	// autocert.domain is only consumed in public mode (tlsacme.New, the
-	// admin Origin allowlist, the SNI gate), and Validate only enforces it
-	// there — so the trim stays gated on IsPublic to keep this a pure
-	// extraction of the previous in-Validate behaviour. A typo'd
-	// deployment.mode reports non-public here and Validate surfaces the
-	// mode error separately, exactly as before.
-	if c.IsPublic() {
-		c.Autocert.Domain = strings.TrimSpace(c.Autocert.Domain)
+	// autocert.domain: served as the host name it names (AutocertHost), and
+	// as InvalidAutocertDomain when it names none, with a warning either
+	// way (backlog B66). Public mode publishes `https://<domain>:<port>` to
+	// any caller of /v1/health and in every pairing QR, and prints the
+	// domain in its banner, so a hand edit that left `user:password@host`
+	// here was published whole; every other consumer (the ACME whitelist,
+	// the SNI route, the console's Origin allowlist) compares a host and
+	// matched nothing. Repaired, never refused: the value loaded before,
+	// and Validate refuses only an empty one, which this never leaves.
+	//
+	// Read in public mode, and by the ACME manager wherever autocert is
+	// enabled (Validate checks its prerequisites only in public mode, and
+	// serve starts it in either posture and prints the domain). A loopback
+	// config with autocert off never reads the field, so its value is left
+	// as written and not warned about. A typo'd deployment.mode reports
+	// non-public here and Validate surfaces the mode error separately.
+	if c.IsPublic() || c.Autocert.Enabled {
+		d := strings.TrimSpace(c.Autocert.Domain)
+		if d != "" {
+			switch host := AutocertHost(d); {
+			case host == "":
+				validateLogger.Warn(autocertDomainNamesNoHost, "field", "autocert.domain")
+				d = InvalidAutocertDomain
+			case host != d:
+				validateLogger.Warn(autocertDomainServedAsItsHost,
+					"field", urlFieldForLog("autocert.domain", "https://"+host))
+				d = host
+			}
+		}
+		c.Autocert.Domain = d
 	}
 
 	// libraryName: trimmed, and a blank one served as DefaultLibraryName.
@@ -3438,17 +3563,29 @@ func validateRenderTempDir(tempDir string, libraryRoots []string) error {
 const maxCustomEndpointHostLen = 255
 
 // errCustomEndpointCredentials is what a custom endpoint carrying a user
-// name, a password, a query or a fragment is refused, or published without
-// them, for: the parts of a URL that carry a credential. /v1/health
-// publishes the list to any caller, a token or none, and every pairing QR
-// carries it (backlog B54). The bridge's own listener reads none of them,
-// and the phone relies on none: it sets its own Authorization header (the
-// bearer token) on every request, its request delegates cancel every
-// challenge but the server's certificate, and its request builder sets the
-// query of every request that has one, the file routes included
+// name, a password, a path, a query or a fragment is refused, or published
+// without them, for: the parts of a URL that can carry a credential.
+// /v1/health publishes the list to any caller, a token or none, and every
+// pairing QR carries it (backlog B54). The bridge's own listener reads none
+// of them, and the phone relies on none: it sets its own Authorization
+// header (the bearer token) on every request, its request delegates cancel
+// every challenge but the server's certificate, and its request builder
+// sets the query of every request that has one, the file routes included
 // (BridgeSourceClient's PinningDelegate, PinningTaskDelegate and
 // buildRequest, read 2026-09-28).
-var errCustomEndpointCredentials = errors.New("carries a user name, password, query or fragment, " +
+//
+// The path since backlog B66. buildRequest sets every data request's path
+// over the endpoint's, and the requests that append to it instead (the
+// pairing requests and the redeem, the first-contact /v1/health probe and
+// the /v1/events stream, through appendingPathComponent) reach a path the
+// bridge does not serve, which answers 404: a redeem that meets one fails
+// pairing ("doesn't accept pairing codes"). So no deployment used a path,
+// every request reaches the bridge without it, and a token someone put in
+// one reached every caller of /v1/health for nothing (read in the app's
+// BridgeSourceClient, BridgePairingClient, BridgeEventStream and
+// BridgePairingPersistence, 2026-09-30). A bare "/" is not counted: it is
+// the root, and the ordinary way to paste an endpoint.
+var errCustomEndpointCredentials = errors.New("carries a user name, password, path, query or fragment, " +
 	"which /v1/health (answering any caller) and every pairing QR would publish")
 
 // customEndpointPublishedWithoutCredentials is what Normalize logs, once per
@@ -3456,15 +3593,17 @@ var errCustomEndpointCredentials = errors.New("carries a user name, password, qu
 // credential parts. Its own message, because "dropped" is not what happened
 // to it.
 const customEndpointPublishedWithoutCredentials = "custom endpoint published without its user name, " +
-	"password, query or fragment; a save stores it that way"
+	"password, path, query or fragment; a save stores it that way"
 
 // HasCredentialParts reports whether raw parses as a URL with a part that
 // can carry a credential: a user name or a password (an empty one included,
-// `https://@host`), a query (`?`, empty or not) or a fragment. A value that
-// does not parse answers false; the prune drops it for that. The one test of
-// "carries a credential" for a custom endpoint: the prune
-// (ValidateCustomEndpoints), the console's settings PATCH
-// (CheckCustomEndpoints) and `bridge init --domain` all ask it.
+// `https://@host`), a path other than the root (backlog B66), a query (`?`,
+// empty or not) or a fragment. A value that does not parse answers false;
+// the prune drops it for that. The one test of "carries a credential" for a
+// custom endpoint: the prune (ValidateCustomEndpoints) and the console's
+// settings PATCH (CheckCustomEndpoints) ask it. `bridge init --domain`
+// asked it too until B66, and asks AutocertHost now, which removes every
+// part this reads and a scheme and a port besides.
 func HasCredentialParts(raw string) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && hasCredentialParts(u)
@@ -3472,15 +3611,28 @@ func HasCredentialParts(raw string) bool {
 
 // hasCredentialParts is HasCredentialParts over a URL already parsed.
 func hasCredentialParts(u *url.URL) bool {
-	return u.User != nil || u.RawQuery != "" || u.ForceQuery ||
+	return u.User != nil || hasPathBeyondRoot(u) || u.RawQuery != "" || u.ForceQuery ||
 		u.Fragment != "" || u.RawFragment != ""
 }
 
+// hasPathBeyondRoot reports whether u has an authority and names a path
+// after it other than none or the root "/" (url.URL.Path is decoded, so
+// "/%2F" reads as "//" and counts). Without an authority there is no
+// endpoint for the path to be part of: "not a url" parses as a relative
+// reference whose path is the whole value, and the prune drops it for
+// having no scheme, as it always did.
+func hasPathBeyondRoot(u *url.URL) bool {
+	return u.Host != "" && u.Path != "" && u.Path != "/"
+}
+
 // withoutCredentialParts returns u without the parts hasCredentialParts
-// reads: the endpoint an entry is published as.
+// reads: the endpoint an entry is published as. A root path is kept.
 func withoutCredentialParts(u *url.URL) *url.URL {
 	out := *u
 	out.User = nil
+	if hasPathBeyondRoot(u) {
+		out.Path, out.RawPath = "", ""
+	}
 	out.RawQuery, out.ForceQuery = "", false
 	out.Fragment, out.RawFragment = "", ""
 	return &out
@@ -3488,7 +3640,8 @@ func withoutCredentialParts(u *url.URL) *url.URL {
 
 // CheckCustomEndpoints says why a customEndpoints list the operator TYPED
 // (the console's settings PATCH) must be refused, or returns nil: an entry
-// that carries a user name, password, query or fragment (HasCredentialParts),
+// that carries a user name, password, path, query or fragment
+// (HasCredentialParts),
 // named by its position and its scheme and host, never its value. A list a
 // config or the environment already holds is repaired instead, published
 // without those parts (ValidateCustomEndpoints, in Normalize): refusing it
@@ -3518,8 +3671,9 @@ func CheckCustomEndpoints(in []string) error {
 // and one that does not parse is not echoed at all, since the parse error
 // quotes it.
 //
-// An entry that carries a user name, password, query or fragment
-// (HasCredentialParts) is KEPT WITHOUT THEM (backlog B54). Everything that
+// An entry that carries a user name, password, path, query or fragment
+// (HasCredentialParts) is KEPT WITHOUT THEM (backlog B54; the path since
+// B66). Everything that
 // publishes an endpoint reads the list this returns: /v1/health, which
 // answers any caller, the pairing QR and the console's endpoints panel. The
 // phone and the bridge rely on none of those parts
@@ -3572,9 +3726,9 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: hostname is %d characters, exceeds %d-character limit", i, hostLen, maxCustomEndpointHostLen))
 			continue
 		}
-		// An entry that carries a user name, password, query or fragment
-		// is published without them (the docblock says why), so the
-		// published form is what is deduped and kept, and one that
+		// An entry that carries a user name, password, path, query or
+		// fragment is published without them (the docblock says why), so
+		// the published form is what is deduped and kept, and one that
 		// duplicates another once they are gone is dropped silently,
 		// like any duplicate: nothing of it is published.
 		strip := hasCredentialParts(u)
@@ -3586,10 +3740,10 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 		// collapse. url.String() does NOT treat an empty path
 		// ("https://host") and a root path ("https://host/") as equal,
 		// so normalise a bare "/" path to "" before building the key —
-		// that's the common trailing-slash paste case. Deeper paths are
-		// compared verbatim (no further path/port normalisation); the
-		// operator's exact input form is what we keep in `kept`, less
-		// any credential part.
+		// that's the common trailing-slash paste case. A deeper path is
+		// gone by now (the strip above), so no further path or port
+		// normalisation is needed; the operator's exact input form is what
+		// we keep in `kept`, less any credential part.
 		cu := *u
 		if cu.Path == "/" {
 			cu.Path = ""
@@ -4012,13 +4166,3 @@ func (c *Config) Save(path string) error {
 	tmpName = "" // suppress defer cleanup
 	return nil
 }
-
-// SCAFFOLD (red-first run, replaced by the fix): main's behaviour.
-const InvalidAutocertDomain = "autocert-domain.invalid"
-
-const autocertDomainServedAsItsHost = "scaffold: served as its host"
-
-const autocertDomainNamesNoHost = "scaffold: names no host"
-
-// AutocertHost is main's behaviour in the scaffold: the value, trimmed.
-func AutocertHost(value string) string { return strings.TrimSpace(value) }

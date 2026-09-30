@@ -195,6 +195,36 @@ func descriptionHostForLog(raw string) string {
 	return u.Host
 }
 
+// fetchErrorForLog renders err, the description fetch's error for the manual
+// URL raw, for a log line: each rendering of the URL in its text is replaced
+// by the URL's host (descriptionHostForLog), so the line keeps the reason
+// the fetch failed and loses the URL (backlog B66). The fetch names the URL
+// in two renderings. Discovery's own wrapping quotes it as the poller passed
+// it (`GET <url>: …`, `parse description <url>: …`), and net/http's
+// *url.Error quotes the request URL as the client re-serialized it, masking
+// a password and nothing else, so a token written as the user name, a query
+// and a fragment reach it whole. The *url.Error's own URL field is that
+// rendering exactly, so neither form is guessed. The longer is replaced
+// first, so a rendering that contains the other is not left half replaced.
+func fetchErrorForLog(err error, raw string) string {
+	msg := err.Error()
+	forms := []string{raw}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		forms = append(forms, ue.URL)
+	}
+	if len(forms) == 2 && len(forms[1]) > len(forms[0]) {
+		forms[0], forms[1] = forms[1], forms[0]
+	}
+	host := descriptionHostForLog(raw)
+	for _, f := range forms {
+		if f != "" {
+			msg = strings.ReplaceAll(msg, f, host)
+		}
+	}
+	return msg
+}
+
 func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUDNs map[string]struct{}) {
 	descURL := strings.TrimSpace(srv.DescriptionURL)
 	if descURL == "" || srv.Key == "" {
@@ -232,16 +262,19 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	// populating desc.Services. Tolerate that specific shape and let the
 	// ContentDirectory lookup below be the real verdict. Same allowance
 	// the SSDP path makes.
+	// Both Debug lines name the host alone, as the warnings do, and the
+	// fetch's error goes through fetchErrorForLog, which takes the URL out
+	// of it (backlog B66): they named the URL whole until then.
 	if err != nil && len(desc.Services) == 0 {
 		p.log.Debug("UPnP manual server: description fetch failed",
-			slog.String("server", srv.Name), slog.String("url", descURL),
-			slog.String("err", err.Error()))
+			slog.String("server", srv.Name), slog.String("host", descriptionHostForLog(descURL)),
+			slog.String("err", fetchErrorForLog(err, descURL)))
 		return
 	}
 	ctrlURL := lookupContentDirectoryControlURL(desc.Services)
 	if ctrlURL == "" {
 		p.log.Debug("UPnP manual server: description carries no ContentDirectory service",
-			slog.String("server", srv.Name), slog.String("url", descURL))
+			slog.String("server", srv.Name), slog.String("host", descriptionHostForLog(descURL)))
 		return
 	}
 

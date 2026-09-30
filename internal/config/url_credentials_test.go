@@ -323,6 +323,10 @@ func TestHasCredentialPartsReadsEveryPartThatCanCarryOne(t *testing.T) {
 		{"https://host:7788/path/", true},
 		{"https://host:7788//", true},
 		{"https://host:7788/%2F", true},
+		// A path is an endpoint's only after an authority: these are no
+		// URL of any host, and the prune drops them for that.
+		{"not a url", false},
+		{"/a/path/alone", false},
 		{"https://[fe80::1%25en0]:7788", false},
 		{"https://user@host", true},
 		{"https://user:pw@host", true},
