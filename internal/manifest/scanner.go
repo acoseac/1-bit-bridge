@@ -1443,10 +1443,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// whose merged re-extract differs) takes the full path.
 			if existing != nil && existing.Size == pi.info.Size() &&
 				existing.MTimeNS == pi.info.ModTime().UnixNano() {
-				if existing.ExtractorVersion >= ExtractorVersion &&
-					!s.needsLocalArtworkRecovery(existing.ArtworkMBID) &&
-					!sidecarLyricsDrifted(pi.abs, existing, ec) &&
-					!s.folderArtDrifted(pi.abs, pi.rel, existing, ec) {
+				if s.rowIsCurrent(pi, existing, ec) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -1476,7 +1473,9 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// stampLocalArtwork already re-wrote the missing cache
 				// file, and the row itself is unchanged. So does a cover
 				// change beside a track whose embedded picture wins: the
-				// stamp records the folder's new key.
+				// stamp records the folder's new key. And so does a file
+				// its extractor refuses: its row as it was, stamped
+				// current and refused.
 				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec, existing); t != nil {
 					tracksToWrite = []*Track{t}
 				}
@@ -1509,8 +1508,14 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					return
 				}
 				// A file read whole that its extractor refused (not
-				// its format): indexed by name, as it always was.
+				// its format): indexed by name, as it always was, and
+				// its row records the refusal, so the skip gate asks it
+				// nothing more until the file or the extractor changes
+				// (rowIsCurrent). Logged once for each size and mtime:
+				// this path reads a file only when no row describes it
+				// (new, changed, or its row could not be looked up).
 				scanLogger.Error("extract", "path", pi.abs, "err", err)
+				t.extractRefused = true
 			}
 			if existing != nil {
 				// A folder cover the extraction could not read: the
@@ -1611,6 +1616,28 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 	}
 }
 
+// rowIsCurrent is the skip gate's question for a file whose size and mtime
+// are its row's: is the row what extracting the file now would give it? Not
+// when its extractor version is stale. When the row records that this
+// version refused the file (TrackStat.ExtractRefused: read whole, not its
+// format), yes, and nothing else is asked: the extraction of a refused file
+// stops before its lyrics and its artwork, so no sidecar, cover or cache
+// file can change what it is given, and each of those questions, asked of a
+// refused row, said yes and re-read the file on every scan, forever
+// (backlog B145). For any other row, no when its local-art cache file is
+// missing, its lyrics sidecar changed or its folder's cover did.
+func (s *Scanner) rowIsCurrent(pi pathInfo, existing *TrackStat, ec *ExtractContext) bool {
+	if existing.ExtractorVersion < ExtractorVersion {
+		return false
+	}
+	if existing.ExtractRefused {
+		return true
+	}
+	return !s.needsLocalArtworkRecovery(existing.ArtworkMBID) &&
+		!sidecarLyricsDrifted(pi.abs, existing, ec) &&
+		!s.folderArtDrifted(pi.abs, pi.rel, existing, ec)
+}
+
 // noteUnsettledArt counts, for the scan's one line (msgUnreadFolderArt),
 // a track whose extraction could not read its folder's cover.
 func (s *Scanner) noteUnsettledArt(rel string, t *Track) {
@@ -1681,23 +1708,33 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 // e.g. parent-dir disc art) → the normal upsert path, whose indexed_at
 // bump is exactly what lets iOS pull the improvement.
 //
-// Failure posture: an EXTRACT error returns nil (skip write AND stamp —
-// the next scan retries; clobbering a good row with a partial extract
-// would be strictly worse, and a transient NAS flap heals itself). That
-// includes a read the extractor itself dropped (dhowden answers a failed
-// read as a tag it cannot parse): ExtractWithContext says the file was not
-// read whole (readFault), and until 2026-09-29, when it did not, such a
-// partial extract reached the diff below as a changed row, replaced the
-// stored one and was stamped current, which no later scan re-read. A
-// stored-row LOOKUP failure fails OPEN to the full upsert (today's
-// pre-guard behaviour — churn plus the same bounded post-scan re-fill
-// window the mergePostScanFields maintenance note describes).
+// Failure posture: a read that did not complete (readFault: an EIO, an
+// ESTALE, a permission, a file gone since the walk) returns nil, writing
+// and stamping nothing (keepUnread), so the row keeps its stale version and
+// the next scan reads the file again: clobbering a good row with a partial
+// extract would be strictly worse, and a transient NAS flap heals itself.
+// That includes a read the extractor itself dropped (dhowden answers a
+// failed read as a tag it cannot parse): ExtractWithContext says the file
+// was not read whole, and until 2026-09-29, when it did not, such a partial
+// extract reached the diff below as a changed row, replaced the stored one
+// and was stamped current, which no later scan re-read. A stored-row LOOKUP
+// failure fails OPEN to the full upsert (today's pre-guard behaviour —
+// churn plus the same bounded post-scan re-fill window the
+// mergePostScanFields maintenance note describes).
 //
-// A file its extractor refused (read whole, not its format) keeps its row
-// as it is, and only its folder-art key moves (SetFolderArtKey, to
-// folderArtNotLookedKey: no cover changes what a refused file is given), so
-// the folder-art gate does not come back for it every scan. stored is the
-// row's stat as the skip gate read it.
+// A file its extractor REFUSED (read whole, not its format) is a read that
+// completed, and its answer holds until the file or the extractor changes.
+// The row keeps what it had (its tags may be what an older extractor read
+// before a stricter one refused the file) and is stamped current and
+// refused: versionStampOnly with extractRefused, so
+// StampExtractorVersionBatch leaves its tags, its lyrics row, indexed_at and
+// enriched_at as they are and records the folder-art key a refusal gets
+// (folderArtNotLookedKey), and the skip gate asks the row nothing more
+// (rowIsCurrent). This returned nil for a refusal too until backlog B145,
+// and the file was re-read, and logged at ERROR, on every scan after an
+// ExtractorVersion bump, forever. The refusal is logged only when the row
+// did not record one: at the same size and mtime, it was logged when it
+// was recorded. stored is the row's stat as the skip gate read it.
 func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext, stored *TrackStat) *Track {
 	t := &Track{
 		Path:    pi.rel,
@@ -1714,15 +1751,12 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 			s.keepUnread(ctx, pi, true, fault)
 			return nil
 		}
-		scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
-		if t.folderArtKey != "" && stored != nil && stored.FolderArtKey != t.folderArtKey {
-			if kerr := s.store.SetFolderArtKey(ctx, pi.rel, t.folderArtKey); kerr != nil {
-				if failure := ctxerr.WithoutCancellation(ctx, kerr); failure != nil {
-					scanLogger.Warn("record folder-art key of a refused file", "path", pi.rel, "err", failure)
-				}
-			}
+		if stored == nil || !stored.ExtractRefused {
+			scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
 		}
-		return nil
+		t.versionStampOnly = true
+		t.extractRefused = true
+		return t
 	}
 	s.noteUnsettledArt(pi.rel, t)
 	old, err := s.store.GetTrack(ctx, pi.rel)
@@ -2077,9 +2111,10 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 			return
 		}
 		// Partition on the versionStampOnly marker (reExtractUnchanged):
-		// unchanged version-stale rows take the light stamp (no
-		// indexed_at / enriched_at / tags_json churn), everything else
-		// the normal upsert. Both legs keep the one-transaction-per-
+		// unchanged version-stale rows, and the refusals of files whose
+		// rows are kept, take the light stamp (no indexed_at /
+		// enriched_at / tags_json churn), everything else the normal
+		// upsert. Both legs keep the one-transaction-per-
 		// batch shape and both count into `committed` so the admin
 		// progress bar doesn't stall during an ExtractorVersion-bump scan.
 		var full []*Track
