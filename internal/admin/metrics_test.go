@@ -245,4 +245,9 @@ func TestTheDiagnosticsMetricsPointerSaysWhoMayScrape(t *testing.T) {
 	if !strings.Contains(got, "metrics.allowCidrs") {
 		t.Error("public-mode pointer does not name metrics.allowCidrs")
 	}
+	// The address alone does not vouch: metricsScrapeVouched also refuses a
+	// request that carries a forwarding header, so the pointer says so.
+	if !strings.Contains(got, "no forwarding header") {
+		t.Error("public-mode pointer does not say the scrape must carry no forwarding header")
+	}
 }

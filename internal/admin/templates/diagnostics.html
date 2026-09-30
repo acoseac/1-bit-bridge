@@ -239,8 +239,10 @@
       The same counters are exposed in Prometheus text format at
       <a href="/metrics"><code>/metrics</code></a>,
       {{if .Data.Public}}to a signed-in session, and without one only to a
-      scraper whose address <code>metrics.allowCidrs</code> lists,
-      connecting directly rather than through a proxy.{{else}}on this
+      scraper whose address <code>metrics.allowCidrs</code> lists and whose
+      requests carry no forwarding header (<code>Forwarded</code>,
+      <code>X-Forwarded-*</code>, <code>X-Real-IP</code> or
+      <code>Via</code>), which a direct scrape never sends.{{else}}on this
       loopback listener only.{{end}} Point a scraper at it if you want
       history — this page shows the current values, not a trend.
     </p>

@@ -2471,7 +2471,7 @@ const metricsPath = "/metrics"
 // 302 to the login form and then reports HTML it cannot parse, where the
 // answer is that it is not allowed.
 const errMsgMetricsNeedsSession = "admin refused: /metrics on a public bridge needs a signed-in session, " +
-	"or a scraper whose address metrics.allowCidrs lists, connecting directly (no proxy in between)"
+	"or a scraper whose address metrics.allowCidrs lists and whose request carries no forwarding header (a direct scrape)"
 
 // metricsForwardingHeaders are the request headers a proxy adds to say it
 // relayed a request: RFC 7239's Forwarded, the de-facto X-Forwarded-*
@@ -2524,10 +2524,13 @@ func metricsScrapeVouched(r *http.Request, allow []string) bool {
 }
 
 // noteRefusedScrape logs, once per process, a public-mode /metrics request
-// refused for want of a session that came straight from this host or a
-// private network: the scraper an upgrade past B171 stops answering, since
-// loopback was implied before. A refusal from a public address (a scanner)
-// or one a proxy relayed says nothing.
+// refused for want of a session that came from this host or a private
+// network and carries no forwarding header: the scraper an upgrade past B171
+// stops answering, since loopback was implied before. A refusal from a
+// public address (a scanner), or of a request carrying a forwarding header
+// (a proxy that announces itself), says nothing. A relay that adds no
+// header reads as a local scraper here as it does to metricsScrapeVouched,
+// so its first refusal logs the line too.
 func (s *Server) noteRefusedScrape(r *http.Request) {
 	ip := remoteIP(r)
 	if ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) || forwardedByAProxy(r) {

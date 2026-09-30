@@ -6796,8 +6796,10 @@ its twin.** The top list is older, shorter, and read first.
   Prometheus on a public bridge that relied on the implied loopback gets
   403 until its address is listed. The first such refusal from this host or
   a private network logs one Warn per process naming the fix
-  (`noteRefusedScrape`); one from a public address (a scanner) or through a
-  proxy logs nothing. Loopback mode is unchanged: its boundary admits this
+  (`noteRefusedScrape`); one from a public address (a scanner) or carrying a
+  forwarding header (a proxy that announces itself) logs nothing, and a
+  relay that adds no header reads as a local scraper there too, so its first
+  refusal logs the Warn. Loopback mode is unchanged: its boundary admits this
   host alone, and `metrics.allowCidrs` plays no part there, as it never did
   (the boundary refused a non-loopback source before the old gate ran, so
   #803's list only ever took effect in public mode).
