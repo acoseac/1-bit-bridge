@@ -34877,6 +34877,265 @@ with `-count=1`, the file restored and the tree checked clean after each.
   endpoint is published now meets a 421 from the listener. No wire change,
   so no Mirror-PR.
 
+## 2026-09-29 — a version-stale re-read that a reconciliation pass would rewrite is judged by the passes at the scan's tail (backlog B188)
+
+Found by the pre-v0.2.1 data-integrity review. The version-stale leg of
+the skip gate (`reExtractUnchanged`) re-extracts an unchanged file, merges
+the post-scan fields from its stored row (`mergePostScanFields`: a stored
+value is kept only where the fresh one is empty) and stamps the row when
+the two marshal alike. The reconciliation passes REWRITE values a file
+sets, and `fillFromPath` gives every untagged file an album, so a row a
+pass had rewritten never marshalled alike: it took the full upsert.
+
+### What was measured on the old code
+
+main at 99f3353e (B187 merged), through the real Store and Scanner
+(`internal/manifest/reconciled_rows_test.go`, each red there):
+
+| case | what the scan did |
+|---|---|
+| a bump (every row one `ExtractorVersion` behind) over 11 rows, 3 of them rewritten by a pass: an untagged album (its folder's name), a minority album artist, a DATE of `0000` (year 0) | the 3 moved (`indexed_at`) and were re-queued for enrichment (`enriched_at` 0); the 8 others stamped |
+| a folder's `cover.jpg` touched (a new folder-art key, B141's re-read), then a subtree scan | the reconciled track served "Some Folder" for "Real Album", moved, and moved again at the next full scan |
+| a file whose tag carries a release (or recording) id that is no MBID, which the enricher replaced | the bump put the tag's value back, moved the row and re-queued it |
+
+Each moved row was written twice per bump: the worker's upsert of the
+file's value, then the tail's pass writing the reconciled one back. The
+v0.2.1 upgrade scan (ExtractorVersion 21) would have done it to every
+reconciled row of a library, and every bump after.
+
+Two findings on the way. One went into the backlog as B222. The other:
+the track-number pass is no source of this churn: the extractor's own
+filename backfill
+(`fillTrackNumberFromFilename`) fills a missing or zero track number with
+the number the pass would, so the fresh value already equals the stored one.
+
+### Which rows each choice moves
+
+- **Remember the value each pass replaced, and keep the reconciled value
+  while the file still reads the replaced one** (the review's first
+  suggestion): rows reconciled before the upgrade carry no record, so the
+  upgrade scan moves and re-enriches exactly the rows main does (the 3 of
+  11 above); only later bumps are clean. Not taken.
+- **Run the passes in ScanSubtree's tail** (its second): a bump's full scan
+  runs the passes already, so a bump moves the same 3 rows; on the subtree
+  case, measured with the passes run after a subtree scan (the hold
+  disabled): the album ends right, but the row moved twice (the file's
+  value, then the reconciled one) and `enriched_at` was reset. Not taken.
+- **Judge each re-read against its siblings' stored rows** (the obvious
+  in-worker version of either): clean on the 3 rows, and it masks
+  extractor changes. A bump that reads a whole album's tag differently
+  (every row "Old Reading" stored, "New Reading" in the files) leaves no
+  outlier among the fresh values, but each re-read judged against its
+  siblings' stored rows is the outlier, voted back to "Old Reading",
+  stamped, and never applied: measured by dropping the overlay (control 2
+  below). Main applies that change (all 3 rows move). Not taken.
+- **Taken: hold, and let the passes judge with every held re-read in
+  place.** A bump moves none of the 3 rows and applies the whole-album
+  change to all 3; the subtree case moves nothing and serves "Real Album".
+
+### The change
+
+- `reExtractUnchanged` holds a re-read that, after the merge, still
+  differs from its row in the album, the album artist, the year or the
+  track number (`reconciledFieldsDiffer`): it returns the UNMERGED Track
+  marked `awaitsReconcile`, and the scan's writer collects it
+  (`Scanner.heldReconciles`) instead of writing it. At most
+  `maxHeldReconciles` (10,000; the scanner's `heldLimit` for tests) are
+  held per scan, each a whole Track until the tail writes it; past the
+  bound a re-read is decided as before.
+- `settleHeldReconciles` runs at the scan's reconciliation head, after the
+  deletion pass and before the passes, with the one routed set: it merges
+  each held re-read with its row as stored now (a row reaped since is
+  dropped), streams the library's rows into the passes' targets with every
+  held re-read's values in place of its row's, runs the five passes in
+  memory in the tail's order (`runReconcileStepsInMemory`), takes each held
+  re-read's four fields from the result, and writes it: a stamp when it
+  then marshals as its row, the whole row otherwise, in the writer's
+  batches. The passes that follow find nothing to change.
+- The five `run*Reconciliation` functions became one table,
+  `reconcileSteps` (label, Info line, pure decision, field copy, store
+  writer), which the tail's loop (`runReconcileStep`) and the settle both
+  read: the order cannot drift. Each step streams the full projection
+  (`reconcileTargetOf`); every pure function reads only its own fields.
+- `ScanSubtree` settles its held re-reads the same way at its tail
+  (`settleSubtreeHeldReconciles`, one routed-set query and one library
+  stream, only when it holds any), before its duplicate restamp. Both scans
+  write held re-reads as they stand on a return that skips the settle
+  (`settleHeldUnreconciled`, deferred; today only a shutdown's, which
+  writes nothing) and on a routed-set failure.
+- `mergePostScanFields` reads a file's release or recording id that is no
+  MBID as no id (`manifest.IsValidMBID`). The enricher's `isValidMBID`
+  answers through it now (it held a copy of the pattern), so the merge and
+  the enricher's scrub agree on what an id is.
+- The acoustic fallback fills a recording id only where the file carries
+  no valid one; it overwrote one the file carried, which the merge (a valid
+  fresh id wins) undid on every bump. `mergePostScanFields`' docblock
+  already said "the fingerprint path fills it when the file does not".
+- `CLAUDE.md`: the rule under Scanner; the reconciliation bullet no longer
+  says every pass is directory-scoped (the MBID year pass crosses folders,
+  bounded to strays).
+
+No `ExtractorVersion` bump and no wire change: extraction is unchanged,
+and a settled re-read writes what the tail's passes would have written.
+
+### Tests
+
+`internal/manifest/reconciled_rows_test.go`:
+`TestScanner_ABumpOverReconciledRowsOnlyStampsThem`,
+`TestScanner_ASubtreeScanAfterACoverTouchKeepsAReconciledAlbumTitle`,
+`TestScanner_ABumpStillAppliesAnExtractorChangeAcrossAWholeAlbum` (the
+control: green on main, and must stay green),
+`TestScanner_ABumpOverAnIDTheEnricherReplacedOnlyStampsIt` (a subtest per
+id), `TestScanner_ReReadsPastTheHoldLimitAreWrittenAsBefore` (a limit of 1
+over two reconciled albums: one row moves, both end reconciled and
+current). `internal/enrich/acoustic_recording_id_test.go`:
+`TestApplyAcousticFallbackKeepsARecordingIDTheFileCarries`.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+1. Never hold (`if false && reconciledFieldsDiffer…`): the bump, subtree
+   and hold-limit tests red; the whole-album control and the id test green.
+2. The settle's stream without the overlay (judged against the stored
+   rows): the whole-album control red, "Old Reading" kept on all three
+   rows, none moved; the others green.
+3. The in-memory passes skipped: the bump, subtree and hold-limit tests red.
+4. `ScanSubtree` settling nothing at its tail: the subtree test red alone
+   (the deferred fallback wrote the re-read as it stood: "Some Folder",
+   moved), which also shows the fallback writes.
+5. Each merge id line back to `== ""`: the release-id subtest red alone,
+   then the recording-id subtest red alone.
+6. The fallback's guard removed: the "valid id the file carries" case red;
+   back to `== ""`: the "value that is no MBID" case red.
+7. The hold limit admitting everything: the hold-limit test red (no row
+   moved).
+
+## 2026-09-29 — in public mode /metrics needs a session unless metrics.allowCidrs vouches for a direct scrape (backlog B171)
+
+Found by the pre-v0.2.1 review and filed as B171 while it was unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured on the old code
+
+main at 24523cff, go1.27.1 on macOS, a public fixture with no
+`metrics.allowCidrs`: the old gate's verdict was measured with the real
+binary before the fix and after it (below). The requests and what they
+returned are kept out of this public record, per SECURITY.md.
+
+The cause, which the rule has to state to be kept: #472 put `/metrics` on
+`isAuthBypassPath` and behind its own `metricsGate`, which judged a scrape
+by its source address alone, and in public mode a source address cannot
+vouch for a scrape. No scraper this project runs depended on the old answer
+(checked, 2026-09-30).
+
+### What was decided
+
+- **A session reads it, as any console page.** `/metrics` is off the bypass
+  list and `metricsGate` is gone, so public mode's `sessionMiddleware` decides
+  it like every other route. A signed-in operator reads it from wherever the
+  console answers (their browser behind a same-host proxy included), which
+  widens nothing: the session is already the trust boundary for everything
+  else the console shows.
+- **Without a session, only a scrape the config vouches for**
+  (`metricsScrapeVouched`): the source address is in `metrics.allowCidrs`, AND
+  the request carries none of `Forwarded`, `X-Forwarded-For`,
+  `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Via`. The B171
+  prompt's shape.
+- **Loopback is not implied.** The handoff before this one proposed keeping
+  the implied loopback on a bridge whose config says no proxy fronts the
+  console (`adminTLSTerminatedByProxy: false`) when no forwarding header is
+  present. Rejected: an autocert public bridge put on 443 beside other
+  services through an SNI router (nginx's `stream` module with
+  `ssl_preread`, HAProxy in TCP mode) relays every connection from 127.0.0.1
+  with its TLS intact, so the flag is false, no header can be added, and the
+  request is indistinguishable from a local scraper. So is anything behind
+  nginx's default `proxy_pass`, which adds no forwarding header. Only the
+  operator knows whether something on the host relays connections to the
+  console, and listing `127.0.0.1/32` (and `::1/128`) is how they say it.
+  The header check still earns its place: it keeps a listed address honest
+  when a proxy that announces itself (HAProxy with `option forwardfor`, Caddy, Traefik,
+  `tailscale serve`) sits on the same address as the scraper.
+- **The refusal is a 403, not the login redirect.** A scraper follows a 302
+  to `/login` and then reports that it cannot parse HTML, where the true
+  answer is that it is not allowed. The body (`errMsgMetricsNeedsSession`)
+  names what would let it in.
+- **One Warn per process** (`noteRefusedScrape`) the first time a refused
+  request came straight from this host or a private network: the local
+  Prometheus that an upgrade past this change stops answering. A refusal
+  from a public address (a scanner, which every public bridge sees) or one a
+  proxy relayed logs nothing.
+- **Loopback mode is untouched.** Its boundary (`loopbackOnly`) refuses a
+  non-loopback source before any route runs, so `metrics.allowCidrs` never
+  took effect there; #803's record says the list exists because loopback is
+  unreachable from a Prometheus outside the container, which was true only of
+  a public-mode container, the only mode whose console listens beyond
+  loopback. The config docblock claimed an unparseable entry "is dropped at
+  load with a warning"; nothing validates the list at load, and the request
+  path skips such an entry silently. Both docblocks now say what holds.
+
+### Measured on the fix
+
+The same fixture, the fixed binary: a request shaped as a same-host proxy
+relays it, without a session, 403 (165 bytes, no `Location`); `/metrics`
+straight from loopback 403, with one `a /metrics scrape without a session
+was refused` Warn in the journal; with a session minted through `bridge
+admin login-link`, 200. With `metrics.allowCidrs: [127.0.0.1/32]`: straight
+from loopback 200 (the exposition), the proxy-shaped request still 403.
+The build with B170 merged in answers the same.
+
+### Tests
+
+`internal/admin/metrics_test.go`, through the console's real handler chain:
+`TestPublicMetricsThroughASameHostProxyNeedsASession` (the same-host proxy shape,
+with and without loopback listed),
+`TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames` (no list;
+listed and unlisted sources, IPv4-mapped, an unparseable entry and remote
+address; each forwarding header from each listed address),
+`TestPublicMetricsAnswersASignedInSession` (through the proxy shape, from the
+LAN and from the internet; a cookie naming no session is refused),
+`TestLoopbackMetricsFollowsTheConsolesLoopbackRule` (a pin: the list plays
+no part there), `TestAPublicMetricsRefusalFromThisHostOrTheLANIsLoggedOnce`,
+`TestTheDiagnosticsMetricsPointerSaysWhoMayScrape` (the page's paragraph
+offering `/metrics` said "on this loopback listener only" in public mode
+too). The two `metricsGate` unit tests in `ops_hardening_test.go` went with
+the gate; their cases are in the table test. `…MetricsLoopbackBypassesSessionInPublicMode`,
+which pinned the bypass, and its twin are replaced by the tests above.
+
+Red on main (the tests first, the fix after): the proxy, table, session,
+logging and diagnostics tests; the loopback-mode test is a pin and passed
+on both.
+
+### Negative controls
+
+Each with one part of the fix reverted, at 60037422, `-count=1`:
+
+- NC1 `/metrics` back on `isAuthBypassPath`: the proxy, table, session and
+  logging tests red (with the gate gone, the bypass serves everyone).
+- NC2 no forwarding-header check: the proxy and table tests red.
+- NC3 loopback implied again: the table test red.
+- NC4 the unauthenticated `/metrics` answered with the login redirect: the
+  proxy, table and session tests red (a 302 with a `Location`).
+- NC5 the Warn logged on every refusal and from anywhere: the logging test
+  red.
+- NC6 the Diagnostics page not told the mode: the diagnostics test red.
+
+### Review rounds after the merge with main (2026-09-30)
+
+CodeRabbit on 443dea08: the Diagnostics pointer said a sessionless scrape
+must connect "directly rather than through a proxy", and the 403 "no proxy
+in between", where the gate decides by the request's headers: both name
+the forwarding headers now, and the diagnostics test asserts it (red with
+the old template). The CLAUDE.md bullet and `noteRefusedScrape`'s docblock
+said a refusal "through a proxy" logs nothing: only one carrying a
+forwarding header does, and a relay that adds none logs the Warn as a
+local scraper would.
+
+CodeRabbit on 6ca0cda2: `remoteIP` handed a link-local source's zone
+(`fe80::1%en0`) to `net.ParseIP`, which refuses it, so a scraper on a
+listed `fe80::/10` was refused, as `metricsGate` refused it before B171.
+The zone is dropped before the match (a CIDR names no zone); the table
+test's zoned row was red before the change.
+
 ## 2026-09-29 — the variant watcher asks again, by identity, whether its variants directory is the one its tick began on, as rows read as missing and before it deletes (backlog B203)
 
 Found by the pre-v0.2.1 review: `VariantWatcher.tick` probed the variants
@@ -34970,6 +35229,14 @@ path was.
   Backlog B223.
 - `upscale --gc` classifies its rows with no probe before, and re-checks
   health, not identity, before its reverse sweep. Backlog B224.
+- A remount between one row's missing read and the identity check after it
+  (two system calls apart) is not seen: the row reaches pass two with its
+  sidecar back on the volume. The checks see a change they observe and
+  record nothing between them; the claim in CLAUDE.md and `classify`'s
+  docblock says so since CodeRabbit's review of the merged head (27bad388).
+  Its other finding there, to count the row whose check saw the change
+  among the refused, was declined: that row's missing verdict is about the
+  directory the path named then, not the one the tick began on.
 
 ## 2026-09-30 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
 
@@ -35111,135 +35378,3 @@ if the folder holds junk too, until the first rendition is written there.
 ### Left open
 
 - `upscale --gc` re-checks health, not identity (B224).
-
-## 2026-09-29 — a version-stale re-read that a reconciliation pass would rewrite is judged by the passes at the scan's tail (backlog B188)
-
-Found by the pre-v0.2.1 data-integrity review. The version-stale leg of
-the skip gate (`reExtractUnchanged`) re-extracts an unchanged file, merges
-the post-scan fields from its stored row (`mergePostScanFields`: a stored
-value is kept only where the fresh one is empty) and stamps the row when
-the two marshal alike. The reconciliation passes REWRITE values a file
-sets, and `fillFromPath` gives every untagged file an album, so a row a
-pass had rewritten never marshalled alike: it took the full upsert.
-
-### What was measured on the old code
-
-main at 99f3353e (B187 merged), through the real Store and Scanner
-(`internal/manifest/reconciled_rows_test.go`, each red there):
-
-| case | what the scan did |
-|---|---|
-| a bump (every row one `ExtractorVersion` behind) over 11 rows, 3 of them rewritten by a pass: an untagged album (its folder's name), a minority album artist, a DATE of `0000` (year 0) | the 3 moved (`indexed_at`) and were re-queued for enrichment (`enriched_at` 0); the 8 others stamped |
-| a folder's `cover.jpg` touched (a new folder-art key, B141's re-read), then a subtree scan | the reconciled track served "Some Folder" for "Real Album", moved, and moved again at the next full scan |
-| a file whose tag carries a release (or recording) id that is no MBID, which the enricher replaced | the bump put the tag's value back, moved the row and re-queued it |
-
-Each moved row was written twice per bump: the worker's upsert of the
-file's value, then the tail's pass writing the reconciled one back. The
-v0.2.1 upgrade scan (ExtractorVersion 21) would have done it to every
-reconciled row of a library, and every bump after.
-
-Two findings on the way. One went into the backlog as B222. The other:
-the track-number pass is no source of this churn: the extractor's own
-filename backfill
-(`fillTrackNumberFromFilename`) fills a missing or zero track number with
-the number the pass would, so the fresh value already equals the stored one.
-
-### Which rows each choice moves
-
-- **Remember the value each pass replaced, and keep the reconciled value
-  while the file still reads the replaced one** (the review's first
-  suggestion): rows reconciled before the upgrade carry no record, so the
-  upgrade scan moves and re-enriches exactly the rows main does (the 3 of
-  11 above); only later bumps are clean. Not taken.
-- **Run the passes in ScanSubtree's tail** (its second): a bump's full scan
-  runs the passes already, so a bump moves the same 3 rows; on the subtree
-  case, measured with the passes run after a subtree scan (the hold
-  disabled): the album ends right, but the row moved twice (the file's
-  value, then the reconciled one) and `enriched_at` was reset. Not taken.
-- **Judge each re-read against its siblings' stored rows** (the obvious
-  in-worker version of either): clean on the 3 rows, and it masks
-  extractor changes. A bump that reads a whole album's tag differently
-  (every row "Old Reading" stored, "New Reading" in the files) leaves no
-  outlier among the fresh values, but each re-read judged against its
-  siblings' stored rows is the outlier, voted back to "Old Reading",
-  stamped, and never applied: measured by dropping the overlay (control 2
-  below). Main applies that change (all 3 rows move). Not taken.
-- **Taken: hold, and let the passes judge with every held re-read in
-  place.** A bump moves none of the 3 rows and applies the whole-album
-  change to all 3; the subtree case moves nothing and serves "Real Album".
-
-### The change
-
-- `reExtractUnchanged` holds a re-read that, after the merge, still
-  differs from its row in the album, the album artist, the year or the
-  track number (`reconciledFieldsDiffer`): it returns the UNMERGED Track
-  marked `awaitsReconcile`, and the scan's writer collects it
-  (`Scanner.heldReconciles`) instead of writing it. At most
-  `maxHeldReconciles` (10,000; the scanner's `heldLimit` for tests) are
-  held per scan, each a whole Track until the tail writes it; past the
-  bound a re-read is decided as before.
-- `settleHeldReconciles` runs at the scan's reconciliation head, after the
-  deletion pass and before the passes, with the one routed set: it merges
-  each held re-read with its row as stored now (a row reaped since is
-  dropped), streams the library's rows into the passes' targets with every
-  held re-read's values in place of its row's, runs the five passes in
-  memory in the tail's order (`runReconcileStepsInMemory`), takes each held
-  re-read's four fields from the result, and writes it: a stamp when it
-  then marshals as its row, the whole row otherwise, in the writer's
-  batches. The passes that follow find nothing to change.
-- The five `run*Reconciliation` functions became one table,
-  `reconcileSteps` (label, Info line, pure decision, field copy, store
-  writer), which the tail's loop (`runReconcileStep`) and the settle both
-  read: the order cannot drift. Each step streams the full projection
-  (`reconcileTargetOf`); every pure function reads only its own fields.
-- `ScanSubtree` settles its held re-reads the same way at its tail
-  (`settleSubtreeHeldReconciles`, one routed-set query and one library
-  stream, only when it holds any), before its duplicate restamp. Both scans
-  write held re-reads as they stand on a return that skips the settle
-  (`settleHeldUnreconciled`, deferred; today only a shutdown's, which
-  writes nothing) and on a routed-set failure.
-- `mergePostScanFields` reads a file's release or recording id that is no
-  MBID as no id (`manifest.IsValidMBID`). The enricher's `isValidMBID`
-  answers through it now (it held a copy of the pattern), so the merge and
-  the enricher's scrub agree on what an id is.
-- The acoustic fallback fills a recording id only where the file carries
-  no valid one; it overwrote one the file carried, which the merge (a valid
-  fresh id wins) undid on every bump. `mergePostScanFields`' docblock
-  already said "the fingerprint path fills it when the file does not".
-- `CLAUDE.md`: the rule under Scanner; the reconciliation bullet no longer
-  says every pass is directory-scoped (the MBID year pass crosses folders,
-  bounded to strays).
-
-No `ExtractorVersion` bump and no wire change: extraction is unchanged,
-and a settled re-read writes what the tail's passes would have written.
-
-### Tests
-
-`internal/manifest/reconciled_rows_test.go`:
-`TestScanner_ABumpOverReconciledRowsOnlyStampsThem`,
-`TestScanner_ASubtreeScanAfterACoverTouchKeepsAReconciledAlbumTitle`,
-`TestScanner_ABumpStillAppliesAnExtractorChangeAcrossAWholeAlbum` (the
-control: green on main, and must stay green),
-`TestScanner_ABumpOverAnIDTheEnricherReplacedOnlyStampsIt` (a subtest per
-id), `TestScanner_ReReadsPastTheHoldLimitAreWrittenAsBefore` (a limit of 1
-over two reconciled albums: one row moves, both end reconciled and
-current). `internal/enrich/acoustic_recording_id_test.go`:
-`TestApplyAcousticFallbackKeepsARecordingIDTheFileCarries`.
-
-### Negative controls, on the committed tree, each restored with `git checkout --`
-
-1. Never hold (`if false && reconciledFieldsDiffer…`): the bump, subtree
-   and hold-limit tests red; the whole-album control and the id test green.
-2. The settle's stream without the overlay (judged against the stored
-   rows): the whole-album control red, "Old Reading" kept on all three
-   rows, none moved; the others green.
-3. The in-memory passes skipped: the bump, subtree and hold-limit tests red.
-4. `ScanSubtree` settling nothing at its tail: the subtree test red alone
-   (the deferred fallback wrote the re-read as it stood: "Some Folder",
-   moved), which also shows the fallback writes.
-5. Each merge id line back to `== ""`: the release-id subtest red alone,
-   then the recording-id subtest red alone.
-6. The fallback's guard removed: the "valid id the file carries" case red;
-   back to `== ""`: the "value that is no MBID" case red.
-7. The hold limit admitting everything: the hold-limit test red (no row
-   moved).

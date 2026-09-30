@@ -84,6 +84,8 @@ func setHSTS(w http.ResponseWriter, r *http.Request) {
 //   - HTML clients (Accept: text/html OR no /api/ prefix) get a
 //     302 to /login?next=<safe-encoded-current-path>.
 //   - API clients (/api/* path prefix) get a JSON 401.
+//   - /metrics gets a plain 403, unless metrics.allowCidrs vouches for
+//     the scrape (metricsScrapeVouched), which then needs no session.
 //
 // The `next` parameter is server-side validated via
 // IsSafeRelativePath when reconstructing the URL — it's also
@@ -132,6 +134,13 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// /metrics answers without a session only a scrape the config
+		// vouches for (backlog B171); anything else is asked for a
+		// session like every other page.
+		if r.URL.Path == metricsPath && metricsScrapeVouched(r, cfg.Metrics.AllowCIDRs) {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if _, err := s.requireSession(r); err == nil {
 			next.ServeHTTP(w, r)
@@ -158,9 +167,14 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Authentication required. /api/* gets JSON 401; pages
-		// get a redirect to /login with the current path
-		// preserved as `next`.
+		// Authentication required. /api/* gets JSON 401; /metrics a
+		// plain 403 a scraper can read as one; pages get a redirect to
+		// /login with the current path preserved as `next`.
+		if r.URL.Path == metricsPath {
+			s.noteRefusedScrape(r)
+			http.Error(w, errMsgMetricsNeedsSession, http.StatusForbidden)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "session required")
 			return
@@ -184,8 +198,13 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 
 // isAuthBypassPath returns true for the small set of routes that
 // must work without a session (login form itself, static assets,
-// favicons, Prometheus metrics). Anything else requires auth in
-// public mode.
+// favicons, the probes). Anything else requires auth in public mode.
+//
+// /metrics is not here, and must not come back (backlog B171): a
+// bypass keyed on the path answered the internet through a proxy on
+// the bridge's own host, which relays every request from 127.0.0.1.
+// sessionMiddleware exempts a scrape metrics.allowCidrs vouches for
+// (metricsScrapeVouched) and asks everything else for a session.
 func isAuthBypassPath(path string) bool {
 	switch {
 	case path == "/login":
@@ -199,12 +218,6 @@ func isAuthBypassPath(path string) bool {
 	case strings.HasPrefix(path, "/favicon"):
 		return true
 	case isProbePath(path):
-		return true
-	case path == "/metrics":
-		// /metrics is gated by its own loopbackOnly wrap at
-		// registration (see admin.go), so a same-host scraper needs no
-		// session cookie. Without this bypass, a local Prometheus
-		// scrape in public mode gets a 302 to /login and breaks.
 		return true
 	}
 	return false

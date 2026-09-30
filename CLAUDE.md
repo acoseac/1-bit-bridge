@@ -317,9 +317,9 @@ giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 force a re-extraction", (2026-09-29) "the app's SSDP path has no
 LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
 listener to the group address", (2026-09-29) "`isLossyCodec` gates every
-`BitsPerSample` write site", (2026-09-29) "`os.SameFile` answers [a
-directory's identity] portably", and (2026-09-29) "reconciliation never
-crosses directories". The first five cost a later session real
+`BitsPerSample` write site", (2026-09-29) "reconciliation never
+crosses directories", and (2026-09-29) "`os.SameFile` answers [a
+directory's identity] portably". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -349,14 +349,15 @@ toolchain's own source. The fourteenth named a function #225's review had
 already replaced (a denylist that failed open on an empty codec, for the
 allowlist `canSetBitsPerSample`), and the comment beside the wire field said
 the same; both were found while naming the compressed AIFF-C and WAV encodings
-(B124). The fifteenth was the model a fix was told to copy: B203's entry
-pointed at the delete handler's directory identity, kept from an `os.Stat`,
-and the first version built the same way passed on macOS and deleted 39 rows
-of 40 on Windows, where `os.Stat` reads a directory's identity only when it is
-compared.
-The sixteenth sat in the Scanner bullet on the reconciliation passes, true of
+(B124).
+The fifteenth sat in the Scanner bullet on the reconciliation passes, true of
 four passes and not of the fifth, the year fill by release id, which crosses
 folders by design; it was found while replaying the passes in memory (B188).
+The sixteenth was the model a fix was told to copy: B203's entry pointed at
+the delete handler's directory identity, kept from an `os.Stat`, and the
+first version built the same way passed on macOS and deleted 39 rows of 40
+on Windows, where `os.Stat` reads a directory's identity only when it is
+compared.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -3534,7 +3535,8 @@ no failing test — which is the shape to expect in this area.
   `variantsDirChanged` as each row reads as missing (`classify`: the one
   verdict that leads to a deletion, so a tick whose rows are where they
   belong pays nothing, and a volume that goes and comes back inside the
-  pass is seen), and once more after `MassDeleteRefusal` and before pass
+  pass is seen if it is still gone when a missing read's check runs), and
+  once more after `MassDeleteRefusal` and before pass
   two, since that check walks the tree after the last row is classified
   and a volume gone in between lets a relocation's deletions through. A
   change refuses the tick as the mount-loss kind (`variantsDirUnavailable`),
@@ -3564,9 +3566,13 @@ no failing test — which is the shape to expect in this area.
   `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
   `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
   `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
-  `upscale --gc` re-checks health but not identity (B224). A mountpoint
-  that already held an entry when a tick STARTED was open here too, until
-  the next bullet.
+  `upscale --gc` re-checks health but not identity (B224). Residual: a
+  remount between one row's missing read and the check after it (two
+  system calls apart) is not seen, and that row's entry is deleted in pass
+  two with its sidecar back on the volume; nothing records a change the
+  checks did not observe (CodeRabbit on #1127). A mountpoint that already
+  held an entry when a tick STARTED was open here too, until the next
+  bullet.
 - **…and the probe counts RENDITIONS, not entries: a variants directory
   holding none is what an unmounted volume looks like, whatever else it
   holds** (2026-09-30, backlog B223). `VariantsDirSweepBlock` called a
@@ -4822,8 +4828,12 @@ no failing test — which is the shape to expect in this area.
   prints a host path into the tenant's report) skip on `Deps.Managed`; the
   log EXPORT refuses for the same reason, ahead of the terminal / journald /
   `docker logs` branches, and for all three export routes rather than only
-  status. Same for the Diagnostics `/metrics` pointer, which is
-  loopback-gated and answers 403 to the reader being told to scrape it.
+  status. Same for the Diagnostics `/metrics` pointer: a scraper there needs
+  its address in `metrics.allowCidrs`, which the control plane owns, so the
+  paragraph would tell the reader to point a scraper at a URL that refuses
+  it. This said until 2026-09-30 that the pointer "is loopback-gated and
+  answers 403", a claim about the gate B171 replaced (under **Auth,
+  pairing, TLS and security posture**).
 - **The console must SEND only what it SHOWED.** The settings Save payload is
   an explicit allowlist naming every field, `hideManagedSettings` sets `hidden`
   on the enclosing `.field` rather than removing the input, and a hidden input
@@ -6880,6 +6890,38 @@ its twin.** The top list is older, shorter, and read first.
 - **Any long-lived GET needs its own Origin gate** — `csrfGuard` lets GETs
   through, which is right for one-shot reads and wrong for a held SSE
   connection.
+- **In public mode `/metrics` is a console page: a signed-in session reads
+  it, and without one it answers only a scraper whose address
+  `metrics.allowCidrs` lists, over a connection that carries no forwarding
+  header** (2026-09-29, backlog B171). Since #472 it sat on
+  `isAuthBypassPath` behind `metricsGate`, which admitted any loopback
+  source, and a proxy on the bridge's own host relays every request from
+  127.0.0.1, so the gate could not tell the proxy's clients from a local
+  scraper (measured with the real binary; the record is in the log). The
+  bypass is gone, and `metricsGate` with it: `metricsScrapeVouched`, in
+  `sessionMiddleware`, is the one exemption, and an unauthenticated
+  `/metrics` gets a plain 403 (`errMsgMetricsNeedsSession`), never the
+  login redirect, which a scraper follows to HTML it cannot parse.
+  **Loopback is not implied, and the forwarding headers are not the fix on
+  their own**: a relay that adds none (a TCP relay such as an SNI router,
+  nginx's default `proxy_pass`) cannot be told from a local scraper by
+  anything in the request, so only the operator can say that nothing on the
+  host relays connections to the console, by listing `127.0.0.1/32` (and
+  `::1/128`). The header check (`Forwarded`, `X-Forwarded-For`, `-Host`,
+  `-Proto`, `X-Real-IP`, `Via`) keeps a listed address honest when a proxy
+  that announces itself sits on it too. A link-local source's zone
+  (`fe80::1%en0`) is dropped before the match (`remoteIP`): no CIDR names
+  one, and `net.ParseIP` refuses it. **The cost**: a same-host
+  Prometheus on a public bridge that relied on the implied loopback gets
+  403 until its address is listed. The first such refusal from this host or
+  a private network logs one Warn per process naming the fix
+  (`noteRefusedScrape`); one from a public address (a scanner) or carrying a
+  forwarding header (a proxy that announces itself) logs nothing, and a
+  relay that adds no header reads as a local scraper there too, so its first
+  refusal logs the Warn. Loopback mode is unchanged: its boundary admits this
+  host alone, and `metrics.allowCidrs` plays no part there, as it never did
+  (the boundary refused a non-loopback source before the old gate ran, so
+  #803's list only ever took effect in public mode).
 - **Pairing token delivery is read-many**: `Poll` returns the token on every
   authorized poll while Approved, and only a client `DELETE` or TTL+grace
   consumes it. A network blip must be recoverable — **don't add a "clear `RawToken` on first

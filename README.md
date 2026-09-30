@@ -75,7 +75,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 **Pairing an iOS device**: on the Devices page, click _Pair new device_, give it a name, optionally edit the bridge URL (defaults to `https://<hostname>.local:7788`), then generate the token. The modal shows a QR encoding a `bridge://pair?...` URL — scan it in the 1-bit app, or copy the URL/token/fingerprint fields manually.
 
-**Metrics** — the admin listener also serves Prometheus text at [http://127.0.0.1:7789/metrics](http://127.0.0.1:7789/metrics): SQLite lock waits, enrichment cache hit rates, conversion-job durations, log-event counts. Loopback-only, like the rest of the console, and always on. The Diagnostics page shows the current values; point a scraper at `/metrics` if you want history.
+**Metrics** — the admin listener also serves Prometheus text at [http://127.0.0.1:7789/metrics](http://127.0.0.1:7789/metrics): SQLite lock waits, enrichment cache hit rates, conversion-job durations, log-event counts. Always on, and loopback-only like the rest of the console; on a public-mode bridge a signed-in session reads it, and a scraper needs its address in `metrics.allowCidrs` and a direct connection (loopback is not implied there, since a proxy on the same host connects from it too). The Diagnostics page shows the current values; point a scraper at `/metrics` if you want history.
 
 ## Build from source
 

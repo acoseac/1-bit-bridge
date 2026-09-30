@@ -539,11 +539,13 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 // when it stops an adoption. And the variants directory no longer being
 // the one the tick began on (changed, the reason): asked as each row reads
 // as missing, the only verdict that leads to a deletion, so a volume that
-// goes and comes back inside the pass is seen too, which a check at the
-// end of the pass is not; asked of that verdict alone, so a tick whose
-// rows are all where they belong pays nothing for it. The row that saw
-// the change is not returned: its verdict is about whatever the path
-// named then.
+// goes and comes back inside the pass is seen too, if it is still gone
+// when a missing read's check runs, which a check at the end of the pass
+// is not; asked of that verdict alone, so a tick whose rows are all where
+// they belong pays nothing for it. A remount between a row's read and its
+// check (two system calls apart) is not seen, and that row goes to pass
+// two. The row that saw the change is not returned: its verdict is about
+// whatever the path named then.
 func (w *VariantWatcher) classify(ctx context.Context, dir string, start os.FileInfo, rows []VariantSnapshot, report *SweepReport, sample *logSampler) (missing []VariantSnapshot, changed string, stopped bool) {
 	for _, r := range rows {
 		// Honour cancellation between rows so a shutdown during a long
