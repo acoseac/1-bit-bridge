@@ -31,7 +31,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -212,9 +211,9 @@ const manualURLNamesNoHost = "the manual URL is not a URL with a host"
 // and a fragment reach it whole; and it quotes it with %q, so a URL holding
 // a `"`, a `\` or a rune that is not printable appears escaped, which a
 // search for the URL as written does not find. The *url.Error's own URL
-// field is its rendering exactly, so no form is guessed, and each form is
-// replaced longest first, so one that contains another is not left half
-// replaced.
+// field is its rendering exactly, so no form is guessed. Where one form
+// holds another verbatim (`"<url>"` holds the URL when %q escapes nothing),
+// replacing either first gives the same line.
 //
 // A URL that names no host it can read (one that does not parse, or
 // `user:password@host` written without a scheme) gets manualURLNamesNoHost
@@ -227,18 +226,13 @@ func fetchErrorForLog(err error, raw string) string {
 	if host == "" {
 		return manualURLNamesNoHost
 	}
-	type form struct{ old, new string }
-	forms := []form{{raw, host}}
+	msg := err.Error()
 	var ue *url.Error
 	if errors.As(err, &ue) && ue.URL != "" {
-		forms = append(forms, form{strconv.Quote(ue.URL), strconv.Quote(host)}, form{ue.URL, host})
+		msg = strings.ReplaceAll(msg, strconv.Quote(ue.URL), strconv.Quote(host))
+		msg = strings.ReplaceAll(msg, ue.URL, host)
 	}
-	sort.SliceStable(forms, func(i, j int) bool { return len(forms[i].old) > len(forms[j].old) })
-	msg := err.Error()
-	for _, f := range forms {
-		msg = strings.ReplaceAll(msg, f.old, f.new)
-	}
-	return msg
+	return strings.ReplaceAll(msg, raw, host)
 }
 
 func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUDNs map[string]struct{}) {
