@@ -34611,3 +34611,124 @@ Gemini was over its daily quota on every head.
   the next `]:<digits>` on its line, since a zone may hold anything a
   Windows adapter's name holds, so a panic value holding such text loses
   it. It is replaced, never kept, so it costs text and never an address.
+
+## 2026-09-29 — in public mode /metrics needs a session unless metrics.allowCidrs vouches for a direct scrape (backlog B171)
+
+Found by the pre-v0.2.1 review and filed as B171 while it was unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured on the old code
+
+main at 24523cff, go1.27.1 on macOS, a public fixture (`bridge init --public
+--domain localhost --admin-tls-proxy`, the console on plain HTTP at
+127.0.0.1:27791, `deployment.adminTLSTerminatedByProxy: true`, no
+`metrics.allowCidrs`), curl from 127.0.0.1 with the headers the hosted
+tenants' HAProxy console frontend sets on every request it relays
+(`Host: t1.cloud.example:7789`, `X-Forwarded-For: 203.0.113.9`,
+`X-Forwarded-Proto: https`, read from the conductor's
+`host/haproxy/haproxy.cfg`): `GET /metrics` 200, 9,714 bytes, 19 `bridge_`
+lines; `GET /api/stats` 401. The same `/metrics` straight from loopback: 200.
+(The session that filed B171 measured 10,816 bytes and 33 lines on e256d6b7:
+the count moves with what the process has done.)
+
+The cause: #472 put `/metrics` on `isAuthBypassPath` and behind its own
+`metricsGate`, which admitted any loopback source or an address in
+`metrics.allowCidrs`, so a same-host scraper needed no session. A proxy on
+the bridge's own host connects from 127.0.0.1 for every client it relays, so
+in public mode the gate's one question, the source address, was answered by
+the proxy. Nothing in the conductor scrapes a tenant's `/metrics` (a grep of
+~/dev/1-bit-conductor, 2026-09-30), so nothing depended on the hole.
+
+### What was decided
+
+- **A session reads it, as any console page.** `/metrics` is off the bypass
+  list and `metricsGate` is gone, so public mode's `sessionMiddleware` decides
+  it like every other route. A signed-in operator reads it from wherever the
+  console answers (their browser behind the tenant's proxy included), which
+  widens nothing: the session is already the trust boundary for everything
+  else the console shows.
+- **Without a session, only a scrape the config vouches for**
+  (`metricsScrapeVouched`): the source address is in `metrics.allowCidrs`, AND
+  the request carries none of `Forwarded`, `X-Forwarded-For`,
+  `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Via`. The B171
+  prompt's shape.
+- **Loopback is not implied.** The handoff before this one proposed keeping
+  the implied loopback on a bridge whose config says no proxy fronts the
+  console (`adminTLSTerminatedByProxy: false`) when no forwarding header is
+  present. Rejected: an autocert public bridge put on 443 beside other
+  services through an SNI router (nginx's `stream` module with
+  `ssl_preread`, HAProxy in TCP mode) relays every connection from 127.0.0.1
+  with its TLS intact, so the flag is false, no header can be added, and the
+  request is indistinguishable from a local scraper. So is anything behind
+  nginx's default `proxy_pass`, which adds no forwarding header. Only the
+  operator knows whether something on the host relays connections to the
+  console, and listing `127.0.0.1/32` (and `::1/128`) is how they say it.
+  The header check still earns its place: it keeps a listed address honest
+  when a proxy that announces itself (HAProxy's frontend, Caddy, Traefik,
+  `tailscale serve`) sits on the same address as the scraper.
+- **The refusal is a 403, not the login redirect.** A scraper follows a 302
+  to `/login` and then reports that it cannot parse HTML, where the true
+  answer is that it is not allowed. The body (`errMsgMetricsNeedsSession`)
+  names what would let it in.
+- **One Warn per process** (`noteRefusedScrape`) the first time a refused
+  request came straight from this host or a private network: the local
+  Prometheus that an upgrade past this change stops answering. A refusal
+  from a public address (a scanner, which every public bridge sees) or one a
+  proxy relayed logs nothing.
+- **Loopback mode is untouched.** Its boundary (`loopbackOnly`) refuses a
+  non-loopback source before any route runs, so `metrics.allowCidrs` never
+  took effect there; #803's record says the list exists because loopback is
+  unreachable from a Prometheus outside the container, which was true only of
+  a public-mode container, the only mode whose console listens beyond
+  loopback. The config docblock claimed an unparseable entry "is dropped at
+  load with a warning"; nothing validates the list at load, and the request
+  path skips such an entry silently. Both docblocks now say what holds.
+
+### Measured on the fix
+
+The same fixture and curl, the fixed binary: the proxy-shaped `/metrics` 403
+(165 bytes, no `Location`), `/api/stats` 401, `/metrics` straight from
+loopback 403 with one `a /metrics scrape without a session was refused` Warn
+in the journal; with a session minted through `bridge admin login-link` and
+the proxy-shaped request, 200. With `metrics.allowCidrs: [127.0.0.1/32]`:
+straight from loopback 200 (the exposition), proxy-shaped 403. On main the
+session request answered 200 as well, through the bypass.
+
+### Tests
+
+`internal/admin/metrics_test.go`, through the console's real handler chain:
+`TestPublicMetricsThroughASameHostProxyNeedsASession` (the tenant shape,
+with and without loopback listed),
+`TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames` (no list;
+listed and unlisted sources, IPv4-mapped, an unparseable entry and remote
+address; each forwarding header from each listed address),
+`TestPublicMetricsAnswersASignedInSession` (through the proxy shape, from the
+LAN and from the internet; a cookie naming no session is refused),
+`TestLoopbackMetricsFollowsTheConsolesLoopbackRule` (a pin: the list plays
+no part there), `TestAPublicMetricsRefusalFromThisHostOrTheLANIsLoggedOnce`,
+`TestTheDiagnosticsMetricsPointerSaysWhoMayScrape` (the page's paragraph
+offering `/metrics` said "on this loopback listener only" in public mode
+too). The two `metricsGate` unit tests in `ops_hardening_test.go` went with
+the gate; their cases are in the table test. `…MetricsLoopbackBypassesSessionInPublicMode`,
+which pinned the bypass, and its twin are replaced by the tests above.
+
+Red on main (the tests first, the fix after): the proxy test (200 twice),
+the table test (the unlisted loopback source, `[::1]`, every forwarding
+header), the session test (the LAN and internet sessions got 403 from
+`metricsGate`; the cookie naming no session got 200), the logging test (no
+line) and the diagnostics test.
+
+### Negative controls
+
+Each with one part of the fix reverted, at 60037422, `-count=1`:
+
+- NC1 `/metrics` back on `isAuthBypassPath`: the proxy, table, session and
+  logging tests red (with the gate gone, the bypass serves everyone).
+- NC2 no forwarding-header check: the proxy and table tests red.
+- NC3 loopback implied again: the table test red.
+- NC4 the unauthenticated `/metrics` answered with the login redirect: the
+  proxy, table and session tests red (a 302 with a `Location`).
+- NC5 the Warn logged on every refusal and from anywhere: the logging test
+  red.
+- NC6 the Diagnostics page not told the mode: the diagnostics test red.
