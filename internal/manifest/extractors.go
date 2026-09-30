@@ -441,7 +441,34 @@ var Ext = map[string]bool{
 // PROTOCOL.md contract, which these files had not met). Every other row
 // re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
 // rows re-expand as on every bump.
-const ExtractorVersion = 19
+//
+// v20 — a file's own text reaches its row where two chunk walkers let the
+// path's guess win (backlog B140). The scanner fills a track's title, album and
+// artist from its path before it extracts, and the DSDIFF DIIN walk and the WAV
+// LIST/INFO walk wrote a field only while it was empty, which in a scan is
+// never. The DIIN walk also read a 1-byte length where the DSDIFF 1.5 layout
+// has a 4-byte count, so it read no title or artist any writer makes (TagLib
+// writes the count, and ffmpeg and MediaInfo read it), took two chunks no
+// specification defines (DIAL, DIGN) for an album and a genre, and the DFF walk
+// skipped the "ID3 " chunk, which is where mutagen, and so Picard, tags a
+// DSDIFF file. A DFF's DIIN title and artist and its ID3 chunk's tag now reach
+// the track, the ID3 tag answering each field it has a value for and the DIIN
+// the rest, as TagLib reads the two (containerText.applyUnder); an ID3 chunk
+// nested in PROP counts where the file holds no root one, as TagLib reads it,
+// and PROP is read up to the ID3 cap for it, where a nested tag with a cover
+// over 1 MiB refused the file. A WAV's INFO title, artist, album and genre rank
+// the same way beneath its ID3 chunk. A DIIN or ID3 chunk the file ends inside
+// ends the walk with the format stamped and allocates nothing, where a
+// truncated DIIN failed the file (indexed by name alone, no sample rate). The
+// picture in a DFF's ID3 chunk is its cover.
+//
+// Only files carrying such text change: a DFF with a DIIN or an ID3 chunk, a
+// WAV whose LIST/INFO names a title, artist or album, and a DFF cut short in a
+// trailing DIIN. They take the full-upsert leg, are the iOS delta, and go back
+// to the enricher, which had searched MusicBrainz with their folder names. Every
+// other row re-extracts byte-identical and rides the version-stamp leg; SACD
+// ISO virtual rows re-expand as on every bump.
+const ExtractorVersion = 20
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -2188,13 +2215,22 @@ func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Tra
 	return m
 }
 
-// extractDFFWithContext walks just enough of a DSDIFF (.dff) container
-// to populate Codec / IsDSD / SampleRate. Unlike DSF (a fixed binary
-// header), DFF is chunk-based (FRM8 outer container with PROP and DSD
-// children) and uses BIG-endian sizes. We don't decode tags — DFF's
-// DIIN/COMT chunks aren't widely populated in the wild, and dhowden/tag
-// doesn't recognize the container at all. Path-derived defaults +
-// future enrichment fill in the rest.
+// extractDFFWithContext walks a DSDIFF (.dff) container for its format
+// (Codec / IsDSD / SampleRate / Channels / Duration) and its tags. Unlike DSF
+// (a fixed binary header), DFF is chunk-based (FRM8 outer container with PROP
+// and DSD children) and uses BIG-endian sizes.
+//
+// Tags (ExtractorVersion 20, backlog B140): the DIIN chunk's title (DITI) and
+// artist (DIAR), in the DSDIFF 1.5 layout TagLib writes and ffmpeg, TagLib and
+// MediaInfo read (parseDIINChunks), and an "ID3 " chunk's ID3v2 tag, which is
+// where mutagen (so Picard) tags a DSDIFF file, read as an AIFF's ID3 chunk is
+// (applyEmbeddedID3). An ID3 chunk nested in PROP is read too, as TagLib reads
+// it, where the file holds no root one (a root tag wins whole). The ID3 tag
+// answers each field it has a value for and the DIIN the rest, and both
+// outrank the path's guess the scanner filled first (containerText.applyUnder,
+// once the walk is over). Until v20 the walk read
+// the DIIN in a layout no writer produces, only into EMPTY fields, and skipped
+// the ID3 chunk, so no DSDIFF file's own tags ever reached a scanned row.
 //
 // Compression handling (docs/DSTFeasibility.md §5/§6 — the Mirror-PR
 // reversal of the PR #186 default-deny, both sides in one release so a
@@ -2276,8 +2312,27 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	var (
 		prop  dffPropInfo
 		sound dffSoundInfo
+		diin  containerText
+		id3   tag.Metadata
 	)
 	sound.physicalSize = physicalSize
+	logPath := trackLogPath(absPath, t)
+	// finish commits everything the walk gathered, once: the format stamps,
+	// the ID3 tag nested in PROP where no root one was read (a root tag wins
+	// whole, wherever the chunks sit, as TagLib reads the two), the DIIN's
+	// text beneath the ID3 tag (whichever chunk came first), and the cover,
+	// the ID3 tag's picture ahead of a cover.jpg beside the file.
+	finish := func() error {
+		applyDFFStamps(t, absPath, prop, sound)
+		if id3 == nil && prop.id3 != nil {
+			id3 = applyEmbeddedID3(prop.id3, t, nil, absPath, "dff")
+		}
+		diin.applyUnder(t, id3)
+		if ec != nil && ec.ArtworkCacheDir != "" {
+			extractLocalArtwork(absPath, t, id3, ec)
+		}
+		return nil
+	}
 	for {
 		var chunkHeader [12]byte
 		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
@@ -2285,11 +2340,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			// PROP / DIIN. Codec already stamped; the format stamps
 			// commit here from everything the walk gathered.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				applyDFFStamps(t, absPath, prop, sound)
-				if ec != nil && ec.ArtworkCacheDir != "" {
-					extractLocalArtwork(absPath, t, nil, ec)
-				}
-				return nil
+				return finish()
 			}
 			return fmt.Errorf("dff: chunk header read: %w", err)
 		}
@@ -2322,9 +2373,27 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			const maxPROPSize = 1 << 20
+			// The cap admits an ID3 tag nested in PROP (the placement
+			// TagLib reads beside a root one, and keeps when it rewrites
+			// a tag it found there), cover and all: 1 MiB for the
+			// property chunks and the ID3 chunk cap beside it. Until
+			// ExtractorVersion 20 it was 1 MiB, and a nested tag holding
+			// a cover over it refused the whole file (backlog B140).
+			const maxPROPSize = 1<<20 + maxID3ChunkSize
 			if size > maxPROPSize {
 				return fmt.Errorf("dff: PROP chunk size %d exceeds %d-byte sanity limit", size, maxPROPSize)
+			}
+			// Allocated only once the file is known to hold it: a PROP
+			// that runs past the end is refused as its failed read always
+			// refused it, without the body a file cut short cannot back.
+			if physicalSize > 0 {
+				pos, err := f.Seek(0, io.SeekCurrent)
+				if err != nil {
+					return fmt.Errorf("dff: PROP position: %w", err)
+				}
+				if pos < 0 || uint64(pos) > physicalSize || size > physicalSize-uint64(pos) {
+					return fmt.Errorf("dff: PROP chunk of %d bytes runs past the end of the file", size)
+				}
 			}
 			body := make([]byte, size)
 			if _, err := io.ReadFull(f, body); err != nil {
@@ -2355,43 +2424,32 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 			}
 		case "DIIN":
-			// DIIN container body: nested sub-chunks (DITI, DIAR,
-			// DIAL, DIGN, COMT, …). 1 MiB cap mirrors PROP — real
+			// DIIN (Edited Master Information) body: nested chunks, the
+			// title and artist among them. 1 MiB cap mirrors PROP — real
 			// DIIN bodies are well under 1 KiB.
 			const maxDIINSize = 1 << 20
-			if size == 0 {
-				continue
+			body, done, err := readDFFTagChunk(f, size, maxDIINSize, physicalSize, "DIIN", logPath)
+			if err != nil {
+				return err
 			}
-			if size > maxDIINSize {
-				scanLogger.Warn("dff: DIIN chunk size exceeds sanity limit; skipping",
-					"path", absPath, "size", size, "limit", maxDIINSize)
-				// Guard against uint64 → int64 overflow on a
-				// malformed-but-plausible DIIN size: maxDIINSize is
-				// 1 MiB so a normal oversize lands well below
-				// math.MaxInt64, but a corrupt header declaring
-				// `size = 0xFFFFFFFFFFFFFFFF` would convert to -1
-				// and seek BACKWARD by one byte. Refuse the
-				// conversion rather than re-read the same chunk
-				// header in a loop (CodeRabbit Major on PR #223).
-				skip, err := safeSeekSkip(size)
-				if err != nil {
-					return fmt.Errorf("dff: oversized DIIN unsafe to skip: %w", err)
-				}
-				// safeSeekSkip already applied the odd-byte pad.
-				if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
-					return fmt.Errorf("dff: seek past oversized DIIN: %w", err)
-				}
-				continue
+			if done {
+				return finish()
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return fmt.Errorf("dff: DIIN body read: %w", err)
+			diin.keepFirst(parseDIINChunks(body, logPath))
+		case "ID3 ", "id3 ":
+			// An ID3v2 tag in a chunk of its own, after the audio: where
+			// mutagen, and so Picard, tags a DSDIFF file. Both spellings,
+			// as the AIFF and WAV walkers take them. The earliest chunk
+			// wins whole (applyEmbeddedID3).
+			body, done, err := readDFFTagChunk(f, size, maxID3ChunkSize, physicalSize, "ID3", logPath)
+			if err != nil {
+				return err
 			}
-			parseDIINChunks(body, t, absPath)
-			if size%2 == 1 {
-				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
-					return fmt.Errorf("dff: DIIN pad seek: %w", err)
-				}
+			if done {
+				return finish()
+			}
+			if body != nil {
+				id3 = applyEmbeddedID3(body, t, id3, absPath, "dff")
 			}
 		case "DSD ":
 			// Uncompressed audio chunk — capture the declared payload
@@ -2502,21 +2560,87 @@ func safeSeekSkip(size uint64) (int64, error) {
 	return int64(size), nil
 }
 
-// parseDIINChunks walks the body of a DSDIFF DIIN container chunk and
-// pulls title (DITI), artist (DIAR), album (DIAL), and genre (DIGN)
-// from their respective sub-chunks. Each text sub-chunk's payload is
-// a DSDIFF Pascal-string: 1-byte length + N bytes ASCII/UTF-8 text,
-// with one pad byte if (1 + N) is odd (the 16-bit chunk alignment
-// rule). COMT (Comments) sub-chunks are recognised but skipped — the
-// Track struct has no Comment field today, and COMT's structured
-// per-comment layout differs from the pstring text chunks.
+// readDFFTagChunk reads the body of a DIIN or ID3 chunk whose 12-byte header
+// the walk has just read, declaring size bytes: nil when the chunk is empty or
+// larger than limit (skipped, with a line), and done when the file ends inside
+// the body. The body is allocated only once the file is known to hold it (the
+// payloadFits rule the audio chunk's duration keeps), so a chunk declaring more
+// than a file cut short holds costs nothing, and the walk ends where the file
+// does with the format it gathered stamped (backlog B140). Until
+// ExtractorVersion 20 the DIIN arm allocated the declared body (up to its
+// 1 MiB cap), failed to read it, and failed the file, which left it indexed by
+// name alone, with no sample rate or DSD flag. An unknown file size
+// (physicalSize 0) fails open, as payloadFits does, and a read that meets the
+// end of the file ends the walk the same way.
+func readDFFTagChunk(f extractSource, size, limit, physicalSize uint64, chunk, logPath string) (body []byte, done bool, err error) {
+	if size == 0 {
+		return nil, false, nil
+	}
+	if physicalSize > 0 {
+		pos, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, false, fmt.Errorf("dff: %s position: %w", chunk, err)
+		}
+		if pos < 0 || uint64(pos) > physicalSize || size > physicalSize-uint64(pos) {
+			scanLogger.Warn("dff: "+chunk+" chunk runs past the end of the file; stopping the chunk walk",
+				"path", logPath, "size", size)
+			return nil, true, nil
+		}
+	}
+	if size > limit {
+		scanLogger.Warn("dff: "+chunk+" chunk size exceeds sanity limit; skipping",
+			"path", logPath, "size", size, "limit", limit)
+		// safeSeekSkip refuses a size past int64 (a seek backward, and the
+		// same chunk header read forever) and applies the odd-byte pad.
+		skip, err := safeSeekSkip(size)
+		if err != nil {
+			return nil, false, fmt.Errorf("dff: oversized %s unsafe to skip: %w", chunk, err)
+		}
+		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			return nil, false, fmt.Errorf("dff: seek past oversized %s: %w", chunk, err)
+		}
+		return nil, false, nil
+	}
+	body = make([]byte, size)
+	if _, err := io.ReadFull(f, body); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			scanLogger.Warn("dff: "+chunk+" body truncated; stopping the chunk walk", "path", logPath, "err", err)
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("dff: %s body read: %w", chunk, err)
+	}
+	if size%2 == 1 {
+		if _, err := f.Seek(1, io.SeekCurrent); err != nil {
+			return nil, false, fmt.Errorf("dff: %s pad seek: %w", chunk, err)
+		}
+	}
+	return body, false, nil
+}
+
+// parseDIINChunks walks the body of a DSDIFF DIIN (Edited Master Information)
+// chunk and returns its title (DITI) and artist (DIAR). The DSDIFF 1.5
+// specification gives the chunk nothing else a track holds: the edited
+// master's id (EMID) is an opaque identifier and its markers (MARK) are
+// positions in the audio. ffmpeg and TagLib 2 read the same two, MediaInfo the
+// title (measured; TagLib's DIIN tag keeps no album: one set on it is dropped
+// on save). Each text chunk is a 4-byte big-endian count and that many
+// bytes of text (readDIINText); the first DITI and the first DIAR keep their
+// fields.
 //
-// Bounds: every read is gated on `remaining` — a pstring declaring
-// length > remaining is logged + the rest of the sub-chunk skipped,
-// matching parsePropChunks's defensive posture. The outer DIIN
-// container's size has already been validated against the file
-// bounds by the caller.
-func parseDIINChunks(body []byte, t *Track, absPath string) {
+// Until ExtractorVersion 20 (backlog B140) this read a 1-byte length in place
+// of the count, a layout no writer produces: a real DITI's first byte is the
+// top byte of its count, 0 for any text under 16 MiB, so every real title read
+// as empty (and ffmpeg reads the 1-byte layout as garbage). It also took a DIAL
+// chunk for an album and a DIGN for a genre, chunks no specification defines
+// and no writer makes, and it wrote into the Track only an EMPTY field, which
+// in a scan, after the path's guess, is never.
+//
+// Bounds: a nested chunk's size is checked against what the body holds before
+// it is sliced, a count against its chunk (readDIINText), and the walk stops at
+// the first chunk that does not fit. COMT, a top-level chunk in the
+// specification, is skipped here as any other nested chunk is.
+func parseDIINChunks(body []byte, logPath string) containerText {
+	var c containerText
 	for len(body) >= 12 {
 		fourcc := string(body[0:4])
 		size := be64(body[4:12])
@@ -2526,26 +2650,9 @@ func parseDIINChunks(body []byte, t *Track, absPath string) {
 		payload := body[12 : 12+size]
 		switch fourcc {
 		case "DITI":
-			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Title == "" {
-				t.Title = s
-			}
+			c.keepFirst(containerText{title: readDIINText(payload, fourcc, logPath)})
 		case "DIAR":
-			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Artist == "" {
-				t.Artist = s
-			}
-		case "DIAL":
-			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Album == "" {
-				t.Album = s
-			}
-		case "DIGN":
-			if s, ok := readDIINPString(payload, fourcc, absPath); ok && t.Genre == "" {
-				t.Genre = s
-			}
-		case "COMT":
-			// Comments chunk — structured (2-byte count + per-
-			// comment timestamps + text). No Track.Comment surface
-			// today, so skip past correctly via the chunk-header
-			// size and continue the walk.
+			c.keepFirst(containerText{artist: readDIINText(payload, fourcc, logPath)})
 		}
 		advance := 12 + size
 		if advance%2 == 1 {
@@ -2556,35 +2663,28 @@ func parseDIINChunks(body []byte, t *Track, absPath string) {
 		}
 		body = body[advance:]
 	}
+	return c
 }
 
-// readDIINPString parses a DSDIFF text sub-chunk payload as
-// (1 byte length, N bytes text). Returns the decoded string and a
-// presence bool. A malformed declared length (zero-payload or
-// length > available) returns ("", false) so the caller leaves the
-// Track field untouched. Logs a warn for the malformed case so
-// operators can correlate against the offending file path.
-//
-// The pad byte after odd `1+length` totals is consumed by the outer
-// walker's `advance%2` adjustment in parseDIINChunks — not here, so
-// the helper stays focused on the single concern of decoding one
-// pstring.
-func readDIINPString(payload []byte, fourcc, absPath string) (string, bool) {
-	if len(payload) < 1 {
-		scanLogger.Warn("dff: DIIN sub-chunk empty payload",
-			"path", absPath, "chunk", fourcc)
-		return "", false
+// readDIINText reads a DITI or DIAR chunk's body as the DSDIFF 1.5
+// specification lays it out and TagLib writes it: a 4-byte big-endian count,
+// then that many bytes of text (diinText decodes them; the pad byte after an
+// odd size is outside the body). A body too short for its count, or whose count
+// claims more than it holds, is no text: a line, and "" (TagLib reads nothing
+// from it either).
+func readDIINText(payload []byte, fourcc, logPath string) string {
+	if len(payload) < 4 {
+		scanLogger.Warn("dff: DIIN text chunk too short for its count",
+			"path", logPath, "chunk", fourcc, "size", len(payload))
+		return ""
 	}
-	length := int(payload[0])
-	if length == 0 {
-		return "", false
+	count := uint64(be32(payload[0:4]))
+	if count > uint64(len(payload)-4) {
+		scanLogger.Warn("dff: DIIN text chunk's count overruns its size",
+			"path", logPath, "chunk", fourcc, "count", count, "available", len(payload)-4)
+		return ""
 	}
-	if length > len(payload)-1 {
-		scanLogger.Warn("dff: DIIN sub-chunk pstring overruns declared size",
-			"path", absPath, "chunk", fourcc, "length", length, "available", len(payload)-1)
-		return "", false
-	}
-	return string(payload[1 : 1+length]), true
+	return diinText(payload[4 : 4+count])
 }
 
 // dffCompression classifies the PROP `CMPR` chunk. `Absent` is
@@ -2611,12 +2711,18 @@ type dffPropInfo struct {
 	channels    int
 	haveCHNL    bool
 	compression dffCompression
+	// id3 is the body of the first ID3 chunk nested in PROP ("ID3 " or
+	// "id3 "), a slice of the PROP body: the placement TagLib reads beside
+	// a root ID3 chunk, used only where the file holds no root one (the
+	// walk's finish). Tags only; nothing the iOS DFFHeadScan mirrors.
+	id3 []byte
 }
 
 // parsePropChunks walks the body of a DSDIFF PROP chunk (after the
-// leading "SND " form-type) and pulls FS (sample rate) + CMPR
-// (compression). Other property chunks (CHNL, ABSS, LSCO) aren't
-// needed for the iOS Track row.
+// leading "SND " form-type) and pulls FS (sample rate), CHNL (channels),
+// CMPR (compression), and an ID3 chunk nested there (its body, for the
+// walk's finish to read where the file holds no root one: backlog B140).
+// Other property chunks (ABSS, LSCO) aren't needed for the Track row.
 //
 // FS values are held in locals during the walk and committed to the
 // Track only after CMPR has been confirmed as "DSD " (uncompressed).
@@ -2672,6 +2778,13 @@ func parsePropChunks(body []byte) dffPropInfo {
 				default:
 					info.compression = dffCompressionUnknown
 				}
+			}
+		case "ID3 ", "id3 ":
+			// An ID3 tag nested in PROP, which TagLib reads (and rewrites
+			// in place) beside a root one. The first one keeps it, as the
+			// first root chunk does (applyEmbeddedID3).
+			if info.id3 == nil && len(payload) > 0 {
+				info.id3 = payload
 			}
 		}
 		// Advance past chunk + odd-byte pad. Use uint64 arithmetic

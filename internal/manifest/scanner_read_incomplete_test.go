@@ -35,33 +35,15 @@ import (
 )
 
 // readFaultFormat writes one audio format as a given version, "Original" or
-// "Retagged", whose bytes hold that word where its tags are, and says which
-// version a row describes.
+// "Retagged", whose bytes hold that word where its tags keep its title: the
+// title a row of the file carries names the version it describes. (The DFF
+// told its versions apart by sample rate until ExtractorVersion 20, since a
+// scanned DFF kept its file name as its title whatever its DIIN said: backlog
+// B140.)
 type readFaultFormat struct {
 	name  string
 	file  string
 	write func(t *testing.T, path, version string)
-	// version names the version a row describes: its title, unless set.
-	version func(tr *Track) string
-}
-
-// versionOf names the version the row tr describes.
-func (f readFaultFormat) versionOf(tr *Track) string {
-	if f.version != nil {
-		return f.version(tr)
-	}
-	return tr.Title
-}
-
-// dffRateOf is the DFF fixture's sample rate for a version: a scanned DFF row
-// carries the path's title whatever its DITI says (the path's guess fills the
-// title before the DIIN walk, which fills only an empty one), so the rate is
-// what tells the versions apart.
-func dffRateOf(version string) uint32 {
-	if version == "Original" {
-		return 2822400
-	}
-	return 5644800
 }
 
 // writeFixtureBytes writes data to path.
@@ -74,7 +56,8 @@ func writeFixtureBytes(t *testing.T, path string, data []byte) {
 
 // readFaultFormats is every family of extractor, each read by its own code:
 // dhowden behind the FLAC, MP3, MP4 and Ogg walks, the DSF walk and its ID3
-// read, the AIFF and WAV chunk walks, the DFF chunk walk.
+// read, the AIFF and WAV chunk walks (a WAV's ID3 chunk and its LIST/INFO),
+// the DFF chunk walk (its DIIN and its ID3 chunk).
 var readFaultFormats = []readFaultFormat{
 	{name: "FLAC", file: "01.flac", write: func(t *testing.T, p, version string) {
 		writeMinimalFLAC(t, p, 44100, 16, map[string]string{"TITLE": version})
@@ -98,14 +81,17 @@ var readFaultFormats = []readFaultFormat{
 		writeFixtureBytes(t, p, buildWAVWithID3(t, buildID3v2_3(map[string]string{"title": version})))
 	}},
 	{name: "DFF", file: "08.dff", write: func(t *testing.T, p, version string) {
-		writeFixtureBytes(t, p, buildDFFWithDIIN(t, dffRateOf(version), "DSD ", buildDIINSubChunk("DITI", version)))
-	}, version: func(tr *Track) string {
-		for _, v := range []string{"Original", "Retagged"} {
-			if tr.SampleRate != nil && *tr.SampleRate == float64(dffRateOf(v)) {
-				return v
-			}
-		}
-		return fmt.Sprintf("no known rate (%v)", tr.SampleRate)
+		writeFixtureBytes(t, p, buildDFFWithDIIN(t, 2822400, "DSD ", buildDIINSubChunk("DITI", version)))
+	}},
+	// The WAV walk's other tag reader, and the DFF walk's (backlog B140). The
+	// WAV has its fmt and data chunks, as a real one does: a walk over its
+	// LIST/INFO alone would never seek, and a seek fault would have nothing
+	// to fail.
+	{name: "WAV (LIST/INFO)", file: "09.wav", write: func(t *testing.T, p, version string) {
+		writeFixtureBytes(t, p, wavWithChunks(listInfo("INAM", version)))
+	}},
+	{name: "DFF (ID3 chunk)", file: "10.dff", write: func(t *testing.T, p, version string) {
+		writeFixtureBytes(t, p, dffWithChunks(t, 2822400, dffChunk("ID3 ", buildID3v2_3(map[string]string{"title": version}))))
 	}},
 }
 
@@ -215,15 +201,15 @@ func storedRowAt(t *testing.T, store *Store, rel string) (storedRow, bool) {
 }
 
 // requireVersion asserts that the row at rel describes the fixture's version
-// want (readFaultFormat.versionOf).
-func requireVersion(t *testing.T, store *Store, format readFaultFormat, rel, want string) {
+// want: its title (readFaultFormat).
+func requireVersion(t *testing.T, store *Store, rel, want string) {
 	t.Helper()
 	tr, err := store.GetTrack(context.Background(), rel)
 	if err != nil || tr == nil {
 		t.Fatalf("%s: no row (%v)", rel, err)
 	}
-	if got := format.versionOf(tr); got != want {
-		t.Errorf("%s: the row describes %q, want %q (title %q)", rel, got, want, tr.Title)
+	if tr.Title != want {
+		t.Errorf("%s: the row's title is %q, want the version %q", rel, tr.Title, want)
 	}
 }
 
@@ -319,7 +305,7 @@ func TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T) {
 		c.format.write(t, c.p, "Original")
 		setMTime(t, c.p, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC))
 		scanOnce(t, c.f.sc, "the original")
-		requireVersion(t, c.f.store, c.format, c.rel, "Original")
+		requireVersion(t, c.f.store, c.rel, "Original")
 		c.markMissing(t, 2)
 		before, _ := storedRowAt(t, c.f.store, c.rel)
 
@@ -329,7 +315,7 @@ func TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T) {
 		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
 
 		c.readableScan(t)
-		requireVersion(t, c.f.store, c.format, c.rel, "Retagged")
+		requireVersion(t, c.f.store, c.rel, "Retagged")
 		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
 	})
 }
@@ -348,7 +334,7 @@ func TestScanner_ANewFileWhoseReadDidNotCompleteGetsNoRow(t *testing.T) {
 		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
 
 		c.readableScan(t)
-		requireVersion(t, c.f.store, c.format, c.rel, "Retagged")
+		requireVersion(t, c.f.store, c.rel, "Retagged")
 		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
 	})
 }
