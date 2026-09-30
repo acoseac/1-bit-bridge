@@ -80,7 +80,7 @@ var stopGrace = 5 * time.Second
 // relocation lasts until someone acts on it: fourteen WARN lines in
 // thirteen seconds on a real serve at a 2 s interval, 48 a day at the
 // default hour (backlog B65). The mount-loss skip WARNed on every tick
-// until 2026-09-30 and logged no summary: nine WARN lines in sixteen
+// until 2026-09-29 and logged no summary: nine WARN lines in sixteen
 // seconds at a 2 s interval, 24 a day at the default hour, for as long
 // as the volume stays unmounted (backlog B131). The latch publishes
 // itself for the console (Status), whose Jobs card said "on"
@@ -429,7 +429,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// A refusal of its own kind, through the latch: one WARN when the
 	// streak starts and at most one a day while it lasts, and the tick's
 	// summary at Info, as a refused relocation's is. It WARNed on every
-	// tick until 2026-09-30 (backlog B131), for a state that lasts until
+	// tick until 2026-09-29 (backlog B131), for a state that lasts until
 	// someone mounts the volume; a rendition download meanwhile answers
 	// 410 and logs a WARN of its own, so the requests that fail still say
 	// so as they fail.
@@ -678,7 +678,7 @@ func VariantRefusalKinds() []VariantRefusalKind {
 }
 
 // VariantSweepStatus is what the variant watcher's refusal latch says, for
-// a reader on another goroutine: until 2026-09-30 the console's Jobs card
+// a reader on another goroutine: until 2026-09-29 the console's Jobs card
 // said "on" while every tick refused a relocation or skipped a variants
 // directory that read as unmounted (backlog B131).
 type VariantSweepStatus = RefusalStatus[VariantRefusalKind]
@@ -748,8 +748,8 @@ const variantRefusalHint = "if the sidecars really are gone: `bridge upscale --g
 const variantsDirUnavailableHint = "nothing was swept and no row was deleted. A variants directory that is " +
 	"missing, empty or unreadable while the catalog lists renditions is what an unmounted volume looks like, " +
 	"and every row would read as a rendition that is gone. Mount the volume, or point the variants directory " +
-	"at where the renditions are; until then every rendition download answers 410. This sweep has no " +
-	"override; it logs this when it starts skipping and once a day while it keeps skipping."
+	"at where the renditions are; until then a download of a rendition stored there answers 410. This sweep " +
+	"has no override; it logs this when it starts skipping and once a day while it keeps skipping."
 
 // The watcher's lines: the latched WARN of each refusal, the Info line a
 // tick logs when it passes both guards after a streak of either, and the
@@ -772,7 +772,7 @@ const (
 // 2026-09-29 this line was Warn for a refused tick too, so every tick of
 // a streak WARNed twice. A tick the mount-loss guard skipped summarises
 // the same way, with `skipped` and the rows it saw: it logged no summary
-// until 2026-09-30, and a WARN on every tick instead.
+// until 2026-09-29, and a WARN on every tick instead.
 //
 // Reached from every exit that saw rows, INCLUDING the two
 // cancellation arms. They used to return bare, so a shutdown partway

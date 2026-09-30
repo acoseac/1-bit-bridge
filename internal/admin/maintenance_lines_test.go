@@ -55,7 +55,7 @@ type maintenanceLinesStep struct {
 // for the variant integrity watcher and the orphan sidecar GC, each off,
 // on, and refusing as each kind, and reads the two lines and their
 // warnings. The watcher's line said "on" while every tick refused until
-// 2026-09-30 (backlog B131); the orphan GC's is the control that the
+// 2026-09-29 (backlog B131); the orphan GC's is the control that the
 // shared renderer (renderMaintenanceLine) paints it as before.
 func TestTheMaintenanceLinesSayWhenASweepRefuses(t *testing.T) {
 	node, err := exec.LookPath("node")

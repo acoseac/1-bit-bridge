@@ -148,7 +148,7 @@ type jobsUpdates struct {
 // rows that look relocated, and skips every tick over a variants directory
 // that reads as unmounted. Neither has an override, and each says so in
 // the journal once a day; the chips said "on" throughout (the orphan
-// sweep's until 2026-09-28, the watcher's until 2026-09-30), so a bridge
+// sweep's until 2026-09-28, the watcher's until 2026-09-29), so a bridge
 // whose sweep had done nothing for weeks looked healthy. Each kind is a
 // KEY (integrity.OrphanRefusalKind, integrity.VariantRefusalKind), worded
 // by the console.
@@ -382,7 +382,7 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 // recorder holds a time for a pass the gate will refuse: the analysis,
 // fingerprint and CarPlay cards read "Next sweep: in 5h", and the smart
 // mixes card "Next run: in 23h", beside an "off" badge (seen in a browser
-// on a real serve, 2026-09-30). A pass the gate refuses does nothing, so
+// on a real serve, 2026-09-29). A pass the gate refuses does nothing, so
 // that time is a promise the loop will not keep, which is why
 // runSweepLoop's dormant branch clears it. The gate is the card's own
 // (`active`, or the smart mixes' switch), read once for the snapshot, so

@@ -13,7 +13,7 @@ const sweepRefusalRepeat = 24 * time.Hour
 // RefusalStatus is what a background sweep's refusal latch says, for a
 // reader on another goroutine: the console's Jobs card, which said "on"
 // for a sweep that refused every tick until each sweep published this
-// (the orphan sweep on 2026-09-28, the variant watcher on 2026-09-30,
+// (the orphan sweep on 2026-09-28, the variant watcher on 2026-09-29,
 // backlog B131). K is the sweep's kind of refusal, a key the console words.
 type RefusalStatus[K comparable] struct {
 	// Refusing is the kind of refusal the current streak is; the zero K
@@ -49,7 +49,7 @@ type RefusalStatus[K comparable] struct {
 //
 // The latch publishes itself (status) whenever a streak starts or ends, so
 // a sweep cannot move the latch and forget to tell the card: the orphan
-// sweep did that publishing by hand until 2026-09-30.
+// sweep did that publishing by hand until 2026-09-29.
 //
 // Owned by the sweep's run goroutine: not safe for concurrent use, but for
 // status, which any goroutine may call.

@@ -126,7 +126,7 @@ func TestVariantWatcherEndsItsStreakOnAnEmptyCatalog(t *testing.T) {
 // neither ends a streak nor starts one: a failed listing, and a tick the
 // shutdown stopped before its first row. The streak goes on through both,
 // with one WARN and no lifted line. (A variants directory the mount-loss
-// guard reads as unmounted was the third such tick until 2026-09-30: it is
+// guard reads as unmounted was the third such tick until 2026-09-29: it is
 // a refusal of its own kind now, TestVariantWatcherSaysEachKindOfRefusalWhenItStarts.)
 func TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing(t *testing.T) {
 	dir, rows, _ := relocationShape(t, 30)

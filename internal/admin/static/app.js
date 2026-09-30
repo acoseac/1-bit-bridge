@@ -5889,7 +5889,7 @@ function renderJobCards(j) {
     // (nextSweepWhileOpen), for this card and the fingerprint, CarPlay and
     // smart mixes cards: a pass the gate refuses does nothing, so this line
     // reads "—" beside an off or degraded badge. It read "in 5h" there
-    // until 2026-09-30 (backlog B156).
+    // until 2026-09-29 (backlog B156).
     setText("job-analysis-next", formatInFuture(sweep.nextDueAt));
     setText("job-analysis-lastrun", describeAnalysisSweep(sweep.last));
   }
@@ -6076,7 +6076,7 @@ function renderOrphanSidecarGC(mt) {
 // delete rows that look relocated, and skips every tick over a variants
 // directory that reads as unmounted, with no override for either, and
 // says so in the journal once a day. This line read "on" throughout until
-// 2026-09-30 (backlog B131). The refusal kind is a key the server sends
+// 2026-09-29 (backlog B131). The refusal kind is a key the server sends
 // and describeVariantIntegrityRefusal words.
 function renderVariantIntegrity(mt) {
   const kind = mt.variantIntegrityActive ? mt.variantIntegrityRefusal : "";
@@ -6101,8 +6101,8 @@ function describeVariantIntegrityRefusal(kind) {
     case "variantsDirUnavailable":
       return "The variants directory is missing, empty or cannot be read while the catalog lists renditions: " +
         "that is what an unmounted volume looks like, so nothing is swept and no row is deleted. Until it is " +
-        "back no rendition can be downloaded. Mount the volume, or point the variants directory at where the " +
-        "renditions are.";
+        "back, the renditions stored there cannot be downloaded. Mount the volume, or point the variants " +
+        "directory at where the renditions are.";
     default:
       return `No row is deleted (${kind}).`;
   }
