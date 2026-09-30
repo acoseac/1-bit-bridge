@@ -612,16 +612,19 @@ func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState
 	// this" from "something else is at this path now". os.SameFile is
 	// the portable comparison (device+inode on POSIX, volume+file index
 	// on Windows) and there is no exported value type for it, hence the
-	// wrapper. A failed stat leaves it nil, which the handler reads as
-	// "cannot claim I emptied it".
+	// wrapper. A directory the probe could not read leaves it nil,
+	// which the handler reads as "cannot claim I emptied it".
 	//
-	// fsutil.DirIdentity, never os.Stat: on Windows an os.Stat of a
-	// plain directory reads its identity only when SameFile asks, from
-	// whatever the path names then, so the instance the handler kept at
-	// its first unlink compared as the same as any directory put at the
-	// path later (backlog B203).
-	if fi, err := fsutil.DirIdentity(dir); err == nil {
-		st.Store = sidecarStoreID{fi}
+	// The probe's own Info: the stat of the handle it read the
+	// directory's first entry with, so Empty and the identity are about
+	// one directory (a second lookup could take them from a directory
+	// swapped in between; CodeRabbit on #1127). Never an os.Stat: on
+	// Windows that reads a plain directory's identity only when SameFile
+	// asks, from whatever the path names then, so the instance the
+	// handler kept at its first unlink compared as the same as any
+	// directory put at the path later (backlog B203).
+	if block.Info != nil {
+		st.Store = sidecarStoreID{block.Info}
 	}
 	return st
 }

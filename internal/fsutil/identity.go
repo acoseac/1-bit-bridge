@@ -7,8 +7,9 @@ import "os"
 // unmounted under a mountpoint leaves the path naming the local directory
 // beneath it, which is another directory, and that comparison is how a sweep
 // that deletes rows whose files it cannot find tells an unmount from a
-// deletion (backlog B203; the variant watcher and the variant delete
-// handler).
+// deletion (backlog B203: the variant watcher asks it, and its directory
+// probe, which the variant delete handler reads too, takes the same stat
+// from the handle it reads the directory with).
 //
 // Not os.Stat. On Windows, os.Stat of a path that is no reparse point reads
 // its attributes with GetFileAttributesEx and leaves the file's identity

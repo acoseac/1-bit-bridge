@@ -3492,7 +3492,9 @@ no failing test — which is the shape to expect in this area.
   `TestOSStatLeavesTheWindowsIdentityToTheComparison` pins the premise). The
   delete handler's kept instance (`SidecarStoreState`, #968) was that
   `os.Stat` and compared as any directory later put at the path: it takes
-  `fsutil.DirIdentity` too. **A test of a kept identity compares it with
+  the probe's `Info` now, from the handle that read `Empty`, so the two are
+  about one directory (a second lookup could take them from a directory
+  swapped in between; CodeRabbit). **A test of a kept identity compares it with
   nothing before the change**: on Windows a comparison reads the lazy
   identity and fixes it at that moment, which passed the handler's test on
   the old line until the early comparison went. The unmount is stood in by

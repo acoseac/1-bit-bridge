@@ -66,12 +66,14 @@ type VariantsDirBlock struct {
 	// different facts and a caller acting on one must not act on
 	// the other.
 	Empty bool
-	// Info is the directory as the probe found it, set only when
-	// Reason is "": the observation a sweep judged healthy, for a
-	// later check (variantsDirChanged) of whether the path still names
-	// that directory. A clean unmount leaves the path naming the local
-	// directory under the mountpoint, which is another directory, and
-	// the comparison is what sees it (backlog B203).
+	// Info is the directory whose entries the probe read, from the
+	// handle it read them with, so it and Empty (or a healthy
+	// Reason) are about one directory: set when Reason is "" or Empty
+	// is true, nil otherwise. A later check compares it with the
+	// directory at the path then (variantsDirChanged; the variant
+	// delete handler's SidecarStoreState), since a clean unmount
+	// leaves the path naming the local directory under the
+	// mountpoint, which is another directory (backlog B203).
 	Info os.FileInfo
 }
 
@@ -91,7 +93,7 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	case err != nil:
 		return VariantsDirBlock{Reason: fmt.Sprintf("cannot read variants directory: %v", err)}
 	case empty:
-		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true}
+		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true, Info: opened}
 	}
 	return VariantsDirBlock{Info: opened}
 }
@@ -151,7 +153,7 @@ func dirIsEmpty(dir string) (opened os.FileInfo, empty bool, err error) {
 	}
 	if _, err := f.ReadDir(1); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, true, nil
+			return opened, true, nil
 		}
 		return nil, false, err
 	}

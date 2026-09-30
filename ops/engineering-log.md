@@ -34802,7 +34802,12 @@ The variant delete handler (#968) kept exactly that `os.Stat`
 (`SidecarStoreState`'s `sidecarStoreID`), so on Windows the directory it
 first unlinked from compared as the same as any empty directory later put at
 the path, and its empty-store exception could run over an unmount. It takes
-`fsutil.DirIdentity` now. `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`
+the probe's `Info` now, which the probe sets for an empty directory too:
+the stat of the handle that read `Empty`, so the emptiness and the identity
+are about one directory (review round 2 took the first version's separate
+`fsutil.DirIdentity` lookup away: between the probe and it, a directory
+swapped at the path could supply the identity while the emptiness was the
+first one's; CodeRabbit). `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`
 is red on nomos with the old line and green on POSIX either way. Its first
 draft compared the kept identity once before the replacement and passed on
 Windows with the old line: the comparison had read the identity early. So
