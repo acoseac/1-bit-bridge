@@ -8,11 +8,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -62,46 +65,58 @@ func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 // TestEveryOtherHandshakeFailureIsLoggedAsBefore runs each failing client
 // shape against the oracle and the wrapped server, and requires the same
 // line from both, addresses aside: the wrapped server's line carries
-// ClientPlaceholder where the oracle's carries the peer.
+// ClientPlaceholder wherever the oracle's carries the peer.
+//
+// The leak check reads every address in what the wrapped server logged,
+// and allows only the server's own. It used to look for the peer only
+// right after "from ", and passed while the timeout and reset reasons
+// named the peer again after "->" (backlog B172).
 func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 	cases := []struct {
 		name string
-		// run drives one connection and returns the address the server
-		// saw it come from.
-		run func(t *testing.T, addr string) string
-		// The oracle's reason must end with this, so a case cannot drift
-		// into testing a different failure than its name says.
-		reason           string
+		// run drives one connection to s and returns the address the
+		// server saw it come from.
+		run func(t *testing.T, s *server) string
+		// The oracle's line must match this, so a case cannot drift into
+		// testing a different failure than its name says.
+		reason           *regexp.Regexp
 		handshakeTimeout time.Duration
 	}{
 		// The case the text cannot tell from the probe: a peer that sent
 		// a whole ClientHello and then went away. The reason is the same
 		// bare "EOF", so the only thing keeping it in the log is the
 		// per-connection record of what the peer sent.
-		{name: "ClientHello then silence", run: helloThenHalfClose, reason: ": EOF"},
-		{name: "client rejects the cert", run: handshaketest.RejectTheCert, reason: ": remote error: tls: bad certificate"},
-		{name: "plaintext HTTP", run: plaintextHTTP, reason: ": client sent an HTTP request to an HTTPS server"},
-		{name: "partial record header", run: partialRecord, reason: ": unexpected EOF"},
-		// Silent, but it never CLOSED: a stalled peer, not a probe.
-		{name: "silent until the handshake times out", run: stallUntilClosed, reason: ": i/o timeout", handshakeTimeout: 200 * time.Millisecond},
+		{name: "ClientHello then silence", run: onAddr(helloThenHalfClose), reason: endsWith(": EOF")},
+		{name: "client rejects the cert", run: onAddr(handshaketest.RejectTheCert), reason: endsWith(": remote error: tls: bad certificate")},
+		{name: "plaintext HTTP", run: onAddr(plaintextHTTP), reason: endsWith(": client sent an HTTP request to an HTTPS server")},
+		{name: "partial record header", run: onAddr(partialRecord), reason: endsWith(": unexpected EOF")},
+		// Silent, but it never CLOSED: a stalled peer, not a probe. From
+		// here down the reason is a socket error, which names both ends.
+		{name: "silent until the handshake times out", run: onAddr(stallUntilClosed), reason: socketError("read", "i/o timeout"), handshakeTimeout: 200 * time.Millisecond},
+		// A reset is not the probe either: the probe closes, and only an
+		// EOF counts as silent.
+		{name: "reset before the ClientHello", run: resetOnceAccepted, reason: socketError("read", resetReasons)},
+		{name: "reset after the ServerHello", run: onAddr(resetAfterServerHello), reason: socketError("read", resetReasons)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := handshaketest.CaptureStdLog(t)
 
 			plain := startServer(t, false, tc.handshakeTimeout)
-			from := tc.run(t, plain.addr)
+			from := tc.run(t, plain)
 			plain.waitUntilClosed(t, from)
 			oracle := oneLineFrom(t, logs, from)
-			if !strings.HasSuffix(oracle, tc.reason) {
-				t.Fatalf("fixture drift: net/http logged %q, the case expects a reason ending %q", oracle, tc.reason)
+			if !tc.reason.MatchString(oracle) {
+				t.Fatalf("fixture drift: net/http logged %q, the case expects a line matching %q", oracle, tc.reason)
 			}
 
 			filtered := startServer(t, true, tc.handshakeTimeout)
-			from = tc.run(t, filtered.addr)
+			before := len(logs.String())
+			from = tc.run(t, filtered)
 			filtered.waitUntilClosed(t, from)
-			if leaked := linesFrom(logs, from); len(leaked) != 0 {
-				t.Errorf("the peer's address reached the log: %q", leaked)
+			out := logs.String()[before:]
+			if leaked := addressesOtherThan(out, filtered.addr); len(leaked) != 0 {
+				t.Errorf("a client's address reached the log: %q; the wrapped server logged:\n%s", leaked, out)
 			}
 			got := redactedLines(logs)
 			if len(got) != 1 {
@@ -111,6 +126,44 @@ func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 				t.Errorf("the forwarded line differs from net/http's own:\n got %q\nwant %q", got[0], oracle)
 			}
 		})
+	}
+}
+
+// TestAnHTTP2PrefaceErrorKeepsNoClientAddress is the phone's own shape: it
+// negotiates h2, and a connection reset before its preface makes the
+// bundled HTTP/2 server log
+//
+//	http2: server: error reading preface from client <peer>: read tcp <local>-><peer>: …
+//
+// The peer after "client " was always redacted; the socket error names it
+// again. Windows logs nothing here: that server counts wsarecv's
+// WSAECONNRESET as a closed connection, whose error it only logs verbosely.
+func TestAnHTTP2PrefaceErrorKeepsNoClientAddress(t *testing.T) {
+	const prefacePrefix = "http2: server: error reading preface from client "
+	logs := handshaketest.CaptureStdLog(t)
+
+	plain := startServer(t, false, 0)
+	from := resetBeforeThePreface(t, plain.addr)
+	plain.waitUntilClosed(t, from)
+	oracle := linesWithPrefix(logs.String(), prefacePrefix+from+": ")
+	if len(oracle) == 0 && runtime.GOOS == "windows" {
+		t.Skip("net/http does not log a reset preface on windows (see the doc comment)")
+	}
+	if len(oracle) != 1 || !socketError("read", resetReasons).MatchString(oracle[0]) {
+		t.Fatalf("fixture drift: want one preface line naming the socket from %s, the log holds:\n%s", from, logs.String())
+	}
+
+	filtered := startServer(t, true, 0)
+	before := len(logs.String())
+	from = resetBeforeThePreface(t, filtered.addr)
+	filtered.waitUntilClosed(t, from)
+	out := logs.String()[before:]
+	if leaked := addressesOtherThan(out, filtered.addr); len(leaked) != 0 {
+		t.Errorf("a client's address reached the log: %q; the wrapped server logged:\n%s", leaked, out)
+	}
+	got := linesWithPrefix(out, prefacePrefix+ClientPlaceholder+": ")
+	if len(got) != 1 || shape(got[0]) != shape(oracle[0]) {
+		t.Errorf("want net/http's preface line less the client's address, %q; the wrapped server logged:\n%s", oracle[0], out)
 	}
 }
 
@@ -246,9 +299,10 @@ func TestALateCloseLeavesANewerRegistration(t *testing.T) {
 // ---- servers ----
 
 type server struct {
-	addr   string
-	lis    *listener // nil for the unfiltered oracle
-	closed sync.Map  // peer address → struct{}, once net/http has closed it
+	addr     string
+	lis      *listener // nil for the unfiltered oracle
+	accepted sync.Map  // peer address → struct{}, once the server has accepted it
+	closed   sync.Map  // peer address → struct{}, once net/http has closed it
 }
 
 // startServer serves on an ephemeral IPv4 loopback port.
@@ -287,7 +341,10 @@ func serveOnWith(t *testing.T, inner net.Listener, filtered bool, handshakeTimeo
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{testCert(t)}, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: handshakeTimeout,
 		ConnState: func(c net.Conn, state http.ConnState) {
-			if state == http.StateClosed {
+			switch state {
+			case http.StateNew:
+				s.accepted.Store(c.RemoteAddr().String(), struct{}{})
+			case http.StateClosed:
 				s.closed.Store(c.RemoteAddr().String(), struct{}{})
 			}
 		},
@@ -316,13 +373,29 @@ func serveOnWith(t *testing.T, inner net.Listener, filtered bool, handshakeTimeo
 // every "was NOT logged" assertion here exact rather than a sleep.
 func (s *server) waitUntilClosed(t *testing.T, peer string) {
 	t.Helper()
+	waitFor(t, &s.closed, peer, "closed")
+}
+
+// waitUntilAccepted returns once the server has accepted the connection
+// from peer, which is what a client that resets needs: a connection reset
+// while it waits in the backlog is never handed to the server on macOS
+// (accept answers ECONNABORTED, and net retries), so the server would
+// have nothing to log.
+func (s *server) waitUntilAccepted(t *testing.T, peer string) {
+	t.Helper()
+	waitFor(t, &s.accepted, peer, "accepted")
+}
+
+// waitFor returns once m holds peer.
+func waitFor(t *testing.T, m *sync.Map, peer, what string) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, ok := s.closed.Load(peer); ok {
+		if _, ok := m.Load(peer); ok {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the server never closed the connection from %s", peer)
+			t.Fatalf("the server never %s the connection from %s", what, peer)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -454,14 +527,84 @@ func stallUntilClosed(t *testing.T, addr string) string {
 	return c.LocalAddr().String()
 }
 
+// resetAndClose closes c with a reset (SO_LINGER 0), the way a phone's
+// connection ends when its network goes away under it: the server's next
+// read or write of the socket fails with "connection reset by peer".
+func resetAndClose(c *net.TCPConn) {
+	_ = c.SetLinger(0)
+	_ = c.Close()
+}
+
+// resetOnceAccepted resets the connection before sending a byte, once the
+// server has accepted it.
+func resetOnceAccepted(t *testing.T, s *server) string {
+	t.Helper()
+	c := dial(t, s.addr)
+	from := c.LocalAddr().String()
+	s.waitUntilAccepted(t, from)
+	resetAndClose(c)
+	return from
+}
+
+// resetOnFirstRead resets the connection as soon as the first byte of the
+// server's reply arrives.
+type resetOnFirstRead struct{ *net.TCPConn }
+
+// Read reads one byte, then resets.
+func (c resetOnFirstRead) Read(p []byte) (int, error) {
+	n, err := c.TCPConn.Read(p[:1])
+	resetAndClose(c.TCPConn)
+	return n, err
+}
+
+// resetAfterServerHello sends a ClientHello and resets once the server's
+// reply begins. Go's server writes its whole flight in one flush, so the
+// reset reaches it while it reads the client's next flight.
+func resetAfterServerHello(t *testing.T, addr string) string {
+	t.Helper()
+	c := dial(t, addr)
+	from := c.LocalAddr().String()
+	_ = tls.Client(resetOnFirstRead{c}, trustingTheTestCert(t, nil)).Handshake()
+	return from
+}
+
+// resetBeforeThePreface completes a handshake that negotiates HTTP/2, and
+// resets before sending the client preface. The server writes its SETTINGS
+// frame as it starts serving the connection, before it reads the preface,
+// so once a byte of it is here the server is waiting for the preface.
+func resetBeforeThePreface(t *testing.T, addr string) string {
+	t.Helper()
+	c := dial(t, addr)
+	from := c.LocalAddr().String()
+	tc := tls.Client(c, trustingTheTestCert(t, []string{"h2"}))
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("the h2 handshake failed: %v", err)
+	}
+	if p := tc.ConnectionState().NegotiatedProtocol; p != "h2" {
+		t.Fatalf("negotiated %q, want h2", p)
+	}
+	_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := tc.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("no SETTINGS frame from the server: %v", err)
+	}
+	resetAndClose(c)
+	return from
+}
+
+// trustingTheTestCert is a client config that trusts exactly the test
+// cert, offering protos over ALPN.
+func trustingTheTestCert(t *testing.T, protos []string) *tls.Config {
+	t.Helper()
+	roots := x509.NewCertPool()
+	roots.AddCert(testCert(t).Leaf)
+	return &tls.Config{RootCAs: roots, ServerName: "127.0.0.1", NextProtos: protos, MinVersion: tls.VersionTLS12}
+}
+
 // verifiedHandshake completes a handshake that trusts exactly the test
 // cert, and returns the address the server saw.
 func verifiedHandshake(t *testing.T, addr string) string {
 	t.Helper()
-	roots := x509.NewCertPool()
-	roots.AddCert(testCert(t).Leaf)
-	c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
-		&tls.Config{RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12})
+	c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, trustingTheTestCert(t, nil))
 	if err != nil {
 		t.Fatalf("a verified handshake failed: %v", err)
 	}
@@ -546,13 +689,53 @@ func firstNonLoopbackIPv4(t *testing.T) net.IP {
 
 // linesFrom returns the handshake-error lines logged for peer.
 func linesFrom(logs *handshaketest.Buffer, peer string) []string {
-	var out []string
-	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.HasPrefix(line, handshakeErrorPrefix+peer+": ") {
-			out = append(out, line)
+	return linesWithPrefix(logs.String(), handshakeErrorPrefix+peer+": ")
+}
+
+// linesWithPrefix returns the lines of out that begin with prefix.
+func linesWithPrefix(out, prefix string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			lines = append(lines, line)
 		}
 	}
-	return out
+	return lines
+}
+
+// addressesOtherThan returns every address in out other than own, the
+// server's listen address, which is also the local end of each of its
+// connections. A test server on loopback shares its IP with its clients,
+// so the address with its port is what tells them apart.
+func addressesOtherThan(out, own string) []string {
+	var others []string
+	for _, a := range addrPattern.FindAllString(out, -1) {
+		if a != own {
+			others = append(others, a)
+		}
+	}
+	return others
+}
+
+// onAddr adapts a client shape that needs only the server's address.
+func onAddr(run func(*testing.T, string) string) func(*testing.T, *server) string {
+	return func(t *testing.T, s *server) string { return run(t, s.addr) }
+}
+
+// endsWith matches a line ending in suffix.
+func endsWith(suffix string) *regexp.Regexp {
+	return regexp.MustCompile(regexp.QuoteMeta(suffix) + `$`)
+}
+
+// resetReasons is the text a reset leaves in a socket error, per platform:
+// Linux and macOS, then Windows.
+const resetReasons = `read: connection reset by peer|wsarecv: An existing connection was forcibly closed by the remote host\.`
+
+// socketError matches a line whose reason is net's error for op on the
+// server's side of a TCP socket: "<op> tcp <local>-><remote>: <reason>",
+// with reason one of the alternatives given.
+func socketError(op, reason string) *regexp.Regexp {
+	return regexp.MustCompile(`: ` + op + ` tcp [^ ]+->[^ ]+: (?:` + reason + `)$`)
 }
 
 // oneLineFrom returns the single handshake-error line for peer. Called
@@ -566,7 +749,11 @@ func oneLineFrom(t *testing.T, logs *handshaketest.Buffer, peer string) string {
 	return got[0]
 }
 
-var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[^\]\s]+\]):\d+`)
+// addrPattern finds any address with a port the servers could print: IPv4,
+// or IPv6 in brackets, whose zone may hold a space (a Windows adapter's
+// name). It is wider than any rule RedactPeers applies, so a check built on
+// it sees an address the redaction missed.
+var addrPattern = regexp.MustCompile(`(\d{1,3}(\.\d{1,3}){3}|\[[^\]\n]+\]):\d+`)
 
 // shape is a line with its addresses, and the placeholder that replaces a
 // peer's, blanked: two servers on different ports, probed from different
@@ -592,6 +779,16 @@ func TestRedactPeers(t *testing.T) {
 			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
 		{"http: TLS handshake error from [fe80::1%en0]:50000: EOF",
 			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
+		// Windows names a link-local zone after the adapter, spaces and
+		// all (measured on Windows 11: "Wi-Fi 4").
+		{"http: TLS handshake error from [fe80::7%Wi-Fi 4]:50000: EOF",
+			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
+		{"http: TLS handshake error from [fe80::7%vEthernet (Default Switch)]:50000: EOF",
+			"http: TLS handshake error from " + ClientPlaceholder + ": EOF"},
+		// ... but a bracket that does not open an IPv6 literal is not an
+		// address, however far away the next "]:<digits>" is.
+		{"http: panic serving 192.0.2.7:41000: boom from [x] happened at [y]:7",
+			"http: panic serving " + ClientPlaceholder + ": boom from [x] happened at [y]:7"},
 		{"http: panic serving 100.64.0.7:41000: boom\ngoroutine 7 [running]:",
 			"http: panic serving " + ClientPlaceholder + ": boom\ngoroutine 7 [running]:"},
 		{"http2: server: error reading preface from client 10.0.0.2:5000: EOF",
@@ -608,14 +805,106 @@ func TestRedactPeers(t *testing.T) {
 		{"http: Accept error: accept tcp [::]:7788: too many open files; retrying in 5ms",
 			"http: Accept error: accept tcp [::]:7788: too many open files; retrying in 5ms"},
 	} {
-		got := RedactPeers(tc.in)
-		if got != tc.want {
-			t.Errorf("RedactPeers(%q)\n got %q\nwant %q", tc.in, got, tc.want)
-		}
-		if again := RedactPeers(got); again != got {
-			t.Errorf("RedactPeers is not idempotent on %q: %q", got, again)
-		}
+		checkRedaction(t, tc.in, tc.want)
 	}
+}
+
+// TestRedactPeersInASocketError pins the reasons that are a socket error,
+// the ones a phone produces most: a handshake that times out, a reset, a
+// write to a peer that is gone. net names both ends of the socket there,
+// local then remote, for a read and a write alike, so the peer comes back
+// after "->" in a line whose first address was already redacted (backlog
+// B172). The texts after the addresses are the ones measured on Linux,
+// macOS and Windows.
+func TestRedactPeersInASocketError(t *testing.T) {
+	const hs = "http: TLS handshake error from %s: %v"
+	const p = ClientPlaceholder
+	local4, peer4 := tcpAddr("192.0.2.1", 7788, ""), tcpAddr("192.0.2.7", 51786, "")
+	local6, peer6 := tcpAddr("2001:db8::1", 7788, ""), tcpAddr("2001:db8::7", 51786, "")
+	localWiFi, peerWiFi := tcpAddr("fe80::1", 7788, "Wi-Fi 4"), tcpAddr("fe80::7", 51786, "Wi-Fi 4")
+	for _, tc := range []struct{ name, in, want string }{
+		{"a handshake that times out",
+			fmt.Sprintf(hs, peer4, sockErr("read", local4, peer4, "i/o timeout")),
+			"http: TLS handshake error from " + p + ": read tcp 192.0.2.1:7788->" + p + ": i/o timeout"},
+		{"a reset, Linux and macOS",
+			fmt.Sprintf(hs, peer4, sockErr("read", local4, peer4, "read: connection reset by peer")),
+			"http: TLS handshake error from " + p + ": read tcp 192.0.2.1:7788->" + p + ": read: connection reset by peer"},
+		{"a reset, Windows",
+			fmt.Sprintf(hs, peer6, sockErr("read", local6, peer6, "wsarecv: An existing connection was forcibly closed by the remote host.")),
+			"http: TLS handshake error from " + p + ": read tcp [2001:db8::1]:7788->" + p + ": wsarecv: An existing connection was forcibly closed by the remote host."},
+		{"a write to a peer that is gone, macOS",
+			fmt.Sprintf(hs, peer4, sockErr("write", local4, peer4, "write: broken pipe")),
+			"http: TLS handshake error from " + p + ": write tcp 192.0.2.1:7788->" + p + ": write: broken pipe"},
+		{"a write to a peer that is gone, Linux",
+			fmt.Sprintf(hs, peer6, sockErr("write", local6, peer6, "write: connection reset by peer")),
+			"http: TLS handshake error from " + p + ": write tcp [2001:db8::1]:7788->" + p + ": write: connection reset by peer"},
+		{"a write to a peer that is gone, Windows",
+			fmt.Sprintf(hs, peer4, sockErr("write", local4, peer4, "wsasend: An existing connection was forcibly closed by the remote host.")),
+			"http: TLS handshake error from " + p + ": write tcp 192.0.2.1:7788->" + p + ": wsasend: An existing connection was forcibly closed by the remote host."},
+		{"a link-local peer on Windows, whose zone is the adapter's name",
+			fmt.Sprintf(hs, peerWiFi, sockErr("read", localWiFi, peerWiFi, "i/o timeout")),
+			"http: TLS handshake error from " + p + ": read tcp [fe80::1%Wi-Fi 4]:7788->" + p + ": i/o timeout"},
+		{"the HTTP/2 preface",
+			fmt.Sprintf("http2: server: error reading preface from client %v: %v", peer4, sockErr("read", local4, peer4, "read: connection reset by peer")),
+			"http2: server: error reading preface from client " + p + ": read tcp 192.0.2.1:7788->" + p + ": read: connection reset by peer"},
+		{"a panic value quoting a socket error",
+			fmt.Sprintf("http: panic serving %v: %v\n%s", peer4, errors.New(sockErr("write", local4, peer4, "write: broken pipe")), "goroutine 7 [running]:"),
+			"http: panic serving " + p + ": write tcp 192.0.2.1:7788->" + p + ": write: broken pipe\ngoroutine 7 [running]:"},
+		{"a socket error needs no word before it",
+			fmt.Sprintf("http2: server closing client connection: %v", sockErr("write", local6, peer6, "write: broken pipe")),
+			"http2: server closing client connection: write tcp [2001:db8::1]:7788->" + p + ": write: broken pipe"},
+		// net's accept ignores a failed getsockname (fd_unix.go, and
+		// fd_windows.go's GetAcceptExSockaddrs), which leaves the local end
+		// nil: the error then names the peer alone, after a space. Only the
+		// words before it say it is the peer, so the redaction takes every
+		// place a line repeats an address it knows is one.
+		{"a socket whose local address could not be read",
+			fmt.Sprintf(hs, peer4, sockErr("read", nil, peer4, "read: connection reset by peer")),
+			"http: TLS handshake error from " + p + ": read tcp " + p + ": read: connection reset by peer"},
+		// ... and the lone address can be the LOCAL end: gVisor's gonet
+		// (the tailnet listener) has no remote address left after a reset,
+		// and net/http then has none to print either. Nothing says it is a
+		// peer, and it is not one.
+		{"the tailnet listener after a reset",
+			fmt.Sprintf(hs, net.Addr(nil), sockErr("read", tcpAddr("100.64.0.1", 443, ""), nil, "connection reset by peer")),
+			"http: TLS handshake error from %!s(<nil>): read tcp 100.64.0.1:443: connection reset by peer"},
+		// A repeat is replaced only where it stands alone: a local address
+		// that begins or ends with the peer's text is a different address.
+		{"a local address that begins with the peer's text",
+			fmt.Sprintf(hs, tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("10.0.0.2", 50001, ""), tcpAddr("10.0.0.2", 5000, ""), "i/o timeout")),
+			"http: TLS handshake error from " + p + ": read tcp 10.0.0.2:50001->" + p + ": i/o timeout"},
+		{"a local address that ends with the peer's text",
+			fmt.Sprintf(hs, tcpAddr("10.0.0.2", 5000, ""), sockErr("read", tcpAddr("110.0.0.2", 5000, ""), nil, "connection reset by peer")),
+			"http: TLS handshake error from " + p + ": read tcp 110.0.0.2:5000: connection reset by peer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkRedaction(t, tc.in, tc.want) })
+	}
+}
+
+// checkRedaction requires RedactPeers(in) == want, and a second pass to
+// change nothing.
+func checkRedaction(t *testing.T, in, want string) {
+	t.Helper()
+	got := RedactPeers(in)
+	if got != want {
+		t.Errorf("RedactPeers(%q)\n got %q\nwant %q", in, got, want)
+	}
+	if again := RedactPeers(got); again != got {
+		t.Errorf("RedactPeers is not idempotent on %q: %q", got, again)
+	}
+}
+
+// sockErr is net's own text for an error on a TCP socket, a *net.OpError:
+// the local end, "->", then the remote end. Built from the type rather than
+// typed out, so a row cannot hold a shape net never prints. A nil end is
+// left out, as net leaves it out.
+func sockErr(op string, local, remote net.Addr, reason string) string {
+	return (&net.OpError{Op: op, Net: "tcp", Source: local, Addr: remote, Err: errors.New(reason)}).Error()
+}
+
+// tcpAddr is a TCP address; zone is empty unless the IP is link-local.
+func tcpAddr(ip string, port int, zone string) *net.TCPAddr {
+	return &net.TCPAddr{IP: net.ParseIP(ip), Port: port, Zone: zone}
 }
 
 // A handler that panics is the other net/http line that names the peer,
@@ -664,8 +953,12 @@ func TestErrorLogRedactsAndDropsNothing(t *testing.T) {
 	l := ErrorLog()
 	l.Print("http: TLS handshake error from 127.0.0.1:41418: EOF")
 	l.Print("http: TLS handshake error from 100.64.0.3:5000: remote error: tls: bad certificate")
+	// A tailnet phone whose handshake times out: gVisor's error names both
+	// ends, as net's does.
+	l.Print("http: TLS handshake error from 100.64.0.3:5001: read tcp 100.64.0.1:443->100.64.0.3:5001: i/o timeout")
 	want := "http: TLS handshake error from " + ClientPlaceholder + ": EOF\n" +
-		"http: TLS handshake error from " + ClientPlaceholder + ": remote error: tls: bad certificate\n"
+		"http: TLS handshake error from " + ClientPlaceholder + ": remote error: tls: bad certificate\n" +
+		"http: TLS handshake error from " + ClientPlaceholder + ": read tcp 100.64.0.1:443->" + ClientPlaceholder + ": i/o timeout\n"
 	if got := logs.String(); got != want {
 		t.Errorf("ErrorLog wrote\n%q\nwant\n%q", got, want)
 	}
