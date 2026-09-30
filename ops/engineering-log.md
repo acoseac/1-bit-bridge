@@ -31483,3 +31483,145 @@ order test alone.
 - `--start-now` is Windows-only and ignored elsewhere without a word, as
   `--force` is without `--yes` (the prompt still asks). Neither changes what
   a run writes; not touched.
+
+## 2026-09-29 — every dhowden read goes through a page buffer, so an unsynchronised ID3v2 tag costs its length over 4096 reads, not a read per byte (backlog B117)
+
+Backlog B117, found by the B101 session: dhowden/tag wraps its stream in a
+filter under an ID3v2 tag's unsynchronisation flag (`unsynchroniser`,
+id3v2.go), and its `Read` fills the caller's slice one byte per Read call on the
+stream beneath. The extractors handed dhowden the `*os.File` (the MP3 and every
+other `tag.ReadFrom` route, the DSF extractor's `tag.ReadID3v2Tags` at the
+metadata pointer) or, for an AIFF or WAV ID3 chunk, a `bytes.Reader` over the
+chunk in memory. On a file every byte of such a tag was a read(2).
+
+### Reproduced
+
+A throwaway program (a `_repro` directory, never committed) building an MP3
+and a DSF around an ID3v2.4 tag with the flag set and one TXXX frame of n bytes
+(no 0xFF in it, so the flag changes no byte), extracted through
+`ExtractWithContext`, best of three, main at ffbcf52b:
+
+| tag | dev Mac | dido (golang:1.26.6 container) |
+|---|---|---|
+| 1 MB, flag set | 381 ms (MP3), 382 ms (DSF) | 644 ms, 648 ms |
+| 10 MB, flag set | 3,811 ms, 3,815 ms | 6,459 ms, 6,521 ms |
+| 10 MB, no flag | 2.3 ms, 2.2 ms | 3.7 ms, 2.8 ms |
+
+About 380 ns a byte on the Mac. The size field admits 512 MiB (B101's unmasked
+synchsafe read), minutes of one scan worker while `Scan` holds the scanner's
+mutex. Counted with a stream that counts its Read calls: a 1 MiB tag reached
+the stream in 1,048,609 reads through `tag.ReadFrom`, 1,048,610 through the DSF
+route.
+
+### Design
+
+- `dhowden_read_buffer.go`: `newDhowdenReadBuffer(rs)` returns a buffered
+  `io.ReadSeeker` over rs from where rs is, and a release. Reads come from a
+  4096-byte buffer (a page, what a NAS client fetches for the smallest read
+  anyway); a Read of a page or more with the buffer drained goes to the stream
+  directly, so a large payload (a cover) is not copied twice.
+- Seek is the stream's: SeekCurrent and SeekStart landing within the bytes the
+  buffer holds move nothing (tag.ReadFrom's `Seek(-11, io.SeekCurrent)` after
+  the 11 bytes it picks a parser by; FLAC's and MP4's short skips); any other
+  Seek, SeekEnd included, is the stream's own call, with its offset and its
+  error, and a failed one leaves both as they were. An empty Read, with the
+  buffer drained, is the stream's own answer (a `bytes.Reader` at its end says
+  io.EOF, an `*os.File` says nil).
+- release seeks the stream to the reader's offset, so the stream ends where an
+  unbuffered read would have left it. Every caller after dhowden seeks
+  absolutely anyway (the FLAC multi-value pass, the MP4 genre walk, the Ogg FLAC
+  join's pass), and release keeps that from being a precondition.
+- Wired at all three dhowden calls: `tag.ReadFrom` in `readDhowdenTags`,
+  `tag.ReadID3v2Tags` in the DSF extractor (whose walk became
+  `extractDSFFromReader`, taking the stream, so a test can count its reads) and
+  in `applyEmbeddedID3`. The last reads a chunk already in memory, where the
+  buffer saves nothing; it is wrapped so the rule has no exception, at the cost
+  of one 4 KB allocation.
+- The guards are untouched: they run before the buffer exists and walk the bare
+  stream by offset (`ReadAt`), and the buffer presents dhowden the same bytes
+  from the same offset.
+- Not forked, and not special-cased to the flag: buffering every read (the
+  backlog's first option) makes the common path faster, as measured below, where
+  a buffer only in front of a flagged tag would have to mirror dhowden's
+  dispatch a second time to find the flag.
+
+### Measured after
+
+The same probe on the fix: a 10 MB flagged tag in 62.4 ms (MP3) and 62.5 ms
+(DSF) on the dev Mac and 72.1 ms and 72.2 ms on dido (main's tree beside it:
+6,459 and 6,521 ms), a 1 MB one in 8.1 and 6.7 ms (dido 7.8 and 7.5), 257
+reads for 1 MiB. Without the flag nothing moved: 2.2 and 2.1 ms on the Mac, and
+on dido, best of fifteen, 2.8–2.9 and 2.6 ms against main's 2.8–3.1 and 2.6. The
+remaining cost is dhowden's own filter calling Read once per byte, now on
+memory.
+
+The common path, the reads dhowden's `tag.ReadFrom` makes on a file (a counting
+wrapper over the `*os.File`), unbuffered and through the buffer:
+
+| file | reads | seeks | bytes read |
+|---|---|---|---|
+| Picard MP3 fixture | 50 → 1 | 1 → 2 | 1,093 → 1,395 |
+| MP3, 1 MB cover, 20 TXXX | 93 → 3 | 1 → 2 | 1,049,640 → 1,050,956 |
+| Picard M4A fixture | 104 → 3 | 8 → 3 | 1,012 → 4,140 |
+| dhowden's sample.m4a | 77 → 3 | 8 → 3 | 593 → 7,333 |
+| dhowden's sample.flac | 33 → 1 | 3 → 3 | 273 → 4,096 |
+| dhowden's sample.dsf | 47 → 2 | 3 → 3 | 337 → 5,424 |
+| libFLAC Ogg fixture | 17 → 2 | 1 → 2 | 1,452 → 1,441 |
+| dhowden's sample.id3v11.mp3 | 8 → 2 | 2 → 3 | 139 → 4,224 |
+
+Same tags and the same final offset in every row. Through `ExtractWithContext`,
+3,000 extractions a file, two interleaved rounds on the dev Mac: the Picard MP3
+95 → 78–82 µs, the 1 MB cover 216–218 → 188–192 µs, the Picard M4A 144 → 108 µs,
+sample.flac 87 → 76–82 µs, sample.dsf 66 → 51–56 µs, the Ogg FLAC fixture 74 →
+62–67 µs, the Picard WAV (an in-memory chunk) 55.6–55.7 → 55.8–58.9 µs; each
+extraction allocates 4.2 KB more (the buffer).
+
+### Tests
+
+- `TestAnUnsynchronisedID3v2TagIsReadAPageAtATime`: a 1 MiB flagged tag through
+  `extractViaDhowdenFromReader` (an MP3) and `extractDSFFromReader` (a DSF) over a
+  stream counting its Read calls, at most len/4096 + 16 of them (272; the fix
+  makes 257). Red on main: 1,048,609 and 1,048,610.
+- `TestDhowdenReadsTheSameThroughTheBuffer`: over every file in `testdata/id3`,
+  `testdata/m4a` and `testdata/ogg`, the B101 `id3v2Shapes`, a FLAC with a
+  picture, an ID3v1-only file, a DSF and flagged tags, `tag.ReadFrom` (and
+  `tag.ReadID3v2Tags` on each stream opening with a tag) answers through the
+  buffer exactly as bare: error, raw map, picture, and the offset the stream is
+  left at.
+- `TestEveryDhowdenReadIsGuarded` now also requires each dhowden read to take a
+  variable a `newDhowdenReadBuffer` call in the same function assigned.
+- `FuzzDhowdenReadBufferReadsAsItsStreamDoes`: a tape of `io.ReadFull`, single
+  Reads and seeks from each whence against the buffer and a bare `bytes.Reader`
+  from the same offset: the same bytes, counts and errors for a full read; a
+  single Read (which may be short) returns bytes the bare stream holds next, and
+  nothing only at its end with io.EOF; the same offset or a failure on both for a
+  seek; the same offset after release. Its first draft compared single Reads
+  count for count and failed on the short reads any buffered reader returns; the
+  io.Reader contract allows them and dhowden reads through io.ReadFull.
+
+Negative controls, each on the committed fix, each red: `tag.ReadFrom` handed
+the bare stream (the MP3 case, 1,048,609 reads); the DSF read handed the bare
+stream (the DSF case); a one-byte buffer (both); the AIFF/WAV read handed the
+bare stream (the structural test, naming `applyEmbeddedID3`); release doing
+nothing (the equivalence test: ffmpeg's MP3 left at 747 where bare reading left
+216); an empty Read answering nil (the fuzz target's first seed); a direct read
+not counted into the buffer's offset (the second seed); and the in-buffer seek
+window one byte too wide, which no seed reached and the fuzzer found in 4.3
+seconds (an index out of range): that input is committed as a seed, and red on
+its own now.
+
+### Fuzzed
+
+dido, golang:1.26.6, one container per target with 3 CPUs and a 5 GB cgroup,
+under the nightly job's 5 GiB address-space limit (`-exec "prlimit
+--as=5368709120 --"`), `-fuzzminimizetime 1s`, from the committed seeds:
+FuzzDhowdenReadBufferReadsAsItsStreamDoes, 10 minutes, 5,577,021 executions;
+every whole-file target whose route reaches dhowden, which now reads through the
+buffer: FuzzExtractMP3 10 minutes, 3,851,799; FuzzExtractFLAC, FuzzExtractM4A,
+FuzzExtractOGG, FuzzExtractDSF, FuzzExtractAIFF and FuzzExtractWAV, 5 minutes
+each, 1,145,812, 1,813,132, 1,143,452, 1,590,573, 1,596,716 and 1,672,037. All
+passed, nothing saved.
+
+### Left open
+
+Nothing in this change.
