@@ -304,12 +304,17 @@ func tailscaleStateLabel(state int) string {
 // because every number here is point-in-time and a template-rendered one
 // would be stale the moment the page painted.
 func (s *Server) pageDiagnostics(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
 	s.renderPage(w, r, "diagnostics", map[string]any{
-		// The one server-rendered fact on the page, and it is about the
-		// READER rather than about the bridge: `/metrics` is gated to
-		// loopback (widened only by metrics.allowCIDRs), so on a hosted
-		// bridge the paragraph offering it points at a link that answers
-		// 403 for the person being told to point a scraper at it.
+		// The page's two server-rendered facts, both for the paragraph
+		// offering `/metrics`, and both about the READER rather than the
+		// bridge. Who may scrape it depends on the mode: loopback mode's
+		// boundary admits this host, public mode a signed-in session or a
+		// scraper metrics.allowCidrs lists (backlog B171). And on a
+		// hosted bridge the paragraph is left out: a scraper there needs
+		// metrics.allowCidrs, which the control plane owns, so it would
+		// tell the reader to point a scraper at a link that refuses it.
 		"Managed": s.managedDeployment(),
+		"Public":  cfg != nil && cfg.IsPublic(),
 	})
 }

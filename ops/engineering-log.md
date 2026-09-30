@@ -35009,6 +35009,133 @@ current). `internal/enrich/acoustic_recording_id_test.go`:
 7. The hold limit admitting everything: the hold-limit test red (no row
    moved).
 
+## 2026-09-29 — in public mode /metrics needs a session unless metrics.allowCidrs vouches for a direct scrape (backlog B171)
+
+Found by the pre-v0.2.1 review and filed as B171 while it was unfixed
+(SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is its
+record now that the fix ships.
+
+### What was measured on the old code
+
+main at 24523cff, go1.27.1 on macOS, a public fixture with no
+`metrics.allowCidrs`: the old gate's verdict was measured with the real
+binary before the fix and after it (below). The requests and what they
+returned are kept out of this public record, per SECURITY.md.
+
+The cause, which the rule has to state to be kept: #472 put `/metrics` on
+`isAuthBypassPath` and behind its own `metricsGate`, which judged a scrape
+by its source address alone, and in public mode a source address cannot
+vouch for a scrape. No scraper this project runs depended on the old answer
+(checked, 2026-09-30).
+
+### What was decided
+
+- **A session reads it, as any console page.** `/metrics` is off the bypass
+  list and `metricsGate` is gone, so public mode's `sessionMiddleware` decides
+  it like every other route. A signed-in operator reads it from wherever the
+  console answers (their browser behind a same-host proxy included), which
+  widens nothing: the session is already the trust boundary for everything
+  else the console shows.
+- **Without a session, only a scrape the config vouches for**
+  (`metricsScrapeVouched`): the source address is in `metrics.allowCidrs`, AND
+  the request carries none of `Forwarded`, `X-Forwarded-For`,
+  `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Via`. The B171
+  prompt's shape.
+- **Loopback is not implied.** The handoff before this one proposed keeping
+  the implied loopback on a bridge whose config says no proxy fronts the
+  console (`adminTLSTerminatedByProxy: false`) when no forwarding header is
+  present. Rejected: an autocert public bridge put on 443 beside other
+  services through an SNI router (nginx's `stream` module with
+  `ssl_preread`, HAProxy in TCP mode) relays every connection from 127.0.0.1
+  with its TLS intact, so the flag is false, no header can be added, and the
+  request is indistinguishable from a local scraper. So is anything behind
+  nginx's default `proxy_pass`, which adds no forwarding header. Only the
+  operator knows whether something on the host relays connections to the
+  console, and listing `127.0.0.1/32` (and `::1/128`) is how they say it.
+  The header check still earns its place: it keeps a listed address honest
+  when a proxy that announces itself (HAProxy with `option forwardfor`, Caddy, Traefik,
+  `tailscale serve`) sits on the same address as the scraper.
+- **The refusal is a 403, not the login redirect.** A scraper follows a 302
+  to `/login` and then reports that it cannot parse HTML, where the true
+  answer is that it is not allowed. The body (`errMsgMetricsNeedsSession`)
+  names what would let it in.
+- **One Warn per process** (`noteRefusedScrape`) the first time a refused
+  request came straight from this host or a private network: the local
+  Prometheus that an upgrade past this change stops answering. A refusal
+  from a public address (a scanner, which every public bridge sees) or one a
+  proxy relayed logs nothing.
+- **Loopback mode is untouched.** Its boundary (`loopbackOnly`) refuses a
+  non-loopback source before any route runs, so `metrics.allowCidrs` never
+  took effect there; #803's record says the list exists because loopback is
+  unreachable from a Prometheus outside the container, which was true only of
+  a public-mode container, the only mode whose console listens beyond
+  loopback. The config docblock claimed an unparseable entry "is dropped at
+  load with a warning"; nothing validates the list at load, and the request
+  path skips such an entry silently. Both docblocks now say what holds.
+
+### Measured on the fix
+
+The same fixture, the fixed binary: a request shaped as a same-host proxy
+relays it, without a session, 403 (165 bytes, no `Location`); `/metrics`
+straight from loopback 403, with one `a /metrics scrape without a session
+was refused` Warn in the journal; with a session minted through `bridge
+admin login-link`, 200. With `metrics.allowCidrs: [127.0.0.1/32]`: straight
+from loopback 200 (the exposition), the proxy-shaped request still 403.
+The build with B170 merged in answers the same.
+
+### Tests
+
+`internal/admin/metrics_test.go`, through the console's real handler chain:
+`TestPublicMetricsThroughASameHostProxyNeedsASession` (the same-host proxy shape,
+with and without loopback listed),
+`TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames` (no list;
+listed and unlisted sources, IPv4-mapped, an unparseable entry and remote
+address; each forwarding header from each listed address),
+`TestPublicMetricsAnswersASignedInSession` (through the proxy shape, from the
+LAN and from the internet; a cookie naming no session is refused),
+`TestLoopbackMetricsFollowsTheConsolesLoopbackRule` (a pin: the list plays
+no part there), `TestAPublicMetricsRefusalFromThisHostOrTheLANIsLoggedOnce`,
+`TestTheDiagnosticsMetricsPointerSaysWhoMayScrape` (the page's paragraph
+offering `/metrics` said "on this loopback listener only" in public mode
+too). The two `metricsGate` unit tests in `ops_hardening_test.go` went with
+the gate; their cases are in the table test. `…MetricsLoopbackBypassesSessionInPublicMode`,
+which pinned the bypass, and its twin are replaced by the tests above.
+
+Red on main (the tests first, the fix after): the proxy, table, session,
+logging and diagnostics tests; the loopback-mode test is a pin and passed
+on both.
+
+### Negative controls
+
+Each with one part of the fix reverted, at 60037422, `-count=1`:
+
+- NC1 `/metrics` back on `isAuthBypassPath`: the proxy, table, session and
+  logging tests red (with the gate gone, the bypass serves everyone).
+- NC2 no forwarding-header check: the proxy and table tests red.
+- NC3 loopback implied again: the table test red.
+- NC4 the unauthenticated `/metrics` answered with the login redirect: the
+  proxy, table and session tests red (a 302 with a `Location`).
+- NC5 the Warn logged on every refusal and from anywhere: the logging test
+  red.
+- NC6 the Diagnostics page not told the mode: the diagnostics test red.
+
+### Review rounds after the merge with main (2026-09-30)
+
+CodeRabbit on 443dea08: the Diagnostics pointer said a sessionless scrape
+must connect "directly rather than through a proxy", and the 403 "no proxy
+in between", where the gate decides by the request's headers: both name
+the forwarding headers now, and the diagnostics test asserts it (red with
+the old template). The CLAUDE.md bullet and `noteRefusedScrape`'s docblock
+said a refusal "through a proxy" logs nothing: only one carrying a
+forwarding header does, and a relay that adds none logs the Warn as a
+local scraper would.
+
+CodeRabbit on 6ca0cda2: `remoteIP` handed a link-local source's zone
+(`fe80::1%en0`) to `net.ParseIP`, which refuses it, so a scraper on a
+listed `fe80::/10` was refused, as `metricsGate` refused it before B171.
+The zone is dropped before the match (a CIDR names no zone); the table
+test's zoned row was red before the change.
+
 ## 2026-09-29 — a restart request exits with status 75, which launchd and the Windows SCM relaunch; a stop still exits 0 (backlog B201)
 
 Found by the pre-v0.2.1 ops review: the console's Restart, "Install &

@@ -101,28 +101,33 @@ type Config struct {
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
 }
 
-// MetricsConfig controls who may scrape /metrics.
+// MetricsConfig controls who may scrape /metrics without a session.
 //
-// The endpoint is loopback-only by default and stays that way: on a
-// single box the operator IS the loopback, and anything that can reach
-// 127.0.0.1 already owns the token store and the SQLite file.
+// In loopback mode (the default) the console's own boundary admits this
+// host and nothing else, /metrics included, and this list plays no part:
+// on a single box the operator IS the loopback, and anything that can
+// reach 127.0.0.1 already owns the token store and the SQLite file.
 //
-// That default is unreachable in a container. A Prometheus running
-// anywhere but inside the same network namespace gets a 403, so the
-// only way to scrape a containerised bridge was a sidecar whose whole
-// job is to be on the right side of the loopback check. AllowCIDRs
-// widens the gate to named networks — a cluster's monitoring subnet —
-// without opening it to the internet.
+// In public mode /metrics is a console page like any other, which a
+// signed-in session reads. A scraper holds no session, so AllowCIDRs
+// names the networks it may scrape from without one (a cluster's
+// monitoring subnet, a Prometheus outside the container's network
+// namespace), over a direct connection: a request carrying a proxy's
+// forwarding header is refused whatever its source. Nothing is implied,
+// loopback included (backlog B171): a proxy or relay on the bridge's own
+// host arrives from 127.0.0.1 too, so list 127.0.0.1/32 (and ::1/128) for
+// a scraper on this host only when nothing on this host relays
+// connections to the console.
 //
-// Deliberately CIDRs and not "any authenticated caller": /metrics has
-// no session, and giving it one would mean a scraper holding an admin
-// credential. A network range is the smaller grant.
+// Deliberately CIDRs and not a scraper credential: a scraper holding a
+// session would be a scraper holding an admin credential. A network
+// range is the smaller grant.
 type MetricsConfig struct {
-	// AllowCIDRs are additional networks permitted to scrape /metrics,
-	// in CIDR form ("10.0.0.0/8", "fd00::/8"). Loopback is always
-	// allowed and needs no entry. An unparseable entry is dropped at
-	// load with a warning rather than failing the boot — a typo in a
-	// monitoring range must not take the bridge down.
+	// AllowCIDRs are the networks permitted to scrape /metrics without a
+	// session in public mode, in CIDR form ("10.0.0.0/8", "fd00::/8",
+	// "127.0.0.1/32"). Loopback is not implied. An unparseable entry is
+	// skipped when a request is judged, never fatal (it can only narrow
+	// the list), and nothing warns about it at load.
 	AllowCIDRs []string `yaml:"allowCidrs,omitempty"`
 }
 
