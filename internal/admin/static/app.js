@@ -5137,6 +5137,7 @@ function applyAnalysisStats(r) {
       setText("job-analysis-sweep", r.sweep.running
         ? "sweeping now"
         : r.sweep.lastFinishedAt ? `last swept ${agoOrDash(r.sweep.lastFinishedAt)}` : "not yet run");
+      // Absent while the gate is closed, as on /api/jobs (renderJobCards).
       setText("job-analysis-next", formatInFuture(r.sweep.nextDueAt));
     }
   }
@@ -5884,6 +5885,11 @@ function renderJobCards(j) {
     setText("job-analysis-sweep", sweep.running
       ? "sweeping now"
       : sweep.lastFinishedAt ? `last swept ${agoOrDash(sweep.lastFinishedAt)}` : "not yet run");
+    // The server sends a next sweep only while the card's gate is open
+    // (nextSweepWhileOpen), for this card and the fingerprint, CarPlay and
+    // smart mixes cards: a pass the gate refuses does nothing, so this line
+    // reads "—" beside an off or degraded badge. It read "in 5h" there
+    // until 2026-09-30 (backlog B156).
     setText("job-analysis-next", formatInFuture(sweep.nextDueAt));
     setText("job-analysis-lastrun", describeAnalysisSweep(sweep.last));
   }
@@ -6014,7 +6020,7 @@ function renderJobCards(j) {
   const mt = j.maintenance || {};
   // Neither chip depends on the upscale flag: the sweepers reconcile
   // EXISTING sidecars and run whenever their interval is positive.
-  setText("job-maint-integrity", mt.variantIntegrityActive ? "on" : "off (integrity.variantSweepIntervalSec: 0)");
+  renderVariantIntegrity(mt);
   renderOrphanSidecarGC(mt);
   setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — LRU eviction every 15 min" : "unlimited");
   const up = j.upnp || {};
@@ -6023,36 +6029,83 @@ function renderJobCards(j) {
     : "off");
 }
 
-// renderOrphanSidecarGC — the Jobs card's "Orphan sidecar GC" line: off,
-// on, or refusing. The background orphan sweep refuses a tick that would
-// reap a tree its catalog no longer describes, that counted over a walk
-// which could not list part of the variants directory, or whose catalog
-// names no rendition at all, and it has no override; it says so in the
-// journal once a day. This line read "on"
-// throughout until 2026-09-28, so a sweep that had unlinked nothing for
-// weeks looked healthy here. The line carries the badge and when the
-// refusal started; the why goes in the warning under the card's list,
-// since a sentence in a list cell wraps into a tall column on a phone.
-// Built with textContent; the refusal kind is a key the server sends and
-// describeOrphanGCRefusal words.
-function renderOrphanSidecarGC(mt) {
-  const el = document.getElementById("job-maint-gc");
-  const why = document.getElementById("job-maint-gc-refusal");
+// renderMaintenanceLine paints one of the Jobs card's maintenance lines
+// for a sweep that can refuse, and the warning under the card's list that
+// says why. While the sweep is not refusing (`why` empty) the line reads
+// `text`, on or off; while it is, a "refusing" badge and when the streak
+// started, with `why` in the warning, since a sentence in a list cell
+// wraps into a tall column on a phone. Built with textContent.
+function renderMaintenanceLine(lineId, whyId, text, why, since) {
+  const el = document.getElementById(lineId);
+  const note = document.getElementById(whyId);
   if (!el) return;
-  const kind = mt.orphanSidecarGC ? mt.orphanSidecarGCRefusal : "";
-  if (why) {
-    why.hidden = !kind;
-    why.textContent = kind ? `Orphan sidecar GC is refusing. ${describeOrphanGCRefusal(kind)}` : "";
+  if (note) {
+    note.hidden = !why;
+    note.textContent = why;
   }
-  if (!kind) {
-    el.textContent = mt.orphanSidecarGC ? "on" : "off (default)";
+  if (!why) {
+    el.textContent = text;
     return;
   }
   const badge = document.createElement("span");
   badge.className = "badge warn";
   badge.textContent = "refusing";
   el.textContent = "";
-  el.append(badge, ` since ${agoOrDash(mt.orphanSidecarGCRefusingSince)}`);
+  el.append(badge, ` since ${agoOrDash(since)}`);
+}
+
+// renderOrphanSidecarGC — the Jobs card's "Orphan sidecar GC" line: off,
+// on, or refusing. The background orphan sweep refuses a tick that would
+// reap a tree its catalog no longer describes, that counted over a walk
+// which could not list part of the variants directory, or whose catalog
+// names no rendition at all, and it has no override; it says so in the
+// journal once a day. This line read "on" throughout until 2026-09-28, so
+// a sweep that had unlinked nothing for weeks looked healthy here. The
+// refusal kind is a key the server sends and describeOrphanGCRefusal
+// words.
+function renderOrphanSidecarGC(mt) {
+  const kind = mt.orphanSidecarGC ? mt.orphanSidecarGCRefusal : "";
+  renderMaintenanceLine("job-maint-gc", "job-maint-gc-refusal",
+    mt.orphanSidecarGC ? "on" : "off (default)",
+    kind ? `Orphan sidecar GC is refusing. ${describeOrphanGCRefusal(kind)}` : "",
+    mt.orphanSidecarGCRefusingSince);
+}
+
+// renderVariantIntegrity — the Jobs card's "Variant integrity" line, the
+// same three states for the variant integrity watcher. It refuses to
+// delete rows that look relocated, and skips every tick over a variants
+// directory that reads as unmounted, with no override for either, and
+// says so in the journal once a day. This line read "on" throughout until
+// 2026-09-30 (backlog B131). The refusal kind is a key the server sends
+// and describeVariantIntegrityRefusal words.
+function renderVariantIntegrity(mt) {
+  const kind = mt.variantIntegrityActive ? mt.variantIntegrityRefusal : "";
+  renderMaintenanceLine("job-maint-integrity", "job-maint-integrity-refusal",
+    mt.variantIntegrityActive ? "on" : "off (integrity.variantSweepIntervalSec: 0)",
+    kind ? `Variant integrity is refusing. ${describeVariantIntegrityRefusal(kind)}` : "",
+    mt.variantIntegrityRefusingSince);
+}
+
+// describeVariantIntegrityRefusal words a refusal kind of the variant
+// integrity watcher (integrity.VariantRefusalKind): why no row is being
+// deleted, and what to do. TestEveryVariantRefusalKindIsWorded runs it
+// under node for every kind the server can send, so a new kind cannot
+// reach this line as its bare key.
+function describeVariantIntegrityRefusal(kind) {
+  switch (kind) {
+    case "relocation":
+      return "More of the catalog's renditions are missing than one sweep will delete, while the variants " +
+        "directory still holds renditions: that is what a moved tree looks like, so no row is deleted. If " +
+        "they were moved, put them back at their places under the variants directory; if they really are " +
+        "gone, bridge upscale --gc --allow-mass-delete removes the rows.";
+    case "variantsDirUnavailable":
+      return "The variants directory is missing, empty or cannot be read while the catalog lists renditions: " +
+        "that is what an unmounted volume looks like, so nothing is swept and no row is deleted. Until it is " +
+        "back no rendition can be downloaded. Mount the volume, or point the variants directory at where the " +
+        "renditions are.";
+    default:
+      return `No row is deleted (${kind}).`;
+  }
 }
 
 // describeOrphanGCRefusal words a refusal kind of the background orphan

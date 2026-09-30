@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
@@ -136,19 +137,29 @@ type jobsUpdates struct {
 }
 
 // jobsMaintenance — the low-key maintenance sweepers: whether each runs
-// (config/wiring-derived), and, for the background orphan-sidecar sweep,
-// whether it is refusing.
+// (config/wiring-derived), and, for the two that refuse (the variant
+// integrity watcher and the background orphan-sidecar sweep), whether each
+// is refusing.
 //
-// The refusal is the one piece of runtime state here. The sweep refuses a
-// tick that would reap a stranded tree, that took its counts from a walk
-// that could not list part of the variants directory, or whose catalog
-// names no sidecar over a directory that holds some, with no override and
-// one journal line a day; the chip said "on" throughout, so a bridge whose
-// orphan GC had reclaimed nothing for weeks looked healthy. The kind is a
-// KEY (integrity.OrphanRefusalKind), worded by the console.
+// The refusals are the runtime state here. The orphan sweep refuses a tick
+// that would reap a stranded tree, that took its counts from a walk that
+// could not list part of the variants directory, or whose catalog names no
+// sidecar over a directory that holds some; the watcher refuses to delete
+// rows that look relocated, and skips every tick over a variants directory
+// that reads as unmounted. Neither has an override, and each says so in
+// the journal once a day; the chips said "on" throughout (the orphan
+// sweep's until 2026-09-28, the watcher's until 2026-09-30), so a bridge
+// whose sweep had done nothing for weeks looked healthy. Each kind is a
+// KEY (integrity.OrphanRefusalKind, integrity.VariantRefusalKind), worded
+// by the console.
 type jobsMaintenance struct {
 	VariantIntegrityActive bool `json:"variantIntegrityActive"`
-	OrphanSidecarGC        bool `json:"orphanSidecarGC"`
+	// VariantIntegrityRefusal is the kind of refusal the watcher's current
+	// streak is; omitted while it is not refusing, or not running.
+	VariantIntegrityRefusal string `json:"variantIntegrityRefusal,omitempty"`
+	// VariantIntegrityRefusingSince is when that streak started.
+	VariantIntegrityRefusingSince *time.Time `json:"variantIntegrityRefusingSince,omitempty"`
+	OrphanSidecarGC               bool       `json:"orphanSidecarGC"`
 	// OrphanSidecarGCRefusal is the kind of refusal the sweep's current
 	// streak is; omitted while it is not refusing, or not running.
 	OrphanSidecarGCRefusal string `json:"orphanSidecarGCRefusal,omitempty"`
@@ -226,20 +237,33 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		resp.Analysis.DegradedReason = "sox_missing"
 	}
 	if sw := s.deps.AnalysisSweep; sw != nil {
-		resp.Analysis.Sweep = sw()
+		if st := sw(); st != nil {
+			sweep := *st
+			sweep.NextDueAt = nextSweepWhileOpen(resp.Analysis.Active, sweep.NextDueAt)
+			resp.Analysis.Sweep = &sweep
+		}
 	}
 	if resp.Analysis.Active {
 		resp.Analysis.Coverage = s.getAnalysisCoverage(ctx)
 	}
 
-	// Fingerprint.
+	// Fingerprint. Its gate is the card's own `active`, read once by the
+	// closure that built it.
 	if fp := s.deps.FingerprintState; fp != nil {
-		resp.Fingerprint = fp()
+		if st := fp(); st != nil {
+			card := *st
+			card.NextDueAt = nextSweepWhileOpen(card.Active, card.NextDueAt)
+			resp.Fingerprint = &card
+		}
 	}
 
-	// Auto-optimize (CarPlay variant pre-generation).
+	// Auto-optimize (CarPlay variant pre-generation), the same way.
 	if ao := s.deps.AutoOptimizeState; ao != nil {
-		resp.AutoOptimize = ao()
+		if st := ao(); st != nil {
+			card := *st
+			card.NextDueAt = nextSweepWhileOpen(card.Active, card.NextDueAt)
+			resp.AutoOptimize = &card
+		}
 	}
 
 	// Enrichment (always-on worker; the card links to Settings for the
@@ -284,13 +308,18 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		resp.Duplicates.Run = run()
 	}
 
-	// Smart mixes.
+	// Smart mixes. The switch is the regenerator's whole gate, read per
+	// run, so it is what the cadence and the next run are withheld on.
 	resp.SmartMixes = jobsSmartMixes{Enabled: cfg.SmartPlaylists.EffectiveEnabled()}
-	if cfg.SmartPlaylists.EffectiveEnabled() {
+	if resp.SmartMixes.Enabled {
 		resp.SmartMixes.IntervalSec = int(cfg.SmartPlaylists.EffectiveRegenerateInterval() / time.Second)
 	}
 	if run := s.deps.SmartMixRun; run != nil {
-		resp.SmartMixes.Run = run()
+		if st := run(); st != nil {
+			state := *st
+			state.NextDueAt = nextSweepWhileOpen(resp.SmartMixes.Enabled, state.NextDueAt)
+			resp.SmartMixes.Run = &state
+		}
 	}
 
 	// Backups.
@@ -330,17 +359,12 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		OrphanSidecarGC:        cfg.OrphanSidecarSweepInterval() > 0,
 		ArtworkCacheLRU:        cfg.Artwork.CacheMaxBytes > 0,
 	}
-	// The orphan sweep's refusal, read from its latch (an atomic snapshot:
-	// no lock, no I/O, cheap on the 10 s poll). Only for a sweep that runs:
-	// the closure is nil otherwise, and a refusal left in a latch the
-	// interval now says is off would describe a sweep that is not there.
-	if st := s.deps.OrphanSweepStatus; st != nil && resp.Maintenance.OrphanSidecarGC {
-		if status := st(); status.Refusing != "" {
-			since := status.Since
-			resp.Maintenance.OrphanSidecarGCRefusal = string(status.Refusing)
-			resp.Maintenance.OrphanSidecarGCRefusingSince = &since
-		}
-	}
+	// Each refusing sweep's refusal, read from its latch (an atomic
+	// snapshot: no lock, no I/O, cheap on the 10 s poll).
+	resp.Maintenance.VariantIntegrityRefusal, resp.Maintenance.VariantIntegrityRefusingSince =
+		refusalOf(s.deps.VariantSweepStatus, resp.Maintenance.VariantIntegrityActive)
+	resp.Maintenance.OrphanSidecarGCRefusal, resp.Maintenance.OrphanSidecarGCRefusingSince =
+		refusalOf(s.deps.OrphanSweepStatus, resp.Maintenance.OrphanSidecarGC)
 
 	// UPnP ingest (trigger + detail live on the UPnP page).
 	resp.UPnP = jobsUPnP{
@@ -348,6 +372,47 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		ConfiguredServers: len(cfg.UPnPUpstream.Servers),
 	}
 	return resp
+}
+
+// nextSweepWhileOpen is a Jobs card's next-sweep time while the card's
+// gate is open, and nil while it is closed (backlog B156).
+//
+// Every sweeper loop runs on every bridge whatever its gate says (#781),
+// and runSweepLoop arms its next pass from the interval alone, so the
+// recorder holds a time for a pass the gate will refuse: the analysis,
+// fingerprint and CarPlay cards read "Next sweep: in 5h", and the smart
+// mixes card "Next run: in 23h", beside an "off" badge (seen in a browser
+// on a real serve, 2026-09-30). A pass the gate refuses does nothing, so
+// that time is a promise the loop will not keep, which is why
+// runSweepLoop's dormant branch clears it. The gate is the card's own
+// (`active`, or the smart mixes' switch), read once for the snapshot, so
+// the badge and this line cannot disagree. A card whose feature is
+// switched on over a missing tool reads closed too: its next pass runs
+// only if the tool is back by then, and the card turns active, next time
+// and all, within a minute of it coming back. The recorder keeps the
+// time; only the payload leaves it out.
+func nextSweepWhileOpen(open bool, next *time.Time) *time.Time {
+	if !open {
+		return nil
+	}
+	return next
+}
+
+// refusalOf reads a refusing sweep's latch for its Jobs line: the kind of
+// refusal as a key, and when the streak started. Nothing while the sweep is
+// not refusing, and nothing for a sweep that does not run: the status
+// closure is nil then, and a refusal left in a latch the interval now says
+// is off would describe a sweep that is not there.
+func refusalOf[K ~string](status func() integrity.RefusalStatus[K], running bool) (kind string, since *time.Time) {
+	if status == nil || !running {
+		return "", nil
+	}
+	st := status()
+	if st.Refusing == "" {
+		return "", nil
+	}
+	started := st.Since
+	return string(st.Refusing), &started
 }
 
 // getLastBackupAt returns the TTL-cached timestamp of the newest

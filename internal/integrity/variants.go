@@ -55,28 +55,36 @@ var stopGrace = 5 * time.Second
 // event is published per tick — iOS reconciles immediately
 // without waiting for a manifest re-sync.
 //
-// Two guards sit between "missing" and "deleted". The mount-loss
-// guard (VariantsDirSweepBlockReason) skips the whole tick when
-// the directory is gone or empty. The relocation guard
-// (MassDeleteRefusal) skips the DELETIONS of a tick that would
-// reap more than cfg.Integrity.VariantSweepMaxDeletePercent of
-// the catalog while the directory still holds sidecar files —
-// the 2026-09-20 shape, where the directory was healthy and full
-// and every row still pointed at the old host's path. Adoptions
-// are applied either way; they are never the dangerous half.
+// Two guards sit between "missing" and "deleted", and each is a kind of
+// refusal (VariantRefusalKind). The mount-loss guard
+// (VariantsDirSweepBlockReason) skips the whole tick when the
+// directory is gone, empty or unreadable while the catalog has rows.
+// The relocation guard (MassDeleteRefusal) skips the DELETIONS of a
+// tick that would reap more than
+// cfg.Integrity.VariantSweepMaxDeletePercent of the catalog while
+// the directory still holds sidecar files — the 2026-09-20 shape,
+// where the directory was healthy and full and every row still
+// pointed at the old host's path. Adoptions are applied either way;
+// they are never the dangerous half.
 //
 // Every tick that saw rows logs ONE summary line (rows / present
-// / adopted / deleted / mismatched / failed / refused) at
+// / adopted / deleted / mismatched / failed / refused / skipped) at
 // Info, at Warn when it deleted anything — the field report's
 // first finding was that 10,248 deletions produced no line at all.
-// A REFUSAL is logged through the refusal latch it shares with
-// OrphanSidecarSweeper (refusalLatch): one WARN when a streak of
-// refused ticks starts, again at most once a day while it lasts, and
-// one Info line when a tick's relocation check proceeds again. It
-// WARNed on every tick until 2026-09-29, twice (the refusal and a
-// Warn summary), and a relocation lasts until someone acts on it:
-// fourteen WARN lines in thirteen seconds on a real serve at a 2 s
-// interval, 48 a day at the default hour (backlog B65).
+// A REFUSAL, of either kind, is logged through the refusal latch it
+// shares with OrphanSidecarSweeper (refusalLatch): one WARN when a
+// streak of refused ticks starts or turns into the other kind, again
+// at most once a day while it lasts, and one Info line when a tick
+// passes both guards again. The relocation refusal WARNed on every
+// tick until 2026-09-29, twice (the refusal and a Warn summary), and a
+// relocation lasts until someone acts on it: fourteen WARN lines in
+// thirteen seconds on a real serve at a 2 s interval, 48 a day at the
+// default hour (backlog B65). The mount-loss skip WARNed on every tick
+// until 2026-09-30 and logged no summary: nine WARN lines in sixteen
+// seconds at a 2 s interval, 24 a day at the default hour, for as long
+// as the volume stays unmounted (backlog B131). The latch publishes
+// itself for the console (Status), whose Jobs card said "on"
+// throughout both.
 //
 // Threading: one long-lived goroutine spun up by Start; stops
 // on the supplied ctx's cancellation. Time.NewTicker is reset
@@ -97,15 +105,16 @@ type VariantWatcher struct {
 	// (cfg.Integrity.VariantSweepMaxDeletePercent); see MassDeleteRefusal.
 	maxDeletePercent int
 
-	// refusal is the relocation refusal's log latch (refusalLatch), the
-	// only state that crosses ticks. A refused tick sets it, and a tick
-	// whose relocation check proceeds clears it, a tick over an empty
-	// catalog included (it has nothing to refuse). A tick that never asked
-	// the question leaves it alone: a listing that failed, a variants
-	// directory the mount-loss guard reads as unmounted, a tick the
-	// shutdown stopped in its first pass. Owned by the run goroutine; the
-	// tests drive tick directly, never beside a running loop.
-	refusal refusalLatch[variantRefusalKind]
+	// refusal is the log latch of both refusals (refusalLatch), the only
+	// state that crosses ticks. A refused tick sets it to its kind: the
+	// mount-loss guard's (VariantRefusalVariantsDir) or the relocation
+	// guard's (VariantRefusalRelocation). A tick that passes both clears
+	// it, a tick over an empty catalog included (it has nothing to refuse).
+	// A tick that decided nothing leaves it alone: a listing that failed,
+	// a tick the shutdown stopped in its first pass. Owned by the run
+	// goroutine; the tests drive tick directly, never beside a running
+	// loop. Status reads its publication from any goroutine.
+	refusal refusalLatch[VariantRefusalKind]
 
 	// onTickComplete fires after every full sweep completes;
 	// the test harness wires this to drive deterministic sync
@@ -374,9 +383,10 @@ func (w *VariantWatcher) currentVariantsDir() string {
 // we can't even start); WARN (sampled per tick, see logSample) on
 // per-row stat / adopt / delete failures; ONE summary line per
 // tick that saw rows; and a refusal through the latch (noteRefusal,
-// noteProceeding). Skips wholesale (WARN, nothing touched) when
-// the variants dir probe reports missing/empty with rows in the
-// catalog — see NewVariantWatcher and VariantsDirSweepBlockReason.
+// noteProceeding). Skips wholesale (nothing touched, a refusal of
+// the mount-loss kind) when the variants dir probe reports missing,
+// empty or unreadable with rows in the catalog — see
+// NewVariantWatcher and VariantsDirSweepBlockReason.
 //
 // Two passes over the snapshot. The first classifies every row with
 // LocateSidecar and applies the ADOPTIONS as it goes (a relocated
@@ -415,14 +425,20 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// helper with `bridge upscale --gc`'s reverse-sweep guard.
 	// The directory is RESOLVED per tick too, so a hot move of
 	// the variants dir moves the probe with it.
+	//
+	// A refusal of its own kind, through the latch: one WARN when the
+	// streak starts and at most one a day while it lasts, and the tick's
+	// summary at Info, as a refused relocation's is. It WARNed on every
+	// tick until 2026-09-30 (backlog B131), for a state that lasts until
+	// someone mounts the volume; a rendition download meanwhile answers
+	// 410 and logs a WARN of its own, so the requests that fail still say
+	// so as they fail.
 	if dir != "" {
 		if reason := VariantsDirSweepBlockReason(dir); reason != "" {
-			logger.Warn("integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog",
-				slog.String("variants_dir", dir),
-				slog.String("reason", reason),
-				slog.Int("rows", len(rows)),
-			)
-			return SweepReport{Rows: len(rows), Skipped: true}
+			report := SweepReport{Rows: len(rows), Skipped: true}
+			w.noteRefusal(tickStart, dir, VariantRefusalVariantsDir, reason, len(rows))
+			w.logSummary(dir, report)
+			return report
 		}
 	}
 
@@ -491,7 +507,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// rows it kept.
 	if reason := MassDeleteRefusal(dir, len(missing), len(rows), w.maxDeletePercent); reason != "" {
 		report.Refused = len(missing)
-		w.noteRefusal(tickStart, dir, reason)
+		w.noteRefusal(tickStart, dir, VariantRefusalRelocation, reason, len(rows))
 		w.logSummary(dir, report)
 		return report
 	}
@@ -634,48 +650,90 @@ func (w *VariantWatcher) publishDeleted(paths, variantIDs []string) {
 	}
 }
 
-// variantRefusalKind names what a streak of the watcher's refused ticks
-// refuses, the kind its refusalLatch keys a streak on. There is one kind
-// today; the type is the latch's contract that a streak is of one kind.
-type variantRefusalKind string
+// VariantRefusalKind names what a streak of the watcher's refused ticks
+// refuses, the kind its refusalLatch keys a streak on. The console
+// receives it as a key and words it itself, as it does the orphan sweep's
+// (OrphanRefusalKind).
+type VariantRefusalKind string
 
-// variantRefusalRelocation: more of the catalog's rows have no sidecar at
-// either location than the threshold allows, while the variants directory
-// still holds sidecar files (MassDeleteRefusal).
-const variantRefusalRelocation variantRefusalKind = "relocation"
+// The kinds of refusal the variant watcher's latch holds.
+const (
+	// VariantRefusalRelocation: more of the catalog's rows have no sidecar
+	// at either location than the threshold allows, while the variants
+	// directory still holds sidecar files (MassDeleteRefusal). The tick
+	// adopts what it found and deletes nothing.
+	VariantRefusalRelocation VariantRefusalKind = "relocation"
+	// VariantRefusalVariantsDir: the variants directory is missing, empty,
+	// not a directory or unreadable while the catalog has rows, which is
+	// what an unmounted volume looks like (VariantsDirSweepBlockReason).
+	// The tick sweeps nothing.
+	VariantRefusalVariantsDir VariantRefusalKind = "variantsDirUnavailable"
+)
 
-// noteRefusal logs a refused tick through the latch: one WARN when a
-// streak of refused ticks starts, then at most one per sweepRefusalRepeat
-// while it lasts, measured between tick starts (refusalLatch). The reason
-// carries the numbers.
-func (w *VariantWatcher) noteRefusal(now time.Time, dir, reason string) {
-	if logIt, _ := w.refusal.refuse(now, variantRefusalRelocation); !logIt {
+// VariantRefusalKinds is every kind a refusing streak of the variant
+// watcher can be, for a caller that has to word each one (the console's
+// Jobs card) and a test that holds it to that.
+func VariantRefusalKinds() []VariantRefusalKind {
+	return []VariantRefusalKind{VariantRefusalRelocation, VariantRefusalVariantsDir}
+}
+
+// VariantSweepStatus is what the variant watcher's refusal latch says, for
+// a reader on another goroutine: until 2026-09-30 the console's Jobs card
+// said "on" while every tick refused a relocation or skipped a variants
+// directory that read as unmounted (backlog B131).
+type VariantSweepStatus = RefusalStatus[VariantRefusalKind]
+
+// Status reports the refusal latch as the run goroutine last left it. Safe
+// from any goroutine; the zero value (not refusing) before the first tick
+// that decided anything, and for a nil watcher.
+func (w *VariantWatcher) Status() VariantSweepStatus {
+	if w == nil {
+		return VariantSweepStatus{}
+	}
+	return w.refusal.status()
+}
+
+// noteRefusal logs a tick refused as kind through the latch: one WARN when
+// a streak of refused ticks starts or turns into the other kind, then at
+// most one per sweepRefusalRepeat while it lasts, measured between tick
+// starts (refusalLatch). The reason carries the numbers, and each kind its
+// own message and advice.
+func (w *VariantWatcher) noteRefusal(now time.Time, dir string, kind VariantRefusalKind, reason string, rows int) {
+	if !w.refusal.refuse(now, kind) {
 		return
 	}
-	logger.Warn(msgVariantRefusal,
+	msg, hint := msgVariantRefusal, variantRefusalHint
+	if kind == VariantRefusalVariantsDir {
+		msg, hint = msgVariantsDirUnavailable, variantsDirUnavailableHint
+	}
+	logger.Warn(msg,
 		slog.String("reason", reason),
+		slog.Int("rows", rows),
 		slog.String("variants_dir", dir),
-		slog.String("hint", variantRefusalHint),
+		slog.String("hint", hint),
 	)
 }
 
-// noteProceeding ends a refusal streak: the first tick whose relocation
-// check proceeds after one says so, once, with the counts it proceeded on.
-// Outside a streak it says nothing.
+// noteProceeding ends a refusal streak: the first tick that passes both
+// guards after one says so, once, with the counts it proceeded on and the
+// kind of refusal that ended. Outside a streak it says nothing.
 //
-// The line claims only that the check passed, because the counts it
+// The line claims only that the checks passed, because the counts it
 // passed on need not be a catalog put right: a tree whose sidecars were
-// removed after all passes it too, and the tick then deletes the rows
-// (its summary says so, at Warn); an empty catalog passes it with nothing
-// to delete. A relocation that comes back starts a new streak with a
-// WARN of its own rather than waiting out a day.
+// removed after all passes them too, and the tick then deletes the rows
+// (its summary says so, at Warn); an empty catalog passes them with
+// nothing to delete, whatever the directory holds, since the mount-loss
+// guard protects rows and there are none. A refusal that comes back
+// starts a new streak with a WARN of its own rather than waiting out a day.
 func (w *VariantWatcher) noteProceeding(dir string, rows, missing int) {
-	if !w.refusal.lift() {
+	ended := w.refusal.lift()
+	if ended == "" {
 		return
 	}
 	logger.Info(msgVariantRefusalLifted,
 		slog.Int("rows", rows),
 		slog.Int("missing", missing),
+		slog.String("ended", string(ended)),
 		slog.String("variants_dir", dir),
 	)
 }
@@ -686,13 +744,21 @@ const variantRefusalHint = "if the sidecars really are gone: `bridge upscale --g
 	"`bridge variants move --to <dir> --confirm MOVE`. This sweep has no override; it logs this when it " +
 	"starts refusing and once a day while it keeps refusing."
 
-// The watcher's lines: the latched WARN of its relocation refusal, the
-// Info line a tick logs when its check proceeds after a streak of them,
-// and the one summary line of every tick that saw rows.
+// variantsDirUnavailableHint is the mount-loss refusal's advice.
+const variantsDirUnavailableHint = "nothing was swept and no row was deleted. A variants directory that is " +
+	"missing, empty or unreadable while the catalog lists renditions is what an unmounted volume looks like, " +
+	"and every row would read as a rendition that is gone. Mount the volume, or point the variants directory " +
+	"at where the renditions are; until then every rendition download answers 410. This sweep has no " +
+	"override; it logs this when it starts skipping and once a day while it keeps skipping."
+
+// The watcher's lines: the latched WARN of each refusal, the Info line a
+// tick logs when it passes both guards after a streak of either, and the
+// one summary line of every tick that saw rows.
 const (
-	msgVariantRefusal       = "integrity variant sweep: refusing to delete rows — this looks like a relocation, not a deletion"
-	msgVariantRefusalLifted = "integrity variant sweep: no longer refusing — this tick's missing rows pass the relocation check"
-	msgVariantSweepSummary  = "integrity variant sweep: summary"
+	msgVariantRefusal         = "integrity variant sweep: refusing to delete rows — this looks like a relocation, not a deletion"
+	msgVariantsDirUnavailable = "integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog"
+	msgVariantRefusalLifted   = "integrity variant sweep: no longer refusing — this tick's rows pass the mount-loss and relocation checks"
+	msgVariantSweepSummary    = "integrity variant sweep: summary"
 )
 
 // logSummary writes the one line per tick that the 2026-09-20 sweep
@@ -704,7 +770,9 @@ const (
 // its WARN is the refusal's, through the latch (noteRefusal), which says
 // it when a streak starts and once a day while it lasts. Until
 // 2026-09-29 this line was Warn for a refused tick too, so every tick of
-// a streak WARNed twice.
+// a streak WARNed twice. A tick the mount-loss guard skipped summarises
+// the same way, with `skipped` and the rows it saw: it logged no summary
+// until 2026-09-30, and a WARN on every tick instead.
 //
 // Reached from every exit that saw rows, INCLUDING the two
 // cancellation arms. They used to return bare, so a shutdown partway
@@ -724,6 +792,7 @@ func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
 		slog.Int("mismatched", r.Mismatched),
 		slog.Int("failed", r.Failed),
 		slog.Int("refused", r.Refused),
+		slog.Bool("skipped", r.Skipped),
 		slog.Bool("cancelled", r.Cancelled),
 		slog.String("variants_dir", dir),
 	)

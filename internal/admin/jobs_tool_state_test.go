@@ -2,9 +2,7 @@ package admin
 
 import (
 	"encoding/json"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -50,6 +48,10 @@ class El {
   get textContent() { return this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this.children = String(v) === "" ? [] : [{ textContent: String(v) }]; }
   appendChild(c) { this.children.push(c); return c; }
+  // Element.append: nodes, and strings as text nodes.
+  append(...nodes) {
+    for (const n of nodes) this.children.push(typeof n === "string" ? { textContent: n } : n);
+  }
   addEventListener() {}
 }
 const els = new Map();
@@ -113,19 +115,28 @@ func jobsToolStateScript(t *testing.T) string {
 // the same shipped functions its own way appends its own script to.
 func jobsToolStateBase(t *testing.T) string {
 	t.Helper()
+	return consoleCardsHarness(t, jobsToolStateStubs, "renderJobCards", "renderSettingsPrereqs")
+}
+
+// consoleCardsHarness assembles a node harness around the shipped app.js:
+// the preamble's DOM, the given stubs, the constant table the cards word
+// their keys from, and every top-level function the entry points reach,
+// extracted as shipped. A test appends its own run to it.
+func consoleCardsHarness(t *testing.T, stubs map[string]string, entries ...string) string {
+	t.Helper()
 	src := readFile(t, "static/app.js")
 	var script strings.Builder
 	script.WriteString(jobsToolStatePreamble)
-	for _, stub := range jobsToolStateStubs {
+	for _, stub := range stubs {
 		script.WriteString(stub + "\n")
 	}
 	script.WriteString(extractJSConst(t, src, "JOB_DEGRADED_LABELS"))
 	seen := map[string]bool{}
-	queue := []string{"renderJobCards", "renderSettingsPrereqs"}
+	queue := append([]string(nil), entries...)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
-		if seen[name] || jobsToolStateStubs[name] != "" {
+		if seen[name] || stubs[name] != "" {
 			continue
 		}
 		seen[name] = true
@@ -139,7 +150,7 @@ func jobsToolStateBase(t *testing.T) string {
 			queue = append(queue, m[2])
 		}
 	}
-	for _, need := range []string{"renderJobCards", "renderSettingsPrereqs", "setBadge", "setText"} {
+	for _, need := range append(append([]string(nil), entries...), "setBadge", "setText") {
 		if !seen[need] {
 			t.Fatalf("the harness did not reach %s, so it no longer runs the shipped cards", need)
 		}
@@ -210,25 +221,9 @@ type jobsToolStateResult struct {
 // and chip cases.
 func runJobsToolStateUnderNode(t *testing.T, node string, jobs []jobsSnapshotResponse, chips []map[string]any) jobsToolStateResult {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "jobs.mjs")
-	if err := os.WriteFile(script, []byte(jobsToolStateScript(t)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	blob, err := json.Marshal(map[string]any{
+	raw := runNodeHarness(t, node, jobsToolStateScript(t), map[string]any{
 		"descriptions": jobsToolStateDescriptions, "jobs": jobs, "chips": chips,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := filepath.Join(dir, "input.json")
-	if err := os.WriteFile(input, blob, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := exec.Command(node, script, input).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, raw)
-	}
 	var out jobsToolStateResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("the harness printed %q: %v", raw, err)

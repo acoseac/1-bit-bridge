@@ -286,9 +286,11 @@
         <dt>UPnP ingest</dt>
         <dd id="job-upnp">—</dd>
       </dl>
-      {{/* Why the orphan sidecar GC is refusing, painted by app.js
-           renderOrphanSidecarGC. Hidden unless it is: the sweep refuses with
-           no override, and its line above says so beside a badge. */}}
+      {{/* Why the variant integrity watcher or the orphan sidecar GC is
+           refusing, painted by app.js renderVariantIntegrity and
+           renderOrphanSidecarGC. Each hidden unless it is: neither sweep has
+           an override, and its line above says so beside a badge. */}}
+      <p class="hint warn" id="job-maint-integrity-refusal" hidden></p>
       <p class="hint warn" id="job-maint-gc-refusal" hidden></p>
       <p class="hint">
         Housekeeping sweepers (config-driven, <code>bridge.yaml</code>).

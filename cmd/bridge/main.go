@@ -3985,6 +3985,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// zero by default), in runServe scope because the sweep is built inside
 	// the upscale block and admin.New comes after it.
 	var orphanSweepStatus func() integrity.OrphanSweepStatus
+	// variantSweepStatus is the variant integrity watcher's, the same way:
+	// nil unless the watcher runs (it does by default, hourly).
+	var variantSweepStatus func() integrity.VariantSweepStatus
 	// Constructed UNCONDITIONALLY — see the analysis pool above for why,
 	// and for why always-construct-never-stop avoids the Stop-ordering
 	// invariants that make a real pool lifecycle dangerous.
@@ -4258,6 +4261,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			)
 			stopVariantWatcher := variantWatcher.Start(scanCtx)
 			defer stopVariantWatcher()
+			variantSweepStatus = variantWatcher.Status
 		}
 
 		// Background forward-sweep GC: walks the variants directory
@@ -4857,9 +4861,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		}(cadenceRearms),
 		DuplicatesSweepRun: jobRunClosure(duplicatesSweepState),
-		// The orphan sweep's refusal latch, so the Jobs card says it is
-		// refusing rather than "on" (nil when the sweep does not run).
-		OrphanSweepStatus: orphanSweepStatus,
+		// The orphan sweep's and the variant watcher's refusal latches, so
+		// the Jobs card says each is refusing rather than "on" (nil when the
+		// sweep does not run).
+		OrphanSweepStatus:  orphanSweepStatus,
+		VariantSweepStatus: variantSweepStatus,
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

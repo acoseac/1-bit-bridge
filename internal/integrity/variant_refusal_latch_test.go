@@ -98,7 +98,7 @@ func TestVariantWatcherSaysOnceWhenItStopsRefusing(t *testing.T) {
 		}
 	}
 	requireLinesSay(t, rec.Lines(msgVariantRefusalLifted), 1, "the lifted line, once, with the counts it passed on",
-		"INFO ", " rows=30", " missing=30", " variants_dir="+dir)
+		"INFO ", " rows=30", " missing=30", " ended=relocation", " variants_dir="+dir)
 	requireLinesSay(t, rec.Failures(msgVariantRefusal), 1, "the refusal's one WARN")
 }
 
@@ -122,16 +122,16 @@ func TestVariantWatcherEndsItsStreakOnAnEmptyCatalog(t *testing.T) {
 }
 
 // TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing — a tick
-// that never asked the relocation question is evidence of nothing about
-// it, so it neither ends a streak nor starts one: a failed listing, a
-// variants directory the mount-loss guard reads as unmounted, and a tick
-// the shutdown stopped before its first row. The streak goes on through
-// all three, with one WARN and no lifted line.
+// that never asked either guard's question is evidence of nothing, so it
+// neither ends a streak nor starts one: a failed listing, and a tick the
+// shutdown stopped before its first row. The streak goes on through both,
+// with one WARN and no lifted line. (A variants directory the mount-loss
+// guard reads as unmounted was the third such tick until 2026-09-30: it is
+// a refusal of its own kind now, TestVariantWatcherSaysEachKindOfRefusalWhenItStarts.)
 func TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing(t *testing.T) {
 	dir, rows, _ := relocationShape(t, 30)
-	current := dir
 	lister := &fakeLister{snapshots: [][]VariantSnapshot{rows}}
-	w := NewVariantWatcher(lister, &fakeDeleter{}, nil, func() string { return current }, time.Hour, 20)
+	w := NewVariantWatcher(lister, &fakeDeleter{}, nil, staticDir(dir), time.Hour, 20)
 	rec := loggingtest.Record(t)
 
 	requireRefusedTicks(t, w, 1, 30, "the relocation")
@@ -146,21 +146,124 @@ func TestVariantWatcherKeepsItsStreakThroughATickThatDecidedNothing(t *testing.T
 	lister.err = nil
 	lister.mu.Unlock()
 
-	current = filepath.Join(t.TempDir(), "unmounted")
-	if r := w.tick(context.Background()); !r.Skipped {
-		t.Fatalf("the unmounted directory's tick: report %+v, want skipped", r)
-	}
-	current = dir
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if r := w.tick(ctx); !r.Cancelled {
 		t.Fatalf("the stopped tick: report %+v, want cancelled", r)
 	}
 
-	requireRefusedTicks(t, w, 1, 30, "the relocation, after three ticks that decided nothing")
+	requireRefusedTicks(t, w, 1, 30, "the relocation, after two ticks that decided nothing")
 	requireLinesSay(t, rec.Failures(msgVariantRefusal), 1, "one WARN for the whole streak")
 	requireLinesSay(t, rec.Lines(msgVariantRefusalLifted), 0, "a streak that never lifted")
+}
+
+// unmountedShape seeds n rows whose sidecars are at their canonical places
+// under a variants directory, and returns that directory, the rows, and an
+// empty directory beside it: the mountpoint an unmount leaves, which the
+// mount-loss guard reads as unmounted while the rows exist. A test points
+// the watcher at one or the other to unmount and remount the volume.
+func unmountedShape(t *testing.T, n int) (mounted, unmounted string, rows []VariantSnapshot) {
+	t.Helper()
+	mounted, unmounted = t.TempDir(), t.TempDir()
+	rows = make([]VariantSnapshot, n)
+	for i := range rows {
+		source := fmt.Sprintf("Artist/Album/%02d.flac", i)
+		p := transcode.VariantSidecarPath(mounted, source, "upscaled-v2-176400-24")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rows[i] = VariantSnapshot{SourcePath: source, VariantID: "upscaled-v2-176400-24", SidecarPath: p, SizeBytes: 10}
+	}
+	return mounted, unmounted, rows
+}
+
+// TestVariantWatcherLatchesItsVariantsDirRefusal — the mount-loss guard's
+// skip is a refusal like the relocation one (backlog B131): three ticks
+// over a variants directory that reads as unmounted log one WARN between
+// them, naming why, how many rows it kept and what to do, and three
+// summary lines at Info that say the tick was skipped. On main: three
+// WARN lines, one per tick, and no summary.
+func TestVariantWatcherLatchesItsVariantsDirRefusal(t *testing.T) {
+	_, unmounted, rows := unmountedShape(t, 12)
+	store := &fakeDeleter{}
+	w := NewVariantWatcher(&fakeLister{snapshots: [][]VariantSnapshot{rows}}, store, nil, staticDir(unmounted), time.Hour, 20)
+	rec := loggingtest.Record(t)
+
+	for i := 1; i <= 3; i++ {
+		if r := w.tick(context.Background()); !r.Skipped || r.Rows != 12 || r.Deleted != 0 {
+			t.Fatalf("tick %d over an unmounted variants directory: report %+v, want 12 rows skipped", i, r)
+		}
+	}
+	requireLinesSay(t, rec.Failures(), 1, "one WARN for three skipped ticks, the refusal's",
+		msgVariantsDirUnavailable, " reason=variants directory is empty ", " rows=12",
+		" variants_dir="+unmounted, "Mount the volume", "once a day")
+	requireLinesSay(t, rec.Lines(msgVariantSweepSummary), 3, "a summary line per tick, at Info",
+		"INFO ", " rows=12", " skipped=true", " deleted=0")
+	if got := store.deleted(); len(got) != 0 {
+		t.Errorf("a skipped tick deleted rows: %v", got)
+	}
+}
+
+// TestVariantWatcherSaysEachKindOfRefusalWhenItStarts — the two guards
+// are two kinds of one latch: a streak that turns from one into the other
+// WARNs at once, since the advice differs, and a tick of the running kind
+// does not. A relocation, then an unmount, then the volume back with the
+// relocation still there: three WARNs, one per streak, and no lifted line
+// between them, since no tick passed both guards.
+func TestVariantWatcherSaysEachKindOfRefusalWhenItStarts(t *testing.T) {
+	dir, rows, _ := relocationShape(t, 30)
+	current := dir
+	w := NewVariantWatcher(&fakeLister{snapshots: [][]VariantSnapshot{rows}}, &fakeDeleter{}, nil,
+		func() string { return current }, time.Hour, 20)
+	rec := loggingtest.Record(t)
+
+	requireRefusedTicks(t, w, 2, 30, "the relocation")
+	current = t.TempDir()
+	for i := 0; i < 2; i++ {
+		if r := w.tick(context.Background()); !r.Skipped {
+			t.Fatalf("an unmounted variants directory's tick: report %+v, want skipped", r)
+		}
+	}
+	current = dir
+	requireRefusedTicks(t, w, 2, 30, "the relocation, once the directory is back")
+
+	requireLinesSay(t, rec.Failures(msgVariantRefusal), 2, "a relocation WARN for each of its two streaks")
+	requireLinesSay(t, rec.Failures(msgVariantsDirUnavailable), 1, "one mount-loss WARN for its streak")
+	requireLinesSay(t, rec.Lines(msgVariantRefusalLifted), 0, "no tick passed both guards")
+}
+
+// TestVariantWatcherSaysOnceWhenTheVariantsDirectoryComesBack — the first
+// tick that finds the directory again, every rendition in it, passes both
+// guards: it says so once, at Info, naming the refusal that ended, and the
+// ticks after it say nothing more. Nothing was deleted on either side.
+func TestVariantWatcherSaysOnceWhenTheVariantsDirectoryComesBack(t *testing.T) {
+	mounted, unmounted, rows := unmountedShape(t, 12)
+	current := unmounted
+	store := &fakeDeleter{}
+	w := NewVariantWatcher(&fakeLister{snapshots: [][]VariantSnapshot{rows}}, store, nil,
+		func() string { return current }, time.Hour, 20)
+	rec := loggingtest.Record(t)
+
+	for i := 0; i < 2; i++ {
+		if r := w.tick(context.Background()); !r.Skipped {
+			t.Fatalf("the unmounted tick: report %+v, want skipped", r)
+		}
+	}
+	current = mounted
+	for i := 0; i < 2; i++ {
+		if r := w.tick(context.Background()); r.Skipped || r.Present != 12 || r.Deleted != 0 {
+			t.Fatalf("tick %d after the volume came back: report %+v, want 12 present", i+1, r)
+		}
+	}
+	requireLinesSay(t, rec.Lines(msgVariantRefusalLifted), 1, "the lifted line, once",
+		"INFO ", " rows=12", " missing=0", " ended=variantsDirUnavailable", " variants_dir="+mounted)
+	requireLinesSay(t, rec.Failures(), 1, "the mount-loss WARN, and nothing else", msgVariantsDirUnavailable)
+	if got := store.deleted(); len(got) != 0 {
+		t.Errorf("rows were deleted: %v", got)
+	}
 }
 
 // TestVariantWatcherRepeatsItsRefusalOnceADay — a streak that goes on is
@@ -182,41 +285,54 @@ func TestVariantWatcherRepeatsItsRefusalOnceADay(t *testing.T) {
 
 // TestRefusalLatch pins the latch both background sweeps share, on its own:
 // a streak WARNs when it starts, when it turns into another kind, and once a
-// repeat after its last WARN; lift reports a streak exactly once; and a new
-// streak after a lift logs at once, whenever the last one logged.
+// repeat after its last WARN; lift reports the streak it ended exactly once;
+// a new streak after a lift logs at once, whenever the last one logged; and
+// what status publishes is the streak's kind and start, moved when a streak
+// starts or ends and at no other step.
 func TestRefusalLatch(t *testing.T) {
 	var l refusalLatch[OrphanRefusalKind]
 	t0 := time.Now()
+	start := func(at time.Duration, k OrphanRefusalKind) OrphanSweepStatus {
+		return OrphanSweepStatus{Refusing: k, Since: t0.Add(at)}
+	}
+	if got := l.status(); got != (OrphanSweepStatus{}) {
+		t.Fatalf("a latch no tick has moved publishes %+v, want the zero status", got)
+	}
+	day := sweepRefusalRepeat
 	for _, step := range []struct {
-		name                  string
-		at                    time.Duration
-		kind                  OrphanRefusalKind
-		lift                  bool
-		wantLog, wantStarted  bool
-		wantLifted, wantSince bool
+		name       string
+		at         time.Duration
+		kind       OrphanRefusalKind
+		lift       bool
+		wantLog    bool
+		wantEnded  OrphanRefusalKind
+		wantStatus OrphanSweepStatus
 	}{
-		{name: "a streak starts", at: 0, kind: OrphanRefusalMassOrphans, wantLog: true, wantStarted: true, wantSince: true},
-		{name: "the same kind, an hour on", at: time.Hour, kind: OrphanRefusalMassOrphans, wantSince: true},
-		{name: "another kind", at: 2 * time.Hour, kind: OrphanRefusalPartialWalk, wantLog: true, wantStarted: true, wantSince: true},
-		{name: "that kind, a minute short of a day on", at: 2*time.Hour + sweepRefusalRepeat - time.Minute, kind: OrphanRefusalPartialWalk, wantSince: true},
-		{name: "that kind, a day on", at: 2*time.Hour + sweepRefusalRepeat, kind: OrphanRefusalPartialWalk, wantLog: true, wantSince: true},
-		{name: "a lift ends the streak", at: 2*time.Hour + sweepRefusalRepeat + time.Minute, lift: true, wantLifted: true},
-		{name: "a second lift finds none", at: 2*time.Hour + sweepRefusalRepeat + 2*time.Minute, lift: true},
-		{name: "a new streak of the old kind logs at once", at: 2*time.Hour + sweepRefusalRepeat + 3*time.Minute, kind: OrphanRefusalPartialWalk, wantLog: true, wantStarted: true, wantSince: true},
+		{name: "a streak starts", at: 0, kind: OrphanRefusalMassOrphans, wantLog: true,
+			wantStatus: start(0, OrphanRefusalMassOrphans)},
+		{name: "the same kind, an hour on", at: time.Hour, kind: OrphanRefusalMassOrphans,
+			wantStatus: start(0, OrphanRefusalMassOrphans)},
+		{name: "another kind", at: 2 * time.Hour, kind: OrphanRefusalPartialWalk, wantLog: true,
+			wantStatus: start(2*time.Hour, OrphanRefusalPartialWalk)},
+		{name: "that kind, a minute short of a day on", at: 2*time.Hour + day - time.Minute, kind: OrphanRefusalPartialWalk,
+			wantStatus: start(2*time.Hour, OrphanRefusalPartialWalk)},
+		{name: "that kind, a day on", at: 2*time.Hour + day, kind: OrphanRefusalPartialWalk, wantLog: true,
+			wantStatus: start(2*time.Hour, OrphanRefusalPartialWalk)},
+		{name: "a lift ends the streak", at: 2*time.Hour + day + time.Minute, lift: true, wantEnded: OrphanRefusalPartialWalk},
+		{name: "a second lift finds none", at: 2*time.Hour + day + 2*time.Minute, lift: true},
+		{name: "a new streak of the old kind logs at once", at: 2*time.Hour + day + 3*time.Minute, kind: OrphanRefusalPartialWalk,
+			wantLog: true, wantStatus: start(2*time.Hour+day+3*time.Minute, OrphanRefusalPartialWalk)},
 	} {
 		now := t0.Add(step.at)
 		if step.lift {
-			if got := l.lift(); got != step.wantLifted {
-				t.Errorf("%s: lift = %v, want %v", step.name, got, step.wantLifted)
+			if got := l.lift(); got != step.wantEnded {
+				t.Errorf("%s: lift = %q, want %q", step.name, got, step.wantEnded)
 			}
-		} else {
-			logIt, started := l.refuse(now, step.kind)
-			if logIt != step.wantLog || started != step.wantStarted {
-				t.Errorf("%s: refuse = (%v, %v), want (%v, %v)", step.name, logIt, started, step.wantLog, step.wantStarted)
-			}
+		} else if logIt := l.refuse(now, step.kind); logIt != step.wantLog {
+			t.Errorf("%s: refuse = %v, want %v", step.name, logIt, step.wantLog)
 		}
-		if got := !l.since.IsZero(); got != step.wantSince {
-			t.Errorf("%s: a streak start is recorded: %v, want %v", step.name, got, step.wantSince)
+		if got := l.status(); !got.Since.Equal(step.wantStatus.Since) || got.Refusing != step.wantStatus.Refusing {
+			t.Errorf("%s: status %+v, want %+v", step.name, got, step.wantStatus)
 		}
 	}
 }
