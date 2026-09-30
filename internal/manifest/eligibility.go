@@ -43,7 +43,9 @@ import (
 // EligibilityOpts.DSDRender exactly as transcode.OptimizeEligibleFor
 // composes the Go halves (PR #863).
 // SQLite LIKE is ASCII-case-insensitive, matching the Go ToLower ext
-// compare.
+// compare. `.aifc` is deliberately absent from that fallback, as it is from
+// the Go one: the extension cannot say whether an AIFF-C is compressed, and
+// the extractor names one it has read by its encoding (backlog B124).
 //
 // NOTE: SQLite's TRIM is NOT strings.TrimSpace — it strips only U+0020,
 // where Go also strips \t \n \v \f \r and Unicode spaces. Harmless
@@ -83,7 +85,7 @@ const optimizeEligibleSQL = `(
 // degrades to covered-only, which is the safe rendering.
 const upscaleEligibleSQL = `(
 	COALESCE(t.is_dsd,0) != 1
-	AND UPPER(TRIM(COALESCE(t.codec,''))) NOT IN ('MP3','AAC','OGG','OPUS','WMA')
+	AND UPPER(TRIM(COALESCE(t.codec,''))) NOT IN ('MP3','AAC','OGG','OPUS','WMA','ULAW','ALAW','IMA4','ADPCM','GSM','MP2')
 	AND COALESCE(t.sample_rate,0) > 0 AND COALESCE(t.bits_per_sample,0) > 0
 	AND NOT (t.sample_rate > ? OR t.bits_per_sample > ?)
 	AND NOT (t.sample_rate = ? AND t.bits_per_sample = ?)

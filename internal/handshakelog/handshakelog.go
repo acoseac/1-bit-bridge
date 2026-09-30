@@ -47,7 +47,10 @@
 // panic and the HTTP/2 connection errors, and the bridge's privacy page
 // promises that client IPs are not logged for the phone-facing API: a
 // phone with a stale pin, a cancelled endpoint probe and a scanner each
-// used to leave one. The line keeps everything else, the reason included.
+// used to leave one. The reason can name it again: a handshake that timed
+// out or was reset ends in a socket error, "read tcp <local>-><peer>: …",
+// which is the commonest failure a phone produces, and that one is taken
+// out too. The line keeps everything else, the listen address included.
 package handshakelog
 
 import (
@@ -100,22 +103,85 @@ func (redactingLog) Write(p []byte) (int, error) {
 // ClientPlaceholder stands where a peer's address was.
 const ClientPlaceholder = "<client address>"
 
-// peerAddr matches an address where net/http and its bundled HTTP/2 server
-// print a peer's (Go 1.26): after "from " ("http: TLS handshake error from
-// %s", "timeout waiting for SETTINGS frames from %v", "http2: server
-// connection error from %v"), after "client " ("error reading preface from
-// client %v") and after "serving " ("http: panic serving %v", "http2: panic
-// serving %v"). The address is IPv4 or bracketed IPv6, with its port.
-// Anchoring on those words keeps a LOCAL address in the line, such as the
-// listen address in an accept error, which is the operator's own
-// configuration and says nothing about who connected.
-var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) )(?:\d{1,3}(?:\.\d{1,3}){3}|\[[^\]\s]+\]):\d+`)
+// peerAddr matches an address where a line the servers log names a peer
+// (Go 1.26):
+//
+//   - after the words net/http and its bundled HTTP/2 server print before
+//     one: "from " ("http: TLS handshake error from %s", "timeout waiting
+//     for SETTINGS frames from %v", "http2: server connection error from
+//     %v"), "client " ("error reading preface from client %v") and
+//     "serving " ("http: panic serving %v", "http2: panic serving %v");
+//   - after the "->" of a socket error. A *net.OpError names both ends of
+//     its socket, "read tcp <local>-><remote>: i/o timeout", for a read and
+//     a write alike (gVisor's, behind the tailnet listener, does the same),
+//     and on a server's socket the remote end is the client. The reason of
+//     a handshake that timed out or was reset is one of those, so the
+//     address the words before it had redacted came back after the arrow
+//     (backlog B172).
+//
+// The address is IPv4, or IPv6 in brackets, with its port. An IPv6 zone
+// runs to the "]" before the port whatever it holds, because on Windows it
+// is the adapter's name, spaces and all ("[fe80::7%Wi-Fi 4]:5000"); the
+// part before the zone must be an IPv6 literal, so a bracket in a panic
+// value is not taken for one. Anchoring on those words and on the arrow
+// keeps a LOCAL address in the line, such as the listen address before the
+// arrow or in an accept error, which is the operator's own configuration
+// and says nothing about who connected.
+var peerAddr = regexp.MustCompile(`((?:^|\s)(?:from|client|serving) |->)((?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+(?:%[^\n]*?)?\]):\d+)`)
 
 // RedactPeers returns line with each peer address in it replaced by
-// ClientPlaceholder.
+// ClientPlaceholder: the one after a word that names a peer, the one after
+// the "->" of a socket error, and every other place the line repeats an
+// address one of those names.
+//
+// The repeat is what net prints for a socket whose local address could not
+// be read. Its accept ignores a failed getsockname (fd_unix.go, and
+// fd_windows.go's GetAcceptExSockaddrs), and a socket error with no local
+// end names the peer alone, "read tcp <peer>: …", where nothing but the
+// words earlier in the line say it is the peer. A lone address can also be
+// the LOCAL end (gVisor's socket has no remote address left after a reset),
+// and then no word names it, so it stays.
 func RedactPeers(line string) string {
-	return peerAddr.ReplaceAllString(line, "${1}"+ClientPlaceholder)
+	found := peerAddr.FindAllStringSubmatch(line, -1)
+	if found == nil {
+		return line
+	}
+	line = peerAddr.ReplaceAllString(line, "${1}"+ClientPlaceholder)
+	for _, m := range found {
+		line = redactRepeats(line, m[2])
+	}
+	return line
 }
+
+// redactRepeats replaces each place line holds the peer address addr on
+// its own, not as part of a longer address: never after a digit or a dot
+// (10.0.0.2:5000 inside 110.0.0.2:5000), never before a digit (inside
+// 10.0.0.2:50001).
+func redactRepeats(line, addr string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(line, addr)
+		if i < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		end := i + len(addr)
+		if (i > 0 && continuesAnAddress(line[i-1])) || (end < len(line) && isDigit(line[end])) {
+			b.WriteString(line[:i+1])
+			line = line[i+1:]
+			continue
+		}
+		b.WriteString(line[:i])
+		b.WriteString(ClientPlaceholder)
+		line = line[end:]
+	}
+}
+
+// continuesAnAddress reports whether c, just before an address, would make
+// it the tail of a longer one.
+func continuesAnAddress(c byte) bool { return isDigit(c) || c == '.' }
+
+func isDigit(c byte) bool { return '0' <= c && c <= '9' }
 
 type listener struct {
 	net.Listener

@@ -502,7 +502,7 @@ func matchProtocolInfoExt(pi string) string {
 // downstream pipeline already handles bit-exact.
 func isKnownAudioExt(ext string) bool {
 	switch strings.ToLower(ext) {
-	case "flac", "dsf", "dff", "wav", "aiff", "aif", "m4a", "mp3", "mp4", "ogg", "opus":
+	case "flac", "dsf", "dff", "wav", "aiff", "aif", "aifc", "m4a", "mp3", "mp4", "ogg", "opus":
 		return true
 	}
 	return false

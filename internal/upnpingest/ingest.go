@@ -1011,6 +1011,11 @@ func codecFromExtension(p string) string {
 		return "WAV"
 	case "aiff", "aif":
 		return "AIFF"
+	case "aifc":
+		// The iOS app's name for an AIFF-C nothing has read (backlog
+		// B124): the DIDL cannot say whether it is linear or compressed,
+		// and no lossless set holds "AIFC".
+		return "AIFC"
 	case "m4a", "mp4":
 		// We can't disambiguate ALAC vs AAC without reading the file.
 		// Leave Codec empty so the iOS side falls back to its existing

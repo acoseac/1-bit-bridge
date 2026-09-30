@@ -178,7 +178,9 @@ func defaultMIMEForExtension(extension string) string {
 		return "audio/mp4"
 	case ".wav":
 		return "audio/wav"
-	case ".aiff", ".aif":
+	case ".aiff", ".aif", ".aifc":
+		// An AIFF-C is an AIFF FORM (backlog B124): the MIME the iOS app
+		// expects for its "AIFC" codec, where it fell to octet-stream.
 		return "audio/aiff"
 	case ".mp3":
 		return "audio/mpeg"

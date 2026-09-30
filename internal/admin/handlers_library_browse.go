@@ -215,7 +215,8 @@ func isLossyCodecLabel(codec string) bool {
 // data — no projection round-trip. Pure + table-tested.
 //
 //   - dsd_bitstream  : DSD (1-bit) — the SoX PCM pipeline rejects it
-//   - lossy_source   : a known lossy codec (MP3/AAC/OGG/OPUS/WMA)
+//   - lossy_source   : a known lossy codec (manifest.IsLossyCodec: MP3,
+//     AAC, OGG, OPUS, WMA, and the compressed AIFF-C and WAV encodings)
 //   - unknown_format : extractor couldn't determine sample rate / bit depth
 //   - no_decoder     : lossless with valid geometry, but THIS sox build has
 //     no handler for the container (ALAC-in-M4A on a sox with no MP4 demuxer,
