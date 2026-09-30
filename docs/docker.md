@@ -605,7 +605,7 @@ concern — mount it on the host and bind-mount the path in, as
 `/mnt/music` above.
 
 For the full security model — firewalling, the admin-console
-exposure options, and the reverse-proxy variant (`--public --proxy`,
+exposure options, and the reverse-proxy variant (`--public --admin-tls-proxy`,
 where TLS is terminated upstream and `--email` isn't needed) — see the
 [Public-VPS deployment runbook](deployment/public-vps.md).
 

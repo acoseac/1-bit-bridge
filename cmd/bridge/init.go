@@ -46,6 +46,14 @@ func baseConfig(roots []string, name, dataDir string) *config.Config {
 	}
 }
 
+// initDataDirFor is the data dir `bridge init` writes for a config in cfgDir:
+// data, beside the config. A rewrite keeps the data dir an install's config
+// names instead (init_rewrite.go). Before init has run, `bridge doctor` grades
+// the TLS pair in it (buildDoctorDepsFor), the pair init keeps or mints.
+func initDataDirFor(cfgDir string) string {
+	return filepath.Join(cfgDir, "data")
+}
+
 // firstInstallName is the library name init gives an install that has none
 // to keep, when the run names none: the host's name, or DefaultLibraryName
 // on a host without one.
@@ -132,6 +140,105 @@ func initAddressFlagsError(public bool, listen, admin string) error {
 	return nil
 }
 
+// postureFlags are init's flags that describe a public install: --public, and
+// the three that apply only with it.
+type postureFlags struct {
+	public        bool
+	domain, email string
+	proxy         bool
+}
+
+// publicOnly lists the flags given that apply only with --public, in the
+// order init's help gives them.
+func (f postureFlags) publicOnly() []string {
+	var out []string
+	if f.domain != "" {
+		out = append(out, "--domain")
+	}
+	if f.email != "" {
+		out = append(out, "--email")
+	}
+	if f.proxy {
+		out = append(out, "--admin-tls-proxy")
+	}
+	return out
+}
+
+// configNotChanged is the line that closes a refusal init makes before it
+// writes over an install's config, so the operator knows the install is as
+// it was.
+const configNotChanged = "the config was NOT changed."
+
+// warnIgnoredPostureFlags says what init does with a posture flag this run
+// does not write, and returns the exit code of a refusal, or 0. exists says a
+// config is at cfgPath, replace that this run rewrites it (--yes --force, or
+// an interactive yes), and prior is readPriorInstall's answer for it.
+//
+// --domain, --email and --admin-tls-proxy describe a public install, and a run
+// without --public ignored them without a word until 2026-09-29 (backlog B61):
+// a loopback first install given all three saved none of them, and a --yes
+// --force rewrite of a public install given --domain and --admin-tls-proxy but
+// not --public saved a loopback config, the endpoint every paired device dials
+// dropped.
+//
+//   - A rewrite of a PUBLIC install is refused, exit 2, before anything is
+//     graded or written. It is the run where the missing --public costs
+//     something: the flags say the operator meant a public install, and the
+//     rewrite would make this one loopback, dropping that endpoint.
+//   - A first install, and a rewrite of a loopback install, warn and go on.
+//     Each writes a working loopback install and loses nothing, so neither is
+//     stopped over a flag that changes nothing it writes. A refusal of the
+//     loopback rewrite was the first draft, and it would fail a script that
+//     rewrites its config on every run with --yes --force, passing these
+//     flags, on its second run, the first having only warned.
+//   - A run that keeps the config says nothing more. Every flag it was given
+//     goes unused, which its "keeping it" line says, and an idempotent `bridge
+//     init --yes` re-run passing these flags must go on working as its first
+//     run did.
+//
+// With --public and --admin-tls-proxy, --email goes unused too: the bridge
+// then runs no ACME client, and --email is that client's contact address. The
+// run warns, as a first install or a rewrite, since the config loses nothing.
+// Every line names the flags and never their values: a --domain may carry a
+// user name and password, which --public refuses without echoing (backlog
+// B54).
+func warnIgnoredPostureFlags(stderr io.Writer, f postureFlags, exists, replace bool, cfgPath string, prior *priorInstallFile) int {
+	if exists && !replace {
+		return 0
+	}
+	if f.public {
+		if f.proxy && f.email != "" {
+			fmt.Fprintln(stderr, "warning: --email is not used with --admin-tls-proxy, so this run ignores it: it is the "+
+				"Let's Encrypt contact for the certificate the bridge obtains itself, and behind a TLS proxy it obtains none.")
+		}
+		return 0
+	}
+	given := f.publicOnly()
+	if len(given) == 0 {
+		return 0
+	}
+	names, verb, them := sentenceOfFlags(given)
+	if !replace || prior == nil || !prior.public() {
+		fmt.Fprintf(stderr, "warning: %s %s only with --public, so this run ignores %s and sets up a loopback install; "+
+			"add --public for a public install.\n", names, verb, them)
+		return 0
+	}
+	fmt.Fprintf(stderr, "%s %s only with --public, and this run would rewrite the public install at %s as a loopback "+
+		"one, which ignores %s and drops the endpoint every paired device dials.\n", names, verb, cfgPath, them)
+	fmt.Fprintf(stderr, "add --public to rewrite it as a public install, or leave %s out to make it a loopback one.\n", them)
+	fmt.Fprintln(stderr, configNotChanged)
+	return 2
+}
+
+// sentenceOfFlags joins flag names for a sentence ("--a", "--a and --b",
+// "--a, --b and --c"), with the verb and the pronoun that agree with them.
+func sentenceOfFlags(flags []string) (names, verb, pronoun string) {
+	if len(flags) == 1 {
+		return flags[0], "applies", "it"
+	}
+	return strings.Join(flags[:len(flags)-1], ", ") + " and " + flags[len(flags)-1], "apply", "them"
+}
+
 // portsThisInitWrites is what init prints under a preflight report whose
 // port-api or port-admin check FAILed on the ports this run writes. The
 // preflight grades those wherever no install's config names its own
@@ -198,7 +305,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// PR 5: public-VPS deployment posture flags.
 	publicMode := fs.Bool("public", false, "configure as a public-VPS deployment (admin auth, no mDNS, no Tailscale by default)")
 	publicDomain := fs.String("domain", "", "public hostname iOS clients dial (required with --public)")
-	publicEmail := fs.String("email", "", "ACME contact email for Let's Encrypt (required with --public)")
+	publicEmail := fs.String("email", "", "ACME contact email for Let's Encrypt (required with --public, unless --admin-tls-proxy)")
 	// The two address flags apply in either posture (initAddresses).
 	adminAddressFlag := fs.String("admin-address", "", "bind address for the admin console (default 127.0.0.1:7789; "+
 		"with --public 0.0.0.0:7789, or 127.0.0.1:7789 with --admin-tls-proxy). Without --public it must be a "+
@@ -292,8 +399,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// rewrite keeps its data dir, which the header, the preflight, the
 	// credential store, the TLS pair and the service all use from here on.
 	// With no config, or one init cannot read, the data dir is init's own.
-	prior, priorErr := readPriorInstall(cfgPath)
-	initDataDir := filepath.Join(cfgDir, "data")
+	// The read is kept: a config that is no longer as read by the time this
+	// run would write is refused (configChangedSinceRead).
+	asRead := readConfigAsIs(cfgPath)
+	prior, priorErr := priorInstallFrom(cfgPath, asRead)
+	initDataDir := initDataDirFor(cfgDir)
 	dataDir := initDataDir
 	if prior != nil {
 		dataDir = prior.DataDir
@@ -373,6 +483,44 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		roots, rootsKept = prior.LibraryRoots, true
 	}
 
+	// Whether this run replaces the config at cfgPath, decided before the
+	// preflight so the preflight knows what it grades. Non-interactive
+	// (`--yes`) is the automation path, so it does not clobber an existing
+	// config unless --force says it may: a CI job or packaging script that
+	// reruns `bridge init --yes` would otherwise wipe an already-tuned
+	// installation. An interactive run asks. A no keeps the config, common when
+	// the operator is re-running init to reinstall the service against an
+	// already-tuned one.
+	//
+	// The question came after the preflight and the name prompt until
+	// 2026-09-29 (backlog B61). So an interactive run's preflight graded the
+	// install's ports for a run that might go on to keep them, a stranger on a
+	// port a yes would move off refused the run before it could ask, where
+	// the same flags with --yes --force went through, and a no discarded the
+	// name the operator had just typed. It comes after the library prompt,
+	// which ends the run on a closed stdin rather than taking a default for a
+	// question nobody answered.
+	_, statErr := os.Stat(cfgPath)
+	exists := statErr == nil
+	replace := false
+	if exists {
+		if *nonInteractive {
+			replace = *force
+		} else {
+			replace = confirm(in, stdout, "Config file exists. Overwrite?", false)
+		}
+	}
+	keep := exists && !replace
+
+	// A posture flag the run would not write (warnIgnoredPostureFlags). A
+	// rewrite of a public install given one is refused here, before anything
+	// is graded or written.
+	if code := warnIgnoredPostureFlags(stderr, postureFlags{
+		public: *publicMode, domain: *publicDomain, email: *publicEmail, proxy: *publicProxy,
+	}, exists, replace, cfgPath, prior); code != 0 {
+		return code
+	}
+
 	// Preflight. Run after library-path resolution so doctor sees the
 	// real path the user chose, not a default. --skip-doctor bypasses
 	// for the rare case where the operator knows better than the check.
@@ -398,18 +546,19 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// a port it would never bind. A refusal on those ports says whose they
 	// are, since it is not a verdict about an install (portsThisInitWrites).
 	//
-	// A --yes --force run over a config that loads is the one rewrite that
-	// is certain before the preflight runs, and the preflight grades only
-	// the install's ports that rewrite keeps. One it moves off is left
-	// ungraded (portsARewriteAbandons, doctor.Deps.AbandonedPorts): who holds
-	// a port the new config does not name says nothing about whether the
-	// bridge can start. Until 2026-09-28 it was graded, and a stranger on
-	// the old port, the install's bridge stopped, refused a rewrite moving
-	// off it. The second pass below grades the ports that rewrite writes in
-	// their place. An interactive run keeps grading them all: its
-	// "Overwrite?" comes after the preflight, and a no keeps these ports,
-	// as `--yes` without `--force` does. #963 is unchanged for everything
-	// else, the certificate and the data dir, which a rewrite keeps.
+	// A rewrite of an install whose config loads, --yes --force or an
+	// interactive yes, is certain by now, and the preflight grades only the
+	// install's ports that rewrite keeps. One it moves off is left ungraded
+	// (portsARewriteAbandons, doctor.Deps.AbandonedPorts): who holds a port
+	// the new config does not name says nothing about whether the bridge can
+	// start. Until 2026-09-28 it was graded, and a stranger on the old port,
+	// the install's bridge stopped, refused a rewrite moving off it; an
+	// interactive rewrite was refused so until 2026-09-29, when its
+	// "Overwrite?" came after the preflight. The second pass below grades the
+	// ports that rewrite writes in their place. A run that keeps the config
+	// grades them all: they are the ports its bridge binds. #963 is unchanged
+	// for everything else, the certificate and the data dir, which a rewrite
+	// keeps.
 	//
 	// preflightDeps is kept for the SECOND port pass below: where the
 	// config loads, the ports graded here are the install's CURRENT ones,
@@ -429,14 +578,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			AdminPort:    adminPort,
 		}
 		installPorts := withExistingInstallDeps(&d, cfgPath)
-		rewriting := installPorts && *nonInteractive && *force
+		rewriting := installPorts && replace
 		if rewriting {
 			d.AbandonedPorts = portsARewriteAbandons(d.APIPort, d.AdminPort, apiPort, adminPort)
 		}
 		preflightDeps = d
 		if report, code := ensureDoctorClean(stdout, d); code != 0 {
 			// Every port graded is one this run writes, unless a config that
-			// loads is being kept (or may be, at the prompt).
+			// loads is being kept.
 			if (!installPorts || rewriting) && report.PortFailed() {
 				fmt.Fprintln(stdout)
 				fmt.Fprintln(stdout, portsThisInitWrites())
@@ -466,6 +615,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// config can hold one over the cap or one that is not UTF-8, which Load
 	// repairs, and keeping the file's would offer at the prompt a name the
 	// prompt then refuses when Enter takes it.
+	//
+	// A run that keeps the config asks for no name: it would discard it.
 	firstName := firstInstallName()
 	defaultName := firstName
 	if prior != nil {
@@ -474,7 +625,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	name := config.TrimLibraryName(*libraryName)
-	if name == "" && !*nonInteractive {
+	if name == "" && !*nonInteractive && !keep {
 		var code int
 		if name, code = askLibraryName(in, stdout, stderr, defaultName); code != 0 {
 			return code
@@ -488,30 +639,17 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		nameKept = *nonInteractive && name != firstName
 	}
 
-	// Write or refresh the config file. Preserve the existing file if the
-	// operator says no at the prompt — common when they're re-running
-	// init to reinstall the service against an already-tuned config.
-	//
-	// Non-interactive (`--yes`) is the automation path, so we refuse to
-	// silently clobber an existing config: the operator must pass `--force`
-	// to acknowledge they mean to overwrite. Without the gate, a CI job or
-	// packaging script that reruns `bridge init --yes` would silently wipe
-	// an already-tuned installation.
-	if _, err := os.Stat(cfgPath); err == nil {
+	// A run that keeps the config (the decision above) installs the service
+	// against it and writes nothing.
+	if keep {
 		if *nonInteractive {
-			if !*force {
-				fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
-				fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
-				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
-				return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
-			}
+			fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
+			fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
 		} else {
-			if !confirm(in, stdout, "Config file exists. Overwrite?", false) {
-				fmt.Fprintf(stdout, "keeping existing config\n")
-				keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
-				return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
-			}
+			fmt.Fprintf(stdout, "keeping existing config\n")
 		}
+		keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
+		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 	}
 
 	// Whether this run may overwrite the config at all, before anything is
@@ -702,15 +840,25 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	_, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, certSANOptions(cfg))
 	if err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
-		fmt.Fprintln(stderr, "the config was NOT changed.")
+		fmt.Fprintln(stderr, configNotChanged)
 		return 1
 	}
 
+	// The config must still be the one this run read and decided about, and
+	// this is the last step before Save: every prompt, refusal and check ran
+	// since, and another process can have written the config meanwhile
+	// (configChangedSinceRead).
+	if configChangedSinceRead(stderr, cfgPath, asRead) {
+		return 1
+	}
 	if err := cfg.Save(cfgPath); err != nil {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
 	}
 	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept)
+	if endpointsKept {
+		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
+	}
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
@@ -768,7 +916,7 @@ func openInitAdminAuth(storePath string, stderr io.Writer) (*adminauth.Store, bo
 		fmt.Fprintf(stderr, "the admin credentials at %s do not load, and init keeps an install's credentials rather than replacing them.\n", storePath)
 		fmt.Fprintln(stderr, "restore that file from a backup, or move it aside and run this init again to mint new ones.")
 	}
-	fmt.Fprintln(stderr, "the config was NOT changed.")
+	fmt.Fprintln(stderr, configNotChanged)
 	return nil, false
 }
 
