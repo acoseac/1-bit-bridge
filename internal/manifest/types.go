@@ -350,6 +350,14 @@ type Track struct {
 	// iOS client's next delta sync nor re-queue full re-enrichment.
 	versionStampOnly bool
 
+	// awaitsReconcile is an internal, NON-WIRE marker (the versionStampOnly
+	// shape) set by reExtractUnchanged on a version-stale re-extraction that
+	// differs from its stored row in a field a reconciliation pass writes
+	// (reconciledFieldsDiffer). The scan's writer holds such a Track, unmerged,
+	// instead of writing it, and the scan's tail writes it as the passes
+	// would leave it (settleHeldReconciles, backlog B188).
+	awaitsReconcile bool
+
 	// extractRefused is an internal, NON-WIRE marker (the versionStampOnly
 	// shape) set by the scanner when this extraction REFUSED the file: it
 	// was read whole, and its extractor answered that it is not its format
