@@ -169,16 +169,21 @@ type locationRecord struct {
 // eviction. A future PR can add cross-package coupling with the
 // server-side advertiser to multiplex NOTIFY observations.
 //
-// **Linux/BSD socket correctness**: binding to wildcard
-// `0.0.0.0:0` (NOT `239.255.255.250:1900` via
-// `ListenMulticastUDP`) is load-bearing. A multicast-bound socket
-// on Linux delivers ONLY packets whose destination IP matches the
-// bound multicast address — unicast M-SEARCH responses from
-// renderers (sent to the host IP + the source port of our
-// M-SEARCH packet) would NOT land on the multicast-bound socket
-// and discovery would silently fail. macOS is more permissive
-// but the correct portable shape is wildcard + explicit
-// multicast-write outgoing. Per Gemini HIGH round-1 on PR #305.
+// **Why a wildcard socket on an ephemeral port** (`0.0.0.0:0`, not
+// `ListenMulticastUDP` on 239.255.255.250:1900, PR #305): a renderer
+// answers an M-SEARCH by unicast to the address and port it came
+// from, so the socket that sends the search must be the one that
+// receives the answers, and it joins no group, since it wants none
+// of the LAN's multicast. Port 1900 is the advertiser's, in this
+// same process. The search is pinned to the client's interface and
+// written unconnected with WriteToUDP, so it leaves that interface
+// with that interface's address (the form the advertiser's NOTIFY
+// sender took in backlog B71). This said until 2026-09-29 that a
+// multicast-bound socket on Linux delivers only datagrams addressed
+// to the group, so unicast answers would not land on it: Go's
+// ListenMulticastUDP binds the WILDCARD address and the group's
+// port (net's listenDatagram), and such a socket takes unicast to
+// that port as well.
 //
 // **Thread model**: the client owns ONE goroutine — `runLoop` —
 // that reads from the UDP socket + dispatches packets to per-event

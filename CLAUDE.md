@@ -291,7 +291,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Twelve claims in this list have been wrong and been corrected** — the
+**Thirteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -303,8 +303,9 @@ directory", (2026-09-27) "init never prompts for `customEndpoints`, so
 the old value survives the rewrite", (2026-09-27) "`Load` serves a config
 giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 `Consider` requires `.1bwf`", (2026-09-28) "`mtime_ns = 0` does not
-force a re-extraction", and (2026-09-29) "the app's SSDP path has no
-LOCATION-versus-source check". The first five cost a later session real
+force a re-extraction", (2026-09-29) "the app's SSDP path has no
+LOCATION-versus-source check", and (2026-09-29) "Go binds a multicast
+listener to the group address". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -326,7 +327,11 @@ the `mtime_ns` column, and the bullet went on describing `GetTrack`, which
 reads the mtime inside `tags_json`. The twelfth was about the OTHER repo, and
 true for a day: the iOS app merged the check (acoseac/1-bit#1998), which
 nothing in this repo sees, so it was corrected only because that session filed
-the bridge's doc change as a backlog entry (B78).
+the bridge's doc change as a backlog entry (B78). The thirteenth was the
+premise of a backlog entry (B71) and, in another form, of a code comment
+that chose a socket by it (the renderer discovery client's); measuring the
+consequence the entry predicted is what found the premise false, from the
+toolchain's own source.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -3578,15 +3583,78 @@ no failing test — which is the shape to expect in this area.
   a production advertiser whose pin fails still advertises. **Measure what
   leaves a Linux host from ANOTHER network namespace, or with tcpdump on
   the bridge, never with a listener
-  in the same one**: Go binds a multicast listener to the group address, and
-  with Linux's default `IP_MULTICAST_ALL` a socket joined on one interface
-  also receives the group's datagrams arriving on any interface another
-  socket joined (a listener on eth0 heard the loopback advertisers' NOTIFYs,
-  and one on lo heard eth0's). The same default reaches a multi-homed Linux
-  bridge's advertisers (backlog B71). On the Windows runner the join and
-  the pin both take on "Loopback Pseudo-Interface 1": the tests run there,
-  and its log shows them starting with no pin warning. What leaves a
-  Windows host was not measured.
+  in the same one**: Go binds a multicast listener to the WILDCARD address
+  and the group's port (this said "the group address" until 2026-09-29),
+  and with Linux's default `IP_MULTICAST_ALL` a socket joined on one
+  interface also receives the group's datagrams arriving on any interface
+  another socket joined (a listener on eth0 heard the loopback advertisers'
+  NOTIFYs, and one on lo heard eth0's). A test's own listener keeps that
+  default; the advertisers' listeners turn it off since backlog B71 (the
+  next bullet). On the Windows runner the join and the pin both take on
+  "Loopback Pseudo-Interface 1": the tests run there, and its log shows them
+  starting with no pin warning. What left a Windows host was measured on
+  2026-09-29 (B71, on a Windows 11 host with Tailscale, with a listener on
+  the same LAN): nothing reached the LAN, because the advertiser's
+  connected NOTIFY sender took the Tailscale route, which its pin did not
+  move. The sender is unconnected since.
+- **Each SSDP advertiser hears only the multicast M-SEARCHes that arrive on
+  its own interface, and announces from that interface's address** (2026-09-29,
+  backlog B71). The DLNA server runs one advertiser per LAN interface, each
+  with that interface's LOCATION (#328), and by the eligibility rule a Linux
+  host running Docker is such a host: `docker0` and every user bridge carry
+  a private IPv4.
+  **The listener**: `net.ListenMulticastUDP` binds the wildcard address
+  (net's `listenDatagram` rewrites the group before the bind), and Linux's
+  default `IP_MULTICAST_ALL = 1` delivers the group's datagrams to it from
+  every interface where any socket on the host joined, so every advertiser
+  answered every interface's M-SEARCHes with its own LOCATION. Measured with
+  the real binary in three network namespaces: each M-SEARCH from either
+  subnet (6 of 6) got two answers, one naming the other subnet, the wrong
+  one first in 3. macOS and Windows deliver per joined interface
+  (measured). `listenSSDP` (ssdp_listen_linux.go) sets `IP_MULTICAST_ALL =
+  0` in the `ListenConfig`'s Control, **before the bind**: from the bind on
+  a wildcard socket takes other interfaces' group datagrams, so setting it
+  after `ListenMulticastUDP` returns leaves a window. A kernel that refuses
+  the option keeps the old listener with one Warn, never a refusal that
+  takes DLNA down. **The sender is an unconnected socket, pinned before
+  anything is sent, writing each NOTIFY to the group** (`openNotifySender`).
+  `net.DialUDP` fixed its route and source address at the connect, along
+  the group's route, and a pin set afterwards did not move the source (Linux,
+  macOS) or even the route (Windows). Measured: the second interface's
+  NOTIFYs came from the first interface's address, and a renderer with no
+  route back received 0 of 5 (5 of 5 now); on Windows with Tailscale
+  (home-pc's shape: Windows' SSDP service holds the group on every
+  interface and Tailscale's route has metric 5) the connect took the
+  Tailscale address and route, and a sender pinned to Ethernet put 0 of 4
+  datagrams on the LAN (2 of 2 now). **And on a host with no route to the
+  group (no default route) the connect failed ("network is unreachable"),
+  no advertiser could start, and DLNA did not start at all**; an
+  unconnected socket needs no route. **Don't connect it, and don't pin a
+  socket after connecting it.** A single-interface host sees no change:
+  its advertiser's one membership is where every search arrives, and its
+  source is that interface's address either way. The discovery clients
+  take nothing from `IP_MULTICAST_ALL` (an ephemeral port, no membership);
+  the upstream client's MediaServer search is answered by the bridge's own
+  advertisers, with both LOCATIONs before and one now (a looped-back
+  search, measured), and only a configured server is ever walked. Pinned
+  by `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` (Linux, and macOS
+  where the host sends its datagram: GitHub's macOS runner answers `no
+  route to host` for en0, and the test skips there),
+  `TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface` and
+  `TestAListenerTheKernelWillNotConfineStillListensAndSaysSo` (Linux),
+  `TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket` (all),
+  `TestAnAdvertiserOnLoopbackNotifiesFromALoopbackAddress` (macOS, Windows:
+  Linux gives a lo-pinned multicast another interface's address either way,
+  127.0.0.1 being host-scoped), and
+  `TestSSDPAdvertisersKeepToTheirOwnInterfaces`, the real server over veths
+  in a network namespace of the test's own, with and without a route to the
+  group (root, or a user namespace: dido, not CI). **Still open**: a unicast
+  M-SEARCH to port 1900 reaches ONE advertiser's socket (Linux: the last
+  bound; macOS, Windows: the first) and is answered with that advertiser's
+  LOCATION, whatever address it was sent to (backlog B119); on Windows the
+  advertiser hears no search sent from its own host (B120); and a pinned
+  `dlna.listenAddress` advertises on the picker's interface, which need
+  not hold that address (B121).
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
