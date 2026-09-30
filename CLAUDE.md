@@ -3201,7 +3201,9 @@ no failing test — which is the shape to expect in this area.
   refuses it again. The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
   the watchers tick regardless. (#917) The orphan GC's chip also says when
-  that sweep is refusing (2026-09-28, the Jobs-card bullet below).
+  that sweep is refusing (2026-09-28, the Jobs-card bullet below), and the
+  variant integrity chip when the watcher is (2026-09-29, the B131 bullet
+  below).
 
 - **A recorded sidecar path is a CLAIM about where the file was, never
   proof that it is gone.** `track_variants.sidecar_path` and
@@ -3316,16 +3318,49 @@ no failing test — which is the shape to expect in this area.
   kind, at most one per `sweepRefusalRepeat` (a day) while it lasts, and
   one Info line (`no longer refusing`) from the first tick whose check
   proceeds. A refused tick still summarises, at Info (`refused=N`); a
-  tick that DELETED still summarises at Warn. A tick that never asked the
-  relocation question leaves the latch alone (a failed listing, the
-  mount-loss skip, a tick the shutdown stopped in its first pass); an
-  EMPTY catalog ends a streak, since the rows it withheld are gone and a
-  relocation after it must WARN at once, not a day later. **A third sweep
-  that refuses takes a `refusalLatch` of its own kind type, never a copy
-  of the fields.** Left as they were, on purpose: the mount-loss skip's
-  own WARN, every tick while the variants volume reads missing or empty,
-  and the Jobs card, whose "Variant integrity sweep" line reads "on"
-  while the watcher refuses (backlog B131).
+  tick that DELETED still summarises at Warn. A tick that asked neither
+  guard's question leaves the latch alone (a failed listing, a tick the
+  shutdown stopped in its first pass; the mount-loss skip was one until
+  B131, the next bullet); an EMPTY catalog ends a streak, since the rows
+  it withheld are gone and a refusal after it must WARN at once, not a
+  day later. **A third sweep that refuses takes a `refusalLatch` of its
+  own kind type, never a copy of the fields.**
+- **…and the mount-loss skip is the latch's second kind, and both of the
+  watcher's refusals reach the Jobs card** (2026-09-29, backlog B131).
+  The skip (`skipping sweep, variants dir unhealthy with rows in
+  catalog`) WARNed on every tick and logged no summary: measured on a
+  real serve at a 2 s interval over four rows and an empty variants
+  directory, nine WARN lines in 16 s and 114 in under four minutes (24 a
+  day at the default hour), for as long as the volume stays unmounted,
+  while the "Variant integrity" chip read "on", as it did through a
+  relocation streak. The skip is `VariantRefusalVariantsDir`
+  (`variantsDirUnavailable`) now, beside `VariantRefusalRelocation`, in
+  the one latch: one WARN per streak, with a hint (mount the volume, or
+  point the variants directory at where the renditions are), at most one
+  a day, an Info summary per tick (`skipped=true`), and one Info line
+  when a tick passes both guards again, naming the kind that ended
+  (`ended=`, which the orphan sweep's lifted line carries too). A streak
+  that turns into the other kind WARNs at once. **Latched, not an hourly
+  WARN, though an unmounted volume is the more urgent state**: every
+  rendition download it breaks WARNs on its own (`variant sidecar
+  missing, but the variants directory is unavailable; keeping the row`,
+  a 410), and the card says it until it ends. **The latch publishes
+  itself** (`RefusalStatus[K]`, `refusalLatch.status`) whenever a streak
+  starts or ends, so a sweep cannot move it and forget the card; the
+  orphan sweep published by hand. `VariantWatcher.Status` →
+  `admin.Deps.VariantSweepStatus` (runServe) → `/api/jobs`
+  `maintenance.variantIntegrityRefusal` (a key) and
+  `variantIntegrityRefusingSince`, omitted while it is not refusing or its
+  interval is off (`refusalOf`, both chips) → the line's "refusing" badge
+  and a `hint warn` worded by `describeVariantIntegrityRefusal`, through
+  the renderer the orphan GC's line shares (`renderMaintenanceLine`).
+  `TestVariantWatcherLatchesItsVariantsDirRefusal`,
+  `TestVariantWatcherSaysEachKindOfRefusalWhenItStarts`,
+  `TestVariantWatcherStatusFollowsTheRefusalLatch`,
+  `TestTheMaintenanceLinesSayWhenASweepRefuses` (the shipped renderJobCards
+  under node, over the served payloads) and
+  `TestServeReportsTheVariantWatcherRefusalOnTheJobsCard` (the wiring
+  line; red alone with it nil).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -3549,7 +3584,9 @@ no failing test — which is the shape to expect in this area.
   interval was positive, while every tick refused and only the journal
   said so, once a day. The sweep publishes its latch through an atomic
   snapshot (`OrphanSidecarSweeper.Status`: the kind,
-  `integrity.OrphanRefusalKind`, and when the streak started), runServe
+  `integrity.OrphanRefusalKind`, and when the streak started; the latch
+  publishes itself since 2026-09-29, when the variant watcher's chip
+  joined, the B131 bullet above), runServe
   wires it into `admin.Deps.OrphanSweepStatus`, and `/api/jobs` carries
   `maintenance.orphanSidecarGCRefusal` (a KEY the console words) and
   `orphanSidecarGCRefusingSince`, omitted while the sweep is not refusing
@@ -6977,6 +7014,11 @@ its twin.** The top list is older, shorter, and read first.
   package's source for every constant of type `OrphanRefusalKind` and
   requires `OrphanRefusalKinds()` to hold exactly those, since a kind the
   list omits is worded by nobody and the wording test passes over it.
+  The variant watcher's key (`maintenance.variantIntegrityRefusal`,
+  2026-09-29) has the same pair, `TestEveryVariantRefusalKindIsWorded` and
+  `TestEveryVariantRefusalKindIsListed`, over the same helpers
+  (`requireEveryRefusalKindIsWorded`, `requireEveryKindIsListed`): **a
+  third refusing sweep takes both helpers, not copies of them.**
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
@@ -7355,6 +7397,32 @@ its twin.** The top list is older, shorter, and read first.
   `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled` wired no
   `WithUpscale` and passed with the flag advertised on the gate's WIRING
   rather than its answer; it wires a gate answering false now and flips it.
+- **…and a card says when its next sweep is due only while its gate is
+  open** (2026-09-29, backlog B156). Every sweeper loop runs on every
+  bridge whatever its gate says (#781), and `runSweepLoop` arms the next
+  pass from the interval alone, so with the features at their defaults the
+  analysis, fingerprint and CarPlay cards read "off" beside "Next sweep:
+  in 5h", and the smart mixes card, switched off, "Next run: in 23h" (seen
+  in a browser on a real serve), each for a pass its gate refuses:
+  `runSweepLoop`'s own dormant branch clears the time for that reason.
+  `nextSweepWhileOpen` (handlers_jobs.go) leaves a gated card's
+  `nextDueAt` out while the card's own gate is closed, read once for the
+  snapshot (the analysis, fingerprint and CarPlay `active`, the smart
+  mixes' switch), in `/api/jobs` and in the SSE `analysis` frame, which
+  paints the same analysis line; the console renders the absence as "—".
+  **The gate, never the switch**: a card switched on over a missing tool
+  is closed too, since its next pass runs only if the tool is back by
+  then, and it turns active, time and all, within a minute of that. The
+  recorder keeps the time; only the payload leaves it out. **A card added
+  with a next-run field is classified, or the build fails**:
+  `TestEveryNextRunOnTheJobsCardsIsClassified` walks the snapshot type for
+  every `next*` field and requires `nextSweepPaths` to say whether a closed
+  gate withholds it (the scanner's, the backups' and the duplicates' are
+  ungated, each with its reason).
+  `TestAJobsCardSendsItsNextSweepOnlyWhileItsGateIsOpen` moves each switch
+  apart from its gate, and `TestTheJobsCardsSayNoNextSweepWhileTheirGateIsClosed`
+  runs the shipped renderJobCards and applyAnalysisStats under node over
+  the payloads served.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the

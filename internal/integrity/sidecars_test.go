@@ -648,8 +648,9 @@ func TestOrphanSidecarSweeperSaysOnceWhenItStopsRefusing(t *testing.T) {
 		t.Fatalf("after the rows came back: %d refusal(s), %d lifted line(s), want 1 and 1", r, lf)
 	}
 	lifted := rec.Lines(msgOrphanRefusalLifted)[0]
-	if !strings.HasPrefix(lifted, "INFO ") || !strings.Contains(lifted, " rows=1020") {
-		t.Errorf("the lifted line should be Info and carry the counts it passed on: %s", lifted)
+	if !strings.HasPrefix(lifted, "INFO ") || !strings.Contains(lifted, " rows=1020") ||
+		!strings.Contains(lifted, " ended=massOrphans") {
+		t.Errorf("the lifted line should be Info and carry the counts it passed on and the refusal that ended: %s", lifted)
 	}
 	if got := countFiles(t, dir); got != 1020 {
 		t.Errorf("%d of 1,020 files survive; nothing here was an orphan once the rows came back", got)
@@ -1336,7 +1337,8 @@ func TestOrphanSidecarSweeperLatchesTheEmptyCatalogRefusal(t *testing.T) {
 
 	l.rows = rowsNaming(files)
 	requireTicksUnlinkNothing(t, s, 2, "every file has its row again")
-	requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once, with the counts it passed on", " rows=5")
+	requireLinesSay(t, rec.Lines(msgOrphanRefusalLifted), 1, "the lifted line, once, with the counts it passed on",
+		" rows=5", " ended=emptyCatalog")
 	if got := s.Status(); got != (OrphanSweepStatus{}) {
 		t.Errorf("after the rows came back: status %+v, want not refusing", got)
 	}

@@ -610,6 +610,15 @@ type Deps struct {
 	// interval alone, as it always has.
 	OrphanSweepStatus func() integrity.OrphanSweepStatus
 
+	// VariantSweepStatus reports the variant integrity watcher's refusal
+	// latch (integrity.VariantWatcher.Status), so the Jobs card's "Variant
+	// integrity" line can say the watcher is refusing, a relocation or a
+	// variants directory that reads as unmounted, rather than "on" while
+	// every tick deletes nothing (backlog B131). Nil when the watcher is not
+	// running (integrity.variantSweepIntervalSec: 0); the line then reads
+	// the interval alone.
+	VariantSweepStatus func() integrity.VariantSweepStatus
+
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
