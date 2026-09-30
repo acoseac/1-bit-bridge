@@ -2639,9 +2639,22 @@ no failing test — which is the shape to expect in this area.
   all" (2026-09-28): the background sweep asks its inventory
   (`emptyCatalogRefusal`), so a directory left holding empty folders, a
   `.DS_Store`, a Trash or the filesystem's `lost+found` is quiet, and
-  `artwork --gc`'s empty-store guard reads the cache as its walk does. The CLI
-  `--gc` sweeps' own guard (`gcRefuseEmptyKnownSetOverPopulatedDir`) still asks
-  for any entry. A BACKGROUND sweeper gets no override (nobody is in the loop to
+  `artwork --gc`'s empty-store guard reads the cache as its walk does. **The
+  CLI `--gc` sweeps decide it the same way since 2026-09-29** (backlog B65),
+  after the walk and ahead of the mass-orphan check (`gcRefuseEmptyCatalog`,
+  which replaced `gcRefuseEmptyKnownSetOverPopulatedDir`, whose "any entry at
+  all" read made empty folders or a `lost+found` need `--allow-empty`).
+  **`integrity.EmptyCatalogOrphans` is the one rule of all three**: a file
+  the sweep would remove BY ITS OWN Consider, or an entry the walk could not
+  stat, weighed as one; never a directory it could not list (the partial
+  walk's refusal) nor a scratch `.tmp`, which is removed whatever the catalog
+  says. So `upscale --gc`, whose nil Consider removes every file, still
+  refuses over a lone `.DS_Store` (the refusal names it), while `analyze --gc`
+  passes over one. **Don't count only rendition-shaped files there while the
+  sweep goes on removing every file**: the refusal would wave through a run
+  that removes files it never weighed. The refusal names
+  `--allow-mass-orphans` beside `--allow-empty` when the mass-orphan check
+  would refuse the same run (ten files or more with no rows). A BACKGROUND sweeper gets no override (nobody is in the loop to
   express intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
   `--gc` command offers it — which is how `artwork --gc` was found to have
   carried an un-escapable refusal since it was written.
@@ -2808,9 +2821,10 @@ no failing test — which is the shape to expect in this area.
   guard's evidence, then hands the reverse sweep a tree that "holds no
   sidecars" — the first draft's test went green while the files were
   already gone (`TestRunGCRefusesAMassDeleteUntilAllowed` now asserts on
-  the FILES). The summary is Warn when it deleted or refused, Info
-  otherwise; per-row lines are sampled at 10 per message per tick, the
-  M-SEARCH lesson applied before the flood. `waveform_path` has the same
+  the FILES). The summary is Warn when it deleted, Info otherwise, a
+  refused tick's included since 2026-09-29: its WARN is the refusal's,
+  latched (the next bullet). Per-row lines are sampled at 10 per message
+  per tick, the M-SEARCH lesson applied before the flood. `waveform_path` has the same
   shape and adopts too, by a narrower route: #954 wired
   `integrity.LocateWaveform` into `analysisStoreAdapter`, so a relocated
   curve rebinds on the first analysis lookup — served from canonical, row
@@ -2821,6 +2835,27 @@ no failing test — which is the shape to expect in this area.
   and needs `bridge analyze --force`. `bridge doctor`'s `sidecar-paths`
   check reports both tables; the schema-relative follow-up is still #938.
   (#937, #954)
+- **…and the watcher's refusal goes through the orphan sweep's latch**
+  (2026-09-29, backlog B65). `VariantWatcher` logged the relocation
+  refusal at WARN on every tick, beside a WARN summary: measured on a real
+  serve at a 2 s interval over twelve rows whose sidecars were gone while
+  the tree held one, fourteen WARN lines in 13 s (48 a day at the default
+  hour) for a state that lasts until someone acts. **`refusalLatch`
+  (internal/integrity/latch.go) is the ONE latch both background sweeps
+  keep**, the M-SEARCH rule: one WARN when a streak starts or changes
+  kind, at most one per `sweepRefusalRepeat` (a day) while it lasts, and
+  one Info line (`no longer refusing`) from the first tick whose check
+  proceeds. A refused tick still summarises, at Info (`refused=N`); a
+  tick that DELETED still summarises at Warn. A tick that never asked the
+  relocation question leaves the latch alone (a failed listing, the
+  mount-loss skip, a tick the shutdown stopped in its first pass); an
+  EMPTY catalog ends a streak, since the rows it withheld are gone and a
+  relocation after it must WARN at once, not a day later. **A third sweep
+  that refuses takes a `refusalLatch` of its own kind type, never a copy
+  of the fields.** Left as they were, on purpose: the mount-loss skip's
+  own WARN, every tick while the variants volume reads missing or empty,
+  and the Jobs card, whose "Variant integrity sweep" line reads "on"
+  while the watcher refuses (backlog B131).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -2893,8 +2928,8 @@ no failing test — which is the shape to expect in this area.
   canonical known set both need the ROWS; the 2026-09-20 aftermath had
   none — the boot sweep had dropped all 10,248 and the auto-optimize
   sweeper had written 200 fresh ones over the stranded tree, so
-  `gcRefuseEmptyKnownSetOverPopulatedDir` ("is the catalog EMPTY?") said
-  no, `gcRefuseRelocationInProgress` ("how many ROWS lost their file?")
+  the empty-catalog refusal (`gcRefuseEmptyCatalog` now; "is the catalog
+  EMPTY?") said no, `gcRefuseRelocationInProgress` ("how many ROWS lost their file?")
   said none, and `--gc` unlinked 10,048 files at exit 0.
   `integrity.MassOrphanRefusal` is the one decision both file-deleting
   sweeps make: the same floor of ten, more than
@@ -2960,7 +2995,8 @@ no failing test — which is the shape to expect in this area.
   ticks was rejected, because its verdict can come from a partial walk (an
   unmount, a cancel, a pruned root) or a catalog that changed mid-pass, and
   a budget carried between passes can be spent on files it never counted.
-  The one cross-tick state is a LOG latch, the M-SEARCH rule: the refusal
+  The one cross-tick state is a LOG latch (`refusalLatch`, which
+  `VariantWatcher` shares since 2026-09-29), the M-SEARCH rule: the refusal
   WARNs once when a streak starts and at most daily while it lasts; a tick
   that decided nothing (a failed or stopped listing or walk) leaves the
   latch alone; the first tick that proceeds after it logs one Info line.
@@ -3062,7 +3098,8 @@ no failing test — which is the shape to expect in this area.
   the mass-orphan check (which would refuse most of the same trees, but
   none under its floor of ten): it refuses when the walk found a sidecar
   file it would remove, or an entry it could not stat, weighed as one
-  (`emptyCatalogRefusal`); a tree with nothing it would remove ends a
+  (`emptyCatalogRefusal`, over `integrity.EmptyCatalogOrphans`, the rule
+  the CLI `--gc` sweeps share since 2026-09-29); a tree with nothing it would remove ends a
   streak and is otherwise quiet; a directory the walk cannot list, with
   no file in view, is the partial walk's refusal. **Don't decide it from
   `dirIsEmpty`**, main's question and this change's first draft: over a
