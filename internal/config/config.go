@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
@@ -530,59 +531,8 @@ type AtlasConfig struct {
 	LyricsEnabled bool `yaml:"lyricsEnabled,omitempty"`
 }
 
-// CanonicalHTTPSBase reduces a plain https base URL to `scheme://host`, or
-// returns "" when it is empty, unparseable, not https, host-less, or carries
-// userinfo / path / query / fragment.
-//
-// **Both sides of the harvest pin MUST go through this one function.** The
-// config value and the wire value are compared for equality, so any reduction
-// applied to one and not the other silently turns a correct pin into a
-// mismatch — which fails CLOSED (the operator's own bootstrap is refused) and
-// therefore looks like a broken feature rather than a broken comparison. The
-// handler used to build `u.Scheme + "://" + u.Host` itself; that duplication
-// is exactly how the `:443` case below got missed.
-//
-// The default port is stripped so `https://host:443` and `https://host` are
-// the same pin — they address the same endpoint, and an operator may write
-// either (gemini-code-assist on PR #724).
-//
-// "Host-less" here means an empty url.URL.Host. A base naming a port and no
-// host (`https://:8443`) reduces to itself, and deliberately so: reducing it
-// to "" would turn a pin written that way into "unpinned" (or, through
-// Validate, stop the bridge from starting). What names no host is refused
-// where it would be USED instead: the credential endpoint refuses such a
-// wire value (BaseURLNamesHost), so a pin written that way matches no
-// credential, and Normalize warns about it.
-func CanonicalHTTPSBase(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" ||
-		u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		(u.Path != "" && u.Path != "/") {
-		return ""
-	}
-	return u.Scheme + "://" + strings.TrimSuffix(u.Host, ":443")
-}
-
-// BaseURLNamesHost reports whether raw parses as a URL whose host names a
-// machine: url.URL.Hostname is not empty. A URL naming a port and no host
-// (`https://:8443`, `http://:5000`) has a Host and no hostname, and Go's
-// client dials such a URL on THIS machine (measured in #1069), so a check of
-// url.URL.Host passes a value that leads to the bridge's own ports. The
-// harvest credential endpoint refuses a base that names no host, and
-// Normalize warns about a configured one, which it cannot refuse: the value
-// loaded before, and a refusal would stop the bridge from starting after an
-// update (backlog B36).
-func BaseURLNamesHost(raw string) bool {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	return err == nil && u.Hostname() != ""
-}
-
 // baseURLNamesNoHostWarning is what Normalize logs for a configured base URL
-// that BaseURLNamesHost refuses.
+// that baseurl.NamesHost refuses.
 const baseURLNamesNoHostWarning = "base URL names a port and no host, which reaches this machine; " +
 	"write the host (localhost for this machine)"
 
@@ -645,9 +595,11 @@ func (a AtlasConfig) LyricsTierActive() bool {
 }
 
 // CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
-// unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
+// unset/invalid (= unpinned). Shares baseurl.CanonicalHTTPS with the handler
+// and the harvest state store: both sides of the pin must go through one
+// reduction, or a correct pin fails closed.
 func (a AtlasConfig) CanonicalHarvestBaseURL() string {
-	return CanonicalHTTPSBase(a.HarvestBaseURL)
+	return baseurl.CanonicalHTTPS(a.HarvestBaseURL)
 }
 
 // DefaultAtlasMetaTTLHours is the metadata freshness window applied when
@@ -2913,7 +2865,7 @@ func (c *Config) Normalize() error {
 	// loaded before, and a refusal here would stop the bridge from starting
 	// after an update. The harvest pin is checked in its canonical form, so
 	// a malformed one (which Validate refuses anyway) is not reported twice,
-	// and it carries no userinfo (CanonicalHTTPSBase refuses it). The value
+	// and it carries no userinfo (baseurl.CanonicalHTTPS refuses it). The value
 	// is logged as its scheme and host alone (urlOriginForLog): an enrich
 	// base may carry a password.
 	for _, base := range []struct{ field, value string }{
@@ -2921,7 +2873,7 @@ func (c *Config) Normalize() error {
 		{"enrich.coverArtBaseURL", caaBase},
 		{"atlas.harvestBaseUrl", c.Atlas.CanonicalHarvestBaseURL()},
 	} {
-		if base.value != "" && !BaseURLNamesHost(base.value) {
+		if base.value != "" && !baseurl.NamesHost(base.value) {
 			validateLogger.Warn(baseURLNamesNoHostWarning, "field", base.field, "value", urlOriginForLog(base.value))
 		}
 	}

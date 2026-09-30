@@ -11,22 +11,36 @@ package atlasharvest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/baseurl"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
+
+var logger = logging.Component("atlasharvest")
+
+// errNotACredentialBase is SetCredential's refusal of a base it cannot hold a
+// credential against. It names no part of the base: the value may carry user
+// information, and net/url's own parse error quotes it whole.
+var errNotACredentialBase = errors.New("atlasharvest: the Atlas base URL is not a plain https base URL naming a host (https://host[:port])")
 
 // State is the persisted harvest state: the provisioned credential plus the
 // delta-sync cursor and the last full-submit time. Stored as a 0600 JSON file
 // in the data dir — NOT the manifest DB (it's a secret + small mutable state,
 // like tokens.json).
 type State struct {
-	Token        string    `json:"token"`        // bulk_harvest bearer (secret)
-	AtlasBaseURL string    `json:"atlasBaseUrl"` // e.g. https://atlas.ars.md
+	Token string `json:"token"` // bulk_harvest bearer (secret)
+	// AtlasBaseURL is "" or baseurl.CredentialBase's scheme://host
+	// (e.g. https://atlas.ars.md), whatever the file says: StateStore holds
+	// no other form (backlog B97), and every request the harvest client, the
+	// booklet fetch, the lyrics tier and the premium cover fetch make is
+	// built from it.
+	AtlasBaseURL string    `json:"atlasBaseUrl"`
 	ExpiresAt    time.Time `json:"expiresAt"`    // token expiry (zero = unknown)
 	ResultCursor int64     `json:"resultCursor"` // delta-sync cursor
 	LastSubmitAt time.Time `json:"lastSubmitAt"` // last full library submit
@@ -51,6 +65,17 @@ type StateStore struct {
 }
 
 // OpenStateStore loads the state file, or starts empty when it's absent.
+//
+// The Atlas base the file holds is held in the one form SetCredential
+// stores, or not at all (holdOnlyACredentialBase): a hand edit can leave any
+// string there, and every request of the harvest client, the booklet fetch,
+// the lyrics tier and the premium cover fetch is built from it. A base with
+// no such form is dropped with the credential held against it, and the drop
+// is written back, so neither stays on disk; the app provisions a new
+// credential, which is what a corrupt file already costs. When that write
+// fails the open fails, naming no part of the base: answering as though the
+// file no longer held the credential would let a harvest-off revoke
+// (ClearStoredCredential) report gone a credential still on disk.
 func OpenStateStore(path string) (*StateStore, error) {
 	s := &StateStore{path: path}
 	b, err := os.ReadFile(path)
@@ -65,8 +90,55 @@ func OpenStateStore(path string) (*StateStore, error) {
 		// app re-provisions the credential; the cursor resets, which only costs
 		// a re-sync of already-cached entities).
 		s.st = State{}
+		return s, nil
+	}
+	if s.st.holdOnlyACredentialBase() {
+		logger.Warn("atlasharvest.state.base_refused", "path", path,
+			"detail", "the atlasBaseUrl this file holds is not a plain https base URL naming a host (https://host[:port]); "+
+				"it is dropped with the credential held against it, and the app provisions a new one")
+		// Nothing else holds s yet, so the lock is uncontended; it is taken
+		// because persistLocked's contract asks for it.
+		s.mu.Lock()
+		err := s.persistLocked()
+		s.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("atlasharvest: %s holds an Atlas base URL no credential can be held against, "+
+				"and could not be rewritten without it: %w", path, err)
+		}
 	}
 	return s, nil
+}
+
+// holdOnlyACredentialBase reduces a loaded AtlasBaseURL to the form
+// SetCredential stores (baseurl.CredentialBase), or, when it has none, drops
+// it with the credential held against it (the token and its expiry) and
+// reports true. The sync position stays, as Clear keeps it; a re-provision
+// resets the cursor anyway, since its base differs from "".
+//
+// A base that reduces to the form (a trailing slash, the default port or an
+// empty one, an uppercase scheme, surrounding space) addresses the same
+// endpoint, so it keeps its credential, and is written in the reduced form
+// at the next write. A re-provision of the same host is then not taken for a
+// new Atlas.
+//
+// Before backlog B97 the store kept whatever the file held, and the harvest
+// client built every request URL from it: user information reached every
+// transport error it logged, a path, a query or a fragment swallowed the
+// path it appended, plain http carried the bearer token in the clear, and a
+// port with no host was dialled on this machine (the stored half of backlog
+// B49).
+func (st *State) holdOnlyACredentialBase() (dropped bool) {
+	if st.AtlasBaseURL == "" {
+		return false
+	}
+	if base := baseurl.CredentialBase(st.AtlasBaseURL); base != "" {
+		st.AtlasBaseURL = base
+		return false
+	}
+	st.Token = ""
+	st.AtlasBaseURL = ""
+	st.ExpiresAt = time.Time{}
+	return true
 }
 
 // Snapshot returns a copy of the current state. The PendingCovers map is
@@ -108,18 +180,26 @@ func (s *StateStore) AtlasCredential() (token, baseURL string, ok bool) {
 // last-submit untouched (a re-provision of the same library keeps its sync
 // position). Resets LastSubmitAt to zero ONLY when the Atlas base URL changes —
 // a different Atlas means a fresh library scope.
+//
+// The base is stored as baseurl.CredentialBase reduces it (scheme://host), so
+// `https://atlas/` and `https://atlas:443` are the host `https://atlas` is,
+// and a base with no such form is refused with an error naming none of it,
+// before anything changes: no credential, cursor or file is touched. The
+// credential endpoint refuses such a base on the wire first, so this is the
+// store's own guarantee for every other caller (backlog B97).
 func (s *StateStore) SetCredential(token, baseURL string, expiresAt time.Time) error {
-	// Trim a trailing slash so https://atlas/ and https://atlas compare equal —
-	// defensive; the API handler already canonicalizes to scheme://host.
-	baseURL = strings.TrimRight(baseURL, "/")
+	base := baseurl.CredentialBase(baseURL)
+	if base == "" {
+		return errNotACredentialBase
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.st.AtlasBaseURL != baseURL {
+	if s.st.AtlasBaseURL != base {
 		s.st.LastSubmitAt = time.Time{}
 		s.st.ResultCursor = 0
 	}
 	s.st.Token = token
-	s.st.AtlasBaseURL = baseURL
+	s.st.AtlasBaseURL = base
 	s.st.ExpiresAt = expiresAt
 	return s.persistLocked()
 }
