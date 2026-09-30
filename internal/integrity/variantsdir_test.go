@@ -86,6 +86,16 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 			if block.Empty != tc.wantEmpty {
 				t.Errorf("Empty = %v, want %v (reason %q)", block.Empty, tc.wantEmpty, block.Reason)
 			}
+			// Info is the healthy directory the watcher compares with
+			// later (backlog B203), and only that.
+			if (block.Info != nil) != (block.Reason == "") {
+				t.Errorf("Info set = %v with reason %q, want it set only on a healthy directory", block.Info != nil, block.Reason)
+			}
+			if block.Info != nil {
+				if now, err := os.Stat(dir); err != nil || !os.SameFile(block.Info, now) {
+					t.Errorf("Info does not name the probed directory (stat err %v)", err)
+				}
+			}
 			// The one-line form is a wrapper, and must stay one:
 			// two probes that can answer differently is the drift
 			// the delegation exists to prevent.

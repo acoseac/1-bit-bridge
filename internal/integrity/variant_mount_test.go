@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -83,7 +84,7 @@ func movedRow(oldDir string, i int) VariantSnapshot {
 func unmountVolume(t *testing.T, dir string, local ...string) (volume string) {
 	t.Helper()
 	volume = dir + ".volume"
-	if err := os.Rename(dir, volume); err != nil {
+	if err := atomicwrite.RenameWithRetry(dir, volume); err != nil {
 		t.Fatalf("unmount: %v", err)
 	}
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -99,10 +100,10 @@ func unmountVolume(t *testing.T, dir string, local ...string) (volume string) {
 // aside: the same directory the tick began on is at the path again.
 func remountVolume(t *testing.T, dir, volume string) {
 	t.Helper()
-	if err := os.Rename(dir, dir+".local"); err != nil {
+	if err := atomicwrite.RenameWithRetry(dir, dir+".local"); err != nil {
 		t.Fatalf("remount: %v", err)
 	}
-	if err := os.Rename(volume, dir); err != nil {
+	if err := atomicwrite.RenameWithRetry(volume, dir); err != nil {
 		t.Fatalf("remount: %v", err)
 	}
 }
@@ -135,7 +136,8 @@ func requireRefusedAsAnUnmount(t *testing.T, w *VariantWatcher, store *mountHook
 // review's shape: forty rows, the first adopted, and the volume unmounted
 // at that adoption, leaving an empty directory at the path. On main the
 // other 39 rows read as gone and were deleted; the tick now refuses as an
-// unmount and deletes none.
+// unmount and deletes none. The next tick's own probe finds the empty
+// mountpoint, and it continues the same streak: no second WARN.
 func TestVariantWatcherRefusesATickWhoseVolumeIsUnmountedDuringIt(t *testing.T) {
 	dir := mountedVariantsDir(t)
 	oldDir := filepath.Join(t.TempDir(), "old-host", "variants")
@@ -155,6 +157,11 @@ func TestVariantWatcherRefusesATickWhoseVolumeIsUnmountedDuringIt(t *testing.T) 
 	if r.Adopted != 1 {
 		t.Errorf("the adoption made before the unmount: report %+v, want 1 adopted", r)
 	}
+
+	if r := w.tick(context.Background()); !r.Skipped || r.Deleted != 0 {
+		t.Errorf("the next tick over the still-unmounted volume: report %+v, want it skipped", r)
+	}
+	requireRefusedAsAnUnmount(t, w, store, r, rec, "no longer the directory this sweep began on")
 }
 
 // TestVariantWatcherRefusesATickWhoseDirectoryIsReplacedByANonEmptyOne —
