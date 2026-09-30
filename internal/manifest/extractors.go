@@ -2925,6 +2925,7 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 					return
 				}
 				if errors.Is(err, errLocalArtworkCacheWrite) {
+					logArtworkCacheWrite(err)
 					t.localArtWriteFailed = true
 				}
 			}
@@ -2985,12 +2986,8 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 
 // notePendingFolderArt marks t unsettled when a folder-art lookup it was
 // given did not complete (folderArtResult.failure), keeping the first
-// failure for the scan's line, and notes a cover whose cache file could not
-// be written (localArtWriteFailed).
+// failure for the scan's line.
 func notePendingFolderArt(t *Track, res folderArtResult) {
-	if res.cacheWriteFailed {
-		t.localArtWriteFailed = true
-	}
 	if res.failure == nil {
 		return
 	}
@@ -3071,14 +3068,16 @@ type folderArtReader func(full string, info os.FileInfo) ([]byte, error)
 // found false.
 //
 // A candidate whose stat or read did not complete (folderArtReadIncomplete:
-// an EIO or ESTALE from a NAS, a permission the service user lacks) is noted
-// in the result's failure and passed over: the answer is then not one, and
-// the tracks given it keep the art they had until a scan reads it (backlog
-// B141). The skip gate retries such a folder on every scan, so its line is
-// the scan's one (msgUnreadFolderArt), never one per folder here, where it
-// used to be a Warn per extraction naming the absolute path. A candidate too
-// large, not an image, or not a file is a verdict about it, logged as it
-// always was; a candidate gone since the listing is no cover, and quiet.
+// an EIO or ESTALE from a NAS, a permission the service user lacks), or whose
+// cache file could not be written (a full or read-only data directory), is
+// noted in the result's failure and passed over: the answer is then not one,
+// and the tracks given it keep the art they had until a scan reads and
+// stores it (backlog B141). The skip gate retries such a folder on every
+// scan, so its line is the scan's one (msgUnreadFolderArt), never one per
+// folder here, where a failed read used to be a Warn per extraction naming
+// the absolute path, and a failed write an Error. A candidate too large, not
+// an image, or not a file is a verdict about it, logged as it always was; a
+// candidate gone since the listing is no cover, and quiet.
 func scanFolderArtwork(dir string, names []string, cacheDir string, read folderArtReader) folderArtResult {
 	if read == nil {
 		read = readFolderArt
@@ -3130,24 +3129,26 @@ func scanFolderArtwork(dir string, names []string, cacheDir string, read folderA
 			res.found, res.mbid = true, mbid
 			return res
 		}
-		// stampLocalArtworkCached already logged the failure; fall
-		// through in case the directory has another candidate (rare). A
-		// cache file that could not be written is not a failed read of
-		// the cover, and the folder-art gate does not retry it (the
-		// bridge's own directory, failing for every cover alike); the
-		// rows given this answer keep the art they had
-		// (cacheWriteFailed, localArtWriteFailed).
+		// Fall through in case the directory has another candidate
+		// (rare). A cover whose bytes could not be scaled was logged and
+		// is no cover. One whose cache file could not be written (a full
+		// or read-only data directory) is a cover this scan could not
+		// store: the lookup did not complete, so the rows keep the art
+		// they had and the skip gate tries the cover again on the next
+		// scan. Recorded as settled, a replaced cover's rows kept the old
+		// art under the new cover's identity, and nothing tried again
+		// (CodeRabbit on #1117).
 		if errors.Is(err, errLocalArtworkCacheWrite) {
-			res.cacheWriteFailed = true
+			notePendingFolderArtRead(&res, err)
 		}
 	}
 	return res
 }
 
-// notePendingFolderArtRead keeps the first folder-art stat or read that did
-// not complete in res. It logs nothing: the scan's one Warn counts the tracks
-// such a folder left unsettled (msgUnreadFolderArt), by their
-// library-relative paths.
+// notePendingFolderArtRead keeps in res the first folder-art stat, read or
+// cache write that did not complete. It logs nothing: the scan's one Warn
+// counts the tracks such a folder left unsettled (msgUnreadFolderArt), by
+// their library-relative paths.
 func notePendingFolderArtRead(res *folderArtResult, err error) {
 	if res.failure == nil {
 		res.failure = err
@@ -3193,6 +3194,7 @@ func readFolderArt(full string, info os.FileInfo) ([]byte, error) {
 // /v1/artwork size ladder serves it for any requested size.
 func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 	mbid, err := stampLocalArtworkCached(data, cacheDir)
+	logArtworkCacheWrite(err)
 	return mbid, err == nil
 }
 
@@ -3201,18 +3203,30 @@ func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 // directory (full, read-only), which says nothing about the picture.
 var errLocalArtworkCacheWrite = errors.New("the artwork cache file could not be written")
 
+// logArtworkCacheWrite logs err when it is a cache file that could not be
+// written, as stampLocalArtwork always did.
+func logArtworkCacheWrite(err error) {
+	if errors.Is(err, errLocalArtworkCacheWrite) {
+		scanLogger.Error("write local artwork", "err", err)
+	}
+}
+
 // stampLocalArtworkCached is stampLocalArtwork answering why a stamp failed:
 // errLocalArtworkCacheWrite when the cache file could not be written, another
-// error when the bytes could not be scaled (a verdict about the picture).
-// Each is logged here, as it always was.
+// error when the bytes could not be scaled (a verdict about the picture,
+// logged here as it always was).
 //
-// The artwork pipeline tells the two apart for the row's sake: a picture
-// that cannot be scaled is no picture, while one whose cache write failed is
-// one this extraction could not store, so a row's old art is kept
-// (localArtWriteFailed; mergePostScanFields copies it) and the recovery of a
-// wiped cache (needsLocalArtworkRecovery) still retries it on the next scan.
-// A cache write that fails is not retried by the folder-art gate: that is
-// the bridge's own directory failing for every cover alike.
+// A failed cache write is not logged here: the caller says it, since the two
+// kinds of picture answer it differently. A picture that cannot be scaled is
+// no picture; one whose cache write failed is one this extraction could not
+// store. An embedded picture's is logged once per
+// extraction (logArtworkCacheWrite), and the row keeps its old art
+// (localArtWriteFailed; mergePostScanFields copies it), which the recovery
+// of a wiped cache (needsLocalArtworkRecovery) retries on the next scan. A
+// folder's cover makes the lookup incomplete (folderArtResult.failure), so
+// the rows keep their art, the skip gate retries the cover on every scan
+// (one read and write per folder) until it is stored, and the scan's one
+// line counts them (msgUnreadFolderArt), never a line per folder per scan.
 func stampLocalArtworkCached(data []byte, cacheDir string) (string, error) {
 	sum := sha256.Sum256(data)
 	mbid := "local-" + hex.EncodeToString(sum[:])
@@ -3229,7 +3243,6 @@ func stampLocalArtworkCached(data []byte, cacheDir string) (string, error) {
 		return "", err
 	}
 	if err := writeArtworkAtomicScan(path, scaled); err != nil {
-		scanLogger.Error("write local artwork", "path", path, "err", err)
 		return "", fmt.Errorf("%w: %w", errLocalArtworkCacheWrite, err)
 	}
 	return mbid, nil

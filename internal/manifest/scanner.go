@@ -272,19 +272,16 @@ func (s *Scanner) effectiveDeleteThreshold() int {
 // sibling tracks short-circuit with no further filesystem work.
 //
 // `failure` is the first stat or read of a candidate that did not
-// complete (folderArtReadIncomplete), or the directory's own when its
-// state could not be seen: the answer is then not one, and the tracks
-// given it keep the art they had (localArtUnsettled) until a scan reads
-// the cover. Settled refusals (a candidate too large, not an image, not
-// a file) carry none. `cacheWriteFailed` says a candidate read whole could
-// not be stored in the artwork cache (errLocalArtworkCacheWrite): the
-// tracks keep the art they had, and nothing retries it but a later
-// extraction.
+// complete (folderArtReadIncomplete), a candidate read whole whose cache
+// file could not be written (errLocalArtworkCacheWrite), or the
+// directory's own failure when its state could not be seen: the answer is
+// then not one, and the tracks given it keep the art they had
+// (localArtUnsettled) until a scan reads and stores the cover. Settled
+// refusals (a candidate too large, not an image, not a file) carry none.
 type folderArtResult struct {
-	found            bool
-	mbid             string
-	failure          error
-	cacheWriteFailed bool
+	found   bool
+	mbid    string
+	failure error
 }
 
 // folderArtPromise serializes per-directory read + hash + atomic
@@ -1791,13 +1788,14 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // changed file re-extracted on the full path always did; the upsert's
 // enriched_at reset lets the enricher give it a network cover. Until
 // 2026-09-29 the copy kept a removed cover's art forever (backlog
-// B141). A pipeline that did not complete (localArtUnsettled: a cover
-// it could not read) keeps the old value whatever it found
+// B141). A pipeline that did not complete (localArtUnsettled: a folder
+// cover it could not read or store) keeps the old value whatever it found
 // (keepArtOfUnsettledRead), and one that did not run
-// (localArtNotLooked), or could not store what it read in the artwork
-// cache (localArtWriteFailed), says nothing, so the old value is copied:
-// dropped there, a wiped cache whose rewrite failed lost its cover for
-// good, where the copy keeps it for needsLocalArtworkRecovery to retry.
+// (localArtNotLooked), or could not store an embedded picture it read in
+// the artwork cache (localArtWriteFailed), says nothing, so the old value
+// is copied: dropped there, a wiped cache whose rewrite failed lost its
+// cover for good, where the copy keeps it for needsLocalArtworkRecovery to
+// retry.
 func mergePostScanFields(fresh, old *Track) {
 	keepArtOfUnsettledRead(fresh, old.ArtworkMBID)
 	if fresh.ArtworkMBID == "" &&
@@ -3658,13 +3656,13 @@ func (u *unreadTally) reportAs(msg string) {
 }
 
 // msgUnreadFolderArt is the line a scan logs, once, for the tracks whose
-// folder's cover it could not read (localArtUnsettled): an EIO or ESTALE
-// from a NAS, a permission the service user lacks, a folder it could not
-// list. Their rows keep the art they had, record folderArtUnsettledKey, and
-// the skip gate reads the cover again on every scan until it reads, at one
-// failed read per folder a scan; the count is of tracks, the example one of
-// them.
-const msgUnreadFolderArt = "tracks whose folder cover the scan could not read; they keep the art they had, and a later scan reads the cover again"
+// folder's cover it could not read or store (localArtUnsettled): an EIO or
+// ESTALE from a NAS, a permission the service user lacks, a folder it could
+// not list, an artwork cache it could not write. Their rows keep the art
+// they had, record folderArtUnsettledKey, and the skip gate tries the cover
+// again on every scan until it is stored, at one failed attempt per folder a
+// scan; the count is of tracks, the example one of them.
+const msgUnreadFolderArt = "tracks whose folder cover the scan could not read or store; they keep the art they had, and a later scan tries the cover again"
 
 // resetScanCaches replaces the scan's per-directory caches, the folder-art
 // lookups and the directory listings, at the start and the end of a scan

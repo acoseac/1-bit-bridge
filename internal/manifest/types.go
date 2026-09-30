@@ -377,9 +377,11 @@ type Track struct {
 	// stored `local-` value is stale (mergePostScanFields) or must be kept
 	// (keepArtOfUnsettledRead). localArtFailure is the read that did not
 	// complete, for the scan's one line about them. localArtWriteFailed
-	// says a picture or cover read whole could not be stored in the artwork
+	// says an embedded picture read whole could not be stored in the artwork
 	// cache (errLocalArtworkCacheWrite): an empty ArtworkMBID is then no
-	// verdict either, and the merge keeps a row's old value.
+	// verdict either, and the merge keeps a row's old value. (A folder
+	// cover that could not be stored is a lookup that did not complete:
+	// localArtUnsettled.)
 	localArt            localArtOutcome
 	localArtFailure     error
 	localArtWriteFailed bool

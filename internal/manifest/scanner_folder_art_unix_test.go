@@ -82,11 +82,12 @@ func TestFolderArtKeyLeavesOutWhatIsNotAFile(t *testing.T) {
 
 // TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt pins the recovery
 // of a wiped artwork cache (needsLocalArtworkRecovery) against the merge
-// rule that drops a removed cover's art: a cover read whole whose cache file
-// cannot be written (the artwork directory made read-only) is no verdict, so
-// the rows keep their `local-` value, and the first scan that can write the
-// cache restores it. Dropped there, the rows lost the cover for good: nothing
-// sends the gate back to a row whose art is "" and whose folder is unchanged.
+// rule that drops a removed cover's art: a folder cover or an embedded
+// picture read whole whose cache file cannot be written (the artwork
+// directory made read-only) is no verdict, so the rows keep their `local-`
+// value, and the first scan that can write the cache restores it. Dropped
+// there, the rows lost the art for good: nothing sends the gate back to a
+// row whose art is "" and whose folder is unchanged.
 func TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only directory")
@@ -98,13 +99,24 @@ func TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt(t *testing.T) {
 	}
 	data := coverBytes("cached")
 	f.cover(t, "Artist/Album/cover.jpg", data, t0)
+	const embedded = "Artist/Pictured/01.mp3"
+	f.dir(t, "Artist/Pictured")
+	picture := coverBytes("embedded, cached")
+	writeMP3WithAPIC(t, f.path(embedded), map[string]string{"title": "One", "artist": "Artist", "album": "Pictured"},
+		"image/jpeg", picture)
 	f.scan(t, "index")
 	want := expectedLocalMBID(data)
+	wantPicture := expectedLocalMBID(picture)
 	f.requireArt(t, want, rels...)
+	f.requireArt(t, wantPicture, embedded)
 
-	cached := filepath.Join(f.sc.artDir, want+"-500.jpg")
-	if err := os.Remove(cached); err != nil {
-		t.Fatalf("wipe the cache: %v", err)
+	var cached []string
+	for _, mbid := range []string{want, wantPicture} {
+		p := filepath.Join(f.sc.artDir, mbid+"-500.jpg")
+		if err := os.Remove(p); err != nil {
+			t.Fatalf("wipe the cache: %v", err)
+		}
+		cached = append(cached, p)
 	}
 	if err := os.Chmod(f.sc.artDir, 0o555); err != nil {
 		t.Fatal(err)
@@ -112,15 +124,63 @@ func TestScanner_AWipedCacheThatCannotBeRewrittenKeepsTheArt(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(f.sc.artDir, 0o755) })
 	f.scan(t, "the cache wiped and unwritable")
 	f.requireArt(t, want, rels...)
+	f.requireArt(t, wantPicture, embedded)
 
 	if err := os.Chmod(f.sc.artDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	f.scan(t, "the cache writable again")
 	f.requireArt(t, want, rels...)
-	if _, err := os.Stat(cached); err != nil {
-		t.Errorf("the cache file was not restored: %v", err)
+	f.requireArt(t, wantPicture, embedded)
+	for _, p := range cached {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the cache file was not restored: %v", err)
+		}
 	}
+	f.requireSettled(t, append(rels, embedded)...)
+}
+
+// TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater pins a
+// cover replaced while the artwork cache cannot be written (a full or
+// read-only data directory): the rows keep the art they had, a scan while it
+// stays unwritable re-reads no audio file (the retry is the cover's, one per
+// folder), and the first scan that can write the cache gives them the new
+// cover. Recorded under the new cover's identity, the rows kept the old art
+// until the cover changed again (CodeRabbit on #1117).
+func TestScanner_AReplacedCoverWhoseCacheCannotBeWrittenIsStoredLater(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	f := newArtFixture(t)
+	rels := []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}
+	for _, rel := range rels {
+		f.flac(t, rel)
+	}
+	old := coverBytes("old cover")
+	f.cover(t, "Artist/Album/cover.jpg", old, t0)
+	f.scan(t, "index")
+	f.requireArt(t, expectedLocalMBID(old), rels...)
+
+	replacement := coverBytes("new cover")
+	f.cover(t, "Artist/Album/cover.jpg", replacement, t0.Add(time.Hour))
+	if err := os.Chmod(f.sc.artDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.sc.artDir, 0o755) })
+	before := f.indexedAts(t, rels...)
+	f.scan(t, "the cache unwritable")
+	f.requireArt(t, expectedLocalMBID(old), rels...)
+	f.requireStill(t, before)
+	if n := f.scan(t, "the cache still unwritable"); n != 0 {
+		t.Errorf("a scan whose cover still cannot be stored re-read %d audio files, want 0", n)
+	}
+
+	if err := os.Chmod(f.sc.artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.scan(t, "the cache writable again")
+	f.requireArt(t, expectedLocalMBID(replacement), rels...)
+	f.requireMoved(t, before)
 	f.requireSettled(t, rels...)
 }
 
