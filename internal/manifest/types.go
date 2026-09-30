@@ -334,8 +334,8 @@ type Track struct {
 	// ignores it — the replayGainFromAnalysis shape) set by the scanner's
 	// reExtractUnchanged when a version-stale re-extraction produced a row
 	// byte-identical (post post-scan-field merge) to what's stored, or
-	// refused the file (extractRefused, below). The
-	// scan writer routes such rows through StampExtractorVersionBatch —
+	// refused the file (extractRefused, below). The scan writer routes
+	// such rows through StampExtractorVersionBatch —
 	// advancing extractor_version + resetting missing_count WITHOUT
 	// touching indexed_at / enriched_at / tags_json — so an
 	// ExtractorVersion bump doesn't surface the entire library in every
