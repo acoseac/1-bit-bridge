@@ -107,13 +107,12 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 		fourcc := string(sub[0:4])
 		size := binary.BigEndian.Uint32(sub[4:8])
 		if fourcc == "ID3 " || fourcc == "id3 " {
-			const maxID3Size = 32 << 20 // 32 MiB — accommodates APIC up to ~25 MiB plus framing
 			if size == 0 {
 				continue
 			}
-			if size > maxID3Size {
+			if size > maxID3ChunkSize {
 				scanLogger.Warn("aiff: ID3 chunk size exceeds sanity limit; skipping",
-					"path", absPath, "size", size, "limit", maxID3Size)
+					"path", absPath, "size", size, "limit", maxID3ChunkSize)
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -318,7 +317,11 @@ func parseAIFFExtended(b []byte) float64 {
 //   - "LIST" with form type "INFO" — RIFF's native tag scheme.
 //     Sub-chunks like INAM (title), IART (artist), IPRD (album),
 //     ICRD (year), IGNR (genre). Text-only, no artwork support.
-//     Populated only when no ID3 chunk surfaced (ID3 wins).
+//     Gathered through the walk and applied once it is over
+//     (containerText.applyUnder): each field replaces the path's guess
+//     unless the ID3 chunk has a value for it, whichever chunk comes
+//     first. Until ExtractorVersion 20 it filled only an EMPTY field,
+//     which in a scan (the guess filled first) is never (backlog B140).
 //
 // dhowden/tag's package-level `ReadFrom` does NOT support WAV
 // containers; pre-PR-F .wav files fell through to the default
@@ -354,7 +357,10 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	)
 	physicalSize := physicalFileSize(f)
 
-	var idTagMetadata tag.Metadata
+	var (
+		idTagMetadata tag.Metadata
+		info          containerText
+	)
 	// Labeled so a truncated chunk BODY inside the switch below can break
 	// the walk loop (a bare `break` would only exit the switch) and fall
 	// through to the extractLocalArtwork tail — see B10 body-read handling.
@@ -371,13 +377,12 @@ chunkLoop:
 		size := binary.LittleEndian.Uint32(sub[4:8])
 		switch {
 		case fourcc == "id3 " || fourcc == "ID3 ":
-			const maxID3Size = 32 << 20
 			if size == 0 {
 				continue
 			}
-			if size > maxID3Size {
+			if size > maxID3ChunkSize {
 				scanLogger.Warn("wav: ID3 chunk size exceeds sanity limit; skipping",
-					"path", absPath, "size", size, "limit", maxID3Size)
+					"path", absPath, "size", size, "limit", maxID3ChunkSize)
 				if err := seekPastChunk(f, int64(size)); err != nil {
 					return err
 				}
@@ -436,7 +441,7 @@ chunkLoop:
 				}
 			}
 			if string(body[0:4]) == "INFO" {
-				parseWAVINFOBlock(body[4:], t)
+				info.keepFirst(parseWAVINFOBlock(body[4:]))
 			}
 		case fourcc == "fmt ":
 			// The fmt chunk carries the PCM geometry (sampleRate +
@@ -483,6 +488,7 @@ chunkLoop:
 	}
 
 	stampIFFDuration(t, wavDurationSeconds(data, bytesPerSecond), data, physicalSize)
+	info.applyUnder(t, idTagMetadata)
 
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, idTagMetadata, ec)
@@ -663,13 +669,18 @@ func stampIFFDuration(t *Track, seconds float64, payload iffPayloadSpan, physica
 }
 
 // parseWAVINFOBlock walks the body of a RIFF LIST/INFO chunk and
-// populates Track text fields from common INFO sub-chunks. Each
-// sub-chunk: 4 bytes ID + 4 bytes LE size + N bytes ASCII text
-// (often null-terminated) + pad byte if size is odd.
+// returns the text of its common sub-chunks, the first of each id with
+// a value keeping its field. Each sub-chunk: 4 bytes ID + 4 bytes LE
+// size + N bytes ASCII text (often null-terminated) + pad byte if size
+// is odd.
 //
-// INFO is text-only — no artwork field exists in the spec. Fields
-// only fill when not already populated (ID3 chunk, if present,
-// wins via populateFromTagMetadata's empty-field guards).
+// INFO is text-only — no artwork field exists in the spec. The walk
+// applies what this returns once it is over, beneath the ID3 chunk
+// (containerText.applyUnder). Until ExtractorVersion 20 this wrote a
+// field only while it was empty, so an ID3 chunk won by filling it
+// first or overwriting it after, and so did the path's guess the
+// scanner fills before extracting, which is how a WAV's INFO title,
+// album and artist never reached a scanned row (backlog B140).
 //
 // Common INFO sub-chunk IDs (per the RIFF spec):
 //   - INAM: title
@@ -682,7 +693,8 @@ func stampIFFDuration(t *Track, seconds float64, payload iffPayloadSpan, physica
 // INFO set, so PR-D's classical metadata flow only reaches WAV/AIFF
 // tracks via their embedded ID3v2 chunks. Acceptable since WAV is
 // rarely used for classical libraries today.
-func parseWAVINFOBlock(body []byte, t *Track) {
+func parseWAVINFOBlock(body []byte) containerText {
+	var c containerText
 	for len(body) >= 8 {
 		id := string(body[0:4])
 		size := binary.LittleEndian.Uint32(body[4:8])
@@ -708,21 +720,13 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 		text := strings.TrimSpace(string(payload))
 		switch id {
 		case "INAM":
-			if text != "" && t.Title == "" {
-				t.Title = text
-			}
+			c.keepFirst(containerText{title: text})
 		case "IART":
-			if text != "" && t.Artist == "" {
-				t.Artist = text
-			}
+			c.keepFirst(containerText{artist: text})
 		case "IPRD":
-			if text != "" && t.Album == "" {
-				t.Album = text
-			}
+			c.keepFirst(containerText{album: text})
 		case "IGNR":
-			if text != "" && t.Genre == "" {
-				t.Genre = text
-			}
+			c.keepFirst(containerText{genre: text})
 		}
 		// Widen BEFORE adding (not `uint64(8 + size)`): the inner `8 + size`
 		// evaluates in uint32 and would wrap for size >= 0xFFFFFFF8, yielding
@@ -737,6 +741,7 @@ func parseWAVINFOBlock(body []byte, t *Track) {
 		}
 		body = body[advance:]
 	}
+	return c
 }
 
 // WAVE format tags (the `wFormatTag` field at fmt-chunk offset 0). Only
@@ -801,6 +806,11 @@ func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 	return 0
 }
 
+// maxID3ChunkSize caps the body of an ID3 chunk the AIFF, WAV and DFF
+// walkers read into memory: 32 MiB holds a cover of about 25 MiB and its
+// framing. A larger chunk is skipped with a line.
+const maxID3ChunkSize = 32 << 20
+
 // applyEmbeddedID3 parses an embedded ID3v2 chunk body, merges its tags
 // into t, and returns the metadata carrier extractLocalArtwork should
 // use after the walk.
@@ -816,9 +826,9 @@ func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 // first. The short-circuit below is what enforces first-wins; it is NOT
 // enforced inside populateFromTagMetadata.
 //
-// On a parse failure it logs (logPrefix names the AIFF / WAV caller) and
-// returns `existing` unchanged. Centralised because the AIFF and WAV
-// walkers' ID3 handling is otherwise byte-identical.
+// On a parse failure it logs (logPrefix names the AIFF / WAV / DFF caller)
+// and returns `existing` unchanged. Centralised because the three walkers'
+// ID3 handling is otherwise byte-identical.
 func applyEmbeddedID3(body []byte, t *Track, existing tag.Metadata, absPath, logPrefix string) tag.Metadata {
 	// Earliest chunk wins entirely — ignore any duplicate ID3 chunk.
 	if existing != nil {

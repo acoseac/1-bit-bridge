@@ -144,6 +144,22 @@ func TestDFFReadsTheTagsItsWritersWrite(t *testing.T) {
 	}
 }
 
+// writeAlone writes data as name alone in a directory of its own under root,
+// <stem>/Guess Artist/Guess Album/<name>, so the path's guess is "Guess Artist"
+// and "Guess Album" for every file while the scanner's album reconciliation,
+// which unifies a directory's albums, has no sibling to unify it with. It
+// returns the file's library-relative path.
+func writeAlone(t *testing.T, root, name string, data []byte) string {
+	t.Helper()
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
+	dir := filepath.Join(root, stem, "Guess Artist", "Guess Album")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureBytes(t, filepath.Join(dir, name), data)
+	return stem + "/Guess Artist/Guess Album/" + name
+}
+
 // storedTrack is the row the store holds at rel.
 func storedTrack(t *testing.T, store *Store, rel string) *Track {
 	t.Helper()
@@ -163,14 +179,11 @@ func storedTrack(t *testing.T, store *Store, rel string) *Track {
 // for a DFF with no tags.
 func TestScanner_ADFFsOwnTagsOutrankThePathsGuess(t *testing.T) {
 	root := t.TempDir()
-	album := filepath.Join(root, "Guess Artist", "Guess Album")
-	if err := os.MkdirAll(album, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	rels := map[string]string{}
 	for _, fx := range dffFixtures {
-		writeFixtureBytes(t, filepath.Join(album, fx.name), dffFixture(t, fx.name))
+		rels[fx.name] = writeAlone(t, root, fx.name, dffFixture(t, fx.name))
 	}
-	writeFixtureBytes(t, filepath.Join(album, "untagged.dff"), dffWithChunks(t, 2822400))
+	untagged := writeAlone(t, root, "untagged.dff", dffWithChunks(t, 2822400))
 	store, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "scan")
 
@@ -183,10 +196,10 @@ func TestScanner_ADFFsOwnTagsOutrankThePathsGuess(t *testing.T) {
 			if want.album == "" {
 				want.album = "Guess Album"
 			}
-			requireTags(t, storedTrack(t, store, "Guess Artist/Guess Album/"+fx.name), want)
+			requireTags(t, storedTrack(t, store, rels[fx.name]), want)
 		})
 	}
-	requireTags(t, storedTrack(t, store, "Guess Artist/Guess Album/untagged.dff"),
+	requireTags(t, storedTrack(t, store, untagged),
 		dffTags{title: "untagged", artist: "Guess Artist", album: "Guess Album"})
 }
 
@@ -213,18 +226,15 @@ func TestScanner_AWAVsListInfoOutranksThePathsGuess(t *testing.T) {
 		{"plain.wav", nil, dffTags{title: "plain", artist: "Guess Artist", album: "Guess Album"}},
 	}
 	root := t.TempDir()
-	album := filepath.Join(root, "Guess Artist", "Guess Album")
-	if err := os.MkdirAll(album, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	rels := map[string]string{}
 	for _, f := range files {
-		writeFixtureBytes(t, filepath.Join(album, f.name), wavWithChunks(f.chunks...))
+		rels[f.name] = writeAlone(t, root, f.name, wavWithChunks(f.chunks...))
 	}
 	store, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "scan")
 	for _, f := range files {
 		t.Run(f.name, func(t *testing.T) {
-			requireTags(t, storedTrack(t, store, "Guess Artist/Guess Album/"+f.name), f.want)
+			requireTags(t, storedTrack(t, store, rels[f.name]), f.want)
 		})
 	}
 }
@@ -313,31 +323,28 @@ func TestExtractDFF_TheCoverInItsID3ChunkIsItsCover(t *testing.T) {
 // re-extracts byte-identical and is only stamped: no delta, no re-enrichment.
 func TestScanner_V20_ARowWhoseOwnTagsWereLostJoinsTheDelta_APlainRowOnlyStamps(t *testing.T) {
 	root := t.TempDir()
-	album := filepath.Join(root, "Guess Artist", "Guess Album")
-	if err := os.MkdirAll(album, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	own := map[string]string{
 		"diin.dff": "Prélude à la nuit, première",
 		"id3.dff":  "Picard Title",
 		"info.wav": "Info Title",
 	}
-	writeFixtureBytes(t, filepath.Join(album, "diin.dff"), dffFixture(t, "taglib_diin.dff"))
-	writeFixtureBytes(t, filepath.Join(album, "id3.dff"), dffFixture(t, "picard_id3.dff"))
-	writeFixtureBytes(t, filepath.Join(album, "info.wav"), wavWithChunks(listInfo("INAM", "Info Title", "IART", "Info Artist")))
-	writeFixtureBytes(t, filepath.Join(album, "plain.dff"), dffWithChunks(t, 2822400))
-	writeFixtureBytes(t, filepath.Join(album, "plain.wav"), wavWithChunks())
+	rels := map[string]string{
+		"diin.dff":  writeAlone(t, root, "diin.dff", dffFixture(t, "taglib_diin.dff")),
+		"id3.dff":   writeAlone(t, root, "id3.dff", dffFixture(t, "picard_id3.dff")),
+		"info.wav":  writeAlone(t, root, "info.wav", wavWithChunks(listInfo("INAM", "Info Title", "IART", "Info Artist"))),
+		"plain.dff": writeAlone(t, root, "plain.dff", dffWithChunks(t, 2822400)),
+		"plain.wav": writeAlone(t, root, "plain.wav", wavWithChunks()),
+	}
 	store, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "initial")
 	for name, title := range own {
-		if got := storedTrack(t, store, "Guess Artist/Guess Album/"+name).Title; got != title {
+		if got := storedTrack(t, store, rels[name]).Title; got != title {
 			t.Fatalf("premise: the current extractor stores %s's own title %q; got %q", name, title, got)
 		}
 	}
 
 	before := map[string]int64{}
-	for _, name := range []string{"diin.dff", "id3.dff", "info.wav", "plain.dff", "plain.wav"} {
-		rel := "Guess Artist/Guess Album/" + name
+	for name, rel := range rels {
 		rewindToV19(t, store, rel, own[name] != "")
 		before[name] = trackIndexedAt(t, store, rel)
 	}
@@ -345,7 +352,7 @@ func TestScanner_V20_ARowWhoseOwnTagsWereLostJoinsTheDelta_APlainRowOnlyStamps(t
 	scanOnce(t, sc, "v20")
 
 	for name, title := range own {
-		rel := "Guess Artist/Guess Album/" + name
+		rel := rels[name]
 		if got := storedTrack(t, store, rel).Title; got != title {
 			t.Errorf("%s: title %q after the re-extract, want its own %q", name, got, title)
 		}
@@ -360,7 +367,7 @@ func TestScanner_V20_ARowWhoseOwnTagsWereLostJoinsTheDelta_APlainRowOnlyStamps(t
 		}
 	}
 	for _, name := range []string{"plain.dff", "plain.wav"} {
-		rel := "Guess Artist/Guess Album/" + name
+		rel := rels[name]
 		if after := trackIndexedAt(t, store, rel); after != before[name] {
 			t.Errorf("%s: indexed_at moved (%d -> %d): v20 must not put a row without tags in the delta", name, before[name], after)
 		}

@@ -249,7 +249,7 @@ func buildDFFWithDIIN(t *testing.T, sampleRate uint32, compression string, diinS
 // any chunk the walk does not know is (backlog B140).
 func TestExtractDFF_DIIN_PopulatesTitleAndArtist(t *testing.T) {
 	sub := []byte{}
-	sub = append(sub, dffChunk("EMID", []byte("an edited master's id"))...) // 21 bytes: odd, padded
+	sub = append(sub, dffChunk("EMID", []byte("an edited master's id"))...)      // 21 bytes: odd, padded
 	sub = append(sub, buildDIINSubChunk("DITI", "Symphony No. 5 in C Minor")...) // 4+25 = 29: odd, padded
 	sub = append(sub, buildDIINSubChunk("DIAR", "Ludwig van Beethoven")...)      // 4+20 = 24: even
 	sub = append(sub, buildDIINSubChunk("DIAL", "Beethoven Symphonies")...)
@@ -304,7 +304,7 @@ func TestExtractDFF_DIIN_OddCountPadHandling(t *testing.T) {
 func TestExtractDFF_DIIN_OverrunCountSkipsField(t *testing.T) {
 	body := make([]byte, 4, 8)
 	binary.BigEndian.PutUint32(body, 100) // a count of 100
-	body = append(body, "ABCD"...)         // and 4 bytes of it
+	body = append(body, "ABCD"...)        // and 4 bytes of it
 	sub := append(dffChunk("DITI", body), buildDIINSubChunk("DIAR", "OK")...)
 	path := writeTempDFF(t, buildDFFWithDIIN(t, 2_822_400, "DSD ", sub))
 

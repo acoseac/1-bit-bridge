@@ -314,14 +314,15 @@ func TestExtractWAV_INFOInteriorNullTruncatedAtFirstNul(t *testing.T) {
 
 func TestExtractWAV_ID3WinsOverLISTInfo(t *testing.T) {
 	// Both ID3 and LIST/INFO present — ID3 fields must NOT be
-	// overwritten by LIST/INFO. populateFromTagMetadata's empty-
-	// field guards (inside parseWAVINFOBlock) enforce this.
+	// overwritten by LIST/INFO. The walk applies the INFO text once it
+	// is over, beneath the ID3 tag (containerText.applyUnder), so the
+	// chunk order does not matter;
+	// TestScanner_AWAVsListInfoOutranksThePathsGuess drives both orders
+	// through a scan.
 	id3 := buildID3v2_3(map[string]string{"title": "FromID3"})
 
 	// Build the file manually so ID3 lands BEFORE LIST/INFO in the
-	// chunk stream — order doesn't actually matter for correctness
-	// (both branches use empty-field guards), but pinning the order
-	// makes the test intent explicit.
+	// chunk stream.
 	body := []byte("WAVE")
 	var sub [8]byte
 	copy(sub[0:4], []byte("id3 "))
@@ -947,21 +948,19 @@ func TestParseWAVINFOBlock_AdvancesPastOddPaddedSubchunks(t *testing.T) {
 	add("INAM", "Odd")  // len 3 → padded; advance must land exactly on IART
 	add("IART", "Even") // len 4
 
-	tr := &Track{}
-	parseWAVINFOBlock(body, tr)
-	if tr.Title != "Odd" {
-		t.Errorf("Title = %q, want %q", tr.Title, "Odd")
+	tr := parseWAVINFOBlock(body)
+	if tr.title != "Odd" {
+		t.Errorf("title = %q, want %q", tr.title, "Odd")
 	}
-	if tr.Artist != "Even" {
-		t.Errorf("Artist = %q, want %q (advance desynced past the odd-size pad?)", tr.Artist, "Even")
+	if tr.artist != "Even" {
+		t.Errorf("artist = %q, want %q (advance desynced past the odd-size pad?)", tr.artist, "Even")
 	}
 
 	// A sub-chunk whose declared size overruns the remaining body must
 	// break the loop cleanly rather than panic or spin.
 	overrun := append([]byte("INAM"), 0xFF, 0xFF, 0xFF, 0x7F) // size 0x7FFFFFFF, no payload
-	trOverrun := &Track{}
-	parseWAVINFOBlock(overrun, trOverrun) // must return without hanging or panicking
-	if trOverrun.Title != "" {
-		t.Errorf("Title = %q, want empty (overrun sub-chunk must be skipped)", trOverrun.Title)
+	trOverrun := parseWAVINFOBlock(overrun)                   // must return without hanging or panicking
+	if trOverrun.title != "" {
+		t.Errorf("title = %q, want empty (overrun sub-chunk must be skipped)", trOverrun.title)
 	}
 }

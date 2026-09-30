@@ -83,9 +83,12 @@ var readFaultFormats = []readFaultFormat{
 	{name: "DFF", file: "08.dff", write: func(t *testing.T, p, version string) {
 		writeFixtureBytes(t, p, buildDFFWithDIIN(t, 2822400, "DSD ", buildDIINSubChunk("DITI", version)))
 	}},
-	// The WAV walk's other tag reader, and the DFF walk's (backlog B140).
+	// The WAV walk's other tag reader, and the DFF walk's (backlog B140). The
+	// WAV has its fmt and data chunks, as a real one does: a walk over its
+	// LIST/INFO alone would never seek, and a seek fault would have nothing
+	// to fail.
 	{name: "WAV (LIST/INFO)", file: "09.wav", write: func(t *testing.T, p, version string) {
-		writeFixtureBytes(t, p, buildWAVWithListInfo(t, map[string]string{"INAM": version}))
+		writeFixtureBytes(t, p, wavWithChunks(listInfo("INAM", version)))
 	}},
 	{name: "DFF (ID3 chunk)", file: "10.dff", write: func(t *testing.T, p, version string) {
 		writeFixtureBytes(t, p, dffWithChunks(t, 2822400, dffChunk("ID3 ", buildID3v2_3(map[string]string{"title": version}))))

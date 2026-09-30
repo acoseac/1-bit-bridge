@@ -90,7 +90,8 @@ func emptyComparedField(be *ast.BinaryExpr) string {
 	return s.Sel.Name
 }
 
-// isEmptyStringLit reports whether e is the literal "" (or ``).
+// isEmptyStringLit reports whether e is an empty string literal, in either
+// kind of quotes.
 func isEmptyStringLit(e ast.Expr) bool {
 	b, ok := e.(*ast.BasicLit)
 	return ok && b.Kind == token.STRING && (b.Value == `""` || b.Value == "``")

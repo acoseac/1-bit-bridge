@@ -109,9 +109,26 @@ func FuzzExtractWAV(f *testing.F) {
 }
 
 func FuzzExtractDFF(f *testing.F) {
+	// A DIIN chunk declaring 64 KiB of which the file holds 12 bytes: the
+	// walk must end at the file's end without allocating the body (backlog
+	// B140).
+	cut := dffChunk("DIIN", nil)
+	cut[9] = 0x01 // a big-endian size of 0x10000
+	cut = append(cut, buildDIINSubChunk("DITI", "cut")[:12]...)
 	fuzzExtract(f, ".dff", [][]byte{
 		// FRM8/DSD with a PROP/SND container holding an FS chunk (2.8224 MHz).
 		[]byte("FRM8\x00\x00\x00\x00\x00\x00\x00\x20DSD PROP\x00\x00\x00\x00\x00\x00\x00\x10SND FS  \x00\x00\x00\x00\x00\x00\x00\x04\x00\x2B\x11\x00"),
+		// What TagLib 2 and mutagen write (testdata/dff, ExtractorVersion 20):
+		// a DIIN in the DSDIFF 1.5 layout, an ID3 chunk, and both, in both
+		// orders.
+		dffFixture(f, "taglib_diin.dff"),
+		dffFixture(f, "picard_id3.dff"),
+		dffFixture(f, "diin_then_id3.dff"),
+		dffFixture(f, "id3_then_diin.dff"),
+		dffWithChunks(f, 2822400, cut),
+		// A DFF's ID3 chunk repeating one frame past the renaming bound
+		// (backlog B101): the chunk reaches the same guard an AIFF's does.
+		dffWithChunks(f, 2822400, dffChunk("ID3 ", repeatedFramesTag())),
 	})
 }
 
