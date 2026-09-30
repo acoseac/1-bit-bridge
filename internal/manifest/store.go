@@ -6398,6 +6398,31 @@ func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 	return err
 }
 
+// ResetTrackMissingCountsUnder sets `missing_count = 0` on every row under
+// the directory-shaped prefix base, by byte range (never LIKE, which would
+// also match a case-twin sibling), after trimming its trailing slash. The
+// scanner calls it for an SACD container the walk saw, whose virtual rows
+// (`<container>/st/NN.dff`) no walk reaches: the container-seen branch of
+// the deletion pass keeps them from being counted missing, and this is the
+// reset ResetTrackMissingCount gives a plain file the skip gate sees
+// (backlog B217). A missed reset made "missing on `threshold` consecutive
+// scans" into "missing on `threshold` scans, ever", and deleted a
+// container's rows while it was on disk.
+//
+// An empty base is an error, never the whole table. A no-op on rows
+// already at 0. Holds `s.mu` per the writer contract on Store.
+func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) error {
+	b, scoped := subtreeRangeBase(base)
+	if !scoped {
+		return errors.New("manifest: ResetTrackMissingCountsUnder needs a prefix")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0
+		WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0' AND missing_count != 0`, b, b)
+	return err
+}
+
 // ClearMissingCounts wipes all rows where missing_count > 0 in tracks +
 // folders. Used by the `bridge manifest clear-missing` operator escape
 // hatch — an operator who KNOWS a mount has been permanently removed
