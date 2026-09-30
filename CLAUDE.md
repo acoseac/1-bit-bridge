@@ -3488,10 +3488,11 @@ no failing test — which is the shape to expect in this area.
   host, and Go dials it on THIS machine**, so every validator reads
   `Hostname()` (backlog B36). `customEndpoints` prunes it (it was advertised
   to every phone); the harvest credential endpoint answers 400
-  (`baseurl.CredentialBase`, which asks `baseurl.NamesHost`), and since
-  backlog B97 the harvest state store drops such a base when it opens its
-  file (a base stored before this check was never re-checked); a configured
-  enrich or harvest base URL of that
+  (`baseurl.CredentialBase`, which asks `baseurl.NamesHost`), and the
+  harvest state store drops such a base, with the credential held against
+  it, whenever it opens its file (backlog B97), so one stored before the
+  endpoint checked is gone at the next start instead of dialled on every
+  tick, as it was until then; a configured enrich or harvest base URL of that
   shape is WARNED about in `Normalize`, never refused, because it loaded
   before and a refusal stops a bridge from starting after an update. **Don't
   move the host test into `baseurl.CanonicalHTTPS`'s reduction**: a hostless pin
