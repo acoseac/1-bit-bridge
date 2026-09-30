@@ -164,6 +164,23 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 	}
 }
 
+// TestOrphanRenditionsCountsOnlyRenditions — `upscale --gc`'s reverse
+// guard explains a directory that holds no rendition after its forward
+// sweep only by the renditions that sweep unlinked (backlog B223): with
+// every orphan counted, a run that unlinked a .DS_Store from under an
+// unmounted mountpoint read the emptiness as its own work.
+func TestOrphanRenditionsCountsOnlyRenditions(t *testing.T) {
+	inv := SidecarInventory{OrphanPaths: []string{
+		filepath.Join("v", ".DS_Store"),
+		filepath.Join("v", "Artist", "Album", "01.flac"),
+		filepath.Join("v", "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac"),
+		filepath.Join("v", "abc123-optimized-v1-44100-16.flac"),
+	}}
+	if got := inv.OrphanRenditions(); got != 2 {
+		t.Errorf("OrphanRenditions = %d, want 2: the two files named as renditions", got)
+	}
+}
+
 // TestTheVariantsDirProbeReadsLinksAndDirectoriesItCannotList pins the
 // probe's rules for what it cannot look into (backlog B223). A link to a
 // directory may lead to renditions the scan does not follow, so it keeps

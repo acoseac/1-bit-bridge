@@ -34970,3 +34970,144 @@ path was.
   Backlog B223.
 - `upscale --gc` classifies its rows with no probe before, and re-checks
   health, not identity, before its reverse sweep. Backlog B224.
+
+## 2026-09-29 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
+
+Left open by B203: `VariantsDirSweepBlock` called a variants directory
+healthy when it held ANY entry (`dirIsEmpty` read one). A clean unmount
+leaves the local directory under the mountpoint, and anything written there
+while the volume is away made that directory "healthy": a Finder
+`.DS_Store`, a README, or the bridge's own render path, which makes
+`Artist/Album/` before sox writes and leaves the folders when the render
+fails. A tick that STARTS on such a directory has no identity to compare
+with, so B203's re-check cannot see it.
+
+### Reproduced red-first
+
+- **The watcher** (`TestVariantWatcherRefusesAMountpointHoldingNoRendition`,
+  the backlog's scratch test made real): forty rows on a "volume", the
+  volume moved aside, a local directory at the path holding a `.DS_Store`,
+  the folders a failed render left, a README and a Thumbs.db, a `.flac` that
+  is not a rendition, or renditions only in a `.Trashes`. On the old code
+  every shape: `{Rows:40 Deleted:40}` in one tick.
+- **`upscale --gc`** (`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`,
+  through the real `runGC`): the same volume, three shapes, each exit 0 with
+  all forty rows deleted. With a `.DS_Store` the forward sweep unlinked it as
+  an orphan (`--gc`'s nil Consider takes every file) and the reverse guard
+  then read the empty directory as that run's own work (#941's
+  `forwardRemoved > 0` exception); with the folders nothing needed
+  explaining, the directory was "healthy".
+- **The serve path's reap and the delete handler** read the same probe
+  through `variantDeleterAdapter.SidecarStoreState`, so each play of a
+  rendition on such a volume reaped its row (the adapter reported
+  available).
+
+### What distinguishes a lost volume from an emptied tree
+
+Nothing in the directory: a volume that is not mounted and a tree whose
+every rendition was deleted by hand both hold no rendition, whatever else
+they hold. The one the bridge must never get wrong is the first (the
+catalog, hours of sox work), and the second is rare and operator-made. So a
+directory holding no rendition is refused like an empty one, by every
+reaper, and the operator's word is the way past it: `bridge upscale --gc
+--allow-mass-delete` ("the sidecars really are gone", the flag the
+relocation refusal already had). The background watcher has no override,
+as before.
+
+Weighed and declined:
+
+- **Remember the identity of the last healthy tick** (the backlog's second
+  idea). In memory it is gone at a restart, and the classic lost mount is a
+  reboot whose NAS mount failed: the first tick would have nothing to
+  compare with. Persisted, it needs a writer that knows the volume is there
+  (a rendition written, a row found present) and a migration story for every
+  existing install.
+- **A marker file on the volume** (`.bridge-variants`). The same existing-
+  install problem, and `--gc`'s nil Consider unlinks dot-files as orphans.
+- **A lost+found at the root as proof the volume is mounted** (it exists only
+  at an ext filesystem's root). ext-only, fooled by stacked mounts, and it
+  contradicts the 2026-09-28 rule that the filesystem's lost+found is
+  evidence neither way. So a fresh ext4 volume holding only its lost+found,
+  which the watcher and `--gc` reaped since 2026-09-28, is refused now and
+  reaped with `--allow-mass-delete` (`TestRunGCReapsTheRowsOfAFreshVolume`
+  and the relocation table say so).
+- **The WalkDir walk `TreeHoldsVariantSidecars` made.** It reads each
+  directory's whole sorted listing; the delete handler asks the probe once
+  per row that unlinked nothing, and a flat 100,000-sidecar tree would be
+  listed whole each time.
+- **A mass-deletion rule in `MassDeleteRefusal` instead of the probe.** It
+  would cover the watcher and `--gc` but not the serve reap or the delete
+  handler, which read the probe, and the adapter's own docblock is that the
+  reapers cannot disagree about what an unmounted directory looks like.
+
+### The fix
+
+- `scanForRenditions` (internal/integrity/renditions.go) is the one walk
+  behind `TreeHoldsVariantSidecars` and the probe: the root resolved, each
+  directory read a batch of 256 at a time, depth first, stopping at the
+  first rendition (`looksLikeVariantSidecar`, regular or a link to a regular
+  file, outside a dot-directory), the filesystem's lost+found skipped. It
+  reports links to directories (not followed) and whether the root held any
+  entry. **Order-independent**: a directory it cannot open or list is noted
+  and the walk goes on, a rendition found anywhere answers true, and only a
+  walk that found none returns the error (the WalkDir form stopped at the
+  first error, so a readable rendition sorted after a locked directory was
+  never seen).
+- `VariantsDirSweepBlock`: healthy for a rendition, or a link to a directory
+  (the scan cannot see behind it, the reading every entry got before);
+  "cannot read" for an error with no rendition; Empty, "variants directory
+  is empty" or "holds no rendition", otherwise. `dirIsEmpty` is gone.
+- `upscale --gc` asks the probe first, before anything is classified or
+  unlinked (`gcRefuseUnavailableVariantsDir`), and its reverse guard's Empty
+  exception counts the RENDITIONS the forward sweep unlinked
+  (`SidecarInventory.OrphanRenditions`), never every file; `--allow-mass-delete`
+  waives the Empty refusal in both, and nothing else.
+- The delete handler keeps a refusal for the rest of its request, until it
+  next unlinks a file inside the store (`storeRefused`): a tree holding no
+  rendition is read whole, and a whole-library delete over a hand-emptied
+  tree read it once per row. Only a refusal is kept, since it keeps rows.
+- The watcher's hint, the Jobs card's wording, the doctor's variants-index
+  hint (which said the sweeps refuse a directory that "reads missing or
+  empty, so nothing is being deleted", false for any other content) and
+  `--allow-mass-delete`'s help say what the probe reads now.
+
+### Tests that asserted the defect
+
+- `TestVariantsDirSweepBlockReason`: "dir with a file is healthy" (a file
+  named `sidecar.flac`) and "dir with only a subdir is healthy".
+- The watcher fixtures wrote `decoy.flac`, `present.flac` or `ok.flac` to keep
+  the guard out; they write rendition-named files now, and the variants-dir
+  guard table gained the junk case the old fixture was.
+- The relocation table's "proceeds: the tree holds no sidecars" and
+  "proceeds: a fresh volume holds only its lost+found", and two latch tests
+  that ended a relocation streak by removing the stray sidecar (thirty rows
+  then deleted over a tree holding none): they end it now the way the
+  refusal's hint says, by putting the files back, which the tick adopts.
+- `TestRunGCReapsTheRowsOfAFreshVolume` (reaped without the flag) and B203's
+  `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne` (its "healthy"
+  directory held one folder).
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: the probe reads a directory holding no rendition as healthy | the watcher test (5 of 5 shapes), the gc test (3 of 3), the hand-deleted "folders left" case, the adapter test |
+| NC2: `--gc`'s pre-flight skipped | the gc test's `.DS_Store` and junk-`.flac` shapes (the forward sweep unlinked them); rows still kept by the reverse guard |
+| NC3: NC2 plus the reverse guard counting every unlinked file | the same two shapes exit 0 with every row deleted |
+| NC4: no refusal cache in the delete handler / no reset after an in-store unlink | 23 probes, 2 probes (want 3) |
+| NC5: the scan stops at its first unlistable directory | both orders of "a rendition beside a directory it cannot list" |
+| NC6: links to directories not counted | "a link to a directory keeps it healthy" |
+
+### The cost, accepted
+
+A tree whose every rendition was deleted by hand, and a fresh volume, keep
+their rows until `bridge upscale --gc --allow-mass-delete`, with the
+watcher's latched WARN and the Jobs card's "refusing" meanwhile; a
+download of such a rendition answers 410 and keeps its row. A variants
+directory pointed at a fresh folder while every row is still present at its
+recorded path elsewhere was refused as "empty" already; it is refused now
+if the folder holds junk too, until the first rendition is written there.
+
+### Left open
+
+- `upscale --gc` re-checks health, not identity (B224).
