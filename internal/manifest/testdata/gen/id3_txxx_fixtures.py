@@ -44,8 +44,9 @@ RELEASE_TRACK = '7f3e2d1c-0b9a-4876-9543-210fedcba987'
 RECORDING = '2a4c6e8f-1b3d-4f5a-8c7e-9d0b1a2c3e4f'
 RELEASE_GROUP = '3f1b0c2d-4e5a-4b6c-9d7e-8f9a0b1c2d3e'
 ARTISTS = ['0383dadf-2a4e-4d10-a46a-e9e041da8eb3', '5b11f4ce-a62d-471e-81fc-a69a8278c7da']
-# The owner Picard gives its recording-id UFID: an identifier, never fetched.
-MUSICBRAINZ_UFID_OWNER = 'http://musicbrainz.org'  # NOSONAR (python:S5332: no request is made)
+# The owner Picard gives its recording-id UFID: an identifier, never fetched,
+# so SonarCloud's python:S5332 (a plain-HTTP URL) does not apply.
+MUSICBRAINZ_UFID_OWNER = 'http://musicbrainz.org'  # NOSONAR
 
 BASE_MP3, BASE_AIFF, BASE_WAV, BASE_DSF = 'base.mp3', 'base.aiff', 'base.wav', 'base.dsf'
 
