@@ -114,6 +114,7 @@ func TestPrimaryNavHighlightsEveryEntry(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code != http.StatusOK {

@@ -40,6 +40,7 @@ func TestVariantFailureRetryClearsScoped(t *testing.T) {
 		strings.NewReader(`{"path":"Album"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "127.0.0.1:12345"
+	req.Host = testConsoleHost
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 

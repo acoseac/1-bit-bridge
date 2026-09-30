@@ -33,6 +33,7 @@ func putChunk(t *testing.T, h http.Handler, sid, fid string, offset int64, body 
 	url := "/api/upload/sessions/" + sid + "/files/" + fid + "?offset=" + strconv.FormatInt(offset, 10)
 	req := httptest.NewRequest(http.MethodPut, url, bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = testConsoleHost
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if digest != nil {
 		req.Header.Set("Content-Digest", "sha-256=:"+base64.StdEncoding.EncodeToString(digest)+":")

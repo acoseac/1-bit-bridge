@@ -474,6 +474,7 @@ func TestApiLibraryArtwork_ServesAndValidates(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", target, nil)
 		req.RemoteAddr = "127.0.0.1:54321" // past the loopback boundary middleware
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rw, req)
 		return rw
@@ -528,6 +529,7 @@ func TestApiLibraryBooklet_PendingNudges(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", target, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = testConsoleHost
 		rw := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rw, req)
 		return rw
