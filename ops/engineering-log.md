@@ -34611,3 +34611,92 @@ Gemini was over its daily quota on every head.
   the next `]:<digits>` on its line, since a zone may hold anything a
   Windows adapter's name holds, so a panic value holding such text loses
   it. It is replaced, never kept, so it costs text and never an address.
+
+## 2026-09-29 — the variant watcher asks again, by identity, whether its variants directory is the one its tick began on, as rows read as missing and before it deletes (backlog B203)
+
+Found by the pre-v0.2.1 review: `VariantWatcher.tick` probed the variants
+directory (`VariantsDirSweepBlockReason`: missing, not a directory,
+unreadable or empty) once, before its first pass. A clean unmount during the
+tick reverts the mountpoint to a local directory, so every row classified
+after it read as a rendition missing at both places, `MassDeleteRefusal`
+walked that directory, found no sidecars ("a library whose files really
+went"), and pass two deleted the rows. The review's scratch test: 39 rows of
+40. `upscale --gc` re-checks the directory before its reverse sweep; the
+watcher did not.
+
+### Reproduced through the real watcher
+
+The tick calls out once during pass one, to adopt a relocated row, so the
+tests' reconciler (`mountHooks`) runs a hook there and stands in for the
+unmount with what one leaves on disk: the directory moved aside
+(`atomicwrite.RenameWithRetry`, for Windows' scan-on-close) and a new one
+made at its path. On main (24523cff), each tick below deleted:
+
+| shape | main | fixed |
+|---|---|---|
+| row 0 adopted, then unmounted to an empty directory; rows 1-39 on the volume | 39 deleted | refused, 0 |
+| the same, unmounted to a directory holding a README | 39 deleted | refused, 0 |
+| rows 0-38 missing while mounted, the tree holding a sidecar no row names (the relocation `MassDeleteRefusal` refuses), row 39 adopted, then unmounted | 39 deleted | refused, 0 |
+| unmounted at row 0, remounted at row 5 (adopted from the local directory), rows 1-4 read in between | 4 deleted (under the floor of 10) | refused, 0 |
+| control: forty rows on an untouched volume, three sidecars removed by hand | 3 deleted | 3 deleted |
+
+### The fix
+
+`VariantsDirBlock.Info` carries the directory the probe judged healthy, and
+`variantsDirChanged` compares the path's directory now with it
+(`os.SameFile`): in `classify` (pass one, split out of `tick`) as each row
+reads as missing, the one verdict that leads to a deletion, and once more
+after `MassDeleteRefusal` and before pass two. A change refuses the tick as
+`variantsDirUnavailable`, the mount-loss kind, through the latch (one WARN;
+the next tick's own probe of the empty mountpoint continues the streak), and
+counts the rows it had found missing as refused. The hint drops "nothing was
+swept" (a changed tick has adopted rows) and names the change.
+
+Negative controls, each committed first and restored with `git checkout`:
+the per-row check removed turns only the came-back test red (the final check
+catches the rest); the final check removed turns only the after-the-last-row
+test red; a re-check of HEALTH in place of identity turns the README and the
+came-back tests red (both local directories hold an entry).
+
+### Windows: an `os.Stat` reads a directory's identity when it is compared
+
+The first version kept the probe's `os.Stat`. It passed on macOS and failed
+on Windows 11 (nomos, go1.26.6): the empty-directory and README tests each
+deleted 39 rows. Go's Windows `os.Stat` reads a path that is no reparse
+point with `GetFileAttributesEx` and leaves the volume serial and file index
+to `os.SameFile`, which opens the PATH when it first compares, so a stat
+taken before a replacement is read from the replacement.
+`TestOSStatLeavesTheWindowsIdentityToTheComparison` pins it (true on
+Windows, false on POSIX, where a stat reads the device and inode at the
+call). The two tests the first version passed there passed by accident: a
+comparison made before the swap had fixed the kept identity.
+
+`fsutil.DirIdentity` opens the directory (`OpenDir`) and stats the handle,
+which reads the identity from the handle at the call on every platform; the
+probe takes its identity from the handle it reads the first entry with, so
+the identity and the emptiness are of one directory.
+
+The variant delete handler (#968) kept exactly that `os.Stat`
+(`SidecarStoreState`'s `sidecarStoreID`), so on Windows the directory it
+first unlinked from compared as the same as any empty directory later put at
+the path, and its empty-store exception could run over an unmount. It takes
+`fsutil.DirIdentity` now. `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`
+is red on nomos with the old line and green on POSIX either way. Its first
+draft compared the kept identity once before the replacement and passed on
+Windows with the old line: the comparison had read the identity early. So
+the kept identity is compared with nothing before the change, in that test
+and in `TestDirIdentitySeesAnotherDirectoryAtThePath` (red on nomos with
+`DirIdentity` built on `os.Stat`). A real Windows unmount of a volume
+mounted in a folder was never this shape (the folder is a reparse point, so
+its stat reads the identity at once, and the variants directory BELOW such
+a folder goes missing); a plain directory replaced by another at the same
+path was.
+
+### Left open
+
+- A mountpoint that already holds an entry when a tick STARTS reads as
+  healthy: an unmounted variants directory holding one `.DS_Store` had all
+  40 rows deleted in one tick (scratch test on this branch, not committed).
+  Backlog B223.
+- `upscale --gc` classifies its rows with no probe before, and re-checks
+  health, not identity, before its reverse sweep. Backlog B224.

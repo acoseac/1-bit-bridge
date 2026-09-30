@@ -302,7 +302,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Fourteen claims in this list have been wrong and been corrected** — the
+**Fifteen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -316,8 +316,9 @@ giving a blank name `DefaultLibraryName`", (2026-09-28) "`analyze --gc`'s
 `Consider` requires `.1bwf`", (2026-09-28) "`mtime_ns = 0` does not
 force a re-extraction", (2026-09-29) "the app's SSDP path has no
 LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
-listener to the group address", and (2026-09-29) "`isLossyCodec` gates every
-`BitsPerSample` write site". The first five cost a later session real
+listener to the group address", (2026-09-29) "`isLossyCodec` gates every
+`BitsPerSample` write site", and (2026-09-29) "`os.SameFile` answers [a
+directory's identity] portably". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -347,7 +348,11 @@ toolchain's own source. The fourteenth named a function #225's review had
 already replaced (a denylist that failed open on an empty codec, for the
 allowlist `canSetBitsPerSample`), and the comment beside the wire field said
 the same; both were found while naming the compressed AIFF-C and WAV encodings
-(B124).
+(B124). The fifteenth was the model a fix was told to copy: B203's entry
+pointed at the delete handler's directory identity, kept from an `os.Stat`,
+and the first version built the same way passed on macOS and deleted 39 rows
+of 40 on Windows, where `os.Stat` reads a directory's identity only when it is
+compared.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -3407,6 +3412,50 @@ no failing test — which is the shape to expect in this area.
   under node, over the served payloads) and
   `TestServeReportsTheVariantWatcherRefusalOnTheJobsCard` (the wiring
   line; red alone with it nil).
+- **…and the watcher asks again, BY IDENTITY, as each row reads as missing
+  and before it deletes: the probe at the start of a tick says nothing
+  about the rows after it** (2026-09-29, backlog B203). `VariantWatcher.tick`
+  probed its variants directory once, before its first pass, so a clean
+  unmount during the tick (the mountpoint reverts to a local directory)
+  made every later row read as a rendition that is gone, the relocation
+  check walked that directory and found no sidecars, and the tick deleted
+  the rows: 39 of 40, through the real watcher. The tick keeps the probe's
+  view of the directory (`VariantsDirBlock.Info`) and asks
+  `variantsDirChanged` as each row reads as missing (`classify`: the one
+  verdict that leads to a deletion, so a tick whose rows are where they
+  belong pays nothing, and a volume that goes and comes back inside the
+  pass is seen), and once more after `MassDeleteRefusal` and before pass
+  two, since that check walks the tree after the last row is classified
+  and a volume gone in between lets a relocation's deletions through. A
+  change refuses the tick as the mount-loss kind (`variantsDirUnavailable`),
+  deleting nothing, the rows it had found missing counted as refused; the
+  next tick's own probe continues the streak. **Identity, never "does it
+  LOOK unmounted" again**: the local directory need not be empty.
+  **Read an identity kept for later from an open handle
+  (`fsutil.DirIdentity`, or the handle the emptiness read uses), never from
+  `os.Stat`**: on Windows `os.Stat` of a plain directory reads its volume
+  serial and file index only when `os.SameFile` first asks, from whatever
+  the path names then (measured on nomos: the first version, on `os.Stat`,
+  deleted 39 rows there and passed on macOS;
+  `TestOSStatLeavesTheWindowsIdentityToTheComparison` pins the premise). The
+  delete handler's kept instance (`SidecarStoreState`, #968) was that
+  `os.Stat` and compared as any directory later put at the path: it takes
+  `fsutil.DirIdentity` too. **A test of a kept identity compares it with
+  nothing before the change**: on Windows a comparison reads the lazy
+  identity and fixes it at that moment, which passed the handler's test on
+  the old line until the early comparison went. The unmount is stood in by
+  moving the directory aside and making another at its path, from inside
+  the tick's one call during pass one, an adoption (`mountHooks`):
+  `TestVariantWatcherRefusesATickWhoseVolumeIsUnmountedDuringIt`,
+  `TestVariantWatcherRefusesATickWhoseDirectoryIsReplacedByANonEmptyOne`,
+  `TestVariantWatcherRefusesATickWhoseVolumeGoesAfterItsLastMissingRow`,
+  `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
+  `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
+  `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**: a
+  mountpoint that already holds any entry when a tick STARTS (a
+  `.DS_Store`, a folder a failed render left) reads as a healthy variants
+  directory, and that tick deletes every row (measured, 40 of 40; B223),
+  and `upscale --gc` re-checks health but not identity (B224).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -3442,9 +3491,13 @@ no failing test — which is the shape to expect in this area.
   row k and says NOTHING about row k+1 — which is why the probe is per row
   in the first place. `SidecarStoreIdentifier` is opaque because identity is
   device+inode on POSIX and volume+file index on Windows, which
-  `os.SameFile` answers portably and no exported type carries as a value;
-  nil or foreign is NOT the same, because the compare exists to refuse an
-  unmount. Captured on the FIRST in-store unlink only — a re-probe per row
+  `os.SameFile` compares and no exported type carries as a value; nil or
+  foreign is NOT the same, because the compare exists to refuse an
+  unmount. **Portably only for an identity read from an open handle**
+  (`fsutil.DirIdentity`): this bullet said "answers portably" of the
+  `os.Stat` the handler kept, and on Windows that stat's identity is read
+  when it is first compared, from whatever the path names then (the B203
+  bullet below). Captured on the FIRST in-store unlink only — a re-probe per row
   puts a stat on the happy path of a whole-library delete and a differing
   instance is refused by the comparison anyway. Missing, unreadable and
   not-a-directory still refuse however much was unlinked: the loop removes
