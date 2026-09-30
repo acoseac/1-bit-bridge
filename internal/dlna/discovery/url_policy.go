@@ -38,8 +38,10 @@ package discovery
 // packet came from that same address. Every device measured announced a
 // LOCATION on its own source address (three of three, 2026-09-28), and a
 // packet with a loopback source was sent on this machine (RFC 1122 has a
-// host discard 127/8 arriving on any other interface). It is enforced
-// twice, because a host STRING shows only part of it. LocationFromSource refuses what the string shows (an IP literal, a
+// host discard 127/8 arriving on any other interface); since backlog B49 a
+// link-local source counts only on a zero-configuration link (below). It is
+// enforced twice, because a host STRING shows only part of it.
+// LocationPermittedBy refuses what the string shows (an IP literal, a
 // localhost name, a numeric spelling no device writes) before any fetch.
 // NewDeviceFetchClient's dial check refuses the rest at the connect, where
 // the address a name resolved to is known: measured with Go 1.27.1, a public
@@ -67,12 +69,23 @@ package discovery
 // own: an SSDP source is not authenticated, and a peer on the link can send
 // one from 169.254.169.254 (CodeRabbit on #1074).
 //
+// For the same reason a packet's link-local source approves itself only when
+// the packet arrived on a zero-configuration IPv4 link (backlog B49): one
+// where this host holds a link-local IPv4 address and no other
+// (ZeroConfIPv4Link), which is the link a direct-cable device is on and the
+// one kind where a device has no other address to announce from. On a link
+// where this host has a routable address, a packet "from" 169.254.x.y named
+// a link-local neighbour the bridge would then GET, at a port and path the
+// sender chose, and dial again for SOAP and proxied byte fetches.
+//
 // The app has the host-kind rules too since iOS #1998 (2026-09-29), in
 // UPnPURLPolicy: hostKind(of:) and hostKindAllowed bound its
 // resolveServiceURL for every source, location(_:announcedFrom:) is
-// LocationFromSource rule for rule, and cloudMetadataAddresses holds the
-// same 19 addresses as cloudMetadataAddrs. It has no twin of the dial check:
-// URLSession offers no hook between resolving a name and connecting.
+// LocationPermittedBy rule for rule but for the link rule (backlog B49),
+// which the app does not have yet (backlog B138), and cloudMetadataAddresses
+// holds the same 19 addresses as cloudMetadataAddrs. It has no twin of the
+// dial check: URLSession offers no hook between resolving a name and
+// connecting.
 
 import (
 	"context"
@@ -173,7 +186,7 @@ const (
 // documentation (2026-09-28). A request the bridge sends one on a device's
 // say-so can read a cloud VM's credentials, and no UPnP device serves on
 // one, so every rule here refuses them (addrKind classifies them as
-// hostMetadata): a LOCATION (LocationFromSource), a service URL
+// hostMetadata): a LOCATION (LocationPermittedBy), a service URL
 // (resolveServiceURL, for every source) and every connect (the dial check),
 // whatever the approval. The approval is the case that needs this list: an
 // SSDP source is not authenticated, a peer on the same L2 segment can send
@@ -418,25 +431,38 @@ func announcerAddr(src *net.UDPAddr) netip.Addr {
 	return a.Unmap().WithZone("")
 }
 
-// LocationFromSource returns location, an SSDP LOCATION that ParseSSDPHeaders
-// kept, when a discovery client may fetch it on the say-so of a packet from
-// src, and "" when it may not. Both SSDP clients call it on every packet and
+// LocationFromSource is LocationPermittedBy under AnnouncedFrom(src): the
+// LOCATION of a packet from src read on a link not known to be a
+// zero-configuration one, so a link-local LOCATION is never kept. The SSDP
+// clients judge their packets by their own link instead
+// (AnnouncementLink.Location).
+func LocationFromSource(location string, src *net.UDPAddr) string {
+	return LocationPermittedBy(location, AnnouncedFrom(src))
+}
+
+// LocationPermittedBy returns location, an SSDP LOCATION that
+// ParseSSDPHeaders kept, when a discovery client may fetch it under ap, the
+// approval of the packet that named it, and "" when it may not. Both SSDP
+// clients call it on every packet (through AnnouncementLink.Location) and
 // read "" as they read an absent LOCATION: a known UDN is refreshed, an
 // unknown one is skipped, and nothing is fetched.
 //
-// It refuses what the host string shows: an IP literal naming this machine
-// or a link-local address that is not the address the packet came from (the
-// unspecified address never is one), a localhost name unless the packet came
-// from a loopback address, a numeric spelling no device writes, and a cloud
-// metadata address from any source, that address included. A packet with a
-// loopback source was sent on this machine, whose processes can reach the
-// console directly; one from a metadata address was spoofed, since the
+// It refuses what the host string shows, by asking what the dial check will
+// ask at the connect (ap.Permits), so the two cannot disagree: an IP literal
+// naming this machine or a link-local address that ap does not cover (the
+// packet's own address, and a link-local one only where the packet arrived
+// on a zero-configuration link; the unspecified address never), a localhost
+// name unless the packet came from a loopback address, a numeric spelling no
+// device writes, and a cloud metadata address under any approval. A packet
+// with a loopback source was sent on this machine, whose processes can reach
+// the console directly; one from a metadata address was spoofed, since the
 // metadata service sends no SSDP. A name the string cannot place is kept:
 // the default client's dial check judges the address it resolves to.
 //
 // Mirrors UPnPURLPolicy.location(_:announcedFrom:) in the iOS app (iOS
-// #1998), which has no dial check behind it.
-func LocationFromSource(location string, src *net.UDPAddr) string {
+// #1998), which has no dial check behind it, except for the link rule
+// (backlog B49), which the app does not have yet.
+func LocationPermittedBy(location string, ap DialApproval) string {
 	if location == "" {
 		return ""
 	}
@@ -451,17 +477,13 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 	case hostNumericSpelling, hostMetadata:
 		return ""
 	}
-	from := announcerAddr(src)
-	if !from.IsValid() {
-		return ""
-	}
 	if !addr.IsValid() { // a localhost name
-		if from.IsLoopback() {
+		if ap.source.IsLoopback() {
 			return location
 		}
 		return ""
 	}
-	if addr.IsUnspecified() || addr.WithZone("") != from {
+	if !ap.Permits(addr) {
 		return ""
 	}
 	return location
@@ -477,16 +499,24 @@ func LocationFromSource(location string, src *net.UDPAddr) string {
 // Three things approve such a connect: the two that let a device's URL name
 // such an address at all, and the peer a GENA callback came from:
 //
-//   - AnnouncedFrom: the SSDP packet the URL came from was sent from that
-//     very address. It approves that address and no other, and never the
-//     unspecified address, which is no packet's source.
+//   - AnnouncedOn: the SSDP packet the URL came from was sent from that very
+//     address. It approves that address and no other, and never the
+//     unspecified address, which is no packet's source. A LINK-LOCAL source
+//     approves itself only when the packet arrived on a zero-configuration
+//     IPv4 link (ZeroConfIPv4Link; backlog B49): a UDP source is not
+//     authenticated, so on a link where this host holds a routable IPv4
+//     address, which is where the other devices are too, a packet "from"
+//     169.254.x.y is a device that failed DHCP or a peer that forged the
+//     address of a neighbour it wants the bridge to reach. AnnouncedFrom is
+//     the approval on a link not known to be a zero-configuration one.
 //   - OperatorChose: the operator configured a URL whose host names this
 //     machine or a link-local address. It approves every address of that
 //     kind, as resolveServiceURL keeps a service URL of that kind from such
 //     a description.
 //   - SubscribedFrom: the GENA SUBSCRIBE whose CALLBACK names the URL came
-//     from that very address (internal/dlna's initial NOTIFY). AnnouncedFrom's
-//     rule, for a TCP source.
+//     from that very address (internal/dlna's initial NOTIFY). AnnouncedOn's
+//     rule, for a TCP source, whose address the handshake has shown to be
+//     the peer's own: a link-local one counts on any link.
 //
 // A fourth form is for one request only, a manual upstream's own
 // description fetch (ManualDescriptionFetch): every address but a metadata
@@ -514,22 +544,53 @@ type DialApproval struct {
 	// but a cloud metadata one. Never recorded with a URL in a cache; it
 	// travels with the one fetch it is for.
 	manualDescription bool
+	// linkLocalSource says a link-local source approves its own address: a
+	// GENA subscriber's (a TCP peer), or an SSDP packet's that arrived on a
+	// zero-configuration IPv4 link (AnnouncedOn). False, the zero value,
+	// leaves a link-local source approving nothing, loopback sources
+	// unaffected.
+	linkLocalSource bool
 }
 
 // AnnouncedFrom is the approval an SSDP packet from src gives the URLs it
-// leads to: a connect to this machine or a link-local address at src's own
-// address only. A nil src, or one that holds no address, approves none.
+// leads to when the link it arrived on is not known to be a
+// zero-configuration IPv4 link: AnnouncedOn(src, false). A connect to this
+// machine at src's own address when that is a loopback address, and never
+// one to a link-local address, src's own included. A nil src, or one that
+// holds no address, approves none.
 func AnnouncedFrom(src *net.UDPAddr) DialApproval {
-	return DialApproval{source: announcerAddr(src)}
+	return AnnouncedOn(src, false)
+}
+
+// AnnouncedOn is the approval an SSDP packet from src gives the URLs it
+// leads to, having arrived on a link of which zeroConfLink says whether it
+// is a zero-configuration IPv4 link (ZeroConfIPv4Link): a connect to this
+// machine at src's own address when that is a loopback address (RFC 1122 has
+// a host discard 127/8 arriving on any other interface), and to a link-local
+// address at src's own address only when that is an IPv4 link-local address
+// and zeroConfLink holds. The discovery clients read it through their
+// AnnouncementLink, which says whether their own interface is such a link.
+//
+// An IPv6 link-local source approves nothing: both SSDP clients are IPv4
+// (udp4) sockets, so none reaches here from a packet, and IPv6 SSDP devices
+// announce from their fe80 address on every link (ff02::c is link-scoped),
+// so this rule would not carry over; it would need one of its own.
+func AnnouncedOn(src *net.UDPAddr, zeroConfLink bool) DialApproval {
+	from := announcerAddr(src)
+	return DialApproval{source: from, linkLocalSource: zeroConfLink && from.Is4() && from.IsLinkLocalUnicast()}
 }
 
 // SubscribedFrom is the approval a GENA SUBSCRIBE from `from` gives the
 // callback URL it names, which internal/dlna sends its initial NOTIFY to
 // (backlog B39): a connect to this machine or a link-local address at that
-// address only, as AnnouncedFrom gives an SSDP packet's LOCATION. from is
-// compared unmapped and without its zone; the zero Addr approves none.
+// address only, as AnnouncedOn gives an SSDP packet's LOCATION. from is
+// compared unmapped and without its zone; the zero Addr approves none. A
+// link-local subscriber approves its own address on any link, where an SSDP
+// packet's approves it only on a zero-configuration one: the SUBSCRIBE came
+// over TCP, and the handshake has shown the address to be the peer's own,
+// which a UDP source never shows.
 func SubscribedFrom(from netip.Addr) DialApproval {
-	return DialApproval{source: from.Unmap().WithZone("")}
+	return DialApproval{source: from.Unmap().WithZone(""), linkLocalSource: true}
 }
 
 // OperatorChose is the approval the operator's configured URL gives a manual
@@ -596,6 +657,8 @@ func (d DialApproval) String() string {
 		return "an operator's URL on this machine"
 	case d.chosen == hostLinkLocal:
 		return "an operator's link-local URL"
+	case d.source.IsValid() && d.source.IsLinkLocalUnicast() && !d.linkLocalSource:
+		return "announced from " + d.source.String() + ", a link-local address this approval does not cover"
 	case d.source.IsValid():
 		return "announced from " + d.source.String()
 	}
@@ -607,9 +670,11 @@ func (d DialApproval) String() string {
 // address under ManualDescriptionFetch, and for any other address elsewhere
 // under every approval; and for this machine or a link-local address when an
 // operator's URL named that kind of host, or when a is the approving peer's
-// own address (never the unspecified address). The dial check asks it at
-// every connect, and internal/dlna's GENA callback guard asks it before it
-// sends anything, so the two cannot disagree.
+// own address (never the unspecified address, and a link-local one only
+// where the approval says its source may approve itself: linkLocalSource).
+// The dial check asks it at every connect, internal/dlna's GENA callback
+// guard asks it before it sends anything, and LocationPermittedBy asks it of
+// a LOCATION's literal, so none of them can disagree.
 func (d DialApproval) Permits(a netip.Addr) bool {
 	a = a.Unmap()
 	kind := addrKind(a)
@@ -622,7 +687,10 @@ func (d DialApproval) Permits(a netip.Addr) bool {
 	if hostKindAllowed(kind, d.chosen) {
 		return true
 	}
-	return !a.IsUnspecified() && d.source.IsValid() && a.WithZone("") == d.source
+	if a.IsUnspecified() || !d.source.IsValid() || a.WithZone("") != d.source {
+		return false
+	}
+	return kind != hostLinkLocal || d.linkLocalSource
 }
 
 // dialApprovalKey carries a request's DialApproval in its context, for the
@@ -637,9 +705,10 @@ func WithDialApproval(ctx context.Context, a DialApproval) context.Context {
 }
 
 // WithAnnouncementSource returns ctx carrying AnnouncedFrom(src): the
-// approval of the SSDP packet from src whose LOCATION a fetch follows. Both
-// SSDP clients wrap every fetch a packet causes (the description, and a
-// renderer's GetProtocolInfo) in it.
+// approval of an SSDP packet from src whose LOCATION a fetch follows, read on
+// a link not known to be a zero-configuration one. The SSDP clients carry
+// the approval their AnnouncementLink gives instead (WithDialApproval),
+// which knows the link.
 func WithAnnouncementSource(ctx context.Context, src *net.UDPAddr) context.Context {
 	return WithDialApproval(ctx, AnnouncedFrom(src))
 }

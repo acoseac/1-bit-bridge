@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -81,14 +82,119 @@ func TestServerCloudMetadataLocationIsNeverFetched(t *testing.T) {
 		t.Errorf("requests = %q, want none", reqs)
 	}
 
-	c.handlePacket(context.Background(), alivePacket("uuid:direct-cable", "http://169.254.7.7:8200/desc.xml"), udpFrom("169.254.7.7"))
-	c.wg.Wait()
+	direct := newServerDiscoveryTestClientOn(t, disp, cache, zeroConfServerLink)
+	direct.handlePacket(context.Background(), alivePacket("uuid:direct-cable", "http://169.254.7.7:8200/desc.xml"), udpFrom("169.254.7.7"))
+	direct.wg.Wait()
 	info, ok := cache.Get("uuid:direct-cable")
 	if want := "http://169.254.7.7:8200/ctl/ContentDir"; !ok || info.ContentDirectoryControlURL != want {
 		t.Errorf("a server on a direct cable: cached %+v (ok %v), want its control URL %s", info, ok, want)
 	}
-	if got, want := info.DialApproval, discovery.AnnouncedFrom(udpFrom("169.254.7.7")); got != want {
+	if got, want := info.DialApproval, discovery.AnnouncedOn(udpFrom("169.254.7.7"), true); got != want {
 		t.Errorf("a server on a direct cable: approval %v, want %v", got, want)
+	}
+}
+
+// TestServerLinkLocalLocationIsFetchedOnlyOnAZeroConfLink is backlog B49 on
+// the upstream path, which matters most: a server cached here has its control
+// URL dialled by the ingest's SOAP and by every byte fetch of its routed
+// tracks, whose answers the proxy relays to the unauthenticated DLNA
+// listener. A UDP source is not authenticated, so on a link where this host
+// holds a routable address a packet "from" a link-local neighbour, with a
+// LOCATION on it, is not fetched, and nothing is cached. On a
+// zero-configuration link the same packet is a direct-cable server: fetched,
+// and cached with the approval that covers its address.
+func TestServerLinkLocalLocationIsFetchedOnlyOnAZeroConfLink(t *testing.T) {
+	const location = "http://169.254.7.7:8200/desc.xml"
+	for _, tc := range []struct {
+		link    string
+		addrs   func() ([]net.Addr, error)
+		fetched bool
+	}{
+		{"configured", configuredServerLink, false},
+		{"zero-conf", zeroConfServerLink, true},
+	} {
+		disp := &controlURLByHost{ctrl: map[string]string{"169.254.7.7:8200": "/ctl/ContentDir"}}
+		cache := NewServerCache()
+		c := newServerDiscoveryTestClientOn(t, disp, cache, tc.addrs)
+		c.handlePacket(context.Background(), alivePacket("uuid:link-local", location), udpFrom("169.254.7.7"))
+		c.wg.Wait()
+		info, cached := cache.Get("uuid:link-local")
+		reqs := disp.requests()
+		if got := cached && len(reqs) == 1; got != tc.fetched {
+			t.Errorf("%s link: fetched = %v (requests %q, cached %+v), want %v", tc.link, got, reqs, info, tc.fetched)
+		}
+		if !tc.fetched {
+			if len(reqs) != 0 {
+				t.Errorf("%s link: requests = %q, want none", tc.link, reqs)
+			}
+			continue
+		}
+		if !info.DialApproval.Permits(netip.MustParseAddr("169.254.7.7")) {
+			t.Errorf("%s link: the cached approval (%v) does not cover the server's address", tc.link, info.DialApproval)
+		}
+	}
+}
+
+// TestAServerAnnouncedFromALinkLocalAddressOffAZeroConfLinkCarriesNoApprovalForIt
+// is the rebinding half of B49: a LOCATION the string check cannot place (a
+// name) is fetched wherever it resolves, so the server can be cached from a
+// packet "from" a link-local address. On a configured link the approval
+// cached beside its control URL does not cover that address, so when the
+// name later answers it the ingest's SOAP and the proxy's byte fetches are
+// refused at the dial check (cmd/bridge's
+// TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere
+// drives them). On a zero-configuration link it does.
+func TestAServerAnnouncedFromALinkLocalAddressOffAZeroConfLinkCarriesNoApprovalForIt(t *testing.T) {
+	for _, tc := range []struct {
+		link   string
+		addrs  func() ([]net.Addr, error)
+		covers bool
+	}{
+		{"configured", configuredServerLink, false},
+		{"zero-conf", zeroConfServerLink, true},
+	} {
+		disp := &controlURLByHost{ctrl: map[string]string{"server.rebind.test:8200": "/ctl/ContentDir"}}
+		cache := NewServerCache()
+		c := newServerDiscoveryTestClientOn(t, disp, cache, tc.addrs)
+		c.handlePacket(context.Background(), alivePacket("uuid:named", "http://server.rebind.test:8200/desc.xml"), udpFrom("169.254.7.7"))
+		c.wg.Wait()
+		info, ok := cache.Get("uuid:named")
+		if !ok {
+			t.Fatalf("%s link: the server described by a name was not cached; the case would test nothing", tc.link)
+		}
+		if got := info.DialApproval.Permits(netip.MustParseAddr("169.254.7.7")); got != tc.covers {
+			t.Errorf("%s link: the cached approval (%v) covers 169.254.7.7 = %v, want %v", tc.link, info.DialApproval, got, tc.covers)
+		}
+	}
+}
+
+// TestAKnownServerCannotMoveOntoALinkLocalLocationOffAZeroConfLink is B49's
+// move attack: a server known at a LAN address is re-announced from a
+// link-local address, with a LOCATION on it, on a link where this host holds
+// a routable address. The move detector must not follow it, so the cached
+// control URL, and LiveHost's target with it, stays where it was.
+func TestAKnownServerCannotMoveOntoALinkLocalLocationOffAZeroConfLink(t *testing.T) {
+	disp := &controlURLByHost{ctrl: map[string]string{
+		"192.0.2.7:8200":   "/ctl/ContentDir",
+		"169.254.7.7:8200": "/ctl/ContentDir",
+	}}
+	cache := NewServerCache()
+	c := newServerDiscoveryTestClient(t, disp, cache)
+	c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://192.0.2.7:8200/desc.xml"), udpFrom("192.0.2.7"))
+	c.wg.Wait()
+	const honest = "http://192.0.2.7:8200/ctl/ContentDir"
+	if info, _ := cache.Get("uuid:ms"); info.ContentDirectoryControlURL != honest {
+		t.Fatalf("first discovery cached %q, want %q", info.ContentDirectoryControlURL, honest)
+	}
+
+	c.handlePacket(context.Background(), alivePacket("uuid:ms", "http://169.254.7.7:8200/desc.xml"), udpFrom("169.254.7.7"))
+	c.wg.Wait()
+	if reqs := disp.requests(); len(reqs) != 1 {
+		t.Errorf("requests = %q, want only the first description GET: the move detector followed a "+
+			"link-local LOCATION on a link where this host holds a routable address", reqs)
+	}
+	if info, _ := cache.Get("uuid:ms"); info.ContentDirectoryControlURL != honest {
+		t.Errorf("ContentDirectoryControlURL = %q, want %q kept", info.ContentDirectoryControlURL, honest)
 	}
 }
 
@@ -165,6 +271,7 @@ func newDefaultServerDiscoveryClient(t *testing.T, cache *ServerCache) *MediaSer
 	t.Helper()
 	c, err := NewMediaServerDiscoveryClient(DiscoveryConfig{
 		Interface:          &net.Interface{},
+		InterfaceAddrs:     configuredServerLink,
 		DetailFetchTimeout: 3 * time.Second,
 	}, cache)
 	if err != nil {

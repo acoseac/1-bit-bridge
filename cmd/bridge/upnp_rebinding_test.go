@@ -324,3 +324,40 @@ func TestAPacketFromAMetadataAddressApprovesNoLaterDialThere(t *testing.T) {
 		t.Error("a stand-in saw a request, which no case here sends")
 	}
 }
+
+// TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere
+// is the same chain for a link-local address that is not a metadata one
+// (backlog B49), on a link where this host holds a routable address. A
+// packet "from" a link-local neighbour, whose LOCATION names a host that
+// resolves elsewhere while discovery fetches the description, is cached
+// under the approval a client on such a link gives it
+// (discovery.AnnouncedOn(src, false), which is AnnouncedFrom). Then the name
+// answers the neighbour's address: the same-address exception approved that
+// connect for the ingest's SOAP and for every byte fetch, whose answers the
+// proxy relays to the unauthenticated DLNA listener. On a link that is not a
+// zero-configuration one it approves nothing, and both are refused at the
+// dial check, before any packet leaves. (On a zero-configuration link the
+// packet's own address stays approved: that is the direct-cable device the
+// exception is for, and internal/upnp's tests pin it.)
+func TestAPacketFromALinkLocalAddressOffAZeroConfLinkApprovesNoLaterDialThere(t *testing.T) {
+	h := newRebindingHosts(t)
+	from := &net.UDPAddr{IP: net.ParseIP("169.254.7.7"), Port: 1900}
+	approval := discovery.AnnouncedOn(from, false)
+	if approval != discovery.AnnouncedFrom(from) {
+		t.Fatalf("AnnouncedOn(src, false) = %v, AnnouncedFrom(src) = %v: the two spellings of a configured link's approval differ", approval, discovery.AnnouncedFrom(from))
+	}
+	server := newRoutedServer(t, config.UPnPUpstreamServerConfig{Name: "Neighbour", UDN: "uuid:rebind-link-local"},
+		"http://"+rebindingName+":"+h.port+"/ctl", approval)
+	h.dns.Answer(netip.MustParseAddr("169.254.7.7"))
+	ingestErr, proxyErr := server.fetchBoth(t)
+	const refusal = "refusing to connect to this machine or a link-local address"
+	if ingestErr == nil || !strings.Contains(ingestErr.Error(), refusal) {
+		t.Errorf("ingest error = %v, want the dial check's refusal (%q)", ingestErr, refusal)
+	}
+	if proxyErr == nil || proxyErr.Code != "upnp_upstream_unreachable" || !strings.Contains(proxyErr.Error(), refusal) {
+		t.Errorf("proxy error = %v, want upnp_upstream_unreachable with the dial check's refusal (%q)", proxyErr, refusal)
+	}
+	if h.console.take() != nil || (h.lanHost != nil && h.lanHost.take() != nil) {
+		t.Error("a stand-in saw a request, which no case here sends")
+	}
+}
