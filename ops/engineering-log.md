@@ -32426,6 +32426,78 @@ Gemini was over its daily quota on every head. CodeRabbit ran on-demand:
   unfixed weakness goes into the private backlog with its evidence, and the
   public record says only that one was filed.**
 
+## 2026-09-29 — the harvest client's bearer token no longer follows a redirect from https to plain http (backlog B133)
+
+Found by the B97 session (#1110) and named there only as B133 while it was
+unfixed (SECURITY.md; the rule in CLAUDE.md's backlog section). This entry is
+its record now that the fix ships.
+
+### What was measured on the old code
+
+main at 71ca33dc, go1.27.1 on macOS. Every harvest request sets its bearer
+token as an explicit `Authorization` header (`doCapped` for the submit and
+booklet-check POSTs and the results and lyrics GETs, `fetchBookletPDF` for
+the PDF) and goes through `Client.httpClient`: `defaultHarvestHTTPClient`,
+which had no `CheckRedirect`, or the caller's client as it was handed in.
+net/http copies an explicit Authorization header onto a redirect to the same
+host whatever the scheme (`shouldCopyHeaderOnRedirect` compares host names
+only), which is #1091's review-round-2 finding. #1091 fixed it for the enrich
+clients with `guardRedirects`, in `internal/enrich`, which
+`internal/atlasharvest` must not import, so the harvest client was left.
+
+The new test, red first: a TLS fake Atlas answering every request with a 307
+to a plain `httptest` server on 127.0.0.1, the client given the TLS server's
+own client. The plain hop recorded `/moved Bearer bh-secret-token` for the
+submit POST, the results GET and the booklet PDF, three of three, and the
+default client had no redirect policy at all. The https-hop control (a
+redirect to another path on the same TLS server keeps the token) passed, as
+it should.
+
+### What was decided
+
+- **One guard, moved, not copied** (B133's constraint): `guardRedirects` and
+  `dropAuthorizationLeavingHTTPS` moved to a new `internal/authredirect` as
+  `Guard`, with their rules unchanged (strip, never refuse; judged per hop
+  against the first request; a caller's `CheckRedirect` still asked, after
+  the strip; net/http's limit of ten restated; the caller's client copied).
+- **enrich keeps `guardRedirects` as a one-line delegate**, because
+  `TestEveryClientThatSendsACredentialIsBuiltWithTheRedirectGuard` finds each
+  constructor's call by that identifier. A delegate is a second name, not a
+  second copy; changing the population test to read a selector instead would
+  have been the larger change for nothing.
+- **`Client.httpClient` wraps both clients**: `defaultHarvestHTTPClient` is
+  built over the guard (its `Timeout` stays 0, the reason it has no overall
+  timeout is unchanged), and a client a caller hands in is guarded per call,
+  a shallow copy, never the caller's own. The copy costs an allocation per
+  request, against a network round trip.
+- No wire change, no log line (the guard's own reason: the server's answer at
+  the plain hop is the report).
+
+### Tests
+
+New: `TestNoHarvestRequestCarriesItsTokenOntoACleartextHop` (three legs over
+a TLS fake Atlas redirecting to a plain server, each required to reach the
+https server with the token first and the plain hop once, without it; plus
+the https-hop control), `TestTheDefaultHarvestClientDropsTheTokenLeavingHTTPS`
+(the production client's policy, asked directly, strips on a cleartext hop
+and keeps on an https one, and its `Timeout` stays 0), and in
+`internal/authredirect` `TestGuardDropsTheHeaderOnlyWhereTheChainLeavesHTTPS`
+(four chains, a later cleartext hop of an https chain included) and
+`TestGuardKeepsTheCallersPolicyAndClient` (the caller's policy decides, asked
+without the header; the limit of ten; the caller's client untouched). enrich's
+redirect tests run unchanged over the delegate.
+
+### Negative controls
+
+Each mutation applied to the committed tree (e1a216b3), the named tests run
+with `-count=1`, the file restored and the tree checked clean after each.
+
+| mutation | goes red |
+|---|---|
+| NC1: `httpClient` hands out the caller's client unguarded | the three legs of the harvest test; the default-client test stays green |
+| NC2: `defaultHarvestHTTPClient` built without the guard | the default-client test only |
+| NC3: the shared guard strips nothing | the harvest legs and the default-client test, both `internal/authredirect` tests (the leave-https rows), and enrich's `TestNoCredentialFollowsARedirectFromHTTPSToACleartextHop` and `TestTheCredentialGuardKeepsACallersRedirectPolicy` for all three enrich clients, which shows they run over the shared guard |
+
 ## 2026-09-29 — a file the scan could not read whole keeps its row, and a new one gets none (backlog B134)
 
 B62 (#1111) made a scan worker write no row for a path that is no longer a
