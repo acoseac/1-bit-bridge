@@ -3526,15 +3526,15 @@ const msgUnreadAudio = "audio files the scan could not read; their rows are kept
 // not one per file: a mount that drops mid-scan fails every open after it,
 // and a file this user may not read fails on every scan until it can.
 type unreadTally struct {
-	mu sync.Mutex
-	walkTally
+	mu    sync.Mutex
+	files walkTally
 }
 
 // reset empties the tally, at the start of a scan.
 func (u *unreadTally) reset() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.walkTally = walkTally{}
+	u.files = walkTally{}
 }
 
 // note records the file at rel, and the failure that kept it from being
@@ -3543,14 +3543,14 @@ func (u *unreadTally) reset() {
 func (u *unreadTally) note(rel string, fault error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.walkTally.note(rel, walkErrReason(fault))
+	u.files.note(rel, walkErrReason(fault))
 }
 
 // report logs msgUnreadAudio, once, when the scan noted a file.
 func (u *unreadTally) report() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.walkTally.report(msgUnreadAudio, "err")
+	u.files.report(msgUnreadAudio, "err")
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx

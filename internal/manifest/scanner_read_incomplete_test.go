@@ -243,55 +243,95 @@ func requireOneUnreadLine(t *testing.T, rec *loggingtest.Recorder, n int, rel, o
 	}
 }
 
+// readFaultCase is one extractor family under one fault, over a fresh
+// library: the file's path p and its library-relative path rel.
+type readFaultCase struct {
+	f      linkedFixture
+	format readFaultFormat
+	fault  audioFault
+	p, rel string
+}
+
+// forEachReadFault runs body for every extractor family under every fault,
+// each in a subtest of its own.
+func forEachReadFault(t *testing.T, body func(t *testing.T, c readFaultCase)) {
+	for _, format := range readFaultFormats {
+		for _, fault := range audioFaults {
+			t.Run(format.name+"/"+fault.name, func(t *testing.T) {
+				f := newLinkedFixture(t)
+				body(t, readFaultCase{f: f, format: format, fault: fault,
+					p: filepath.Join(f.album, format.file), rel: "Music/Album/" + format.file})
+			})
+		}
+	}
+}
+
+// markMissing sets the row's missing count to n, as scans that missed it
+// would have.
+func (c readFaultCase) markMissing(t *testing.T, n int) {
+	t.Helper()
+	if _, err := c.f.store.db.Exec(`UPDATE tracks SET missing_count = ? WHERE path = ?`, n, c.rel); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// faultScan runs a scan with c's fault injected into its file, which holds
+// the version "Retagged", and returns what the scan logged.
+func (c readFaultCase) faultScan(t *testing.T) *loggingtest.Recorder {
+	t.Helper()
+	injectAudioFault(t, c.f.sc, c.p, "Retagged", c.fault)
+	rec := loggingtest.Record(t)
+	scanOnce(t, c.f.sc, "the fault")
+	return rec
+}
+
+// requireKept asserts that the row is before, byte for byte and at the same
+// indexed_at, but for its missing count, which the walk that saw the file
+// reset.
+func (c readFaultCase) requireKept(t *testing.T, before storedRow) {
+	t.Helper()
+	after, ok := storedRowAt(t, c.f.store, c.rel)
+	if !ok {
+		t.Fatal("the row was deleted")
+	}
+	before.missingCount = 0
+	if after != before {
+		t.Errorf("the row changed:\n got  %+v\n want %+v", after, before)
+	}
+}
+
+// readableScan takes the fault away and scans again.
+func (c readFaultCase) readableScan(t *testing.T) {
+	t.Helper()
+	c.f.sc.openAudio = nil
+	scanOnce(t, c.f.sc, "readable again")
+}
+
 // TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow: a file indexed
 // once, then changed, whose open, seek or tag read fails during the scan that
 // would re-read it, keeps the row it had, byte for byte and at the same
 // indexed_at (nothing to send a paired device), with its missing count reset
 // as the walk saw the file; the scan says so once. The next scan, reading it
-// whole, writes the file's own tags.
+// whole, writes the file's own tags, and logs nothing more: each scan counts
+// its own unread files.
 func TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T) {
-	for _, format := range readFaultFormats {
-		for _, fault := range audioFaults {
-			t.Run(format.name+"/"+fault.name, func(t *testing.T) {
-				f := newLinkedFixture(t)
-				p := filepath.Join(f.album, format.file)
-				rel := "Music/Album/" + format.file
-				format.write(t, p, "Original")
-				setMTime(t, p, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC))
-				scanOnce(t, f.sc, "the original")
-				requireVersion(t, f.store, format, rel, "Original")
-				if _, err := f.store.db.Exec(`UPDATE tracks SET missing_count = 2 WHERE path = ?`, rel); err != nil {
-					t.Fatal(err)
-				}
-				before, ok := storedRowAt(t, f.store, rel)
-				if !ok {
-					t.Fatal("precondition: the original was not indexed")
-				}
+	forEachReadFault(t, func(t *testing.T, c readFaultCase) {
+		c.format.write(t, c.p, "Original")
+		setMTime(t, c.p, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC))
+		scanOnce(t, c.f.sc, "the original")
+		requireVersion(t, c.f.store, c.format, c.rel, "Original")
+		c.markMissing(t, 2)
+		before, _ := storedRowAt(t, c.f.store, c.rel)
 
-				format.write(t, p, "Retagged")
-				injectAudioFault(t, f.sc, p, "Retagged", fault)
-				rec := loggingtest.Record(t)
-				scanOnce(t, f.sc, "the fault")
+		c.format.write(t, c.p, "Retagged")
+		rec := c.faultScan(t)
+		c.requireKept(t, before)
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
 
-				after, ok := storedRowAt(t, f.store, rel)
-				if !ok {
-					t.Fatal("the row was deleted")
-				}
-				before.missingCount = 0
-				if after != before {
-					t.Errorf("the row changed:\n got  %+v\n want %+v", after, before)
-				}
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-
-				f.sc.openAudio = nil
-				scanOnce(t, f.sc, "readable again")
-				requireVersion(t, f.store, format, rel, "Retagged")
-				// The scan that read it logged nothing more: each scan
-				// counts its own unread files.
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-			})
-		}
-	}
+		c.readableScan(t)
+		requireVersion(t, c.f.store, c.format, c.rel, "Retagged")
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
+	})
 }
 
 // TestScanner_ANewFileWhoseReadDidNotCompleteGetsNoRow: a file the store has
@@ -299,77 +339,48 @@ func TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T) {
 // reads it whole. A row by its name would carry its size and mtime, which the
 // skip gate trusts, and the path's guess at its tags, which it keeps.
 func TestScanner_ANewFileWhoseReadDidNotCompleteGetsNoRow(t *testing.T) {
-	for _, format := range readFaultFormats {
-		for _, fault := range audioFaults {
-			t.Run(format.name+"/"+fault.name, func(t *testing.T) {
-				f := newLinkedFixture(t)
-				p := filepath.Join(f.album, format.file)
-				rel := "Music/Album/" + format.file
-				format.write(t, p, "Retagged")
-				injectAudioFault(t, f.sc, p, "Retagged", fault)
-				rec := loggingtest.Record(t)
-				scanOnce(t, f.sc, "the fault")
-
-				if title, ok := rowTitle(t, f.store, rel); ok {
-					t.Errorf("a row was made for a file the scan could not read: title %q", title)
-				}
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-
-				f.sc.openAudio = nil
-				scanOnce(t, f.sc, "readable again")
-				requireVersion(t, f.store, format, rel, "Retagged")
-				// The scan that read it logged nothing more: each scan
-				// counts its own unread files.
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-			})
+	forEachReadFault(t, func(t *testing.T, c readFaultCase) {
+		c.format.write(t, c.p, "Retagged")
+		rec := c.faultScan(t)
+		if title, ok := rowTitle(t, c.f.store, c.rel); ok {
+			t.Errorf("a row was made for a file the scan could not read: title %q", title)
 		}
-	}
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
+
+		c.readableScan(t)
+		requireVersion(t, c.f.store, c.format, c.rel, "Retagged")
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
+	})
 }
 
 // TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow: the
 // version-stale leg (reExtractUnchanged), which an ExtractorVersion bump sends
 // every row down, keeps a row whose re-read did not complete as it was, stale
-// version included, so the next scan tries again. A read failure dhowden
-// swallowed reached its diff as a changed row and replaced the stored one.
+// version included, so the next scan tries again. A read failure the parser
+// dropped reached its diff as a changed row, replaced the stored one and
+// stamped it current, which no later scan re-read.
 func TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T) {
-	for _, format := range readFaultFormats {
-		for _, fault := range audioFaults {
-			t.Run(format.name+"/"+fault.name, func(t *testing.T) {
-				f := newLinkedFixture(t)
-				p := filepath.Join(f.album, format.file)
-				rel := "Music/Album/" + format.file
-				format.write(t, p, "Retagged")
-				scanOnce(t, f.sc, "this version")
-				if _, err := f.store.db.Exec(`UPDATE tracks SET extractor_version = ?, missing_count = 2 WHERE path = ?`,
-					ExtractorVersion-1, rel); err != nil {
-					t.Fatal(err)
-				}
-				before, _ := storedRowAt(t, f.store, rel)
-
-				injectAudioFault(t, f.sc, p, "Retagged", fault)
-				rec := loggingtest.Record(t)
-				scanOnce(t, f.sc, "the fault")
-
-				after, ok := storedRowAt(t, f.store, rel)
-				if !ok {
-					t.Fatal("the row was deleted")
-				}
-				before.missingCount = 0
-				if after != before {
-					t.Errorf("the row changed:\n got  %+v\n want %+v", after, before)
-				}
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-
-				f.sc.openAudio = nil
-				scanOnce(t, f.sc, "readable again")
-				stamped, _ := storedRowAt(t, f.store, rel)
-				if stamped.extractorVersion != ExtractorVersion || stamped.tags != before.tags || stamped.indexedAt != before.indexedAt {
-					t.Errorf("read whole, the row is %+v; want it stamped current and otherwise as it was (%+v)", stamped, before)
-				}
-				requireOneUnreadLine(t, rec, 1, rel, fault.op)
-			})
+	forEachReadFault(t, func(t *testing.T, c readFaultCase) {
+		c.format.write(t, c.p, "Retagged")
+		scanOnce(t, c.f.sc, "this version")
+		if _, err := c.f.store.db.Exec(`UPDATE tracks SET extractor_version = ? WHERE path = ?`,
+			ExtractorVersion-1, c.rel); err != nil {
+			t.Fatal(err)
 		}
-	}
+		c.markMissing(t, 2)
+		before, _ := storedRowAt(t, c.f.store, c.rel)
+
+		rec := c.faultScan(t)
+		c.requireKept(t, before)
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
+
+		c.readableScan(t)
+		stamped, _ := storedRowAt(t, c.f.store, c.rel)
+		if stamped.extractorVersion != ExtractorVersion || stamped.tags != before.tags || stamped.indexedAt != before.indexedAt {
+			t.Errorf("read whole, the row is %+v; want it stamped current and otherwise as it was (%+v)", stamped, before)
+		}
+		requireOneUnreadLine(t, rec, 1, c.rel, c.fault.op)
+	})
 }
 
 // TestScanner_AFileReadWholeIsWrittenAsItAlwaysWas is the positive control:

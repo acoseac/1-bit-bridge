@@ -1885,7 +1885,7 @@ func parseYearPrefix(s string) (int, error) {
 // hands it to extractFLACFormatFromReader. Used by anything outside
 // ExtractWithContext (e.g. tests calling Extract directly).
 func extractFLACFormat(absPath string, t *Track) error {
-	f, _, err := fsutil.OpenAsFile(absPath)
+	f, err := openAudioFile(absPath, nil)
 	if err != nil {
 		return err
 	}
