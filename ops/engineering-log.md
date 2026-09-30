@@ -31786,7 +31786,7 @@ failed to build.
 | NC5: `SetCredential` stores the base as given | its eleven refusal subtests, its four canonical spellings, and both reworked `TestStateStore_AtlasCredential` subtests |
 | NC6: `SetCredential` refuses after resetting the cursor | its ten shape subtests (the cursor moved); the empty-base one stays green, having nothing to reset |
 | NC7: `CredentialBase` skips the host test | the two port-and-no-host reduction rows, that shape in both store tests, and the endpoint's `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost` |
-| NC8: `:443` is stripped when it leaves nothing | the `https://:443` reduction row, the config pin row, and the pin-as-serve-wires-it test |
+| NC8: a port is stripped when it leaves nothing | the `https://:443` and `https://:` reduction rows, the config pin row, and the pin-as-serve-wires-it test |
 | NC9: the drop is logged under another message | the ten shapes of the main test |
 | NC10: the drop's Warn carries the base | the seven shapes whose base carries the secret |
 | NC11: the refusal quotes the base | the eight shapes whose base carries the secret or the host |
