@@ -221,7 +221,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
-	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files, or while it holds no rendition at all (the sidecars really are gone); refused by default, because the first shape is a relocation in progress and the second what an unmounted volume looks like")
+	allowMassDelete := fs.Bool("allow-mass-delete", false, gcAllowMassDeleteUsage)
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
 	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
@@ -999,6 +999,17 @@ func gcRefuseMassOrphans(stderr io.Writer, outputDir string, inv integrity.Sidec
 	fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans.")
 	return 1
 }
+
+// gcAllowMassDeleteUsage is `--allow-mass-delete`'s help, one text for the
+// three commands whose `--gc` deletes rows (upscale, optimize, render), as
+// gcAllowPartialWalkUsage is for its flag. It waives the relocation
+// refusal and, since backlog B223, the refusal of a variants directory that
+// holds no rendition, the two shapes in which the sidecars may really be
+// gone.
+const gcAllowMassDeleteUsage = "with --gc: delete rows whose sidecar is missing even when that is more than " +
+	"integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files, " +
+	"or while it holds no rendition at all (the sidecars really are gone); refused by default, because the first " +
+	"shape is a relocation in progress and the second what an unmounted volume looks like"
 
 // gcAllowPartialWalkUsage is `--allow-partial-walk`'s help, one text for
 // the four commands whose `--gc` unlinks sidecar files (upscale, optimize,

@@ -47,7 +47,7 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	force := fs.Bool("force", false, "re-render even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips rendering. Shares the upscale GC path, which is prefix-agnostic — every variant family is preserved.")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
-	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files (the sidecars really are gone); refused by default, because that shape is a relocation in progress")
+	allowMassDelete := fs.Bool("allow-mass-delete", false, gcAllowMassDeleteUsage)
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
 	if !parseTranscodeArgs(fs, "render", args, stderr) {
