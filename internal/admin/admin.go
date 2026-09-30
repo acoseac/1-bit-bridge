@@ -49,6 +49,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/trash"
 	"github.com/acoseac/1-bit-bridge/internal/upload"
 )
@@ -138,8 +139,11 @@ type Deps struct {
 	StartedAt time.Time
 
 	// Restart is called when the operator clicks "Restart now" on a
-	// restart-required settings edit. Nil means os.Exit(0) — fine when
-	// running under launchd/systemd which will relaunch.
+	// restart-required settings edit, and by "Install & restart". serve
+	// wires the cancel SIGINT and SIGTERM reach, marked so serve exits
+	// with supervision.RestartExitCode, which its supervisor relaunches.
+	// Nil means os.Exit(supervision.RestartExitCode), for a caller with
+	// no shutdown of its own to run.
 	Restart func()
 
 	// ScanCtx is the parent context for admin-triggered scans. serveCmd
@@ -2419,18 +2423,22 @@ func ipInAnyCIDR(ip net.IP, cidrs []string) bool {
 	return false
 }
 
-// restart fires the configured restart callback (or os.Exit(0) by default).
-// Called by the restart endpoint after a non-hot-reloadable settings
-// change; service-manager (launchd / systemd) relaunches the process.
+// restart fires the configured restart callback (or exits with
+// supervision.RestartExitCode by default). Called by the restart endpoint
+// after a non-hot-reloadable settings change; the service manager
+// (launchd / systemd / the SCM) relaunches the process.
 func (s *Server) restart() {
 	if s.deps.Restart != nil {
 		s.deps.Restart()
 		return
 	}
-	// launchd and systemd user units both have KeepAlive / Restart=always
-	// by default in the templates shipped via `bridge init`, so a plain
-	// exit-0 lands us back on our feet within a second or so.
-	os.Exit(0)
+	// Not os.Exit(0): the LaunchAgent `bridge init` writes relaunches an
+	// unsuccessful exit only (KeepAlive {SuccessfulExit: false}), and the
+	// Windows service's recovery actions answer a failure, so an exit 0
+	// left the bridge down under both; systemd's Restart=always takes
+	// either (backlog B201). This comment said until then that a plain
+	// exit 0 "lands us back on our feet" under launchd.
+	os.Exit(supervision.RestartExitCode)
 }
 
 // staticAssetHandler wraps the embedded-FS file server with two
