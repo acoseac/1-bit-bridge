@@ -66,52 +66,74 @@ const musicBrainzUFIDName = "musicbrainz_trackid"
 // name can answer, as stringOf passes over an empty value. A tag without such
 // frames, and every other format's raw map, returns nil.
 func id3v2NamedValues(raw map[string]any) []id3v2Named {
-	type found struct {
-		ufid  bool
-		index int
-		key   string
-		named id3v2Named
-	}
-	var all []found
+	var all []namedFrame
 	for key, v := range raw {
-		switch v := v.(type) {
-		case *tag.Comm:
-			index, ok := renamedFrameIndex(key, "TXXX", "TXX")
-			if !ok || v == nil {
-				continue
-			}
-			if value := id3v2TextValue(v.Text); value != "" {
-				all = append(all, found{index: index, key: key,
-					named: id3v2Named{name: normaliseRawTagKey(v.Description), value: value}})
-			}
-		case *tag.UFID:
-			index, ok := renamedFrameIndex(key, "UFID", "UFI")
-			if !ok || v == nil || !isMusicBrainzUFIDOwner(v.Provider) {
-				continue
-			}
-			if value := id3v2TextValue(string(v.Identifier)); value != "" {
-				all = append(all, found{ufid: true, index: index, key: key,
-					named: id3v2Named{name: musicBrainzUFIDName, value: value}})
-			}
+		if f, ok := namedFrameOf(key, v); ok {
+			all = append(all, f)
 		}
 	}
 	if len(all) == 0 {
 		return nil
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].ufid != all[j].ufid {
-			return all[i].ufid
-		}
-		if all[i].index != all[j].index {
-			return all[i].index < all[j].index
-		}
-		return all[i].key < all[j].key
-	})
+	sort.Slice(all, func(i, j int) bool { return all[i].before(all[j]) })
 	named := make([]id3v2Named, len(all))
 	for i, f := range all {
 		named[i] = f.named
 	}
 	return named
+}
+
+// namedFrame is one frame id3v2NamedValues keeps, with what orders it: whether
+// it is a UFID, its place among the frames of its id, and its key.
+type namedFrame struct {
+	ufid  bool
+	index int
+	key   string
+	named id3v2Named
+}
+
+// before is id3v2NamedValues' order: the UFIDs, then by place, then by key. The
+// key is unique in a map, so the order is strict.
+func (a namedFrame) before(b namedFrame) bool {
+	if a.ufid != b.ufid {
+		return a.ufid
+	}
+	if a.index != b.index {
+		return a.index < b.index
+	}
+	return a.key < b.key
+}
+
+// namedFrameOf reads what raw holds under key as a named frame: a TXXX or TXX
+// frame, named by its description, or a UFID or UFI frame owned by
+// MusicBrainz, named musicBrainzUFIDName. Anything else, and a frame whose
+// value is empty, is none.
+func namedFrameOf(key string, v any) (namedFrame, bool) {
+	switch v := v.(type) {
+	case *tag.Comm:
+		index, ok := renamedFrameIndex(key, "TXXX", "TXX")
+		if !ok || v == nil {
+			return namedFrame{}, false
+		}
+		value := id3v2TextValue(v.Text)
+		if value == "" {
+			return namedFrame{}, false
+		}
+		return namedFrame{index: index, key: key,
+			named: id3v2Named{name: normaliseRawTagKey(v.Description), value: value}}, true
+	case *tag.UFID:
+		index, ok := renamedFrameIndex(key, "UFID", "UFI")
+		if !ok || v == nil || !isMusicBrainzUFIDOwner(v.Provider) {
+			return namedFrame{}, false
+		}
+		value := id3v2TextValue(string(v.Identifier))
+		if value == "" {
+			return namedFrame{}, false
+		}
+		return namedFrame{ufid: true, index: index, key: key,
+			named: id3v2Named{name: musicBrainzUFIDName, value: value}}, true
+	}
+	return namedFrame{}, false
 }
 
 // renamedFrameIndex reports whether key is one of dhowden's keys for a frame

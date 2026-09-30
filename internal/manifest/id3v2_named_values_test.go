@@ -86,12 +86,34 @@ func extractID3Frames(t testing.TB, version byte, frames ...[]byte) Track {
 	return requireBoundedExtraction(t, "x.mp3", data, &ExtractContext{})
 }
 
-// gainString is a ReplayGain field as a test compares it: "nil" or the value.
+// gainString is a ReplayGain field as a test compares it: "" for none, else the
+// value.
 func gainString(g *float64) string {
 	if g == nil {
-		return "nil"
+		return ""
 	}
 	return strconv.FormatFloat(*g, 'f', -1, 64)
+}
+
+// namedFields is what the named lookup fills on a track, as a test compares
+// it: the release id, the recording id and the two gains (gainString's form).
+type namedFields struct {
+	album, recording, trackGain, albumGain string
+}
+
+func namedFieldsOf(tr Track) namedFields {
+	return namedFields{
+		album:     tr.MusicBrainzAlbumID,
+		recording: tr.MusicBrainzTrackID,
+		trackGain: gainString(tr.ReplayGainTrackDB),
+		albumGain: gainString(tr.ReplayGainAlbumDB),
+	}
+}
+
+// picardFields is what a fixture's tag names: its release id, the recording
+// id if it has a UFID, and its gains.
+func picardFields(recording string) namedFields {
+	return namedFields{album: picardAlbumMBID, recording: recording, trackGain: "-6.48", albumGain: "-7.25"}
 }
 
 // TestPicardsID3v2IdsAndReplayGainReachTheirFields is the regression test for
@@ -105,35 +127,26 @@ func gainString(g *float64) string {
 // release's TRACK, not the recording, and must not fill MusicBrainzTrackID.
 func TestPicardsID3v2IdsAndReplayGainReachTheirFields(t *testing.T) {
 	for _, c := range []struct {
-		file      string
-		recording string
+		file string
+		want namedFields
 	}{
-		{"picard_v24_utf16.mp3", picardRecordingMBID},
-		{"picard_v23_utf16.mp3", picardRecordingMBID},
-		{"picard_v24_utf8.mp3", picardRecordingMBID},
-		{"picard_v24_utf16.dsf", picardRecordingMBID},
-		{"picard_v24_utf16.aiff", picardRecordingMBID},
-		{"picard_v24_utf16.wav", picardRecordingMBID},
+		{"picard_v24_utf16.mp3", picardFields(picardRecordingMBID)},
+		{"picard_v23_utf16.mp3", picardFields(picardRecordingMBID)},
+		{"picard_v24_utf8.mp3", picardFields(picardRecordingMBID)},
+		{"picard_v24_utf16.dsf", picardFields(picardRecordingMBID)},
+		{"picard_v24_utf16.aiff", picardFields(picardRecordingMBID)},
+		{"picard_v24_utf16.wav", picardFields(picardRecordingMBID)},
 		// ffmpeg writes no UFID; its ReplayGain names are lower case.
-		{"ffmpeg_v23.mp3", ""},
+		{"ffmpeg_v23.mp3", picardFields("")},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			tr := requireBoundedExtraction(t, c.file, id3Fixture(t, c.file), &ExtractContext{})
 			if tr.Title != "Bohemian Rhapsody" {
 				t.Fatalf("premise: Title = %q, want the tag's", tr.Title)
 			}
-			if tr.MusicBrainzAlbumID != picardAlbumMBID {
-				t.Errorf("MusicBrainzAlbumID = %q, want %q (TXXX \"MusicBrainz Album Id\")", tr.MusicBrainzAlbumID, picardAlbumMBID)
-			}
-			if tr.MusicBrainzTrackID != c.recording {
-				t.Errorf("MusicBrainzTrackID = %q, want %q (the recording id, from the MusicBrainz UFID; %q is the release track's)",
-					tr.MusicBrainzTrackID, c.recording, picardReleaseTrackMBID)
-			}
-			if tr.ReplayGainTrackDB == nil || *tr.ReplayGainTrackDB != picardTrackGainDB {
-				t.Errorf("ReplayGainTrackDB = %s, want %v", gainString(tr.ReplayGainTrackDB), picardTrackGainDB)
-			}
-			if tr.ReplayGainAlbumDB == nil || *tr.ReplayGainAlbumDB != picardAlbumGainDB {
-				t.Errorf("ReplayGainAlbumDB = %s, want %v", gainString(tr.ReplayGainAlbumDB), picardAlbumGainDB)
+			if got := namedFieldsOf(tr); got != c.want {
+				t.Errorf("read %+v, want %+v (the recording id comes from the MusicBrainz UFID; %q is the release track's)",
+					got, c.want, picardReleaseTrackMBID)
 			}
 		})
 	}
@@ -149,12 +162,10 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 	const mb = "http://musicbrainz.org"
 	bom := string(rune(0xFEFF)) // a byte order mark as dhowden leaves one in a later UTF-16 value
 	for _, c := range []struct {
-		name      string
-		version   byte
-		frames    [][]byte
-		album     string
-		recording string
-		trackGain string
+		name    string
+		version byte
+		frames  [][]byte
+		want    namedFields
 	}{
 		{
 			name:    "the first alias answers wherever its frame sits",
@@ -163,7 +174,7 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 3, "MusicBrainz Album Id", a),
 				txxxFrame(4, 3, "MUSICBRAINZ_ALBUMID", b),
 			},
-			album: b,
+			want: namedFields{album: b},
 		},
 		{
 			name:    "the first alias answers wherever its frame sits, the other way round",
@@ -172,7 +183,7 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 3, "MUSICBRAINZ_ALBUMID", b),
 				txxxFrame(4, 3, "MusicBrainz Album Id", a),
 			},
-			album: b,
+			want: namedFields{album: b},
 		},
 		{
 			name:    "one name twice: the first frame in the tag",
@@ -181,7 +192,7 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 3, "replaygain_track_gain", "-1.00 dB"),
 				txxxFrame(4, 3, "REPLAYGAIN_TRACK_GAIN", "-2.00 dB"),
 			},
-			trackGain: "-1",
+			want: namedFields{trackGain: "-1"},
 		},
 		{
 			name:    "one name twice: the first frame in the tag, the other way round",
@@ -190,7 +201,7 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 3, "REPLAYGAIN_TRACK_GAIN", "-2.00 dB"),
 				txxxFrame(4, 3, "replaygain_track_gain", "-1.00 dB"),
 			},
-			trackGain: "-2",
+			want: namedFields{trackGain: "-2"},
 		},
 		{
 			name:    "a frame the tag leaves empty is no answer",
@@ -200,14 +211,13 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 1, "MusicBrainz Album Id", " "+bom+" "),
 				txxxFrame(4, 3, "MusicBrainz Album Id", a),
 			},
-			album: a,
+			want: namedFields{album: a},
 		},
 		{
-			name:      "the first of several values, past an empty one and a byte order mark",
-			version:   4,
-			frames:    [][]byte{txxxFrame(4, 1, "MusicBrainz Album Id", "", a, b)},
-			album:     a,
-			recording: "",
+			name:    "the first of several values, past an empty one and a byte order mark",
+			version: 4,
+			frames:  [][]byte{txxxFrame(4, 1, "MusicBrainz Album Id", "", a, b)},
+			want:    namedFields{album: a},
 		},
 		{
 			name:    "the MusicBrainz UFID is the recording id, ahead of a TXXX of the same name",
@@ -216,13 +226,13 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				txxxFrame(4, 3, "MUSICBRAINZ_TRACKID", b),
 				ufidFrame(4, mb, a),
 			},
-			recording: a,
+			want: namedFields{recording: a},
 		},
 		{
-			name:      "a TXXX named as an MP4 freeform atom names the recording id",
-			version:   3,
-			frames:    [][]byte{txxxFrame(3, 1, "MusicBrainz Track Id", a)},
-			recording: a,
+			name:    "a TXXX named as an MP4 freeform atom names the recording id",
+			version: 3,
+			frames:  [][]byte{txxxFrame(3, 1, "MusicBrainz Track Id", a)},
+			want:    namedFields{recording: a},
 		},
 		{
 			name:    "the release track id is not the recording id",
@@ -242,26 +252,13 @@ func TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes(t *testing.T) {
 				ufidFrame(2, mb, b),
 				txxxFrame(2, 0, "REPLAYGAIN_TRACK_GAIN", "+1.50 dB"),
 			},
-			album:     a,
-			recording: b,
-			trackGain: "1.5",
+			want: namedFields{album: a, recording: b, trackGain: "1.5"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			for range 20 {
-				tr := extractID3Frames(t, c.version, c.frames...)
-				if tr.MusicBrainzAlbumID != c.album {
-					t.Fatalf("MusicBrainzAlbumID = %q, want %q", tr.MusicBrainzAlbumID, c.album)
-				}
-				if tr.MusicBrainzTrackID != c.recording {
-					t.Fatalf("MusicBrainzTrackID = %q, want %q", tr.MusicBrainzTrackID, c.recording)
-				}
-				want := c.trackGain
-				if want == "" {
-					want = "nil"
-				}
-				if got := gainString(tr.ReplayGainTrackDB); got != want {
-					t.Fatalf("ReplayGainTrackDB = %s, want %s", got, want)
+			for run := range 20 {
+				if got := namedFieldsOf(extractID3Frames(t, c.version, c.frames...)); got != c.want {
+					t.Fatalf("extraction %d read %+v, want %+v", run+1, got, c.want)
 				}
 			}
 		})
@@ -325,60 +322,81 @@ func TestScanner_V19_ATagNamingItsIDsJoinsTheDelta_APlainID3RowOnlyStamps(t *tes
 		"title": "Plain", "artist": "Band", "album": "Own Album", "track": "1",
 	})
 	store, sc := newDiscArtScanFixture(t, root)
-	ctx := context.Background()
 	scanOnce(t, sc, "initial")
-
-	fresh, err := store.GetTrack(ctx, "picard.mp3")
-	if err != nil || fresh == nil || fresh.MusicBrainzAlbumID != picardAlbumMBID {
+	if fresh, err := store.GetTrack(context.Background(), "picard.mp3"); err != nil || fresh == nil || fresh.MusicBrainzAlbumID != picardAlbumMBID {
 		t.Fatalf("premise: the current extractor stores the tag's release id; got %+v err=%v", fresh, err)
 	}
 
-	// What a v18 bridge left behind: stamped 18, the tag's ids and gains
-	// never read, a release id the enricher found by searching, enriched.
 	const searched = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-	if _, err := store.db.Exec(`UPDATE tracks SET extractor_version = 18, enriched_at = 1,
-		tags_json = json_set(json_remove(tags_json, '$.musicBrainzTrackID', '$.replayGainTrackDB', '$.replayGainAlbumDB'),
-		                     '$.musicBrainzAlbumID', ?, '$.artworkMBID', ?)
-		WHERE path = ?`, searched, searched, "picard.mp3"); err != nil {
-		t.Fatalf("munge picard: %v", err)
-	}
-	if _, err := store.db.Exec("UPDATE tracks SET extractor_version = 18, enriched_at = 1 WHERE path = ?", "plain.mp3"); err != nil {
-		t.Fatalf("munge plain: %v", err)
-	}
+	rewindToV18(t, store, "picard.mp3", searched)
+	rewindToV18(t, store, "plain.mp3", "")
 	beforePicard := trackIndexedAt(t, store, "picard.mp3")
 	beforePlain := trackIndexedAt(t, store, "plain.mp3")
 
 	scanOnce(t, sc, "v19")
 
-	got, err := store.GetTrack(ctx, "picard.mp3")
+	requireTaggedRowRejoined(t, store, "picard.mp3", beforePicard, searched)
+	requirePlainRowOnlyStamped(t, store, "plain.mp3", beforePlain)
+}
+
+// rewindToV18 puts a row back where a v18 bridge left it: stamped 18, and
+// enriched. Given a searched release id, its tags are what v18 made of a Picard
+// tag too: none of its ids or gains, and the release id and the cover the
+// enricher found by searching.
+func rewindToV18(t *testing.T, store *Store, rel, searched string) {
+	t.Helper()
+	q, args := "UPDATE tracks SET extractor_version = 18, enriched_at = 1 WHERE path = ?", []any{rel}
+	if searched != "" {
+		q = `UPDATE tracks SET extractor_version = 18, enriched_at = 1,
+			tags_json = json_set(json_remove(tags_json, '$.musicBrainzTrackID', '$.replayGainTrackDB', '$.replayGainAlbumDB'),
+			                     '$.musicBrainzAlbumID', ?, '$.artworkMBID', ?)
+			WHERE path = ?`
+		args = []any{searched, searched, rel}
+	}
+	if _, err := store.db.Exec(q, args...); err != nil {
+		t.Fatalf("rewind %s to v18: %v", rel, err)
+	}
+}
+
+// requireTaggedRowRejoined fails unless the v19 scan gave the row the ids and
+// gains its tag names (the tag's release id in place of the searched one),
+// kept the enricher's cover until the enricher runs again, advanced its
+// indexed_at (the iOS delta), reset its enriched_at (the enricher runs again,
+// with the file's own release id) and stamped it.
+func requireTaggedRowRejoined(t *testing.T, store *Store, rel string, before int64, searched string) {
+	t.Helper()
+	got, err := store.GetTrack(context.Background(), rel)
 	if err != nil || got == nil {
-		t.Fatalf("GetTrack(picard): err=%v nil=%v", err, got == nil)
+		t.Fatalf("GetTrack(%s): err=%v nil=%v", rel, err, got == nil)
 	}
-	if got.MusicBrainzAlbumID != picardAlbumMBID || got.MusicBrainzTrackID != picardRecordingMBID {
-		t.Errorf("ids after the re-extract: album %q, recording %q; want the tag's %q, %q",
-			got.MusicBrainzAlbumID, got.MusicBrainzTrackID, picardAlbumMBID, picardRecordingMBID)
-	}
-	if got.ReplayGainTrackDB == nil || got.ReplayGainAlbumDB == nil {
-		t.Errorf("ReplayGain after the re-extract: track %s, album %s", gainString(got.ReplayGainTrackDB), gainString(got.ReplayGainAlbumDB))
+	if f := namedFieldsOf(*got); f != picardFields(picardRecordingMBID) {
+		t.Errorf("after the re-extract the row reads %+v, want the tag's %+v", f, picardFields(picardRecordingMBID))
 	}
 	if got.ArtworkMBID != searched {
 		t.Errorf("ArtworkMBID = %q: the merge keeps the enricher's cover until it runs again (want %q)", got.ArtworkMBID, searched)
 	}
-	if after := trackIndexedAt(t, store, "picard.mp3"); after <= beforePicard {
-		t.Errorf("the tagged row's indexed_at did not advance (%d -> %d): iOS would never pull its ids", beforePicard, after)
+	if after := trackIndexedAt(t, store, rel); after <= before {
+		t.Errorf("the tagged row's indexed_at did not advance (%d -> %d): iOS would never pull its ids", before, after)
 	}
-	if v := trackColumn(t, store, "picard.mp3", "enriched_at"); v != 0 {
+	if v := trackColumn(t, store, rel, "enriched_at"); v != 0 {
 		t.Errorf("the tagged row's enriched_at = %d: the enricher would not run again with the file's own release id", v)
 	}
-	if after := trackIndexedAt(t, store, "plain.mp3"); after != beforePlain {
-		t.Errorf("the plain row's indexed_at moved (%d -> %d): v19 must not put every ID3 row in the delta", beforePlain, after)
+	if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+		t.Errorf("%s extractor_version = %d, want %d", rel, v, ExtractorVersion)
 	}
-	if v := trackColumn(t, store, "plain.mp3", "enriched_at"); v != 1 {
+}
+
+// requirePlainRowOnlyStamped fails unless the v19 scan left a row whose tag
+// names nothing out of the delta and the enricher's queue, and stamped it.
+func requirePlainRowOnlyStamped(t *testing.T, store *Store, rel string, before int64) {
+	t.Helper()
+	if after := trackIndexedAt(t, store, rel); after != before {
+		t.Errorf("the plain row's indexed_at moved (%d -> %d): v19 must not put every ID3 row in the delta", before, after)
+	}
+	if v := trackColumn(t, store, rel, "enriched_at"); v != 1 {
 		t.Errorf("the plain row's enriched_at = %d: v19 must not re-enrich a row whose tag names nothing", v)
 	}
-	for _, rel := range []string{"picard.mp3", "plain.mp3"} {
-		if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
-			t.Errorf("%s extractor_version = %d, want %d", rel, v, ExtractorVersion)
-		}
+	if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+		t.Errorf("%s extractor_version = %d, want %d", rel, v, ExtractorVersion)
 	}
 }

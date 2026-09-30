@@ -44,6 +44,10 @@ RELEASE_TRACK = '7f3e2d1c-0b9a-4876-9543-210fedcba987'
 RECORDING = '2a4c6e8f-1b3d-4f5a-8c7e-9d0b1a2c3e4f'
 RELEASE_GROUP = '3f1b0c2d-4e5a-4b6c-9d7e-8f9a0b1c2d3e'
 ARTISTS = ['0383dadf-2a4e-4d10-a46a-e9e041da8eb3', '5b11f4ce-a62d-471e-81fc-a69a8278c7da']
+# The owner Picard gives its recording-id UFID: an identifier, never fetched.
+MUSICBRAINZ_UFID_OWNER = 'http://musicbrainz.org'  # NOSONAR (python:S5332: no request is made)
+
+BASE_MP3, BASE_AIFF, BASE_WAV, BASE_DSF = 'base.mp3', 'base.aiff', 'base.wav', 'base.dsf'
 
 
 def ffmpeg(*args):
@@ -72,7 +76,7 @@ def picard_frames(enc):
         id3.TPE1(encoding=enc, text=['Queen']),
         id3.TALB(encoding=enc, text=['A Night at the Opera']),
         id3.TDOR(encoding=enc, text=['1975-11-21']),
-        id3.UFID(owner='http://musicbrainz.org', data=bytes(RECORDING, 'ascii')),
+        id3.UFID(owner=MUSICBRAINZ_UFID_OWNER, data=bytes(RECORDING, 'ascii')),
         id3.TXXX(encoding=enc, desc='MusicBrainz Album Id', text=[ALBUM]),
         id3.TXXX(encoding=enc, desc='MusicBrainz Release Track Id', text=[RELEASE_TRACK]),
         id3.TXXX(encoding=enc, desc='MusicBrainz Release Group Id', text=[RELEASE_GROUP]),
@@ -98,23 +102,23 @@ def picard(opener, src, dst, enc, v23=False):
         f.save(v2_version=4, padding=lambda info: 0)
 
 
-silence('libmp3lame', '0.05', 'base.mp3', '-b:a', '32k', '-write_xing', '0', '-id3v2_version', '0')
-silence('pcm_s16be', '0.01', 'base.aiff')
-silence('pcm_s16le', '0.01', 'base.wav')
-base_dsf('base.dsf')
+silence('libmp3lame', '0.05', BASE_MP3, '-b:a', '32k', '-write_xing', '0', '-id3v2_version', '0')
+silence('pcm_s16be', '0.01', BASE_AIFF)
+silence('pcm_s16le', '0.01', BASE_WAV)
+base_dsf(BASE_DSF)
 
 UTF16, UTF8 = id3.Encoding.UTF16, id3.Encoding.UTF8
-picard(MP3, 'base.mp3', 'picard_v24_utf16.mp3', UTF16)
-picard(MP3, 'base.mp3', 'picard_v23_utf16.mp3', UTF16, v23=True)
-picard(MP3, 'base.mp3', 'picard_v24_utf8.mp3', UTF8)
-picard(DSF, 'base.dsf', 'picard_v24_utf16.dsf', UTF16)
-picard(AIFF, 'base.aiff', 'picard_v24_utf16.aiff', UTF16)
-picard(WAVE, 'base.wav', 'picard_v24_utf16.wav', UTF16)
-ffmpeg('-i', 'base.mp3', '-c', 'copy', '-id3v2_version', '3', '-write_id3v1', '0',
+picard(MP3, BASE_MP3, 'picard_v24_utf16.mp3', UTF16)
+picard(MP3, BASE_MP3, 'picard_v23_utf16.mp3', UTF16, v23=True)
+picard(MP3, BASE_MP3, 'picard_v24_utf8.mp3', UTF8)
+picard(DSF, BASE_DSF, 'picard_v24_utf16.dsf', UTF16)
+picard(AIFF, BASE_AIFF, 'picard_v24_utf16.aiff', UTF16)
+picard(WAVE, BASE_WAV, 'picard_v24_utf16.wav', UTF16)
+ffmpeg('-i', BASE_MP3, '-c', 'copy', '-id3v2_version', '3', '-write_id3v1', '0',
        '-metadata', 'title=Bohemian Rhapsody',
        '-metadata', 'MusicBrainz Album Id=' + ALBUM,
        '-metadata', 'replaygain_track_gain=-6.48 dB',
        '-metadata', 'replaygain_album_gain=-7.25 dB',
        'ffmpeg_v23.mp3')
-for base in ('base.mp3', 'base.aiff', 'base.wav', 'base.dsf'):
+for base in (BASE_MP3, BASE_AIFF, BASE_WAV, BASE_DSF):
     os.remove(base)
