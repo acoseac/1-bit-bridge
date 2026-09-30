@@ -71,6 +71,7 @@ func TestPlayerByteRoutesRefuseWhatIsNotAFile(t *testing.T) {
 		requests++
 		req := httptest.NewRequest(method, target, nil)
 		req.RemoteAddr = "127.0.0.1:1"
+		req.Host = testConsoleHost
 		return fsutiltest.ServeWithin(t, h, req, pipe, sidecar)
 	}
 	refused := func(label string, rec *httptest.ResponseRecorder, status int, code string) {

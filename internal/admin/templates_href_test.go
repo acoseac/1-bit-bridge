@@ -66,6 +66,7 @@ func TestTemplateHrefsResolveToRegisteredRoutes(t *testing.T) {
 		t.Run(ref.target, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, ref.target, nil)
 			req.RemoteAddr = "127.0.0.1:12345"
+			req.Host = testConsoleHost
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			if rec.Code == http.StatusNotFound {
