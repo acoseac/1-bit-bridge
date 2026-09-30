@@ -147,7 +147,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design. Nor on a `bridge init` rewrite: it keeps the pair the config names (`tlsCertPath`, or the data dir's) and the data dir, which `--force` dropped until 2026-09-27 (the `cmd/bridge` bullet on what a rewrite keeps).
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what the public demo and the hosted tenants run, and what `bridge.ars.md` ran as the operator bridge until it moved to a home NUC on 2026-09-22; this bullet omitted public mode until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
-- **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
+- **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`, as `restart.request`, which also makes serve exit with `supervision.RestartExitCode` (75) where a stop exits 0: launchd and the Windows SCM relaunch only the former (B201, under **Config, settings and process lifecycle**).
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with ONE 5s window, which the LAN and tailnet servers drain under together, to protect active media streams, and never waits on a handler past it: an HTTP/3 drain gets the window plus a 1 s allowance for quic-go's force-close, and a handler still running then costs a line (the serve-wiring section's HTTP/3 drain bullets).
 - **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
@@ -4795,6 +4795,47 @@ no failing test — which is the shape to expect in this area.
   SIGINT/SIGTERM**, never `os.Exit(0)` — that is what honours the `bgScans`
   WaitGroup (SQLite corruption), cleans up in-flight jobs, and flushes the auth
   store's debounce buffer. Same rule for the updater's auto-install restart.
+- **…and a restart request exits with `supervision.RestartExitCode` (75),
+  a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29,
+  backlog B201). The console's Restart, "Install & restart" and the
+  auto-installer's restart all exited 0, and the LaunchAgent `bridge init`
+  writes relaunches an unsuccessful exit only (KeepAlive
+  {SuccessfulExit: false}), while the Windows service had no recovery
+  actions: measured under a real LaunchAgent on the dev Mac and a real SCM
+  service on nomos, `restarting: true`, then exit 0 and nothing listening,
+  for good. `serveRestart.request` marks the stop and calls runServe's own
+  cancel (so the whole shutdown runs, the rule above), and runServe's
+  second defer turns a clean exit after a request into 75 (EX_TEMPFAIL):
+  launchd relaunched the probe with `last exit code = 75: EX_TEMPFAIL`,
+  and a SIGTERM (`launchctl kill`) still exited 0 and stayed down.
+  `admin.Deps.Restart` and `AutoInstallRestart` are both
+  `restart.request`, never a bare `cancel`
+  (`TestEveryRestartInServeGoesThroughTheRestartRequest` reads the wiring;
+  `TestARestartRequestedFromTheConsoleExitsToBeRestarted` drives the
+  console's). **Windows needs two more parts, both load-bearing**: the
+  service's recovery actions (restart after 2 s, 2 s, then 30 s, reset
+  after an hour) with `FailureActionsOnNonCrashFailures`, set by the
+  installer and, for a service installed before v0.2.1, by the running
+  service itself as it starts (`packaging.EnsureServiceRecovery` with its
+  own name, args[0]; it leaves recovery an operator configured alone), since
+  a console update replaces the binary and never re-installs; and the
+  service handler returns the exit code WITHOUT reporting Stopped first,
+  because the SCM takes the exit code from the first Stopped status: the
+  old handler's early Stopped (exit 0) made a failure read as a clean stop
+  (measured on nomos with recovery set: the early-Stopped build stayed down
+  with exit code 0; the fixed one logged event 7024, "service-specific
+  error 75", then 7031, "corrective action … Restart the service", and was
+  back in 4 s; an SCM Stop stays stopped). systemd's Restart=always restarts
+  either (its journal names this one 75/TEMPFAIL), and Docker's
+  `on-failure` policy, which restarts a non-zero exit, now relaunches it
+  too (docs/docker.md). **And `bridge start` kickstarts a
+  loaded agent**: `launchctl bootstrap` of one answers "Bootstrap failed:
+  5: Input/output error" on macOS 27, which `startForOS` did not swallow,
+  so `bridge start` over the stopped agent failed; a kickstart starts a
+  loaded agent and leaves a running one alone (both measured).
+  **Release note**: a macOS or Windows service install that updates from
+  v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
+  comes back down: run `bridge restart` once after that update.
 - **Atomic writes: stage, then rename with retry.** `RenameWithRetry` absorbs
   the Windows AV scan-on-close window; the deferred `Close` must be registered
   AFTER the deferred `Remove` (LIFO — Windows won't unlink an open file).

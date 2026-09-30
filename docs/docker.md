@@ -245,11 +245,12 @@ docker run -d \
 
 **`--restart unless-stopped` is load-bearing, not hygiene.** The admin
 console's Restart action (and an operator-triggered update install)
-exits the process **cleanly** and relies on the supervisor to relaunch
-it. Docker's default policy (`no`) — and `on-failure`, which ignores
-clean exits — leave the container permanently stopped after either of
-those. `unless-stopped` relaunches any exit while still honouring an
-explicit `docker stop`. The shipped `compose.yaml` already sets it.
+stops the process and relies on the supervisor to relaunch it: it exits
+with status 75, where a stop exits 0. Docker's default policy (`no`)
+leaves the container permanently stopped after either of those; images
+up to v0.2.0 exited 0 there, which `on-failure` ignores too.
+`unless-stopped` relaunches any exit while still honouring an explicit
+`docker stop`. The shipped `compose.yaml` already sets it.
 
 iOS devices pair against `https://<host>:7788` with the
 fingerprint shown by `docker exec 1-bit-bridge bridge cert info`
