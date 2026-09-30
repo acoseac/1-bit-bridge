@@ -100,8 +100,11 @@ func timePtrIfSet(t time.Time) *time.Time {
 
 // analysisPoolStatsClosure adapts analyze.Pool.Stats to the admin's
 // UpscalePoolStats DTO (field sets match one-for-one; ActiveWorkers
-// stays empty — the analysis pool has no per-worker grid). nil pool →
-// nil closure → the admin omits the `pool` field entirely.
+// stays empty — the analysis pool has no per-worker grid). It answers
+// whatever the analysis gate says: serve builds the pool on every
+// bridge (#781), and the console's handler leaves the `pool` field out
+// while the gate is closed (getAnalysisStatsSnapshot). nil pool (a
+// caller with none) → nil closure → the admin omits the field too.
 func analysisPoolStatsClosure(pool *analyze.Pool) func() *admin.UpscalePoolStats {
 	if pool == nil {
 		return nil
@@ -218,8 +221,11 @@ func valueOr[T any](f func() T, fallback T) T {
 // than reading as switched off: a card that answered the switches alone
 // said "on" through every sweep a missing sox turned into failures.
 //
-// nil recorder → nil closure → the card is omitted entirely, which is
-// what a bridge with no upscale pool should render.
+// nil recorder → nil closure → the card is omitted entirely. serve
+// passes a recorder on every bridge, the sweeper running whatever the
+// switches say (#781), so only a caller with no sweeper omits it; this
+// named "a bridge with no upscale pool", which #781 retired, until
+// 2026-09-29.
 func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[admin.AutoOptimizeSweepCounts]) func() *admin.AutoOptimizeJobState {
 	if status == nil || enabled == nil || active == nil {
 		return nil

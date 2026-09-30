@@ -132,8 +132,15 @@ func withUsableSox(o *serveOpts) {
 // PATCH and requires the report to call the change live.
 func patchUpscaleEnabled(t *testing.T, client *http.Client, adminBase string, on bool, stderr *safeBuffer) {
 	t.Helper()
+	patchSwitchLive(t, client, adminBase, "upscaleEnabled", on, stderr)
+}
+
+// patchSwitchLive sets one of the settings PATCH's boolean fields and
+// requires the report to call the change live.
+func patchSwitchLive(t *testing.T, client *http.Client, adminBase, field string, on bool, stderr *safeBuffer) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPatch, adminBase+"/api/settings",
-		strings.NewReader(fmt.Sprintf(`{"upscaleEnabled":%t}`, on)))
+		strings.NewReader(fmt.Sprintf(`{%q:%t}`, field, on)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +152,7 @@ func patchUpscaleEnabled(t *testing.T, client *http.Client, adminBase string, on
 	raw, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PATCH /api/settings {upscaleEnabled:%t} = %d: %s", on, resp.StatusCode, raw)
+		t.Fatalf("PATCH /api/settings {%s:%t} = %d: %s", field, on, resp.StatusCode, raw)
 	}
 	var report struct {
 		Fields map[string]struct {
@@ -155,8 +162,8 @@ func patchUpscaleEnabled(t *testing.T, client *http.Client, adminBase string, on
 	if err := json.Unmarshal(raw, &report); err != nil {
 		t.Fatalf("decode the settings report: %v: %s", err, raw)
 	}
-	if got := report.Fields["upscaleEnabled"].Status; got != "live" {
-		t.Fatalf("the settings report calls upscaleEnabled %q, want \"live\": %s", got, raw)
+	if got := report.Fields[field].Status; got != "live" {
+		t.Fatalf("the settings report calls %s %q, want \"live\": %s", field, got, raw)
 	}
 }
 

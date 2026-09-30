@@ -325,8 +325,11 @@ type Deps struct {
 	// appear to work while doing nothing for exactly the files the operator
 	// just watched fail.
 	//
-	// Wired in cmd/bridge/main.go only when fingerprinting is enabled; nil is
-	// a no-op, which is correct — with no sweeper there is no cache to clear.
+	// Wired in cmd/bridge/main.go on every bridge: the cache and the sweeper
+	// are built whatever the switch says, which a live gate decides (#770,
+	// #781). Nil (a harness) is a no-op. This said it was wired only with
+	// fingerprinting enabled, and that no sweeper meant no cache to clear,
+	// until 2026-09-29.
 	FingerprintForget func(prefix string) int
 
 	// EnrichSkipReasons returns the enricher's process-lifetime tally of
@@ -442,18 +445,18 @@ type Deps struct {
 	// analyze.Pool's counters. Reuses the UpscalePoolStats DTO —
 	// analyze.PoolStats' field set matches transcode.PoolStats
 	// one-for-one (ActiveWorkers stays empty; the analysis pool has no
-	// per-worker grid). Unlike UpscaleStats it does not read the gate:
-	// serve builds the pool on every bridge (#781) and wires this
-	// whatever the gate says, so the `pool` field is present with the
-	// feature off too, and only a nil closure (a test harness) omits
-	// it. Wired in cmd/bridge/main.go.
+	// per-worker grid). It answers whatever the gate says: serve builds
+	// the pool on every bridge (#781) and wires this on every bridge.
+	// The HANDLER leaves the `pool` field out while the live gate
+	// (AnalysisActive) is closed, from the read that sets `enabled`, as
+	// the upscale tile leaves its pool out: counters beside an off badge
+	// read as a feature that is on and idle. Until 2026-09-29 the
+	// handler set the field whenever this was wired, so the Jobs card
+	// showed "0 queued · 0 in flight · 4 done" beside its off badge
+	// (backlog B113). Nil (a test harness) omits the field too. Wired in
+	// cmd/bridge/main.go.
 	AnalysisPoolStats func() *UpscalePoolStats
 
-	// AnalysisSweep returns the serve-side auto-analysis sweeper's
-	// lifecycle snapshot (running / last sweep timestamps + counts /
-	// next due). Ephemeral "since process start" state recorded by
-	// cmd/bridge's sweepStatus; nil-safe — absent omits the `sweep`
-	// field.
 	// DoctorRun executes the preflight checks and returns the report,
 	// wired by cmd/bridge so internal/admin needs no dependency on
 	// internal/doctor and the Deps assembly (config paths, roots, ports,
@@ -469,6 +472,13 @@ type Deps struct {
 	// than erroring).
 	DoctorRun func(ctx context.Context) *DoctorReport
 
+	// AnalysisSweep returns the serve-side auto-analysis sweeper's
+	// lifecycle snapshot (running / last sweep timestamps + counts /
+	// next due). Ephemeral "since process start" state recorded by
+	// cmd/bridge's sweepStatus, wired on every bridge, since the sweeper
+	// runs on every bridge (a pass the gate refuses records nothing, so
+	// the counts stay the last run's). Nil-safe — absent omits the
+	// `sweep` field.
 	AnalysisSweep func() *AnalysisSweepState
 
 	// TriggerAnalysisSweep queues an out-of-band auto-analysis sweep by
@@ -503,9 +513,10 @@ type Deps struct {
 
 	// AutoOptimizeState returns the auto-optimize sweeper's admin
 	// snapshot: the live config flag, the runtime active/degraded verdict,
-	// and the sweeper's lifecycle recorder. Wired for every serve where
-	// an upscale pool exists (even flag-off — the card then explains why
-	// nothing is happening). Nil-safe: absent omits the field.
+	// and the sweeper's lifecycle recorder. Wired for every serve, the
+	// sweeper running whatever the switches say since #781 (even
+	// flag-off — the card then explains why nothing is happening).
+	// Nil-safe: absent (a harness) omits the field.
 	AutoOptimizeState func() *AutoOptimizeJobState
 
 	// TriggerAutoOptimizeSweep — the auto-optimize twin of
@@ -513,8 +524,9 @@ type Deps struct {
 	// hot-apply half of the settings PATCH: flipping
 	// `upscale.autoOptimize.enabled` fires this instead of setting
 	// RestartRequired, because the sweeper reads the flag live (the
-	// TriggerDuplicatesPass precedent). Nil when the sweeper isn't wired
-	// — the PATCH then still persists and takes effect on restart.
+	// TriggerDuplicatesPass precedent). Wired on every serve; nil (a
+	// harness) leaves the PATCH persisting a value that takes effect on
+	// restart.
 	TriggerAutoOptimizeSweep func() bool
 
 	// FingerprintDegraded reports the bounded reason acoustic

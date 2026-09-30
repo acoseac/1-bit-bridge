@@ -347,10 +347,9 @@ func mustFreePort(t *testing.T) int {
 // TestCheckFingerprintToolchain covers the three states an operator can be in.
 //
 // The middle one is the reason this check exists: fpcalc present but no
-// AcoustID key is a SILENT failure. The feature degrades to off at startup
-// with one stderr line that scrolls away, so without a doctor entry the only
-// symptom is that fingerprinting never resolves anything — with nothing
-// anywhere saying why.
+// AcoustID key is a quiet failure. The feature stays inactive with one
+// stderr line per process that scrolls away, so without a doctor entry the
+// CLI shows no symptom but fingerprinting never resolving anything.
 func TestCheckFingerprintToolchain(t *testing.T) {
 	t.Run("disabled is a no-op", func(t *testing.T) {
 		c := checkFingerprintToolchain(t.Context(), Deps{FingerprintEnabled: false})

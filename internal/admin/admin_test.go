@@ -875,9 +875,10 @@ func TestSettingsPatchFingerprint(t *testing.T) {
 }
 
 // TestAnalysisStatsHandler covers GET /api/analysis/stats. Without the
-// serve-side closures wired (feature off / test harness), the response
-// carries no Pool or Sweep — just enabled / sox / cached counts /
-// storage path.
+// serve-side closures wired (a test harness: serve wires both on every
+// bridge), the response carries no Pool or Sweep — just enabled / sox /
+// cached counts / storage path. What the pool line does with the closure
+// wired and the gate closed is TestTheAnalysisPoolLineFollowsTheGate's.
 func TestAnalysisStatsHandler(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
@@ -918,8 +919,8 @@ func TestAnalysisStatsHandler(t *testing.T) {
 	if got.SoxAvailable == nil || !*got.SoxAvailable {
 		t.Error("SoxAvailable should be true when precheck reports nil")
 	}
-	// Pool/Sweep stay absent while the closures aren't wired — absent
-	// must read as "feature machinery off", never as zero-padded idle.
+	// Pool/Sweep stay absent while the closures aren't wired: nothing
+	// is reported that nothing supplied.
 	if got.Pool != nil || got.Sweep != nil {
 		t.Errorf("Pool/Sweep should be nil without closures; got pool=%+v sweep=%+v", got.Pool, got.Sweep)
 	}
@@ -1728,11 +1729,11 @@ func TestAutoOptimizeSweepEndpoint503sWhenUnwired(t *testing.T) {
 }
 
 // TestSettingsPatchAutoOptimizeUnwiredRequiresRestart is the other half of
-// the hot-apply contract: with no sweeper wired (no upscale pool at boot,
-// or the optimize kind opted out) the persisted flag cannot take effect
-// until a restart, so the banner is the honest answer. Reporting a silent
-// success would have the operator flip the switch, see nothing happen, and
-// have nothing to act on.
+// the hot-apply contract: with no sweeper wired the persisted flag cannot
+// take effect until a restart, so the banner is the honest answer.
+// Reporting a silent success would have the operator flip the switch, see
+// nothing happen, and have nothing to act on. serve wires the sweeper on
+// every bridge since #781, so only a harness reaches this branch.
 func TestSettingsPatchAutoOptimizeUnwiredRequiresRestart(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	srv.deps.TriggerAutoOptimizeSweep = nil // no sweeper on this bridge
