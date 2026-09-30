@@ -135,6 +135,65 @@ func dueTickClient(state *StateStore) *Client {
 	}
 }
 
+// mustNotHold fails t for each of subs that text holds, whatever the case of
+// either; what names where text came from.
+func mustNotHold(t *testing.T, what, text string, subs ...string) {
+	t.Helper()
+	for _, s := range subs {
+		if containsFold(text, s) {
+			t.Errorf("%s holds %q:\n%s", what, s, text)
+		}
+	}
+}
+
+// mustFileNotHold fails t for each of subs the file at path holds.
+func mustFileNotHold(t *testing.T, path string, subs ...string) {
+	t.Helper()
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNotHold(t, "the state file", string(onDisk), subs...)
+}
+
+// mustLogNeither fails t for each line rec holds, at any level, that carries
+// the stored token or the stored secret.
+func mustLogNeither(t *testing.T, rec *loggingtest.Recorder) {
+	t.Helper()
+	for _, line := range rec.All() {
+		mustNotHold(t, "a log line", line, storedToken, storedSecret)
+	}
+}
+
+// mustHoldNoCredential fails t unless state offers the premium cover fetch no
+// credential and holds none, and kept the sync position writeHarvestState
+// wrote: the drop is the credential's, not the file's.
+func mustHoldNoCredential(t *testing.T, state *StateStore) {
+	t.Helper()
+	if _, _, ok := state.AtlasCredential(); ok {
+		t.Error("AtlasCredential offers the premium cover fetch a credential against the stored base")
+	}
+	snap := state.Snapshot()
+	if snap.Token != "" || snap.AtlasBaseURL != "" || !snap.ExpiresAt.IsZero() {
+		t.Errorf("the store still holds the credential: token %q, base %q, expiry %v",
+			snap.Token, snap.AtlasBaseURL, snap.ExpiresAt)
+	}
+	if snap.ResultCursor != 42 || snap.PendingCovers[relCoverOnly] != 1 {
+		t.Errorf("the drop took the sync position with it: cursor %d, pending %v", snap.ResultCursor, snap.PendingCovers)
+	}
+}
+
+// loggedTickError reports whether rec holds a tick_error of phase that names
+// hostPort, the address the request went to.
+func loggedTickError(rec *loggingtest.Recorder, phase, hostPort string) bool {
+	for _, line := range rec.Failures("atlasharvest.tick_error") {
+		if strings.Contains(line, "phase="+phase) && strings.Contains(line, hostPort) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed pins backlog B97 (and the
 // stored-base half of B49): the harvest state store holds the Atlas base only
 // in the one form the credential endpoint stores, scheme://host naming a
@@ -160,27 +219,8 @@ func TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("OpenStateStore: %v", err)
 			}
-			if _, _, ok := state.AtlasCredential(); ok {
-				t.Error("AtlasCredential offers the premium cover fetch a credential against the stored base")
-			}
-			snap := state.Snapshot()
-			if snap.Token != "" || snap.AtlasBaseURL != "" || !snap.ExpiresAt.IsZero() {
-				t.Errorf("the store still holds the credential: token %q, base %q, expiry %v",
-					snap.Token, snap.AtlasBaseURL, snap.ExpiresAt)
-			}
-			if snap.ResultCursor != 42 || snap.PendingCovers[relCoverOnly] != 1 {
-				t.Errorf("the drop took the sync position with it: cursor %d, pending %v", snap.ResultCursor, snap.PendingCovers)
-			}
-
-			onDisk, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, s := range []string{storedToken, storedSecret} {
-				if containsFold(string(onDisk), s) {
-					t.Errorf("the state file still holds %q after the open dropped it:\n%s", s, onDisk)
-				}
-			}
+			mustHoldNoCredential(t, state)
+			mustFileNotHold(t, path, storedToken, storedSecret)
 			if got := rec.Lines("atlasharvest.state.base_refused"); len(got) != 1 {
 				t.Errorf("logged the drop %d times, want once: %v", len(got), rec.All())
 			}
@@ -190,13 +230,7 @@ func TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed(t *testing.T) {
 			for _, c := range atlas.connections() {
 				t.Errorf("the harvest client connected to the stored base's address (first bytes %q)", c)
 			}
-			for _, line := range rec.All() {
-				for _, s := range []string{storedToken, storedSecret} {
-					if containsFold(line, s) {
-						t.Errorf("a log line carries %q: %s", s, line)
-					}
-				}
-			}
+			mustLogNeither(t, rec)
 		})
 	}
 
@@ -222,15 +256,9 @@ func TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed(t *testing.T) {
 		if n := len(atlas.connections()); n < 2 {
 			t.Errorf("the harvest client made %d connections, want one per due leg (submit, poll)", n)
 		}
-		for _, phase := range []string{"phase=submit", "phase=poll"} {
-			found := false
-			for _, line := range rec.Failures("atlasharvest.tick_error") {
-				if strings.Contains(line, phase) && strings.Contains(line, atlas.hostPort()) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("no tick_error with %s naming %s: %v", phase, atlas.hostPort(), rec.All())
+		for _, phase := range []string{"submit", "poll"} {
+			if !loggedTickError(rec, phase, atlas.hostPort()) {
+				t.Errorf("no tick_error with phase=%s naming %s: %v", phase, atlas.hostPort(), rec.All())
 			}
 		}
 		if got := rec.Lines("atlasharvest.state.base_refused"); len(got) != 0 {
@@ -250,14 +278,55 @@ func TestARevokeLeavesNoStoredBaseBehind(t *testing.T) {
 	if err := ClearStoredCredential(path); err != nil {
 		t.Fatal(err)
 	}
-	onDisk, err := os.ReadFile(path)
+	mustFileNotHold(t, path, storedToken, storedSecret)
+}
+
+// heldCredential is a store holding a credential against
+// https://atlas.example at cursor 42, the file it was written to, and that
+// file's stat, for a test that must show a refused write changed neither.
+type heldCredential struct {
+	state   *StateStore
+	path    string
+	expires time.Time
+	file    os.FileInfo
+}
+
+func newHeldCredential(t *testing.T) heldCredential {
+	t.Helper()
+	h := heldCredential{
+		path:    filepath.Join(t.TempDir(), "atlas-harvest.json"),
+		expires: time.Now().Add(time.Hour).UTC().Truncate(time.Second),
+	}
+	h.state = mustOpenState(t, h.path)
+	if err := h.state.SetCredential("bh-held", "https://atlas.example", h.expires); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.state.SetCursor(42); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	if h.file, err = os.Stat(h.path); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// mustBeUnchanged fails t when the store or its file moved since
+// newHeldCredential. Every write stages a new file and renames it over the
+// path, so a rewrite is another file (CLAUDE.md's rule against mtimes).
+func (h heldCredential) mustBeUnchanged(t *testing.T) {
+	t.Helper()
+	snap := h.state.Snapshot()
+	if snap.Token != "bh-held" || snap.AtlasBaseURL != "https://atlas.example" ||
+		!snap.ExpiresAt.Equal(h.expires) || snap.ResultCursor != 42 {
+		t.Errorf("a refused SetCredential changed the store: %+v", snap)
+	}
+	after, err := os.Stat(h.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{storedToken, storedSecret} {
-		if containsFold(string(onDisk), s) {
-			t.Errorf("the state file still holds %q after the revoke:\n%s", s, onDisk)
-		}
+	if !os.SameFile(h.file, after) {
+		t.Error("a refused SetCredential rewrote the state file")
 	}
 }
 
@@ -270,43 +339,13 @@ func TestARevokeLeavesNoStoredBaseBehind(t *testing.T) {
 func TestSetCredentialRefusesABaseThatIsNotSchemeAndHost(t *testing.T) {
 	for _, shape := range storedBaseShapes {
 		t.Run(shape.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "atlas-harvest.json")
-			state := mustOpenState(t, path)
-			expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-			if err := state.SetCredential("bh-held", "https://atlas.example", expires); err != nil {
-				t.Fatal(err)
-			}
-			if err := state.SetCursor(42); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			err = state.SetCredential(storedToken, shape.base("atlas.example:8443"), time.Now().Add(2*time.Hour))
+			h := newHeldCredential(t)
+			err := h.state.SetCredential(storedToken, shape.base("atlas.example:8443"), time.Now().Add(2*time.Hour))
 			if err == nil {
 				t.Fatal("SetCredential stored the base")
 			}
-			for _, s := range []string{storedToken, storedSecret, "atlas.example:8443"} {
-				if containsFold(err.Error(), s) {
-					t.Errorf("the refusal names %q: %v", s, err)
-				}
-			}
-			snap := state.Snapshot()
-			if snap.Token != "bh-held" || snap.AtlasBaseURL != "https://atlas.example" ||
-				!snap.ExpiresAt.Equal(expires) || snap.ResultCursor != 42 {
-				t.Errorf("a refused SetCredential changed the store: %+v", snap)
-			}
-			after, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Every write stages a new file and renames it over the path, so
-			// a rewrite is another file (CLAUDE.md's rule against mtimes).
-			if !os.SameFile(before, after) {
-				t.Error("a refused SetCredential rewrote the state file")
-			}
+			mustNotHold(t, "the refusal", err.Error(), storedToken, storedSecret, "atlas.example:8443")
+			h.mustBeUnchanged(t)
 		})
 	}
 	t.Run("an empty base", func(t *testing.T) {
@@ -323,11 +362,10 @@ func TestSetCredentialRefusesABaseThatIsNotSchemeAndHost(t *testing.T) {
 // TestTheStoreHoldsABaseInItsCanonicalForm pins the other half of "one
 // value": a base that reduces to scheme://host (a trailing slash, the default
 // port or an empty one, an uppercase scheme, surrounding space) is held in
-// that reduced form,
-// through SetCredential and through a file that holds the long form, which
-// keeps its credential and its sync position. So a re-provision of the same
-// host, which the endpoint sends in the reduced form, is not taken for a new
-// Atlas and does not reset the cursor.
+// that reduced form, through SetCredential and through a file that holds the
+// long form, which keeps its credential and its sync position. So a
+// re-provision of the same host, which the endpoint sends in the reduced
+// form, is not taken for a new Atlas and does not reset the cursor.
 func TestTheStoreHoldsABaseInItsCanonicalForm(t *testing.T) {
 	const want = "https://atlas.example"
 	for _, in := range []string{
@@ -390,9 +428,5 @@ func TestOpeningAStoreThatCannotDropItsBaseFails(t *testing.T) {
 		}
 		t.Fatal("the open answered though the drop was not written, and the file still holds the credential")
 	}
-	for _, s := range []string{storedToken, storedSecret} {
-		if containsFold(err.Error(), s) {
-			t.Errorf("the error names %q: %v", s, err)
-		}
-	}
+	mustNotHold(t, "the error", err.Error(), storedToken, storedSecret)
 }

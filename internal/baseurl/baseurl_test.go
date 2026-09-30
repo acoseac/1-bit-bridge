@@ -53,25 +53,26 @@ func TestTheReductions(t *testing.T) {
 		{"a port that is not a number", "https://atlas.example:443:443", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := CanonicalHTTPS(tc.in); got != tc.canonical {
-				t.Errorf("CanonicalHTTPS(%q) = %q, want %q", tc.in, got, tc.canonical)
-			}
-			if got := CredentialBase(tc.in); got != tc.credential {
-				t.Errorf("CredentialBase(%q) = %q, want %q", tc.in, got, tc.credential)
-			}
+			mustReduce(t, "CanonicalHTTPS", CanonicalHTTPS, tc.in, tc.canonical)
+			mustReduce(t, "CredentialBase", CredentialBase, tc.in, tc.credential)
 			if got := NamesHost(tc.in); got != tc.namesHost {
 				t.Errorf("NamesHost(%q) = %v, want %v", tc.in, got, tc.namesHost)
 			}
-			if tc.canonical != "" {
-				if again := CanonicalHTTPS(tc.canonical); again != tc.canonical {
-					t.Errorf("CanonicalHTTPS is not a fixed point on %q: %q", tc.canonical, again)
-				}
-			}
-			if tc.credential != "" {
-				if again := CredentialBase(tc.credential); again != tc.credential {
-					t.Errorf("CredentialBase is not a fixed point on %q: %q", tc.credential, again)
-				}
-			}
 		})
+	}
+}
+
+// mustReduce fails t unless reduce answers want for in, and, when want is not
+// "", answers want again for want: the fixed point TestTheReductions pins.
+func mustReduce(t *testing.T, name string, reduce func(string) string, in, want string) {
+	t.Helper()
+	if got := reduce(in); got != want {
+		t.Errorf("%s(%q) = %q, want %q", name, in, got, want)
+	}
+	if want == "" {
+		return
+	}
+	if again := reduce(want); again != want {
+		t.Errorf("%s is not a fixed point on %q: %q", name, want, again)
 	}
 }
