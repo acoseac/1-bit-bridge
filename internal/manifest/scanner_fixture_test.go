@@ -99,6 +99,19 @@ func caseSensitiveFS(t *testing.T, dir string) bool {
 	return os.IsNotExist(err)
 }
 
+// readTrack reads the row at rel, failing the test when there is none. The
+// Track carries the version it was read at, which a test that stamps or
+// reconciles the row (MarkEnriched, applyReconciledTracks) needs: both refuse
+// a Track the store did not hand out.
+func readTrack(t *testing.T, store *Store, rel string) *Track {
+	t.Helper()
+	tr, err := store.GetTrack(context.Background(), rel)
+	if err != nil || tr == nil {
+		t.Fatalf("GetTrack(%s): err=%v nil=%v", rel, err, tr == nil)
+	}
+	return tr
+}
+
 // rowTitle returns the title of the row at rel, and "" with ok false when
 // there is no row.
 func rowTitle(t *testing.T, store *Store, rel string) (title string, ok bool) {

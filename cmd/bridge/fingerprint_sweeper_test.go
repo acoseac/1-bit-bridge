@@ -353,6 +353,7 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 	// Both are eligible in every other respect: real file, PCM, a duration
 	// inside the gate's window, and missing exactly what fingerprinting supplies.
 	dur := 240.0
+	seeded := map[string]*manifest.Track{}
 	for _, name := range []string{"tried.flac", "untried.flac"} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
 			t.Fatal(err)
@@ -361,12 +362,11 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 		if err := store.UpsertTrack(ctx, tr); err != nil {
 			t.Fatalf("UpsertTrack %q: %v", name, err)
 		}
+		seeded[name] = tr
 	}
 	// UpsertTrack resets enriched_at to 0, so both rows now read "never tried".
 	// Stamp one of them the way the enricher does when it gives up.
-	if err := store.MarkEnriched(ctx, &manifest.Track{
-		Path: "tried.flac", Size: 5, ModTime: time.Now(), Duration: &dur,
-	}); err != nil {
+	if err := store.MarkEnriched(ctx, seeded["tried.flac"]); err != nil {
 		t.Fatal(err)
 	}
 
