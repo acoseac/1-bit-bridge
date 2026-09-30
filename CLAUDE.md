@@ -4443,8 +4443,9 @@ no failing test — which is the shape to expect in this area.
   bullet under **The wire contract**, and the manual-URL one under **DLNA,
   UPnP and discovery**).
 - **When a change cannot take effect, say so** — but only when the outcome
-  depended on THIS bridge's runtime state (no sweeper wired; applied-but-inert
-  because a toolchain is missing). NOT for "listeners bind once", which is true
+  depended on THIS bridge's runtime state (a Tailscale mode's transition;
+  applied-but-inert because a toolchain is missing; no sweeper wired, which
+  only a harness is since #781). NOT for "listeners bind once", which is true
   everywhere; twenty near-identical strings is how the two that carry
   information get skipped. The verdict is computed inside the update closure,
   never from a static table, because a table cannot see this bridge's wiring.
@@ -7152,6 +7153,45 @@ its twin.** The top list is older, shorter, and read first.
   switch.** `TestAJobCardSaysWhyItIsInactiveBesideItsDescriptionAndClearsWhenActive`
   and `TestTheFingerprintChipReadsTheGateNotTheSwitch` run the shipped
   `renderJobCards` and `renderSettingsPrereqs` under node.
+- **…and a card's LIVE counters follow the gate its badge reads, never
+  the pool's existence** (2026-09-29, backlog B113). The analysis pool is
+  built on every bridge (#781), and `GET /api/analysis/stats` (the SSE
+  `analysis` event, which paints the Jobs card's Queue line) set `pool`
+  whenever `Deps.AnalysisPoolStats` was wired, which serve does on every
+  bridge: with analysis off the card read "off" beside "0 queued · 0 in
+  flight · 4 done · 0 failed (6 workers)" (measured on a real serve after
+  four analyses and a switch-off), where the upscale tile leaves its pool
+  out by the live gate. `getAnalysisStatsSnapshot` sets `pool` only while
+  `enabled`, from the SAME read of `AnalysisActive`, so the two cannot
+  disagree within a snapshot (the closure answers whatever the gate
+  says); the line reads "—", as the upscale tile's live fields do, and the
+  sweeper's lines stay, being the last run's (a pass the gate refuses
+  records nothing). **Gate on the live gate, never the flag**: a flag
+  switched on over a missing sox is the degraded card, and a handler that
+  read `cfg.Analysis.Enabled` put the counters back there
+  (`TestTheAnalysisPoolLineFollowsTheGate` moves the two apart;
+  `TestServeAnalysisPoolLineFollowsTheLiveGate` boots serve both ways).
+  **Residual: a job queued before the gate closed still runs**, and
+  neither tile shows it: a pool drains its queue whatever the gate says
+  (measured: 37 analyses in 114 s after a switch-off, each an `indexed_at`
+  bump; backlog B155). **A comment that explains a gate by a pool, a
+  sweeper or a card being ABSENT with the feature off describes the code
+  before #770 and #781**: the /v1/health gating comment said no
+  `upscale.complete` event can arrive because a disabled bridge has no
+  pool and no `SetOnJobComplete` (both exist on every bridge; the flag
+  goes with the feature because no job can be asked for, and a job queued
+  before the switch-off still publishes one), `WithUpscaleEnqueuer` said
+  it was wired "IFF" the flag and sox, and some thirty more said the same
+  in the stats docblocks, the auto-optimize card, its PATCH reason ("the
+  upscale pool is absent"), the fingerprint cache and a Settings hint
+  ("the Jobs card stays hidden"). `api.AnalysisStats` carried a `pool`
+  that nothing ever set and PROTOCOL.md says is not there; it went (no
+  byte changed). **Every pool, sweeper and closure beside them exists on
+  every bridge, and only the live gates move**: a test that "disables" a
+  feature by wiring nothing tests a bridge serve never runs.
+  `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled` wired no
+  `WithUpscale` and passed with the flag advertised on the gate's WIRING
+  rather than its answer; it wires a gate answering false now and flips it.
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
   grid load (its default is the literal `all`, and `qs()` drops only the
