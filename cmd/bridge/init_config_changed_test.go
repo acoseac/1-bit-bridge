@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,7 +24,7 @@ import (
 
 // TestInitRefusesAConfigThatChangedWhileItRan: a config written while the
 // name prompt waits is left as that writer left it, and the run exits 1
-// having written nothing. With nothing written meanwhile, the run is not
+// without writing it. With nothing written meanwhile, the run is not
 // refused.
 func TestInitRefusesAConfigThatChangedWhileItRan(t *testing.T) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -100,6 +103,76 @@ func checkLeftAsWritten(t *testing.T, cfgDir, written, printed string) {
 	if !strings.Contains(printed, "changed while this init ran") {
 		t.Errorf("the run does not say the config changed while it ran")
 	}
+}
+
+// TestTheChangedConfigCheckIsTheStepBeforeSave: in initCmd, the statement
+// that asks configChangedSinceRead comes directly before the one that calls
+// cfg.Save, so no step of the run falls between the check and the write.
+// The check sat before refuseRewrite first, and the second port pass and the
+// TLS load then ran after it (CodeRabbit's second review of #1106). A change
+// made during those steps cannot be timed from a test without a seam, so the
+// order is pinned here.
+func TestTheChangedConfigCheckIsTheStepBeforeSave(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "init.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "initCmd" && fn.Recv == nil {
+			body = fn.Body.List
+		}
+	}
+	if body == nil {
+		t.Fatal("init.go declares no initCmd")
+	}
+	check, save := statementsCalling(body, isCallOf("configChangedSinceRead")), statementsCalling(body, isCfgSave)
+	if len(check) != 1 || len(save) != 1 {
+		t.Fatalf("initCmd has %d top-level statements calling configChangedSinceRead and %d calling cfg.Save, want one of each",
+			len(check), len(save))
+	}
+	if save[0] != check[0]+1 {
+		t.Errorf("initCmd calls cfg.Save at %s and configChangedSinceRead at %s, %d statements before it; want the check directly before the save",
+			fset.Position(body[save[0]].Pos()), fset.Position(body[check[0]].Pos()), save[0]-check[0])
+	}
+}
+
+// statementsCalling returns the indexes of the statements in list that make
+// a call match accepts, anywhere inside them.
+func statementsCalling(list []ast.Stmt, match func(*ast.CallExpr) bool) []int {
+	var out []int
+	for i, s := range list {
+		found := false
+		ast.Inspect(s, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok && match(c) {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// isCallOf matches a call of the package-level function name.
+func isCallOf(name string) func(*ast.CallExpr) bool {
+	return func(c *ast.CallExpr) bool {
+		id, ok := c.Fun.(*ast.Ident)
+		return ok && id.Name == name
+	}
+}
+
+// isCfgSave matches cfg.Save(…).
+func isCfgSave(c *ast.CallExpr) bool {
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Save" {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == "cfg"
 }
 
 // installAnyLoopback writes a loopback install at cfgDir on two free ports.

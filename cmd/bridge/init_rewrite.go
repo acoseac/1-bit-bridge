@@ -148,23 +148,21 @@ func readConfigAsIs(cfgPath string) configAsRead {
 	return configAsRead{raw: raw, err: err}
 }
 
-// sameAs says a and b read one config: the same bytes, no file both times,
-// or a file neither read could read, which refuseRewrite refuses either way.
+// sameAs says a and b read one config: the same bytes, or no file both
+// times. A read that failed any other way cannot say the config is the one
+// read, so it is a change. (A config the first read could not read never
+// gets this far: refuseRewrite refuses it.)
 func (a configAsRead) sameAs(b configAsRead) bool {
-	aAbsent, bAbsent := errors.Is(a.err, fs.ErrNotExist), errors.Is(b.err, fs.ErrNotExist)
-	switch {
-	case a.err == nil && b.err == nil:
-		return bytes.Equal(a.raw, b.raw)
-	case aAbsent || bAbsent:
-		return aAbsent && bAbsent
-	default:
-		return a.err != nil && b.err != nil
+	if a.err != nil || b.err != nil {
+		return errors.Is(a.err, fs.ErrNotExist) && errors.Is(b.err, fs.ErrNotExist)
 	}
+	return bytes.Equal(a.raw, b.raw)
 }
 
 // configChangedSinceRead refuses a run whose config is no longer the one it
-// read at its start, and says so: asRead is that read. initCmd asks it after
-// its last prompt and before it writes anything.
+// read at its start, and says so: asRead is that read. initCmd asks it right
+// before Config.Save, after every prompt, refusal and check, so what is left
+// between the check and the write is Save's own staging and rename.
 //
 // A run reads the config (what a rewrite keeps, readPriorInstall) and decides
 // whether to keep or replace it before its preflight and its name prompt,
@@ -177,12 +175,19 @@ func (a configAsRead) sameAs(b configAsRead) bool {
 // take them in, which CodeRabbit's security review of #1106 named. The
 // check holds for a first install and a rewrite alike, and for a change the
 // old order let through too (a rewrite keeps what it read at the start).
+//
+// It sat after the last prompt, before anything was written, until the same
+// review's next round: the second port pass and the TLS load ran after it,
+// and a change there was still written over. Right before Save, a refusal
+// can follow a first install's TLS mint, which the next run loads, as it
+// loads the pair a Save that fails leaves. Nothing but an interprocess lock
+// would close the rename that remains, which #1043 declined for tokens.json.
 func configChangedSinceRead(stderr io.Writer, cfgPath string, asRead configAsRead) bool {
 	if asRead.sameAs(readConfigAsIs(cfgPath)) {
 		return false
 	}
 	fmt.Fprintf(stderr, "the config at %s changed while this init ran, after it read it (another init, or an edit?).\n", cfgPath)
-	fmt.Fprintln(stderr, "run init again to decide about the config as it is now; this run wrote nothing.")
+	fmt.Fprintln(stderr, "run init again to decide about the config as it is now; this run did not write it.")
 	return true
 }
 

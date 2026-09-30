@@ -652,13 +652,6 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 	}
 
-	// The config must still be the one this run read and decided about: the
-	// preflight and the name prompt ran since, and another process can have
-	// written it meanwhile (configChangedSinceRead).
-	if configChangedSinceRead(stderr, cfgPath, asRead) {
-		return 1
-	}
-
 	// Whether this run may overwrite the config at all, before anything is
 	// written, the directories included: refuseRewrite.
 	if refuseRewrite(stderr, cfgPath, prior, priorErr) {
@@ -851,6 +844,13 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// The config must still be the one this run read and decided about, and
+	// this is the last step before Save: every prompt, refusal and check ran
+	// since, and another process can have written the config meanwhile
+	// (configChangedSinceRead).
+	if configChangedSinceRead(stderr, cfgPath, asRead) {
+		return 1
+	}
 	if err := cfg.Save(cfgPath); err != nil {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
 		return 1
