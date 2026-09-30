@@ -31767,7 +31767,7 @@ expiry and cursor unchanged, the file not rewritten, by `os.SameFile`),
 `TestARevokeLeavesNoStoredBaseBehind`,
 `TestOpeningAStoreThatCannotDropItsBaseFails` (a read-only directory; skipped
 where the write goes through anyway), `TestTheReductions` (the three
-functions over 33 shapes, each answer reduced again), and
+functions over 31 shapes, each answer reduced again), and
 `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` (the pin handed over as
 serve hands it); a row in `TestAtlasHarvestBaseURLValidation`.
 
