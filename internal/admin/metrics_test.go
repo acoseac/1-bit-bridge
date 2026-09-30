@@ -62,9 +62,9 @@ func assertMetricsRefused(t *testing.T, rw *httptest.ResponseRecorder, why strin
 	}
 }
 
-// proxiedHeaders are the headers the hosted tenants' HAProxy console
-// frontend sets on every request it relays to a tenant's console on
-// 127.0.0.1 (backlog B171).
+// proxiedHeaders are the headers a TLS-terminating reverse proxy on the
+// bridge's own host (HAProxy's `option forwardfor`, say) sets on every
+// request it relays to the console on 127.0.0.1 (backlog B171).
 func proxiedHeaders() http.Header {
 	h := http.Header{}
 	h.Set("X-Forwarded-For", "203.0.113.9")
@@ -72,7 +72,8 @@ func proxiedHeaders() http.Header {
 	return h
 }
 
-const tenantHost = "t1.cloud.example:7789"
+// proxiedHost is the public name such a proxy's clients reach it by.
+const proxiedHost = "bridge.example.com:443"
 
 // TestPublicMetricsThroughASameHostProxyNeedsASession is backlog B171: a proxy
 // on the bridge's own host relays every request from 127.0.0.1, so a source
@@ -81,11 +82,11 @@ const tenantHost = "t1.cloud.example:7789"
 func TestPublicMetricsThroughASameHostProxyNeedsASession(t *testing.T) {
 	srv, _, _ := newPublicTestServer(t, "test-password-123")
 
-	rw := scrapeMetrics(t, srv, "127.0.0.1:54321", tenantHost, proxiedHeaders(), "")
+	rw := scrapeMetrics(t, srv, "127.0.0.1:54321", proxiedHost, proxiedHeaders(), "")
 	assertMetricsRefused(t, rw, "relayed by a same-host proxy, no session")
 
 	withMetricsAllowCIDRs(srv, "127.0.0.1/32", "::1/128")
-	rw = scrapeMetrics(t, srv, "127.0.0.1:54321", tenantHost, proxiedHeaders(), "")
+	rw = scrapeMetrics(t, srv, "127.0.0.1:54321", proxiedHost, proxiedHeaders(), "")
 	assertMetricsRefused(t, rw, "relayed by a same-host proxy whose address metrics.allowCidrs lists")
 }
 
@@ -152,7 +153,7 @@ func TestPublicMetricsAnswersASignedInSession(t *testing.T) {
 		header       http.Header
 		why          string
 	}{
-		{"127.0.0.1:54321", tenantHost, proxiedHeaders(), "through a same-host proxy"},
+		{"127.0.0.1:54321", proxiedHost, proxiedHeaders(), "through a same-host proxy"},
 		{"192.168.1.5:5000", "bridge.example.com:7789", nil, "from the LAN"},
 		{"203.0.113.5:5000", "bridge.example.com", nil, "from the internet"},
 	} {
@@ -160,7 +161,7 @@ func TestPublicMetricsAnswersASignedInSession(t *testing.T) {
 			t.Errorf("signed in, %s: got %d, want the exposition", c.why, rw.Code)
 		}
 	}
-	assertMetricsRefused(t, scrapeMetrics(t, srv, "127.0.0.1:54321", tenantHost, proxiedHeaders(), "not-a-session"),
+	assertMetricsRefused(t, scrapeMetrics(t, srv, "127.0.0.1:54321", proxiedHost, proxiedHeaders(), "not-a-session"),
 		"a cookie that names no session")
 }
 
@@ -192,7 +193,7 @@ func TestAPublicMetricsRefusalFromThisHostOrTheLANIsLoggedOnce(t *testing.T) {
 	srv, _, _ := newPublicTestServer(t, "test-password-123")
 
 	scrapeMetrics(t, srv, "203.0.113.5:5000", "bridge.example.com", nil, "")
-	scrapeMetrics(t, srv, "127.0.0.1:54321", tenantHost, proxiedHeaders(), "")
+	scrapeMetrics(t, srv, "127.0.0.1:54321", proxiedHost, proxiedHeaders(), "")
 	if lines := rec.Lines(msg); len(lines) != 0 {
 		t.Fatalf("a refusal from the internet or through a proxy logged:\n%s", strings.Join(lines, "\n"))
 	}

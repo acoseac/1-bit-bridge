@@ -4583,9 +4583,8 @@ no failing test — which is the shape to expect in this area.
   its address in `metrics.allowCidrs`, which the control plane owns, so the
   paragraph would tell the reader to point a scraper at a URL that refuses
   it. This said until 2026-09-30 that the pointer "is loopback-gated and
-  answers 403"; on a tenant it answered 200 to anyone, through the host's
-  own proxy (backlog B171, under **Auth, pairing, TLS and security
-  posture**).
+  answers 403", a claim about the gate B171 replaced (under **Auth,
+  pairing, TLS and security posture**).
 - **The console must SEND only what it SHOWED.** The settings Save payload is
   an explicit allowlist naming every field, `hideManagedSettings` sets `hidden`
   on the enclosing `.field` rather than removing the input, and a hidden input
@@ -6612,11 +6611,9 @@ its twin.** The top list is older, shorter, and read first.
   header** (2026-09-29, backlog B171). Since #472 it sat on
   `isAuthBypassPath` behind `metricsGate`, which admitted any loopback
   source, and a proxy on the bridge's own host relays every request from
-  127.0.0.1: the hosted tenants' console frontend terminates TLS and
-  connects to each tenant's plain-HTTP console on loopback, so `/metrics`
-  answered the internet while `/api/stats` answered 401 (measured with the
-  real binary on main, with the headers that frontend sets). The bypass is
-  gone, and `metricsGate` with it: `metricsScrapeVouched`, in
+  127.0.0.1, so the gate could not tell the proxy's clients from a local
+  scraper (measured with the real binary; the record is in the log). The
+  bypass is gone, and `metricsGate` with it: `metricsScrapeVouched`, in
   `sessionMiddleware`, is the one exemption, and an unauthenticated
   `/metrics` gets a plain 403 (`errMsgMetricsNeedsSession`), never the
   login redirect, which a scraper follows to HTML it cannot parse.
@@ -6635,8 +6632,7 @@ its twin.** The top list is older, shorter, and read first.
   proxy logs nothing. Loopback mode is unchanged: its boundary admits this
   host alone, and `metrics.allowCidrs` plays no part there, as it never did
   (the boundary refused a non-loopback source before the old gate ran, so
-  #803's list only ever took effect in public mode). Nothing in the
-  conductor scrapes a tenant's `/metrics` (checked 2026-09-30).
+  #803's list only ever took effect in public mode).
 - **Pairing token delivery is read-many**: `Poll` returns the token on every
   authorized poll while Approved, and only a client `DELETE` or TTL+grace
   consumes it. A network blip must be recoverable — **don't add a "clear `RawToken` on first

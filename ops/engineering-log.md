@@ -34622,30 +34622,26 @@ record now that the fix ships.
 
 main at 24523cff, go1.27.1 on macOS, a public fixture (`bridge init --public
 --domain localhost --admin-tls-proxy`, the console on plain HTTP at
-127.0.0.1:27791, `deployment.adminTLSTerminatedByProxy: true`, no
-`metrics.allowCidrs`), curl from 127.0.0.1 with the headers the hosted
-tenants' HAProxy console frontend sets on every request it relays
-(`Host: t1.cloud.example:7789`, `X-Forwarded-For: 203.0.113.9`,
-`X-Forwarded-Proto: https`, read from the conductor's
-`host/haproxy/haproxy.cfg`): `GET /metrics` 200, 9,714 bytes, 19 `bridge_`
-lines; `GET /api/stats` 401. The same `/metrics` straight from loopback: 200.
-(The session that filed B171 measured 10,816 bytes and 33 lines on e256d6b7:
-the count moves with what the process has done.)
+127.0.0.1:27791, no `metrics.allowCidrs`), requests from 127.0.0.1 shaped as a
+TLS-terminating reverse proxy on the same host relays them (forwarding
+headers, the public name in `Host`), without a session: `/metrics` answered
+with the exposition while `/api/stats` answered 401. The request details are
+kept out of this public record, per SECURITY.md.
 
 The cause: #472 put `/metrics` on `isAuthBypassPath` and behind its own
 `metricsGate`, which admitted any loopback source or an address in
 `metrics.allowCidrs`, so a same-host scraper needed no session. A proxy on
 the bridge's own host connects from 127.0.0.1 for every client it relays, so
 in public mode the gate's one question, the source address, was answered by
-the proxy. Nothing in the conductor scrapes a tenant's `/metrics` (a grep of
-~/dev/1-bit-conductor, 2026-09-30), so nothing depended on the hole.
+the proxy. No scraper this project runs depended on the old answer (checked,
+2026-09-30).
 
 ### What was decided
 
 - **A session reads it, as any console page.** `/metrics` is off the bypass
   list and `metricsGate` is gone, so public mode's `sessionMiddleware` decides
   it like every other route. A signed-in operator reads it from wherever the
-  console answers (their browser behind the tenant's proxy included), which
+  console answers (their browser behind a same-host proxy included), which
   widens nothing: the session is already the trust boundary for everything
   else the console shows.
 - **Without a session, only a scrape the config vouches for**
@@ -34665,7 +34661,7 @@ the proxy. Nothing in the conductor scrapes a tenant's `/metrics` (a grep of
   operator knows whether something on the host relays connections to the
   console, and listing `127.0.0.1/32` (and `::1/128`) is how they say it.
   The header check still earns its place: it keeps a listed address honest
-  when a proxy that announces itself (HAProxy's frontend, Caddy, Traefik,
+  when a proxy that announces itself (HAProxy with `option forwardfor`, Caddy, Traefik,
   `tailscale serve`) sits on the same address as the scraper.
 - **The refusal is a 403, not the login redirect.** A scraper follows a 302
   to `/login` and then reports that it cannot parse HTML, where the true
@@ -34698,7 +34694,7 @@ session request answered 200 as well, through the bypass.
 ### Tests
 
 `internal/admin/metrics_test.go`, through the console's real handler chain:
-`TestPublicMetricsThroughASameHostProxyNeedsASession` (the tenant shape,
+`TestPublicMetricsThroughASameHostProxyNeedsASession` (the same-host proxy shape,
 with and without loopback listed),
 `TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames` (no list;
 listed and unlisted sources, IPv4-mapped, an unparseable entry and remote

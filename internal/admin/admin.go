@@ -2411,9 +2411,9 @@ func remoteIP(r *http.Request) net.IP {
 // request without a session (backlog B171): it comes from an address
 // metrics.allowCidrs lists, over a connection that carries no forwarding
 // header. Nothing is implied, loopback included. A proxy on the bridge's
-// own host relays every request from 127.0.0.1 (the hosted tenants'
-// console frontend does), and a relay that adds no header (a TCP relay,
-// nginx's default proxy_pass) cannot be told from a local scraper at all,
+// own host relays every request from 127.0.0.1, and a relay that adds no
+// header (a TCP relay, nginx's default proxy_pass) cannot be told from a
+// local scraper at all,
 // so only the operator can say that nothing on this host relays
 // connections to the console, and listing 127.0.0.1/32 is how they say it.
 // The header check is what keeps a listed address honest when a proxy that
