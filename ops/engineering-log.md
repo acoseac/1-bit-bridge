@@ -33494,3 +33494,161 @@ passed on Windows 11 (nomos, go1.26.6) and on the dev Mac; the whole
   makes only its folder-art half converge.
 - B146: an SACD ISO's virtual rows never carry the cover beside the image
   (measured: both rows of a two-track ISO had "").
+
+## 2026-09-29 — a file its extractor refuses records the refusal, and the skip gate asks its row nothing more until the file or the extractor changes (backlog B145)
+
+### The defect
+
+A file its extractor refuses (read whole, and not its format) is indexed by
+its name. Four extractors refuse: the DSF, DFF, AIFF and WAV walks, for a
+header that is not one ("dsf: bad magic", "dff: bad FRM8 magic", "aiff: bad
+FORM magic", "wav: bad RIFF magic"); every other extractor reads what it can
+of a file that is not its format (dhowden answers a tag it cannot parse as no
+tags, a junk FLAC's format parse is non-fatal) and refuses nothing. The skip
+gate re-extracts an unchanged file for a stale `extractor_version`, a missing
+`local-` cache file, lyrics sidecar drift or folder-art drift, and a refused
+file looped on three of them. Measured with the real scanner on main
+(`75916247`), each case a red test, over a DSF of 136 junk bytes
+(`writeJunkDSF`), the audio opens counted through `Scanner.openAudio`:
+
+- **After a version bump** (`extractor_version` set one back): every scan read
+  the file once and logged `ERROR re-extract (version-stale) … err=dsf: bad
+  magic "not "`, and the column stayed at 18. `reExtractUnchanged` answered a
+  refusal with nil, writing and stamping nothing, under a docblock that gave
+  "the next scan retries" and "a transient NAS flap heals itself" as the
+  reason: that is `readFault`'s job since B134, and a refusal is not a flap.
+  The subtree scan did the same.
+- **Beside a lyrics sidecar, with no bump at all** (`bad.dsf` + a synced
+  `bad.lrc`): three scans, three reads, three ERROR lines. The full path wrote
+  the refused row with no lyrics (`ExtractWithContext` returns before
+  `applySidecarLyrics` on an error), `sidecarLyricsDrifted` then saw a sidecar
+  outranking a row with none (rank 1 against the empty source's 99) and said
+  drift on every scan, and the re-read refused again.
+- **With a `local-` value whose cache file is gone** (a row an older extractor
+  wrote with an embedded picture, the artwork cache since wiped): three scans,
+  three reads, three ERROR lines. `needsLocalArtworkRecovery` asks for a
+  re-read that a refusal can never answer.
+
+B141 had made the fourth, folder art, converge with `folderArtNotLookedKey`
+("-") and `SetFolderArtKey`. The entry's own suggestion, "stamp a refusal's
+version", fixes only the first: the version is current in the other two.
+NC1 below is that design as far as the gate can tell (the version stamped,
+the mark ignored), and the lyrics and cache-file cases each read three times
+in three scans under it.
+
+### Alternatives considered
+
+- **Stamp the version alone.** Fixes the bump, not the lyrics or the art loop,
+  which have no bump to converge (above).
+- **Reuse `folder_art_key = "-"` as the mark.** B141 writes "-" exactly for a
+  refusal, but only where local art is on (`NewScanner(..., "")` records no
+  key, and many scanner tests run that way), and it would make a folder-art
+  key carry a fact about the audio file.
+- **Rewrite the row as the full path would (by name), through the diff.** A
+  row an older extractor read before a stricter one refused the file would
+  lose its tags (the entry's constraint), the rewrite resets `enriched_at` and
+  bumps `indexed_at` once, and the lyrics loop stays: the refusal still
+  carries no lyrics.
+- **Give a refused file its sidecar lyrics** so the lyrics question converges:
+  changes what extraction produces (a bump), and leaves the art loop.
+- **One ERROR line per scan counting the refusals** (`unreadTally`'s shape,
+  the entry's other suggestion). Declined: an unread file is usually one of
+  many behind a mount that dropped, where a refusal is a fact about one file
+  (corrupt, cut short, misnamed) that the operator has to find, and the full
+  path has always named each. With the dedup below each path, size and mtime
+  is named once, which is what made the line noise.
+
+### The change
+
+- `tracks.extract_refused` (v50, column-only, `addColumnsIfMissing` in
+  post()): whether the extraction a row was last written or stamped from
+  refused the file. `Track.extractRefused` (unexported, the
+  `versionStampOnly` shape) carries it: the full path sets it on the refusal
+  it writes, both upserts write it (`= excluded`, unconditionally, so a file
+  that reads clears it), and `GetTrackStat` reads it.
+- `rowIsCurrent` is the gate's question, factored out of the worker: a stale
+  version re-extracts; a refused row at the current version is current, and
+  nothing else is asked of it; any other row asks the art-recovery, lyrics and
+  folder-art questions as before.
+- `reExtractUnchanged` answers a refusal (after `notAFileNow` and
+  `readFault`, in that order) with a `versionStampOnly` Track marked
+  `extractRefused`. `StampExtractorVersionBatch` writes `extract_refused`
+  from every Track it stamps (1 for a refusal, 0 for a Track that read), and
+  skips `writeLyricsRowTx` for a refusal: that write reads a Track with no
+  lyrics as a file that holds none and deletes the row (with an `indexed_at`
+  bump when the old tag was non-empty), which for a row an older extractor
+  wrote is the loss the entry warned about (NC3). The refusal's folder-art key
+  ("-") rides the same stamp, so `SetFolderArtKey`, which wrote it alone, is
+  gone.
+- The version-stale refusal is logged only when the stored row had not
+  recorded one. The full path logs every refusal it writes, as before: it
+  reads a file only when no row describes it (new, changed, or a lookup that
+  failed). So each path, size and mtime is logged once, the analysis strike's
+  rule; a later bump re-reads a refused file once, and says nothing.
+
+### No ExtractorVersion bump; the upgrade
+
+What extraction produces is unchanged. v50 leaves every existing row
+unmarked, which the gate reads as it read every row before, so a refused file
+the gate goes back to (the next bump, or one of the two questions above) is
+read once more, logged once more (its row had not recorded the refusal), and
+marked. Until then an unmarked refused row with no reason to be re-read costs
+nothing. The first scan after v0.2.1 reaches every refused file on a bridge
+upgraded from v0.2.0, since v0.2.1 carries `ExtractorVersion` bumps.
+
+### Tests
+
+`internal/manifest/scanner_refused_file_test.go`, over the real scanner with
+the artwork cache on (`newArtFixture`, which counts audio opens). Red on main
+(`75916247`) as first written, five of the six (the change test was green,
+and is kept as the positive control for what must not change):
+`TestScanner_ARefusedFileIsReadOnceAfterAVersionBump` (for DSF, DFF, AIFF and
+WAV: read once, stamped, the row's tags, stat, `indexed_at` and `enriched_at`
+as they were, read no more, one line in all),
+`TestScanner_ASubtreeScanStampsARefusedFileToo`,
+`TestScanner_ARefusedFileWhoseReadDidNotCompleteIsReadAgain` (an EIO on the
+open keeps the stale version and says so in the unread line; the next scan
+that can read it stamps it and is the last),
+`TestScanner_ARefusedFileIsNotReadForWhatItsExtractionNeverReaches` (the
+lyrics sidecar and the missing cache file, each for a row the scan marked,
+read never, and a row from before the mark, read once and logged once more)
+and `TestScanner_ARefusalKeepsTheRowAnOlderExtractorWrote` (a row with a
+title and an SYLT lyrics row over a file the extractor refuses: stamped, its
+tags, lyrics row, `indexed_at` and `enriched_at` kept, one line).
+`TestScanner_ARefusedFileIsReadAgainWhenItChanges` (a changed refused file is
+read and logged again, once; a readable one is written with its tags and then
+takes its new sidecar) and `TestScanner_AFileTheExtractorNowReadsLosesItsRefusal`
+(a marked row whose file reads is stamped as read, unmoved, and then takes its
+new sidecar) pin the mark's clearing. The store half:
+`TestTheRefusalMarkRidesEveryTrackWrite` and
+`TestMigrationV50AddsTheRefusalMarkIdempotently`. B141's
+`TestScanner_AFileItsExtractorRefusesIsNotReReadForItsFolder` simulated its
+upgrade by clearing the folder-art key alone; a row from before the key is
+from before the mark too, so it clears both now (with only the key cleared,
+the mark kept the file from being read at all, and the test's "read once"
+failed).
+
+### Negative controls
+
+On the committed fix, each restored with `git checkout --` and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `rowIsCurrent` ignores the mark | the lyrics and cache-file cases, all four (three reads in three scans) |
+| NC2: `reExtractUnchanged` answers a refusal with nil (main's shape, the dedup kept) | the bump test (all four formats), the subtree, failed-read and older-extractor tests, both before-the-mark cases, and B141's refusal test |
+| NC3: the stamp of a refusal writes the lyrics row | the older-extractor test and the store test (the lyrics row deleted) |
+| NC4: the full path does not mark a refusal | the bump test (all four: a second line on the re-read) and the two marked cases of the lyrics/cache test (read once, logged twice) |
+| NC5: the version-stale refusal always logs | the bump test (all four: two lines) |
+| NC6: the stamp never clears the mark (`MAX(extract_refused, ?)`) | `TestScanner_AFileTheExtractorNowReadsLosesItsRefusal` (the new sidecar never read) and the store test |
+| NC7: the upserts never clear the mark (`MAX(tracks.…, excluded.…)`) | `TestScanner_ARefusedFileIsReadAgainWhenItChanges` (the readable file's new sidecar never read) and the store test |
+| NC8: a read fault is stamped like a refusal (the `readFault` branch removed) | the failed-read test, and B134's `TestScanner_AVersionStaleFileWhoseReadDidNotCompleteKeepsItsRow` in all 32 cases |
+
+### Not covered, filed
+
+- B157: an `.iso` that is not an SACD image has no row, so `processSACDISO`
+  opens and probes it on every scan (measured: three scans, three opens
+  through `Scanner.openSACD`), logging at Debug only. B145's mark lives on a
+  row; such an image has none.
+- A refused row holding a `local-` value an older extractor gave it, whose
+  cache file is gone, keeps that value: a refusal cannot recover the picture,
+  and the row is not rewritten. It no longer costs a read per scan.
