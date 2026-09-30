@@ -113,7 +113,8 @@ func namedFieldsOf(tr Track) namedFields {
 // picardFields is what a fixture's tag names: its release id, the recording
 // id if it has a UFID, and its gains.
 func picardFields(recording string) namedFields {
-	return namedFields{album: picardAlbumMBID, recording: recording, trackGain: "-6.48", albumGain: "-7.25"}
+	track, album := picardTrackGainDB, picardAlbumGainDB
+	return namedFields{album: picardAlbumMBID, recording: recording, trackGain: gainString(&track), albumGain: gainString(&album)}
 }
 
 // TestPicardsID3v2IdsAndReplayGainReachTheirFields is the regression test for
