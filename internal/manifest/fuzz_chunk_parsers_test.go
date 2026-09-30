@@ -11,7 +11,10 @@
 // and the parser must not depend on them for memory safety.
 package manifest
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 func FuzzParseAIFFCOMMChunk(f *testing.F) {
 	// A real 18-byte COMM: 2 channels, 0x1000 frames, 24-bit, 44100 Hz as an
@@ -48,19 +51,34 @@ func FuzzParseWAVINFOBlock(f *testing.F) {
 	// layer of declared lengths inside an already length-bounded body.
 	f.Add([]byte("INFOINAM\x04\x00\x00\x00abc\x00"))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		var tr Track
-		parseWAVINFOBlock(b, &tr)
+		_ = parseWAVINFOBlock(b)
 	})
 }
 
 func FuzzParseDIINChunks(f *testing.F) {
-	// DSDIFF DIIN sub-chunks decode pstrings (1-byte length + N bytes +
-	// pad-if-odd) inside a 64-bit-length container: two independent length
-	// fields that can disagree.
-	f.Add([]byte("DITI\x00\x00\x00\x00\x00\x00\x00\x05\x04abcd"))
+	// A DSDIFF DIIN chunk's text chunks hold a 4-byte count and the text
+	// (DSDIFF 1.5; backlog B140) inside a 64-bit-length chunk: two length
+	// fields that can disagree, beside the edited master's id and markers.
+	f.Add([]byte("DITI\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x04abcd"))
+	// The body TagLib 2 writes (testdata/dff/taglib_diin.dff): an ISO-8859-1
+	// title of odd size, its pad byte, and an artist.
+	f.Add([]byte("DITI\x00\x00\x00\x00\x00\x00\x00\x1f\x00\x00\x00\x1bPr\xe9lude \xe0 la nuit, premi\xe8re\x00" +
+		"DIAR\x00\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x0dEnsemble DIIN\x00"))
+	// EMID and MARK ahead of the text, and a count past its chunk.
+	f.Add(append(append(append(dffChunk("EMID", []byte("an edited master's id")),
+		dffChunk("MARK", make([]byte, 22))...),
+		dffChunk("DITI", []byte("\x00\x00\x01\x00short"))...),
+		buildDIINSubChunk("DIAR", "After")...))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		var tr Track
-		parseDIINChunks(b, &tr, "fuzz")
+		c := parseDIINChunks(b, "fuzz")
+		for _, v := range []string{c.title, c.artist} {
+			if !utf8.ValidString(v) {
+				t.Fatalf("parseDIINChunks returned text that is not UTF-8: %q", v)
+			}
+		}
+		if c.album != "" || c.genre != "" {
+			t.Fatalf("a DIIN has no album or genre, and parseDIINChunks returned %q / %q", c.album, c.genre)
+		}
 	})
 }
 
@@ -70,7 +88,14 @@ func FuzzParsePropChunks(f *testing.F) {
 	// stay in the fuzz corpus.
 	f.Add([]byte("CHNL\x00\x00\x00\x00\x00\x00\x00\x02\x00\x02"))
 	f.Add([]byte("CMPR\x00\x00\x00\x00\x00\x00\x00\x05DST \x00\x00"))
+	// An ID3 chunk nested among the properties (backlog B140), in both
+	// spellings, the second one ignored.
+	f.Add(append(dffChunk("ID3 ", []byte("ID3\x04\x00\x00\x00\x00\x00\x00")),
+		dffChunk("id3 ", []byte("ID3\x03\x00\x00\x00\x00\x00\x00"))...))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		_ = parsePropChunks(b)
+		info := parsePropChunks(b)
+		if len(info.id3) > len(b) {
+			t.Fatalf("parsePropChunks returned a %d-byte ID3 body from %d bytes", len(info.id3), len(b))
+		}
 	})
 }

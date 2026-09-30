@@ -33653,3 +33653,206 @@ UPnP and harvest closures, whose features are wired at boot and not part of
 - B156: the analysis and fingerprint cards of a switched-off feature say
   "Next sweep: in 5h", for a pass that will stand down (seen in the
   browser).
+
+## 2026-09-29 — a DFF's DIIN and ID3 chunk and a WAV's LIST/INFO reach its row; ExtractorVersion 20 (backlog B140)
+
+B140 read: `parseDIINChunks` fills a DFF's DITI / DIAR / DIAL only into an
+empty Title / Artist / Album, and the scanner's `fillFromPath` fills those
+from the path before extracting, so a scanned DFF never gets its DIIN text.
+True, and the smaller half of it.
+
+### What real files hold, measured
+
+No DFF on the dev Mac carries a DIIN: the twelve Philips reference files of
+the MPEG-4 DST inserts (C043465e, `dsd_data/` and `dst_data/`) have FVER,
+PROP and the sound chunk only. So the first of `dsd_data/` was given a DIIN
+two ways, a DSDIFF 1.5 one (EMID, MARK, then DIAR and DITI as a 4-byte
+big-endian count and the text) and the 1-byte-length ("pstring") one PR #223
+read, and an ID3 chunk from mutagen 1.47 (the library Picard writes with:
+`mutagen.dsdiff` tags a DSDIFF file only through an "ID3 " chunk it appends,
+and knows no DIIN). Read back:
+
+| file | ffmpeg 9.0.2 | TagLib 2.0.2 | MediaInfo 25.04 | bridge (main) |
+|---|---|---|---|---|
+| spec DIIN | title, artist | title, artist | title | nothing |
+| 1-byte DIIN | "ring Title", "ring Artist" | nothing | nothing | title, artist, album, genre |
+| ID3 chunk | nothing | title, artist, album, genre | the same, track 3 | nothing |
+| spec DIIN + ID3 | the DIIN's | the ID3 tag's | the ID3 tag's | nothing |
+
+The bridge read only a layout no reader reads and, since ffmpeg's `avio_rb32`
+takes the 1-byte length and the first three characters as a count, a layout
+no writer makes: a real DITI's first byte is the top byte of its count, 0 for
+any text under 16 MiB, which the old parser took for an empty string. TagLib
+(Debian 13's libtag 2.0.2, in a container on dido) is also a WRITER: saving
+its DIIN tag writes DITI and DIAR with the 4-byte count, the text in
+ISO-8859-1 (`\xe9` for é), and an album set on the tag is dropped on save. The
+DSDIFF 1.5 DIIN holds EMID (an opaque id), MARK (markers in the audio), DIAR
+and DITI; DIAL and DIGN, which PR #223 read as an album and a genre, are in no
+specification and no implementation measured.
+
+Where a file holds both chunks, TagLib's DSDIFF tag answers each field from the
+ID3 chunk first and from the DIIN where that has nothing, in either chunk
+order: `diin_then_id3.dff` and `id3_then_diin.dff` (written by TagLib and
+mutagen in both orders) both read title and album from the ID3 tag and the
+artist, which the ID3 tag lacks, from the DIIN. MediaInfo shows the ID3 values.
+That is the precedence taken.
+
+The iOS app reads no DFF tags at all: `MetadataExtractionRoute` gives `.dff` no
+extractor, `DFFParser` defers DIIN and COMT to "the bridge's manifest", and the
+scanner's `enrichDFF` types the file (`DFFHeadScan`) and nothing else. So the
+bridge's precedence is the one users see, there is no Mirror-PR, and an app
+reader added later takes the same order (backlog B149).
+
+### The same defect in the WAV walk
+
+A sweep for the pattern (a write of Title, Artist or Album guarded on the field
+being empty) found exactly two sites: the DIIN parser and `parseWAVINFOBlock`.
+A WAV's LIST/INFO title, artist and album lost to the path's guess in every
+scan the same way; its genre did not, the path guessing none. A scan on main
+stored title "info", artist and album from the folders, genre "Info Genre" for
+a WAV whose INFO named all four.
+
+### The change
+
+- `containerText` (container_text.go) is a container's own text: a DIIN's title
+  and artist, an INFO chunk's title, artist, album and genre. Both walks gather
+  it (`keepFirst`: the first chunk to name a field keeps it) and apply it once
+  the walk is over (`applyUnder`): each field it has a value for replaces the
+  track's, unless the file's ID3 tag has a value for that field (the test
+  `populateFromTagMetadata` makes: not empty once trimmed). Applying after the
+  walk is what makes the answer independent of chunk order.
+- `parseDIINChunks` reads DITI and DIAR as a 4-byte count and that many bytes
+  (`readDIINText`; a count past its chunk is no text and a line), decoded by
+  `diinText`: cut at the first NUL, UTF-8 when valid, ISO-8859-1 otherwise,
+  trimmed. It returns the text rather than writing the Track, and reads no DIAL
+  or DIGN.
+- The DFF walk reads an "ID3 " or "id3 " chunk through `applyEmbeddedID3`, as the
+  AIFF and WAV walks do (the B99/B101 guards and the B117 buffer come with it),
+  and hands its tag to `extractLocalArtwork`, so its picture is the cover.
+  `maxID3ChunkSize` (32 MiB) is now the one cap of the three walkers.
+- `readDFFTagChunk` reads a DIIN or ID3 body only once the file is known to
+  hold it (the `payloadFits` rule; an unknown size fails open). A chunk the file
+  ends inside ends the walk, and `finish` stamps what the walk gathered: until
+  now the DIIN arm allocated the declared body (up to 1 MiB), failed its read,
+  and the extractor's error left the file indexed by name, with no sample rate or
+  DSD flag. New log lines name the file library-relative (`trackLogPath`).
+- ExtractorVersion 20. Rows of files carrying such text change (a DFF with a
+  DIIN or ID3 chunk, a WAV whose INFO names a title, artist or album, a DFF cut
+  short in a trailing DIIN): the full-upsert leg, the iOS delta, and a
+  re-enrichment, the enricher having searched MusicBrainz with the folder names.
+  Every other row rides the version-stamp leg.
+
+No wire change: the fields exist. The public site's learn page says `.dff`
+"lacks a standard metadata tagging system", which stays true of the format.
+
+### Tests
+
+- Fixtures by real writers (`testdata/gen/dff_tag_fixtures.sh`, run in a Debian
+  13 container with python3-mutagen and libtag-dev): TagLib's DIIN
+  (`taglib_diin.dff`, an ISO-8859-1 title of odd size), mutagen's ID3v2.4 UTF-16
+  tag (`picard_id3.dff`), and both in both orders. The base under the tags is
+  written by the script; what is under test is how the writers lay out their
+  chunks. 472 to 612 bytes each.
+- `TestDFFReadsTheTagsItsWritersWrite` (extractor), `TestScanner_ADFFsOwnTagsOutrankThePathsGuess`
+  and `TestScanner_AWAVsListInfoOutranksThePathsGuess` (a real scan, each file
+  alone in a directory, since the scanner's album reconciliation unifies a
+  directory's albums: with the WAVs side by side it gave the untagged one the
+  others' "Info Album", and the DFF test passed only on a tie),
+  `TestScanner_EveryFormatsOwnTitleOutranksThePathsGuess` (one file of each of
+  B134's extractor families, which gained "WAV (LIST/INFO)" and "DFF (ID3
+  chunk)"; the DFF entry tells its versions apart by title now, not by rate),
+  `TestExtractDFF_AChunkPastTheEndOfTheFileKeepsTheFormat` (a 900 KiB DIIN and a
+  30 MiB ID3 chunk declared in a 216-byte file: format stamped,
+  allocation under the declared size), `TestExtractDFF_TheCoverInItsID3ChunkIsItsCover`,
+  `TestScanner_V20_ARowWhoseOwnTagsWereLostJoinsTheDelta_APlainRowOnlyStamps`,
+  and `TestNoExtractorFillsAPathGuessedFieldOnlyWhenEmpty` (an AST sweep of the
+  package: a comparison of Title, Artist or Album with "" outside `fillFromPath`
+  and `mergePostScanFields` fails it; on main it named the six sites).
+- The DIIN tests in `extractors_dff_diin_test.go` were built on the 1-byte
+  layout (`buildDIINSubChunk`), so they encoded the defect; the builder writes
+  the DSDIFF 1.5 layout now and the tests expect no album or genre.
+- The B134 table's WAV (LIST/INFO) entry first used a fixture with no fmt or data
+  chunk; its walk never seeks, so the "a seek fails" case wrote the new title and
+  failed. A real WAV has both chunks (the data chunk's position is a seek), and
+  the entry uses one.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+- The 1-byte layout back in `readDIINText`: the DIIN fixtures (extractor and
+  scan), the DFF sweep entry, v20, the DIIN unit tests and the two PROP-recovery
+  tests that read a DITI go red.
+- The old rule (write only an empty field) in `applyUnder`: the scan tests (DFF
+  and WAV), the sweep's DFF and WAV (LIST/INFO) entries, v20 and the AST guard
+  go red; every extractor-level test stays green, which is how the defect lived.
+- The container's text over the ID3 tag: both two-chunk fixtures, both WAV
+  orders and `TestExtractWAV_ID3WinsOverLISTInfo` go red.
+- No fit check in `readDFFTagChunk`: both past-the-end cases go red (the
+  declared body allocated).
+- No ID3 arm: the ID3 fixtures, the sweep's DFF (ID3 chunk) entry, the cover
+  test and v20 go red.
+- No ISO-8859-1 fallback: `taglib_diin.dff` (extractor and scan), v20 and the
+  DIIN fuzz target's TagLib seed go red.
+- No bump (ExtractorVersion 19): v20 alone goes red.
+
+### Fuzzing
+
+Four minutes a target on dido (golang:1.26.6, `-fuzzminimizetime 1s`,
+`-parallel 8`), no crasher: FuzzParseDIINChunks 11,222,385 executions (its
+properties: the text is UTF-8, and a DIIN yields no album or genre),
+FuzzExtractDFF 3,822,732 (the allocation property; seeds: the four real
+fixtures, a DIIN declaring 64 KiB in a file holding 12 bytes of it, and an ID3
+chunk repeating one frame past B101's renaming bound), FuzzParseWAVINFOBlock
+10,375,270 and FuzzExtractWAV 4,142,540.
+
+### Not covered
+
+- An ID3 chunk's lyrics: `applyEmbeddedID3` applies no USLT or SYLT, for AIFF
+  and WAV as for DFF now, while the DSF read does (backlog B150).
+- An edited-master DFF (one file per disc, its tracks marked by MARK chunks, as
+  sacd_extract's `--output-dsdiff-em` writes) indexes as one track titled by its
+  DITI; splitting it by its markers as the SACD ISO expansion splits an image is
+  a feature, not this fix (backlog B151).
+- A WAV's INFO text is still copied raw: a CP1252 or ISO-8859-1 value that is
+  not UTF-8 reaches the wire as U+FFFD, as before.
+
+### Review round 1 (CodeRabbit's full review of the merged head)
+
+CodeRabbit: TagLib 2.0.2 also reads an ID3 chunk nested in PROP, and the walk
+read root chunks alone. True, from TagLib's source at the v2.0.2 tag
+(`dsdifffile.cpp`): the PROP walk takes an "ID3 " or "id3 " child as the file's
+ID3 tag unless a root one was found, which then wins and marks the PROP copy a
+duplicate that the next save removes; `save()` rewrites a tag where it was read.
+So a tag nested there by any writer stays there through TagLib. And one step
+wider than the finding: PROP's 1 MiB cap refused the whole file for a nested tag
+holding a cover over it (no sample rate, no DSD flag), the class this PR fixes
+for DIIN.
+
+- `parsePropChunks` keeps the first nested ID3 chunk's body (`dffPropInfo.id3`,
+  a slice of the PROP body), and the walk's `finish` reads it through
+  `applyEmbeddedID3` only where no root tag was read, ahead of the DIIN. A root
+  tag wins whole, whichever chunk comes first, as TagLib's does.
+- PROP's cap is 1 MiB plus `maxID3ChunkSize`, and its body is allocated only
+  once the file is known to hold it (a PROP past the end is refused, as its
+  failed read always refused it).
+- Fixtures by the real writers again: `prop_id3.dff` (mutagen's tag bytes nested
+  in PROP, then rewritten there by TagLib with a new title, beside TagLib's
+  DIIN) reads as TagLib reads it, title and album from the nested tag and the
+  artist from the DIIN; `prop_and_root_id3.dff` (the same, plus a root tag from
+  mutagen) reads wholly from the root tag. The four earlier fixtures
+  regenerated byte for byte.
+- Tests: both fixtures joined the extractor and scan tables;
+  `TestScanner_AnID3TagNestedInPROPGivesTheRowItsTextAndCover`,
+  `TestExtractDFF_APROPHoldingALargeID3TagIsRead` (1.5 MiB, refused before),
+  `TestExtractDFF_APROPPastTheEndOfTheFileAllocatesNothing`. Controls: no nested
+  arm turns the nested fixture (extractor and scan), the nested scan test and the
+  large-PROP test red; reading the nested tag even beside a root one turns
+  `prop_and_root_id3.dff` red (extractor and scan); the old cap turns the
+  large-PROP test red; no fit check turns the allocation test red.
+- Fuzzed on dido, three minutes a target, no crasher: FuzzParsePropChunks
+  10,888,566 executions (its seeds now hold a nested ID3 chunk in both
+  spellings, and it asserts the kept body lies within its input),
+  FuzzExtractDFF 3,903,123 (the two nested fixtures among its seeds).
+
+Gemini (round 0): a `len(body) >= 4` guard before `body[0:4]` in the WAV LIST arm.
+Declined: that arm refuses `size < 4` before reading, and `readIFFChunkBody`
+returns a body of exactly `size` bytes or none.

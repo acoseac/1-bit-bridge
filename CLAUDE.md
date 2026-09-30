@@ -1417,6 +1417,49 @@ lost my library."
   `FuzzDhowdenReadBufferReadsAsItsStreamDoes` holds the buffer to a bare `bytes.Reader`
   over a tape of reads and seeks (a seek window one byte too wide, a control, fell to it
   in 4 s; that input is a seed). No `ExtractorVersion` bump: dhowden reads the same bytes.
+- **A tag a container keeps in chunks of its own outranks the path's guess, and a
+  DFF's are read where its writers put them** (ExtractorVersion 20, 2026-09-29,
+  backlog B140). The scanner fills a track's title, album and artist from its path
+  (`fillFromPath`) BEFORE it extracts, and two walkers wrote a field only while it
+  was EMPTY, which in a scan is never: the DSDIFF DIIN walk and the WAV LIST/INFO
+  walk. Their extractor tests start from an empty Track and passed; B134's
+  read-fault test told its DFF versions apart by sample rate because the title
+  never moved. **The DIIN walk also read a layout no writer makes**: PR #223 read
+  DITI / DIAR as a 1-byte length where DSDIFF 1.5 has a 4-byte big-endian count,
+  and took DIAL and DIGN, chunks no specification defines, for an album and a
+  genre, so it read nothing from a real DIIN even into an empty Track. Measured
+  on a Philips reference DFF given a spec-layout DIIN: ffmpeg 9.0.2 and TagLib
+  2.0.2 read its title and artist, MediaInfo 25.04 its title, the bridge nothing;
+  on the 1-byte layout ffmpeg read "ring Title" and the others nothing. **And the
+  DFF walk skipped the "ID3 " chunk**, which is where mutagen, so Picard, tags a
+  DSDIFF file. Now `parseDIINChunks` reads DITI and DIAR as TagLib writes them
+  (ISO-8859-1 when the bytes are not UTF-8: TagLib writes 0xE9 for é), the ID3
+  chunk goes through `applyEmbeddedID3` (its picture is the cover), and
+  `containerText.applyUnder`, once the walk is over, writes the container's own
+  text beneath the ID3 tag: the tag answers each field it has a value for and the
+  DIIN or INFO the rest, whichever chunk comes first, as TagLib reads a DSDIFF
+  file (measured on `testdata/dff/diin_then_id3.dff` and `id3_then_diin.dff`).
+  **An ID3 chunk nested in PROP counts too**, where the file holds no root one:
+  TagLib 2.0.2 reads that placement (and rewrites a tag it found there in
+  place), and a root tag wins whole wherever the chunks sit (`prop_id3.dff`,
+  `prop_and_root_id3.dff`; CodeRabbit on #1118). So PROP's cap is 1 MiB plus
+  the ID3 chunk cap, behind a fit check: at 1 MiB a nested tag holding a cover
+  refused the whole file. **A DIIN holds a title and an artist and no album**:
+  TagLib drops an album set on its DIIN tag when it saves, EMID is an opaque id
+  and MARK a position in the audio. A DIIN or ID3 chunk the file ends inside is
+  never allocated
+  (`readDFFTagChunk`, the payloadFits rule): the walk ends there with the format
+  stamped, where a truncated DIIN failed the file (indexed by name alone, no
+  sample rate). **Don't write a path-guessed field only while it is empty**:
+  `TestNoExtractorFillsAPathGuessedFieldOnlyWhenEmpty` fails on a comparison of
+  Title, Artist or Album with "" anywhere in the package but `fillFromPath` and
+  `mergePostScanFields`, and `TestScanner_EveryFormatsOwnTitleOutranksThePathsGuess`
+  scans one file of every extractor family, since a test on an empty Track cannot
+  see this. The fixtures are real writers' output (`testdata/gen/dff_tag_fixtures.sh`:
+  TagLib 2 and mutagen in a Debian 13 container). The iOS app reads no DFF tags
+  (`MetadataExtractionRoute` gives `.dff` no extractor and `DFFHeadScan` types the
+  file only), so there is no Mirror-PR; an app reader added later takes this
+  precedence (backlog B149). v20 changes only rows of files carrying such text.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to
