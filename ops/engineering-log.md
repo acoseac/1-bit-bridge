@@ -31483,3 +31483,193 @@ order test alone.
 - `--start-now` is Windows-only and ignored elsewhere without a word, as
   `--force` is without `--yes` (the prompt still asks). Neither changes what
   a run writes; not touched.
+
+## 2026-09-29 — the harvest state store holds its Atlas base as scheme://host or not at all, and the base reduction is a fixed point (backlog B97, and the stored half of B49)
+
+B69 (#1091) kept a configured base URL's user information out of the
+enricher's request URLs, and out of the Atlas premium cover fetch's, which
+builds its request from the harvest credential's stored base. It left the
+harvest client itself, which reads the same stored base (B97): the
+credential endpoint stores `config.CanonicalHTTPSBase`'s `scheme://host`,
+while `atlasharvest.StateStore` kept whatever `atlas-harvest.json` held. B49
+added that a base naming a port and no host, stored before #1074's check, was
+never re-checked.
+
+### What was measured on the old code
+
+main at abac4b54, go1.27.1 on macOS.
+
+- **The real `serve`**, harvest on, over a hand-edited state file (an empty
+  library, so the poll was the leg that asked; every tick after too):
+  `https://s3cret-Pw@127.0.0.1:1` gave `WARN atlasharvest.tick_error
+  phase=poll error="Get \"https://s3cret-Pw@127.0.0.1:1/v1/atlas/harvest/results?limit=200&since=0\":
+  dial tcp 127.0.0.1:1: connect: connection refused"`, the token written as
+  the user name, whole. `https://:1` gave `Get "https://:1/…": dial tcp :1:
+  connect: connection refused`, a dial on this machine.
+- **What a port and no host reaches** (a listener on 127.0.0.1 and a client
+  given `https://:PORT` with a bearer header, go1.26.6 and go1.27.1): the
+  listener accepted a connection and read 0 bytes, and the client failed with
+  `tls: either ServerName or InsecureSkipVerify must be specified`. A TCP
+  connect to this machine's port, and nothing sent: there is no server name
+  to verify against, so the token never leaves.
+- **The new tests, red first** (stored_base_test.go beside no production
+  change): for each of ten shapes in the file, the store offered
+  `AtlasCredential` to the premium fetch, kept the credential, and a tick
+  connected to the base's address. A token as the user name reached both
+  `tick_error` lines (submit and poll); a user name and a password, or a
+  password alone, were masked by net/http (`***`) but still dialled; a base
+  written without a scheme, `s3cret-Pw:pw@host`, failed `unsupported protocol
+  scheme "s3cret-pw"` with the URL quoted whole and LOWERCASED, which a
+  case-sensitive search passes over (B54's lesson); a path, a query or a
+  fragment put the secret in both request URLs
+  (`…?key=s3cret-Pw/v1/atlas/harvest/submit`); plain http put
+  `Authorization: Bearer bh-harvest-token` on the wire in the clear (the
+  listener read the whole request); a port and no host connected and sent
+  nothing; `https://` alone was offered as a credential. `SetCredential`
+  stored all ten and an empty base, and kept `:443`, an uppercase scheme and
+  surrounding space verbatim. The harvest-off revoke (`ClearStoredCredential`)
+  cleared the token and left the base, secret included, in the file. The
+  positive control (a base in the stored form on the same listener) passed, as
+  it should.
+- **The pin, found by the new reduction table's fixed-point check.**
+  `CanonicalHTTPSBase("https://:443")` was `https://`; `WithAtlasHarvest`
+  reduces the pin it is handed again (it does not trust its caller), and
+  `CanonicalHTTPSBase("https://")` is "": unpinned. With main's binary, a
+  config pinning `atlas.harvestBaseUrl: https://:443`, a device paired with
+  `bridge pair`, and `POST /v1/atlas-harvest/credential` naming
+  `https://attacker.example`: `200 {"ok":true}`, and the state file held the
+  planted credential. The config warning about that pin named it as
+  `value=""`. `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` on main: 200
+  and the sink called once for `:443`, 403 for the `:8443` twin; the config pin
+  row `CanonicalHarvestBaseURL() = "https://"`.
+
+### What was decided
+
+- **At the store, as B97's constraint says**: `OpenStateStore` and
+  `SetCredential` are the two ways a base gets in, and every reader goes
+  through the store (the tick's snapshot for every leg, `pollResults`' and
+  `fetchBooklets`' own snapshots, `AtlasCredential` for the premium fetch).
+- **One reduction, moved to `internal/baseurl`**: `CanonicalHTTPS` (was
+  `config.CanonicalHTTPSBase`), `NamesHost` (was `config.BaseURLNamesHost`),
+  and `CredentialBase`, the two together, which the handler spelled out as
+  `canonicalBase == "" || !BaseURLNamesHost(canonicalBase)`. config, the
+  handler and the store import it; `internal/atlasharvest` still imports
+  neither config nor enrich. The config functions are REMOVED, not wrapped:
+  every caller moved in this change, and a wrapper is a second name for the
+  next reader to wonder about.
+- **Drop, not repair.** The store could have cut the user information out and
+  kept the rest (a URL's user information was never sent: the client sets
+  `Authorization: Bearer` itself, and net/http builds Basic auth from a URL
+  only when no Authorization header is set). It does not: `CanonicalHTTPS`
+  refuses user information rather than strip it, the endpoint has always
+  refused such a base, and a store that repaired what the endpoint refuses
+  would be a second rule. What is dropped is the credential: the token, the
+  base and the expiry. The sync position, the last submit and booklet check,
+  and the pending covers stay, as `Clear` keeps them; a re-provision resets
+  the cursor anyway, since its base differs from "".
+- **The drop is written back at the open.** `ClearStoredCredential` writes
+  only when the store holds a credential, so a drop held in memory alone would
+  have the harvest-off revoke answer 204 while the token and the base stayed
+  in the file. **A write-back that fails fails the open**, naming the file and
+  no part of the base: `serve` then reports `atlas harvest: open state: …
+  (feature disabled)` and runs without the harvest, as for a file it cannot
+  read, and the harvest-off DELETE answers 500, which the app reports as not
+  revoked, which is true. A harvest whose state file cannot be written could
+  not keep its cursor either.
+- **A base that reduces keeps its credential** (a trailing slash, `:443`, an
+  empty port, an uppercase scheme, surrounding space): held reduced in memory
+  and written at the next write, not at the open, since nothing is lost and an
+  open should not fail over a trailing slash. A pre-#724 file holding `:443`
+  therefore no longer reads as a new Atlas at the next re-provision.
+- **One Warn, `atlasharvest.state.base_refused`**, naming the file and the
+  field and none of the value (B54's rule for a configured URL, applied to the
+  state file); the open rewrites the file, so it is said once.
+- **`SetCredential` refuses before it touches anything**: a changed base
+  resets the cursor and the last submit, and a refusal must not.
+- **The reduction is a fixed point, and an empty port is the default port.**
+  `CanonicalHTTPS` strips `:443`, and a bare `:` (`https://host:` names no
+  port, which net/http dials on the default), only from a host it leaves
+  something of. So `https://:443` and `https://:` stay themselves, a port and
+  no host that pins to nothing (B36's stated behaviour), and the config
+  warning about such a pin now names it. The endpoint's answers do not change:
+  both were refused with 400 before and still are. No wire change, no
+  PROTOCOL.md change, no Mirror-PR.
+- **The harvest tests' fake Atlases are TLS servers.** 23 tests (31 leaves
+  with their subtests) seeded an http `httptest.NewServer` URL, or in four
+  leaves an empty base, through `SetCredential`, and failed at it on the
+  fixed store; `TestClientTokenRejectedClearsCredential` ignored that error
+  (`_ = state.SetCredential(…)`) and passed having shown nothing: no token was
+  ever stored, so "the token is cleared" held. They use
+  `httptest.NewTLSServer` and give the client `srv.Client()`; the helpers take
+  the server (`bookletTestClient`, `dueClient`, `bookletClient`), with nil for a
+  step that makes no request (a credential against `https://atlas.invalid`,
+  where those steps passed an empty base the store now refuses). The tests
+  that hand a client method a `State` built by hand never went through the
+  store, and were converted with the rest so that no fixture describes an
+  http Atlas.
+
+### Tests
+
+New: `TestAStoredBaseThatIsNotSchemeAndHostIsNeverUsed` (ten shapes in the
+file against a `connRecorder` listener: the credential is not offered, the
+store and the file hold neither the token nor the secret, the sync position
+stays, the drop is logged once, and a tick connects nowhere and logs no line,
+at any level, carrying the secret or the token, searched without regard to
+case; plus a positive control, a base in the stored form on the same listener,
+which must connect for each due leg and log a `tick_error` naming the
+address), `TestSetCredentialRefusesABaseThatIsNotSchemeAndHost` (the ten
+shapes and an empty base: an error naming none of it, the held credential,
+expiry and cursor unchanged, the file not rewritten, by `os.SameFile`),
+`TestTheStoreHoldsABaseInItsCanonicalForm` (five spellings, through
+`SetCredential` and through the file, which keeps its token and cursor),
+`TestARevokeLeavesNoStoredBaseBehind`,
+`TestOpeningAStoreThatCannotDropItsBaseFails` (a read-only directory; skipped
+where the write goes through anyway), `TestTheReductions` (the three
+functions over 33 shapes, each answer reduced again), and
+`TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt` (the pin handed over as
+serve hands it); a row in `TestAtlasHarvestBaseURLValidation`.
+
+### Negative controls
+
+Each mutation applied to the committed tree, the named tests run with
+`-count=1`, the file restored and the tree checked clean after each. None
+failed to build.
+
+| mutation | goes red |
+|---|---|
+| NC1: the open skips the reduction | all ten shapes of the main test, the revoke test, the four file spellings of the canonical test, the read-only-directory test |
+| NC2: the drop keeps the token | the ten shapes of the main test (the store and the file still hold it); the revoke test stays green, since the revoke clears a token itself |
+| NC3: the drop is not written back | the ten shapes (the file), the revoke test, the read-only-directory test |
+| NC4: a failed write-back is ignored | the read-only-directory test only |
+| NC5: `SetCredential` stores the base as given | its eleven refusal subtests, its four canonical spellings, and both reworked `TestStateStore_AtlasCredential` subtests |
+| NC6: `SetCredential` refuses after resetting the cursor | its ten shape subtests (the cursor moved); the empty-base one stays green, having nothing to reset |
+| NC7: `CredentialBase` skips the host test | the two port-and-no-host reduction rows, that shape in both store tests, and the endpoint's `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost` |
+| NC8: `:443` is stripped when it leaves nothing | the `https://:443` reduction row, the config pin row, and the pin-as-serve-wires-it test |
+| NC9: the drop is logged under another message | the ten shapes of the main test |
+| NC10: the drop's Warn carries the base | the seven shapes whose base carries the secret |
+| NC11: the refusal quotes the base | the eight shapes whose base carries the secret or the host |
+| NC12: the client never asks the store (`credentialUsable` always false) | the positive control only: the ten shapes pass without it, which is why it is there |
+| NC13: the endpoint takes `CanonicalHTTPS` without the host test | `TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost` only |
+| NC14: an empty port is kept | the two empty-port reduction rows and both `https://atlas.example:` spellings of the canonical test |
+
+### After the fix, with the real binary
+
+The same `serve` over the same edited file logged one
+`WARN atlasharvest.state.base_refused path=…/atlas-harvest.json detail="the
+atlasBaseUrl this file holds is not a plain https base URL naming a host
+(https://host[:port]); it is dropped with the credential held against it, and
+the app provisions a new one"`, no `tick_error`, and left the file as
+`{"token":"","atlasBaseUrl":"",…,"resultCursor":42,…}`, mode 0600. With the
+`https://:443` pin the same POST answered `403 harvest_base_url_not_allowed`,
+wrote no state file, and the config warning named `https://:443`.
+
+### Out of scope
+
+- **The harvest client's bearer token follows a redirect from https to plain
+  http on the same host**: a throwaway probe (a TLS fake Atlas answering 302
+  to a plain server on 127.0.0.1) showed the plain hop receive `Bearer
+  bh-secret-token` from `pollResults`. It is #1091's round-2 finding in the
+  one client that did not get `guardRedirects`, which lives in
+  `internal/enrich`. Filed as backlog B133.
+- B49's other half, a spoofed link-local SSDP source that is not a cloud
+  metadata address, is untouched and stays open there.

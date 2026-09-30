@@ -1938,7 +1938,7 @@ no failing test — which is the shape to expect in this area.
   `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. Still open: the harvest
   client's bearer token follows a redirect from https to plain http on the
   same host, which `guardRedirects` fixed for the enrich clients only
-  (backlog B131).
+  (backlog B133).
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
