@@ -35382,6 +35382,24 @@ directory pointed at a fresh folder while every row is still present at its
 recorded path elsewhere was refused as "empty" already; it is refused now
 if the folder holds junk too, until the first rendition is written there.
 
+### Review
+
+- CodeRabbit (round 1, on 746b59e7): the reverse guard's count was the
+  renditions the INVENTORY listed (`OrphanRenditions`), so an unlink that
+  failed counted, and so did one that found the file gone: a volume
+  unmounted between the inventory and the unlinks makes every unlink ENOENT
+  (a success to the exit code), and the listed count then explained the
+  empty mountpoint as this run's work. `runGCForwardSweep` returns the
+  renditions its own `os.Remove` unlinked (`renditionsUnlinked`, per orphan
+  through `SidecarInventory.OrphanIsRendition`), and runGC hands the guard
+  that. `TestTheReverseGuardCountsOnlyTheRenditionsThisRunUnlinked` runs
+  runGC's three steps with the unmount between the inventory and the
+  forward sweep; `TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt`
+  counts one of four (an unlinked rendition; not one already gone, one in a
+  directory this user may not write, or a file that is not a rendition).
+  Both red with the ENOENT unlink counted (NC1) and with every listed
+  rendition counted, the old reading (NC2).
+
 ### Left open
 
 - `upscale --gc` re-checks health, not identity (B224).

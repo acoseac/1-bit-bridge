@@ -3613,9 +3613,12 @@ no failing test — which is the shape to expect in this area.
   ext4 volume, which the sweeps reaped from 2026-09-28, needs the flag.
   **`upscale --gc` asks the probe BEFORE anything is classified or
   unlinked** (`gcRefuseUnavailableVariantsDir`), and its reverse guard's
-  Empty exception counts the RENDITIONS the forward sweep unlinked
-  (`SidecarInventory.OrphanRenditions`), never every file, or a removed
-  `.DS_Store` explains an unmounted volume; `--allow-mass-delete` waives
+  Empty exception counts the RENDITIONS the forward sweep's own unlink
+  removed (`runGCForwardSweep`'s `renditionsUnlinked`): never every file,
+  or a removed `.DS_Store` explains an unmounted volume, and never one
+  whose unlink failed or found it already gone, since a volume unmounted
+  between the inventory and the unlinks makes every unlink ENOENT
+  (CodeRabbit on #1129); `--allow-mass-delete` waives
   the Empty refusal in both and nothing else. **The delete handler keeps a
   refusal for the rest of its request** until it next unlinks inside the
   store (`storeRefused`; a refusal only keeps rows), since a tree holding
