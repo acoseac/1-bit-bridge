@@ -6,6 +6,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // VariantsDirSweepBlockReason probes a variants output directory
@@ -84,14 +86,14 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	case !info.IsDir():
 		return VariantsDirBlock{Reason: "variants path is not a directory"}
 	}
-	empty, err := dirIsEmpty(dir)
+	opened, empty, err := dirIsEmpty(dir)
 	switch {
 	case err != nil:
 		return VariantsDirBlock{Reason: fmt.Sprintf("cannot read variants directory: %v", err)}
 	case empty:
 		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true}
 	}
-	return VariantsDirBlock{Info: info}
+	return VariantsDirBlock{Info: opened}
 }
 
 // variantsDirChanged reports why dir no longer names the directory start
@@ -108,7 +110,9 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 // the local directory need not be empty; its identity is what an unmount
 // changes. os.SameFile is the comparison the variant delete handler makes
 // for the same reason (cmd/bridge's sidecarStoreID): device and inode on
-// POSIX, volume and file index on Windows. A nil start is never the same.
+// POSIX, volume and file index on Windows, each read from an open handle
+// (fsutil.DirIdentity says why never from os.Stat). A nil start is never
+// the same.
 //
 // "" for an empty dir: the watcher probes nothing then (a nil or empty
 // provider disables the mount-loss guard), so there is nothing to compare.
@@ -116,13 +120,13 @@ func variantsDirChanged(dir string, start os.FileInfo) string {
 	if dir == "" {
 		return ""
 	}
-	info, err := os.Stat(dir)
+	now, err := fsutil.DirIdentity(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "the variants directory went missing during the sweep"
 	case err != nil:
-		return fmt.Sprintf("cannot stat variants directory during the sweep: %v", err)
-	case !os.SameFile(start, info):
+		return fmt.Sprintf("cannot open variants directory during the sweep: %v", err)
+	case !os.SameFile(start, now):
 		return "the variants directory is no longer the directory this sweep began on"
 	}
 	return ""
@@ -130,18 +134,26 @@ func variantsDirChanged(dir string, start os.FileInfo) string {
 
 // dirIsEmpty reports whether dir holds zero entries, reading at
 // most one entry — a full os.ReadDir would materialize every
-// name in a 100k-sidecar tree just to answer "any?".
-func dirIsEmpty(dir string) (bool, error) {
-	f, err := os.Open(dir)
+// name in a 100k-sidecar tree just to answer "any?". It also
+// returns the directory's stat from the handle it read, the
+// identity VariantsDirBlock.Info carries: from the handle so the
+// identity is of the directory whose entries were read, and read
+// at the call on Windows too (fsutil.DirIdentity).
+func dirIsEmpty(dir string) (opened os.FileInfo, empty bool, err error) {
+	f, err := fsutil.OpenDir(dir)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	defer func() { _ = f.Close() }()
+	opened, err = f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
 	if _, err := f.ReadDir(1); err != nil {
 		if errors.Is(err, io.EOF) {
-			return true, nil
+			return nil, true, nil
 		}
-		return false, err
+		return nil, false, err
 	}
-	return false, nil
+	return opened, false, nil
 }

@@ -614,7 +614,13 @@ func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState
 	// on Windows) and there is no exported value type for it, hence the
 	// wrapper. A failed stat leaves it nil, which the handler reads as
 	// "cannot claim I emptied it".
-	if fi, err := os.Stat(dir); err == nil {
+	//
+	// fsutil.DirIdentity, never os.Stat: on Windows an os.Stat of a
+	// plain directory reads its identity only when SameFile asks, from
+	// whatever the path names then, so the instance the handler kept at
+	// its first unlink compared as the same as any directory put at the
+	// path later (backlog B203).
+	if fi, err := fsutil.DirIdentity(dir); err == nil {
 		st.Store = sidecarStoreID{fi}
 	}
 	return st
