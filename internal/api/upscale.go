@@ -21,9 +21,10 @@ import (
 // api package doesn't import internal/transcode directly.
 //
 // The cmd/bridge wiring constructs an adapter that wraps a
-// transcode.Pool. Nil-safe: when WithUpscaleEnqueuer wasn't
-// called (or was called with nil because the feature gate / sox
-// probe failed), the handler returns 503 `upscale_disabled`.
+// transcode.Pool, on every bridge. Nil-safe: when WithUpscaleEnqueuer
+// wasn't called (a test harness), the handler returns 503
+// `upscale_disabled`, as it does while the live upscale gate is closed
+// (the flag off, or no usable sox), which it reads first.
 //
 // `libraryRelativePath` is the wire-shape path the manifest
 // emits and that iOS sends back. The adapter resolves it to an

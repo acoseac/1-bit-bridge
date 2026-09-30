@@ -930,10 +930,14 @@ func (s *Server) WithStaleRendition(fn StaleRenditionFunc) *Server {
 // WithUpscaleEnqueuer attaches the long-lived transcode worker
 // pool's job-submit interface so the v1.2 `POST /v1/upscale`
 // endpoint can hand off track / folder requests. Optional —
-// when nil the endpoint returns `503 upscale_disabled`.
+// when nil the endpoint returns `503 upscale_disabled`, as it does
+// while the live upscale gate is closed.
 //
-// Wired in cmd/bridge serve startup IFF `cfg.Upscale.Enabled &&
-// sox-on-PATH probe passed`. The adapter at the wiring point
+// Wired in cmd/bridge serve startup on every bridge, whatever
+// `upscale.enabled` says: the pool is built on every bridge (#781),
+// and the handler reads the live gate before it enqueues anything.
+// This said "IFF `cfg.Upscale.Enabled && sox-on-PATH probe passed`"
+// until 2026-09-29 (backlog B113). The adapter at the wiring point
 // translates `transcode.ErrQueueFull` into the api package's
 // `ErrUpscaleQueueFull` sentinel so the handler can map cleanly
 // to the wire response.
