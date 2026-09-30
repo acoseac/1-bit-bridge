@@ -2020,7 +2020,14 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		return err
 	}
 	defer f.Close()
+	return extractDSFFromReader(f, absPath, t, ec)
+}
 
+// extractDSFFromReader is extractDSFWithContext's walk over an open stream:
+// the DSD and fmt chunks from where the stream is, then the ID3v2 tag at the
+// metadata pointer. The stream is its own argument so a test can see the reads
+// that reach it.
+func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *ExtractContext) error {
 	header := make([]byte, 28)
 	if _, err := io.ReadFull(f, header); err != nil {
 		return fmt.Errorf("dsf: short header: %w", err)
