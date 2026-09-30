@@ -34877,6 +34877,138 @@ with `-count=1`, the file restored and the tree checked clean after each.
   endpoint is published now meets a 421 from the listener. No wire change,
   so no Mirror-PR.
 
+## 2026-09-29 — a version-stale re-read that a reconciliation pass would rewrite is judged by the passes at the scan's tail (backlog B188)
+
+Found by the pre-v0.2.1 data-integrity review. The version-stale leg of
+the skip gate (`reExtractUnchanged`) re-extracts an unchanged file, merges
+the post-scan fields from its stored row (`mergePostScanFields`: a stored
+value is kept only where the fresh one is empty) and stamps the row when
+the two marshal alike. The reconciliation passes REWRITE values a file
+sets, and `fillFromPath` gives every untagged file an album, so a row a
+pass had rewritten never marshalled alike: it took the full upsert.
+
+### What was measured on the old code
+
+main at 99f3353e (B187 merged), through the real Store and Scanner
+(`internal/manifest/reconciled_rows_test.go`, each red there):
+
+| case | what the scan did |
+|---|---|
+| a bump (every row one `ExtractorVersion` behind) over 11 rows, 3 of them rewritten by a pass: an untagged album (its folder's name), a minority album artist, a DATE of `0000` (year 0) | the 3 moved (`indexed_at`) and were re-queued for enrichment (`enriched_at` 0); the 8 others stamped |
+| a folder's `cover.jpg` touched (a new folder-art key, B141's re-read), then a subtree scan | the reconciled track served "Some Folder" for "Real Album", moved, and moved again at the next full scan |
+| a file whose tag carries a release (or recording) id that is no MBID, which the enricher replaced | the bump put the tag's value back, moved the row and re-queued it |
+
+Each moved row was written twice per bump: the worker's upsert of the
+file's value, then the tail's pass writing the reconciled one back. The
+v0.2.1 upgrade scan (ExtractorVersion 21) would have done it to every
+reconciled row of a library, and every bump after.
+
+Two findings on the way. One went into the backlog as B222. The other:
+the track-number pass is no source of this churn: the extractor's own
+filename backfill
+(`fillTrackNumberFromFilename`) fills a missing or zero track number with
+the number the pass would, so the fresh value already equals the stored one.
+
+### Which rows each choice moves
+
+- **Remember the value each pass replaced, and keep the reconciled value
+  while the file still reads the replaced one** (the review's first
+  suggestion): rows reconciled before the upgrade carry no record, so the
+  upgrade scan moves and re-enriches exactly the rows main does (the 3 of
+  11 above); only later bumps are clean. Not taken.
+- **Run the passes in ScanSubtree's tail** (its second): a bump's full scan
+  runs the passes already, so a bump moves the same 3 rows; on the subtree
+  case, measured with the passes run after a subtree scan (the hold
+  disabled): the album ends right, but the row moved twice (the file's
+  value, then the reconciled one) and `enriched_at` was reset. Not taken.
+- **Judge each re-read against its siblings' stored rows** (the obvious
+  in-worker version of either): clean on the 3 rows, and it masks
+  extractor changes. A bump that reads a whole album's tag differently
+  (every row "Old Reading" stored, "New Reading" in the files) leaves no
+  outlier among the fresh values, but each re-read judged against its
+  siblings' stored rows is the outlier, voted back to "Old Reading",
+  stamped, and never applied: measured by dropping the overlay (control 2
+  below). Main applies that change (all 3 rows move). Not taken.
+- **Taken: hold, and let the passes judge with every held re-read in
+  place.** A bump moves none of the 3 rows and applies the whole-album
+  change to all 3; the subtree case moves nothing and serves "Real Album".
+
+### The change
+
+- `reExtractUnchanged` holds a re-read that, after the merge, still
+  differs from its row in the album, the album artist, the year or the
+  track number (`reconciledFieldsDiffer`): it returns the UNMERGED Track
+  marked `awaitsReconcile`, and the scan's writer collects it
+  (`Scanner.heldReconciles`) instead of writing it. At most
+  `maxHeldReconciles` (10,000; the scanner's `heldLimit` for tests) are
+  held per scan, each a whole Track until the tail writes it; past the
+  bound a re-read is decided as before.
+- `settleHeldReconciles` runs at the scan's reconciliation head, after the
+  deletion pass and before the passes, with the one routed set: it merges
+  each held re-read with its row as stored now (a row reaped since is
+  dropped), streams the library's rows into the passes' targets with every
+  held re-read's values in place of its row's, runs the five passes in
+  memory in the tail's order (`runReconcileStepsInMemory`), takes each held
+  re-read's four fields from the result, and writes it: a stamp when it
+  then marshals as its row, the whole row otherwise, in the writer's
+  batches. The passes that follow find nothing to change.
+- The five `run*Reconciliation` functions became one table,
+  `reconcileSteps` (label, Info line, pure decision, field copy, store
+  writer), which the tail's loop (`runReconcileStep`) and the settle both
+  read: the order cannot drift. Each step streams the full projection
+  (`reconcileTargetOf`); every pure function reads only its own fields.
+- `ScanSubtree` settles its held re-reads the same way at its tail
+  (`settleSubtreeHeldReconciles`, one routed-set query and one library
+  stream, only when it holds any), before its duplicate restamp. Both scans
+  write held re-reads as they stand on a return that skips the settle
+  (`settleHeldUnreconciled`, deferred; today only a shutdown's, which
+  writes nothing) and on a routed-set failure.
+- `mergePostScanFields` reads a file's release or recording id that is no
+  MBID as no id (`manifest.IsValidMBID`). The enricher's `isValidMBID`
+  answers through it now (it held a copy of the pattern), so the merge and
+  the enricher's scrub agree on what an id is.
+- The acoustic fallback fills a recording id only where the file carries
+  no valid one; it overwrote one the file carried, which the merge (a valid
+  fresh id wins) undid on every bump. `mergePostScanFields`' docblock
+  already said "the fingerprint path fills it when the file does not".
+- `CLAUDE.md`: the rule under Scanner; the reconciliation bullet no longer
+  says every pass is directory-scoped (the MBID year pass crosses folders,
+  bounded to strays).
+
+No `ExtractorVersion` bump and no wire change: extraction is unchanged,
+and a settled re-read writes what the tail's passes would have written.
+
+### Tests
+
+`internal/manifest/reconciled_rows_test.go`:
+`TestScanner_ABumpOverReconciledRowsOnlyStampsThem`,
+`TestScanner_ASubtreeScanAfterACoverTouchKeepsAReconciledAlbumTitle`,
+`TestScanner_ABumpStillAppliesAnExtractorChangeAcrossAWholeAlbum` (the
+control: green on main, and must stay green),
+`TestScanner_ABumpOverAnIDTheEnricherReplacedOnlyStampsIt` (a subtest per
+id), `TestScanner_ReReadsPastTheHoldLimitAreWrittenAsBefore` (a limit of 1
+over two reconciled albums: one row moves, both end reconciled and
+current). `internal/enrich/acoustic_recording_id_test.go`:
+`TestApplyAcousticFallbackKeepsARecordingIDTheFileCarries`.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+1. Never hold (`if false && reconciledFieldsDiffer…`): the bump, subtree
+   and hold-limit tests red; the whole-album control and the id test green.
+2. The settle's stream without the overlay (judged against the stored
+   rows): the whole-album control red, "Old Reading" kept on all three
+   rows, none moved; the others green.
+3. The in-memory passes skipped: the bump, subtree and hold-limit tests red.
+4. `ScanSubtree` settling nothing at its tail: the subtree test red alone
+   (the deferred fallback wrote the re-read as it stood: "Some Folder",
+   moved), which also shows the fallback writes.
+5. Each merge id line back to `== ""`: the release-id subtest red alone,
+   then the recording-id subtest red alone.
+6. The fallback's guard removed: the "valid id the file carries" case red;
+   back to `== ""`: the "value that is no MBID" case red.
+7. The hold limit admitting everything: the hold-limit test red (no row
+   moved).
+
 ## 2026-09-29 — the variant watcher asks again, by identity, whether its variants directory is the one its tick began on, as rows read as missing and before it deletes (backlog B203)
 
 Found by the pre-v0.2.1 review: `VariantWatcher.tick` probed the variants
