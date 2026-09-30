@@ -846,7 +846,7 @@ func applyEmbeddedID3(body []byte, t *Track, existing tag.Metadata, absPath, log
 	release()
 	if err != nil {
 		scanLogger.Warn(logPrefix+": embedded ID3v2 parse failed",
-			"path", absPath, "err", err)
+			"path", trackLogPath(absPath, t), "err", err)
 		return existing
 	}
 	populateFromTagMetadata(m, t)

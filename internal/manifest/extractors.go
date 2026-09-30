@@ -2581,9 +2581,9 @@ func readDFFTagChunk(f extractSource, size, limit, physicalSize uint64, chunk, l
 // chunk and returns its title (DITI) and artist (DIAR). The DSDIFF 1.5
 // specification gives the chunk nothing else a track holds: the edited
 // master's id (EMID) is an opaque identifier and its markers (MARK) are
-// positions in the audio. ffmpeg, TagLib 2 and MediaInfo read the same two
-// (measured 2026-09-30, and TagLib's DIIN tag keeps no album: one set on it is
-// dropped on save). Each text chunk is a 4-byte big-endian count and that many
+// positions in the audio. ffmpeg and TagLib 2 read the same two, MediaInfo the
+// title (measured; TagLib's DIIN tag keeps no album: one set on it is dropped
+// on save). Each text chunk is a 4-byte big-endian count and that many
 // bytes of text (readDIINText); the first DITI and the first DIAR keep their
 // fields.
 //
