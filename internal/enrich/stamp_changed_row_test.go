@@ -113,6 +113,29 @@ func requireRetaggedAndStamped(t *testing.T, store *manifest.Store, path string)
 	return got
 }
 
+// changedRowEnricher returns an enricher whose MusicBrainz and Cover Art
+// Archive are mb and caa, over a fresh store holding one row at path: title
+// "Old", artist "Artist", album "Album". It sets *store before it returns,
+// and the MusicBrainz handler rewrites the row through it
+// (rewriteOnFirstSearch).
+func changedRowEnricher(t *testing.T, store **manifest.Store, path string, mb, caa *httptest.Server) *Enricher {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	*store = s
+	if err := s.UpsertTrack(context.Background(), &manifest.Track{
+		Path: path, Size: 1, ModTime: time.Now(), Title: "Old", Artist: "Artist", Album: "Album",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return NewEnricher(s, NewMusicBrainzClient(mb.URL, "t", nil),
+		NewCoverArtClient(caa.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+}
+
 // TestAStampOverARowThatChangedMidEnrichmentIsNotCounted: the release search
 // finds a match, the row is rewritten during it, and the stamp is refused.
 // The enricher counts nothing for that pass; its next batch reads the
@@ -135,20 +158,7 @@ func TestAStampOverARowThatChangedMidEnrichmentIsNotCounted(t *testing.T) {
 		_, _ = w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0})
 	}))
 	t.Cleanup(caaSrv.Close)
-	dir := t.TempDir()
-	var err error
-	store, err = manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.UpsertTrack(context.Background(), &manifest.Track{
-		Path: path, Size: 1, ModTime: time.Now(), Title: "Old", Artist: "Artist", Album: "Album",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := changedRowEnricher(t, &store, path, mbSrv, caaSrv)
 
 	runUntilStamped(t, e, store, path)
 
@@ -177,20 +187,7 @@ func TestASkipOverARowThatChangedMidEnrichmentIsNotCounted(t *testing.T) {
 	t.Cleanup(mbSrv.Close)
 	caaSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(caaSrv.Close)
-	dir := t.TempDir()
-	var err error
-	store, err = manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.UpsertTrack(context.Background(), &manifest.Track{
-		Path: path, Size: 1, ModTime: time.Now(), Title: "Old", Artist: "Artist", Album: "Album",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := changedRowEnricher(t, &store, path, mbSrv, caaSrv)
 
 	runUntilStamped(t, e, store, path)
 
