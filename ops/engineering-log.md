@@ -32708,3 +32708,170 @@ moved there.
   `parsed`, `failed`) and a Retry (`LibraryHealthView`), so a source that
   dropped out mid-parse leaves a failed row, never a guess its gate trusts
   (read, not run). No wire change, no Mirror-PR.
+
+## 2026-09-29 — the watcher tests wait for the walk and the row, the projection test answers serve's sox probe, and a doctor test's stand-in pid is never the test process (backlog B104, B105, B106)
+
+Three flakes that turned red required checks on PRs that touched none of
+what failed, each cleared by a rerun. All three were tests leaving to the
+host something the test should have decided: when the watcher's watches
+exist, how long a process takes to start, and which pid the test binary
+has. Each was reproduced on main before any code changed.
+
+The starvation harness, used for B104 and B105: dido (Ubuntu 26.04, 16
+cores), test binaries built in `golang:1.26.6` and run in a container
+pinned to one CPU (`--cpuset-cpus`) with `--cpu-shares 2` (cgroup v2
+weight 1), beside a container of four busy threads on the same CPU at the
+default weight (100). Each run is its own process, `GOMAXPROCS=1`.
+
+### B104: the watcher tests raced Run's initial walk
+
+CI: the macOS leg of run 36576129635 (job 109432102039) and of run
+36601132795 (job 109518500220), both "a file dropped into a root that is a
+link to a link never reached the manifest through the watcher" at
+`waitForPath`'s 3 s. `runWatcherOn` started `Run` on a goroutine and slept
+150 ms "for the initial walk" before the test dropped its file, and a file
+created before its directory is watched makes no event at all: nothing but
+the periodic scan (not running in the test) would find it.
+
+- **Deterministic.** With the 150 ms sleep set to 0 on the dev Mac, 10 of
+  10 runs failed with CI's message.
+- **Starved, main (0894a0e7).** 11 of 110 runs failed (1 of 10, 4 of 50,
+  6 of 50), every one with CI's message. Instrumented (timestamps at the
+  walk's start and end, the drop and the row; not committed), 20 runs: the
+  walk ended 0 to 288 ms after the watcher started, after the drop began in
+  3 of the 20 (each of those passed only because the root's own watch, the
+  walk's first, was in by the time the file was created), and the drop took
+  200 to 340 ms to reach the store.
+- **Starved, branch.** 0 of 100.
+
+The four other watcher tests that drop a file after a sleep
+(`TestWatcherDebounce`, `TestWatcherWatchesDotNamedLibraryRoot`,
+`TestWatcherWatchesALinkedLibraryRoot`, and `TestWatcherIgnoresDotfiles`,
+whose sleep only made its pass vacuous) share the shape. Under the same
+harness each took about 2.5 s against the 3 s bound, and main failed 26 of
+50 runs of the four (`TestWatcherDebounce` in 13, the dot-named test in 10,
+the linked-root test in 9, each with a message that blamed the watch). The
+branch failed none of 50 runs of all five, its slowest test taking 3.05 s,
+past the old bound.
+
+The fix is on the test side. `Watcher.afterInitialWalkHookForTests` fires
+once `Run`'s initial walk has registered every watch, per instance and set
+before `Run` (as `afterDispatchHookForTests` is). `startWatcher` waits for
+it, runs the watcher and joins it at cleanup; `runWatcherOn` and all five
+tests start through it (three had their own `go Run` and a `defer
+cancel()` with no join, the linked-root test a join of its own).
+`watchWaitUntil` waits for a row, or for a folder made at
+run time to be in `WatchList`, until the test binary's deadline less 30 s
+(`watchWaitReserve`); the join gives up 10 s before the deadline. That is
+B63's rule for serve tests: each wait covers the kernel's event delivery
+and a subtree scan's SQLite writes, neither bounded. What a regression
+costs: a wait that reaches the deadline. So where a failure has an event of
+its own the wait ends on it: the link-chain test stops on a subtree scan
+outside the configured root (#1090's defect), and the dot-named and
+linked-root tests read the watch list once the walk is done.
+`TestWatcherIgnoresDotfiles` asserted an absence after 200 ms; it now drops
+a track after its dotfiles and waits for a scan that indexed the track to
+return (`afterDispatchHookForTests` reads the store), since that scan
+listed the dotfiles too. Its dotfile was `.DS_Store`, which the scan's
+extension filter keeps out whatever the dot rule says, so the test pinned
+nothing about the dot; `._track.flac`, the AppleDouble file macOS writes
+beside a copy on an exFAT or SMB volume, is audio-named and kept out by
+the dot alone. Its docblock said a dotfile's event triggers no scan:
+`handleEvent` filters by operation, not by name, and always dispatched one.
+
+### B105: the projection test's stand-in sox was a process
+
+`TestServeProjectionFollowsTheLiveUpscaleGate` failed at step 1 of the
+boot-off subtest ("/v1/health says upscaleEnabled=false with the flag at
+true and a usable sox on PATH…; stderr=" empty) in the B99 session's gate
+on the dev Mac (load 18 to 24 on 12 cores, from sibling sessions) and in
+two of three full `go test -race ./cmd/bridge/` runs in the B82 session. It
+opened the gate with a stand-in sox, a shell script first on PATH.
+`ProbeSox` gives `sox --help` 2 s, a timed-out probe reads as no sox, and
+`soxToolchainCache` keeps that for 30 s, longer than the test.
+
+- **Deterministic.** A stand-in that sleeps 2.2 s first: both subtests
+  fail, the boot-off one at step 1 with CI's message and an empty stderr,
+  the boot-on one at step 0 with the boot line's "sox --help timed out
+  after 2s". The `/v1/health` request that ran the probe took 2217 ms.
+- **CPU-starved, main.** 31 runs under `-race` (19 with one test container
+  on the CPU, 12 with three) passed; the health request that ran the probe
+  took up to 2.08 s. On Linux, CPU starvation alone brought the probe to
+  the edge of the timeout and not past it in those runs.
+- **A host where starting a process takes longer than the timeout**: the
+  same image with `/bin/sh` pointed at a shell that sleeps 2.2 s first (the
+  stand-in's interpreter, and nothing else the test runs): main failed 10
+  of 10, the branch 0 of 10.
+
+`serveOpts.soxProbe` stands in for `transcode.ProbeSox` inside
+`soxToolchainCache`, the one sox probe serve makes, and the test answers it
+(`withUsableSox`) with no process, which also puts its health check on
+Windows, where the stand-in never ran. The boot line about a feature
+switched on without sox probed for itself (`soxFeatureReady`): the one
+serve consumer the stand-in would not have reached, and a second fork at
+boot beside the gates' own. It reads the shared probe now, and
+`soxFeatureReady` is gone (`soxProbeCallers` loses its entry).
+`TestServeBootLineReadsTheSharedSoxProbe` pins it: the stand-in answers no
+sox with a sentence of its own, and each boot line must carry it. The
+product's 2 s is unchanged; what a timed-out probe does to the gate is
+backlog B142.
+
+### B106: two doctor tests recorded the test binary's own pid
+
+The macOS leg of run 36581336196 (job 109449993132):
+`TestPortCheck_DeadPIDStillFails` and
+`TestChosenPortIsExcusedOnlyByTheRecordedBridgeSeenListening/recorded_bridge_not_running`
+answered "ok (bound by our own bridge (pid 4242))". Both bind a port in the
+test process, record pid 4242 as a bridge of their own choosing, force its
+liveness to false, and left the owner probe to the host, which `checkPort`
+asks before liveness. A freshly booted macOS runner hands pids out low and
+in sequence, so on that run the test binary WAS 4242, and lsof named it as
+the holder of the port it had bound.
+
+- **Reproduced, Linux.** A privileged `golang:1.26.6` container writes
+  4241 to `/proc/sys/kernel/ns_last_pid` and starts the test binary, which
+  runs as pid 4242 of the container's namespace. Main's whole doctor
+  package: exactly three failures, those two and
+  `TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds/recorded_pid_not_running`
+  (the image has no lsof, and /proc named the test binary). The branch's:
+  PASS.
+- **Windows.** With `checkPort` made to ignore liveness, main's dead-pid
+  test still passed on nomos: the listener table names the test process and
+  rules 4242 out, which FAILs the port anyway. The control could not see
+  the regression it exists for there. The branch's goes red (warn).
+
+The three sites now force the probe (`withUnattributedMiss`, and
+`withProcAnswering` for the no-lsof row), so the dead-pid test differs from
+its live twin in liveness alone. Every test records `standInPID`: 4242, or
+4243 when the test binary is 4242; the scripted lsof answers and the hint
+texts that name it are built from it.
+`TestStandInTestsHoldWhenTheStandInIsThisProcess` finds every test that
+reaches `standInPID` (a fixed point over the names each top-level
+declaration uses, in the files this build compiles: 11 tests, 6 on
+Windows), runs them in a child whose `standInPID` is its own pid, and
+refuses a `writePIDFile` given a pid literal.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+| mutation | goes red |
+|---|---|
+| B104 NC1: the walk hook fires before the walk, and the walk starts 300 ms later | the link-chain test, with CI's message at the give-up |
+| B104 NC2: the walk hook fires before the walk (no delay) | the dot-named and linked-root tests, on the watch-list check, at once; the link-chain and debounce tests passed, the walk winning its race |
+| B104 NC3: `watchWalkStart` ignores the resolved directory (#1090 reverted) | the link-chain test, in 0.09 s, on the stray subtree scan |
+| B104 NC4: the dot-named root's exemption dropped | the dot-named test, at once |
+| B104 NC5: configured roots walked as the link | the linked-root test, at once |
+| B104 NC6: the scan walk indexes dot-files (`isLibraryEntry` loses its dot rule) | the dotfile test, naming `._track.flac` |
+| B105 NC1: the cache ignores the stand-in, no sox on PATH | the projection test (step 1 boot-off, step 0 boot-on) and the boot-line test |
+| B105 NC2: the boot line probes sox for itself | the boot-line test, alone |
+| B105 NC3: the console's gate a boot snapshot of the flag | the projection test, both subtests: what it pins |
+| B106 NC1: the dead-pid test's probe left to the host | the guard (its child: "bound by our own bridge (pid N)"), on the Mac and on Windows |
+| B106 NC2: the chosen-port row's probe left to the host | the guard, both ladders |
+| B106 NC3: the no-lsof row's /proc left to the host | the guard, on Linux |
+| B106 NC4: a `writePIDFile` given 4242 | the guard, naming the call |
+
+### Out of scope
+
+- A sox probe that times out closes the live gates for 30 s on a host
+  whose sox is merely slow, and the request that runs it waits up to 2 s
+  under the cache's lock (backlog B142).
+- The in-process tests' other fixed bounds stay backlog B107's.

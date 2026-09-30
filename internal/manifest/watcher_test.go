@@ -37,39 +37,119 @@ func newWatcherFixture(t *testing.T, libName string, debounce time.Duration) (li
 	return libDir, store, w
 }
 
-// waitForTrack polls until a track appears in the manifest, or fails
-// with `msg` at the deadline.
+// A test waits on the watcher for an EVENT (its initial walk, a watch it
+// registered, a row its scan wrote) and gives up only at the test binary's
+// deadline, less watchWaitReserve. Each wait covers the kernel's event
+// delivery and a subtree scan's SQLite writes, and neither has a bound a
+// starved host keeps to: the tests here slept 100 or 150 ms for the walk and
+// gave the row 3 s, and on a macOS CI runner a file dropped into a linked
+// root never reached the manifest (backlog B104). On a Linux host starved by
+// a CPU hog the initial walk ended up to 288 ms after the watcher started,
+// and 11 of 110 runs of that test failed as CI had. A wait that reaches the
+// deadline means the event never came; run with a shorter -timeout to see
+// that sooner. It is B63's rule for serve tests, in cmd/bridge.
+
+// watchWaitReserve is the part of the test binary's deadline a wait on the
+// watcher leaves unspent: the watcher's join, the store's close and the
+// report a failure runs next.
+const watchWaitReserve = 30 * time.Second
+
+// watchDrainReserve is the part the watcher's join at cleanup leaves
+// unspent. Smaller than watchWaitReserve, so a join after a wait that gave
+// up still sees the watcher out.
+const watchDrainReserve = 10 * time.Second
+
+// watchGiveUp fires when a wait on the watcher gives up: the test binary's
+// deadline less reserve, at once if that has passed, and never when the
+// test binary runs with no deadline.
+func watchGiveUp(t *testing.T, reserve time.Duration) <-chan time.Time {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	return time.After(time.Until(deadline.Add(-reserve)))
+}
+
+// watchWaitUntil polls ready until it holds, and fails the test with msg
+// when the wait gives up (watchGiveUp). stop, when not nil, ends the wait
+// sooner with the failure it names: an event that says the one awaited is
+// not coming.
+func watchWaitUntil(t *testing.T, ready func() bool, stop func() string, msg string) {
+	t.Helper()
+	giveUp := watchGiveUp(t, watchWaitReserve)
+	for !ready() {
+		if stop != nil {
+			if why := stop(); why != "" {
+				t.Fatalf("%s: %s", msg, why)
+			}
+		}
+		select {
+		case <-giveUp:
+			t.Fatal(msg)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// startWatcher runs w, joins it at cleanup, and returns once its initial
+// walk has registered every watch (afterInitialWalkHookForTests): a file
+// created before then is one no watch sees. The join is registered after
+// the fixture's store close, so it runs first: the watcher stops before the
+// store it writes to is closed.
+func startWatcher(t *testing.T, w *Watcher) {
+	t.Helper()
+	walked := make(chan struct{})
+	w.afterInitialWalkHookForTests = func() { close(walked) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = w.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-watchGiveUp(t, watchDrainReserve):
+			t.Error("the watcher did not stop on cancel")
+		}
+	})
+	select {
+	case <-walked:
+	case <-done:
+		t.Fatal("the watcher returned before its initial walk finished")
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("the watcher's initial walk never finished")
+	}
+}
+
+// watched reports whether w holds a watch on a directory named base, in
+// whichever spelling it registered it: a linked root's own directory and
+// what appears below it are watched where the root resolves to (on Windows,
+// a junction as configured).
+func watched(w *Watcher, base string) bool {
+	for _, p := range w.w.WatchList() {
+		if filepath.Base(p) == base {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForTrack waits until a track appears in the manifest, or fails with
+// msg when the wait gives up.
 func waitForTrack(t *testing.T, store *Store, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	watchWaitUntil(t, func() bool {
 		got, _ := store.ListTracks(context.Background(), nil)
-		if len(got) > 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal(msg)
+		return len(got) > 0
+	}, nil, msg)
 }
 
 // TestWatcherDebounce drops a file into a watched directory and
-// asserts ScanSubtree fires within `debounce + slack` and the
-// new track lands in the manifest. End-to-end check of the watch
-// → debounce → ScanSubtree → UpsertTrackBatch path.
-//
-// We deliberately use a short debounce window (50 ms) and a
-// generous deadline (3 s) so the test stays fast on a busy CI
-// machine without flaking on debounce timing.
+// asserts ScanSubtree fires and the new track lands in the manifest.
+// End-to-end check of the watch → debounce → ScanSubtree →
+// UpsertTrackBatch path, with a short debounce window (50 ms).
 func TestWatcherDebounce(t *testing.T) {
 	libDir, store, w := newWatcherFixture(t, "Music", 50*time.Millisecond)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = w.Run(ctx) }()
-
-	// Give the watcher a moment to register watches before
-	// dropping the file. fsnotify's Add() is synchronous on
-	// every supported platform, so 100 ms is generous.
-	time.Sleep(100 * time.Millisecond)
+	startWatcher(t, w)
 
 	target := filepath.Join(libDir, "test.flac")
 	// Write a placeholder — the scanner's Extract may fail to
@@ -211,28 +291,54 @@ func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
 	}
 }
 
-// TestWatcherIgnoresDotfiles asserts dotfile creates don't trigger
-// a scan. The scanner skips them anyway, but we'd rather not
-// spend a debounce window on them.
+// TestWatcherIgnoresDotfiles asserts a dotfile dropped into a watched
+// directory never becomes a track. Its event does dispatch a subtree scan
+// (handleEvent filters by operation, not by name), and the scan skips the
+// file; this said until 2026-09-29 that the event triggers no scan, which
+// the watcher has never done.
+//
+// It waited 200 ms after the drop and counted no track, which passes
+// whether or not a scan ran: after a drop that beat the initial walk (a
+// 100 ms sleep stood for it) no event came at all (backlog B104). So a
+// track is dropped after the dotfile, and the event is a scan that indexed
+// the track having returned (afterDispatchHookForTests): that scan listed
+// the directory the dotfile was already in, and every row it wrote has
+// landed.
 func TestWatcherIgnoresDotfiles(t *testing.T) {
 	libDir, store, w := newWatcherFixture(t, "Music", 50*time.Millisecond)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = w.Run(ctx) }()
-	time.Sleep(100 * time.Millisecond)
+	scanned := make(chan struct{})
+	var once sync.Once
+	w.afterDispatchHookForTests = func() {
+		if st, err := store.GetTrackStat(context.Background(), "track.flac"); err == nil && st != nil {
+			once.Do(func() { close(scanned) })
+		}
+	}
+	startWatcher(t, w)
 
-	// Drop a dotfile — even a triggered ScanSubtree would skip
-	// it, so this test is mostly a regression guard against an
-	// over-eager event filter that would deliver scan dispatches
-	// for files that can't be in the manifest.
-	if err := os.WriteFile(filepath.Join(libDir, ".DS_Store"), []byte("x"), 0o644); err != nil {
+	// `._track.flac` is the AppleDouble file macOS writes beside a copy on
+	// an exFAT or SMB volume: audio-named, so only the dot keeps it out,
+	// where `.DS_Store` would be kept out by its extension alone.
+	for _, name := range []string{".DS_Store", "._track.flac"} {
+		if err := os.WriteFile(filepath.Join(libDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "track.flac"), []byte("not a real flac"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-scanned:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("no scan indexed the track dropped beside the dotfile")
+	}
 
 	got, _ := store.ListTracks(context.Background(), nil)
-	if len(got) != 0 {
-		t.Errorf("expected 0 tracks for dotfile event; got %d", len(got))
+	if len(got) != 1 || got[0].Path != "track.flac" {
+		paths := make([]string, len(got))
+		for i, tr := range got {
+			paths[i] = tr.Path
+		}
+		t.Errorf("tracks %q after a scan over the dotfile, want only track.flac", paths)
 	}
 }
 
@@ -404,21 +510,19 @@ func TestWatcherStaleTimerDoesNotEvictFreshEntry(t *testing.T) {
 // file dropped into the root actually reaches the manifest.
 func TestWatcherWatchesDotNamedLibraryRoot(t *testing.T) {
 	libDir, store, w := newWatcherFixture(t, ".music", 50*time.Millisecond)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = w.Run(ctx) }()
-
-	// fsnotify's Add() is synchronous on every supported platform, so
-	// this is generous headroom for the initial addTree pass.
-	time.Sleep(100 * time.Millisecond)
+	startWatcher(t, w)
+	// The decision itself, read once the walk is done: without it the drop
+	// below waits for a row until the test's deadline.
+	if !watched(w, ".music") {
+		t.Fatalf("the initial walk registered no watch for a dot-named library root (watches: %q)", w.w.WatchList())
+	}
 
 	if err := os.WriteFile(filepath.Join(libDir, "dropped.flac"),
 		[]byte("not a real flac"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	waitForTrack(t, store, "no watch registered for a dot-named library root: "+
-		"the dropped file never reached the manifest")
+	waitForTrack(t, store, "a file dropped into a dot-named library root never reached the manifest")
 }
 
 // A dot-directory that appears at RUNTIME gets no carve-out — the
