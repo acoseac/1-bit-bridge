@@ -30994,6 +30994,235 @@ user on dido: the same tests red and green as in the table above.
   picker's interface (`PickLANEligibleInterface`), which need not be the one
   holding that address. Read from the code, not measured.
 
+## 2026-09-29 — an ID3v2 tag's MusicBrainz ids and ReplayGain are read by name, from its TXXX frames and the MusicBrainz UFID (backlog B116)
+
+Backlog B116, found by the B101 session reading what `populateFromTagMetadata`
+makes of dhowden's raw map. dhowden/tag's `readID3v2Frames` stores a TXXX frame
+(TXX in version 2.2) as a `*tag.Comm{Description, Text}` under the key `TXXX`,
+the next under `TXXX_0`, then `TXXX_1` (its renaming of a repeated id, which
+B101 bounds), and a UFID frame as a `*tag.UFID{Provider, Identifier}` under
+`UFID`. `stringOf` matches the raw map's KEYS, normalised, against aliases
+such as `musicbrainz_album_id`, and coerces only strings, string slices and
+integers, so no TXXX description or UFID owner was ever seen. That is where an
+ID3v2 tag keeps the MusicBrainz ids and ReplayGain: every MP3, DSF, AIFF and WAV
+reached the manifest without them.
+
+### Reproduced
+
+Real tags, not a synthetic map. mutagen 1.47.0 (the library Picard writes with,
+on the dev Mac's `/usr/bin/python3`) writing the frames Picard's
+`formats/id3.py` `_save` writes: the recording id as a UFID owned by
+`http://musicbrainz.org` (ASCII, no terminator), TXXX "MusicBrainz Album Id",
+"MusicBrainz Release Track Id", "MusicBrainz Release Group Id", "MusicBrainz
+Artist Id" (two values), "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_ALBUM_GAIN" (upper
+case, Picard's `__rtranslate_freetext_ci`), "originalyear", and TDOR; in
+Picard's default (ID3v2.4, UTF-16), its "write ID3v2.3" and UTF-8 options, and in
+a DSF, an AIFF and a WAV. And ffmpeg's id3v2 muxer (`-metadata "MusicBrainz
+Album Id=…" -metadata "replaygain_track_gain=…"`, ISO-8859-1). Through
+`manifest.Extract` on main (3c49f7e3), every one of the seven files came out with
+`MusicBrainzAlbumID ""`, `MusicBrainzTrackID ""` and both ReplayGain fields nil,
+while its title, artist, album and original year (TDOR / TORY) read. dhowden's
+raw map for the first reproduction's v2.4 UTF-16 MP3 (values shortened):
+
+    TXXX     *tag.Comm{Description: "originalyear", Text: "1999\x00"}
+    TXXX_0   *tag.Comm{Description: "REPLAYGAIN_ALBUM_GAIN", Text: "-7.25 dB\x00"}
+    TXXX_2   *tag.Comm{Description: "MusicBrainz Album Id", Text: "0b4c…2a11\x00"}
+    TXXX_5   *tag.Comm{Description: "MusicBrainz Artist Id", Text: "1111…5555\x00\ufeff6666…aaaa\x00"}
+    UFID     *tag.UFID{Provider: "http://musicbrainz.org", Identifier: "9a8b…7c6d"}
+
+Both writers end each TXXX value with a terminator (mutagen's
+`EncodedTextSpec.write` appends it to every value; ffmpeg's bytes show it too),
+and dhowden keeps it
+(`readTextWithDescrFrame` decodes the whole value field; only `readTFrame`, for
+the standard text frames, drops NULs). A version 2.4 field holds its values
+NUL-separated, and a UTF-16 value after the first keeps its byte order mark
+(dhowden's `decodeUTF16WithBOM` strips only the field's first). So a lookup that
+merely saw the frames would still have stored "id\x00", which the enricher's
+`isValidMBID` refuses with a Warn, and "-7.25 dB\x00", which `parseReplayGain`
+cannot parse.
+
+The comments claimed the opposite: the call site said the lookup "catches …
+ID3v2 TXXX descriptions (`MusicBrainz Album Id` — Picard's canonical form)", and
+`stringOf`'s docblock credited its case folding with fixing "any ID3v2-tagged
+album". What that fold fixed is an MP4 file's: dhowden keys an MP4 freeform atom
+by its name. `…StringOfMatchesVorbisAndID3v2Spellings` passed throughout because
+it handed `stringOf` a map keyed "MusicBrainz Album Id", MP4's shape; it is
+`TestStringOfMatchesVorbisAndMP4Spellings` now.
+
+### Design
+
+- `id3v2_named_values.go`: `id3v2NamedValues(raw)` collects the values an ID3v2
+  tag files under a name, once per extraction: each TXXX / TXX frame named by
+  its description, normalised by `normaliseRawTagKey` (the raw keys' own
+  normalisation), and each UFID / UFI frame whose owner is MusicBrainz, named
+  `musicbrainz_trackid`. `namedValueOf(raw, named, aliases…)` asks, per alias in
+  priority order, the raw map first (`stringOf`) and then the named values, so a
+  Vorbis or MP4 file (no named values) resolves exactly as `stringOf` did, and an
+  ID3v2 tag (whose raw keys are frame ids, none of which is one of these names)
+  resolves from its frames. Same aliases, same normalisation, same precedence.
+- **Order is never the map's.** The UFIDs come first (the recording id's own
+  frame outranks a TXXX claiming the same name), then the TXXX frames, each kind
+  in the tag's order, which dhowden's suffix gives back (`TXXX` is the first,
+  `TXXX_n` the (n+2)th, only `strconv.Itoa`'s spelling counting), the key
+  breaking a tie (a v2.2 TXX beside a TXXX, which no one tag holds). One name
+  twice (a lower-case ReplayGain name beside Picard's upper case, in a file two
+  taggers wrote) resolves to the first frame on every scan.
+- **Values**: `id3v2TextValue` takes the first value that is not empty after
+  trimming white space and U+FEFF (which `unicode.IsSpace` does not count). An
+  empty frame is left out, so a later one of the same name answers, as `stringOf`
+  passes over an empty value.
+- **The recording id.** `Track.MusicBrainzTrackID` is the RECORDING id: the
+  Vorbis path fills it from MUSICBRAINZ_TRACKID and the MP4 path from "MusicBrainz
+  Track Id" (both Picard's recording id), the fingerprint fallback writes the
+  AcoustID recording, and the Atlas lyrics tier asks `/v1/atlas/recording/{it}`.
+  The MusicBrainz UFID is its ID3v2 home. Picard's TXXX "MusicBrainz Release Track
+  Id" names the release's TRACK, a different entity: taken as the recording id it
+  would 404 at Atlas and stamp the track `unavailable` for thirty days, so it
+  answers no alias. The owner test is the app's
+  (`owner.lowercased().contains("musicbrainz.org")`); Picard, beets and Mp3tag
+  write exactly `http://musicbrainz.org`.
+- **Scope: the fields whose ID3v2 home is a TXXX or UFID frame.** The release id,
+  the recording id and the two gains. Every other field `populateFromTagMetadata`
+  reads by alias has a frame of its own in ID3v2, which both this reader and the
+  app read, and neither reads a TXXX for it: the compilation flag (TCMP), the
+  composer (TCOM), the conductor (TPE3), the work (TIT1), the original year (TDOR /
+  TORY) and the tempo (TBPM). For the compilation flag that is a pinned cross-repo
+  agreement (the app's `test_TXXXCompilationAndV22TCP_areNotRead`: a flagged file
+  with no album artist is keyed into "Various Artists" on both sides; the v17
+  record above). The backlog entry listed originalyear among the lost fields: a
+  Picard file carries TDOR / TORY whenever it carries TXXX:originalyear, so
+  leaving it out loses nothing measured.
+- **The presence gates stay frame-keyed.** `hasAnyRawKey` decides whether to read
+  Year, TrackNumber and DiscNumber through dhowden's accessors, which read frames;
+  a TXXX "TRACKNUMBER" seen there would turn an absent track number into Some(0).
+
+### The app
+
+`ID3v2Parser.swift` reads TXXX "replaygain_track_gain", "replaygain_album_gain"
+and "musicbrainz album id" (after lower-casing), "musicbrainz release track id",
+and the UFID whose owner contains "musicbrainz.org", each first in the tag's
+order. So both sides read the MusicBrainz ids and ReplayGain from TXXX and UFID,
+and neither reads a TXXX for a field with a frame of its own. They still differ:
+the app files the release track id as `musicBrainzTrackID` (nothing in the app
+looks it up today), and it matches fewer spellings (no space-to-underscore fold,
+no "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_TRACKID" or "MusicBrainz Track Id"):
+backlog B126. Picard's TXXX:WORK, read by neither: B127. No wire change and no
+Mirror-PR: the four fields are in `manifest.Track` and in the app's `BridgeTrack`
+(`musicBrainzTrackID`, `musicBrainzAlbumID`, `replayGainTrackDB`,
+`replayGainAlbumDB`, all optional), which `BridgeSyncActor` applies.
+
+### ExtractorVersion 19, the diff-guard and enrichment
+
+The bump is what reaches an already-scanned row (the skip gate compares
+`extractor_version`); without it the v19 scan test stays red. The merge set
+(`mergePostScanFields`) was re-derived from the `tags_json` writers, grepped:
+the two upserts (the scanner, and UPnP ingest for routed rows), `MarkEnriched`
+(the enricher: ArtworkMBID, ArtistMBID, MusicBrainzAlbumID, and
+MusicBrainzTrackID from the fingerprint fallback) and `applyReconciledTracks`
+(Album, AlbumArtist, Year, TrackNumber). The two ids already have fresh-wins
+arms; ReplayGain has no post-scan writer (the analysis loudness is spliced at
+read time and scrubbed by `marshalForStorage`), so it needs none. No arm
+changes.
+
+On the first scan after the bump:
+
+- A file whose tag names nothing of these re-extracts byte-identical and rides
+  the version-stamp leg: no `indexed_at` bump, no re-enrichment.
+- A file whose tag carries one takes the full-upsert leg: it gains the ids and
+  gains, its `indexed_at` advances (the iOS delta), and its `enriched_at` goes
+  to 0. The tag's release id replaces one the enricher found by searching (the
+  re-extract's non-empty value wins the merge), while the enricher's cover
+  (`ArtworkMBID`) is kept until the enricher runs again.
+- The enricher then takes the tag's release id as found: `enrichOne` searches
+  MusicBrainz for the release only when `MusicBrainzAlbumID` is empty (a
+  non-UUID value is scrubbed first, with a Warn), so these tracks cost no
+  release search. It fetches that release's cover from the Cover Art Archive
+  (the release group, then iTunes, on a miss) unless the file has local art,
+  resolves the artist by name (cached per artist), and stamps the track. An
+  album whose tag names a release other than the one the text search found gets
+  that release's cover and credits: the wrong-match fix. Where the tagged
+  release has no cover anywhere, the searched release's cover stays, as the
+  merge left it.
+- The Atlas lyrics tier: a row that gains a recording id skips the release
+  listing for it (`resolveRecording`'s tagged arm), and a row that gains a
+  release id becomes a candidate; the attempt row records the identity it was
+  made against, so an earlier verdict is re-asked by construction.
+- A tag ReplayGain now outranks the analysis loudness spliced in for a file
+  with none, which PROTOCOL.md's `replayGainTrackDB` section has always promised
+  ("curated tags always win"); these files had not been getting it. The phone
+  and the console's web player apply it as playback gain, and the smart mixes'
+  mood bands read it (the effective value, tag first), so a mix may place such
+  a track differently once.
+- A row that gains a release id joins `reconcileYearsByMBID`'s groups, so a
+  year-less stray among its album's tracks (three at most) may borrow the
+  album's year: one more bounded reconciliation write. The duplicate key
+  (`internal/dupes`) and the catalog's album identity (`internal/librarycat`)
+  read none of these fields.
+
+### Cost
+
+The named values are collected once per extraction: one pass over the raw map,
+a sort of the frames found. Through `manifest.Extract`, 20,000 extractions on
+the dev Mac: the Picard MP3 allocates 144,503 bytes an extraction against
+142,895 on main (+1.6 KB, the named values and the fields they fill), ffmpeg's
+v2.4 MP3 138,361 against 137,905; time was within the noise of a host shared
+with sibling agents (70 to 230 µs an extraction on either binary). At B101's
+renaming bound with TXXX frames (2,048 copies of one TXXX, every one a named
+value) an extraction allocates 34.2 MB against the allocation property's
+76.2 MB, where 2,048 TIT2 copies take 32.9 MB (a new case in
+`TestATagTheID3v2GuardPassesMeetsTheAllocationProperty`).
+
+### Tests
+
+- `TestPicardsID3v2IdsAndReplayGainReachTheirFields`: the seven real files in
+  `testdata/id3` (`testdata/gen/id3_txxx_fixtures.py`), through
+  `ExtractWithContext` under the allocation property: the release id, the
+  recording id (the UFID, never the release track id; none from ffmpeg) and
+  both gains.
+- `TestAnID3v2NameAnswersAsAVorbisOrMP4NameDoes`, over tags built in the test
+  with mutagen's layout, each case twenty times: the first alias answers
+  wherever its frame sits (both orders); one name twice, the first frame (both
+  orders); empty and whitespace-and-BOM frames are no answer; the first of
+  several UTF-16 values; the UFID ahead of a TXXX "MUSICBRAINZ_TRACKID"; a TXXX
+  "MusicBrainz Track Id" as the recording id; the release track id as nothing;
+  another owner's UFID as nothing; version 2.2's TXX and UFI.
+- `TestAFieldID3v2GivesAFrameOfItsOwnIsNotReadFromATXXX`: TXXX COMPILATION,
+  COMPOSER, CONDUCTOR, WORK, originalyear and BPM fill nothing.
+- `TestScanner_V19_ATagNamingItsIDsJoinsTheDelta_APlainID3RowOnlyStamps`: a v18
+  row set (the tagged row with a searched release id, enriched) re-extracted.
+- The fuzz targets FuzzExtractMP3 (three), FuzzExtractDSF, FuzzExtractAIFF and
+  FuzzExtractWAV (one each) gained the fixtures as seeds.
+
+All but the scan test were red on main; the scan test was red on the fix until
+the bump. Negative controls, each on the committed fix and each red: the named
+values never consulted (every case); the NUL not split (values end "\x00",
+gains nil); the BOM not trimmed (the empty-frame and several-values cases); the
+UFID sorted after the TXXX frames; no sort at all, the map's order (both
+one-name-twice cases, and the UFID case, within twenty runs); the release track
+id added as an alias; any UFID owner accepted; the compilation flag, then the
+conductor and the original year, read through the named values (the scope
+test); ExtractorVersion left at 18, and the stored release id winning the merge
+(the scan test); only the first TXXX key seen, never a renamed one (every
+fixture); version 2.2's TXX and UFI dropped (its case).
+
+### Fuzzed
+
+dido, golang:1.26.6, one container per target with 3 CPUs and an 8 GB cgroup,
+under the nightly job's 5 GiB address-space limit (`-exec "prlimit
+--as=5368709120 --"`), `-fuzzminimizetime 1s`, from the committed seeds
+(the fixtures among them): FuzzExtractMP3, 10 minutes, 3,181,739 executions;
+FuzzExtractDSF, FuzzExtractAIFF and FuzzExtractWAV, 5 minutes each, 794,445,
+978,847 and 1,051,029. All passed, nothing saved. No new target: the named
+values are a pure function of dhowden's map, which the whole-file targets reach
+with these seeds under the allocation property.
+
+### Left open
+
+- B126: the app files Picard's TXXX "MusicBrainz Release Track Id" as the
+  recording id and matches fewer TXXX spellings than the bridge.
+- B127: Picard writes the work to TXXX:WORK by default, and both readers take
+  the work from TIT1 alone: a paired decision.
+
 ## 2026-09-29 — bridge init warns about or refuses a posture flag it would not write, asks "Overwrite?" before its preflight, and names a kept endpoint on a moved port; doctor grades init's data dir before init (backlog B61)
 
 The four leftovers #1081's entry recorded under Out of scope. Every run

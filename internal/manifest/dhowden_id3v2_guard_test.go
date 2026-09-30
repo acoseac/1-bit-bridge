@@ -503,6 +503,10 @@ func TestATagTheID3v2GuardPassesMeetsTheAllocationProperty(t *testing.T) {
 		"frames at the frames bound": distinctFrames(65536),
 		// Both at once: one id at the renaming bound among the most frames.
 		"both bounds": append(repeatedTIT2(2048), distinctFrames(65536-2048)...),
+		// TXXX frames at the renaming bound, every one a named value the
+		// extraction collects and sorts (id3v2NamedValues, backlog B116).
+		"TXXX frames at the renaming bound": bytes.Repeat(
+			txxxFrame(4, 3, "MusicBrainz Album Id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), 2048),
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := append(id3v2TagBytes(4, 0, body), mp3Audio()...)

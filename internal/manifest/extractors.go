@@ -404,7 +404,28 @@ var Ext = map[string]bool{
 // or Opus stream is still dhowden's to read); SACD ISO virtual rows
 // re-expand as on every bump. The codec stays "OGG", and an Ogg file still
 // carries no sample rate, bit depth or duration: this bump is about tags.
-const ExtractorVersion = 18
+//
+// v19 — an ID3v2 tag's MusicBrainz ids and ReplayGain reach the manifest
+// (backlog B116). dhowden files a TXXX frame under TXXX, TXXX_0, … and the
+// MusicBrainz UFID under UFID, holding a description or an owner no lookup by
+// key sees, so every MP3, DSF, AIFF and WAV lost the release id (TXXX
+// "MusicBrainz Album Id"), the recording id (the UFID owned by
+// http://musicbrainz.org) and its ReplayGain (TXXX "REPLAYGAIN_TRACK_GAIN" /
+// "…_ALBUM_GAIN"), and every writer measured ends a TXXX value with a NUL
+// dhowden keeps. id3v2NamedValues and namedValueOf (id3v2_named_values.go)
+// read them under the aliases a Vorbis or MP4 name answers. Only the files
+// whose tag carries one change: they gain the ids and gains, take the
+// full-upsert leg (the tag's release id replaces one the enricher found by
+// searching, since the re-extract's value wins mergePostScanFields; the
+// enricher's cover stays until it runs again) and are the iOS delta. Their
+// enrichment is re-queued once, and with a release id in hand the enricher does
+// not search MusicBrainz for the release: it fetches that release's cover
+// (unless the file has local art) and resolves the artist. A tag ReplayGain now
+// outranks the analysis-derived loudness spliced in for a file with none (the
+// PROTOCOL.md contract, which these files had not met). Every other row
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
+// rows re-expand as on every bump.
+const ExtractorVersion = 19
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -989,11 +1010,16 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		d, _ := m.Disc()
 		t.DiscNumber = &d
 	}
-	// MusicBrainz IDs — many tagged libraries carry these. The
-	// case/space-agnostic stringOf below catches both Vorbis-flavour
-	// keys (`MUSICBRAINZ_ALBUMID`) AND ID3v2 TXXX descriptions
-	// (`MusicBrainz Album Id` — Picard's canonical form).
+	// MusicBrainz IDs — many tagged libraries carry these. The case- and
+	// space-agnostic lookup below matches a Vorbis comment's name
+	// (`MUSICBRAINZ_ALBUMID`) and an MP4 freeform atom's (`MusicBrainz
+	// Album Id`, Picard's form) by the raw map's keys, and an ID3v2 TXXX
+	// frame's description and the MusicBrainz UFID through namedValueOf
+	// (backlog B116: dhowden files those under TXXX, TXXX_0, … and UFID,
+	// which no key matches, so until ExtractorVersion 19 no ID3v2 tag gave
+	// up these ids or its ReplayGain).
 	if raw := m.Raw(); raw != nil {
+		named := id3v2NamedValues(raw)
 		// Compilation flag + safety net (CLAUDE.md / Gemini A6 / iOS
 		// bug review #6b). TCMP (ID3v2), CPIL (iTunes / MP4),
 		// COMPILATION (Vorbis / FLAC) all carry the same semantic, and
@@ -1008,21 +1034,25 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		}
 		// Pass BOTH underscore-joined ("musicbrainz_trackid") AND
 		// space-derived ("musicbrainz_track_id") variants — they
-		// normalise differently and both are valid spellings on the
-		// wire (Vorbis vs ID3v2 TXXX). See stringOf docstring.
-		if v, ok := stringOf(raw, "musicbrainz_trackid", "musicbrainz_track_id"); ok {
+		// normalise differently and both are valid spellings (a Vorbis
+		// comment's, an MP4 freeform atom's, and either as a TXXX
+		// description). See stringOf docstring. The recording id: the
+		// MusicBrainz UFID answers "musicbrainz_trackid" ahead of a TXXX of
+		// that name (musicBrainzUFIDName), and Picard's TXXX "MusicBrainz
+		// Release Track Id", the release's track, answers neither.
+		if v, ok := namedValueOf(raw, named, "musicbrainz_trackid", "musicbrainz_track_id"); ok {
 			t.MusicBrainzTrackID = v
 		}
-		if v, ok := stringOf(raw, "musicbrainz_albumid", "musicbrainz_album_id"); ok {
+		if v, ok := namedValueOf(raw, named, "musicbrainz_albumid", "musicbrainz_album_id"); ok {
 			t.MusicBrainzAlbumID = v
 		}
 		// ReplayGain.
-		if v, ok := stringOf(raw, "replaygain_track_gain"); ok {
+		if v, ok := namedValueOf(raw, named, "replaygain_track_gain"); ok {
 			if g := parseReplayGain(v); g != nil {
 				t.ReplayGainTrackDB = g
 			}
 		}
-		if v, ok := stringOf(raw, "replaygain_album_gain"); ok {
+		if v, ok := namedValueOf(raw, named, "replaygain_album_gain"); ok {
 			if g := parseReplayGain(v); g != nil {
 				t.ReplayGainAlbumDB = g
 			}
@@ -1583,8 +1613,8 @@ func readUint32LE(r io.Reader) (uint32, error) {
 // directly against the caller's set — no per-call allocation, no
 // repeated normalisation of the static literals at call sites.
 //
-// To match BOTH Vorbis-style ("MUSICBRAINZ_ALBUMID") and ID3v2-TXXX-
-// style ("MusicBrainz Album Id") shapes, callers MUST pass BOTH
+// To match BOTH Vorbis-style ("MUSICBRAINZ_ALBUMID") and Picard's
+// spaced ("MusicBrainz Album Id") shapes, callers MUST pass BOTH
 // normalised variants where they differ — e.g. "musicbrainz_album_id"
 // (from the space-separated form) AND "musicbrainz_albumid" (from
 // the underscore-separated form). The normaliser bridges minor case
@@ -1592,16 +1622,20 @@ func readUint32LE(r io.Reader) (uint32, error) {
 // fundamentally different word-boundary shapes.
 //
 // Pre-fix the lookup did exact case-sensitive map subscripts, so
-// MBID extraction silently failed for any ID3v2-tagged album —
-// Cover-Art-Archive enrichment fell back to the lower-quality iTunes
-// path, and the iOS app couldn't fall through to bridge-served
-// local-art for those files. Per Gemini A6 / iOS bug review #6d.
+// MBID extraction silently failed for Picard's spaced names. What
+// that fixed is an MP4 file's: dhowden keys an MP4 freeform atom by
+// its name ("MusicBrainz Album Id"). It never fixed an ID3v2 tag's,
+// though this docblock and the call site said so until 2026-09-29:
+// dhowden keys an ID3v2 TXXX frame "TXXX", "TXXX_0", …, holding the
+// description inside a *tag.Comm, which no key matches. Those are
+// read through namedValueOf (id3v2_named_values.go, backlog B116).
+// Per Gemini A6 / iOS bug review #6d.
 //
 // Trimmed return: every matched value is `strings.TrimSpace`'d
 // before being returned, defending against trailing-space tagging
-// hygiene issues at the consuming layer (Vorbis comments rarely
-// carry leading/trailing whitespace, but ID3v2 TXXX frames
-// occasionally do).
+// hygiene issues at the consuming layer (Vorbis comments and MP4
+// freeform values rarely carry leading/trailing whitespace, but
+// hand-edited tags occasionally do).
 func stringOf(raw map[string]any, keys ...string) (string, bool) {
 	if len(keys) == 0 {
 		return "", false
@@ -1681,8 +1715,10 @@ const mp4CopyrightAtomPrefix = "\xa9"
 
 // normaliseRawTagKey lowercases and replaces spaces with underscores
 // so the search keys passed to stringOf can match both Vorbis-style
-// (`MUSICBRAINZ_ALBUMID`) and ID3v2-TXXX-style (`MusicBrainz Album Id`)
-// shapes uniformly. The replacement is space → underscore only —
+// (`MUSICBRAINZ_ALBUMID`) and Picard's spaced (`MusicBrainz Album Id`)
+// shapes uniformly. It normalises a raw map key (a Vorbis comment's or
+// an MP4 freeform atom's name) and an ID3v2 TXXX frame's description
+// (id3v2NamedValues) alike. The replacement is space → underscore only —
 // other punctuation (slash, colon, etc.) stays intact since dhowden's
 // raw map keys preserve them on the surfaces we care about.
 //
