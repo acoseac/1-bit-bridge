@@ -1296,9 +1296,17 @@ func (s *Scanner) runTrackNumberReconciliation(ctx context.Context, routedSet ma
 
 // loadAndApplyReconciled loads the full Track for each changed target, stamps
 // the reconciled value via set, skips rows deleted since the stream (not
-// fatal), and persists the batch via apply. Shared by the three post-scan
-// reconciliation passes (AlbumArtist / Year / TrackNumber); apply bumps
-// indexed_at and leaves enriched_at untouched (see applyReconciledTracks).
+// fatal), and persists the batch via apply. Shared by the post-scan
+// reconciliation passes (album title, AlbumArtist, Year, the MBID year,
+// TrackNumber); apply bumps indexed_at and leaves enriched_at untouched (see
+// applyReconciledTracks). Each Track carries the version GetTrack read it at,
+// and apply writes a row only while it still has that version: the enricher
+// stamps rows while this tail runs, and a write of the tags_json read before
+// a stamp would take the stamp's MBIDs away (backlog B187). The pass decided
+// from the stream's values, read earlier still; while Scan holds the
+// scanner's mutex the enricher is the one other writer of a row it may hold
+// (routed rows are excluded), and it writes none of the fields a pass sets,
+// only the MBIDs and the artwork.
 func (s *Scanner) loadAndApplyReconciled(
 	ctx context.Context,
 	changed []ReconcileTarget,
@@ -1323,8 +1331,23 @@ func (s *Scanner) loadAndApplyReconciled(
 	if len(tracks) == 0 {
 		return 0, nil
 	}
+	if hook := beforeApplyReconciledHookForTests; hook != nil {
+		paths := make([]string, len(tracks))
+		for i := range tracks {
+			paths[i] = tracks[i].Path
+		}
+		hook(paths)
+	}
 	return apply(ctx, tracks)
 }
+
+// beforeApplyReconciledHookForTests, when non-nil, runs in
+// loadAndApplyReconciled after a pass has read the rows it will write and
+// before it writes them, with their paths: the window in which another
+// writer (the enricher's stamp) can change a row the pass read. Set only by
+// tests, before the scan, and cleared by them; production code MUST NOT set
+// it.
+var beforeApplyReconciledHookForTests func(paths []string)
 
 // runScanWorker is one of NumCPU workers reading walker-supplied paths
 // off `paths`, doing the early-skip GetTrack check + the CPU-bound

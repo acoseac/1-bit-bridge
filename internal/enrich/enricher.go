@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1080,8 +1081,18 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 // = 0 and the next run retries it, exactly as for a failed one. The tier-2
 // fetches (artwork, portrait) absorb their own errors, so a pass whose fetch
 // the shutdown cancelled reaches this on the cancelled context.
+//
+// Nor is a stamp over a row that changed since the batch read it
+// (manifest.ErrTrackChanged: the scanner re-read the file, a reconciliation
+// pass rewrote it). Nothing was written and nothing was enriched: the row
+// is as the other writer left it, still unenriched, and the next batch
+// reads it again, answering mostly from this enricher's caches.
 func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
+		if errors.Is(err, manifest.ErrTrackChanged) {
+			noteChangedWhileEnriched(t)
+			return
+		}
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 			logger.Error("mark enriched", "path", t.Path, "err", failure)
 		}
@@ -1089,6 +1100,18 @@ func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 	}
 	e.done.Add(1)
 }
+
+// noteChangedWhileEnriched says, at Debug, that a stamp found its row
+// changed since the batch read it (manifest.ErrTrackChanged). Debug because
+// it is no failure: nothing is lost, the next batch reads the row again, and
+// a library retagged while the enricher works through it would otherwise log
+// a line per track.
+func noteChangedWhileEnriched(t *manifest.Track) {
+	logger.Debug(msgChangedWhileEnriched, "path", t.Path)
+}
+
+// msgChangedWhileEnriched is noteChangedWhileEnriched's message.
+const msgChangedWhileEnriched = "track changed while it was enriched; the next batch reads it again"
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
 // unsearchable track forever.
@@ -1105,8 +1128,17 @@ func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 // cancelled: the portrait search after a release miss, whose error the pass
 // absorbs. So the pass stops at the one place every such path converges
 // (this and stampEnriched), rather than at each fetch that can be cancelled.
+//
+// A stamp over a row that changed since the batch read it
+// (manifest.ErrTrackChanged) records nothing either, for stampEnriched's
+// reason: the verdict is about tags the row no longer holds, and the next
+// batch reads the row again.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
+		if errors.Is(err, manifest.ErrTrackChanged) {
+			noteChangedWhileEnriched(t)
+			return
+		}
 		failure := ctxerr.WithoutCancellation(ctx, err)
 		if failure == nil {
 			return

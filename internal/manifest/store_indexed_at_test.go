@@ -214,17 +214,15 @@ func TestIndexedAtBumpsClearTheLibraryWideMax(t *testing.T) {
 		run  func(t *testing.T, s *Store)
 	}{
 		{"MarkEnriched", func(t *testing.T, s *Store) {
-			if err := s.MarkEnriched(context.Background(), &Track{
-				Path: target, Size: 100, ModTime: time.Unix(0, 0).UTC(),
-			}); err != nil {
+			if err := s.MarkEnriched(context.Background(), readTrack(t, s, target)); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{"applyReconciledTracks", func(t *testing.T, s *Store) {
-			if _, err := s.applyReconciledTracks(context.Background(), []Track{{
-				Path: target, Size: 100, ModTime: time.Unix(0, 0).UTC(), Album: "Reconciled",
-			}}); err != nil {
-				t.Fatal(err)
+			tr := readTrack(t, s, target)
+			tr.Album = "Reconciled"
+			if n, err := s.applyReconciledTracks(context.Background(), []Track{*tr}); err != nil || n != 1 {
+				t.Fatalf("applyReconciledTracks = (%d, %v), want (1, nil)", n, err)
 			}
 		}},
 		{"UpsertVariant", func(t *testing.T, s *Store) {
@@ -501,11 +499,38 @@ var indexedAtAssign = regexp.MustCompile(`indexed_at\s*=`)
 // advance nor a documented exclusion.
 func classifyIndexedAtAssignments(t *testing.T, name, text, shared string) int {
 	t.Helper()
-	checked := 0
+	checked, handRolled := handRolledIndexedAtAssignments(text, shared)
+	for _, h := range handRolled {
+		t.Errorf("%s:%d — hand-rolled indexed_at assignment.\n"+
+			"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
+			"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
+			"the only exclusions are the upsert conflict arms and migration\n"+
+			"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
+			name, h.line, h.window[:min(180, len(h.window))])
+	}
+	return checked
+}
+
+// handRolledAssignment is one assignment classifyIndexedAtAssignments fails
+// on: its line, and the statement from it to the end of its literal.
+type handRolledAssignment struct {
+	line   int
+	window string
+}
+
+// handRolledIndexedAtAssignments counts the `indexed_at =` assignments in
+// text and returns those that are neither the shared advance nor a
+// documented exclusion. A comparison in a predicate (the word before it is
+// WHERE, AND or OR) is no assignment and is not counted: MarkEnriched and
+// the reconciliation writer compare the row's version there (backlog B187).
+func handRolledIndexedAtAssignments(text, shared string) (checked int, handRolled []handRolledAssignment) {
 	for _, loc := range indexedAtAssign.FindAllStringIndex(text, -1) {
 		// Skip prose: the docblocks discuss both forms by name.
 		lineStart := strings.LastIndexByte(text[:loc[0]], '\n') + 1
 		if strings.HasPrefix(strings.TrimSpace(text[lineStart:loc[0]]), "//") {
+			continue
+		}
+		if inPredicate(text[:loc[0]]) {
 			continue
 		}
 		checked++
@@ -529,13 +554,47 @@ func classifyIndexedAtAssignments(t *testing.T, name, text, shared string) int {
 			// healTransitionBandBandwidths, migration v34's post(): frozen and
 			// append-only, both live bridges already ran it.
 		default:
-			t.Errorf("%s:%d — hand-rolled indexed_at assignment.\n"+
-				"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
-				"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
-				"the only exclusions are the upsert conflict arms and migration\n"+
-				"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
-				name, 1+strings.Count(text[:loc[0]], "\n"), window[:min(180, len(window))])
+			handRolled = append(handRolled, handRolledAssignment{
+				line: 1 + strings.Count(text[:loc[0]], "\n"), window: window,
+			})
 		}
 	}
-	return checked
+	return checked, handRolled
+}
+
+// inPredicate reports whether the text before an `indexed_at =` ends in the
+// word WHERE, AND or OR, so the match is a comparison in a predicate, not an
+// assignment. It reads the last 128 bytes, which hold that word whole.
+func inPredicate(before string) bool {
+	words := strings.Fields(before[max(0, len(before)-128):])
+	if len(words) == 0 {
+		return false
+	}
+	switch strings.ToUpper(words[len(words)-1]) {
+	case "WHERE", "AND", "OR":
+		return true
+	}
+	return false
+}
+
+// TestTheIndexedAtSweepTellsAnAssignmentFromAComparison pins what
+// TestNoHandRolledIndexedAtBump reads as an assignment. On the package it
+// cannot show both halves: the tree holds no hand-rolled bump to fail, so
+// this reads a fixture holding each shape (a bare SET, a SET through the
+// shared advance, a compare-and-set predicate after AND, one after WHERE on
+// the line before, one after OR, and prose).
+func TestTheIndexedAtSweepTellsAnAssignmentFromAComparison(t *testing.T) {
+	shared := squashSpace(indexedAtAdvanceSQL)
+	src := "package manifest\n" +
+		"const handRolled = `UPDATE tracks SET indexed_at = ? WHERE path = ?`\n" +
+		"const advanced = `UPDATE tracks\n SET indexed_at = " + indexedAtAdvanceSQL + "\n WHERE path = ? AND indexed_at = ?`\n" +
+		"const compared = `SELECT 1 FROM tracks WHERE\n indexed_at = ? OR indexed_at = ?`\n" +
+		"// prose naming indexed_at = something is not read\n"
+	checked, handRolled := handRolledIndexedAtAssignments(src, shared)
+	if checked != 2 {
+		t.Errorf("counted %d assignments, want 2 (the two SETs; every comparison and the prose is skipped)", checked)
+	}
+	if len(handRolled) != 1 || handRolled[0].line != 2 {
+		t.Errorf("hand-rolled = %+v, want the one on line 2 (the SET without the shared advance)", handRolled)
+	}
 }

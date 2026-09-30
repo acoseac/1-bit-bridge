@@ -34612,6 +34612,128 @@ Gemini was over its daily quota on every head.
   Windows adapter's name holds, so a panic value holding such text loses
   it. It is replaced, never kept, so it costs text and never an address.
 
+## 2026-09-29 — the enricher's stamp and the reconciliation passes write a row back only while it is the row they read (backlog B187)
+
+Found by the pre-v0.2.1 data-integrity review, a throwaway probe per case.
+`MarkEnriched` (the enricher's `stampEnriched` and `markSkipped`) and
+`applyReconciledTracks` (the post-scan reconciliation passes, through
+`loadAndApplyReconciled`) each write back the WHOLE `tags_json` of a read
+made earlier, with no check that the row is still the one read. Whatever
+another writer did to the row in between was overwritten.
+
+### What was measured on the old code
+
+main at 1f784879, through the real Store and Scanner
+(`internal/manifest/row_version_test.go`, each test red there):
+
+| case | what the row held afterwards |
+|---|---|
+| a FLAC retagged (longer title) between the enricher's read and its stamp; the scanner's upsert lands in between | title "Old" and a `size` of 124 inside `tags_json` against 161 on disk, `enriched_at` set, unchanged through three more scans |
+| a `cover.jpg` added while the enricher works on the album; the scan that reads it lands before the stamp | `ArtworkMBID` "" where the scan had written the cover's `local-` key, while `folder_art_key` recorded the cover as seen |
+| a reconcile pass reads a row, the enricher stamps it, the pass writes | MBIDs "" / "" / "", `enriched_at` still set |
+
+Nothing heals any of these. The skip gate compares the `size` and
+`mtime_ns` COLUMNS (`GetTrackStat`), which neither writer touches, so no
+scan reads the file again; the enricher never revisits a stamped row; and
+B141's folder-art key says the cover was seen. The phone checks a
+download against the size it was told (`validateDownloadedSize`), so
+every offline download of the retagged file fails.
+
+### The change
+
+`indexed_at` is the row's version. There are exactly four `tags_json`
+writers (a grep for `tags_json =`, `SET tags_json` and the json_* mutators
+over non-test Go: `MarkEnriched`, `applyReconciledTrackSQL`, `UpsertTrack`,
+`UpsertTrackBatch`), and every one moves `indexed_at`: the upserts' conflict
+arm is `CASE WHEN tracks.indexed_at >= excluded.indexed_at THEN +1 ELSE
+excluded END`, the other two go through `indexedAtAdvanceSQL`.
+
+- `Track` carries `rowVersion` and `hasRowVersion` (unexported, never
+  marshaled, the `versionStampOnly` shape). Every store reader that returns
+  a Track records the version it read: `UnenrichedTracks`, `GetTrack`,
+  `LookupTrack`'s folded fallback, `listTracks`, `streamTracks`,
+  `listTracksPage` and `ListUPnPTracksByServer`. `UpsertTrack` selects the
+  version it wrote inside its transaction (it has no production caller; the
+  tests upsert and then stamp).
+- `markEnrichedSQL` is `… WHERE path = ? AND indexed_at = ? RETURNING
+  indexed_at`: no row back is `ErrTrackChanged`, and a stamp records the
+  version it wrote. A Track with no version is refused (`errTrackNotRead`)
+  before anything is marshaled.
+- `applyReconciledTrackSQL` is `… WHERE path = ? AND indexed_at = ?`; a
+  row changed since the pass's `GetTrack` is skipped and not counted, and a
+  batch holding a Track with no version is refused before it writes
+  anything.
+- The enricher answers `ErrTrackChanged` in both `stampEnriched` and
+  `markSkipped` with one Debug line (`msgChangedWhileEnriched`) and nothing
+  else: no `done` or skip count, no "enrichment skipped" line. The row
+  stays at `enriched_at = 0` and the next batch reads it again.
+- `TestNoHandRolledIndexedAtBump` read the new `AND indexed_at = ?` as a
+  hand-rolled assignment. It now classifies a match whose last word before
+  it is WHERE, AND or OR as a comparison (`inPredicate`, in a pure
+  `handRolledIndexedAtAssignments` the fixture test drives).
+- Stale docblocks corrected on the way: `GetTrackStat` said the other
+  writers "can't drift" because they round-trip the original ModTime, and
+  named the artwork-version and booklet-tag stampers among the `tags_json`
+  writers (they write columns); `MarkEnriched`'s own comment and
+  `ApplyAlbumArtistReconciliation`'s described the dead "CASE WHEN" bump.
+
+### Rejected
+
+- **Compare the `tags_json` bytes.** Older rows hold TEXT or BLOB, so the
+  compare needs a CAST, and it buys only fewer spurious misses.
+- **`json_set` only the fields each writer owns.** It keeps the new title,
+  and stamps an enrichment found for the OLD tags onto the new ones, with
+  `enriched_at` set: the enricher never runs for the new tags.
+- **Fail open on a Track with no version.** A reader that forgets to record
+  the version would reopen the race without a word.
+
+A writer that moves `indexed_at` without changing `tags_json` (a rendition,
+the lyrics write, a booklet tag) now costs a spurious miss: one more
+enrichment of that row, answered mostly from the enricher's caches. No
+livelock: each such bump is a one-off, and no enricher path bumps the row
+it is enriching (it calls `UnenrichedTracks`, `SetAcoustIDTagVeto`, which
+writes columns only, and `MarkEnriched`). A Gemini consult on the design
+was refused by the API's spending cap (HTTP 429); decided on the
+measurements above.
+
+### Tests
+
+`internal/manifest/row_version_test.go`: the three measured cases
+(`TestAStampOverARowTheScannerRewroteWritesNothing`,
+`TestAStampOverARowWhoseCoverArrivedWritesNothing`,
+`TestAReconcileWriteOverAStampedRowWritesNothing`, the last through
+`beforeApplyReconciledHookForTests`, which stamps in the window between a
+pass's read and its write), and `TestAWriteBackOfATrackTheStoreDidNotHandOutIsRefused`,
+`TestAStampRecordsTheVersionItWrote`, `TestAStampOverADeletedRowWritesNothing`.
+`internal/enrich/stamp_changed_row_test.go`: the real enricher over the
+real store, whose MusicBrainz handler rewrites the row on its first
+request (`TestAStampOverARowThatChangedMidEnrichmentIsNotCounted`,
+`TestASkipOverARowThatChangedMidEnrichmentIsNotCounted`: no done or skip
+count, exactly one Debug line, no line at Warn or above).
+`TestTheIndexedAtSweepTellsAnAssignmentFromAComparison` pins the guard's
+new reading.
+
+### Negative controls, on the committed tree, each restored with `git checkout --`
+
+1. `markEnrichedSQL`'s predicate made `(indexed_at = ? OR 1)`: the three
+   stamp tests red; the deleted-row test stays green (an UPDATE of a
+   missing row returns no row either way: it pins the sentinel).
+2. `applyReconciledTrackSQL`'s predicate made `(… OR 1)`:
+   `TestAReconcileWriteOverAStampedRowWritesNothing` red.
+3. The `ErrTrackChanged` branch removed from `stampEnriched`: the stamp
+   test red; from `markSkipped`: the skip test red (each alone).
+4. `MarkEnriched`'s `!t.hasRowVersion` refusal removed: the hand-built test
+   red (it gets `ErrTrackChanged`: version 0 matches no row); the
+   reconcile batch's refusal removed: red, `(1, <nil>)` where `(0,
+   errTrackNotRead)` was wanted (the batch wrote the row that had a
+   version).
+5. `t.rowVersion = wrote` removed from `MarkEnriched`:
+   `TestAStampRecordsTheVersionItWrote` red alone ("a second stamp through
+   the same Track = manifest: track changed since it was read").
+6. `inPredicate` made to answer false: `TestNoHandRolledIndexedAtBump`
+   (store.go's two write-backs reported as hand-rolled assignments) and
+   `TestTheIndexedAtSweepTellsAnAssignmentFromAComparison` red.
+
 ## 2026-09-29 — the variant watcher asks again, by identity, whether its variants directory is the one its tick began on, as rows read as missing and before it deletes (backlog B203)
 
 Found by the pre-v0.2.1 review: `VariantWatcher.tick` probed the variants
