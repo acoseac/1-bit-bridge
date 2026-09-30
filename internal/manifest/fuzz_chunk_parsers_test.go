@@ -88,7 +88,14 @@ func FuzzParsePropChunks(f *testing.F) {
 	// stay in the fuzz corpus.
 	f.Add([]byte("CHNL\x00\x00\x00\x00\x00\x00\x00\x02\x00\x02"))
 	f.Add([]byte("CMPR\x00\x00\x00\x00\x00\x00\x00\x05DST \x00\x00"))
+	// An ID3 chunk nested among the properties (backlog B140), in both
+	// spellings, the second one ignored.
+	f.Add(append(dffChunk("ID3 ", []byte("ID3\x04\x00\x00\x00\x00\x00\x00")),
+		dffChunk("id3 ", []byte("ID3\x03\x00\x00\x00\x00\x00\x00"))...))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		_ = parsePropChunks(b)
+		info := parsePropChunks(b)
+		if len(info.id3) > len(b) {
+			t.Fatalf("parsePropChunks returned a %d-byte ID3 body from %d bytes", len(info.id3), len(b))
+		}
 	})
 }

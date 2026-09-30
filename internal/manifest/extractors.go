@@ -2221,9 +2221,11 @@ func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Tra
 // artist (DIAR), in the DSDIFF 1.5 layout TagLib writes and ffmpeg, TagLib and
 // MediaInfo read (parseDIINChunks), and an "ID3 " chunk's ID3v2 tag, which is
 // where mutagen (so Picard) tags a DSDIFF file, read as an AIFF's ID3 chunk is
-// (applyEmbeddedID3). The ID3 tag answers each field it has a value for and the
-// DIIN the rest, and both outrank the path's guess the scanner filled first
-// (containerText.applyUnder, once the walk is over). Until v20 the walk read
+// (applyEmbeddedID3). An ID3 chunk nested in PROP is read too, as TagLib reads
+// it, where the file holds no root one (a root tag wins whole). The ID3 tag
+// answers each field it has a value for and the DIIN the rest, and both
+// outrank the path's guess the scanner filled first (containerText.applyUnder,
+// once the walk is over). Until v20 the walk read
 // the DIIN in a layout no writer produces, only into EMPTY fields, and skipped
 // the ID3 chunk, so no DSDIFF file's own tags ever reached a scanned row.
 //
@@ -2313,10 +2315,15 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	sound.physicalSize = physicalSize
 	logPath := trackLogPath(absPath, t)
 	// finish commits everything the walk gathered, once: the format stamps,
-	// the DIIN's text beneath the ID3 tag (whichever chunk came first), and
-	// the cover, the ID3 tag's picture ahead of a cover.jpg beside the file.
+	// the ID3 tag nested in PROP where no root one was read (a root tag wins
+	// whole, wherever the chunks sit, as TagLib reads the two), the DIIN's
+	// text beneath the ID3 tag (whichever chunk came first), and the cover,
+	// the ID3 tag's picture ahead of a cover.jpg beside the file.
 	finish := func() error {
 		applyDFFStamps(t, absPath, prop, sound)
+		if id3 == nil && prop.id3 != nil {
+			id3 = applyEmbeddedID3(prop.id3, t, nil, absPath, "dff")
+		}
 		diin.applyUnder(t, id3)
 		if ec != nil && ec.ArtworkCacheDir != "" {
 			extractLocalArtwork(absPath, t, id3, ec)
@@ -2363,9 +2370,27 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			const maxPROPSize = 1 << 20
+			// The cap admits an ID3 tag nested in PROP (the placement
+			// TagLib reads beside a root one, and keeps when it rewrites
+			// a tag it found there), cover and all: 1 MiB for the
+			// property chunks and the ID3 chunk cap beside it. Until
+			// ExtractorVersion 20 it was 1 MiB, and a nested tag holding
+			// a cover over it refused the whole file (backlog B140).
+			const maxPROPSize = 1<<20 + maxID3ChunkSize
 			if size > maxPROPSize {
 				return fmt.Errorf("dff: PROP chunk size %d exceeds %d-byte sanity limit", size, maxPROPSize)
+			}
+			// Allocated only once the file is known to hold it: a PROP
+			// that runs past the end is refused as its failed read always
+			// refused it, without the body a file cut short cannot back.
+			if physicalSize > 0 {
+				pos, err := f.Seek(0, io.SeekCurrent)
+				if err != nil {
+					return fmt.Errorf("dff: PROP position: %w", err)
+				}
+				if pos < 0 || uint64(pos) > physicalSize || size > physicalSize-uint64(pos) {
+					return fmt.Errorf("dff: PROP chunk of %d bytes runs past the end of the file", size)
+				}
 			}
 			body := make([]byte, size)
 			if _, err := io.ReadFull(f, body); err != nil {
@@ -2683,12 +2708,18 @@ type dffPropInfo struct {
 	channels    int
 	haveCHNL    bool
 	compression dffCompression
+	// id3 is the body of the first ID3 chunk nested in PROP ("ID3 " or
+	// "id3 "), a slice of the PROP body: the placement TagLib reads beside
+	// a root ID3 chunk, used only where the file holds no root one (the
+	// walk's finish). Tags only; nothing the iOS DFFHeadScan mirrors.
+	id3 []byte
 }
 
 // parsePropChunks walks the body of a DSDIFF PROP chunk (after the
-// leading "SND " form-type) and pulls FS (sample rate) + CMPR
-// (compression). Other property chunks (CHNL, ABSS, LSCO) aren't
-// needed for the iOS Track row.
+// leading "SND " form-type) and pulls FS (sample rate), CHNL (channels),
+// CMPR (compression), and an ID3 chunk nested there (its body, for the
+// walk's finish to read where the file holds no root one: backlog B140).
+// Other property chunks (ABSS, LSCO) aren't needed for the Track row.
 //
 // FS values are held in locals during the walk and committed to the
 // Track only after CMPR has been confirmed as "DSD " (uncompressed).
@@ -2744,6 +2775,13 @@ func parsePropChunks(body []byte) dffPropInfo {
 				default:
 					info.compression = dffCompressionUnknown
 				}
+			}
+		case "ID3 ", "id3 ":
+			// An ID3 tag nested in PROP, which TagLib reads (and rewrites
+			// in place) beside a root one. The first one keeps it, as the
+			// first root chunk does (applyEmbeddedID3).
+			if info.id3 == nil && len(payload) > 0 {
+				info.id3 = payload
 			}
 		}
 		// Advance past chunk + odd-byte pad. Use uint64 arithmetic

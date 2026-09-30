@@ -125,6 +125,10 @@ func FuzzExtractDFF(f *testing.F) {
 		dffFixture(f, "picard_id3.dff"),
 		dffFixture(f, "diin_then_id3.dff"),
 		dffFixture(f, "id3_then_diin.dff"),
+		// An ID3 tag nested in PROP (TagLib's rewrite of it), alone and
+		// beside a root one.
+		dffFixture(f, "prop_id3.dff"),
+		dffFixture(f, "prop_and_root_id3.dff"),
 		dffWithChunks(f, 2822400, cut),
 		// A DFF's ID3 chunk repeating one frame past the renaming bound
 		// (backlog B101): the chunk reaches the same guard an AIFF's does.
