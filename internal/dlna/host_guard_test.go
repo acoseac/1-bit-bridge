@@ -52,8 +52,8 @@ func hostGuardServer(t *testing.T) (*Server, *httptest.Server, *atomic.Int32) {
 	return s, ts, &calls
 }
 
-// do sends one request to the test server under the given Host.
-func do(t *testing.T, ts *httptest.Server, req *http.Request, host string) (int, string) {
+// sendAs sends one request to the test server under the given Host.
+func sendAs(t *testing.T, ts *httptest.Server, req *http.Request, host string) (int, string) {
 	t.Helper()
 	req.Host = host
 	resp, err := ts.Client().Do(req)
@@ -103,12 +103,12 @@ func Test_ownHostOnly_RefusesAHostThatIsNotThisHosts(t *testing.T) {
 		"0.0.0.0:7790",
 		"[::]:7790",
 	} {
-		if code, body := do(t, ts, descriptionRequest(t, ts), host); code != http.StatusMisdirectedRequest {
+		if code, body := sendAs(t, ts, descriptionRequest(t, ts), host); code != http.StatusMisdirectedRequest {
 			t.Errorf("Host %q, description.xml: status %d, want 421", host, code)
 		} else if strings.Contains(body, "uuid:test-host-guard") {
 			t.Errorf("Host %q: the refusal carries the device description", host)
 		}
-		code, body := do(t, ts, browseRequest(t, ts), host)
+		code, body := sendAs(t, ts, browseRequest(t, ts), host)
 		if code != http.StatusMisdirectedRequest {
 			t.Errorf("Host %q, Browse: status %d, want 421", host, code)
 		}
@@ -138,10 +138,10 @@ func Test_ownHostOnly_AnswersThisHostsAddresses(t *testing.T) {
 		"[::1]:7790",
 		"localhost:7790",
 	} {
-		if code, _ := do(t, ts, descriptionRequest(t, ts), host); code != http.StatusOK {
+		if code, _ := sendAs(t, ts, descriptionRequest(t, ts), host); code != http.StatusOK {
 			t.Errorf("Host %q, description.xml: status %d, want 200", host, code)
 		}
-		code, body := do(t, ts, browseRequest(t, ts), host)
+		code, body := sendAs(t, ts, browseRequest(t, ts), host)
 		if code != http.StatusOK {
 			t.Errorf("Host %q, Browse: status %d, want 200", host, code)
 			continue
@@ -191,12 +191,12 @@ func Test_ownHostOnly_AnswersARequestWithNoHost(t *testing.T) {
 func Test_ownHostOnly_AsksTheInterfacesOnlyForAnUnnamedLiteral(t *testing.T) {
 	_, ts, calls := hostGuardServer(t)
 	for _, host := range []string{"192.0.2.10:7790", "198.51.100.7:7790", "bridge-box.lan:7790", "127.0.0.1:7790", "evil.example:7790", ""} {
-		do(t, ts, descriptionRequest(t, ts), host)
+		sendAs(t, ts, descriptionRequest(t, ts), host)
 	}
 	if n := calls.Load(); n != 0 {
 		t.Errorf("the interfaces were listed %d times for hosts the configuration names or names it does not, want 0", n)
 	}
-	do(t, ts, descriptionRequest(t, ts), "10.1.2.3:7790")
+	sendAs(t, ts, descriptionRequest(t, ts), "10.1.2.3:7790")
 	if n := calls.Load(); n != 1 {
 		t.Errorf("the interfaces were listed %d times for one unnamed literal, want 1", n)
 	}
@@ -209,13 +209,13 @@ func Test_ownHostOnly_LogsARefusedNameOnce(t *testing.T) {
 	_, ts, _ := hostGuardServer(t)
 	const msg = "DLNA refused a request that names another host"
 	for i := 0; i < 3; i++ {
-		do(t, ts, descriptionRequest(t, ts), "evil.example:7790")
+		sendAs(t, ts, descriptionRequest(t, ts), "evil.example:7790")
 	}
 	if n := len(rec.Failures(msg)); n != 1 {
 		t.Fatalf("got %d refusal lines for one name, want 1", n)
 	}
 	for i := 0; i < 3*hostRefusedSeenCap; i++ {
-		do(t, ts, descriptionRequest(t, ts), fmt.Sprintf("rebind-%d.example:7790", i))
+		sendAs(t, ts, descriptionRequest(t, ts), fmt.Sprintf("rebind-%d.example:7790", i))
 	}
 	if n := len(rec.Failures(msg)); n != hostRefusedSeenCap {
 		t.Errorf("got %d refusal lines, want the cap %d", n, hostRefusedSeenCap)
