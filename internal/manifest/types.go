@@ -333,13 +333,25 @@ type Track struct {
 	// versionStampOnly is an internal, NON-WIRE marker (unexported ⇒ json
 	// ignores it — the replayGainFromAnalysis shape) set by the scanner's
 	// reExtractUnchanged when a version-stale re-extraction produced a row
-	// byte-identical (post post-scan-field merge) to what's stored. The
+	// byte-identical (post post-scan-field merge) to what's stored, or
+	// refused the file (extractRefused, below). The
 	// scan writer routes such rows through StampExtractorVersionBatch —
 	// advancing extractor_version + resetting missing_count WITHOUT
 	// touching indexed_at / enriched_at / tags_json — so an
 	// ExtractorVersion bump doesn't surface the entire library in every
 	// iOS client's next delta sync nor re-queue full re-enrichment.
 	versionStampOnly bool
+
+	// extractRefused is an internal, NON-WIRE marker (the versionStampOnly
+	// shape) set by the scanner when this extraction REFUSED the file: it
+	// was read whole, and its extractor answered that it is not its format
+	// (a DSF, DFF, AIFF or WAV whose header is not one), so the scan
+	// indexes it by its name. It travels into the tracks.extract_refused
+	// column (v50) on both write legs; on the version-stale leg it rides a
+	// versionStampOnly Track, whose row keeps what it had (backlog B145).
+	// The skip gate asks a refused row nothing but its stat and version: the
+	// extraction of a refused file never reaches its lyrics or its artwork.
+	extractRefused bool
 
 	// audioMD5 is the FLAC STREAMINFO audio checksum captured by
 	// extractFLACFormatFromReader — lowercase hex, or "" for non-FLAC

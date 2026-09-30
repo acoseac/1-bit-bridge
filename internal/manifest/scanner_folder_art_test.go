@@ -583,7 +583,10 @@ func TestScanner_AnUnchangedLibraryIsNotReRead(t *testing.T) {
 // one; the scan writes it by its name): no cover can change what it is given,
 // so its row records that (folderArtNotLookedKey), and a row from before the
 // key, re-read once in a folder with a cover, records it without being
-// written, never to be read for it again.
+// written, never to be read for it again. A row from before the key is from
+// before the refusal mark too (extract_refused, v50, backlog B145), which
+// the upgrade leaves 0; set, the gate asks a refused row nothing and the
+// file is not read at all.
 func TestScanner_AFileItsExtractorRefusesIsNotReReadForItsFolder(t *testing.T) {
 	f := newArtFixture(t)
 	const rel = "Artist/Album/bad.dsf"
@@ -600,7 +603,7 @@ func TestScanner_AFileItsExtractorRefusesIsNotReReadForItsFolder(t *testing.T) {
 	}
 	f.requireSettled(t, rel)
 
-	if _, err := f.store.db.Exec(`UPDATE tracks SET folder_art_key = ''`); err != nil {
+	if _, err := f.store.db.Exec(`UPDATE tracks SET folder_art_key = '', extract_refused = 0`); err != nil {
 		t.Fatal(err)
 	}
 	before := f.indexedAts(t, rel)

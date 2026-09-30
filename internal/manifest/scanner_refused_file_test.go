@@ -311,3 +311,123 @@ func TestScanner_ARefusalKeepsTheRowAnOlderExtractorWrote(t *testing.T) {
 		t.Errorf("refusal lines %q, want one: this refusal is new", lines)
 	}
 }
+
+// openRefusalStore opens a store of its own for the store-half tests.
+func openRefusalStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// refusedMark returns what GetTrackStat, the skip gate's read, says of the
+// row at rel's refusal mark.
+func refusedMark(t *testing.T, s *Store, rel string) bool {
+	t.Helper()
+	st, err := s.GetTrackStat(context.Background(), rel)
+	if err != nil || st == nil {
+		t.Fatalf("GetTrackStat(%s): %+v, %v", rel, st, err)
+	}
+	return st.ExtractRefused
+}
+
+// TestTheRefusalMarkRidesEveryTrackWrite pins the store half: both upserts
+// write the refusal mark from the Track, the version stamp writes it too and
+// clears it for a Track that is not a refusal (a file that reads again), and
+// the stamp of a refusal leaves the row's lyrics, tags and indexed_at as
+// they were.
+func TestTheRefusalMarkRidesEveryTrackWrite(t *testing.T) {
+	ctx := context.Background()
+	s := openRefusalStore(t)
+	at := time.Unix(1_700_000_000, 0).UTC()
+
+	if err := s.UpsertTrack(ctx, &Track{Path: "a/one.dsf", Size: 1, ModTime: at, extractRefused: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertTrackBatch(ctx, []*Track{
+		{Path: "a/two.dsf", Size: 1, ModTime: at, extractRefused: true},
+		{Path: "a/three.dsf", Size: 1, ModTime: at},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for rel, want := range map[string]bool{"a/one.dsf": true, "a/two.dsf": true, "a/three.dsf": false} {
+		if got := refusedMark(t, s, rel); got != want {
+			t.Errorf("%s: refused %v after its upsert, want %v", rel, got, want)
+		}
+	}
+
+	if err := s.UpsertTrack(ctx, &Track{Path: "a/one.dsf", Size: 2, ModTime: at, Title: "Reads"}); err != nil {
+		t.Fatal(err)
+	}
+	if refusedMark(t, s, "a/one.dsf") {
+		t.Error("a/one.dsf: an upsert of a file that reads kept the refusal mark")
+	}
+	if err := s.StampExtractorVersionBatch(ctx, []*Track{{Path: "a/two.dsf"}}); err != nil {
+		t.Fatal(err)
+	}
+	if refusedMark(t, s, "a/two.dsf") {
+		t.Error("a/two.dsf: a stamp of a file that reads kept the refusal mark")
+	}
+
+	const body = "[00:01.00]Kept\n[00:02.00]As it was\n"
+	doc := lyrics.Doc{Format: "lrc", Synced: true, Body: body}
+	if err := s.UpsertTrack(ctx, &Track{Path: "a/three.dsf", Size: 1, ModTime: at, Title: "Read Before",
+		lyrics: &extractedLyrics{Format: "lrc", Synced: true, Body: body, Source: string(lyrics.SourceSYLT), Tag: lyrics.Tag(doc)}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := storedRowAt(t, s, "a/three.dsf")
+	lyricsBefore, err := s.GetLyrics(ctx, "a/three.dsf")
+	if err != nil || lyricsBefore == nil {
+		t.Fatalf("fixture: no lyrics row (%v)", err)
+	}
+	if err := s.StampExtractorVersionBatch(ctx, []*Track{{Path: "a/three.dsf", versionStampOnly: true, extractRefused: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if !refusedMark(t, s, "a/three.dsf") {
+		t.Error("a/three.dsf: the stamp of a refusal did not record it")
+	}
+	if after, _ := storedRowAt(t, s, "a/three.dsf"); after.tags != before.tags || after.indexedAt != before.indexedAt {
+		t.Errorf("a/three.dsf: the stamp of a refusal moved the row: %+v, want %+v", after, before)
+	}
+	if l, err := s.GetLyrics(ctx, "a/three.dsf"); err != nil || l == nil || *l != *lyricsBefore {
+		t.Errorf("a/three.dsf: lyrics %+v (%v) after the stamp of a refusal, want %+v kept", l, err, lyricsBefore)
+	}
+}
+
+// TestMigrationV50AddsTheRefusalMarkIdempotently: the column exists after a
+// fresh open, reads 0 for a row that never recorded a refusal, and a re-run
+// of the migration (version rewound, column already there) neither fails
+// nor touches a recorded mark. The ladder is append-only and a re-run is the
+// only thing a later edit could exercise.
+func TestMigrationV50AddsTheRefusalMarkIdempotently(t *testing.T) {
+	ctx := context.Background()
+	s := openRefusalStore(t)
+	exists, err := atlasColumnExists(s.db, "tracks", "extract_refused")
+	if err != nil || !exists {
+		t.Fatalf("tracks.extract_refused after a fresh open: exists %v (%v)", exists, err)
+	}
+	at := time.Unix(1_700_000_000, 0).UTC()
+	if err := s.UpsertTrackBatch(ctx, []*Track{
+		{Path: "a/refused.dsf", Size: 1, ModTime: at, extractRefused: true},
+		{Path: "a/read.flac", Size: 1, ModTime: at},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for run := 1; run <= 2; run++ {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA user_version = 49`); err != nil {
+			t.Fatalf("rewind user_version: %v", err)
+		}
+		if err := s.migrate(); err != nil {
+			t.Fatalf("re-run %d of migrate: %v", run, err)
+		}
+		if v, want := readUserVersion(t, s.db), migrations[len(migrations)-1].version; v != want {
+			t.Errorf("re-run %d: user_version = %d, want %d", run, v, want)
+		}
+		if !refusedMark(t, s, "a/refused.dsf") || refusedMark(t, s, "a/read.flac") {
+			t.Errorf("re-run %d: the marks moved", run)
+		}
+	}
+}
