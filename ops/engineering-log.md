@@ -33054,7 +33054,13 @@ No wire change: the fields exist. The public site's learn page says `.dff`
 
 ### Fuzzing
 
-FUZZ_RESULTS_PENDING
+Four minutes a target on dido (golang:1.26.6, `-fuzzminimizetime 1s`,
+`-parallel 8`), no crasher: FuzzParseDIINChunks 11,222,385 executions (its
+properties: the text is UTF-8, and a DIIN yields no album or genre),
+FuzzExtractDFF 3,822,732 (the allocation property; seeds: the four real
+fixtures, a DIIN declaring 64 KiB in a file holding 12 bytes of it, and an ID3
+chunk repeating one frame past B101's renaming bound), FuzzParseWAVINFOBlock
+10,375,270 and FuzzExtractWAV 4,142,540.
 
 ### Not covered
 
