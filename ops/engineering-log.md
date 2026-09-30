@@ -31625,3 +31625,175 @@ passed, nothing saved.
 ### Left open
 
 Nothing in this change.
+
+## 2026-09-29 — what the scanner, the jobs and the listing read opens as a file or a directory, so a named pipe holds none of them (backlog B62)
+
+#1082 left three things open ("Not covered" in its entry): `/v1/list`
+listing a named pipe as a zero-byte file, the listing's own directory open,
+and the scanner's extractors and the background jobs, which still opened
+library paths with `os.Open`. A plain open of a named pipe waits for a
+writer, and nothing can cancel the wait.
+
+### What was measured
+
+On main (fe02fbb1), with this change's tests committed first (8ffadeb5) and
+run before the fix, on the dev Mac and in `golang:1.26.6` on dido, each held
+open call bounded by `fsutiltest.AwaitPastFIFOs`, which then plays the writer:
+
+- **The extractors.** `ExtractWithContext` of a named pipe named like each of
+  the 14 extensions the scanner extracts waited 5 s, every one; once the
+  writer came each read an empty stream (`short header: EOF`, `illegal
+  seek`, and for `.ogg` / `.oga` no error at all). The scan worker's opener
+  for an `.iso` and `ExpandSACDISO` waited the same way.
+- **The worker.** Handed a path and the walk's stat of a FLAC, a DSF and an
+  `.iso` (a new file, a changed one, a version-stale one, one reached through
+  a link) after the file was replaced by a named pipe, the worker waited 10 s,
+  and once the writer came it wrote a row minted from the path: title "01",
+  94 bytes, the walk's size of a file that was gone, in place of the file's
+  own tags, which is what #1070 measured for a FIFO a writer had opened. A
+  path replaced by a socket or a directory wrote that row at once.
+- **The folder art needed no swap.** `scanFolderArtwork` stat'ed a
+  candidate for its size and read it with `os.ReadFile`, and the walk judges
+  only audio-named entries: a full scan of an album without embedded art and
+  a named pipe called `cover.jpg` was still running at 10 s, as was the
+  parent-folder fallback of a disc folder. A link to `/dev/zero` called
+  `cover.jpg` stats as 0 bytes, under the 25 MiB cap; a throwaway program
+  doing exactly that stat and read had 3 GiB of heap in 0.85 s and was still
+  reading. An allocation that fails is a throw, which no `recover` catches,
+  so one such link took `bridge serve` down on any scan that looked for its
+  album's cover (every scan after an `ExtractorVersion` bump).
+- **The lyrics sidecar** (`readSidecarCandidate`, after its callers' stat
+  and `IsRegular` check), **the analysis job's STREAMINFO read**
+  (`verifyFLACAudioMD5`) and **the fingerprint prefix read**
+  (`ComputeFromPrefix`) each waited 5 s on a named pipe; the prefix read then
+  returned a fingerprint of nothing with no error.
+- **The listing.** Through a per-server opener seam (`Server.openDir`, below)
+  that replaces the album directory with a named pipe just before the real
+  open runs, `/v1/list` waited 5 s, and once the writer came answered 500
+  "couldn't read this directory" (`fdopendir: not a directory`).
+
+Linux and macOS agree on the facts the fix rests on (a throwaway program, run
+in `golang:1.26.6` on dido and on the dev Mac): an open with `O_DIRECTORY`
+refuses a named pipe, a link to one, a link to `/dev/null`, a socket and a
+file with ENOTDIR in 4 to 206 µs, and opens a directory and a link to one; a
+plain `os.Open` of the pipe was still waiting at 2 s; `os.ReadDir` of the pipe
+answers ENOTDIR in 3 to 14 µs, because go1.26.6's `os.openDirNolog` opens with
+`O_RDONLY|O_CLOEXEC|O_DIRECTORY`, so `filepath.WalkDir`'s and `os.ReadDir`'s
+directory opens were never exposed. And a CHILD process waiting to open a pipe
+(`cat` under `exec.CommandContext` with a 1 s timeout, the shape of every sox,
+ffmpeg and fpcalc call) ended at 1.001 s, "signal: killed": the wait is
+interruptible, so a job that hands the path to a child is bounded by its own
+timeout and needs nothing here.
+
+### The listing lists such an entry, deliberately
+
+The first question B62 asked. Read in the iOS repo (not run):
+`BridgeSourceClient.list` decodes every entry into an `SMBEntry` (a name, a
+path, `isDirectory`, a size, an mtime; no kind); a bridge share never walks
+(`LibraryScanner` routes `.bridge` to `runBridgeSync`, the manifest), so
+`SMBStore.listDetailed`'s bridge branch has no caller that reaps, and the
+listing feeds only the folder browser. A named pipe there is a row whose
+download answers #1082's 400 at once, naming the kind. The app's own local
+listing (`LocalSourceBridge.listDetailed`) lists what `contentsOfDirectory`
+returns, a FIFO included, and an SMB server lists one too. Leaving the entry
+out would change what the app shows, and PROTOCOL.md's rule for what a listing
+holds (it already says a link whose target cannot be reached still appears),
+which is a Mirror-PR, for a row that harms nothing: the manifest the app syncs
+holds none of these (#1070). No wire change. `TestListingListsWhatIsNotAFileAsAnEntry`
+pins it: each kind is listed, not as a directory, at once.
+
+### The change
+
+- `fsutil.OpenDir` opens a directory to read its entries: `O_DIRECTORY` on
+  unix, and on Windows (whose open of a named pipe does not wait for its
+  server) `os.Open` and a refusal with ENOTDIR of a handle whose stat is not
+  a directory. `/v1/list` opens through it; `Server.openDir`, which `New`
+  sets, is the test seam, per server. An open refused there answers 500
+  "couldn't open this directory", the listing's answer for any directory it
+  cannot open; no new mapping (the resolver answers a component that is not
+  a directory at its stat with 500 as well).
+- `fsutil.ReadAsFile` is `os.ReadFile` opened as `OpenAsFile` opens.
+- In `internal/manifest`, every open of a library file is `OpenAsFile`: the
+  seven in `extractors.go`, the two in `extractors_aiff_wav.go`,
+  `ExpandSACDISO`, `openSACDContainer`; `readSidecarCandidate` reads through
+  `ReadAsFile`; the folder art (`readFolderArt`) refuses on its stat first,
+  so a device is never opened and a socket, which no open reaches, is named,
+  then reads through `ReadAsFile`. The artwork cache's two readers
+  (`artwork_rescale.go`, `artwork_thumbs.go`) take the same calls, so the
+  package holds no plain read-open and the sweep below needs no exception.
+- The worker writes no row for a path that is no longer a file:
+  `notAFileNow` names it from the refusal's kind, or for a failed open, from
+  a stat of the path (the socket); the full path, `reExtractUnchanged` and
+  `processSACDISO` all log one Warn, `audio file replaced after the walk by
+  something that is not a file; nothing is written for it`, library-relative,
+  with the kind. The next walk sees what is there, and the row goes as a
+  deleted file's does.
+- `verifyFLACAudioMD5`'s STREAMINFO read and `ComputeFromPrefix` open
+  through `OpenAsFile`. The analysis answer for a refused open is the one it
+  gave any failed open ("", retryable); the prefix read answers
+  `ErrUnreadable`, the path redacted to its base name.
+- `TestEveryLibraryReadOpensAsAFile` (cmd/bridge) fails on a read-open
+  (`os.Open`, `os.ReadFile`, `ioutil.ReadFile`, an `os.OpenFile` whose flags
+  name neither `O_WRONLY` nor `O_RDWR`) in the packages that read library
+  files (`libraryReaders`: `internal/api`, `internal/dlna`,
+  `internal/manifest`, `internal/analyze`, `internal/acoustid`), with floors
+  (129 production files and 28 reads through fsutil when set);
+  `TestLibraryReadSweepOnFixtures` runs its scan over known sources.
+
+Cost: `OpenAsFile` then `Close` took 13.1 µs against 11.6 µs for `os.Open`
+then `Close` (a throwaway benchmark, APFS, three runs of 2 s each): 1.5 µs an
+extracted file, 75 ms over a 50,000-file re-extract. Nothing dhowden, B117's
+buffer or the B99 and B101 guards read changes: they are handed the same
+`*os.File`, at offset 0, with `O_NONBLOCK` cleared (#1082's `setBlocking`), and
+the whole `internal/manifest` suite passes. No `ExtractorVersion` bump: what
+extraction produces for a file is unchanged; only a path that is not a file
+answers differently.
+
+### Tests
+
+Red on main, green after (`-count=1`, macOS and Linux):
+`TestEveryExtractorRefusesANamedPipeWithoutWaiting`,
+`TestTheSACDOpenersRefuseANamedPipeWithoutWaiting`,
+`TestReadSidecarCandidateRefusesANamedPipeWithoutWaiting`,
+`TestScanWorkerWritesNoRowForAPathThatIsNoLongerAFile` (eight cases; its
+positive control `TestScanWorkerStillWritesAFileLeftAlone` passes on both),
+`TestScanner_AFolderArtCandidateThatIsNotAFileIsSkipped` (a real scan: the
+three pipes, the device and the socket each refused and named by kind, a real
+cover beside another album still stamped),
+`TestVerifyFLACAudioMD5RefusesANamedPipeWithoutWaiting`,
+`TestComputeFromPrefixRefusesANamedPipeWithoutWaiting`,
+`TestListingOfADirectoryReplacedByANamedPipeAnswersAtOnce` and
+`TestEveryLibraryReadOpensAsAFile`. New with the fix, on every platform:
+`TestOpenDirOpensADirectoryAndRefusesAFile` and
+`TestReadAsFileReadsAFileWholeAndRefusesADirectory`; on unix
+`TestOpenDirRefusesWhatIsNotADirectoryWithoutWaiting` and
+`TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting`.
+
+Negative controls on the committed fix, each restored and re-run green:
+
+| mutation | goes red |
+|---|---|
+| NC1: `New` sets `openDir` to `os.Open` | the listing swap test: held 5 s, then 500 "couldn't read" |
+| NC2: `OpenDir` without `O_DIRECTORY` | the two OpenDir tests (a file opened; the device opened as a directory; the socket refused with EOPNOTSUPP, not ENOTDIR; both pipes held 5 s) and the listing swap test |
+| NC3: the MP3 case back on `os.Open` | the extractor test's `.mp3` case alone, and the sweep, naming `extractors.go:687` |
+| NC4: the full path writes a row whatever it found | six worker cases (a row titled "01", no line); the version-stale and SACD cases stay green |
+| NC4b: `reExtractUnchanged` names nothing | the version-stale case alone (no line; it wrote no row before either) |
+| NC4c: `processSACDISO` names nothing | the SACD case alone |
+| NC5: `notAFileNow` without the stat after a failed open | the socket case alone (a row written) |
+| NC6: the folder art without its stat check | the folder-art test: the socket refused by the kernel's EOPNOTSUPP, not named |
+| NC7: `ReadAsFile` as `os.ReadFile` | the ReadAsFile tests (both pipes held 5 s, the device read as empty, the directory read), and the sidecar test |
+
+### Not covered
+
+- A changed file whose open fails for any other reason (EIO or ESTALE from a
+  NAS, EACCES, ENOENT because it went between the walk and the worker) is
+  still written from its path, under the walk's stat, as it always was; the
+  skip gate then keeps that row until the file changes again (a throwaway
+  test: a changed FLAC made unreadable before the worker's open was written
+  titled "01", and a scan after it read again kept "01"). Not a path that is
+  not a file, so not this change: backlog B134.
+- Directory opens of the bridge's own directories (the variants directory's
+  emptiness probe in `internal/integrity`, the fsync opens in `fsutil`,
+  `transcode` and the updater) and reads of files the bridge wrote under its
+  data dir (the enricher's cache hashing, `hashFileShort`, backup): a named
+  pipe there needs write access to the data or variants directory.

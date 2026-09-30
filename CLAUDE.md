@@ -521,9 +521,59 @@ lost my library."
   with `os.Open`/`os.OpenFile`**, so the cache routes (artwork, booklets,
   playlist covers, waveforms) open through it too and the rule has no
   exceptions; it reads one declaration at a time, so an open in one function
-  served from another goes unseen. Still `os.Open`: the scanner's
-  extractors, which open what the walk judged a moment earlier (a swap in
-  between is a race), and the background jobs that open manifest paths.
+  served from another goes unseen. The scanner's reads and the jobs' open
+  the same way since 2026-09-29 (the next bullet); this said they were
+  still `os.Open` until then.
+- **…and so does everything else that reads a library file in this
+  process, and the listing opens its directory with `fsutil.OpenDir`**
+  (2026-09-29, backlog B62). The walk judges what it hands the workers, and
+  a worker opens the path later (on a large library, minutes later), so a
+  file renamed over by a named pipe in between reached the extractors'
+  `os.Open` and held the worker, the scan and the scanner's mutex until
+  something wrote to the pipe. Measured on main: every extension the
+  scanner reads (14) waited, as did an `.iso`, and a worker handed a path
+  swapped for a pipe waited and then wrote a row minted from the path
+  (title "01", the walk's size of a file that was gone); one swapped for a
+  socket or a directory wrote that row at once. **The folder-art lookup
+  needed no swap**: it read `cover.jpg` with `os.ReadFile` after a stat
+  that judged only the size, and the walk judges only audio-named entries,
+  so a named pipe called `cover.jpg` held every scan that extracted a track
+  of its album without embedded art, and a link to `/dev/zero` called
+  `cover.jpg` (0 bytes by its stat) grew the heap by 3 GiB in 0.85 s: an
+  out-of-memory throw, which no `recover` catches. The lyrics sidecar read,
+  the analysis job's STREAMINFO read and the fingerprint prefix read had the
+  swap window too. Each now opens through `fsutil.OpenAsFile`, or
+  `fsutil.ReadAsFile` for a whole read (`os.ReadFile`, opened as a file),
+  and the folder art refuses on its stat first, so a device is never opened
+  and a socket is named. **A worker whose path is no longer a file writes
+  no row** (`notAFileNow`: the refusal's kind, or for the socket no open
+  reaches, a stat after the failed open) and logs one Warn naming it
+  library-relative; the next walk sees what is there and the row goes as a
+  deleted file's, after the grace. **`/v1/list` opens with `OpenDir`**
+  (`O_DIRECTORY` on unix, which the kernel checks before it opens anything;
+  on Windows, whose pipe opens do not wait, `os.Open` and an `IsDir`
+  check): a directory replaced by a named pipe between the resolver's stat
+  and the open held the request, and now answers 500 "couldn't open this
+  directory" at once. `os.ReadDir` and `filepath.WalkDir` open with
+  `O_DIRECTORY` already (go1.26.6's `os.openDir`, measured), so only a
+  hand-rolled directory open needs it. **The listing still lists a named
+  pipe, socket or device, as an entry that is not a directory, on
+  purpose**: the app's bridge share syncs from the manifest, which holds
+  none (#1070), and reads the listing only to browse, where following such
+  an entry gets #1082's 400 naming the kind; leaving it out would change
+  what the app shows, and PROTOCOL.md's rule for what a listing holds (a
+  Mirror-PR), for a row that harms nothing
+  (`TestListingListsWhatIsNotAFileAsAnEntry`). A job that hands the path
+  to a CHILD process (sox, ffmpeg, fpcalc's `Compute`) needs nothing: SIGKILL
+  ends a child waiting to open a pipe, so the job's own timeout bounds it
+  (measured on macOS and Linux). **`TestEveryLibraryReadOpensAsAFile` fails
+  on a read-open (`os.Open`, `os.ReadFile`, a read-only `os.OpenFile`) in a
+  package that reads library files** (`libraryReaders`: api, dlna,
+  manifest, analyze, acoustid; a new such package joins the list). The
+  cost is 1.5 µs an open (13.1 against 11.6 µs, APFS), and nothing dhowden,
+  B117's buffer or the B99 and B101 guards see changes: they read the same
+  `*os.File`, blocking again, from offset 0. No `ExtractorVersion` bump:
+  what extraction produces for a file is unchanged.
 - **A library ROOT that is itself a link to a directory is walked THROUGH,
   and every walk of a root starts from `fsutil.WalkableRoot`** (2026-09-28,
   backlog B41). `filepath.WalkDir` Lstats its root and follows no link, so a
