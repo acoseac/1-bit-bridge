@@ -6,6 +6,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // VariantsDirSweepBlockReason probes a variants output directory
@@ -64,6 +66,15 @@ type VariantsDirBlock struct {
 	// different facts and a caller acting on one must not act on
 	// the other.
 	Empty bool
+	// Info is the directory whose entries the probe read, from the
+	// handle it read them with, so it and Empty (or a healthy
+	// Reason) are about one directory: set when Reason is "" or Empty
+	// is true, nil otherwise. A later check compares it with the
+	// directory at the path then (variantsDirChanged; the variant
+	// delete handler's SidecarStoreState), since a clean unmount
+	// leaves the path naming the local directory under the
+	// mountpoint, which is another directory (backlog B203).
+	Info os.FileInfo
 }
 
 // VariantsDirSweepBlock probes dir once and reports both halves.
@@ -77,30 +88,74 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	case !info.IsDir():
 		return VariantsDirBlock{Reason: "variants path is not a directory"}
 	}
-	empty, err := dirIsEmpty(dir)
+	opened, empty, err := dirIsEmpty(dir)
 	switch {
 	case err != nil:
 		return VariantsDirBlock{Reason: fmt.Sprintf("cannot read variants directory: %v", err)}
 	case empty:
-		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true}
+		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true, Info: opened}
 	}
-	return VariantsDirBlock{}
+	return VariantsDirBlock{Info: opened}
+}
+
+// variantsDirChanged reports why dir no longer names the directory start
+// observed, or "" while it does. VariantWatcher.tick asks it after the
+// probe that began the tick (VariantsDirSweepBlock, whose Info is start):
+// as each row reads as missing, and once more before it deletes anything.
+//
+// The probe at the start of a tick proves the volume was mounted then and
+// says nothing about the rows classified after it: a clean unmount during
+// the tick reverts the mountpoint to a local directory, every later row
+// reads as a rendition that is gone, and the relocation check walks that
+// directory and finds no sidecars (backlog B203: 39 rows of 40 deleted).
+// Asking again whether the directory LOOKS unmounted is not enough, since
+// the local directory need not be empty; its identity is what an unmount
+// changes. os.SameFile is the comparison the variant delete handler makes
+// for the same reason (cmd/bridge's sidecarStoreID): device and inode on
+// POSIX, volume and file index on Windows, each read from an open handle
+// (fsutil.DirIdentity says why never from os.Stat). A nil start is never
+// the same.
+//
+// "" for an empty dir: the watcher probes nothing then (a nil or empty
+// provider disables the mount-loss guard), so there is nothing to compare.
+func variantsDirChanged(dir string, start os.FileInfo) string {
+	if dir == "" {
+		return ""
+	}
+	now, err := fsutil.DirIdentity(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the variants directory went missing during the sweep"
+	case err != nil:
+		return fmt.Sprintf("cannot open variants directory during the sweep: %v", err)
+	case !os.SameFile(start, now):
+		return "the variants directory is no longer the directory this sweep began on"
+	}
+	return ""
 }
 
 // dirIsEmpty reports whether dir holds zero entries, reading at
 // most one entry — a full os.ReadDir would materialize every
-// name in a 100k-sidecar tree just to answer "any?".
-func dirIsEmpty(dir string) (bool, error) {
-	f, err := os.Open(dir)
+// name in a 100k-sidecar tree just to answer "any?". It also
+// returns the directory's stat from the handle it read, the
+// identity VariantsDirBlock.Info carries: from the handle so the
+// identity is of the directory whose entries were read, and read
+// at the call on Windows too (fsutil.DirIdentity).
+func dirIsEmpty(dir string) (opened os.FileInfo, empty bool, err error) {
+	f, err := fsutil.OpenDir(dir)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	defer func() { _ = f.Close() }()
+	opened, err = f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
 	if _, err := f.ReadDir(1); err != nil {
 		if errors.Is(err, io.EOF) {
-			return true, nil
+			return opened, true, nil
 		}
-		return false, err
+		return nil, false, err
 	}
-	return false, nil
+	return opened, false, nil
 }
