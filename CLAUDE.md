@@ -278,6 +278,12 @@ every Mac, and every account on a Mac reads the same file. A backlog entry holds
 WORK, not rules: a rule a follow-up teaches still goes in this file, and its record
 in `ops/engineering-log.md`.
 
+**When the follow-up is an unfixed weakness, the public record names the entry
+and nothing more**: not this file, the log, a PR body, a PR comment or a commit
+message describes it or how to reproduce it before its fix ships (SECURITY.md).
+The B97 session wrote one up in this file, the log and its PR body, and a review
+caught it (#1110's log entry).
+
 ## Things that have bitten before
 
 Every rule here was paid for by a real defect, most of them silent. They are
@@ -2027,10 +2033,9 @@ no failing test — which is the shape to expect in this area.
   `TestTheStoreHoldsABaseInItsCanonicalForm`,
   `TestARevokeLeavesNoStoredBaseBehind`,
   `TestOpeningAStoreThatCannotDropItsBaseFails` and
-  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. Still open: the harvest
-  client's bearer token follows a redirect from https to plain http on the
-  same host, which `guardRedirects` fixed for the enrich clients only
-  (backlog B133).
+  `TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt`. A follow-up found
+  beside it is backlog B133, which is private: an unfixed weakness is not
+  described in this public repo before its fix ships (SECURITY.md).
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**

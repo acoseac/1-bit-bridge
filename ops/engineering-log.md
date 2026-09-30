@@ -32171,12 +32171,9 @@ wrote no state file, and the config warning named `https://:443`.
 
 ### Out of scope
 
-- **The harvest client's bearer token follows a redirect from https to plain
-  http on the same host**: a throwaway probe (a TLS fake Atlas answering 302
-  to a plain server on 127.0.0.1) showed the plain hop receive `Bearer
-  bh-secret-token` from `pollResults`. It is #1091's round-2 finding in the
-  one client that did not get `guardRedirects`, which lives in
-  `internal/enrich`. Filed as backlog B133.
+- A further finding, outside this change, is filed privately as backlog B133:
+  an unfixed weakness is not described in this public repo before its fix
+  ships (SECURITY.md).
 - B49's other half, a spoofed link-local SSDP source that is not a cloud
   metadata address, is untouched and stays open there.
 
@@ -32214,3 +32211,12 @@ Gemini was over its daily quota on every head. CodeRabbit ran on-demand:
 |---|---|
 | NC15: `CredentialBase` stops checking the port | the three undialable-port reduction rows, that shape in both store tests, and the endpoint's port test; the config pin row stays green |
 | NC16: the port check moves into `CanonicalHTTPS` | the three undialable-port reduction rows (their canonical form) and the config pin row (`Validate` refuses it) |
+
+- **Round 4 (cbd6fcd2, the merge with main at 6f914ef4)**: one comment, Major,
+  taken. This entry's Out of scope first described the follow-up it filed as
+  B133 in enough detail to act on, and so did the CLAUDE.md bullet and the PR
+  body. SECURITY.md keeps a weakness out of public until its fix ships, and
+  the backlog lives outside the repo for exactly that reason, so all three
+  now name the backlog entry and nothing more. **A follow-up that is an
+  unfixed weakness goes into the private backlog with its evidence, and the
+  public record says only that one was filed.**
