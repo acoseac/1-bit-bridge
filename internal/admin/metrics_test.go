@@ -103,7 +103,7 @@ func TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames(t *testing.T) 
 	assertMetricsRefused(t, scrapeMetrics(t, srv, "127.0.0.1:54321", "127.0.0.1:7789", nil, ""),
 		"loopback scrape, metrics.allowCidrs empty")
 
-	withMetricsAllowCIDRs(srv, "127.0.0.1/32", "10.42.0.0/16", "not-a-cidr")
+	withMetricsAllowCIDRs(srv, "127.0.0.1/32", "10.42.0.0/16", "fe80::/10", "not-a-cidr")
 	direct := []struct {
 		remote string
 		ok     bool
@@ -112,6 +112,10 @@ func TestPublicMetricsWithoutASessionNeedsAnAddressTheConfigNames(t *testing.T) 
 		{"127.0.0.1:54321", true, "a listed loopback address"},
 		{"10.42.7.9:5000", true, "inside a listed monitoring range"},
 		{"[::ffff:10.42.7.9]:5000", true, "the same address, IPv4-mapped"},
+		// A link-local source arrives with its zone, which net.ParseIP
+		// refuses and no CIDR names.
+		{"[fe80::1%en0]:5000", true, "a listed link-local range, the source zoned"},
+		{"[2001:db8::1%en0]:5000", false, "a zoned address outside every listed range"},
 		{"[::1]:54321", false, "IPv6 loopback, which the list does not name"},
 		{"10.43.7.9:5000", false, "outside every listed range"},
 		{"192.168.1.5:5000", false, "a LAN address nobody listed"},

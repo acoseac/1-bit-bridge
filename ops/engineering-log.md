@@ -35118,3 +35118,20 @@ Each with one part of the fix reverted, at 60037422, `-count=1`:
 - NC5 the Warn logged on every refusal and from anywhere: the logging test
   red.
 - NC6 the Diagnostics page not told the mode: the diagnostics test red.
+
+### Review rounds after the merge with main (2026-09-30)
+
+CodeRabbit on 443dea08: the Diagnostics pointer said a sessionless scrape
+must connect "directly rather than through a proxy", and the 403 "no proxy
+in between", where the gate decides by the request's headers: both name
+the forwarding headers now, and the diagnostics test asserts it (red with
+the old template). The CLAUDE.md bullet and `noteRefusedScrape`'s docblock
+said a refusal "through a proxy" logs nothing: only one carrying a
+forwarding header does, and a relay that adds none logs the Warn as a
+local scraper would.
+
+CodeRabbit on 6ca0cda2: `remoteIP` handed a link-local source's zone
+(`fe80::1%en0`) to `net.ParseIP`, which refuses it, so a scraper on a
+listed `fe80::/10` was refused, as `metricsGate` refused it before B171.
+The zone is dropped before the match (a CIDR names no zone); the table
+test's zoned row was red before the change.

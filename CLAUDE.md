@@ -6792,7 +6792,9 @@ its twin.** The top list is older, shorter, and read first.
   host relays connections to the console, by listing `127.0.0.1/32` (and
   `::1/128`). The header check (`Forwarded`, `X-Forwarded-For`, `-Host`,
   `-Proto`, `X-Real-IP`, `Via`) keeps a listed address honest when a proxy
-  that announces itself sits on it too. **The cost**: a same-host
+  that announces itself sits on it too. A link-local source's zone
+  (`fe80::1%en0`) is dropped before the match (`remoteIP`): no CIDR names
+  one, and `net.ParseIP` refuses it. **The cost**: a same-host
   Prometheus on a public bridge that relied on the implied loopback gets
   403 until its address is listed. The first such refusal from this host or
   a private network logs one Warn per process naming the fix

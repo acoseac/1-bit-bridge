@@ -2495,11 +2495,17 @@ func forwardedByAProxy(r *http.Request) bool {
 }
 
 // remoteIP is the connection's source address, or nil when RemoteAddr does
-// not parse.
+// not parse. A link-local IPv6 source arrives with its zone
+// ("[fe80::1%en0]:port"), which net.ParseIP refuses, so the zone is dropped
+// first: no CIDR names one, and a scraper on a range metrics.allowCidrs
+// lists (fe80::/10) must match it.
 func remoteIP(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return nil
+	}
+	if i := strings.LastIndexByte(host, '%'); i >= 0 {
+		host = host[:i]
 	}
 	return net.ParseIP(host)
 }
