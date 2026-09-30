@@ -681,6 +681,47 @@ func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
 	}
 }
 
+// TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne — the delete
+// handler keeps the directory it first unlinked from (SidecarStoreState's
+// Store) and later asks whether an EMPTY directory at the path is that one,
+// the only emptiness it may explain away (#968). A directory replaced by
+// another, the shape a clean unmount leaves at a mountpoint, must not
+// compare as the one it kept. It did on Windows until backlog B203: the
+// identity came from os.Stat, which there reads it only when SameFile asks,
+// from whatever the path names then (fsutil.DirIdentity). Red there alone:
+// on POSIX an os.Stat reads the device and inode at the call. The kept
+// identity is compared with nothing before the directory is replaced, as
+// in the handler, whose first comparison is at the first missing sidecar:
+// a comparison before it would read, and fix, the identity at that moment,
+// which passed this test with os.Stat on Windows.
+func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "variants")
+	if err := os.MkdirAll(filepath.Join(dir, "Artist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
+	kept := a.SidecarStoreState()
+	if !kept.Available || kept.Store == nil {
+		t.Fatalf("a variants directory holding a folder: state %+v, want available with its identity", kept)
+	}
+	if err := os.Rename(dir, dir+".volume"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := a.SidecarStoreState()
+	if !now.Empty {
+		t.Fatalf("the directory left at the path: state %+v, want it empty", now)
+	}
+	if now.Store == nil || now.Store.Same(kept.Store) {
+		t.Error("an empty directory made at the path compares as the directory the handler kept, so an unmount reads as its own unlinks")
+	}
+	if again := a.SidecarStoreState(); again.Store == nil || !again.Store.Same(now.Store) {
+		t.Error("the same directory, asked twice, is not the same directory")
+	}
+}
+
 // TestPathUnderRefusesASiblingWithAPrefixName.
 //
 // `pathUnder` decides whether an unlink can explain the probed variants

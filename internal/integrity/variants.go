@@ -16,6 +16,7 @@ package integrity
 import (
 	"context"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -233,13 +234,15 @@ type SweepReport struct {
 // `variantsDir` resolves the effective variants output directory
 // (`cfg.Upscale.EffectiveVariantsDir`) the sidecar paths live
 // under. Before every sweep the watcher probes it via
-// VariantsDirSweepBlockReason and skips the whole tick when the
+// VariantsDirSweepBlock and skips the whole tick when the
 // directory is missing or empty while rows exist — the signature
 // of a cleanly-unmounted variants volume, where every per-row
 // stat would report ENOENT and an unguarded sweep would
-// mass-delete the catalog (2026-07-21 review H4). A nil provider,
-// or one answering "", disables the guard (legacy unconditional
-// sweep).
+// mass-delete the catalog (2026-07-21 review H4). It asks again,
+// by identity, as rows read as missing and before it deletes, so a
+// volume unmounted during the tick is refused too (backlog B203).
+// A nil provider, or one answering "", disables the guard (legacy
+// unconditional sweep).
 //
 // A PROVIDER rather than a path, asked on every tick: the
 // directory is a hot setting (POST /api/upscale/variants-dir), and
@@ -386,7 +389,10 @@ func (w *VariantWatcher) currentVariantsDir() string {
 // noteProceeding). Skips wholesale (nothing touched, a refusal of
 // the mount-loss kind) when the variants dir probe reports missing,
 // empty or unreadable with rows in the catalog — see
-// NewVariantWatcher and VariantsDirSweepBlockReason.
+// NewVariantWatcher and VariantsDirSweepBlockReason. Refuses as the
+// same kind, deleting nothing, when the path stops naming the
+// directory that probe saw before the tick deletes: a volume
+// unmounted during the tick (classify, variantsDirChanged).
 //
 // Two passes over the snapshot. The first classifies every row with
 // LocateSidecar and applies the ADOPTIONS as it goes (a relocated
@@ -433,72 +439,41 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// someone mounts the volume; a rendition download meanwhile answers
 	// 410 and logs a WARN of its own, so the requests that fail still say
 	// so as they fail.
+	//
+	// The probe proves the volume was there when the tick began and
+	// says nothing about the rows classified after it, so the tick
+	// keeps what the probe saw (start) and asks again that the path
+	// still names that directory: as each row reads as missing, and
+	// once more before it deletes anything (backlog B203; see
+	// variantsDirChanged).
+	var start os.FileInfo
 	if dir != "" {
-		if reason := VariantsDirSweepBlockReason(dir); reason != "" {
+		block := VariantsDirSweepBlock(dir)
+		if block.Reason != "" {
 			report := SweepReport{Rows: len(rows), Skipped: true}
-			w.noteRefusal(tickStart, dir, VariantRefusalVariantsDir, reason, len(rows))
+			w.noteRefusal(tickStart, dir, VariantRefusalVariantsDir, block.Reason, len(rows))
 			w.logSummary(dir, report)
 			return report
 		}
+		start = block.Info
 	}
 
 	report := SweepReport{Rows: len(rows)}
-	var (
-		missing []VariantSnapshot
-		sample  logSampler
-	)
-	// Pass one: classify, adopting as we go.
-	for _, r := range rows {
-		// Honour cancellation between rows so a shutdown
-		// during a long sweep on a large library doesn't
-		// hold the process up for minutes.
-		select {
-		case <-ctx.Done():
-			// Still one summary line. The docblock's promise is
-			// "every tick that saw rows logs ONE summary line",
-			// and a cancelled pass one has already applied its
-			// adoptions — returning bare left a shutdown mid-sweep
-			// with per-row lines (sampled at ten) and no totals,
-			// which is a smaller copy of the silence the field
-			// report's first finding was about.
-			report.Cancelled = true
-			w.logSummary(dir, report)
-			return report
-		default:
-		}
-		loc := LocateSidecar(dir, r)
-		switch loc.Verdict {
-		case SidecarPresent:
-			report.Present++
-		case SidecarRelocated:
-			if w.adoptRelocated(ctx, r, loc, &report, &sample) {
-				// An adoption the shutdown stopped ends the tick, as the
-				// check at the top of this loop would.
-				report.Cancelled = true
-				w.logSummary(dir, report)
-				return report
-			}
-		case SidecarMismatched:
-			report.Mismatched++
-			sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
-				slog.String("source_path", r.SourcePath),
-				slog.String("variant_id", r.VariantID),
-				slog.String("canonical", loc.Canonical),
-				slog.Int64("recorded_size", r.SizeBytes),
-			)
-		case SidecarUnknown:
-			// Permission errors, I/O faults, etc. — log and skip
-			// rather than treating as "missing". `--gc`'s reverse
-			// pass behaves the same way.
-			report.Failed++
-			sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
-				slog.String("sidecar", r.SidecarPath),
-				slog.String("variant_id", r.VariantID),
-				slog.Any("err", loc.Err),
-			)
-		case SidecarMissing:
-			missing = append(missing, r)
-		}
+	var sample logSampler
+	missing, changed, stopped := w.classify(ctx, dir, start, rows, &report, &sample)
+	if stopped {
+		// Still one summary line. The docblock's promise is "every tick
+		// that saw rows logs ONE summary line", and a cancelled pass one
+		// has already applied its adoptions — returning bare left a
+		// shutdown mid-sweep with per-row lines (sampled at ten) and no
+		// totals, which is a smaller copy of the silence the field
+		// report's first finding was about.
+		report.Cancelled = true
+		w.logSummary(dir, report)
+		return report
+	}
+	if changed != "" {
+		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
 
 	// Relocation guard, asked of the whole tick. A refusal leaves the
@@ -510,6 +485,24 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		w.noteRefusal(tickStart, dir, VariantRefusalRelocation, reason, len(rows))
 		w.logSummary(dir, report)
 		return report
+	}
+	// Once more before anything is deleted: the relocation check walked
+	// the tree AFTER the last row was classified, and a volume that went
+	// in between leaves it walking an empty local directory, which holds
+	// no sidecars and lets a relocation's deletions through.
+	//
+	// Pass two deletes catalog ROWS, never files, and every row it deletes
+	// was found missing while the path named the directory the tick began
+	// on, as far as the checks saw (the check as each row read missing,
+	// this one after the last). They see a change they observe and nothing
+	// between them: a volume that went and came back between one row's
+	// read and its check leaves that row here with its sidecar on the
+	// volume again. So pass two asks LocateSidecar once more, just before
+	// each delete, and deletes only a row still at neither location; any
+	// other answer is counted as pass one would have counted it
+	// (CodeRabbit on #1127).
+	if changed := variantsDirChanged(dir, start); changed != "" {
+		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
 	w.noteProceeding(dir, len(rows), len(missing))
 
@@ -527,8 +520,13 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 			return report
 		default:
 		}
-		if w.deleteMissing(ctx, r, &report, &sample, &gone) {
-			// A delete the shutdown stopped ends the tick, as above.
+		stillGone, stopped := w.classifyRow(ctx, dir, r, &report, &sample)
+		if !stopped && !stillGone {
+			continue
+		}
+		if stopped || w.deleteMissing(ctx, r, &report, &sample, &gone) {
+			// A delete the shutdown stopped, or an adoption at the
+			// recheck, ends the tick, as above.
 			report.Cancelled = true
 			w.publishDeleted(gone.paths, gone.variantIDs)
 			w.logSummary(dir, report)
@@ -536,6 +534,101 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		}
 	}
 	w.publishDeleted(gone.paths, gone.variantIDs)
+	w.logSummary(dir, report)
+	return report
+}
+
+// classify is the tick's pass one: it asks LocateSidecar about every row,
+// counting each verdict in report, applying the adoptions as it goes, and
+// returning the rows whose sidecar is at neither location.
+//
+// It stops early in two cases. The shutdown (stopped): between rows, and
+// when it stops an adoption. And the variants directory no longer being
+// the one the tick began on (changed, the reason): asked as each row reads
+// as missing, the only verdict that leads to a deletion, so a volume that
+// goes and comes back inside the pass is seen too, if it is still gone
+// when a missing read's check runs, which a check at the end of the pass
+// is not; asked of that verdict alone, so a tick whose rows are all where
+// they belong pays nothing for it. A remount between a row's read and its
+// check (two system calls apart) is not seen, and that row goes to pass
+// two, whose recheck before the delete keeps it if its sidecar is back.
+// The row that saw the change is not returned: its verdict is about
+// whatever the path named then.
+func (w *VariantWatcher) classify(ctx context.Context, dir string, start os.FileInfo, rows []VariantSnapshot, report *SweepReport, sample *logSampler) (missing []VariantSnapshot, changed string, stopped bool) {
+	for _, r := range rows {
+		// Honour cancellation between rows so a shutdown during a long
+		// sweep on a large library doesn't hold the process up for
+		// minutes.
+		if ctx.Err() != nil {
+			return missing, "", true
+		}
+		gone, stopped := w.classifyRow(ctx, dir, r, report, sample)
+		if stopped {
+			// An adoption the shutdown stopped ends the tick, as the
+			// check at the top of this loop would.
+			return missing, "", true
+		}
+		if !gone {
+			continue
+		}
+		if changed := variantsDirChanged(dir, start); changed != "" {
+			return missing, changed, false
+		}
+		missing = append(missing, r)
+	}
+	return missing, "", false
+}
+
+// classifyRow asks LocateSidecar where r's sidecar is and acts on the
+// answer: it counts a present, mismatched or unreadable sidecar in report,
+// and adopts a relocated one. A sidecar at neither location (gone) is
+// counted by nothing here: pass one asks whether the directory is still
+// the tick's before it keeps the row for pass two, and pass two asks again
+// just before it deletes. stopped is true when the shutdown stopped an
+// adoption.
+func (w *VariantWatcher) classifyRow(ctx context.Context, dir string, r VariantSnapshot, report *SweepReport, sample *logSampler) (gone, stopped bool) {
+	loc := LocateSidecar(dir, r)
+	switch loc.Verdict {
+	case SidecarPresent:
+		report.Present++
+	case SidecarRelocated:
+		return false, w.adoptRelocated(ctx, r, loc, report, sample)
+	case SidecarMismatched:
+		report.Mismatched++
+		sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("canonical", loc.Canonical),
+			slog.Int64("recorded_size", r.SizeBytes),
+		)
+	case SidecarUnknown:
+		// Permission errors, I/O faults, etc. — log and skip rather
+		// than treating as "missing". `--gc`'s reverse pass behaves
+		// the same way.
+		report.Failed++
+		sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
+			slog.String("sidecar", r.SidecarPath),
+			slog.String("variant_id", r.VariantID),
+			slog.Any("err", loc.Err),
+		)
+	case SidecarMissing:
+		return true, false
+	}
+	return false, false
+}
+
+// refuseChangedDir ends a tick whose variants directory stopped being the
+// one it began on, deleting nothing: the refusal of the mount-loss kind,
+// through the latch, since an unmount is what it looks like, and the
+// tick's summary with the rows it had found missing counted as refused.
+// The adoptions it made stand: each pointed a row at its canonical path
+// under the variants directory, where a file of the recorded size was, and
+// that path is where the row belongs whichever directory answered it. If
+// the file is not there once the volume is, the next tick finds the row
+// missing at both places, as it would have without the adoption.
+func (w *VariantWatcher) refuseChangedDir(tickStart time.Time, dir, reason string, missing int, report SweepReport) SweepReport {
+	report.Refused = missing
+	w.noteRefusal(tickStart, dir, VariantRefusalVariantsDir, reason, report.Rows)
 	w.logSummary(dir, report)
 	return report
 }
@@ -745,9 +838,10 @@ const variantRefusalHint = "if the sidecars really are gone: `bridge upscale --g
 	"starts refusing and once a day while it keeps refusing."
 
 // variantsDirUnavailableHint is the mount-loss refusal's advice.
-const variantsDirUnavailableHint = "nothing was swept and no row was deleted. A variants directory that is " +
-	"missing, empty or unreadable while the catalog lists renditions is what an unmounted volume looks like, " +
-	"and every row would read as a rendition that is gone. Mount the volume, or point the variants directory " +
+const variantsDirUnavailableHint = "no row was deleted. A variants directory that is missing, empty or " +
+	"unreadable while the catalog lists renditions, or that stops being the same directory during a sweep, is " +
+	"what an unmounted volume looks like, and every row would read as a rendition that is gone. Mount the " +
+	"volume, or point the variants directory " +
 	"at where the renditions are; until then a download of a rendition stored there answers 410. This sweep " +
 	"has no override; it logs this when it starts skipping and once a day while it keeps skipping."
 
