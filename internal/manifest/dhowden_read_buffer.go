@@ -38,7 +38,9 @@ type dhowdenReadBuffer struct {
 func newDhowdenReadBuffer(rs io.ReadSeeker) (io.ReadSeeker, func()) {
 	base, err := rs.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return rs, func() {}
+		return rs, func() {
+			// Nothing was read ahead, so the stream is where its reader left it.
+		}
 	}
 	b := &dhowdenReadBuffer{rs: rs, buf: make([]byte, dhowdenReadBufferSize), base: base}
 	return b, b.release

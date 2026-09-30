@@ -2103,38 +2103,43 @@ func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *Extract
 		}
 	}
 
-	// Tags: ID3v2 at metadataPointer (if non-zero).
-	var dsfMeta tag.Metadata
-	if metadataPointer > 0 {
-		if _, err := f.Seek(int64(metadataPointer), io.SeekStart); err != nil {
-			// Tags optional — but the folder-level fallback is still
-			// worth attempting since the directory-level cache
-			// doesn't depend on tag-read success.
-			if ec != nil && ec.ArtworkCacheDir != "" {
-				extractLocalArtwork(absPath, t, nil, ec)
-			}
-			return nil
-		}
-		// The ID3v2 guard (dhowden_id3v2_guard.go) walks the tag from here,
-		// where ReadID3v2Tags will read it, through a dhowdenReadBuffer (a
-		// page at a time: backlog B117).
-		if ok, refusal := id3v2TagWithinBudget(f); !ok {
-			warnID3v2Refused(absPath, t, refusal)
-		} else {
-			buffered, release := newDhowdenReadBuffer(f)
-			m, err := tag.ReadID3v2Tags(buffered)
-			release()
-			if err == nil && m != nil {
-				populateFromTagMetadata(m, t)
-				applyEmbeddedLyricsFromTag(m, t)
-				dsfMeta = m
-			}
-		}
-	}
+	// Tags optional: the folder-level fallback is still worth attempting
+	// without them, since the directory-level cache does not depend on
+	// tag-read success.
+	dsfMeta := readDSFTags(f, metadataPointer, absPath, t)
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, dsfMeta, ec)
 	}
 	return nil
+}
+
+// readDSFTags reads the ID3v2 tag at a DSF's metadata pointer into t, and
+// returns it for the artwork hook: nil when there is none to hand on (a zero
+// pointer, a seek that failed, a tag the guard refused or dhowden could not
+// read).
+func readDSFTags(f io.ReadSeeker, metadataPointer uint64, absPath string, t *Track) tag.Metadata {
+	if metadataPointer == 0 {
+		return nil
+	}
+	if _, err := f.Seek(int64(metadataPointer), io.SeekStart); err != nil {
+		return nil
+	}
+	// The ID3v2 guard (dhowden_id3v2_guard.go) walks the tag from here,
+	// where ReadID3v2Tags will read it, through a dhowdenReadBuffer (a page
+	// at a time: backlog B117).
+	if ok, refusal := id3v2TagWithinBudget(f); !ok {
+		warnID3v2Refused(absPath, t, refusal)
+		return nil
+	}
+	buffered, release := newDhowdenReadBuffer(f)
+	m, err := tag.ReadID3v2Tags(buffered)
+	release()
+	if err != nil || m == nil {
+		return nil
+	}
+	populateFromTagMetadata(m, t)
+	applyEmbeddedLyricsFromTag(m, t)
+	return m
 }
 
 // extractDFFWithContext walks just enough of a DSDIFF (.dff) container
