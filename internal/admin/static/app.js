@@ -4817,7 +4817,9 @@ function applyUpscaleStats(r) {
     setText("upscale-failed", r.pool.failed);
   } else {
     // Feature is off but we have cached variants — show the historical
-    // fields, em-dash the live ones to communicate "no live pool".
+    // fields, em-dash the live ones: the payload leaves the pool out while
+    // the upscale gate is closed, though the pool itself runs on every
+    // bridge, so a counter here would read as a feature on and idle.
     setText("upscale-workers", "—");
     setText("upscale-queue", "—");
     setText("upscale-inflight", "—");
@@ -4963,7 +4965,8 @@ let workerElapsedTimer = null;
 
 // renderWorkerGrid paints the Jobs page "Workers" panel from the SSE
 // `upscale` payload's pool.activeWorkers. No-op off the Jobs page. The
-// panel hides when the upscale feature is off (no pool → no workers).
+// panel hides when the upscale feature is off: the payload leaves the
+// pool out while the gate is closed, so there are no workers to show.
 function renderWorkerGrid(r) {
   const panel = document.getElementById("workers-panel");
   const grid = document.getElementById("workers-grid");
@@ -5122,6 +5125,10 @@ function applyAnalysisStats(r) {
   if (document.getElementById("job-analysis-card")) {
     const q = document.getElementById("job-analysis-queue");
     if (q) {
+      // `pool` is present only while the analysis gate is open (the
+      // handler's rule, the upscale tile's too), so the line reads "—"
+      // beside an off or degraded badge rather than counters that read as
+      // a feature on and idle.
       q.textContent = r.pool
         ? `${r.pool.queueLen} queued · ${r.pool.inflight} in flight · ${r.pool.done} done · ${r.pool.failed} failed (${r.pool.workers} worker${r.pool.workers === 1 ? "" : "s"})`
         : "—";
@@ -5912,8 +5919,10 @@ function renderJobCards(j) {
   }
 
   // CarPlay pre-generation (auto-optimize). The whole card stays hidden
-  // when the field is absent — that means no upscale pool on this bridge,
-  // so a card explaining a feature that can't run would be noise.
+  // when the field is absent, which only a Server with no card closure
+  // sends (a test harness): serve wires it on every bridge, the sweeper
+  // running whatever the switches say, and the card then says why nothing
+  // runs.
   const ao = j.autoOptimize;
   const aoCard = document.getElementById("job-ao-card");
   if (aoCard) aoCard.hidden = !ao;

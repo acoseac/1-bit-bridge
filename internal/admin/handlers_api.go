@@ -2643,16 +2643,18 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// block at the end of this handler). Same shape as
 				// duplicates.filter.
 				//
-				// With no sweeper wired (no upscale pool at boot, or the
-				// optimize kind opted out) the persisted value cannot take
-				// effect until a restart, so the honest answer is the banner.
-				// Reporting a silent success there would have the operator flip
-				// the switch, see nothing happen, and have nothing to act on.
+				// With no sweeper wired the persisted value cannot take effect
+				// until a restart, so the honest answer is the banner. Reporting
+				// a silent success there would have the operator flip the switch,
+				// see nothing happen, and have nothing to act on. serve wires the
+				// sweeper on every bridge since #781, whatever the switches say,
+				// so this branch is a harness's; it named "no upscale pool at
+				// boot, or the optimize kind opted out" as its causes until
+				// 2026-09-29, neither of which leaves the sweeper unwired now.
 				autoOptimizeFlipped = true
 				if s.deps.TriggerAutoOptimizeSweep == nil {
 					report.restartBecause("autoOptimizeEnabled",
-						"no auto-optimize sweeper is wired on this bridge "+
-							"(the upscale pool is absent, or the optimize kind is off), "+
+						"no auto-optimize sweeper is wired on this bridge, "+
 							errMsgPersistedNeedsRestart)
 				} else {
 					autoOptimizeOn = *p.AutoOptimizeEnabled
@@ -3064,8 +3066,10 @@ type upscaleStatsResponse struct {
 	// (soxAvailability), so it moves when Enabled does. Nil when the
 	// precheck closure isn't wired (test harnesses).
 	SoxAvailable *bool `json:"soxAvailable,omitempty"`
-	// Pool reports the live worker-pool snapshot. Nil when
-	// the feature is off (no pool to query).
+	// Pool reports the live worker-pool snapshot. Nil while the
+	// live upscale gate is closed: the Deps closure answers nil
+	// then, although the pool itself runs on every bridge (#781).
+	// This said "no pool to query" until 2026-09-29.
 	Pool *UpscalePoolStats `json:"pool,omitempty"`
 	// SuppressedFailures counts sources sidelined by the transcode-failure
 	// debounce (migration v39): repeated failures on the same file version.

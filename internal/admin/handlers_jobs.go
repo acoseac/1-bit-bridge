@@ -77,9 +77,14 @@ type jobsAnalysisCoverage struct {
 	UnreadableExcluded int `json:"unreadableExcluded"`
 }
 
-// jobsAnalysis — the audio-analysis card. Sweep/Coverage omitted when
-// the feature machinery is off; DegradedReason explains an
-// enabled-but-inactive state (no usable sox, judged live).
+// jobsAnalysis — the audio-analysis card. Coverage is omitted while the
+// live gate is closed (Active false); Sweep is the sweeper's last-run
+// state, present whenever its closure is wired, which serve does on
+// every bridge (the sweeper runs whatever the gate says, #781; this
+// said "omitted when the feature machinery is off" until 2026-09-29).
+// The pool's counters are not here: they ride the SSE `analysis`
+// event, which leaves them out while the gate is closed. DegradedReason
+// explains an enabled-but-inactive state (no usable sox, judged live).
 type jobsAnalysis struct {
 	Enabled        bool                  `json:"enabled"`
 	Active         bool                  `json:"active"`
@@ -175,8 +180,11 @@ type jobsSnapshotResponse struct {
 	Analysis    jobsAnalysis         `json:"analysis"`
 	Fingerprint *FingerprintJobState `json:"fingerprint,omitempty"`
 	// AutoOptimize is the CarPlay-variant pre-generation card. Pointer +
-	// omitempty so a bridge without an upscale pool renders no card at
-	// all rather than a permanently-inactive one.
+	// omitempty so a Server with no AutoOptimizeState closure (a test
+	// harness) renders no card rather than an empty one; serve wires it
+	// on every bridge, the sweeper running whatever the switches say
+	// (#781). This said "a bridge without an upscale pool" until
+	// 2026-09-29, a bridge #781 retired.
 	AutoOptimize *AutoOptimizeJobState `json:"autoOptimize,omitempty"`
 	Enrichment   jobsEnrichment        `json:"enrichment"`
 	Lyrics       jobsLyrics            `json:"lyrics"`
@@ -545,8 +553,10 @@ func (s *Server) apiFingerprintSweep(w http.ResponseWriter, _ *http.Request) {
 // apiAutoOptimizeSweep: POST /api/upscale/auto-optimize/sweep — the
 // auto-optimize twin of apiAnalysisSweep. 202 = queued (the nudge
 // coalesces and is honored after the sweeper's settle window),
-// 503 = the sweeper isn't wired on this bridge (no upscale pool, or the
-// optimize kind is opted out in config).
+// 503 = no trigger is wired, which serve never leaves unset: it runs the
+// sweeper on every bridge since #781, whatever the switches say (this
+// said "no upscale pool, or the optimize kind is opted out in config"
+// until 2026-09-29).
 //
 // Deliberately does NOT check whether the feature FLAG is on: the
 // sweeper reads that live and reports a disabled sweep, which is more

@@ -325,8 +325,11 @@ type Deps struct {
 	// appear to work while doing nothing for exactly the files the operator
 	// just watched fail.
 	//
-	// Wired in cmd/bridge/main.go only when fingerprinting is enabled; nil is
-	// a no-op, which is correct — with no sweeper there is no cache to clear.
+	// Wired in cmd/bridge/main.go on every bridge: the cache and the sweeper
+	// are built whatever the switch says, which a live gate decides (#770,
+	// #781). Nil (a harness) is a no-op. This said it was wired only with
+	// fingerprinting enabled, and that no sweeper meant no cache to clear,
+	// until 2026-09-29.
 	FingerprintForget func(prefix string) int
 
 	// EnrichSkipReasons returns the enricher's process-lifetime tally of
@@ -510,9 +513,10 @@ type Deps struct {
 
 	// AutoOptimizeState returns the auto-optimize sweeper's admin
 	// snapshot: the live config flag, the runtime active/degraded verdict,
-	// and the sweeper's lifecycle recorder. Wired for every serve where
-	// an upscale pool exists (even flag-off — the card then explains why
-	// nothing is happening). Nil-safe: absent omits the field.
+	// and the sweeper's lifecycle recorder. Wired for every serve, the
+	// sweeper running whatever the switches say since #781 (even
+	// flag-off — the card then explains why nothing is happening).
+	// Nil-safe: absent (a harness) omits the field.
 	AutoOptimizeState func() *AutoOptimizeJobState
 
 	// TriggerAutoOptimizeSweep — the auto-optimize twin of
@@ -520,8 +524,9 @@ type Deps struct {
 	// hot-apply half of the settings PATCH: flipping
 	// `upscale.autoOptimize.enabled` fires this instead of setting
 	// RestartRequired, because the sweeper reads the flag live (the
-	// TriggerDuplicatesPass precedent). Nil when the sweeper isn't wired
-	// — the PATCH then still persists and takes effect on restart.
+	// TriggerDuplicatesPass precedent). Wired on every serve; nil (a
+	// harness) leaves the PATCH persisting a value that takes effect on
+	// restart.
 	TriggerAutoOptimizeSweep func() bool
 
 	// FingerprintDegraded reports the bounded reason acoustic

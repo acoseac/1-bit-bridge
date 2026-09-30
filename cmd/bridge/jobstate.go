@@ -221,8 +221,11 @@ func valueOr[T any](f func() T, fallback T) T {
 // than reading as switched off: a card that answered the switches alone
 // said "on" through every sweep a missing sox turned into failures.
 //
-// nil recorder → nil closure → the card is omitted entirely, which is
-// what a bridge with no upscale pool should render.
+// nil recorder → nil closure → the card is omitted entirely. serve
+// passes a recorder on every bridge, the sweeper running whatever the
+// switches say (#781), so only a caller with no sweeper omits it; this
+// named "a bridge with no upscale pool", which #781 retired, until
+// 2026-09-29.
 func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[admin.AutoOptimizeSweepCounts]) func() *admin.AutoOptimizeJobState {
 	if status == nil || enabled == nil || active == nil {
 		return nil
