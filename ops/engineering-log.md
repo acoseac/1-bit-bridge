@@ -33030,9 +33030,11 @@ currently reachable at"), no Mirror-PR.
 - **The reading.** A value with no `@`, `/`, `?` or `#` never went near a
   credential; the rest go through `url.Parse` as an authority (`//` + the
   value, after a scheme if it names one). Three rules, each driven by a row
-  of the table test and a control below: an IP address alone is returned as
+  of the table test and a control below: an IP address, once a scheme, user
+  information, a path, a query and a fragment are removed, is returned as
   written (`url.Parse("//2001:db8::1")` reads the host `2001:db8:` and the
-  port 1; measured with go1.26.6); nothing that precedes an `@` is ever
+  port 1, after `user@` too; measured with go1.26.6), and never bracketed
+  (review round 3, below); nothing that precedes an `@` is ever
   returned, so an `@` after the first `/`, `?` or `#` names no host
   (`url.Parse` reads `user:12/34@host` as the host `user`, which would have
   published the user name; a lexical "after the last `@`" reading was
@@ -33081,7 +33083,7 @@ currently reachable at"), no Mirror-PR.
 ### Tests
 
 - `internal/config/autocert_domain_test.go`:
-  `TestAutocertHostReadsTheHostAValueNames` (36 shapes, each a fixed point,
+  `TestAutocertHostReadsTheHostAValueNames` (39 shapes, each a fixed point,
   none carrying the secret), `TestNormalizeServesAutocertDomainAsItsHost`
   (every shape through `NormalizeAndValidate`: it loads, the field, one
   warning of the right kind naming the field by scheme and host, no line
@@ -33134,10 +33136,10 @@ test launches serve itself.
 
 Each mutation applied once to the committed tree by a script that requires its
 target text exactly once, the named tests run with `-count=1`, the file
-restored from HEAD and the tree checked clean after each. 24 controls: NC1 to
+restored from HEAD and the tree checked clean after each. 26 controls: NC1 to
 NC22 on the fix commit (efb8becc), then NC16 to NC18 again and NC23 and NC24
-on review round 1's code (6528653c), where `fetchErrorForLog` had changed.
-The tree was clean after every one.
+on review round 1's code (6528653c), where `fetchErrorForLog` had changed, and
+NC25 and NC26 on round 3's (259b4f7e). The tree was clean after every one.
 
 | | mutation | red |
 |---|---|---|
@@ -33165,6 +33167,8 @@ The tree was clean after every one.
 | NC22 | the transport error names the URL as configured | the SOAP test's failed-connection half |
 | NC23 | the `%q` rendering not replaced (round 1) | the refused-connection and timeout rows of the `%q` shape alone: for the others the quoted form holds the URL verbatim |
 | NC24 | a hostless URL's error logged with the URL taken out (round 1) | the scheme-less row |
+| NC25 | the IP rule asked of the whole value only (round 2's code) | the table's and `Normalize`'s rows with an unbracketed IPv6 after `user:…@` and before a path (the IPv4 row stays green: `url.Parse` reads IPv4) |
+| NC26 | the warning's IPv6 host not bracketed | `Normalize`'s two unbracketed-IPv6 rows (the warning names the field alone) |
 
 ### Review round 1
 
@@ -33199,6 +33203,20 @@ The tree was clean after every one.
 - **Round 2**: CodeRabbit asked the control count to match the table (it
   said 22 beside 24 rows); it says which ran where now. Gemini had no
   comments.
+- **Round 3**: Gemini (high) proposed bracketing an IPv6 address kept as
+  written, since `https://2001:db8::1:7788` is no URL. Measured with a
+  throwaway test before answering: the console's Origin allowlist matched an
+  Origin of `https://[2001:db8::1]` for the domain `2001:db8::1` and not for
+  `[2001:db8::1]`, since it compares the domain with `url.URL.Hostname`,
+  which has no brackets. So bracketing would have traded a console that
+  works for a URL that never did, in a change about credentials; declined,
+  and the disagreement between the consumers filed as backlog B152. Checking
+  it found a misread in `AutocertHost`: an IPv6 address after `user@`, or
+  before a path, went to `url.Parse` and came back `[2001:db8:]`; the IP rule
+  is now asked of the authority once the user information and the path are
+  removed (NC25). The warning named such a host by the field alone, since
+  `urlFieldForLog` cannot read `https://2001:db8::1`; `hostForURL` brackets
+  it there only (NC26).
 
 ### With the fix, the same binary runs
 
@@ -33226,3 +33244,6 @@ The branch's binary (at the fix commit), over the same files:
   `upnpproxy` builds each byte fetch from the device's own `<res>` URL with
   the live host and port, never the manual URL's user information. A
   functional gap for a setup nobody has reported, filed as B143.
+- A public `autocert.domain` written as an IPv6 address builds an invalid
+  advertised URL unbracketed and fails the console's Origin check
+  bracketed (review round 3). It was so before B66 as well: B152.

@@ -1480,7 +1480,7 @@ const (
 //     either: the console's Origin allowlist compares the domain with a
 //     browser's Origin hostname, which carries no brackets, so an
 //     unbracketed address is the one it can match. The URL public mode
-//     builds from such a domain is not a valid one; that is backlog B144.
+//     builds from such a domain is not a valid one; that is backlog B152.
 //   - Nothing that precedes an "@" is ever returned. An "@" after the first
 //     "/", "?" or "#" could as well end user information a hand edit left
 //     unescaped (url.Parse reads user:12/34@host as the host "user" and the

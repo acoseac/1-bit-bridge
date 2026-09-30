@@ -1671,9 +1671,14 @@ lost my library."
   such a bridge may still reach it through `customEndpoints`. None of those
   values ever worked (no certificate, no Origin match, a URL the app cannot
   parse), so the placeholder breaks nothing. **Three rules keep the
-  reading clean.** An IP address alone is returned as written:
+  reading clean.** An IP address, once a scheme, user information, a path,
+  a query and a fragment are removed, is returned as written:
   `url.Parse("//2001:db8::1")` reads the host `2001:db8:` and the port 1,
-  and the Origin allowlist compares the operator's spelling. **Nothing that
+  after `user@` too. **Never bracketed**: the Origin allowlist compares the
+  domain with an Origin hostname, which has no brackets, so bracketing
+  would lock the console out of a bridge whose unbracketed IPv6 domain
+  passes it today; the URL built from that domain is invalid, which is
+  backlog B152 (both spellings measured, a review's proposal). **Nothing that
   precedes an `@` is ever returned**: an `@` after the first `/`, `?` or `#`
   could as well end user information a hand edit left unescaped
   (`user:12/34@host` parses with the host `user`), so it names no host.
