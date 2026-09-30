@@ -32167,16 +32167,16 @@ about was never reachable there. Both gates were already pinned
   instead of reading the zero `net.Interface`'s addresses, which are every
   address of the host on macOS and none on Linux.
 
-### Negative controls, on the committed tree, each restored with `git checkout --`
+### Negative controls, on the committed tree (ee64e60b), each restored with `git checkout --`
 
 | mutation | goes red |
 |---|---|
-| NC1: `AnnouncedOn` ignores the link (main's exception on every link) | 8 discovery tests, 3 upnp tests, the cmd/bridge chain |
+| NC1: `AnnouncedOn` ignores the link (main's exception on every link) | 8 discovery tests, 2 upnp tests, the cmd/bridge chain |
 | NC2: the string check compares addresses itself (not `Permits`) | the string-check tests only (4 discovery, 2 upnp); the dial-check table, the approval test and the chain stay green: the dial check holds alone |
 | NC3: `Permits` drops the link condition | as NC1 (the string check asks `Permits`) |
-| NC4: the renderer client bypasses its link (always zero-conf) | its 3 configured-link tests |
-| NC5: the upstream client bypasses its link | its 3 configured-link tests |
-| NC6: both clients always read a configured link | the direct-cable positives (3 + 3) |
+| NC4: the renderer client bypasses its link (always zero-conf) | its 3 configured-link tests (the link-local move row among them) |
+| NC5: the upstream client bypasses its link | its 2 configured-link tests (the table and the move row) |
+| NC6: both clients always read a configured link | the direct-cable positives (3 renderer, 2 upstream) |
 | NC7: the tick loops stop refreshing the link | `TestTheRendererClientReadsItsLinkBeforeEverySearch` / `TestTheServerClientReadsItsLinkBeforeEverySearch`, each alone |
 | NC8: the predicate admits a mixed link | the two mixed rows of `TestZeroConfIPv4Link` only |
 | NC9a: the refusal log without its once-per-source rule | the log test and the renderer's warning count |
