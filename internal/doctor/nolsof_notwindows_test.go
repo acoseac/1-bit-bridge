@@ -78,10 +78,15 @@ func TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds(t *testing.T) {
 			return filepath.Join(t.TempDir(), "server.pid")
 		}},
 		// A bridge that stopped without removing it. #640 pinned this
-		// one as a Fail, with the probe forced available.
+		// one as a Fail, with the probe forced available. What /proc says
+		// about the stand-in is forced as the test below forces it: left
+		// to the host, on Linux it reads this process's descriptors
+		// wherever this process is the stand-in, and names it the port's
+		// holder (backlog B106).
 		{"recorded pid not running", func(t *testing.T) string {
+			withProcAnswering(t, false, procCannotTell, nil)
 			withPIDAlive(t, false)
-			return writePIDFile(t, 4242)
+			return writePIDFile(t, standInPID)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,8 +105,8 @@ func TestPortCheckWithoutLsofFailsAPortNoLiveBridgeOfOursHolds(t *testing.T) {
 // the test above: taking the fallback out must not make every bound port
 // on such a host a Fail. A recorded pid that is alive still reaches #640's
 // arm, which answers for a live bridge the probe cannot attribute, with or
-// without lsof. What /proc says about the pid is forced, since pid 4242 may
-// be a readable process of this user on a Linux host: a pid /proc rules
+// without lsof. What /proc says about the pid is forced, since the stand-in
+// may be a readable process of this user on a Linux host: a pid /proc rules
 // out is not a bridge the probe cannot attribute, and its port FAILs,
 // whoever the listener runs as.
 func TestPortCheckWithoutLsofStillAnswersALiveRecordedPID(t *testing.T) {
@@ -122,7 +127,7 @@ func TestPortCheckWithoutLsofStillAnswersALiveRecordedPID(t *testing.T) {
 			withPIDAlive(t, true)
 			withHiddenListener(t, tc.owned, nil)
 			port := bindPort(t)
-			c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
+			c := checkPort(t.Context(), "port-test", port, writePIDFile(t, standInPID))
 			if c.Status != tc.want {
 				t.Errorf("bound port, recorded pid alive, no lsof: got %v (%s / %s), want %v",
 					c.Status, c.Summary, c.Hint, tc.want)

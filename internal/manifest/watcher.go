@@ -79,6 +79,16 @@ type Watcher struct {
 	// one nil check per debounced directory change.
 	afterDispatchHookForTests func()
 
+	// afterInitialWalkHookForTests fires once Run's initial walk has
+	// registered every watch it is going to, before the event loop starts:
+	// a file created before then is one no watch sees, and nothing but the
+	// periodic scan picks it up. A test that drops a file waits on it
+	// (startWatcher), where it slept a guess at how long the walk takes,
+	// and a starved host walked past the guess (backlog B104). Per-instance
+	// and set before Run starts, for afterDispatchHookForTests' reason; nil
+	// in production.
+	afterInitialWalkHookForTests func()
+
 	// aliases are the configured roots that are links, each watched at the
 	// directory it resolves to (watchWalkStart), paired with the root as
 	// configured so an event is named back under it (configuredName).
@@ -156,6 +166,9 @@ func (wt *Watcher) Run(ctx context.Context) error {
 			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
 				"root", root, "err", err)
 		}
+	}
+	if hook := wt.afterInitialWalkHookForTests; hook != nil {
+		hook()
 	}
 
 	for {
