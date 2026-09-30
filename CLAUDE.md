@@ -3566,16 +3566,21 @@ no failing test — which is the shape to expect in this area.
   `TestVariantWatcherRefusesATickWhoseVolumeWentAndCameBackDuringIt`,
   `TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne`,
   `TestDirIdentitySeesAnotherDirectoryAtThePath`. **Still open**:
-  `upscale --gc` re-checks health but not identity (B224). Residual: a
-  remount between one row's missing read and the check after it (two
-  system calls apart) is not seen, and that row's entry is deleted in pass
-  two with its sidecar back on the volume; nothing records a change the
-  checks did not observe (CodeRabbit on #1127). A mountpoint that already
+  `upscale --gc` re-checks health but not identity (B224). **Pass two
+  asks `LocateSidecar` again just before each delete** (`classifyRow`, the
+  one per-row verdict both passes use) and deletes only a row still at
+  neither location: the checks see a change they observe and nothing
+  between them, so a remount between one row's missing read and the check
+  after it left that row's verdict stale with its sidecar back on the
+  volume (CodeRabbit on #1127;
+  `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete`). A row
+  kept there is counted as pass one would have counted it. What stays open
+  is a volume that is gone again at that recheck. A mountpoint that already
   held an entry when a tick STARTED was open here too, until the next
   bullet.
 - **…and the probe counts RENDITIONS, not entries: a variants directory
   holding none is what an unmounted volume looks like, whatever else it
-  holds** (2026-09-30, backlog B223). `VariantsDirSweepBlock` called a
+  holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a
   directory healthy when it held any entry, and the local directory an
   unmount leaves holds what was written there while the volume was away
   (a Finder `.DS_Store`, a README, the folders a render makes before sox

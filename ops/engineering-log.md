@@ -35230,15 +35230,22 @@ path was.
 - `upscale --gc` classifies its rows with no probe before, and re-checks
   health, not identity, before its reverse sweep. Backlog B224.
 - A remount between one row's missing read and the identity check after it
-  (two system calls apart) is not seen: the row reaches pass two with its
-  sidecar back on the volume. The checks see a change they observe and
-  record nothing between them; the claim in CLAUDE.md and `classify`'s
-  docblock says so since CodeRabbit's review of the merged head (27bad388).
-  Its other finding there, to count the row whose check saw the change
-  among the refused, was declined: that row's missing verdict is about the
-  directory the path named then, not the one the tick began on.
+  (two system calls apart) is not seen by the checks: the row reached pass
+  two with its sidecar back on the volume (CodeRabbit on the merged head,
+  27bad388, and on dfb7bc27). Pass two now asks `LocateSidecar` again just
+  before each delete, through `classifyRow`, the per-row verdict pass one
+  uses, and deletes only a row still at neither location; a row kept there
+  is counted as pass one would count it.
+  `TestVariantWatcherKeepsARowWhoseSidecarIsBackBeforeItsDelete` stands the
+  stale verdict in with the sidecar reappearing at a later row's adoption,
+  one row under the mass-delete floor: red before the recheck (the row
+  deleted, 38 present), green after (39 present, none deleted). Left open:
+  a volume gone again at the recheck. The other finding on 27bad388, to
+  count the row whose check saw the change among the refused, was
+  declined: that row's missing verdict is about the directory the path
+  named then, not the one the tick began on.
 
-## 2026-09-30 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
+## 2026-09-29 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
 
 Left open by B203: `VariantsDirSweepBlock` called a variants directory
 healthy when it held ANY entry (`dirIsEmpty` read one). A clean unmount
