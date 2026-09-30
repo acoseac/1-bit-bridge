@@ -139,7 +139,8 @@ func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 // newTestClient constructs a client with stub dispatcher + fixed
-// clock for deterministic testing of handlePacket dispatch.
+// clock for deterministic testing of handlePacket dispatch, on a configured
+// LAN link (configuredLink).
 //
 // Its M-SEARCH sends go nowhere (discardMSearch). The interface it names is
 // the zero one, which pins a real send to the OS default, the LAN, so a test
@@ -148,8 +149,17 @@ func TestDefaultDetailFetchClientRefusesRedirects(t *testing.T) {
 // result sets writeMSearch itself.
 func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient {
 	t.Helper()
+	return newTestClientOn(t, dispatcher, configuredLink)
+}
+
+// newTestClientOn is newTestClient on the link addrs describes. The zero
+// interface's own addresses are no model of a link: net.Interface.Addrs of
+// index 0 lists every address of the host on macOS and none on Linux.
+func newTestClientOn(t *testing.T, dispatcher SOAPDispatcher, addrs func() ([]net.Addr, error)) *SSDPDiscoveryClient {
+	t.Helper()
 	cfg := DefaultDiscoveryConfig()
 	cfg.Interface = &net.Interface{}
+	cfg.InterfaceAddrs = addrs
 	cfg.Dispatcher = dispatcher
 	cfg.NowFunc = func() time.Time {
 		return time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
@@ -160,6 +170,27 @@ func newTestClient(t *testing.T, dispatcher SOAPDispatcher) *SSDPDiscoveryClient
 	}
 	c.writeMSearch = discardMSearch
 	return c
+}
+
+// configuredLink is the addresses of an interface on a LAN with a DHCP
+// server: a private IPv4 address, and the fe80 one every IPv6-capable
+// interface holds. A link-local source approves nothing there (backlog B49).
+func configuredLink() ([]net.Addr, error) {
+	return []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(192, 0, 2, 1), Mask: net.CIDRMask(24, 32)},
+	}, nil
+}
+
+// zeroConfLink is the addresses of an interface on a zero-configuration
+// link, a direct cable to a renderer with no DHCP server: a self-assigned
+// IPv4 link-local address and fe80, the shape measured on the dev Mac's USB
+// link to an iPhone (2026-09-30). A link-local source approves itself there.
+func zeroConfLink() ([]net.Addr, error) {
+	return []net.Addr{
+		&net.IPNet{IP: net.ParseIP("fe80::2"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(169, 254, 3, 4), Mask: net.CIDRMask(16, 32)},
+	}, nil
 }
 
 // discardMSearch is a writeMSearch that puts nothing on the wire and reports
