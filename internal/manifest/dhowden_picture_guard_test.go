@@ -29,7 +29,8 @@ func heapAllocated() uint64 {
 // themselves before the bytes arrive: dhowden's 10 MB readBytes up front and
 // the 10 MB its picture budget allows once, the 16 MiB a VORBIS_COMMENT
 // block's 24-bit length lets parseVorbisCommentBounded ask for, and the
-// 32 MiB cap on an AIFF or WAV ID3 chunk (no one path reaches all of them).
+// 32 MiB cap on an AIFF, WAV or DFF ID3 chunk (maxID3ChunkSize; no one path
+// reaches all of them).
 // The per-byte term covers the copies a parse makes of what it reads. A
 // length read out of a file that sizes a buffer the file cannot back
 // overshoots it by orders of magnitude: a random 32-bit length asks for
