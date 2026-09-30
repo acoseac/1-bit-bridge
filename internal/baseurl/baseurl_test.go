@@ -39,6 +39,14 @@ func TestTheReductions(t *testing.T) {
 		{"the default port and no host", "https://:443", "https://:443", "", false},
 		{"an empty port and no host", "https://:", "https://:", "", false},
 		{"no host at all", "https://", "", "", false},
+		// url.Parse checks that a port is digits, not that it is one a
+		// connection can be made to. Such a pin keeps its canonical form, as a
+		// port and no host does, so a config that loaded keeps loading; no
+		// credential is held against it, since every dial refuses it.
+		{"a port past 65535", "https://atlas.example:99999", "https://atlas.example:99999", "", true},
+		{"port zero", "https://atlas.example:0", "https://atlas.example:0", "", true},
+		{"a port no integer holds", "https://atlas.example:99999999999999999999", "https://atlas.example:99999999999999999999", "", true},
+		{"a port with leading zeros", "https://atlas.example:08443", "https://atlas.example:08443", "https://atlas.example:08443", true},
 		{"a token as the user name", "https://tok@atlas.example", "", "", true},
 		{"a user name and a password", "https://user:pw@atlas.example", "", "", true},
 		{"a password alone", "https://:pw@atlas.example", "", "", true},

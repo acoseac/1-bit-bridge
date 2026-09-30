@@ -18,6 +18,7 @@ package baseurl
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -90,25 +91,50 @@ func NamesHost(raw string) bool {
 }
 
 // CredentialBase is the base a harvest credential may be held against: raw
-// reduced by CanonicalHTTPS, when that reduction names a host, and "" for
-// anything else. It is the one form POST /v1/atlas-harvest/credential stores
-// and the one form the harvest state store holds (backlog B97), so the
-// harvest client, the booklet fetch, the lyrics tier and the premium cover
-// fetch, which build every request URL from it, see a base that carries no
-// user information, path, query or fragment, never plain http, and never a
-// port with no host.
+// reduced by CanonicalHTTPS, when that reduction names a host and any port
+// it names is one a connection can be made to, and "" for anything else. It
+// is the one form POST /v1/atlas-harvest/credential stores and the one form
+// the harvest state store holds (backlog B97), so the harvest client, the
+// booklet fetch, the lyrics tier and the premium cover fetch, which build
+// every request URL from it, see a base that carries no user information,
+// path, query or fragment, never plain http, never a port with no host, and
+// never a port outside 1-65535.
 //
 // Why each refusal matters to a request built from it: user information
 // reaches every error net/http returns (its `*url.Error` names the request
 // URL, masking a password and nothing else, so a token written as the user
 // name is quoted whole); a path moves every request under it, and a query or
 // a fragment swallows the path the client appends; plain http sends the
-// bearer token in cleartext; and a port with no host is dialled on this
-// machine.
+// bearer token in cleartext; a port with no host is dialled on this machine;
+// and a port no connection can be made to (url.Parse checks that a port is
+// digits, not its range) fails every dial, so a credential stored against it
+// could never be used (CodeRabbit on #1110).
+//
+// The host and port tests live here and not in CanonicalHTTPS, which the
+// configured pin goes through: config's Validate refuses a pin that reduces
+// to "", so a test there would stop a bridge whose config loaded before from
+// starting after an update. A pin written with such a base keeps its
+// canonical form and matches no credential, which is what it can mean.
 func CredentialBase(raw string) string {
 	base := CanonicalHTTPS(raw)
-	if base == "" || !NamesHost(base) {
+	if base == "" || !NamesHost(base) || !dialablePort(base) {
 		return ""
 	}
 	return base
+}
+
+// dialablePort reports whether the port base names, if it names one, is one a
+// connection can be made to: a decimal from 1 to 65535. A base naming no port
+// is dialled on the scheme's default, so it answers true.
+func dialablePort(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		return true
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }

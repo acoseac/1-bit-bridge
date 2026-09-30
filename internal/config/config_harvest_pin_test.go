@@ -30,6 +30,10 @@ func TestAtlasHarvestBaseURLValidation(t *testing.T) {
 		// `https://`, which the handler's own reduction turns into ""
 		// (unpinned), so this pin left a non-demo bridge open (backlog B97).
 		{"the default port with no host pins to nothing", "https://:443", "https://:443", false},
+		// A port no connection can be made to pins to nothing the same way:
+		// the credential endpoint refuses it (baseurl.CredentialBase), and a
+		// config that loaded with it keeps loading (#1110).
+		{"a port past 65535 pins to nothing", "https://atlas.example:99999", "https://atlas.example:99999", false},
 		{"no scheme is refused", "atlas.example", "", true},
 		{"garbage is refused", "://nope", "", true},
 	} {

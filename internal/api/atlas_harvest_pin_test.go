@@ -190,6 +190,24 @@ func TestAtlasHarvestCredentialRefusesABaseThatNamesNoHost(t *testing.T) {
 	}
 }
 
+// TestAtlasHarvestCredentialRefusesAPortNoConnectionCanBeMadeTo: url.Parse
+// takes any digits as a port, so `https://atlas.example:99999` passed the
+// canonical reduction and was stored, and every harvest request then failed
+// at the dial (CodeRabbit on #1110). baseurl.CredentialBase refuses a port
+// outside 1-65535, on an unpinned non-demo bridge, the widest acceptance
+// there is.
+func TestAtlasHarvestCredentialRefusesAPortNoConnectionCanBeMadeTo(t *testing.T) {
+	for _, sent := range []string{"https://atlas.example:99999", "https://atlas.example:0"} {
+		sink := &fakeHarvestCred{}
+		token, srv := newHarvestCredTestServerPinned(t, sink, "", false)
+		resp := postCredential(t, srv, token, sent)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || sink.called != 0 {
+			t.Errorf("sent %q: status %d, sink called %d times; want 400 and none", sent, resp.StatusCode, sink.called)
+		}
+	}
+}
+
 // TestAPinOfAPortAndNoHostStaysAPinAsServeWiresIt drives the pin the way
 // serve hands it over, already reduced (cfg.Atlas.CanonicalHarvestBaseURL())
 // and reduced again by WithAtlasHarvest. A pin written as a port and no host

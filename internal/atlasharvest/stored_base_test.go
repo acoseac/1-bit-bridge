@@ -49,6 +49,10 @@ var storedBaseShapes = []struct {
 		_, port, _ := net.SplitHostPort(h)
 		return "https://:" + port
 	}},
+	{"a port no connection can be made to", func(h string) string {
+		host, _, _ := net.SplitHostPort(h)
+		return "https://" + host + ":99999"
+	}},
 	{"no host at all", func(string) string { return "https://" }},
 }
 
