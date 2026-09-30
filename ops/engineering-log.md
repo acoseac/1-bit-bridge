@@ -33848,6 +33848,10 @@ for DIIN.
   large-PROP test red; reading the nested tag even beside a root one turns
   `prop_and_root_id3.dff` red (extractor and scan); the old cap turns the
   large-PROP test red; no fit check turns the allocation test red.
+- Fuzzed on dido, three minutes a target, no crasher: FuzzParsePropChunks
+  10,888,566 executions (its seeds now hold a nested ID3 chunk in both
+  spellings, and it asserts the kept body lies within its input),
+  FuzzExtractDFF 3,903,123 (the two nested fixtures among its seeds).
 
 Gemini (round 0): a `len(body) >= 4` guard before `body[0:4]` in the WAV LIST arm.
 Declined: that arm refuses `size < 4` before reading, and `readIFFChunkBody`
