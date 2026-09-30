@@ -186,8 +186,8 @@ func TestAJobsCardSendsItsNextSweepOnlyWhileItsGateIsOpen(t *testing.T) {
 		}
 		for path, open := range gateOf {
 			if got := jsonPathPresent(jobs, path); got != open() {
-				t.Errorf("%s: /api/jobs carries %s: %v, want %v (the gate is open: %v)",
-					step.name, path, got, open(), open())
+				t.Errorf("%s: /api/jobs carries %s: %v, want %v, with the gate %s",
+					step.name, path, got, open(), map[bool]string{true: "open", false: "closed"}[open()])
 			}
 		}
 		for _, path := range []string{"backups.run.nextDueAt", "duplicates.run.nextDueAt"} {
