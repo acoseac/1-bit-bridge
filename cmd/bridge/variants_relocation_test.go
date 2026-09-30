@@ -696,13 +696,11 @@ func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
 // which passed this test with os.Stat on Windows.
 func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "variants")
-	if err := os.MkdirAll(filepath.Join(dir, "Artist"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFixtureFile(t, filepath.Join(dir, "Artist", "01.flac.upscaled-v2-176400-24.flac"), 10)
 	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
 	kept := a.SidecarStoreState()
 	if !kept.Available || kept.Store == nil {
-		t.Fatalf("a variants directory holding a folder: state %+v, want available with its identity", kept)
+		t.Fatalf("a variants directory holding a rendition: state %+v, want available with its identity", kept)
 	}
 	if err := os.Rename(dir, dir+".volume"); err != nil {
 		t.Fatal(err)
@@ -719,6 +717,31 @@ func TestSidecarStoreStateTellsTheDirectoryItKeptFromANewOne(t *testing.T) {
 	}
 	if again := a.SidecarStoreState(); again.Store == nil || !again.Store.Same(now.Store) {
 		t.Error("the same directory, asked twice, is not the same directory")
+	}
+}
+
+// TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable —
+// the serve path's reap and the variant delete handler ask the adapter
+// whether a missing rendition is evidence about the file or about the
+// volume, from the probe the watcher and `--gc` refuse on (backlog B223).
+// A local directory under an unmounted mountpoint that holds a .DS_Store
+// and the folders a failed render left read as available until then, so a
+// play of each rendition reaped its row while the files sat on the
+// volume. It is unavailable now, and Empty (the one reason the delete
+// handler may explain away by its own unlinks), with its identity.
+func TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "variants")
+	writeFixtureFile(t, filepath.Join(dir, ".DS_Store"), 10)
+	if err := os.MkdirAll(filepath.Join(dir, "Artist", "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
+	if st := a.SidecarStoreState(); st.Available || !st.Empty || st.Store == nil {
+		t.Fatalf("a mountpoint holding a .DS_Store and empty folders: state %+v, want unavailable, Empty, with its identity", st)
+	}
+	writeFixtureFile(t, filepath.Join(dir, "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac"), 10)
+	if st := a.SidecarStoreState(); !st.Available || st.Empty {
+		t.Fatalf("the same directory holding a rendition: state %+v, want available", st)
 	}
 }
 

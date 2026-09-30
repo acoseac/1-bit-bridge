@@ -50,6 +50,16 @@ func relocationShape(t *testing.T, n int) (dir string, rows []VariantSnapshot, s
 	return dir, rows, sidecar
 }
 
+// putBack writes each row's file, ten bytes as relocationShape records,
+// at its canonical place under dir: the copy an operator makes to answer
+// a relocation refusal, which the next tick adopts.
+func putBack(t *testing.T, dir string, rows []VariantSnapshot) {
+	t.Helper()
+	for _, r := range rows {
+		writeSidecar(t, CanonicalSidecarPath(dir, r))
+	}
+}
+
 // requireRefusedTicks runs n ticks of w and fails the test at the first
 // that does not refuse all of want rows and delete none; what says which
 // state the ticks ran in.
@@ -80,25 +90,29 @@ func TestVariantWatcherLatchesItsMassDeleteRefusal(t *testing.T) {
 // TestVariantWatcherSaysOnceWhenItStopsRefusing — the first tick whose
 // relocation check proceeds after a streak says so once, at Info, with the
 // counts it proceeded on; the ticks after it say nothing more. Here the
-// sidecar that made the tree read as a relocation goes, so the missing rows
-// are a library whose files really went, and the tick reaps them.
+// files are put where the rows' layout says, but for five whose files
+// really went, which is under the floor: the tick adopts the 25 and reaps
+// the five.
+//
+// It ended the streak by removing the stray sidecar until backlog B223,
+// after which the thirty missing rows over a tree holding no sidecar were
+// reaped; that tree is what an unmounted volume looks like, and the
+// mount-loss probe skips it now.
 func TestVariantWatcherSaysOnceWhenItStopsRefusing(t *testing.T) {
-	dir, rows, sidecar := relocationShape(t, 30)
+	dir, rows, _ := relocationShape(t, 30)
 	store := &fakeDeleter{}
 	w := NewVariantWatcher(&fakeLister{snapshots: [][]VariantSnapshot{rows}}, store, nil, staticDir(dir), time.Hour, 20)
 	rec := loggingtest.Record(t)
 
 	requireRefusedTicks(t, w, 1, 30, "every row is gone while the tree holds a sidecar")
-	if err := os.Remove(sidecar); err != nil {
-		t.Fatal(err)
-	}
+	putBack(t, dir, rows[:25])
 	for i := 0; i < 2; i++ {
-		if r := w.tick(context.Background()); r.Refused != 0 || r.Deleted != 30 {
-			t.Fatalf("tick %d after the sidecar went: report %+v, want the 30 rows deleted", i+1, r)
+		if r := w.tick(context.Background()); r.Refused != 0 || r.Adopted != 25 || r.Deleted != 5 {
+			t.Fatalf("tick %d after the files were put back: report %+v, want 25 adopted and 5 deleted", i+1, r)
 		}
 	}
 	requireLinesSay(t, rec.Lines(msgVariantRefusalLifted), 1, "the lifted line, once, with the counts it passed on",
-		"INFO ", " rows=30", " missing=30", " ended=relocation", " variants_dir="+dir)
+		"INFO ", " rows=30", " missing=5", " ended=relocation", " variants_dir="+dir)
 	requireLinesSay(t, rec.Failures(msgVariantRefusal), 1, "the refusal's one WARN")
 }
 

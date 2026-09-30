@@ -3,7 +3,6 @@ package integrity
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 )
@@ -16,7 +15,7 @@ import (
 // restarts the clock; a tick that decided nothing leaves it; a tick that
 // passes both guards, or an empty catalog, clears it.
 func TestVariantWatcherStatusFollowsTheRefusalLatch(t *testing.T) {
-	dir, rows, sidecar := relocationShape(t, 30)
+	dir, rows, _ := relocationShape(t, 30)
 	current := dir
 	lister := &fakeLister{snapshots: [][]VariantSnapshot{rows}}
 	w := NewVariantWatcher(lister, &fakeDeleter{}, nil, func() string { return current }, time.Hour, 20)
@@ -59,15 +58,15 @@ func TestVariantWatcherStatusFollowsTheRefusalLatch(t *testing.T) {
 		t.Errorf("the unmounted streak's second tick moved the status: %+v, want %+v", got, unmounted)
 	}
 
-	// It comes back, and the stray sidecar that made the missing rows read
-	// as a relocation is gone: the tick passes both guards (and deletes the
-	// rows, whose files really are gone).
+	// It comes back, and the files are put where the rows' layout says, but
+	// for five whose files really went: the tick passes both guards, adopts
+	// the 25 and deletes the five. (Removing the stray sidecar ended the
+	// streak until backlog B223; a tree holding no sidecar is what an
+	// unmounted volume looks like, which the mount-loss probe skips now.)
 	current = dir
-	if err := os.Remove(sidecar); err != nil {
-		t.Fatal(err)
-	}
-	if r := tick(); r.Deleted != 30 {
-		t.Fatalf("the tick after both refusals ended: report %+v, want the 30 rows deleted", r)
+	putBack(t, dir, rows[:25])
+	if r := tick(); r.Adopted != 25 || r.Deleted != 5 {
+		t.Fatalf("the tick after both refusals ended: report %+v, want 25 adopted and 5 deleted", r)
 	}
 	if got := w.Status(); got != (VariantSweepStatus{}) {
 		t.Errorf("a tick that passed both guards: %+v, want not refusing", got)

@@ -473,14 +473,23 @@ func TestRunGCRefusesWhenOutputDirUnhealthyButRowsExist(t *testing.T) {
 // while a MISSING one still refuses however much was removed — the
 // forward sweep unlinks files and never directories, so it cannot be
 // what took the root.
+//
+// Since backlog B223 a directory that holds no RENDITION is "empty",
+// whatever else is in it: the case below that proceeded over a lone
+// "sidecar.flac" (not a rendition by name) asserted the defect, a
+// mountpoint holding a stray file read as the volume. removed counts the
+// renditions the forward sweep unlinked, and --allow-mass-delete (allow)
+// waives the Empty refusal and nothing else.
 func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 	cases := []struct {
 		name string
 		// setup returns the outputDir to probe.
 		setup func(t *testing.T) string
 		rows  int
-		// removed is what the forward sweep unlinked on this run.
+		// removed is the renditions the forward sweep unlinked on this run.
 		removed int
+		// allow is --allow-mass-delete.
+		allow   bool
 		wantRC  int
 		wantMsg string // stderr substring expected when refusing; "" otherwise
 	}{
@@ -503,7 +512,20 @@ func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 			wantMsg: "refusing to delete rows",
 		},
 		{
-			name: "non-empty dir with rows proceeds",
+			name: "a dir holding a rendition, with rows, proceeds",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "01.flac.upscaled-v2-176400-24.flac"), []byte("x"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return dir
+			},
+			rows:    2,
+			wantRC:  0,
+			wantMsg: "",
+		},
+		{
+			name: "a dir holding only a file that is not a rendition, with rows, refuses",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				if err := os.WriteFile(filepath.Join(dir, "sidecar.flac"), []byte("x"), 0o644); err != nil {
@@ -512,8 +534,32 @@ func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 				return dir
 			},
 			rows:    2,
+			wantRC:  1,
+			wantMsg: "holds no rendition",
+		},
+		{
+			name: "a dir holding no rendition proceeds with --allow-mass-delete",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, ".DS_Store"), []byte("x"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return dir
+			},
+			rows:    2,
+			allow:   true,
 			wantRC:  0,
 			wantMsg: "",
+		},
+		{
+			name: "a missing dir refuses even with --allow-mass-delete",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "unmounted-mountpoint")
+			},
+			rows:    2,
+			allow:   true,
+			wantRC:  1,
+			wantMsg: "variants directory is missing",
 		},
 		{
 			name: "zero rows proceeds regardless of missing dir",
@@ -553,7 +599,7 @@ func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows, tc.removed)
+			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows, tc.removed, tc.allow)
 			if rc != tc.wantRC {
 				t.Fatalf("gcCheckOutputDirBeforeReverseSweep rc = %d, want %d (stderr=%s)", rc, tc.wantRC, stderr.String())
 			}

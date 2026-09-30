@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -179,10 +177,6 @@ func looksLikeVariantSidecar(name string) bool {
 	return variantSidecarNameRe.MatchString(name)
 }
 
-// errFoundSidecar stops the walk in TreeHoldsVariantSidecars at the
-// first hit; it never escapes the function.
-var errFoundSidecar = errors.New("integrity: sidecar found")
-
 // resolveSidecarRoot is the one place a sidecar walk turns a configured
 // directory into the path filepath.WalkDir may be handed.
 //
@@ -226,11 +220,15 @@ func resolveSidecarRoot(dir string) (string, error) {
 // the way the orphan sweep does — a `.Trashes/` full of sidecars an
 // operator threw away is not a tree that still holds them. Stops at the
 // first hit, so on the tree it exists for (a relocated library, every
-// file a sidecar) it reads one directory entry; only a tree with NO
-// sidecars is walked whole, and that walk is what proves the negative.
+// file a sidecar) it reads one batch of one directory; only a tree with
+// NO sidecars is walked whole, and that walk is what proves the negative.
+// The walk is scanForRenditions, which the mount-loss probe
+// (VariantsDirSweepBlock) reads too, so the two cannot disagree about
+// what a tree holds (backlog B223).
 //
 // Symlinks count when they resolve to a regular file, and the ROOT is
-// resolved before the walk. filepath.WalkDir follows neither: a variants
+// resolved before the walk. filepath.WalkDir, which this walked until
+// 2026-09-29, follows neither: a variants
 // directory that is itself a symlink (`/srv/variants -> /mnt/vol/…`, the
 // ordinary mountpoint alias) would otherwise walk as one non-directory
 // entry and "hold nothing", and a tree of symlinked sidecars the same —
@@ -239,9 +237,12 @@ func resolveSidecarRoot(dir string) (string, error) {
 // because the serving path opens through it (the #207 broken-link rule);
 // a dangling one is not.
 //
-// Any walk error other than the sentinel counts as "unknown" and is
-// returned so the caller can fail closed: a directory it cannot read is
-// not evidence the sidecars are gone.
+// A directory the walk cannot open or list counts as "unknown" and its
+// error is returned so the caller can fail closed: a directory it cannot
+// read is not evidence the sidecars are gone. Unless a sidecar turned up
+// elsewhere, which answers true whatever else could not be read: the
+// WalkDir form stopped at its first error, so which of the two it
+// answered depended on how the names sorted.
 //
 // Except one directory, which is evidence of nothing either way: the
 // root-owned `lost+found` of an ext4 volume mounted AS the variants
@@ -255,48 +256,11 @@ func resolveSidecarRoot(dir string) (string, error) {
 // sidecars all sort after it was refused for that error rather than for
 // its sidecars.
 func TreeHoldsVariantSidecars(dir string) (bool, error) {
-	if dir == "" {
-		// Refused before resolveSidecarRoot: filepath.EvalSymlinks("") is
-		// ".", so an unguarded "" would walk the working directory.
-		return false, errors.New("integrity: no variants directory")
-	}
-	root, err := resolveSidecarRoot(dir)
-	if err != nil {
-		return false, err
-	}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if d != nil && d.IsDir() && IsFilesystemLostFound(root, path, d, walkErr) {
-				return nil
-			}
-			return walkErr
-		}
-		if d.IsDir() {
-			if path != root && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !looksLikeVariantSidecar(d.Name()) {
-			return nil
-		}
-		if d.Type().IsRegular() {
-			return errFoundSidecar
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
-				return errFoundSidecar
-			}
-		}
-		return nil
-	})
-	switch {
-	case errors.Is(err, errFoundSidecar):
+	scan, err := scanForRenditions(dir)
+	if scan.rendition {
 		return true, nil
-	case err != nil:
-		return false, err
 	}
-	return false, nil
+	return false, err
 }
 
 // massDeleteFloor is the smallest deletion the relocation guard will
@@ -316,8 +280,13 @@ const massDeleteFloor = 10
 // exceeds maxDeletePercent of the catalog (100 disables; 0 refuses any
 // mass deletion), and the variants directory still holds sidecar files —
 // the signature of a tree that is there but not where the rows say. A
-// tree that holds no sidecars is a library whose files really went, and
-// the sweep proceeds as it always has; a tree that cannot be read is
+// tree that holds no sidecars proceeds here, and since backlog B223 it
+// never gets this far: the mount-loss probe (VariantsDirSweepBlock),
+// which both reapers ask first, skips a directory holding no rendition,
+// since that is what an unmounted volume looks like as well as a library
+// whose files really went; `--allow-mass-delete` is the way past both. So
+// this answer is reached only by a tree the probe found a rendition in
+// and this walk found none in. A tree that cannot be read is
 // treated as holding them (fail closed, with the error in the reason),
 // except the filesystem's own lost+found at its top, which is no evidence
 // either way (TreeHoldsVariantSidecars).

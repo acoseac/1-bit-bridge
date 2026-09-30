@@ -221,7 +221,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
-	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files (the sidecars really are gone); refused by default, because that shape is a relocation in progress")
+	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files, or while it holds no rendition at all (the sidecars really are gone); refused by default, because the first shape is a relocation in progress and the second what an unmounted volume looks like")
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	allowPartialWalk := fs.Bool("allow-partial-walk", false, gcAllowPartialWalkUsage)
 	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
@@ -1146,7 +1146,22 @@ func gcRefuseEmptyCatalog(stderr io.Writer, sweep gcSweep, outputDir string, inv
 // `forwardRemoved == 0` keeps the guard whole for the case it was
 // written for: the directory read empty and this run did nothing to
 // make it so.
-func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount, forwardRemoved int) int {
+//
+// Since backlog B223 "empty" is "holds no rendition" (the probe counts
+// renditions, not entries), and forwardRemoved counts the RENDITIONS the
+// forward sweep unlinked (SidecarInventory.OrphanRenditions), never every
+// file: `--gc`'s nil Consider unlinks a .DS_Store as an orphan, and a run
+// that removed only that found the directory holding no rendition
+// already. Read as its own work, it deleted every row of an unmounted
+// volume whose mountpoint held a .DS_Store (measured, 40 of 40). The
+// pre-flight (gcRefuseUnavailableVariantsDir) refuses that directory
+// before anything is unlinked; this is the same question asked again
+// after the forward sweep, as the watcher asks again before it deletes.
+// allowMassDelete (`--allow-mass-delete`) waives the Empty refusal here
+// as there: the operator saying every rendition was deleted on purpose,
+// the one case the directory alone cannot tell from an unmount. Until
+// B223 no flag reached this refusal at all (#941).
+func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount, forwardRemoved int, allowMassDelete bool) int {
 	if rowCount == 0 {
 		// LEGITIMATELY-empty case (no upscales ever generated on
 		// this bridge); the forward sweep's walk treats a missing
@@ -1159,10 +1174,51 @@ func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowC
 	if block.Reason == "" {
 		return 0
 	}
-	if block.Empty && forwardRemoved > 0 {
+	if block.Empty && (forwardRemoved > 0 || allowMassDelete) {
 		return 0
 	}
 	fmt.Fprintf(stderr, "GC reverse sweep: %s (%q) but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", block.Reason, outputDir, rowCount)
+	if block.Empty {
+		fmt.Fprintln(stderr, gcNoRenditionHint)
+	}
+	return 1
+}
+
+// gcNoRenditionHint follows a refusal over a variants directory that holds
+// no rendition, whose one way past is the operator's word.
+const gcNoRenditionHint = "  An unmounted volume looks exactly like this: the directory under its mountpoint holds no rendition,\n" +
+	"  whatever else is in it. If every rendition was deleted on purpose, re-run with --allow-mass-delete."
+
+// gcRefuseUnavailableVariantsDir is the mount-loss guard as a pre-flight
+// over the whole gc (backlog B223): the probe the watcher asks before every
+// tick, asked before anything is classified or unlinked. Returns 0 to
+// proceed, 1 after printing the refusal.
+//
+// It asked this only after the forward sweep until B223, when the probe
+// called a directory holding any entry healthy: over an unmounted volume
+// whose mountpoint held a .DS_Store the forward sweep unlinked the
+// .DS_Store and the reverse guard read the emptiness as that run's work,
+// and over the folders a failed render leaves nothing needed explaining;
+// either way the run deleted every row (measured, 40 of 40). The probe
+// counts renditions now, and asking it first also keeps a refused run from
+// unlinking anything under a mountpoint.
+//
+// With no rows there is nothing to delete and nothing to refuse (the
+// forward sweep's own empty-catalog refusal takes over). allowMassDelete
+// waives the one reason the operator can vouch for, a directory that holds
+// no rendition; missing, unreadable and not-a-directory still refuse.
+func gcRefuseUnavailableVariantsDir(stderr io.Writer, outputDir string, rowCount int, allowMassDelete bool) int {
+	if rowCount == 0 {
+		return 0
+	}
+	block := integrity.VariantsDirSweepBlock(outputDir)
+	if block.Reason == "" || (block.Empty && allowMassDelete) {
+		return 0
+	}
+	fmt.Fprintf(stderr, "GC: refusing to run — %s (%q) but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run). Nothing was unlinked and no row was removed.\n", block.Reason, outputDir, rowCount)
+	if block.Empty {
+		fmt.Fprintln(stderr, gcNoRenditionHint)
+	}
 	return 1
 }
 
@@ -1432,6 +1488,13 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		fmt.Fprintf(stderr, "list variants: %v\n", err)
 		return 1
 	}
+	// The mount-loss guard first, before anything is classified or
+	// unlinked: a variants directory that is missing, unreadable or holds
+	// no rendition is what an unmounted volume looks like, and a run over
+	// it can only delete rows (backlog B223).
+	if code := gcRefuseUnavailableVariantsDir(stderr, outputDir, len(allRows), opts.allowMassDelete); code != 0 {
+		return code
+	}
 	// The known set carries BOTH spellings of every row — the recorded
 	// sidecar_path and its canonical path under outputDir — case-folded
 	// and cleaned (integrity.KnownSidecarSet, shared with the background
@@ -1483,15 +1546,16 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		}
 	}
 
-	forwardRemoved, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
+	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
 	if exitCode != 0 {
 		return exitCode
 	}
 
-	// The reverse guard is told what the forward sweep just unlinked: a
-	// variants directory this run emptied is explained, an unmounted one
-	// is not. See gcCheckOutputDirBeforeReverseSweep.
-	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), forwardRemoved); exitCode != 0 {
+	// The reverse guard is told which renditions the forward sweep just
+	// unlinked: a variants directory this run emptied of renditions is
+	// explained, an unmounted one is not. See
+	// gcCheckOutputDirBeforeReverseSweep.
+	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), inv.OrphanRenditions(), opts.allowMassDelete); exitCode != 0 {
 		return exitCode
 	}
 

@@ -173,15 +173,19 @@ func TestVariantWatcher_doesNotAdoptAPartialCopy(t *testing.T) {
 // old host, the files are in the tree but not where the layout says
 // (or the copy is not there yet), and one tick would reap most of the
 // catalog. It refuses, warns, and deletes nothing — and the same
-// catalog with the guard disabled, or over a tree that holds no
-// sidecars, is reaped as it always was.
+// catalog with the guard disabled is reaped as it always was.
 //
-// A fresh ext4 volume mounted as the variants directory is such a tree:
+// A tree that holds no sidecar at all was reaped too, until backlog B223:
+// the local directory an unmounted volume leaves holds none either, and
+// the mount-loss probe now skips such a tick before this guard is asked
+// (the variantsDir kind, one WARN), whatever else the directory holds. A
+// fresh ext4 volume mounted as the variants directory is such a tree too:
 // it holds nothing but its locked lost+found, which is the filesystem's
-// (IsFilesystemLostFound). Until 2026-09-28 the probe answered that
-// directory's permission error, and the guard refused the reap on every
-// tick; a volume whose sidecars sort after its lost+found was refused
-// for the same error rather than for its sidecars.
+// (IsFilesystemLostFound), evidence neither way. Until 2026-09-28 the
+// probe answered that directory's permission error, and the guard refused
+// the reap on every tick; a volume whose sidecars sort after its
+// lost+found was refused for the same error rather than for its sidecars,
+// and still is refused for its sidecars alone.
 func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T) {
 	oldDir := filepath.Join(t.TempDir(), "mnt", "bridge-variants")
 	const n = 30
@@ -211,13 +215,17 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 	}
 	treeWithJunk := func(t *testing.T) string {
 		dir := t.TempDir()
-		writeDecoySidecar(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "decoy.flac"), []byte("ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		return dir
 	}
 	// A variants directory that is an ext4 volume's mount root, replaced
 	// by a fresh volume: nothing on it but the volume's root-owned
 	// lost+found, which the bridge's user cannot list. Every sidecar
-	// really went, and the rows are the sweep's to reap.
+	// really went; since B223 the mount-loss probe skips it, as it skips
+	// the unmounted volume its contents cannot be told from, and
+	// `bridge upscale --gc --allow-mass-delete` is what reaps it.
 	freshVolume := func(t *testing.T) string {
 		dir := t.TempDir()
 		lockDir(t, mkdirAllUnder(t, dir, "lost+found"))
@@ -243,13 +251,16 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 		locks bool
 		// wantReason is what the refusal must say, when set.
 		wantReason string
+		// wantSkipped is a tick the mount-loss probe skipped before this
+		// guard was asked (backlog B223).
+		wantSkipped bool
 	}{
-		{"refused: every row missing, sidecars in the tree", treeWithSidecars, 20, 0, n, false, ""},
-		{"proceeds: the tree holds no sidecars", treeWithJunk, 20, n, 0, false, ""},
-		{"proceeds: guard disabled at 100", treeWithSidecars, 100, n, 0, false, ""},
-		{"proceeds: a fresh volume holds only its lost+found", freshVolume, 20, n, 0, true, ""},
+		{"refused: every row missing, sidecars in the tree", treeWithSidecars, 20, 0, n, false, "", false},
+		{"skipped: the tree holds no sidecar, only junk", treeWithJunk, 20, 0, 0, false, "", true},
+		{"proceeds: guard disabled at 100", treeWithSidecars, 100, n, 0, false, "", false},
+		{"skipped: a fresh volume holds only its lost+found", freshVolume, 20, 0, 0, true, "", true},
 		{"refused: the sidecars sort after the volume's lost+found", sidecarsAfterLostFound, 20, 0, n, true,
-			"while the variants directory still holds sidecar files"},
+			"while the variants directory still holds sidecar files", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,8 +275,11 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 			w := NewVariantWatcher(lister, store, publisher.publish, staticDir(dir), time.Hour, tc.percent)
 
 			report := awaitBootSweep(t, w, tc.wantDeleted)
-			if report.Refused != tc.wantRefused {
-				t.Fatalf("report = %+v, want refused=%d", report, tc.wantRefused)
+			if report.Refused != tc.wantRefused || report.Skipped != tc.wantSkipped {
+				t.Fatalf("report = %+v, want refused=%d skipped=%v", report, tc.wantRefused, tc.wantSkipped)
+			}
+			if skips := logLines(buf, msgVariantsDirUnavailable); tc.wantSkipped != (len(skips) == 1) {
+				t.Errorf("mount-loss WARN lines %v, want one exactly when the tick is skipped", skips)
 			}
 			if got := len(store.deleted()); got != tc.wantDeleted {
 				t.Errorf("DeleteVariant called %d times, want %d", got, tc.wantDeleted)
@@ -291,7 +305,7 @@ func TestVariantWatcher_refusesAMassDeleteWhileTheTreeHoldsSidecars(t *testing.T
 			// summarises at Info: its WARN is the refusal's, through the
 			// latch (TestVariantWatcherLatchesItsMassDeleteRefusal).
 			wantLevel := "level=WARN"
-			if tc.wantRefused > 0 {
+			if tc.wantRefused > 0 || tc.wantSkipped {
 				wantLevel = "level=INFO"
 			}
 			summaries := logLines(buf, msgVariantSweepSummary)
@@ -336,7 +350,7 @@ func TestVariantWatcher_belowTheFloorTheGuardStaysOut(t *testing.T) {
 func TestVariantWatcher_healthyTickLogsOneInfoLine(t *testing.T) {
 	buf := captureLogs(t)
 	dir := t.TempDir()
-	p := filepath.Join(dir, "ok.flac")
+	p := filepath.Join(dir, "01.flac.upscaled-v2-176400-24.flac")
 	if err := os.WriteFile(p, []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
