@@ -33134,7 +33134,10 @@ test launches serve itself.
 
 Each mutation applied once to the committed tree by a script that requires its
 target text exactly once, the named tests run with `-count=1`, the file
-restored from HEAD and the tree checked clean after each (22 of 22 clean).
+restored from HEAD and the tree checked clean after each. 24 controls: NC1 to
+NC22 on the fix commit (efb8becc), then NC16 to NC18 again and NC23 and NC24
+on review round 1's code (6528653c), where `fetchErrorForLog` had changed.
+The tree was clean after every one.
 
 | | mutation | red |
 |---|---|---|
@@ -33193,6 +33196,9 @@ restored from HEAD and the tree checked clean after each (22 of 22 clean).
   share one helper per surface now (`healthOfNormalized`,
   `publicPairingQR`), and the predicate lists the URLs that carry a part and
   those that do not.
+- **Round 2**: CodeRabbit asked the control count to match the table (it
+  said 22 beside 24 rows); it says which ran where now. Gemini had no
+  comments.
 
 ### With the fix, the same binary runs
 
