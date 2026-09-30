@@ -261,7 +261,10 @@ func ComputeFromPrefix(ctx context.Context, absPath string, length time.Duration
 	if err != nil {
 		return Fingerprint{}, fmt.Errorf("%w: %v", ErrFpcalcMissing, err)
 	}
-	f, err := os.Open(absPath)
+	// As a file, never a plain open: a named pipe here (a file replaced by
+	// one since its scan) would hold the run until something wrote to it,
+	// and ctx could not stop the wait (fsutil.OpenAsFile).
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		// Redact the path but KEEP the cause: without it a permission failure
 		// and a missing file render identically, which is the difference an

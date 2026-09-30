@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	tag "github.com/dhowden/tag"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // readIFFChunkBody reads exactly `size` bytes of an IFF/RIFF chunk body from r.
@@ -60,7 +62,7 @@ func readIFFChunkBody(r io.Reader, size uint32, format, chunk, absPath string) (
 func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "AIFF"
 
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}
@@ -327,7 +329,7 @@ func parseAIFFExtended(b []byte) float64 {
 func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "WAV"
 
-	f, err := os.Open(absPath)
+	f, _, err := fsutil.OpenAsFile(absPath)
 	if err != nil {
 		return err
 	}

@@ -13,22 +13,24 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil/fsutiltest"
 )
 
-// openBounded runs fsutil.OpenAsFile(p) within fsutiltest.ServeBound,
-// playing the writer on fifos if it is still waiting then, so a test of the
-// defect neither hangs nor leaves the open behind.
-func openBounded(t *testing.T, p string, fifos ...string) (*os.File, os.FileInfo, error) {
+// within runs fn within fsutiltest.ServeBound, playing the writer on fifos
+// if it is still running then, so a test of the defect neither hangs nor
+// leaves the call behind.
+func within(t *testing.T, label string, fn func(), fifos ...string) {
 	t.Helper()
-	var (
-		f    *os.File
-		info os.FileInfo
-		err  error
-	)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f, info, err = fsutil.OpenAsFile(p)
+		fn()
 	}()
-	fsutiltest.AwaitPastFIFOs(t, "OpenAsFile("+filepath.Base(p)+")", fsutiltest.ServeBound, done, fifos...)
+	fsutiltest.AwaitPastFIFOs(t, label, fsutiltest.ServeBound, done, fifos...)
+}
+
+// openBounded runs fsutil.OpenAsFile(p) within fsutiltest.ServeBound
+// (within).
+func openBounded(t *testing.T, p string, fifos ...string) (f *os.File, info os.FileInfo, err error) {
+	t.Helper()
+	within(t, "OpenAsFile("+filepath.Base(p)+")", func() { f, info, err = fsutil.OpenAsFile(p) }, fifos...)
 	return f, info, err
 }
 
@@ -90,5 +92,33 @@ func TestOpenAsFileLeavesTheFileItOpensBlocking(t *testing.T) {
 	}
 	if flags&unix.O_NONBLOCK != 0 {
 		t.Errorf("the opened file is still O_NONBLOCK (flags %#x)", flags)
+	}
+}
+
+// TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting: ReadAsFile refuses a
+// named pipe, a link to one and a link to a character device at once, each
+// named by its kind, as OpenAsFile refuses them. os.ReadFile of the pipe
+// waited for a writer, and of a link to /dev/zero read until the process ran
+// out of memory: what the scanner's folder-art and lyrics-sidecar reads did
+// until 2026-09-29.
+func TestReadAsFileRefusesWhatIsNotAFileWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	kinds, pipe := fsutiltest.PlantNotAFiles(t, dir)
+	for name, kind := range kinds {
+		if kind == "socket" {
+			// Refused by the kernel before there is a file to stat
+			// (TestOpenAsFileRefusesWhatIsNotAFileWithoutWaiting).
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			var (
+				body []byte
+				err  error
+			)
+			within(t, "ReadAsFile("+name+")", func() { body, err = fsutil.ReadAsFile(filepath.Join(dir, name)) }, pipe)
+			if body != nil || fsutil.NotAFileKind(err) != kind {
+				t.Errorf("read %d bytes, %v; want the %s refused", len(body), err, kind)
+			}
+		})
 	}
 }

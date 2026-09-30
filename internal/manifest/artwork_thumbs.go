@@ -153,7 +153,7 @@ func EnsureThumb(src, dst string, targetPx int) error {
 		// same posture rescaleOneArtworkFile takes.
 		return errThumbNotNeeded
 	}
-	data, err := os.ReadFile(src)
+	data, err := fsutil.ReadAsFile(src)
 	if err != nil {
 		return err
 	}

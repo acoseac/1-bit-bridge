@@ -44,6 +44,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
@@ -159,6 +160,13 @@ type Server struct {
 	endpointsCache         *endpointsCache              // TTL cache for /v1/health advertised-endpoint interface walk
 	fingerprint            string
 	startedAt              time.Time
+
+	// openDir opens the directory /v1/list lists (openListDir). New sets
+	// it to fsutil.OpenDir; a test wraps it to change the directory inside
+	// the window between the resolver's stat and the open, which no fixture
+	// on disk can reach. Per server, never a package var, so no other
+	// test's server sees it.
+	openDir func(string) (*os.File, error)
 
 	// deviceRegistrar binds the client's durable X-Device-Token recovery
 	// token to the auth token currently presenting it. Nil unless
@@ -466,6 +474,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		writeRateLimiter:    newTokenRateLimiter(cfg.Limits.Write.EffectiveRPM(), cfg.Limits.Write.EffectiveBurst()),
 		searchRateLimiter:   newTokenRateLimiter(cfg.Limits.Search.EffectiveRPM(), cfg.Limits.Search.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
+		openDir:             fsutil.OpenDir,
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
 		endpointsCache:      newEndpointsCache(),
