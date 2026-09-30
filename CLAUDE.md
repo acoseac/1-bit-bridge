@@ -596,8 +596,12 @@ lost my library."
   `openAudioFile`**, which under `ExtractWithContext` hands back a
   `faultNotingSource` that notes the first open, read, seek or stat of the
   file that did not complete, and `ExtractWithContext` then answers
-  `readIncompleteError` (`readFault`) whatever the parser made of it; a
-  new extractor opens there too. **Two error answers complete a read**,
+  `readIncompleteError` (`readFault`) whatever the parser made of it.
+  `TestEveryAudioFileReadGoesThroughOpenAudioFile` fails on a function of
+  the package that opens or reads a file through fsutil and is not one of
+  the readers of OTHER files it names (the `.iso` containers, a folder's
+  cover, a lyrics sidecar, the artwork cache): a new extractor opens
+  through `openAudioFile`. **Two error answers complete a read**,
   being about what the file holds: the end of the file (a truncated file)
   and an offset the OS refuses before reading (`seekOffsetRefused`: EINVAL,
   on Windows ERROR_NEGATIVE_SEEK; a ReadAt at a negative offset), which a
@@ -622,8 +626,13 @@ lost my library."
   (`TestScanner_AChangedFileWhoseReadDidNotCompleteKeepsItsRow`, its
   new-file and version-stale twins), and with chmod 0 on unix. **No
   `ExtractorVersion` bump**: a file read whole extracts byte-identically,
-  and the first scan after the change rewrites nothing the gate skips
-  (`TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead`). The guesses
+  and the first scan after the change rewrites only the files it reads, as
+  it always did (`TestScanner_AScanOverUnreadFilesRewritesOnlyWhatItRead`).
+  The cost, accepted: a file that never reads whole (a permission, a bad
+  sector under its tags) never gets a row, or keeps the one it had, with
+  a line every scan; and a kept row of a changed file keeps its old size,
+  so the app's size check fails a download of it until a scan reads it,
+  the state the library was in before that scan. The guesses
   the defect already wrote keep a stat that matches, so they stay until
   their file changes or a later bump re-reads every row (its diff then sees
   the file's tags); a bump now re-reads the library and re-upserts every

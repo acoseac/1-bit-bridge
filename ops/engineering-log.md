@@ -32060,9 +32060,13 @@ nothing on a read that did not complete (2026-09-28). `reExtractUnchanged`'s
 docblock already said it: "clobbering a good row with a partial extract would
 be strictly worse". It kept that promise only for errors that reached it.
 
-The cost: a file the service user can never read (a permission) is in no
-manifest, with one Warn per scan naming it, where it used to appear by name
-with a download that failed.
+The cost, accepted: a file that never reads whole (a permission the service
+user lacks, a bad sector under its tags) never gets a row, or keeps the one it
+had, with one Warn per scan naming it, where it used to appear by name with a
+download that failed. And a kept row of a changed file keeps its old size, so
+the app's exact size check fails a download of it until a scan reads it: the
+state the library was in before that scan, which a scan that could not read
+the file does not improve.
 
 ### The change
 
@@ -32095,6 +32099,15 @@ with a download that failed.
   library-relative `example` and the failure as `err` (`walkErrReason`: the
   operation and cause, no absolute path), e.g. `err=open: permission denied`.
 - `Scanner.openAudio` is a per-scanner test seam, the twin of `openSACD`.
+- `TestEveryAudioFileReadGoesThroughOpenAudioFile` fails on a function of
+  `internal/manifest` that opens or reads a file through fsutil and is not
+  one of the readers of other files it names (`openSACDContainer` and
+  `ExpandSACDISO` for an `.iso`, `readFolderArt`, `readSidecarCandidate` and
+  the artwork cache's three), so a new extractor cannot open around
+  `faultNotingSource`; `extractFLACFormat`, the path-based STREAMINFO shim,
+  opens through `openAudioFile` for that reason. With the DSF extractor put
+  back on `fsutil.OpenAsFile`, the sweep names `extractDSFWithContext` and
+  the DSF cases of the matrix tests go red.
 - `TestEveryLibraryReadOpensAsAFile`'s floor on reads through fsutil went
   from 20 to 15: the eight opens became one, so the tree now holds 21.
 
