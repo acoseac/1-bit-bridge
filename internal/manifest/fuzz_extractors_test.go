@@ -91,6 +91,9 @@ func FuzzExtractAIFF(f *testing.F) {
 		[]byte("FORM\x00\x00\x00\x04AIFC"),
 		// An ID3 chunk repeating one frame past the renaming bound (B101).
 		buildAIFFWithID3(f, repeatedFramesTag()),
+		// Picard's tag in its ID3 chunk: TXXX and UFID frames, whose values
+		// the extraction reads by name (backlog B116).
+		id3Fixture(f, "picard_v24_utf16.aiff"),
 	})
 }
 
@@ -101,6 +104,7 @@ func FuzzExtractWAV(f *testing.F) {
 		[]byte("RIFF\x28\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00\x44\xAC\x00\x00\x10\xB1\x02\x00\x04\x00\x10\x00data\x04\x00\x00\x00\x00\x00\x00\x00"),
 		[]byte("RIFF\x04\x00\x00\x00WAVE"),
 		buildWAVWithID3(f, repeatedFramesTag()),
+		id3Fixture(f, "picard_v24_utf16.wav"),
 	})
 }
 
@@ -117,6 +121,7 @@ func FuzzExtractDSF(f *testing.F) {
 		// Its ID3v2 tag repeating one frame past the renaming bound (backlog
 		// B101): the ordinary suite runs it through the allocation property.
 		dsfWithID3(repeatedFramesTag()),
+		id3Fixture(f, "picard_v24_utf16.dsf"),
 	})
 }
 
@@ -190,5 +195,11 @@ func FuzzExtractMP3(f *testing.F) {
 		// which dhowden renamed in quadratic time and space: on the old code
 		// this seed failed the allocation property (about 190 MB).
 		append(repeatedFramesTag(), mp3Audio()...),
+		// Picard's tag in version 2.4 and 2.3 (UTF-16) and ffmpeg's: TXXX
+		// and UFID frames, whose values the extraction reads by name (backlog
+		// B116).
+		id3Fixture(f, "picard_v24_utf16.mp3"),
+		id3Fixture(f, "picard_v23_utf16.mp3"),
+		id3Fixture(f, "ffmpeg_v23.mp3"),
 	})
 }
