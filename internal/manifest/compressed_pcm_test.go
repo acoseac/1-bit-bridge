@@ -57,6 +57,17 @@ var compressedFixtures = []compressedFixture{
 	{path: "wav/s24.wav", codec: "WAV", rate: 44100, bits: 24},
 }
 
+// compressedPCMFixture is the bytes of one of those files (rel is below
+// testdata), for the fuzz targets' seeds.
+func compressedPCMFixture(t testing.TB, rel string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // requireCompressedFixture fails unless tr carries what fx says.
 func requireCompressedFixture(t *testing.T, fx compressedFixture, tr *Track) {
 	t.Helper()

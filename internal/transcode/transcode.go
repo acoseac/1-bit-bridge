@@ -828,6 +828,10 @@ func OptimizeEligible(sourcePath, codec string, sourceRate, sourceBits int) bool
 	isPCM := c == "FLAC" || c == "ALAC" || c == "WAV" || c == "AIFF" || c == "PCM"
 
 	if c == "" {
+		// .aifc is deliberately absent, as in the SQL mirror
+		// (optimizeEligibleSQL): the extension cannot say whether an
+		// AIFF-C is compressed, and the extractor names a read one by its
+		// encoding (backlog B124).
 		ext := strings.ToLower(filepath.Ext(sourcePath))
 		isPCM = ext == ".flac" || ext == ".wav" ||
 			ext == ".aif" || ext == ".aiff" || ext == ".m4a"

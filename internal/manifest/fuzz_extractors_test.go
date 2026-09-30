@@ -94,6 +94,12 @@ func FuzzExtractAIFF(f *testing.F) {
 		// Picard's tag in its ID3 chunk: TXXX and UFID frames, whose values
 		// the extraction reads by name (backlog B116).
 		id3Fixture(f, "picard_v24_utf16.aiff"),
+		// AIFF-C as afconvert writes it (ExtractorVersion 21, backlog B124):
+		// IMA4, whose COMM counts 64-frame packets, a companded type, and a
+		// linear one.
+		compressedPCMFixture(f, "aifc/af_ima4.aifc"),
+		compressedPCMFixture(f, "aifc/af_ulaw.aifc"),
+		compressedPCMFixture(f, "aifc/af_fl32.aifc"),
 	})
 }
 
@@ -105,6 +111,13 @@ func FuzzExtractWAV(f *testing.F) {
 		[]byte("RIFF\x04\x00\x00\x00WAVE"),
 		buildWAVWithID3(f, repeatedFramesTag()),
 		id3Fixture(f, "picard_v24_utf16.wav"),
+		// Compressed WAVs as ffmpeg writes them (ExtractorVersion 21, backlog
+		// B154): IMA ADPCM behind an extensible header, MS ADPCM, MPEG layer
+		// II, and a format code the bridge does not name (G.726).
+		compressedPCMFixture(f, "wav/ima_adpcm_96k.wav"),
+		compressedPCMFixture(f, "wav/ms_adpcm.wav"),
+		compressedPCMFixture(f, "wav/mp2.wav"),
+		compressedPCMFixture(f, "wav/g726.wav"),
 	})
 }
 

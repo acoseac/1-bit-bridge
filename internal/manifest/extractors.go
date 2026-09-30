@@ -52,11 +52,12 @@ const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 // Playing chip" regression's root cause was exactly the
 // container-width misclassification a fail-open gate would re-admit.
 //
-// Defense-in-depth contract: every site in this file that writes
+// Defense-in-depth contract: every extractor site that writes
 // `t.BitsPerSample` MUST first check `canSetBitsPerSample(t.Codec)`.
-// Today only FLAC + DSF + DFF actually assign bitsPerSample (ALAC
-// flows through the MP4 dhowden path which doesn't surface
-// BitsPerSample today); the allowlist is structural insurance
+// FLAC, ALAC (extractALACBitDepth), DSF and DFF assign it, and the WAV
+// and AIFF walkers do for linear PCM alone: since ExtractorVersion 21
+// they name a compressed AIFF-C or WAV by its encoding, which is not on
+// this list (backlog B124, B154). The allowlist is structural insurance
 // against a future addition with an unknown codec slipping through.
 //
 // Case-folded via strings.EqualFold so the gate works regardless
@@ -468,7 +469,35 @@ var Ext = map[string]bool{
 // to the enricher, which had searched MusicBrainz with their folder names. Every
 // other row re-extracts byte-identical and rides the version-stamp leg; SACD
 // ISO virtual rows re-expand as on every bump.
-const ExtractorVersion = 20
+//
+// v21 — a compressed AIFF-C or WAV is named by its encoding, and counted lossy
+// (backlog B124, B154). The AIFF walker named every AIFF-C "AIFF" and the RIFF
+// walker every WAV "WAV", both on the lossless lists (librarycat's quality
+// sets, the CarPlay optimize gate, the app's), so a µ-law AIFF-C at 44.1 kHz
+// with no depth was filed CD Quality and an ADPCM WAV at 96 kHz Hi-Res, and
+// either at 96 kHz was a CarPlay render candidate. An AIFF-C is named by its
+// COMM compression type (aifcEncodingOf: the linear types keep "AIFF", µ-law,
+// A-law and IMA4 are "ULAW", "ALAW" and "IMA4", anything else "AIFC", the
+// app's name for an AIFF-C nothing has read), a WAV by its fmt format code
+// (wavEncodingOf: PCM and float keep "WAV", the compressed ones are "ADPCM",
+// "GSM", "ALAW", "ULAW", "MP3" and "MP2", as the app names them since its
+// #2014 and #2028 but for MP2), and the six compressed names join
+// IsLossyCodec. An IMA4 AIFF-C's COMM counts 64-frame packets, so its duration
+// was 64 times too short (0.4688 s for a 30 s file) and now counts its frames;
+// an "AIFC" of a compression the bridge does not know gets no duration, its
+// count being in units it cannot read. A WAV whose format code the bridge does
+// not know keeps "WAV", the app's name for it, and loses its rate, as a DFF of
+// an unknown compression does, so the lossless name claims no quality tier.
+// The linear AIFF-C types the old depth list lacked (42ni, FL32, FL64) gain
+// their depth.
+//
+// Only those files change: they take the full-upsert leg (their enrichment is
+// re-queued once) and are the iOS delta, where the app already files ULAW,
+// ALAW, IMA4, ADPCM, GSM and MP3 as lossy and AIFC in no tier, and MP2 in none
+// yet (backlog B158). Every linear AIFF, AIFF-C and WAV
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
+// rows re-expand as on every bump.
+const ExtractorVersion = 21
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by

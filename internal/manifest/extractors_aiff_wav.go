@@ -54,8 +54,13 @@ func readIFFChunkBody(r io.Reader, size uint32, format, chunk, absPath string) (
 // path-derived defaults.
 //
 // AIFF and AIFC share the same chunk-walker shape; the FORM type
-// FOURCC differs ("AIFF" vs "AIFC") but only affects audio-payload
-// codec interpretation — irrelevant here. We accept both.
+// FOURCC differs ("AIFF" vs "AIFC"). An AIFC names its encoding in the
+// COMM chunk's compression type, and the row is named by it
+// (aifcEncodingOf, backlog B124): a linear one keeps "AIFF", a compressed
+// one gets its codec ("ULAW", "ALAW", "IMA4"), and one whose compression
+// the bridge does not know, or that carries no COMM, is "AIFC", the iOS
+// app's name for an AIFF-C nothing has read. Until ExtractorVersion 21
+// every AIFC was "AIFF", on the lossless list.
 func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "AIFF"
 
@@ -80,6 +85,10 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 	if formType != "AIFF" && formType != "AIFC" {
 		return fmt.Errorf("aiff: not an AIFF/AIFC form (got %q)", formType)
 	}
+	if formType == "AIFC" {
+		// Unknown until its COMM names the compression.
+		t.Codec = "AIFC"
+	}
 
 	// Duration inputs, resolved once the walk is over (the spec fixes no
 	// chunk order, so COMM may follow SSND): the COMM frame count, and
@@ -87,7 +96,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 	// past the physical end — reports no duration for bytes it does not
 	// hold (the DFF `payloadFits` rule; see iffPayloadFits).
 	var (
-		numSampleFrames uint32
+		numSampleFrames uint64
 		ssnd            iffPayloadSpan
 	)
 	physicalSize := physicalFileSize(f)
@@ -197,10 +206,11 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 	return nil
 }
 
-// aiffDurationSeconds is COMM numSampleFrames / sampleRate: frames are
-// per-channel sample frames, so channel count does not enter. 0 when
-// either input is absent; the plausibility gate is the caller's.
-func aiffDurationSeconds(numSampleFrames uint32, sampleRate *float64) float64 {
+// aiffDurationSeconds is the COMM's frame count (in frames:
+// parseAIFFCOMMChunk scales an IMA4 AIFF-C's packets) over sampleRate:
+// frames are per-channel sample frames, so channel count does not enter.
+// 0 when either input is absent; the plausibility gate is the caller's.
+func aiffDurationSeconds(numSampleFrames uint64, sampleRate *float64) float64 {
 	if numSampleFrames == 0 || sampleRate == nil || *sampleRate <= 0 {
 		return 0
 	}
@@ -208,63 +218,85 @@ func aiffDurationSeconds(numSampleFrames uint32, sampleRate *float64) float64 {
 }
 
 // parseAIFFCOMMChunk reads the PCM geometry from an AIFF/AIFC COMM
-// chunk body and stamps t.SampleRate + t.BitsPerSample. Layout (all
-// big-endian):
+// chunk body, names the row by its encoding, and stamps t.SampleRate +
+// t.BitsPerSample. Layout (all big-endian):
 //
-//	[0:2]  numChannels   int16
-//	[2:6]  numSampleFrames uint32
-//	[6:8]  sampleSize    int16   — bits per sample of the (decompressed) signal
-//	[8:18] sampleRate    80-bit IEEE-754 extended
+//	[0:2]   numChannels     int16
+//	[2:6]   numSampleFrames uint32
+//	[6:8]   sampleSize      int16   — bits per sample of the (decompressed) signal
+//	[8:18]  sampleRate      80-bit IEEE-754 extended
+//	[18:22] compressionType FOURCC  — AIFC only, then its name as a pstring
 //
-// Returns numSampleFrames — the per-channel sample-frame count the
-// duration is derived from (0 for a body too short to carry one). It is
-// RETURNED rather than stamped because the duration also needs the
-// SSND payload to fit the file, which only the walk knows.
+// Returns the frame count the duration is derived from, in frames: an IMA4
+// AIFF-C counts PACKETS of 64 frames in numSampleFrames (measured on
+// afconvert's and ffmpeg's: a 30 s file declares 20,672 packets, and the
+// count alone gave 0.4688 s, backlog B124), and a compression the bridge
+// does not know gives 0, no duration, since its count cannot be read as
+// frames. It is RETURNED rather than stamped because the duration also
+// needs the SSND payload to fit the file, which only the walk knows.
 //
-// SampleRate is always stamped. BitsPerSample is gated TWICE: by
-// canSetBitsPerSample (allowlists "AIFF") AND by aiffCOMMHasPCMDepth —
-// because `.aifc` is stamped Codec="AIFF" before the COMM is parsed, a
-// COMPRESSED AIFC variant (e.g. ima4 / ulaw) would otherwise surface its
-// COMM.sampleSize as a real PCM bit depth, the AIFF analog of the iOS
-// PR #371 "lossy source reports a container bit depth" regression. For
-// AIFC we therefore only set bits when the compressionType is a known
-// PCM-like FOURCC. Plain AIFF is uncompressed by definition, so it's
-// always eligible.
-func parseAIFFCOMMChunk(body []byte, t *Track, formType string) (numSampleFrames uint32) {
+// SampleRate is always stamped. BitsPerSample only for linear PCM: the
+// codec aifcEncodingOf names gates it (canSetBitsPerSample allows "AIFF"
+// and none of the compressed names), and so does the encoding's own
+// linear flag, since a COMPRESSED variant's COMM.sampleSize describes the
+// pre-compression source, not the stored signal (the AIFF analog of the
+// iOS PR #371 "lossy source reports a container bit depth" regression).
+func parseAIFFCOMMChunk(body []byte, t *Track, formType string) (frames uint64) {
 	if len(body) < 18 {
 		return 0
 	}
-	numSampleFrames = binary.BigEndian.Uint32(body[2:6])
+	enc := aifcEncodingOf(body, formType)
+	t.Codec = enc.codec
+	numSampleFrames := binary.BigEndian.Uint32(body[2:6])
 	sampleSize := int16(binary.BigEndian.Uint16(body[6:8]))
 	sampleRate := parseAIFFExtended(body[8:18])
 	if sampleRate > 0 {
 		t.SampleRate = &sampleRate
 	}
-	if sampleSize > 0 && canSetBitsPerSample(t.Codec) && aiffCOMMHasPCMDepth(body, formType) {
+	if enc.linear && sampleSize > 0 && canSetBitsPerSample(t.Codec) {
 		bps := int(sampleSize)
 		t.BitsPerSample = &bps
 	}
-	return numSampleFrames
+	return uint64(numSampleFrames) * uint64(enc.framesPerCount)
 }
 
-// aiffCOMMHasPCMDepth reports whether the COMM chunk's sampleSize is a
-// meaningful PCM bit depth. Plain AIFF is always uncompressed PCM. AIFC
-// appends a 4-byte compressionType FOURCC at COMM body offset 18; only
-// the byte-ordered / float / sized-PCM "compressions" carry a real bit
-// depth — every other code is a lossy/compressed scheme whose sampleSize
-// describes the pre-compression source, not the stored signal.
-func aiffCOMMHasPCMDepth(body []byte, formType string) bool {
+// aifcEncoding is what an AIFF or AIFF-C COMM chunk says about the samples:
+// the codec the row is named by, whether they are linear PCM (so the COMM's
+// sampleSize is their depth), and how many frames numSampleFrames counts
+// each unit as (0: no duration can be derived).
+type aifcEncoding struct {
+	codec          string
+	linear         bool
+	framesPerCount uint32
+}
+
+// aifcEncodingOf names an AIFF-C's encoding by its COMM compression type, as
+// the iOS app names it (ProgressivePCMLayout's linear set, and
+// Track.canonicalCodec's "ULAW", "ALAW", "IMA4": #2014, backlog B112 there,
+// B124 here). A plain AIFF is linear PCM by definition. The linear types, by
+// their samples' width and byte order, keep "AIFF". A compression the bridge
+// does not know (MACE, GSM, QDesign, …), or a COMM too short to hold one, is
+// "AIFC": neither lossless nor lossy anywhere, with no depth and no duration.
+// Upper- and lower-case spellings of the compressed three are both written
+// (Apple's are lower case, SGI's audiofile writes upper).
+func aifcEncodingOf(body []byte, formType string) aifcEncoding {
 	if formType == "AIFF" {
-		return true
+		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1}
 	}
-	if formType != "AIFC" || len(body) < 22 {
-		return false
+	if len(body) < 22 {
+		return aifcEncoding{codec: "AIFC"}
 	}
 	switch string(body[18:22]) {
-	case "NONE", "twos", "sowt", "raw ", "fl32", "fl64", "in24", "in32", "23ni":
-		return true
+	case "NONE", "twos", "sowt", "raw ", "in24", "42ni", "in32", "23ni", "fl32", "FL32", "fl64", "FL64":
+		return aifcEncoding{codec: "AIFF", linear: true, framesPerCount: 1}
+	case "ulaw", "ULAW":
+		return aifcEncoding{codec: "ULAW", framesPerCount: 1}
+	case "alaw", "ALAW":
+		return aifcEncoding{codec: "ALAW", framesPerCount: 1}
+	case "ima4", "IMA4":
+		return aifcEncoding{codec: "IMA4", framesPerCount: 64}
 	default:
-		return false
+		return aifcEncoding{codec: "AIFC"}
 	}
 }
 
@@ -750,21 +782,69 @@ func parseWAVINFOBlock(body []byte) containerText {
 // bitsPerSample is a container artefact, not a signal depth.
 const (
 	wavFormatPCM        = 0x0001
+	wavFormatMSADPCM    = 0x0002
 	wavFormatIEEEFloat  = 0x0003
+	wavFormatALaw       = 0x0006
+	wavFormatMuLaw      = 0x0007
+	wavFormatIMAADPCM   = 0x0011
+	wavFormatGSM610     = 0x0031
+	wavFormatMPEG       = 0x0050
+	wavFormatMPEGLayer3 = 0x0055
 	wavFormatExtensible = 0xFFFE
 )
 
+// wavEncodingOf names a WAV by its format code (the fmt chunk's tag, or an
+// extensible header's subformat), as the iOS app names the same file
+// (Track.canonicalCodec, #2028: backlog B139 there, B154 here), and says
+// whether its samples are linear PCM (so the fmt chunk's bits are their depth)
+// and whether the code is one the bridge knows.
+//
+// Linear PCM and IEEE float keep "WAV". The compressed codes are named: IMA
+// and MS ADPCM both "ADPCM" (4-bit ADPCM either way, the app's reasoning),
+// GSM 6.10 "GSM", G.711 A-law and µ-law "ALAW" and "ULAW" (the AIFF-C names
+// for the same encodings), MPEG layer III "MP3", and MPEG layers I and II
+// "MP2" (the one name here the app's lossy set lacks: backlog B158). A code
+// the bridge does not know is default-denied, as a DFF with an unknown
+// compression is: its container's name, no rate and no depth, which is also
+// how the app presents a WAV it cannot decode. Until ExtractorVersion 21
+// every WAV was "WAV", on the lossless list, with its fmt chunk's rate: an
+// ADPCM WAV at 96 kHz was counted Hi-Res and a µ-law one at 44.1 kHz, with
+// no depth, CD Quality.
+func wavEncodingOf(code uint16) (codec string, linear, known bool) {
+	switch code {
+	case wavFormatPCM, wavFormatIEEEFloat:
+		return "WAV", true, true
+	case wavFormatMSADPCM, wavFormatIMAADPCM:
+		return "ADPCM", false, true
+	case wavFormatGSM610:
+		return "GSM", false, true
+	case wavFormatALaw:
+		return "ALAW", false, true
+	case wavFormatMuLaw:
+		return "ULAW", false, true
+	case wavFormatMPEGLayer3:
+		return "MP3", false, true
+	case wavFormatMPEG:
+		return "MP2", false, true
+	default:
+		return "WAV", false, false
+	}
+}
+
 // parseWAVFmtChunk reads the PCM geometry from a RIFF/WAVE fmt chunk
-// body and stamps t.SampleRate + t.BitsPerSample. Layout (all
-// little-endian): [0:2] wFormatTag, [2:4] nChannels, [4:8] nSamplesPerSec,
-// [8:12] nAvgBytesPerSec, [12:14] nBlockAlign, [14:16] wBitsPerSample.
+// body, names the row by its encoding (wavEncodingOf), and stamps
+// t.SampleRate + t.BitsPerSample. Layout (all little-endian): [0:2]
+// wFormatTag, [2:4] nChannels, [4:8] nSamplesPerSec, [8:12]
+// nAvgBytesPerSec, [12:14] nBlockAlign, [14:16] wBitsPerSample.
 //
 // WAVE_FORMAT_EXTENSIBLE (0xFFFE) wraps the real format code in the
-// first 2 bytes of the SubFormat GUID (offset 24); wBitsPerSample at
-// [14:16] is then the container width (the value iOS / the composition
-// bar want), with the valid-bits count at [18:20]. BitsPerSample is set
-// only for PCM / IEEE-float and gated by canSetBitsPerSample (allowlists
-// "WAV") as defense-in-depth, matching every other bits-write site.
+// first 2 bytes of the SubFormat GUID (offset 24; ffmpeg writes one for
+// every ADPCM WAV above 48 kHz); wBitsPerSample at [14:16] is then the
+// container width (the value iOS / the composition bar want), with the
+// valid-bits count at [18:20]. SampleRate is set for a code the bridge
+// knows, BitsPerSample only for PCM / IEEE-float and gated by
+// canSetBitsPerSample (allowlists "WAV", and none of the compressed
+// names) as defense-in-depth, matching every other bits-write site.
 //
 // Returns the stream's bytes-per-second for the duration derivation —
 // `nAvgBytesPerSec` as written, which is defined for compressed WAV
@@ -788,11 +868,12 @@ func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 		effectiveFormat = binary.LittleEndian.Uint16(body[24:26])
 	}
 
-	if sampleRate > 0 {
+	codec, isPCMLike, known := wavEncodingOf(effectiveFormat)
+	t.Codec = codec
+	if known && sampleRate > 0 {
 		sr := float64(sampleRate)
 		t.SampleRate = &sr
 	}
-	isPCMLike := effectiveFormat == wavFormatPCM || effectiveFormat == wavFormatIEEEFloat
 	if isPCMLike && bitsPerSample > 0 && canSetBitsPerSample(t.Codec) {
 		bps := int(bitsPerSample)
 		t.BitsPerSample = &bps

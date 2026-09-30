@@ -37,9 +37,11 @@ type Policy struct {
 // mirrors manifest.IsLossyCodec's set — internal/manifest imports this
 // package, so calling it directly would be an import cycle; the lockstep
 // test lives on the manifest side (TestDupesLossyCodecsMirrorIsLossyCodec),
-// which is the only package that can see both.
+// which is the only package that can see both. The compressed AIFF-C and
+// WAV encodings joined both with ExtractorVersion 21 (backlog B124, B154).
 var lossyCodecs = map[string]struct{}{
 	"MP3": {}, "AAC": {}, "OGG": {}, "OPUS": {}, "WMA": {},
+	"ULAW": {}, "ALAW": {}, "IMA4": {}, "ADPCM": {}, "GSM": {}, "MP2": {},
 }
 
 // LossyCodecNames returns the ranking vocabulary, sorted, for the
