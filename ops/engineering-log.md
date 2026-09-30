@@ -34971,7 +34971,7 @@ path was.
 - `upscale --gc` classifies its rows with no probe before, and re-checks
   health, not identity, before its reverse sweep. Backlog B224.
 
-## 2026-09-29 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
+## 2026-09-30 — the variants directory probe counts renditions, not entries: a directory holding none is what an unmounted volume looks like (backlog B223)
 
 Left open by B203: `VariantsDirSweepBlock` called a variants directory
 healthy when it held ANY entry (`dirIsEmpty` read one). A clean unmount

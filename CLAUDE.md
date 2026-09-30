@@ -3569,7 +3569,7 @@ no failing test — which is the shape to expect in this area.
   the next bullet.
 - **…and the probe counts RENDITIONS, not entries: a variants directory
   holding none is what an unmounted volume looks like, whatever else it
-  holds** (2026-09-29, backlog B223). `VariantsDirSweepBlock` called a
+  holds** (2026-09-30, backlog B223). `VariantsDirSweepBlock` called a
   directory healthy when it held any entry, and the local directory an
   unmount leaves holds what was written there while the volume was away
   (a Finder `.DS_Store`, a README, the folders a render makes before sox
@@ -3593,8 +3593,10 @@ no failing test — which is the shape to expect in this area.
   tree whose every rendition was deleted by hand, or from a fresh volume**,
   so all three are refused, and `bridge upscale --gc --allow-mass-delete`
   is the operator's way past (the background watcher has none): so the
-  watcher never mass-deletes now, since a mass that leaves renditions is
-  the relocation refusal and one that leaves none is this one. **Don't
+  watcher mass-deletes only over a tree that still holds a rendition with
+  the relocation guard disabled (`integrity.variantSweepMaxDeletePercent:
+  100`), since a mass that leaves renditions is otherwise the relocation
+  refusal and one that leaves none is this one, at any threshold. **Don't
   take a lost+found as proof the volume is mounted** (ext-only, stacked
   mounts, and the rule below makes it evidence neither way), so a fresh
   ext4 volume, which the sweeps reaped from 2026-09-28, needs the flag.
@@ -3606,7 +3608,7 @@ no failing test — which is the shape to expect in this area.
   the Empty refusal in both and nothing else. **The delete handler keeps a
   refusal for the rest of its request** until it next unlinks inside the
   store (`storeRefused`; a refusal only keeps rows), since a tree holding
-  no rendition is read whole on every ask. Six tests had asserted the
+  no rendition is read whole on every ask. Tests in eight files asserted the
   defect (a "healthy" directory holding `sidecar.flac`, a lone folder, the
   watcher fixtures' `decoy.flac`, a streak ended by removing the last
   sidecar); fixtures that stand for a mounted volume hold a rendition-named
