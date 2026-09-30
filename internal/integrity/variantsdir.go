@@ -64,6 +64,13 @@ type VariantsDirBlock struct {
 	// different facts and a caller acting on one must not act on
 	// the other.
 	Empty bool
+	// Info is the directory as the probe found it, set only when
+	// Reason is "": the observation a sweep judged healthy, for a
+	// later check (variantsDirChanged) of whether the path still names
+	// that directory. A clean unmount leaves the path naming the local
+	// directory under the mountpoint, which is another directory, and
+	// the comparison is what sees it (backlog B203).
+	Info os.FileInfo
 }
 
 // VariantsDirSweepBlock probes dir once and reports both halves.
@@ -84,7 +91,41 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	case empty:
 		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true}
 	}
-	return VariantsDirBlock{}
+	return VariantsDirBlock{Info: info}
+}
+
+// variantsDirChanged reports why dir no longer names the directory start
+// observed, or "" while it does. VariantWatcher.tick asks it after the
+// probe that began the tick (VariantsDirSweepBlock, whose Info is start):
+// as each row reads as missing, and once more before it deletes anything.
+//
+// The probe at the start of a tick proves the volume was mounted then and
+// says nothing about the rows classified after it: a clean unmount during
+// the tick reverts the mountpoint to a local directory, every later row
+// reads as a rendition that is gone, and the relocation check walks that
+// directory and finds no sidecars (backlog B203: 39 rows of 40 deleted).
+// Asking again whether the directory LOOKS unmounted is not enough, since
+// the local directory need not be empty; its identity is what an unmount
+// changes. os.SameFile is the comparison the variant delete handler makes
+// for the same reason (cmd/bridge's sidecarStoreID): device and inode on
+// POSIX, volume and file index on Windows. A nil start is never the same.
+//
+// "" for an empty dir: the watcher probes nothing then (a nil or empty
+// provider disables the mount-loss guard), so there is nothing to compare.
+func variantsDirChanged(dir string, start os.FileInfo) string {
+	if dir == "" {
+		return ""
+	}
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the variants directory went missing during the sweep"
+	case err != nil:
+		return fmt.Sprintf("cannot stat variants directory during the sweep: %v", err)
+	case !os.SameFile(start, info):
+		return "the variants directory is no longer the directory this sweep began on"
+	}
+	return ""
 }
 
 // dirIsEmpty reports whether dir holds zero entries, reading at
