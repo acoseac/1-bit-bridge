@@ -4427,6 +4427,38 @@ no failing test — which is the shape to expect in this area.
   home-pc has not been updated since before #818. The evidence needs a LAN
   bridge with `dlna.enabled` running the observer for a release. The iOS app
   subscribes to nothing (`subscribeGENA` is a stub), so no Mirror-PR.
+- **A service URL is kept only as a string that parses back to the scheme
+  and host the policy judged** (2026-10-01, backlog B233). The nightly fuzz
+  on f2bb02bd found `FuzzParseDeviceDescription` keeping
+  `http://[fe80::1%25en0%B3…]:8080/t`, which `url.Parse` refuses (`invalid
+  URL escape "%B3"`): net/url takes a raw non-ASCII byte in an IPv6 zone,
+  `URL.String` writes it back as `%B3`, and a zone's unescape refuses an
+  escape of a byte the host rules would escape. The same zone in UTF-8 in
+  the XML does it too (`%C2%B3`), from a discovered description or a manual
+  upstream. The policy judged the PARSED URL, and every later reader (the
+  caches, `LiveHost`, the proxy, the ingest's SOAP, GetProtocolInfo's POST)
+  parses the kept STRING, which named nothing. `resolveServiceURL` parses
+  back the string it returns and refuses one whose scheme or `Host` differs
+  (`errServiceURLDoesNotParseBack`; a refused control URL takes its service
+  with it, an optional URL goes alone). **Refused, never repaired**: a zone
+  names an interface of the host that reads the URL, which no device can
+  know, and such a URL never worked, since no reader could parse it.
+  **`Host`, not only `Hostname`**: it carries the port `LiveHost` dials. A
+  zone that reads back is kept (ASCII, a Windows zone with a space,
+  `%25Wi-Fi%204`), and so is non-ASCII in a host name outside a zone (its
+  `%C3%A9` reads back). **The LOCATION path cannot keep this shape**:
+  `fetchableLocation` and `LocationPermittedBy` keep the value as it
+  arrived, which every reader parses as the policy did, and a description
+  fetched from such a LOCATION keeps no service
+  (`TestALocationIsKeptAsItArrived` fails if either returns `u.String()`).
+  **A URL the bridge writes back from its parsed form and keeps is checked
+  by parsing it back.** The minimised crasher is the seed
+  (`testdata/fuzz/FuzzParseDeviceDescription/1bd8ceb8fcd09b36`);
+  `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack`,
+  `TestParseDeviceDescription_DropsAnOptionalURLThatDoesNotParseBackAlone`.
+  The app's twin returns the `URL` value it judged, never a string parsed
+  again (read, not measured), and B167 (`baseurl.CanonicalHTTPS`) is the
+  same zone class, still open.
 - **Both discovery clients track in-flight detail fetches in a `WaitGroup`, and
   `cache.Clear()` runs UNDER `runMu` as `Stop`'s final act.** Without the group, a
   fetch that already passed its ctx check upserts AFTER `Stop` cleared the cache —
