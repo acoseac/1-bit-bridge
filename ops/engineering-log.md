@@ -35578,3 +35578,82 @@ No twin: the app's scanner reaps a vanished row at once, with its circuit
 breaker, and keeps no missing count (`LibraryScanner.reapVanishedTracks`,
 `reapRowIsSeen`). No wire change and no `ExtractorVersion` bump: nothing
 extraction produces moves.
+
+## 2026-10-01 — a service URL is kept only as a string that parses back to the scheme and host the policy judged (backlog B233)
+
+The nightly fuzz on main `f2bb02bd` (run 36811754748, leg
+`FuzzParseDeviceDescription`, artifact `fuzz-crashers-FuzzParseDeviceDescription`)
+failed on its property:
+
+```
+fuzz_parser_test.go:98: 1: kept "http://[fe80::1%25en0%B3%B3%B3%B3%B3%B3%B3]:8080/t",
+which does not re-parse: parse "…": invalid URL escape "%B3"
+```
+
+The input (`7a1d6a85395fe4f6`, 256 bytes) is a description whose one service
+has the relative control URL `t`, read against the base
+`http://[fe80::1%25en0\xb3…]:8080/d.xml`, a zone holding raw 0xB3 bytes.
+Reproduced red on the dev Mac with the file in `testdata/fuzz/` (`go test
+./internal/dlna/discovery/ -run 'FuzzParseDeviceDescription$'`).
+
+### Why
+
+net/url's `parseHost` unescapes a zone in `encodeZone` mode, which takes a
+raw byte at or above 0x80 as it is, and refuses a `%XX` whose byte
+`shouldEscape(…, encodeHost)` would escape (0xB3 among them). `URL.String`
+escapes the host with `encodeHost`, which writes that raw byte as `%B3`. So
+the URL the policy judged (`abs`, parsed, Hostname `fe80::1%en0\xb3…`) has a
+string no reader can parse, and the kept value is that string: the caches,
+`LiveHost`, the proxy, the ingest's SOAP Browse and GetProtocolInfo's POST
+all parse it again and fail. The same zone written in UTF-8 inside the XML
+(`http://[fe80::1%25en0³]:9000/avt`) does the same (`%C2%B3`), from a
+discovered description beside a base of the same zone, or from a manual
+upstream (SourceUserChosen) on a link-local address. A host name outside a
+zone round-trips (`encodeHost` unescape takes `%C3`), and so does every zone
+spelled in ASCII, a Windows zone with a space included (`%25Wi-Fi%204`).
+
+### Fix
+
+`resolveServiceURL` parses back the string it returns and refuses one whose
+scheme or `Host` differs from the URL it judged
+(`errServiceURLDoesNotParseBack`). A refused control URL takes its service
+with it and an optional URL goes alone, as for every other refusal there.
+
+- **Refuse, never repair** (the backlog entry's "decide once"): a zone names
+  an interface of the host that reads the URL, which a device cannot know,
+  and such a URL never worked (no later reader could parse it), so nothing
+  that worked stops working. Keeping the re-serialised form would keep a
+  string that does not parse; keeping the raw form would keep a string
+  `URL.String` never produces.
+- **`Host`, not only `Hostname`**: `Host` is what `LiveHost` dials, port
+  included. No round trip measured changes a port.
+- **The LOCATION path cannot keep this shape**: `fetchableLocation` (in
+  `ParseSSDPHeaders`) and `LocationPermittedBy` return the value as it
+  arrived, never re-serialised, so every reader parses the string the policy
+  parsed. A LOCATION with such a zone is fetched (an IPv6 link-local one
+  from an IPv4 packet is refused by the link rule anyway; a global one with
+  a zone is not), and a description fetched from it keeps no service under
+  the new rule. `TestALocationIsKeptAsItArrived` pins the verbatim keep.
+
+The crasher, minimised by hand to `string("http://[fe80::1%25\xb3]/")` and
+the control URL `t`, is the regression seed
+`testdata/fuzz/FuzzParseDeviceDescription/1bd8ceb8fcd09b36` (named by Go's
+rule, the first 16 hex of its SHA-256). Fuzzed 60 s afterwards
+(`-fuzzminimizetime 1s`, dev Mac): 2,227,979 executions, 211 new
+interesting inputs, PASS.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: the parse-back check removed | the seed (`kept "http://[fe80::1%25%B3]/t"`), every refused row of `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack` (4 of 4, each with the URL it kept), `TestParseDeviceDescription_DropsAnOptionalURLThatDoesNotParseBackAlone` |
+| NC2: `fetchableLocation` returns `u.String()` | `TestALocationIsKeptAsItArrived` (kept `…%25en0%B3…`) |
+
+### Not covered
+
+- The iOS twin (`DeviceDescriptionParser.resolveServiceURL`) returns the
+  `URL` value it judged, never a string parsed again; read, not measured, and
+  whether a later persistence path re-parses one is not checked.
+- B167 (`baseurl.CanonicalHTTPS` is not a fixed point for a zone-escaped
+  host) is the same zone class in another package, still open; this entry
+  answers its "decide once" for the discovery parser only: refuse.

@@ -151,6 +151,15 @@ var errServiceURLNumericHost = errors.New("host ends in a number but is not an I
 // on a cloud metadata address (cloudMetadataAddrs), whatever the source.
 var errServiceURLCloudMetadata = errors.New("names a cloud metadata address, which no device serves on")
 
+// errServiceURLDoesNotParseBack is resolveServiceURL's refusal of a service
+// URL whose string does not parse back to the scheme and host it was judged
+// on, whatever the source (backlog B233). Every later reader (the caches,
+// LiveHost, the proxy, GetProtocolInfo's POST) parses the kept string again,
+// so the policy must have judged what they will read. net/url takes a raw
+// non-ASCII byte in an IPv6 zone, writes it back escaped, and refuses that
+// escape in a zone: such a URL was kept as a string that parses to nothing.
+var errServiceURLDoesNotParseBack = errors.New("does not parse back to the scheme and host it was judged on")
+
 // hostKind says where a URL host can lead a connection, judged from the
 // string alone.
 type hostKind int
@@ -378,6 +387,13 @@ func fetchableLocation(raw string) string {
 //     when that is this machine (the console) or the link (a cloud VM's
 //     metadata service). A manual URL on this machine is the operator
 //     pointing at a local server on purpose, and keeps its local services.
+//   - Whatever the source, a URL whose string does not parse back to the
+//     scheme and host judged above is refused
+//     (errServiceURLDoesNotParseBack): that string is what every later
+//     reader parses. A zone holding a raw non-ASCII byte is written back as
+//     an escape net/url refuses in a zone. Refused, never repaired: a zone
+//     names an interface of the host that reads the URL, which no device
+//     can know, so a description that carries one names no service usable.
 //
 // The one home for these rules: every service URL of every device kind goes
 // through it, so the mandatory control URL and the optional ones cannot
@@ -414,7 +430,12 @@ func resolveServiceURL(base *url.URL, raw string, source DescriptionSource) (str
 	if baseKind, _ := classifyHost(base.Hostname()); !hostKindAllowed(kind, baseKind) {
 		return "", errServiceURLHostLocal
 	}
-	return abs.String(), nil
+	out := abs.String()
+	// Host, not only Hostname: it is the address and the port LiveHost dials.
+	if back, err := url.Parse(out); err != nil || back.Scheme != abs.Scheme || back.Host != abs.Host {
+		return "", errServiceURLDoesNotParseBack
+	}
+	return out, nil
 }
 
 // announcerAddr is the address an SSDP packet came from as the checks below
