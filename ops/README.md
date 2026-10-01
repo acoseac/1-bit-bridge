@@ -14,6 +14,7 @@ must also be **untracked** (`.gitignore`), not merely relocated:
 | File | Why it can't be published | How it's kept out |
 |---|---|---|
 | `deployment-runbook.md` | Host coordinates: SSH user@host for both bridges, key filename, the router port-forward endpoint, the tailnet addresses, and the ufw posture (which documents that an IP allowlist is the only control on SSH and the admin console). | **Tracked, but placeholdered.** Every real coordinate is a `<PLACEHOLDER>`; the values live in `coordinates.local.md`. |
+| `release-playbook.md` | The end-to-end release procedure: scope, the three sanity reviews, fix agents, validating a candidate (Docker upgrade test, the operator bridge, the cloud tenants), tag + verify + publish, the gated rollout (operator bridge, then demo, then tenants), and running it with agents within the usage limits. | **Tracked, placeholdered** like the runbook. |
 | `coordinates.local.md` | The real values behind the runbook's placeholders. | Untracked — `.gitignore: ops/*.local.md` |
 | `audit-2026-07-18.md` | A full codebase audit — effectively an exploit index, with `file:line` and fix sketches for every finding. Actionable against any bridge whose operator hasn't upgraded yet, which is why "the fixes are merged" is not on its own sufficient. | Untracked — `.gitignore: ops/*audit*.md` |
 | `1bit-audit-2026-07-18.md` | A second, independently-run audit of the same Go bridge (`internal/*` + `cmd/bridge`, 38 packages) — same exposure as above. | Untracked — `.gitignore: ops/*audit*.md` |

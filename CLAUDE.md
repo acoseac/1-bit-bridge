@@ -9457,6 +9457,15 @@ Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag 
 
 ## Documentation refresh on each release
 
+**Release day: follow [`ops/release-playbook.md`](ops/release-playbook.md)**, the end-to-end procedure as run for v0.2.1:
+- scope and freeze, the three read-only sanity reviews (network, data, operations including the upgrade itself), and one fresh fix agent per finding (two related findings may share one, in sequence);
+- validating the candidate: the gate and a goreleaser snapshot, a Docker upgrade test from the previous release image, the candidate on the operator's bridge (and, with the operator's go-ahead, the cloud tenants), and the nightly fuzz;
+- the annotated tag, the artifact checks (checksums, codesign, both image arches), and publishing the notes;
+- the gated rollout of the release artifact: the operator's bridge, then the demo, then the tenants, each healthy before the next;
+- how to run all of it with agents inside the usage limits.
+
+The operator decides the scope, every production deploy, the tag and the publish.
+
 **See `docs/release-process.md`** — which docs to update per release, which NOT to touch, the process, gotchas, after-the-tag steps.
 
 **User-facing docs moved to 1-bit.app (2026-06-09).** The overview / setup / features / troubleshooting / privacy pages now live in the **`acoseac/1bitapp`** repo (local `~/dev/1bitapp`), published at **`1-bit.app/bridge/*`**. This repo's `docs/*.html` are **redirect stubs** to those URLs — don't edit them. Per-release doc work *here* is just the `README.md` status bump + the cross-repo logging/privacy audit (`docs/release-process.md`); user-facing copy is updated in the `1bitapp` repo. `docs/docker.md`, `docs/deployment/*`, `PROTOCOL.md`, and `.nojekyll` stay.
