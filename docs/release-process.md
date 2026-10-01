@@ -4,6 +4,8 @@ Extracted from CLAUDE.md. The per-release documentation-refresh procedure:
 which files to update, which NOT to touch, the process, gotchas, and the
 after-the-tag steps.
 
+**Release day, end to end** (the sanity reviews, validating a candidate, tag + verify + publish, and the gated rollout to the operator's bridge, the demo and the cloud tenants) is the internal playbook [`ops/release-playbook.md`](../ops/release-playbook.md). This file stays the source for the documentation refresh and the tag mechanics.
+
 ## v0.2.0 gate: the privacy pages are part of the release
 
 Before tagging **v0.2.0**, re-read `1-bit.app/privacy` and `1-bit.app/bridge/privacy`
