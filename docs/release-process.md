@@ -81,7 +81,7 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 6. **Open PR**, branch + PR convention (never direct to main *for code*; CLAUDE.md alone is the docs-only direct-to-main exception).
 7. **Bot review rounds.** Plan for 2 rounds minimum, expect up to 4 on a docs-touch + privacy-adjacent PR. Greptile finds smaller things each round; CodeRabbit confirms "no actionable" once the security-shaped issues are gone. Address all comments per round in a single fix commit; reject suggestions that contradict deliberate in-code rationale (Gemini flagged "iOS 26.4" as a typo for "16.4" on PR #185 — rejected, iOS 26 is real and Gemini's training cutoff predates it).
 8. **Merge** once reviews are quiet AND CI is green.
-9. **Tag the release.** `git tag v0.1.x && git push --tags` triggers `.github/workflows/release.yml`. The workflow drafts a GitHub Release with the goreleaser-generated changelog; **edit the notes** to highlight user-facing features (use the `### v0.1.x` per-version sections in this CLAUDE.md as raw material), then publish.
+9. **Tag the release** on the validated candidate's sha, annotated like the previous tags: `git tag -a vX.Y.Z <sha> -m "vX.Y.Z" && git push origin vX.Y.Z` triggers `.github/workflows/release.yml` (never a bare `git tag` at `HEAD` with `--tags`, which tags whatever is checked out and pushes every local tag). The workflow drafts a GitHub Release with the goreleaser-generated changelog; **edit the notes** to highlight user-facing features (use the `### v0.1.x` per-version sections in this CLAUDE.md as raw material), then publish.
 
 ### Gotchas (proven on PR #185)
 

@@ -9458,7 +9458,7 @@ Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag 
 ## Documentation refresh on each release
 
 **Release day: follow [`ops/release-playbook.md`](ops/release-playbook.md)**, the end-to-end procedure as run for v0.2.1:
-- scope and freeze, the three read-only sanity reviews (network, data, operations including the upgrade itself), and one fresh fix agent per finding;
+- scope and freeze, the three read-only sanity reviews (network, data, operations including the upgrade itself), and one fresh fix agent per finding (two related findings may share one, in sequence);
 - validating the candidate: the gate and a goreleaser snapshot, a Docker upgrade test from the previous release image, the candidate on the operator's bridge (and, with the operator's go-ahead, the cloud tenants), and the nightly fuzz;
 - the annotated tag, the artifact checks (checksums, codesign, both image arches), and publishing the notes;
 - the gated rollout of the release artifact: the operator's bridge, then the demo, then the tenants, each healthy before the next;

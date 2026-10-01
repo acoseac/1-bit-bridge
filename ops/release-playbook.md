@@ -123,8 +123,13 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
    - Main's head is the candidate plus fixes and docs only; `gh pr list --state open` is empty.
    - CI on the tag commit:
      `gh api repos/acoseac/1-bit-bridge/commits/<sha>/check-runs --paginate --jq '.check_runs[] | (.conclusion // .status)' | sort | uniq -c`.
-     SonarCloud's main-branch gate (security hotspots to review) has failed on every main commit
-     since before v0.2.0, so it is not a release check. Everything else must be green.
+     Everything else must be green, with one known exception: SonarCloud's main-branch gate
+     fails on security hotspots nobody has reviewed (25 at v0.2.1, failing on every main commit
+     since before v0.2.0; their review is a backlog entry).
+   - Review the hotspots the release ADDS before tagging. List them in SonarCloud for the new
+     code period (the `hotspots` tool of the SonarCloud MCP server, or the project's Security
+     Hotspots page), and give each a disposition: safe (marked reviewed, with the reason), fixed,
+     or a backlog entry. A new hotspot with no disposition blocks the tag.
    - The `Dockerfile`'s `ARG GO_VERSION` agrees with go.mod (docs/release-process.md).
 2. **Tag**, annotated like the previous tags:
    `git tag -a vX.Y.Z <sha> -m "vX.Y.Z" && git push origin vX.Y.Z`.
@@ -175,8 +180,9 @@ protection reads a burst as an attack (runbook, SSH note).
 1. Check whether its updater already installed the release: compare health's
    `serverVersion` and the binary's sha256 against the release's. A candidate build compares
    equal to the previous tag, so the updater offers the new release once it is published.
-2. `gh release download vX.Y.Z -R acoseac/1-bit-bridge` for the host's arch (`uname -m`) plus
-   `checksums.txt`, then verify and extract.
+2. Download only what the host needs:
+   `gh release download vX.Y.Z -R acoseac/1-bit-bridge -p "*linux_<arch>*" -p checksums.txt`
+   (`<arch>` from `uname -m`: amd64 or arm64), then verify and extract.
 3. Take a database backup per the runbook.
 4. Upload, and verify the sha256 on arrival.
 5. Do a DETACHED swap (`setsid nohup`, so a dropped SSH cannot leave it half-swapped):
