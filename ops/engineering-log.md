@@ -35657,3 +35657,80 @@ interesting inputs, PASS.
 - B167 (`baseurl.CanonicalHTTPS` is not a fixed point for a zone-escaped
   host) is the same zone class in another package, still open; this entry
   answers its "decide once" for the discovery parser only: refuse.
+
+## 2026-10-01 — a Vorbis DATE dhowden cannot parse is read by its year prefix, not stored as year 1 (backlog B222, B234)
+
+Found by the B188 session (2026-09-30) while building its year fixture, and
+reported again from the app's side as B234 (acoseac/1-bit#2038 files such an
+album under Unknown). Taken into v0.2.1 by the user's decision.
+
+### The defect
+
+dhowden's `metadataVorbis.Year()` (vorbis.go; FLAC, Ogg Vorbis, Opus and Ogg
+FLAC, every reader whose `Format()` is `tag.VORBIS`) picks a `time.Parse`
+layout by the DATE's length (4, 7 or 10 bytes) and returns `t.Year()` with the
+parse error dropped. Any other length leaves the layout empty and any value the
+layout refuses fails, and both answer the zero time's year: 1. The extractor's
+fallback to `parseYearPrefix` ran only when `Year()` was 0, so an ISO timestamp
+(`2017-01-27T12:00:00Z`, which store downloads write), `1974?`, `2019/03/22`,
+and a DATE holding no year (`unknown`, `22.03.2019`) all stored year 1. The year
+pass fills only a non-positive year, so nothing repaired it; the phone showed
+year 1, and since the year is part of its album identity the track split its
+album. The fallback also parsed only the FIRST year tag present, so
+`DATE=22.03.2019` beside `YEAR=2019` read 0 where the app's
+`VorbisCommentParser` reads 2019.
+
+The other readers do not do it: ID3v2's `Year()` is `strconv.Atoi` of the whole
+value or a `time.DateOnly` parse, else 0, and MP4's `strconv.Atoi` of the first
+four bytes, 0 when that fails (read in the module source,
+dhowden/tag 3d75831295e8). A 1 from either is what the tag says.
+
+### Reproduced red-first
+
+Through `ExtractWithContext`, with fixtures from the existing writers
+(`writeMinimalFLACPairs`, `oggLogicalStream` + `vorbisCommentPacket` /
+`opusCommentPacket`, `oggFLACFile` + `commentBlock`): on main f2bb02bd, 24 of
+the 40 subtests of `TestADateDhowdenCannotParseIsReadByItsYearPrefix` (four
+formats × the six shapes above, beside four controls dhowden reads) stored year
+1. `TestAnID3OrMP4DateHoldsNoYearOne` (MP3 TYER, M4A ©day, the same five
+shapes) was green on main: no year 1 there. And the upgrade scan,
+`TestScanner_V22_AnUnparseableDateJoinsTheDelta_AReadableOneOnlyStamps` (six
+rows rewound to what a v21 bridge stored), kept year 1 on its three Vorbis rows.
+
+### The fix
+
+`if y == 0 || (y == 1 && m.Format() == tag.VORBIS) { y = rawDateYear(raw) }`:
+`rawDateYear` asks each year tag in `yearTagAliases` order (the order the old
+`stringOf` call used, now one list with the presence check) and returns the
+first year `parseYearPrefix` reads, else 0, present with no year, which the year
+pass fills from the folder. A literal `0001` still reads 1; a Vorbis `YEAR=1`
+reads 0. The presence gate is unchanged (no date tag is still nil).
+`ExtractorVersion` 21 → 22.
+
+What the bump sends, measured by the scan test: of six rows (two FLAC albums,
+an Ogg Vorbis, an MP3), exactly the three whose year changes move: the ISO
+timestamp to 2017, `1974?` to 1974, and `unknown`, which re-reads 0, is held by
+#1128 (Year is one of its four fields), and takes its sibling's 2019 from the
+in-memory pass, written once. Their `indexed_at` advances (the iOS delta) and
+their enrichment is re-queued. The other three re-extract byte-identical and
+are only stamped (`indexed_at` and `enriched_at` unchanged), and a third scan
+moves nothing.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: the re-read on 0 only, as before | the same 24 Extract subtests; the scan test's three moving rows |
+| NC2: `rawDateYear` reads only the first tag present | the four "day-first date beside a YEAR" subtests |
+| NC3: `ExtractorVersion` left at 21 | the scan test's three moving rows (rows stamped 21 are never re-read) |
+
+NC2's first run did not build (the loop variable went unused); it was redone
+with `for range`, and only then counted.
+
+### iOS
+
+No twin: the app reads a Vorbis year as `Int(value.prefix(4))`, so it never
+makes a 1, and it already reads YEAR when DATE holds none. No wire change, no
+Mirror-PR. B235 (the app's album year is its earliest positive track year, so a
+row sent as 1 sent the album to Unknown) loses its bridge-side cause once the
+v22 re-read reaches the phone.

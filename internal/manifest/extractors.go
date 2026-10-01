@@ -501,7 +501,25 @@ var Ext = map[string]bool{
 // yet (backlog B158). Every linear AIFF, AIFF-C and WAV
 // re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
 // rows re-expand as on every bump.
-const ExtractorVersion = 21
+//
+// v22 — a Vorbis DATE dhowden cannot parse no longer reads as year 1 (backlog
+// B222, B234). dhowden's Vorbis reader (FLAC, Ogg Vorbis, Opus, Ogg FLAC)
+// parses DATE with a layout chosen by its length and answers the zero time's
+// year, 1, for anything else, and the parseYearPrefix fallback ran only on a
+// 0, so an ISO timestamp ("2017-01-27T12:00:00Z"), "1974?", "2019/03/22" or a
+// DATE holding no year indexed as year 1, which the year pass never fills and
+// which splits an album on the phone. A Vorbis 1 is now re-read like a 0, and
+// the fallback asks each year tag in turn for a year (rawDateYear) where it
+// read only the first present, so a DATE holding none beside a YEAR holding
+// one reads the YEAR, as the app does.
+//
+// Only those rows change: a row whose year moves is held to the scan's tail
+// (#1128's reconcile hold, since Year is one of its four fields), where the
+// passes fill a DATE holding no year from its folder, and it then takes the
+// full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
+// other row re-extracts byte-identical and rides the version-stamp leg; SACD
+// ISO virtual rows re-expand as on every bump.
+const ExtractorVersion = 22
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1086,21 +1104,28 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		// silently drop `Year` / `TrackNumber` / `DiscNumber` even
 		// though the dhowden accessor would happily parse the value.
 		// `hasAnyRawKey` is key-only — value shape is irrelevant.
-		if hasAnyRawKey(raw, "tyer", "tdrc", "tdrl", "date", "year", "©day", "©yyy") {
+		if hasAnyRawKey(raw, yearTagAliases...) {
 			y := m.Year()
 			// dhowden's `Year()` returns 0 for an ISO-8601 date value like
-			// "2023-06-09" (a valid DATE / TDRC tag — Melody Gardot's
+			// "2023-06-09" in an ID3v2 tag (a valid TDRC — Melody Gardot's
 			// "Entre eux deux (The Paris Sessions)" is tagged that way).
-			// Recover the 4-digit year from the raw tag the same way
+			// Recover the 4-digit year from the raw tags the same way
 			// `OriginalYear` already does (`parseYearPrefix`), so a
-			// full-date release tag doesn't surface as year 0. Only on the
-			// 0 case — a clean `m.Year()` (plain "2022") is left untouched.
-			if y == 0 {
-				if v, ok := stringOf(raw, "tdrc", "tdrl", "tyer", "date", "year", "©day", "©yyy"); ok {
-					if py, perr := parseYearPrefix(v); perr == nil {
-						y = py
-					}
-				}
+			// full-date release tag doesn't surface as year 0.
+			//
+			// Its Vorbis reader (FLAC, Ogg Vorbis, Opus, Ogg FLAC) answers
+			// 1 instead (backlog B222): it parses DATE with a layout chosen
+			// by the value's length (4, 7 or 10 bytes) and returns the zero
+			// time's year for any other length or a value time.Parse
+			// refuses, so an ISO timestamp ("2017-01-27T12:00:00Z"),
+			// "1974?" or a DATE holding no year read as year 1, a positive
+			// year the year pass never fills. No reader makes a 1 the tag
+			// does not say but this one, and year 1 is no recording's, so
+			// for it a 1 is re-read too: a literal "0001" still reads 1,
+			// and a value holding no year reads 0 (present, no year).
+			// A clean `m.Year()` (plain "2022") is left untouched.
+			if y == 0 || (y == 1 && m.Format() == tag.VORBIS) {
+				y = rawDateYear(raw)
 			}
 			t.Year = &y
 		}
@@ -1913,6 +1938,28 @@ func parseReplayGain(s string) *float64 {
 		return nil
 	}
 	return &v
+}
+
+// yearTagAliases are the raw tags a release year is read from, in the order
+// rawDateYear asks them: ID3v2.4's recording and release times, ID3v2.3's
+// year, Vorbis's DATE and YEAR, MP4's ©day. A track carries a year (Some, if
+// only 0) exactly when one of them is present.
+var yearTagAliases = []string{"tdrc", "tdrl", "tyer", "date", "year", "©day", "©yyy"}
+
+// rawDateYear is the year the first of the year tags that holds one says, the
+// tags asked in yearTagAliases' order and each read by parseYearPrefix, or 0
+// when none holds one. Each tag in turn, not only the first present: a Vorbis
+// DATE of "22.03.2019" beside a YEAR of "2019" reads 2019, as the app's
+// reader (VorbisCommentParser) does, where the first tag alone read 0.
+func rawDateYear(raw map[string]any) int {
+	for _, alias := range yearTagAliases {
+		if v, ok := stringOf(raw, alias); ok {
+			if y, err := parseYearPrefix(v); err == nil {
+				return y
+			}
+		}
+	}
+	return 0
 }
 
 // parseYearPrefix extracts a 4-digit year from the leading characters

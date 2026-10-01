@@ -1697,11 +1697,36 @@ lost my library."
   keep `Some(0)` distinguishable from `nil`. `canSetBitsPerSample`, an allowlist
   of the lossless names, gates every extractor's `BitsPerSample` write
   structurally (this said `isLossyCodec`, a denylist #225's review replaced
-  because it failed open on an empty codec, until 2026-09-29). `Year()==0` falls back to
-  `parseYearPrefix` over the raw date tags — a valid ISO `2023-06-09` otherwise
+  because it failed open on an empty codec, until 2026-09-29). `Year()==0` (and a
+  Vorbis 1, the next bullet) falls back to `rawDateYear`, `parseYearPrefix` over
+  each raw date tag in turn — a valid ISO `2023-06-09` otherwise
   indexes as year 0. `stringOf` iterates the REQUESTED aliases in priority order,
   never `range raw` (Go map order is randomised, so a file carrying two matching
   tags resolved differently across scans).
+- **dhowden's Vorbis reader answers year 1 for a DATE it cannot parse, so a
+  Vorbis 1 is re-read like a 0** (ExtractorVersion 22, backlog B222, B234).
+  `metadataVorbis.Year()` (FLAC, Ogg Vorbis, Opus, Ogg FLAC: every reader whose
+  `Format()` is `tag.VORBIS`) picks a `time.Parse` layout by the DATE's length
+  (4, 7 or 10 bytes) and drops the error, so any other length or a value the
+  layout refuses is the zero time's year: an ISO timestamp
+  (`2017-01-27T12:00:00Z`, store downloads), `1974?`, `2019/03/22`, and a DATE
+  holding no year (`unknown`, `22.03.2019`) all stored 1, which the year pass
+  never fills (it is positive), so the phone showed year 1 and split the album
+  (year is in its album identity). `rawDateYear` re-reads it: the first tag in
+  `yearTagAliases` order that `parseYearPrefix` reads, else 0 (present, no
+  year: the pass fills it from the folder). **Each tag in turn**, not the first
+  present: `DATE=22.03.2019` beside `YEAR=2019` reads 2019, as the app's
+  `VorbisCommentParser` does. **Only the Vorbis reader**: ID3v2's `Year()` is
+  `strconv.Atoi` of the whole value or a `DateOnly` parse, else 0, and MP4's
+  `Atoi` of the first four bytes, 0 when that fails, so neither makes a 1 the
+  tag does not say; don't widen the rule to them. A literal `0001` still reads
+  1. The app reads `Int(value.prefix(4))` and has no year-1 gap (no Mirror-PR).
+  Measured: on main 24 of 40 `Extract` subtests (four formats, six shapes)
+  stored 1, and the v22 upgrade scan moved only the rows whose year changes
+  (an `unknown` DATE took its sibling's 2019 through #1128's hold) and stamped
+  the rest (`TestADateDhowdenCannotParseIsReadByItsYearPrefix`,
+  `TestAnID3OrMP4DateHoldsNoYearOne`,
+  `TestScanner_V22_AnUnparseableDateJoinsTheDelta_AReadableOneOnlyStamps`).
 - **`normaliseRawTagKey` canonicalizes a LEADING `0xA9` before `ToLower`.**
   dhowden surfaces MP4 ilst atoms under a single-byte `\xa9day` key, which is
   invalid UTF-8, and `ToLower` rewrites it to U+FFFD — so source-literal `©day`
