@@ -6,7 +6,9 @@ which owns the per-release documentation refresh and the tag mechanics, and
 [`ops/deployment-runbook.md`](deployment-runbook.md), which owns each host's deploy
 commands. Read this first on release day, then those two for their sections.
 
-Every `<PLACEHOLDER>` resolves in the gitignored `ops/coordinates.local.md`. This repo is
+Every upper-case placeholder (`<OPERATOR-SSH>`, `<DOCKER-TEST-SSH>` and the like) resolves in
+the gitignored `ops/coordinates.local.md`; a lower-case one (`<sha>`, `<previous>`, `<arch>`)
+is a value of the release in hand. This repo is
 public: never write a real host, IP, SSH target or key path into this file. Until a
 weakness is fixed, public records (PR titles and bodies, commits, release notes) name only
 its backlog entry, never a reproduction recipe.
@@ -184,7 +186,8 @@ protection reads a burst as an attack (runbook, SSH note).
    equal to the previous tag, so the updater offers the new release once it is published.
 2. Download only what the host needs:
    `gh release download vX.Y.Z -R acoseac/1-bit-bridge -p "*linux_<arch>*" -p checksums.txt`
-   (`<arch>` from `uname -m`: amd64 or arm64), then verify and extract.
+   (`<arch>` is `amd64` where `uname -m` says `x86_64`, `arm64` where it says `aarch64`), then
+   verify and extract.
 3. Take a database backup per the runbook.
 4. Upload, and verify the sha256 on arrival.
 5. Do a DETACHED swap (`setsid nohup`, so a dropped SSH cannot leave it half-swapped):
