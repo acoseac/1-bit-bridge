@@ -123,13 +123,15 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
    - Main's head is the candidate plus fixes and docs only; `gh pr list --state open` is empty.
    - CI on the tag commit:
      `gh api repos/acoseac/1-bit-bridge/commits/<sha>/check-runs --paginate --jq '.check_runs[] | (.conclusion // .status)' | sort | uniq -c`.
-     Everything else must be green, with one known exception: SonarCloud's main-branch gate
-     fails on security hotspots nobody has reviewed (25 at v0.2.1, failing on every main commit
-     since before v0.2.0; their review is a backlog entry).
-   - Review the hotspots the release ADDS before tagging. List them in SonarCloud for the new
-     code period (the `hotspots` tool of the SonarCloud MCP server, or the project's Security
-     Hotspots page), and give each a disposition: safe (marked reviewed, with the reason), fixed,
-     or a backlog entry. A new hotspot with no disposition blocks the tag.
+     Every check must be green, with one known exception: SonarCloud's main-branch quality
+     gate, red on every main commit since before v0.2.0. Its new-code period has run since
+     2026-05-14, and three of its conditions fail over it: the reliability rating, the security
+     rating and the share of security hotspots reviewed. Clearing them is backlog B242.
+   - So the gate cannot show what this release added: look before tagging. List the bugs,
+     vulnerabilities and security hotspots created since the previous release (the SonarCloud MCP
+     server's `issues` tool with `created_after`, and its `hotspots` tool; or the project's Issues
+     and Security Hotspots pages), and give each a disposition: fixed, marked safe or a false
+     positive with the reason, or a backlog entry. One with no disposition blocks the tag.
    - The `Dockerfile`'s `ARG GO_VERSION` agrees with go.mod (docs/release-process.md).
 2. **Tag**, annotated like the previous tags:
    `git tag -a vX.Y.Z <sha> -m "vX.Y.Z" && git push origin vX.Y.Z`.
