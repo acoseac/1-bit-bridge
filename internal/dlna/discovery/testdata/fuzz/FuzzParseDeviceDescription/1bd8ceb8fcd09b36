@@ -1,0 +1,3 @@
+go test fuzz v1
+[]byte("<root><device><serviceList><service><serviceType>1</serviceType><controlURL>t</controlURL></service></serviceList></device></root>")
+string("http://[fe80::1%25\xb3]/")
