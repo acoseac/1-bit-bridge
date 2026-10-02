@@ -42,6 +42,19 @@ func TestTryLockRefusesASecondOpenOfTheFile(t *testing.T) {
 	}
 }
 
+// TestTryLockAnswersErrInvalidForNoFile requires TryLock and Unlock to
+// answer a nil file with os.ErrInvalid, as os.File's own methods do, never
+// with a panic: the error is wrapped with the file's name, and Name
+// dereferences its receiver.
+func TestTryLockAnswersErrInvalidForNoFile(t *testing.T) {
+	if err := TryLock(nil); !errors.Is(err, os.ErrInvalid) {
+		t.Errorf("TryLock(nil) = %v, want os.ErrInvalid", err)
+	}
+	if err := Unlock(nil); !errors.Is(err, os.ErrInvalid) {
+		t.Errorf("Unlock(nil) = %v, want os.ErrInvalid", err)
+	}
+}
+
 // TestALockIsReleasedWhenItsFileCloses requires a lock whose file is
 // closed without an Unlock to be free again. On Windows the release a
 // close makes may lag (LockFileEx's documentation), so the second open is

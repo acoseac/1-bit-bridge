@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -177,6 +178,32 @@ func TestServeStartsWhereTheDataDirCannotBeLocked(t *testing.T) {
 	served := bootServe(t, "--config", cfg)
 	if s := served.stderr.String(); !strings.Contains(s, "could not lock") {
 		t.Errorf("serve did not say it could not lock the data dir; stderr=%s", s)
+	}
+}
+
+// TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed plants the lock
+// file as a link to a file outside the data dir, and requires
+// lockServeDataDir to refuse it (an error that is not "held", so serve
+// says so and serves) rather than create or lock the file the link names:
+// a serve run as root would do either as root.
+func TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside")
+	if err := os.Symlink(outside, filepath.Join(dataDir, serveLockFileName)); err != nil {
+		t.Skipf("this host makes no symlink here: %v", err)
+	}
+	release, err := lockServeDataDir(dataDir)
+	release()
+	var held *serveDataDirHeldError
+	if err == nil || errors.As(err, &held) {
+		t.Errorf("lockServeDataDir over a link out of the data dir = %v, want an error that is not a held lock", err)
+	}
+	if _, statErr := os.Lstat(outside); !os.IsNotExist(statErr) {
+		t.Errorf("the file the link names was created (lstat: %v)", statErr)
 	}
 }
 

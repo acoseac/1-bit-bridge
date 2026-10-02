@@ -6651,7 +6651,12 @@ mentions across the four `ops/audit-*.md` files.
   the serve still serves (`TestServeFreesTheDataDirWhenItReturns` runs with
   automatic collection off for that reason). On Windows the release unlocks
   before it closes (a close's release may lag), and the locked range refuses
-  other handles' reads, so nothing reads `server.lock`. **Not the listeners
+  other handles' reads, so nothing reads `server.lock`. **The lock file opens
+  through the data dir's `os.Root`**: `Precreate`'s O_EXCL refuses a link at
+  that path and a plain open then follows it, so a serve run as root would
+  create or lock whatever file a planted link names, as root; through the
+  root a link out of the data dir is an error (warned, not a refusal).
+  **Not the listeners
   first**: binding before the wiring would refuse nothing on ports of its own.
   And **`server.pid` is removed only while it names this process**
   (`removeServerPIDFile`), for a serve that ran without the lock. Tests:
@@ -6661,7 +6666,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestRemoveServerPIDFileKeepsAnotherProcesssRecord`,
   `TestServeLockFileKeepsTheInstallOwnerAsRoot` (as root, on dido: a lock
   file `sudo bridge serve` left root's would lock the service user out of
-  the check), and fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
+  the check), `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed`, and
+  fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
   `TestALockDiesWithTheProcessThatHeldIt`.
 - **A write gate on a second process is a GUARD, not mutual exclusion — say
   which.** `bridge restore` and `bridge manifest clear-missing` mutate the store

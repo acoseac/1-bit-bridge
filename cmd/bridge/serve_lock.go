@@ -74,10 +74,19 @@ func lockServeDataDir(dataDir string) (release func(), err error) {
 	if err := fsutil.Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
 		return release, err
 	}
-	// Open for writing though nothing is written: on a Linux NFS mount
-	// flock is carried out as a POSIX record lock, whose exclusive form
-	// wants a descriptor open for writing.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	// Through the data dir's os.Root, so a lock file that is a link
+	// leading out of the data dir is refused rather than followed: a
+	// serve run as root would otherwise create, or lock, whatever file the
+	// link names, as root (Precreate's O_EXCL refuses the link, and a plain
+	// open then follows it). Open for writing though nothing is written:
+	// on a Linux NFS mount flock is carried out as a POSIX record lock,
+	// whose exclusive form wants a descriptor open for writing.
+	root, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return release, err
+	}
+	f, err := root.OpenFile(serveLockFileName, os.O_RDWR|os.O_CREATE, 0o600)
+	_ = root.Close() // f stays open: it does not belong to the root
 	if err != nil {
 		return release, err
 	}

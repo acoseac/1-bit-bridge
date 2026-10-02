@@ -29,13 +29,26 @@ var ErrLocked = errors.New("locked by another open of the file")
 // Advisory on unix (only another TryLock is refused); on Windows the
 // locked range also refuses another handle's reads and writes, which is
 // why the file it is taken on should be one nothing reads.
-func TryLock(f *os.File) error { return tryLock(f) }
+//
+// A nil f is os.ErrInvalid, as os.File's own methods answer it.
+func TryLock(f *os.File) error {
+	if f == nil {
+		return &os.PathError{Op: "lock", Err: os.ErrInvalid}
+	}
+	return tryLock(f)
+}
 
 // Unlock releases the lock TryLock took on f. Closing f releases it too,
 // but on Windows the release on a close may lag ("depends upon available
 // system resources", LockFileEx's documentation), so a holder that means to
-// hand the lock on at once unlocks before it closes.
-func Unlock(f *os.File) error { return unlock(f) }
+// hand the lock on at once unlocks before it closes. A nil f is
+// os.ErrInvalid.
+func Unlock(f *os.File) error {
+	if f == nil {
+		return &os.PathError{Op: "unlock", Err: os.ErrInvalid}
+	}
+	return unlock(f)
+}
 
 // controlFD runs fn on f's descriptor and wraps what it answers in an
 // *os.PathError naming op and f. Through SyscallConn rather than Fd, which

@@ -36230,7 +36230,12 @@ presence, not its content, is what the pid check can see.
   `--addr`) and before the TLS load: it makes the data dir if it is missing
   (`fsutil.MkdirAll`, 0700, as `atomicwrite` makes it), creates
   `<dataDir>/server.lock` (`fsutil.Precreate` first, so a serve run as root
-  gives it the data dir's owner), and takes `fsutil.TryLock` on it. Held by
+  gives it the data dir's owner), opens it through the data dir's `os.Root`
+  (review round 2, CodeRabbit: `Precreate`'s O_EXCL refuses a link at that
+  path and a plain open then followed it, so a serve run as root created
+  the file a link out of the data dir named, as root; through the root
+  that link is an error, which serve warns about and serves past), and
+  takes `fsutil.TryLock` on it. Held by
   another open: runServe prints `serve: another bridge serve (pid N, from
   server.pid) is already running on the data dir …; stop it first, or give
   this serve a data dir of its own` and returns 1. Any other error: one
@@ -36292,6 +36297,12 @@ lock file itself as `dst`, which it reads, while nothing is there, as the
 directory the file is created in (`targetOwnerFrom`), the shape
 `manifest.OpenStore` uses for the database; a review bot read that as a
 failed lookup, and the test, run as root, says otherwise.
+`TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed` plants the lock
+file as a link to a path outside the data dir (any user shows it: the
+open follows the link the same way for every uid) and requires an error
+and no file at the link's target. `TestTryLockAnswersErrInvalidForNoFile`
+(review round 2, Gemini): a nil file is `os.ErrInvalid`, where it was a
+panic in the error's `f.Name()`.
 
 ### Negative controls (each on the committed fix, restored after)
 
@@ -36304,6 +36315,8 @@ failed lookup, and the test, run as root, says otherwise.
 | NC5: `TryLock` takes no lock | both fsutil refusal tests, and the second-serve test |
 | NC6: the lock taken after the token store and `server.pid` | the second-serve test, on the pid file and `tokens.json` in both shapes |
 | NC7: no `Precreate` before the open | `TestServeLockFileKeepsTheInstallOwnerAsRoot`, as root on dido (the lock file is 0:0) |
+| NC8: the lock file opened by its path, not through the root | `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed` (no error, and the link's target created) |
+| NC9: no nil guard in `TryLock` / `Unlock` | `TestTryLockAnswersErrInvalidForNoFile` (a nil pointer panic) |
 
 ### Residuals
 
