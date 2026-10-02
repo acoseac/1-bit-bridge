@@ -66,10 +66,11 @@ func TestDeleteVariantIfUnchangedDeletesARowStillAsListed(t *testing.T) {
 }
 
 // TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged — each writer of
-// the table, between the listing and the delete: the delete writes nothing,
-// answers ErrVariantChanged, and leaves the parent's indexed_at alone. The
-// render that rewrites the row at the same path with the same size (an
-// unchanged source renders the same bytes) differs only in created_at.
+// the table, between the listing and the delete, and each column the
+// comparison holds: the delete writes nothing, answers ErrVariantChanged, and
+// leaves the parent's indexed_at alone. The render that rewrites the row at
+// the same path with the same size (an unchanged source renders the same
+// bytes) differs only in created_at.
 func TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
@@ -83,10 +84,12 @@ func TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, true},
-		{"re-rendered at another size", func(t *testing.T, s *Store, listed VariantRow) {
+		// The size alone, created_at kept: no writer does that, and it is
+		// here because the size is half of what the caller's verdict was
+		// taken from (LocateSidecar), so the comparison holds it apart.
+		{"rewritten at another size", func(t *testing.T, s *Store, listed VariantRow) {
 			again := listed
 			again.SizeBytes = 120
-			again.CreatedAt = listed.CreatedAt + 1
 			if err := s.UpsertVariant(ctx, again); err != nil {
 				t.Fatal(err)
 			}
