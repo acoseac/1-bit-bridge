@@ -3172,7 +3172,12 @@ no failing test — which is the shape to expect in this area.
   output and kind** through the streak record the tool report now shares
   (`outageStreaks`): one Warn when it starts, Debug after, one Info when a
   job proves it over, a re-Warn after 24 h, the error redacted as every job
-  failure is. **A volume fault is proven over by any job that writes on the
+  failure is. **`end` walks the open streaks in the order they STARTED,
+  never the map's**, so the lines one proof logs come out in one order
+  (`TestOutageStreaksEndInTheOrderTheyStarted`), and what its one predicate
+  needs from the job is worked out through `lazily` (a `sync.Once`), once
+  and only while a streak is open: a success on a healthy host costs a lock
+  and a length check. **A volume fault is proven over by any job that writes on the
   volume; a permission only by a job that writes in the folder that refused
   it**: in a variants tree where one album folder is root's, every other
   album still renders, and ending the outage on any success would Warn again
