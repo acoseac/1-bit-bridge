@@ -352,7 +352,9 @@ func TestSpellerRefusals(t *testing.T) {
 }
 
 // TestSpellerListsAFolderOnceForABatch: paths in one folder resolve the
-// folders above them once per Speller.
+// folders above them once per Speller (the folder holding a path's last
+// component is listed for each path), and a folder it has resolved answers
+// for itself, asked as a path's last component, with no listing at all.
 func TestSpellerListsAFolderOnceForABatch(t *testing.T) {
 	v := newFakeVolume(true)
 	v.add("Artist/Album/01.flac", 0)
@@ -364,8 +366,17 @@ func TestSpellerListsAFolderOnceForABatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if v.listed[""] != 1 || v.listed["Artist"] != 2 {
-		t.Errorf("listed %v, want the root once, and Artist once per folder below it", v.listed)
+	if v.listed[""] != 1 || v.listed["Artist"] != 2 || v.listed["Artist/Album"] != 2 {
+		t.Errorf("listed %v, want the root once, Artist once per folder below it, "+
+			"and Artist/Album once per file in it", v.listed)
+	}
+	lstats := v.lstats
+	if got, err := sp.Spell("artist/album"); err != nil || got != "Artist/Album" {
+		t.Errorf("Spell(artist/album) = %q, %v; want Artist/Album", got, err)
+	}
+	if v.listed["Artist"] != 2 || v.lstats != lstats {
+		t.Errorf("a folder the batch resolved, asked as a last component, listed %v and took %d Lstats, want neither",
+			v.listed, v.lstats-lstats)
 	}
 }
 

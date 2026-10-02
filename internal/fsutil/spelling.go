@@ -50,9 +50,11 @@ var errNotSpelled = errors.New("no on-disk spelling")
 // never lists a directory outside root. The last component is spelled
 // whatever it is.
 //
-// A Speller remembers each directory it has resolved, so a batch of paths in
-// one folder lists the folders above it once. Make one per batch: what it
-// remembers is what each directory listed when it was read. It is not safe
+// A Speller remembers each directory it has resolved above a path's last
+// component, so a batch of paths in one folder lists the folders above it
+// once; the folder holding a path's last component is listed for each path,
+// as far as that component's name. Make one per batch: what it remembers is
+// what each directory listed when it was read. It is not safe
 // for concurrent use, which is also why it holds its own case folder: an
 // x/text Caser is stateful and must not be shared between goroutines.
 type Speller struct {
@@ -99,10 +101,11 @@ func (s *Speller) Spell(rel string) (string, error) {
 
 // spellNext spells the last component of asked inside spelled, the spelling
 // of the components before it, and returns the path spelled so far. A
-// component above the last must be a directory, and is remembered.
+// component above the last must be a directory, and is remembered; a
+// remembered directory answers for itself as a last component too.
 func (s *Speller) spellNext(spelled string, asked []string, last bool) (string, error) {
 	key := strings.Join(asked, "/")
-	if known, ok := s.dirs[key]; ok && !last {
+	if known, ok := s.dirs[key]; ok {
 		return known, nil
 	}
 	parent := filepath.Join(s.root, filepath.FromSlash(spelled))

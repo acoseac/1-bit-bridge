@@ -1272,8 +1272,10 @@ lost my library."
   `trash.Result.FullScan`), which finds its files as the walk spells them;
   the trash still retires it under the client's spelling, as before. A path
   spelled as listed costs one Lstat per component (the listing is read in
-  directory order and stops at the exact name), and a Speller lists each
-  folder once per batch. **Don't respell inside `ScanSubtree`**: its
+  directory order and stops at the exact name), and a Speller remembers
+  each folder it spelled, so the folders above a path's last component are
+  listed once per batch while the folder holding that component is listed
+  per path. **Don't respell inside `ScanSubtree`**: its
   deletion scope is a byte range over the spelling it is handed, and the
   watcher and the rescanner hand it the walk's own. Rows an older build
   already wrote heal at full scans, measured at the production threshold:
