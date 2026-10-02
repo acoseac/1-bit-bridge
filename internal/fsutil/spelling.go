@@ -53,16 +53,22 @@ var errNotSpelled = errors.New("no on-disk spelling")
 // A Speller remembers each directory it has resolved, so a batch of paths in
 // one folder lists the folders above it once. Make one per batch: what it
 // remembers is what each directory listed when it was read. It is not safe
-// for concurrent use.
+// for concurrent use, which is also why it holds its own case folder: an
+// x/text Caser is stateful and must not be shared between goroutines.
 type Speller struct {
 	root string
 	sys  spellingSys
+	fold cases.Caser
 	dirs map[string]string // a directory below root, as asked → as listed
 }
 
 // NewSpeller returns a Speller for the paths below root.
 func NewSpeller(root string) *Speller {
-	return &Speller{root: root, sys: osSpelling{}, dirs: map[string]string{}}
+	return newSpeller(root, osSpelling{})
+}
+
+func newSpeller(root string, sys spellingSys) *Speller {
+	return &Speller{root: root, sys: sys, fold: cases.Fold(), dirs: map[string]string{}}
 }
 
 // Spell returns rel as the listings below root spell it. rel is
@@ -81,30 +87,39 @@ func (s *Speller) Spell(rel string) (string, error) {
 			return "", fmt.Errorf("%w: %q is not a path below the root", errNotSpelled, rel)
 		}
 	}
-	spelled := make([]string, 0, len(segs))
-	for i, seg := range segs {
-		asked := strings.Join(segs[:i+1], "/")
-		last := i == len(segs)-1
-		if !last {
-			if known, ok := s.dirs[asked]; ok {
-				spelled = strings.Split(known, "/")
-				continue
-			}
-		}
-		parent := filepath.Join(s.root, filepath.FromSlash(strings.Join(spelled, "/")))
-		name, info, err := spellComponent(s.sys, parent, seg)
-		if err != nil {
-			return "", fmt.Errorf("%w: %q: %w", errNotSpelled, asked, err)
-		}
-		spelled = append(spelled, name)
-		if !last {
-			if !info.IsDir() {
-				return "", fmt.Errorf("%w: %q is not a directory a walk descends into", errNotSpelled, asked)
-			}
-			s.dirs[asked] = strings.Join(spelled, "/")
+	spelled := ""
+	for i := range segs {
+		var err error
+		if spelled, err = s.spellNext(spelled, segs[:i+1], i == len(segs)-1); err != nil {
+			return "", err
 		}
 	}
-	return strings.Join(spelled, "/"), nil
+	return spelled, nil
+}
+
+// spellNext spells the last component of asked inside spelled, the spelling
+// of the components before it, and returns the path spelled so far. A
+// component above the last must be a directory, and is remembered.
+func (s *Speller) spellNext(spelled string, asked []string, last bool) (string, error) {
+	key := strings.Join(asked, "/")
+	if known, ok := s.dirs[key]; ok && !last {
+		return known, nil
+	}
+	parent := filepath.Join(s.root, filepath.FromSlash(spelled))
+	name, info, err := s.spellComponent(parent, asked[len(asked)-1])
+	if err != nil {
+		return "", fmt.Errorf("%w: %q: %w", errNotSpelled, key, err)
+	}
+	if spelled != "" {
+		name = spelled + "/" + name
+	}
+	if !last {
+		if !info.IsDir() {
+			return "", fmt.Errorf("%w: %q is not a directory a walk descends into", errNotSpelled, key)
+		}
+		s.dirs[key] = name
+	}
+	return name, nil
 }
 
 // plainName reports whether seg names one entry of a directory: not empty,
@@ -120,7 +135,8 @@ func plainName(seg string) bool {
 // spellComponent answers how dir lists the entry dir/seg opens, with that
 // entry's Lstat. It reads the listing once, and only as far as an entry
 // named exactly seg, which is the common answer.
-func spellComponent(sys spellingSys, dir, seg string) (string, fs.FileInfo, error) {
+func (s *Speller) spellComponent(dir, seg string) (string, fs.FileInfo, error) {
+	sys := s.sys
 	want, err := sys.lstat(filepath.Join(dir, seg))
 	if err != nil {
 		return "", nil, pathErrCause(err)
@@ -141,10 +157,10 @@ func spellComponent(sys spellingSys, dir, seg string) (string, fs.FileInfo, erro
 	if exact {
 		return seg, want, nil
 	}
-	key := spellingFold(seg)
+	key := spellingFold(s.fold, seg)
 	var candidates []string
 	for _, name := range listed {
-		if spellingFold(name) == key {
+		if spellingFold(s.fold, name) == key {
 			candidates = append(candidates, name)
 		}
 	}
@@ -171,11 +187,11 @@ func sameEntry(sys spellingSys, dir string, want fs.FileInfo, names []string) (s
 	return "", nil, false
 }
 
-// spellingFold is the candidate key: Unicode case folding, then NFC. Two
-// names a volume opens as one usually share it; whether they ARE one is
+// spellingFold is the candidate key: Unicode case folding by fold, then NFC.
+// Two names a volume opens as one usually share it; whether they ARE one is
 // decided by identity, never by this.
-func spellingFold(name string) string {
-	return norm.NFC.String(cases.Fold().String(name))
+func spellingFold(fold cases.Caser, name string) string {
+	return norm.NFC.String(fold.String(name))
 }
 
 // pathErrCause drops the absolute path an *fs.PathError carries, so an error

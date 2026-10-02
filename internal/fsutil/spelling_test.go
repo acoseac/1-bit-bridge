@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -155,7 +156,7 @@ func (v *fakeVolume) child(dir *fakeEntry, seg string) *fakeEntry {
 	}
 	if v.folding {
 		for _, c := range dir.children {
-			if spellingFold(c.name) == spellingFold(seg) {
+			if spellingFold(cases.Fold(), c.name) == spellingFold(cases.Fold(), seg) {
 				return c
 			}
 		}
@@ -199,7 +200,7 @@ func (v *fakeVolume) sameFile(a, b fs.FileInfo) bool {
 }
 
 func (v *fakeVolume) speller() *Speller {
-	return &Speller{root: v.root, sys: v, dirs: map[string]string{}}
+	return newSpeller(v.root, v)
 }
 
 type fakeInfo struct{ e *fakeEntry }
