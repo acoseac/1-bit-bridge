@@ -61,14 +61,31 @@ func countStampingPasses(t *testing.T) *atomic.Int32 {
 // still describe the table (backlog B218). A deletion of a row that is no copy
 // of anything counts nothing, which is what keeps it costing no pass.
 func TestEveryDeletionOfAStampedRowIsCounted(t *testing.T) {
-	ctx := context.Background()
-	for _, tc := range []struct {
-		name string
-		// del deletes the row at a path, or every row where the deleter
-		// cannot single one out (wholeTable: both copies are deleted).
-		del        func(s *Store, path string) error
-		wholeTable bool
-	}{
+	for _, tc := range trackDeleters(context.Background()) {
+		t.Run(tc.name, func(t *testing.T) {
+			s, sc := stampedPair(t)
+			want := int64(2)
+			if !tc.wholeTable {
+				want = 1
+				requireDeletionUncounted(t, s, sc, func() error { return tc.del(s, pairSolo) })
+			}
+			requireDeletionCounted(t, s, sc, func() error { return tc.del(s, pairWinner) }, want)
+		})
+	}
+}
+
+// trackDeleter is one of the Store functions that delete tracks rows: del
+// deletes the row at a path, or every row where the function cannot single
+// one out (wholeTable: both copies are deleted with it).
+type trackDeleter struct {
+	name       string
+	del        func(s *Store, path string) error
+	wholeTable bool
+}
+
+// trackDeleters lists every Store function that deletes tracks rows.
+func trackDeleters(ctx context.Context) []trackDeleter {
+	return []trackDeleter{
 		{"DeleteTrack", func(s *Store, p string) error { return s.DeleteTrack(ctx, p) }, false},
 		{"DeleteTracksBatch", func(s *Store, p string) error { return s.DeleteTracksBatch(ctx, []string{p}) }, false},
 		{"DeleteTracksByPrefix", func(s *Store, p string) error {
@@ -89,42 +106,47 @@ func TestEveryDeletionOfAStampedRowIsCounted(t *testing.T) {
 		}, false},
 		{"WipeFilesystemTracks", func(s *Store, _ string) error { return s.WipeFilesystemTracks(ctx) }, true},
 		{"WipeAllTracks", func(s *Store, _ string) error { return s.WipeAllTracks(ctx) }, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, sc := stampedPair(t)
-			want := int64(2)
-			if !tc.wholeTable {
-				want = 1
-				if err := tc.del(s, pairSolo); err != nil {
-					t.Fatal(err)
-				}
-				if tr, err := s.GetTrack(ctx, pairSolo); err != nil || tr != nil {
-					t.Fatalf("precondition: %s still has a row (%v)", pairSolo, err)
-				}
-				if got := stampedDeletionsOf(t, s); got != 0 {
-					t.Errorf("deleting a row that is no copy of anything counted %d", got)
-				}
-				if sc.stampsBehindDeletions(ctx) {
-					t.Error("the stamps read as behind after deleting a row that carried none")
-				}
-			}
-			if err := tc.del(s, pairWinner); err != nil {
-				t.Fatal(err)
-			}
-			if got := stampedDeletionsOf(t, s); got != want {
-				t.Errorf("stamped rows counted deleted = %d, want %d", got, want)
-			}
-			if !sc.stampsBehindDeletions(ctx) {
-				t.Error("the stamps do not read as behind after a stamped row was deleted")
-			}
-			// A pass covers what it saw.
-			if _, err := sc.RestampDuplicates(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if sc.stampsBehindDeletions(ctx) {
-				t.Error("the stamps still read as behind after a pass that applied")
-			}
-		})
+	}
+}
+
+// requireDeletionUncounted deletes pairSolo, a row that is no copy of
+// anything, and fails unless the deletion counted nothing.
+func requireDeletionUncounted(t *testing.T, s *Store, sc *Scanner, del func() error) {
+	t.Helper()
+	ctx := context.Background()
+	if err := del(); err != nil {
+		t.Fatal(err)
+	}
+	if tr, err := s.GetTrack(ctx, pairSolo); err != nil || tr != nil {
+		t.Fatalf("precondition: %s still has a row (%v)", pairSolo, err)
+	}
+	if got := stampedDeletionsOf(t, s); got != 0 {
+		t.Errorf("deleting a row that is no copy of anything counted %d", got)
+	}
+	if sc.stampsBehindDeletions(ctx) {
+		t.Error("the stamps read as behind after deleting a row that carried none")
+	}
+}
+
+// requireDeletionCounted deletes the served copy and fails unless the
+// deletion counted want stamped rows, and a stamping pass then covers it.
+func requireDeletionCounted(t *testing.T, s *Store, sc *Scanner, del func() error, want int64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := del(); err != nil {
+		t.Fatal(err)
+	}
+	if got := stampedDeletionsOf(t, s); got != want {
+		t.Errorf("stamped rows counted deleted = %d, want %d", got, want)
+	}
+	if !sc.stampsBehindDeletions(ctx) {
+		t.Error("the stamps do not read as behind after a stamped row was deleted")
+	}
+	if _, err := sc.RestampDuplicates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sc.stampsBehindDeletions(ctx) {
+		t.Error("the stamps still read as behind after a pass that applied")
 	}
 }
 
@@ -230,29 +252,15 @@ func TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted(t *testing.T) {
 		delete func(t *testing.T, s *Store, dbPath string)
 	}{
 		{"the console's delete", func(t *testing.T, s *Store, _ string) {
-			if _, err := s.IncrementMissingTracksAndDeleteAtThreshold(ctx, []string{pairWinner}, 1); err != nil {
-				t.Fatal(err)
-			}
+			mustDelete(t, func() error {
+				_, err := s.IncrementMissingTracksAndDeleteAtThreshold(ctx, []string{pairWinner}, 1)
+				return err
+			})
 		}},
 		{"a root removal", func(t *testing.T, s *Store, _ string) {
-			if _, err := s.DeleteTracksByPrefix(ctx, "CopyB"); err != nil {
-				t.Fatal(err)
-			}
+			mustDelete(t, func() error { _, err := s.DeleteTracksByPrefix(ctx, "CopyB"); return err })
 		}},
-		{"clear-missing while the bridge was stopped", func(t *testing.T, s *Store, dbPath string) {
-			// The scan that missed the file counted it.
-			if _, err := s.IncrementMissingTracksAndDeleteAtThreshold(ctx, []string{pairWinner}, 3); err != nil {
-				t.Fatal(err)
-			}
-			cli, err := OpenStore(dbPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer cli.Close()
-			if n, err := cli.ClearMissingCounts(ctx); err != nil || n != 1 {
-				t.Fatalf("clear-missing = %d, %v; want the one row", n, err)
-			}
-		}},
+		{"clear-missing while the bridge was stopped", clearMissingFromAnotherStore},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -266,40 +274,12 @@ func TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted(t *testing.T) {
 
 			// The file goes with its row, as the console's delete moves it
 			// to the trash, and a new file gives the walk one to extract.
-			if err := os.Remove(filepath.Join(root, filepath.FromSlash(pairWinner))); err != nil {
-				t.Fatal(err)
-			}
+			mustDelete(t, func() error { return os.Remove(filepath.Join(root, filepath.FromSlash(pairWinner))) })
 			tc.delete(t, s, dbPath)
-			probe := filepath.Join(root, "Probe", "Album", "03 Probe.flac")
-			if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(probe, []byte("probe"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			var walked, suppressedMidWalk atomic.Bool
-			afterExtractHookForTests = func(abs string) {
-				if abs != probe {
-					return
-				}
-				walked.Store(true)
-				var sup int
-				if err := s.db.QueryRow(`SELECT dupe_suppressed FROM tracks WHERE path = ?`,
-					pairLoser).Scan(&sup); err != nil || sup != 0 {
-					suppressedMidWalk.Store(true)
-				}
-			}
-			t.Cleanup(func() { afterExtractHookForTests = nil })
+			probe := writeProbe(t, root)
 
 			rec := loggingtest.Record(t)
-			if _, err := sc.Scan(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if !walked.Load() {
-				t.Fatal("the walk never extracted the probe file")
-			}
-			if suppressedMidWalk.Load() {
+			if scanWithTheLoserSuppressedMidWalk(t, s, sc, probe) {
 				t.Errorf("%s was still suppressed while the scan walked: the restamp ran only after the walk", pairLoser)
 			}
 			if stampOf(t, s, pairLoser).Suppressed {
@@ -310,6 +290,71 @@ func TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustDelete fails the test on del's error.
+func mustDelete(t *testing.T, del func() error) {
+	t.Helper()
+	if err := del(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// clearMissingFromAnotherStore deletes the served copy as `bridge manifest
+// clear-missing` does, through a second store on the same database: after a
+// scan that missed its file counted it.
+func clearMissingFromAnotherStore(t *testing.T, s *Store, dbPath string) {
+	t.Helper()
+	ctx := context.Background()
+	mustDelete(t, func() error {
+		_, err := s.IncrementMissingTracksAndDeleteAtThreshold(ctx, []string{pairWinner}, 3)
+		return err
+	})
+	cli, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	if n, err := cli.ClearMissingCounts(ctx); err != nil || n != 1 {
+		t.Fatalf("clear-missing = %d, %v; want the one row", n, err)
+	}
+}
+
+// writeProbe writes a new file under root for a walk to extract.
+func writeProbe(t *testing.T, root string) string {
+	t.Helper()
+	probe := filepath.Join(root, "Probe", "Album", "03 Probe.flac")
+	if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(probe, []byte("probe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return probe
+}
+
+// scanWithTheLoserSuppressedMidWalk runs a full scan and reports whether
+// pairLoser was still suppressed when the walk extracted probe.
+func scanWithTheLoserSuppressedMidWalk(t *testing.T, s *Store, sc *Scanner, probe string) bool {
+	t.Helper()
+	var walked, suppressed atomic.Bool
+	afterExtractHookForTests = func(abs string) {
+		if abs != probe {
+			return
+		}
+		walked.Store(true)
+		var sup int
+		err := s.db.QueryRow(`SELECT dupe_suppressed FROM tracks WHERE path = ?`, pairLoser).Scan(&sup)
+		suppressed.Store(err != nil || sup != 0)
+	}
+	t.Cleanup(func() { afterExtractHookForTests = nil })
+	if _, err := sc.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !walked.Load() {
+		t.Fatal("the walk never extracted the probe file")
+	}
+	return suppressed.Load()
 }
 
 // TestAFullScanWithNoStampedRowDeletedStampsOnce: the pass before the walk
