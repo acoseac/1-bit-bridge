@@ -2650,6 +2650,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		cfg.ListenAddress = *addrOverride
 	}
 
+	// One serve per data dir, decided before anything below writes there
+	// or binds a port (backlog B208): the TLS mint, the token store's
+	// flush, server.pid, the migrations, the batch coordinator's recovery,
+	// the updater's boot marker, the sweepers and the startup scan all
+	// come after this line. Everything above it only reads. Released last,
+	// after every teardown registered below it has run.
+	releaseDataDir, lockErr := lockServeDataDir(cfg.DataDir)
+	var heldErr *serveDataDirHeldError
+	switch {
+	case errors.As(lockErr, &heldErr):
+		fmt.Fprintf(stderr, "serve: %v; stop it first, or give this serve a data dir of its own\n", heldErr)
+		return 1
+	case lockErr != nil:
+		// Never a refusal: a filesystem that keeps no locks must not stop
+		// a bridge from starting. Said once, where the pid file's own
+		// non-fatal failure is said.
+		fmt.Fprintf(stderr, "serve: could not lock %s (%v); serving without the check that no other "+
+			"bridge serve runs on this data dir\n", filepath.Join(cfg.DataDir, serveLockFileName), lockErr)
+	}
+	defer releaseDataDir()
+
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
 	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`
 	// loads its pair with, so init prints the fingerprint serve presents.
