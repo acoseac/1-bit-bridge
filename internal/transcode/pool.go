@@ -245,6 +245,10 @@ type Pool struct {
 	// (tool_unavailable.go). The zero value is ready.
 	outages toolOutages
 
+	// outputs reports the output directories this pool's jobs could not
+	// write, the same way (output_fault.go). The zero value is ready.
+	outputs outputOutages
+
 	// Coalescing publisher (CLAUDE.md: "Bounded SSE publisher
 	// goroutine for transcode events"). Replaces the prior pattern
 	// of spawning a fresh `go fire()` goroutine per state transition,
@@ -1358,6 +1362,16 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			p.outages.fail(tool, job.spec.SourceLibraryRel, msg)
 			return
 		}
+		// A directory this host will not let the job write (the sidecar's
+		// under the variants directory, or the render scratch) is a fact
+		// about the HOST too: counted and announced, no strike, one report
+		// per outage. Striking here suppressed every file rendered into a
+		// root-owned album folder, or onto a read-only variants volume, for
+		// 30 days past the fix (output_fault.go).
+		if fault, ok := unwritableOutput(err); ok {
+			p.outputs.fail(fault, job.spec.SourceLibraryRel, msg)
+			return
+		}
 		// A source that changed after its row was written, found by Run
 		// before it rendered or before it published (source_version.go), is
 		// a fact about the file's VERSION: the job failed, and is counted and
@@ -1379,9 +1393,9 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// One strike against this file version. Only HERE: shutdown is
 		// excluded by the closed check above, the timeout exit is
 		// excluded because a deadline says as much about a hung mount as
-		// about the source, and a missing tool and a changed source by
-		// the two exits just above. A
-		// failed job writes no variant row, so without
+		// about the source, and a missing tool, an output directory this
+		// host refuses and a changed source by the three exits just above.
+		// A failed job writes no variant row, so without
 		// this the candidate queries re-select the same doomed source on
 		// every sweep, forever. Suppression needs `variantFailureThreshold`
 		// CONSECUTIVE strikes on the same (size, mtime), so a transient
@@ -1436,6 +1450,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		_ = os.Remove(sidecarPath)
 		return
 	}
+	// The sidecar is in place and durable, so the places this job wrote
+	// (its sidecar's directory, and a DSD render's scratch) are writable
+	// again: any output outage they end is over. After the fsync, since a
+	// volume failing its writes can still take a rename; before the
+	// store, whose failure says nothing about them.
+	p.outputs.proven(func() []outputWrite { return writtenBy(job.spec, sidecarPath, settings) })
 
 	// Capture the completion instant ONCE so the DB row's CreatedAt
 	// and the SSE event's CompletedAt point to the same wall-clock

@@ -1033,8 +1033,13 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// fsutil.MkdirAll, so a `sudo bridge upscale` over a service install
 	// leaves album directories the service can write (each takes the
 	// owner of the directory it is created in).
-	if err := fsutil.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-		return RunResult{}, fmt.Errorf("mkdir sidecar dir: %w", err)
+	//
+	// Every step here that writes to the variants directory marks its own
+	// failure: a directory this host will not let the job write is a fact
+	// about the host, which strikes no source (output_fault.go).
+	sidecarDir := filepath.Dir(finalPath)
+	if err := fsutil.MkdirAll(sidecarDir, 0o755); err != nil {
+		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("mkdir sidecar dir: %w", err))
 	}
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
@@ -1051,12 +1056,14 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	// sox, not this process, writes the sidecar, so as root it was
-	// root's. Precreated as the install's owner (the replaced
-	// rendition's, or its directory's), it keeps that owner: sox opens
-	// its output with O_TRUNC. A no-op when this process is not root.
-	if err := fsutil.Precreate(tmpPath, 0o666, finalPath); err != nil {
-		return RunResult{}, fmt.Errorf("create sidecar: %w", err)
+	// Created here, before sox runs, so a directory that refuses new files
+	// fails in this process's open, by type, and not in sox's message. sox,
+	// not this process, writes the sidecar, so as root it was root's:
+	// created with the install's owner (the replaced rendition's, or its
+	// directory's), it keeps that owner, since sox opens its output with
+	// O_TRUNC. Nothing on Windows, where sox creates it (createOutput).
+	if err := createOutput(tmpPath, finalPath); err != nil {
+		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("create sidecar: %w", err))
 	}
 
 	switch route {
