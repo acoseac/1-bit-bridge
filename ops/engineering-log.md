@@ -35734,3 +35734,120 @@ makes a 1, and it already reads YEAR when DATE holds none. No wire change, no
 Mirror-PR. B235 (the app's album year is its earliest positive track year, so a
 row sent as 1 sent the album to Unknown) loses its bridge-side cause once the
 v22 re-read reaches the phone.
+
+## 2026-10-02 — the variant sweep deletes a row only while it is still the row it listed (backlog B204)
+
+Found by the pre-v0.2.1 operations review (2026-09-30), whose scratch test
+deleted all 6 rows a `bridge variants move` relocated during a sweep, with
+their files intact at the move's destination.
+
+### The defect
+
+`VariantWatcher.tick` lists the catalog (`AllVariants`), classifies every row
+as listed with `LocateSidecar`, and deletes in pass two the rows whose sidecar
+is at neither location, through `DeleteVariant`, which deletes the row whatever
+it records by then. Pass two asks `LocateSidecar` again just before each delete
+(B203), with the row as listed.
+
+`bridge variants move --to X` is meant to run beside a serving bridge: the
+console's variants panel ("run `bridge variants move --to <path>` to migrate
+them"), its change-path dialog and `bridge doctor`'s `sidecar-paths` hint all
+say so, and neither the command's usage, docs/docker.md nor the runbook says to
+stop the bridge. The move renames each file into X and points its row at it,
+on a store of its own (another process, where `Store.mu` does not reach). A row
+it moved after the tick's listing is, to the tick, a row recorded at its old
+path: the file is gone from there, and its canonical place under the variants
+directory is that same old path (X is not the variants directory yet, or the
+tick began before it was switched), so it reads as gone at both. Moved rows
+arrive a few per tick, under the mass-delete floor of ten, so no guard sees
+them, and the tick deleted each one, bumped its track's `indexed_at` and sent
+`upscale.deleted` to every paired device, with the rendition intact at X.
+
+### Reproduced red-first
+
+`TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated` (cmd/bridge): the
+real `VariantWatcher` over the serve wiring's adapters
+(`integrityVariantListerAdapter`, `integrityVariantReconcilerAdapter`) and a
+real store, forty rows with their sidecars under the variants directory, two of
+them removed by hand (the positive control), and the real `moveOneVariant`, on
+a second `manifest.OpenStore` over the same database as the CLI opens one,
+moving six rows to X in a hook that runs after the tick's listing and before it
+classifies anything. On main af4f4569: report `deleted=8` (the 6 moved rows and
+the 2 controls), the six moved rows gone from the store, their files at X, all
+eight published as deleted.
+
+### The fix
+
+`Store.DeleteVariantIfUnchanged(ctx, VariantRow)`: one statement,
+`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ? AND
+sidecar_path = ? AND size_bytes = ? AND created_at = ?`, in the transaction
+that bumps the parent (`deleteVariantRow`, now the one body behind it and
+`DeleteVariant`). No row removed: nothing written, no bump, and
+`manifest.ErrVariantChanged`. The watcher's reconciler interface takes the
+snapshot (`DeleteVariantIfUnchanged(VariantSnapshot)`), the snapshot carries
+`CreatedAt`, and the tick counts a row the delete refused as `changed` (a new
+`SweepReport` field and summary attribute), logs it at Info (sampled), and
+publishes nothing for it; the next tick lists it as it is now. Measured: with
+the fix the reproduction keeps the six rows (recorded at X, files there) and
+deletes only the two controls, and a second tick finds all 38 rows present.
+
+Why those three columns: they are what the table's writers move.
+`UpdateVariantSidecarPath` (the move, an adoption) rewrites `sidecar_path`;
+`UpsertVariant` (a render) rewrites the row, `created_at` with it, which the
+pool stamps with the completion time in nanoseconds, so a render of an
+unchanged source (same path, same bytes, same size) still compares as another
+row; and the path and the size are what `LocateSidecar`'s verdict was taken
+from, so a row that still records them is a row the verdict is about. A
+`DeleteVariant` or a track's CASCADE leaves no row, which reads the same way.
+
+### Alternatives weighed
+
+- **(a) Re-read the row just before the delete and judge the current one.**
+  Leaves a window between the read and the DELETE, which is exactly where a
+  move's UPDATE can land. The comparison in the DELETE has none, and a row it
+  refuses is judged by the next tick from a fresh listing, which is (a) with
+  no window, an interval later.
+- **(c) Make `variants move` refuse while a bridge answers on the admin port**
+  (`probeBridge`, as `restore` and `manifest clear-missing` do). Declined: the
+  console and `bridge doctor` tell an operator to run the move beside a
+  serving bridge, so a refusal would make the documented migration need
+  downtime and contradict three surfaces; and a probe is a guard, not mutual
+  exclusion (a bridge started during the move is not seen), which is what
+  CLAUDE.md says of the two existing gates.
+- **Compare `indexed_at` as B187 does.** `track_variants` has no version
+  column; the parent track's `indexed_at` moves for writes to the track, not
+  to the variant row (`UpdateVariantSidecarPath` deliberately bumps nothing).
+
+`DeleteVariant` keeps its unconditional delete for its other callers (the
+`upscale --gc` reverse sweep, the serve reap, `DELETE /v1/upscale/variants`),
+unchanged by this entry. Its docblock said it had no production callers
+(#156), false since the watcher landed with one (#209); corrected, with the same claim
+in `TestDeleteVariantBumpsParentIndexedAt`'s docblock and a "same CASE WHEN
+form" comment over a bump that has been `bumpIndexedAtByPathSQL` since #711.
+
+### Tests
+
+- `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated` (above).
+- `TestVariantWatcherKeepsARowThatChangedSinceItsListing` and
+  `TestVariantWatcherSaysNothingAtWarnWhenEveryMissingRowChanged`
+  (internal/integrity): a reconciler answering `ErrVariantChanged`, wrapped,
+  for chosen rows: those are counted as changed, never published, never a
+  Warn; a tick whose every missing row changed summarises at Info.
+- `TestDeleteVariantIfUnchangedDeletesARowStillAsListed` and
+  `TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged`
+  (internal/manifest): the bump on a delete; a case per writer (moved,
+  re-rendered at the same path and size, deleted) and per compared column
+  (the size alone), each answering `ErrVariantChanged` with the row as the
+  writer left it and `indexed_at` unmoved.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: the adapter deletes through `DeleteVariant` again | the reproduction: 6 moved rows deleted, `deleted=8`, 8 published |
+| NC2: the DELETE drops `created_at` | the "re-rendered at the same path and size" case |
+| NC3: the DELETE drops `sidecar_path` | the "moved" case; the reproduction |
+| NC4: the DELETE drops `size_bytes` | the "rewritten at another size" case |
+| NC5: the tick reads `ErrVariantChanged` as a failed delete | both watcher tests (`failed=3` and `failed=5`, a Warn per row); the reproduction (`failed=6`) |
+| NC6: `integritySnapshotsFromRows` drops `CreatedAt` | the reproduction: every delete refused, the two controls kept |
+| NC7: `DeleteVariantIfUnchanged` answers nil on a miss | every changed-row case; the reproduction (the 6 kept rows counted as deleted and published) |
