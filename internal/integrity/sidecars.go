@@ -1063,13 +1063,17 @@ func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]stru
 // default) the walk hands back the name as the directory holds it, which
 // can differ in case from the path the row recorded (CodeRabbit on #477).
 //
-// Composed, because an HFS+ volume stores every name decomposed (NFD),
-// whatever spelling created it, and a walk hands it back that way, while
-// the row records the spelling the file was written by: the library's
-// relative path as the scanner read it, composed (NFC) on most
-// filesystems. APFS keeps the spelling a name was created with and looks
-// either one up, so a tree copied there from HFS+ keeps its decomposed
-// names. Keyed by the case alone, a live rendition on either was an
+// Composed, because an HFS+ volume stores every name decomposed (its own
+// canonical decomposition: NFD but for a few ranges it leaves as they
+// are, Apple's TN1150), whatever spelling created it, and a walk hands it
+// back that way, while the row records the spelling the file was written
+// by: the library's relative path as the scanner read it, composed (NFC)
+// on most filesystems. APFS keeps the spelling a name was created with and
+// looks either one up, so a tree copied there from HFS+ keeps its
+// decomposed names. Every such spelling is canonically equivalent to the
+// name, and NFC turns canonically equivalent strings into one, the ranges
+// HFS+ leaves alone included. Keyed by the case alone, a live rendition on
+// either was an
 // orphan to the forward sweeps while LocateSidecar's stat of the composed
 // path reached it, so `upscale --gc`, `analyze --gc` and the background
 // sweep unlinked it, and it was rendered again (backlog B206, measured on

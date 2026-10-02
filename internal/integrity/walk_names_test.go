@@ -191,8 +191,9 @@ func TestOrphanSidecarSweeperLeavesARecycleBinAndASnapshotAlone(t *testing.T) {
 }
 
 // TestTheKnownSetMatchesASidecarInEitherNormalization — HFS+ stores a name
-// decomposed (NFD) whatever spelling created it, and a walk hands it back
-// that way, while the row records the spelling the file was written by:
+// decomposed (its own canonical decomposition, NFD but for a few ranges)
+// whatever spelling created it, and a walk hands it back that way, while
+// the row records the spelling the file was written by:
 // the library-relative path the scanner read, composed (NFC) on most
 // filesystems. The lookup found the decomposed name in no row, while
 // LocateSidecar's stat of the composed one reached the file, so a live
@@ -313,6 +314,11 @@ func TestKnownSidecarKeyIsOneKeyPerName(t *testing.T) {
 		{norm.NFC.String("/v/CAFÉ/01.flac"), norm.NFD.String("/v/café/01.flac")},
 		{"/v/İstanbul/01.flac", "/v/İstanbul/01.flac"},
 		{"/v/Album/../Album/01.flac", "/v/album/01.flac"},
+		// Characters in ranges HFS+ leaves undecomposed (TN1150): a CJK
+		// compatibility ideograph and the angstrom sign, each beside the
+		// spelling NFC gives it.
+		{"/v/豈/01.flac", "/v/豈/01.flac"},
+		{"/v/Å/01.flac", "/v/Å/01.flac"},
 	}
 	for _, p := range same {
 		if a, b := KnownSidecarKey(p[0]), KnownSidecarKey(p[1]); a != b {

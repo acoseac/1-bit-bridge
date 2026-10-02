@@ -36186,10 +36186,16 @@ The forward sweeps (the background `OrphanSidecarSweeper`, `bridge upscale
 variants-index count) build a known set from the rows and look every walked
 file up in it. The keys were `strings.ToLower(filepath.Clean(p))`: case-folded,
 for case-insensitive filesystems (CodeRabbit on #477, Gemini on #395), and
-nothing else. An HFS+ volume stores every name decomposed (NFD) whatever
-spelling created it, and a walk hands it back that way; the row records the
-spelling the file was written by, the library-relative path as the scanner read
-it, composed (NFC) wherever the library is not itself on HFS+. Measured with a
+nothing else. An HFS+ volume stores every name decomposed whatever spelling
+created it (its own canonical decomposition: NFD but for the ranges Apple's
+TN1150 leaves as they are, U+2000 to U+2FFF, U+F900 to U+FAFF and U+2F800 to
+U+2FAFF; CodeRabbit on #1141), and a walk hands it back that way; the row
+records the spelling the file was written by, the library-relative path as the
+scanner read it, composed (NFC) wherever the library is not itself on HFS+.
+Every such spelling is canonically equivalent to the name, and NFC turns
+canonically equivalent strings into one, so the ranges HFS+ leaves alone need
+nothing of their own (a CJK compatibility ideograph HFS+ keeps composes to the
+unified ideograph its row's spelling composes to). Measured with a
 probe on this Mac: a name created composed lists decomposed on the HFS+ image,
 composed on APFS, and a stat of the composed spelling finds the file on both.
 APFS keeps whatever bytes a name was created with, so a tree copied there from

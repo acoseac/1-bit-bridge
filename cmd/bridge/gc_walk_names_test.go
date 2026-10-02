@@ -118,7 +118,7 @@ func seedVariantCopies(t *testing.T, variantsDir, to string) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && strings.HasPrefix(d.Name(), "#") {
+		if p != variantsDir && d.IsDir() && strings.HasPrefix(d.Name(), "#") {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
@@ -138,8 +138,9 @@ func seedVariantCopies(t *testing.T, variantsDir, to string) {
 }
 
 // TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization — on an
-// HFS+ volume a file comes back from a walk decomposed (NFD) whatever
-// spelling created it, while its row records the spelling it was written
+// HFS+ volume a file comes back from a walk decomposed (HFS+'s own
+// canonical decomposition, NFD but for a few ranges) whatever spelling
+// created it, while its row records the spelling it was written
 // by, composed (NFC) on most filesystems. Both `--gc` sweeps keyed the
 // known set on the case-folded path alone, so the file was an orphan and
 // was unlinked (measured on main), while the row stayed (a stat of the

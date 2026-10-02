@@ -3483,11 +3483,14 @@ no failing test — which is the shape to expect in this area.
 - **…and a forward sweep compares a walked file with its rows in ONE
   spelling, `integrity.KnownSidecarKey`: cleaned, NFC-composed, THEN
   lowercased** (2026-10-02, backlog B206). HFS+ stores every name
-  decomposed (NFD) whatever spelling created it, and APFS keeps a
-  decomposed name it is given (a tree copied from HFS+) while looking
-  either spelling up, so a walk handed back NFD where the row recorded the
-  composed spelling the file was written by: `LocateSidecar`'s stat reached
-  the file and the forward sweeps read it as an orphan. Measured on an
+  decomposed whatever spelling created it (its own canonical
+  decomposition: NFD but for a few ranges it leaves as they are, TN1150),
+  and APFS keeps a decomposed name it is given (a tree copied from HFS+)
+  while looking either spelling up, so a walk handed back a decomposed name
+  where the row recorded the composed spelling the file was written by:
+  `LocateSidecar`'s stat reached the file and the forward sweeps read it as
+  an orphan. Every such spelling is canonically equivalent to the name, so
+  NFC makes them one string, the ranges HFS+ leaves alone included. Measured on an
   hdiutil HFS+ image: the background sweep, `upscale --gc` and `analyze
   --gc` each unlinked a live file written by its row's own path, and `--gc`
   then reaped the row, so it was rendered again. **Every known set and the
