@@ -915,8 +915,8 @@ type upscaleEnqueuerAdapter struct {
 	// scan.
 	rescan func(rel string)
 	// diskFree probes a volume's free space for the pre-flight
-	// (roomForRendition); nil is transcode.AvailableDiskSpaceNearest. A
-	// seam, as the auto-optimize sweeper's diskFree is.
+	// (roomForRendition); nil is quietDiskFree. A seam, as the auto-optimize
+	// sweeper's diskFree is.
 	diskFree func(dir string) (int64, error)
 	// sameVolume answers whether the variants directory and the render
 	// scratch are on one volume, for the same pre-flight; nil is
@@ -1121,7 +1121,7 @@ func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error 
 func (a *upscaleEnqueuerAdapter) roomOn(dir string, need int64) error {
 	free := a.diskFree
 	if free == nil {
-		free = transcode.AvailableDiskSpaceNearest
+		free = quietDiskFree
 	}
 	have, err := free(dir)
 	if err != nil {
@@ -1133,6 +1133,15 @@ func (a *upscaleEnqueuerAdapter) roomOn(dir string, need int64) error {
 		})
 	}
 	return nil
+}
+
+// quietDiskFree is transcode.AvailableDiskSpaceNearest without its warning
+// about a missing directory: the on-demand pre-flight runs per request, and
+// a variants directory or a render scratch nothing has written yet is missing
+// on every request until the first render makes it. The sweep and the batch,
+// which probe once a pass, keep the warning.
+func quietDiskFree(dir string) (int64, error) {
+	return transcode.AvailableDiskSpace(transcode.NearestExistingDir(dir))
 }
 
 // buildOptimizeSpec runs the optimize-kind eligibility gate against

@@ -133,7 +133,7 @@ func ProjectedSize(
 // the wrong (parent) volume.
 func AvailableDiskSpaceNearest(dir string) (int64, error) {
 	dir = filepath.Clean(dir)
-	probe := nearestExisting(dir)
+	probe := NearestExistingDir(dir)
 	if probe != dir {
 		logger.Warn("disk probe: directory missing; probing nearest existing ancestor",
 			"dir", dir, "ancestor", probe)
@@ -141,9 +141,13 @@ func AvailableDiskSpaceNearest(dir string) (int64, error) {
 	return AvailableDiskSpace(probe)
 }
 
-// nearestExisting is the directory a probe of the cleaned dir reads: dir
-// itself, or its closest existing ancestor while dir does not exist.
-func nearestExisting(dir string) string {
+// NearestExistingDir is the directory AvailableDiskSpaceNearest probes for
+// dir: dir itself, cleaned, or its closest existing ancestor while dir does
+// not exist. It logs nothing, for a caller that probes on every request
+// (the on-demand pre-flight), where a directory nothing has written yet is
+// missing on every request until the first render makes it.
+func NearestExistingDir(dir string) string {
+	dir = filepath.Clean(dir)
 	probe := dir
 	for {
 		_, err := os.Stat(probe)
@@ -176,11 +180,11 @@ func nearestExisting(dir string) string {
 // DSD render's Stage A scratch and its rendition, which it holds at once)
 // adds them on one volume.
 func SameVolume(a, b string) (bool, error) {
-	va, err := volumeID(nearestExisting(filepath.Clean(a)))
+	va, err := volumeID(NearestExistingDir(a))
 	if err != nil {
 		return false, err
 	}
-	vb, err := volumeID(nearestExisting(filepath.Clean(b)))
+	vb, err := volumeID(NearestExistingDir(b))
 	if err != nil {
 		return false, err
 	}

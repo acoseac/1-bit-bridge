@@ -3343,7 +3343,11 @@ no failing test — which is the shape to expect in this area.
   are one volume**, `transcode.SameVolume`, each judged where the probe judges
   it: a DSD render holds its scratch while Stage C writes the rendition;
   CodeRabbit on #1145); a refusal is `api.ErrUpscaleNoRoom`, rejected, one
-  Warn per request, no wire change. **A stand-in sox that "renders" writes a whole
+  Warn per request, no wire change. **It probes without the missing-directory
+  warning** (`quietDiskFree`, `transcode.NearestExistingDir`): it runs per
+  request, and a variants directory or a render scratch nothing has written
+  yet is missing on every request until the first render makes it; the sweep
+  and the batch, which probe once a pass, keep it. **A stand-in sox that "renders" writes a whole
   FLAC** (`internal/flactest`, `shWrites`): a payload like `fLaC` is refused
   now. Tests: `TestARenditionThatCouldNotBeWrittenWholeIsNotPublished` (real
   tools on a full volume: an HFS+ image on macOS, `BRIDGE_TEST_SMALL_VOLUME`
@@ -3356,6 +3360,7 @@ no failing test — which is the shape to expect in this area.
   `TestACutStreamIsNotWhole`,
   `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
   `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+  `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`,
   `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing

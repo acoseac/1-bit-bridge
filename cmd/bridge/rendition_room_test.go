@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
@@ -83,8 +84,8 @@ func (tc roomCase) run(t *testing.T) {
 	} else {
 		f.seed(t, rel, "FLAC", 96000, 24, false, "", 0, 0)
 	}
-	var scratchProbed bool
-	f.a.diskFree = tc.probe(t, f.a.outputDir(), transcode.RenderScratchDir(f.a.renderTempDir()), &scratchProbed)
+	var variantsProbed, scratchProbed bool
+	f.a.diskFree = tc.probe(t, f.a.outputDir(), transcode.RenderScratchDir(f.a.renderTempDir()), &variantsProbed, &scratchProbed)
 	f.a.sameVolume = func(string, string) (bool, error) {
 		if tc.compareFails {
 			return false, errors.New("stat: input/output error")
@@ -101,16 +102,23 @@ func (tc roomCase) run(t *testing.T) {
 	if scratchProbed != tc.scratchProbed {
 		t.Errorf("the render scratch was probed = %v, want %v", scratchProbed, tc.scratchProbed)
 	}
+	// An earlier gate can answer as the pool does (EnqueueOne reads a stopped
+	// pool as a missing source), so an outcome the pre-flight decided needs
+	// the variants volume probed.
+	if (tc.want == roomQueued || tc.want == roomRefused) && !variantsProbed {
+		t.Error("the variants volume was never probed")
+	}
 }
 
 // probe is the free-space probe a row reports: its two volumes' free bytes,
-// or its failure.
-func (tc roomCase) probe(t *testing.T, variantsDir, scratchDir string, scratchProbed *bool) func(string) (int64, error) {
+// or its failure. It notes which volumes were asked.
+func (tc roomCase) probe(t *testing.T, variantsDir, scratchDir string, variantsProbed, scratchProbed *bool) func(string) (int64, error) {
 	return func(dir string) (int64, error) {
 		switch {
 		case tc.probeFails:
 			return 0, errors.New("statfs: input/output error")
 		case strings.HasPrefix(dir, variantsDir):
+			*variantsProbed = true
 			return tc.variants, nil
 		case dir == scratchDir:
 			*scratchProbed = true
@@ -144,16 +152,40 @@ func TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition(t *testing.T
 	if both := transcode.RequiredBytesWithMargin(projected+scratch, margin); projected <= 0 || both <= each {
 		t.Fatalf("premise: projected %d and scratch %d need %d together, more than the %d each needs alone", projected, scratch, both, each)
 	}
-	f.a.diskFree = func(string) (int64, error) { return each, nil }
+	var probes int
+	f.a.diskFree = func(string) (int64, error) { probes++; return each, nil }
 	for _, shared := range []bool{false, true} {
 		f.a.sameVolume = func(string, string) (bool, error) { return shared, nil }
+		probes = 0
 		err := f.a.EnqueueOptimize(rel)
-		want := roomQueued
+		want, wantProbes := roomQueued, 2 // two volumes, each probed
 		if shared {
-			want = roomRefused
+			want, wantProbes = roomRefused, 1 // one volume, probed once for the sum
 		}
-		if got := roomOutcomeOf(err); got != want {
-			t.Errorf("one volume = %v: enqueue = %v, outcome %d; want %d", shared, err, got, want)
+		if got := roomOutcomeOf(err); got != want || probes != wantProbes {
+			t.Errorf("one volume = %v: enqueue = %v, outcome %d after %d probe(s); want %d after %d", shared, err, got, probes, want, wantProbes)
 		}
+	}
+}
+
+// TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet: the
+// pre-flight runs per request, and before the first render makes them the
+// variants directory and the render scratch are missing on every request,
+// so it probes their closest existing ancestors without the warning the
+// sweep's and the batch's probe logs once a pass.
+func TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet(t *testing.T) {
+	logs := loggingtest.Record(t)
+	f := newAdapterFixture(t).withCaps(capsDSD)
+	const rel = "A/DSD/01.dsf"
+	f.seed(t, rel, "DSF", 2822400, 1, true, "", 300, 2)
+	f.a.tempDir = func() string { return filepath.Join(t.TempDir(), "not-yet") }
+	f.a.sameVolume = func(string, string) (bool, error) { return false, nil } // probe both
+	for range 3 {
+		if err := f.a.EnqueueOptimize(rel); roomOutcomeOf(err) != roomQueued {
+			t.Fatalf("enqueue = %v, want the job to reach the pool", err)
+		}
+	}
+	if lines := logs.Lines("disk probe: directory missing; probing nearest existing ancestor"); len(lines) != 0 {
+		t.Errorf("the per-request pre-flight warned about a missing directory:\n%s", strings.Join(lines, "\n"))
 	}
 }

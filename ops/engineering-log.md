@@ -37335,6 +37335,8 @@ held exactly because its reference is the chain's own intermediate.
 | one volume checked as two (round 1) | room for each need and not both refused only on two volumes; one volume with room for both probes the scratch |
 | `SameVolume` always true (round 1) | another volume (`/dev`) |
 | `SameVolume` without the ancestor walk (round 1) | a directory that does not exist yet |
+| the warning probe per request (round 2) | the quiet pre-flight test |
+| no on-demand pre-flight (round 2, again) | every row of the room table, the queued ones included ("the variants volume was never probed") |
 
 ### Review round 1
 
@@ -37361,3 +37363,25 @@ held exactly because its reference is the chain's own intermediate.
   tests share `standInsWriting`, `checkRunVerdict`, `checkStruck` and
   `checkOutputFault`. No behaviour moved: every B264 test passes before and
   after.
+
+### Review round 2
+
+- CodeRabbit (on a79cc399): `roomOutcomeOf` read `api.ErrUpscaleSourceMissing`
+  as a queued job, and an earlier gate can answer it (`EnqueueOne` reads a
+  stopped pool that way), so a queued row could pass without the pre-flight
+  having run. Taken: the room table notes which volumes were probed and
+  requires the variants volume for every queued or refused row, and the
+  one-volume test counts the probes (two on two volumes, one for the sum).
+  With the pre-flight removed, the queued rows went red too.
+- CodeRabbit asked that the disk-probe warning
+  (`AvailableDiskSpaceNearest`'s "directory missing") name no absolute path.
+  Its text is unchanged from main, where the sweep's and the batch's probe
+  log it once a pass; changing it is outside B264. What this change did to
+  it was call it per request: before the first render makes them, the
+  variants directory and the render scratch are missing on every request.
+  The on-demand pre-flight now probes their closest existing ancestors
+  without the warning (`quietDiskFree`, over the exported
+  `transcode.NearestExistingDir`, which `AvailableDiskSpaceNearest` and
+  `SameVolume` share);
+  `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`
+  went red with the warning probe put back.
