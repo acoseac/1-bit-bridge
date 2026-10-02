@@ -37029,6 +37029,117 @@ pre-existing cost of `tracks_fts_ad`, reported as a follow-up.
   the database) and never reads the count; the first scan of the newer binary
   then restamps once.
 
+## 2026-10-02 — A sweep loop whose cadence is 0 parks before its boot pass, so `backup.intervalHours: 0` takes no snapshot at boot (backlog B209)
+
+### The defect
+
+`runSweepLoop`, the loop the backup ticker, the analysis, fingerprint and
+auto-optimize sweepers and the smart-mix regenerator share, ran its first pass
+as soon as its settle delay ended and read the interval only after, to arm the
+next wait. #769 (the cadence conversion) started the backup ticker on every
+bridge, so that `backupIntervalHours: 0 → N` had a loop alive to notice, and
+from then on a bridge whose operator set `backup.intervalHours: 0` took the
+startup snapshot at every boot and pruned the backups directory to
+`backup.keep`. The config doc (`0 → disabled`), runServe's comment ("we skip
+the goroutine in that case", true before #769) and the settings matrix ("parks
+when the interval is 0") all said it parks. `TestMatrixDocMatchesWhatTheHandlerReports`
+passed throughout: it checks what the PATCH reports, not what the loop does.
+`TestSweepLoopDormantIntervalIsResumable` asserted the boot pass at 0 ("want 1
+(the initial one only)").
+
+### Reproduced red-first
+
+- Through the real serve (`TestServeWithBackupsOffTakesNoSnapshotAndFollowsItsCadenceLive`,
+  booted with `backup:\n  intervalHours: 0`): `backup (startup): wrote
+  …/data/backups/2026-10-02T16-31-26Z` 0.15 s into the test, the snapshot on
+  disk, and the Jobs card showing a pass started.
+- Through `runBackupTicker` on the real snapshot code, two old snapshots and a
+  keep of 1 (`TestABackupTickerWhoseCadenceIsOffTakesNoPassUntilItIsSwitchedOn`):
+  `backup (startup): wrote …` and `backup (startup): pruned 2 older
+  snapshot(s)` before the loop's second read of its interval.
+
+### Every loop on runSweepLoop, and which can be 0
+
+| Loop | Cadence | Can it be 0? |
+|---|---|---|
+| backup ticker | `backup.EffectiveIntervalHours()` | yes, `intervalHours: 0` (the defect) |
+| analysis sweeper | `Config.ScanInterval()` | no: `Validate` keeps `scanIntervalSec` in 1..max |
+| auto-optimize | `Config.AutoOptimizeInterval()` | no: a value ≤ 0 inherits `scanIntervalSec` |
+| fingerprint | `EffectiveSweepInterval()` | no: 0 reads as 6 h |
+| smart mixes | `EffectiveRegenerateInterval()` | no: 0 reads as 24 h |
+
+Not on the loop: the integrity watchers (variant integrity, orphan GC) are
+built only when their interval is positive (boot-time knobs, not on the
+settings page); the artwork cache sweeper only with a cap; the scanner's
+`RunPeriodic`, the updater's poll and the UPnP ingest loop all read a 0 as
+their default or are validated to 1 or more. So the fix is in the shared loop,
+and only the backup ticker's behaviour moves. No loop intends a boot pass at a
+cadence of 0: before #769 the backup goroutine was not started at 0, and no
+other caller ever passed 0.
+
+### The fix
+
+- `runSweepLoop` reads the interval first and takes the boot pass only when it
+  is positive. The nudge drain moved inside that branch: a nudge from the
+  settle window is covered by the boot pass, and with no boot pass it is a
+  request nothing has covered, so the loop's select serves it.
+- Each pass is told whether it is the boot pass (`sweep func(boot bool)`). The
+  backup ticker's startup snapshot skips when a snapshot exists within 24 h,
+  and its own "first call" flag would have taken the first scheduled pass
+  after a dormant boot and a `0 → N` rearm for the startup one, skipping it
+  when the operator's last snapshot was recent (an hourly cadence's first
+  snapshot). The other four ignore the flag.
+- Comments corrected: runServe's, `runBackupTicker`'s, `BackupConfig`'s and the
+  matrix row.
+
+### Alternatives weighed
+
+- **Gate the backup closure alone** (skip the first call when the interval
+  reads 0): fixes this symptom and leaves the shape for the next caller whose
+  cadence can be 0, and needs a second read of the interval beside the loop's.
+- **Read the interval in `runBackupTicker` to decide the startup label**: two
+  reads of one setting where the loop's one decides; a PATCH between them
+  mislabels one pass. The loop knows which pass is the boot pass, so it says.
+
+### Tests
+
+- `TestServeWithBackupsOffTakesNoSnapshotAndFollowsItsCadenceLive`: the real
+  serve at 0, then `0 → 1` and `1 → 0` through `PATCH /api/settings`, asking
+  the loop (the Jobs card's next run: armed, then cleared), not the report. No
+  snapshot, no `backup (` line, no pass on the card at any step. The PATCH
+  cannot reach the loop before its boot decision: runServe starts its
+  goroutine about 2,000 lines before the console serves (main.go 3210
+  against 5229 on the branch), with no settle delay.
+- `TestABackupTickerWhoseCadenceIsOffTakesNoPassUntilItIsSwitchedOn`: phase
+  one as above; phase two puts a snapshot an hour old in place, switches the
+  cadence on (20 ms and a rearm) and requires the first pass to print `backup
+  (scheduled): wrote`, never the startup pass's skip.
+- `TestSweepLoopDormantIntervalIsResumable` (rewritten: no boot pass at 0, the
+  first pass after re-enabling is not the boot pass),
+  `TestSweepLoopDormantServesANudgeFromTheSettleWindow` (new),
+  `TestSweepLoopRereadsIntervalEveryIteration` (now also pins the flag).
+- `TestRunAutoOptimizeSweeperSweepsOnNudge` used an interval of 0 to mean
+  "nudge-only" and relied on the boot pass at 0; it uses an hour now, as the
+  analysis sweeper's tests do. No production cadence of that loop is 0.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Control | Red |
+|---|---|
+| Boot pass and drain unconditional again (main's shape) | the serve test, the ticker test (both phases), the dormant-resumable test, the settle-window nudge test |
+| Drain unconditional, boot pass gated | the settle-window nudge test alone (timed out: the nudge was lost) |
+| Backup closure back on its own "first call" flag | the ticker test's second phase alone (`recent snapshot … — skipping`) |
+| Boot pass told `false` | the flag pin in `TestSweepLoopRereadsIntervalEveryIteration`, and three existing ticker tests that expect `backup (startup)` |
+| Periodic and nudge passes told `true` | the flag pin, the dormant-resumable and settle-window tests, the ticker test's second phase |
+| The backup rearm unwired in runServe | the serve test (the loop never armed after `0 → 1`) |
+
+### Residuals
+
+- A bridge that boots with backups on and is switched off keeps the startup
+  snapshot it already took; switching off is a schedule change, not an undo.
+- `0 → N` takes the first snapshot N later, by the rearm rule; a restart takes
+  one at once (the startup pass, unless a recent one exists).
+
 ## 2026-10-02 — a rendition is published only whole, read from its frames, whatever the tool's exit status (backlog B264)
 
 Found by the B211 session (#1142) measuring sox on a full volume: sox 14.4.2

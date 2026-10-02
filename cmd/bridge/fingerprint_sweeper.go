@@ -145,7 +145,7 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // which is worse than the card looking stale: it says the feature is
 // doing something.
 func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
-	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func() {
+	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func(bool) {
 		if enabled != nil && !enabled() {
 			return
 		}

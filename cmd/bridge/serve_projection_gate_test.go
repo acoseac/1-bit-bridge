@@ -139,8 +139,19 @@ func patchUpscaleEnabled(t *testing.T, client *http.Client, adminBase string, on
 // requires the report to call the change live.
 func patchSwitchLive(t *testing.T, client *http.Client, adminBase, field string, on bool, stderr *safeBuffer) {
 	t.Helper()
+	patchSettingLive(t, client, adminBase, field, on, stderr)
+}
+
+// patchSettingLive sets one field of the settings PATCH to value and
+// requires the report to call the change live.
+func patchSettingLive(t *testing.T, client *http.Client, adminBase, field string, value any, stderr *safeBuffer) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{field: value})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPatch, adminBase+"/api/settings",
-		strings.NewReader(fmt.Sprintf(`{%q:%t}`, field, on)))
+		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +163,7 @@ func patchSwitchLive(t *testing.T, client *http.Client, adminBase, field string,
 	raw, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PATCH /api/settings {%s:%t} = %d: %s", field, on, resp.StatusCode, raw)
+		t.Fatalf("PATCH /api/settings %s = %d: %s", body, resp.StatusCode, raw)
 	}
 	var report struct {
 		Fields map[string]struct {

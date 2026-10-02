@@ -699,7 +699,7 @@ func (s *analysisSweeper) active() bool { return s != nil && s.enabled != nil &&
 // fingerprintSweeper and autoOptimizeSweeper already use in this package,
 // and what keeps this entry point inside the parameter budget.
 func runAnalysisSweeper(ctx context.Context, s *analysisSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
-	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, rearm, func() {
+	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, rearm, func(bool) {
 		if !s.active() {
 			return
 		}

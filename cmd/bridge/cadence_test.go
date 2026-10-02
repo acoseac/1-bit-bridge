@@ -38,10 +38,13 @@ import (
 // restart. Here the provider hands out a long interval first and a short
 // one afterwards; if the loop cached the first value the second sweep
 // never arrives inside the deadline.
+//
+// It also pins what the loop tells each pass: the settle-delay sweep is the
+// boot pass, and a periodic one is not.
 func TestSweepLoopRereadsIntervalEveryIteration(t *testing.T) {
 	var reads atomic.Int64
 	interval := func() time.Duration {
-		// First read (the pre-sweep scheduleNext) and second (the first
+		// First read (the boot pass's decision) and second (the first
 		// wait) are long; everything after is short. A cached provider
 		// parks on the long one forever.
 		if reads.Add(1) <= 2 {
@@ -50,15 +53,15 @@ func TestSweepLoopRereadsIntervalEveryIteration(t *testing.T) {
 		return 5 * time.Millisecond
 	}
 
-	sweeps := make(chan struct{}, 8)
+	sweeps := make(chan bool, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	rearm := make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, interval, nil, rearm, func() {
+		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, interval, nil, rearm, func(boot bool) {
 			select {
-			case sweeps <- struct{}{}:
+			case sweeps <- boot:
 			default:
 			}
 		})
@@ -66,11 +69,15 @@ func TestSweepLoopRereadsIntervalEveryIteration(t *testing.T) {
 	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
 	// The settle-delay sweep.
-	waitSweep(t, sweeps, "initial")
+	if boot := waitSweep(t, sweeps, "initial"); !boot {
+		t.Error("the settle-delay sweep was not told it is the boot pass")
+	}
 	// The loop is now parked on the 1 h wait it read. Rearm it: the next
 	// read returns 5 ms, so a periodic sweep must follow shortly.
 	rearm <- struct{}{}
-	waitSweep(t, sweeps, "after the interval shortened")
+	if boot := waitSweep(t, sweeps, "after the interval shortened"); boot {
+		t.Error("a periodic sweep was told it is the boot pass")
+	}
 }
 
 // TestSweepLoopRearmDoesNotSweep pins the distinction between the two
@@ -86,7 +93,7 @@ func TestSweepLoopRearmDoesNotSweep(t *testing.T) {
 	go func() {
 		defer close(done)
 		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, staticInterval(time.Hour), nil, rearm,
-			func() { sweeps.Add(1) })
+			func(bool) { sweeps.Add(1) })
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
@@ -109,10 +116,16 @@ func TestSweepLoopRearmDoesNotSweep(t *testing.T) {
 // no nudge was wired, so "disabled" was terminal for the process: an
 // operator setting backup.intervalHours back to 24 had no loop alive to
 // notice. Parking instead is what makes the field hot in both directions.
+//
+// And a loop dormant from the start takes no boot pass (backlog B209).
+// This test asserted the opposite until 2026-10-02 ("want 1 (the initial
+// one only)"), the defect written down as intended: since #769 started the
+// backup ticker on every bridge, that initial sweep was a snapshot and a
+// prune at every boot of a bridge whose backups were switched off. The
+// first pass after re-enabling is a periodic one, never the boot pass.
 func TestSweepLoopDormantIntervalIsResumable(t *testing.T) {
-	var d atomic.Int64
-	d.Store(0) // dormant
-	var sweeps atomic.Int64
+	var d, reads atomic.Int64 // d 0: dormant
+	sweeps := make(chan bool, 8)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	rearm := make(chan struct{}, 1)
@@ -120,21 +133,57 @@ func TestSweepLoopDormantIntervalIsResumable(t *testing.T) {
 	go func() {
 		defer close(done)
 		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0,
-			func() time.Duration { return time.Duration(d.Load()) }, nil, rearm,
-			func() { sweeps.Add(1) })
+			func() time.Duration { reads.Add(1); return time.Duration(d.Load()) }, nil, rearm,
+			func(boot bool) { sweeps <- boot })
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
-	waitFor(t, func() bool { return sweeps.Load() == 1 }, "initial sweep")
-	time.Sleep(60 * time.Millisecond)
-	if got := sweeps.Load(); got != 1 {
-		t.Fatalf("sweeps = %d while dormant, want 1 (the initial one only)", got)
+	// The loop reads its interval where it decides on the boot pass and
+	// again where it parks, so a second read says it has parked.
+	waitFor(t, func() bool { return reads.Load() >= 2 }, "the loop to park")
+	if got := len(sweeps); got != 0 {
+		t.Fatalf("sweeps = %d while dormant from the start, want 0: a cadence that is off takes no boot pass", got)
 	}
 
 	// Re-enable. Without the parked loop there is nothing here to wake.
 	d.Store(int64(5 * time.Millisecond))
 	rearm <- struct{}{}
-	waitFor(t, func() bool { return sweeps.Load() >= 2 }, "sweep after re-enabling")
+	if boot := waitSweep(t, sweeps, "a sweep after re-enabling"); boot {
+		t.Error("the first sweep after re-enabling was told it is the boot pass")
+	}
+}
+
+// TestSweepLoopDormantServesANudgeFromTheSettleWindow pins the drain's other
+// half. A nudge that lands in the settle window is drained because the boot
+// pass covers it; a loop dormant at the end of that window takes no boot
+// pass, so the nudge is a request nothing has covered, and it gets a sweep
+// of its own. Drained there, as it was before the boot pass learned to
+// stand down, it would be lost.
+func TestSweepLoopDormantServesANudgeFromTheSettleWindow(t *testing.T) {
+	var reads atomic.Int64
+	sweeps := make(chan bool, 8)
+	nudge := make(chan struct{}, 1)
+	nudge <- struct{}{} // lands before the settle window ends
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0,
+			func() time.Duration { reads.Add(1); return 0 }, nudge, nil,
+			func(boot bool) { sweeps <- boot })
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
+
+	// The boot decision, the first park and the park after the nudge's
+	// sweep: three reads.
+	waitFor(t, func() bool { return reads.Load() >= 3 }, "the loop to serve the nudge and park again")
+	if got := len(sweeps); got != 1 {
+		t.Fatalf("sweeps = %d, want 1: the nudge's", got)
+	}
+	if boot := <-sweeps; boot {
+		t.Error("the nudge's sweep was told it is the boot pass")
+	}
 }
 
 // TestSweepLoopDormantClearsScheduledNext — a stale "next run at 14:00"
@@ -151,7 +200,7 @@ func TestSweepLoopDormantClearsScheduledNext(t *testing.T) {
 	go func() {
 		defer close(done)
 		runSweepLoop(ctx, status, 0,
-			func() time.Duration { return time.Duration(d.Load()) }, nil, rearm, func() {})
+			func() time.Duration { return time.Duration(d.Load()) }, nil, rearm, func(bool) {})
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
@@ -170,12 +219,16 @@ func TestSweepLoopDormantClearsScheduledNext(t *testing.T) {
 
 // --- helpers ---
 
-func waitSweep(t *testing.T, ch <-chan struct{}, what string) {
+// waitSweep waits for a sweep on ch and gives what the loop told it: whether
+// it is the boot pass.
+func waitSweep(t *testing.T, ch <-chan bool, what string) bool {
 	t.Helper()
 	select {
-	case <-ch:
+	case boot := <-ch:
+		return boot
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for %s", what)
+		return false
 	}
 }
 

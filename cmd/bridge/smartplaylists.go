@@ -42,7 +42,7 @@ var smartPlaylistSettleDelay = 120 * time.Second
 // effect, since analysisActiveFn folds in the 30 s-TTL probe.
 func runSmartPlaylistRegenerator(ctx context.Context, store *manifest.Store, analysisActive func() bool, enabled func() bool, interval func() time.Duration, rearm <-chan struct{}, status *sweepStatus[struct{}]) {
 	on := func() bool { return enabled == nil || enabled() }
-	regen := func() {
+	regen := func(bool) {
 		// Checked per run, not once at startup: the toggle hot-applies,
 		// and a regenerator that captured the boot value would keep
 		// writing families to a store the API has stopped serving.
