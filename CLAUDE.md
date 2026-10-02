@@ -6763,15 +6763,72 @@ mentions across the four `ops/audit-*.md` files.
   source: this package's commentary names what it discusses, so a text scan
   reports its own docblock.
 
+- **One `bridge serve` per data dir, decided before its first write: runServe
+  takes an exclusive kernel lock on `<dataDir>/server.lock`
+  (`lockServeDataDir`, over `fsutil.TryLock`) right after the read-only config
+  checks, ahead of the TLS mint, the token store, `server.pid`, the
+  migrations, the updater's boot marker and every sweeper** (2026-10-02,
+  backlog B208). A second serve of a live data dir ran all its wiring and
+  failed only at the bind. Measured with two runServes on one data dir: its
+  batch coordinator's `RecoverInterruptedBatches` marked the live bridge's
+  running batch `interrupted` for good, its exit removed the live bridge's
+  `server.pid` (so `bridge doctor` then FAILed the live bridge's own ports)
+  and rewrote `tokens.json`, and a second serve on ports of its own (`--addr`,
+  another config naming the data dir) never failed at all: two bridges served
+  one database. Now it exits 1 at once, naming the data dir and the pid
+  `server.pid` records, having written nothing in the data dir. **The lock
+  needs the data dir, which comes from the config**, so the one write that
+  can come before it is `--init-if-missing`'s seed config, made only where
+  no config file exists, which is never the config a live bridge loaded;
+  building the seed in memory to lock first would copy `Load`'s env and
+  path resolution (declined on #1140). **Only a lock another serve
+  HOLDS refuses**: any other failure (a filesystem that keeps no locks answers
+  ENOLCK or EOPNOTSUPP; a lock file this user cannot open) prints one line and
+  serves without the check, since a lock that cannot be taken must not stop a
+  bridge from starting. **A kernel lock, not a lock FILE**: the kernel drops it
+  with the process however it exits, a SIGKILL included (measured on macOS,
+  Linux and Windows), so the stale-lockfile objection the next bullet records
+  is not about it. The file stays: never unlink a held lock file, or a later
+  serve locks a new file at the same path beside the old holder. **flock and
+  LockFileEx, never fcntl**: the lock belongs to the OPEN FILE, so a second
+  runServe in the same process (the launcher menu, every serve test) is
+  refused as well, where fcntl's per-process record locks would let it
+  through. **Released by runServe's own defer, after every teardown registered
+  below it** (the writer joins, the store close, the pid file's removal), and
+  never left to the `*os.File`'s finalizer, which closes a file nothing
+  references, and so releases its lock, at whatever collection finds it while
+  the serve still serves (`TestServeFreesTheDataDirWhenItReturns` runs with
+  automatic collection off for that reason). On Windows the release unlocks
+  before it closes (a close's release may lag), and the locked range refuses
+  other handles' reads, so nothing reads `server.lock`. **The lock file opens
+  through the data dir's `os.Root`**: `Precreate`'s O_EXCL refuses a link at
+  that path and a plain open then follows it, so a serve run as root would
+  create or lock whatever file a planted link names, as root; through the
+  root a link out of the data dir is an error (warned, not a refusal).
+  **Not the listeners
+  first**: binding before the wiring would refuse nothing on ports of its own.
+  And **`server.pid` is removed only while it names this process**
+  (`removeServerPIDFile`), for a serve that ran without the lock. Tests:
+  `TestASecondServeOfALiveDataDirChangesNothing` (both shapes, red on main on
+  every check), `TestServeStartsWhereTheDataDirCannotBeLocked`,
+  `TestServeFreesTheDataDirWhenItReturns`,
+  `TestRemoveServerPIDFileKeepsAnotherProcesssRecord`,
+  `TestServeLockFileKeepsTheInstallOwnerAsRoot` (as root, on dido: a lock
+  file `sudo bridge serve` left root's would lock the service user out of
+  the check), `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed`, and
+  fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
+  `TestALockDiesWithTheProcessThatHeldIt`.
 - **A write gate on a second process is a GUARD, not mutual exclusion — say
   which.** `bridge restore` and `bridge manifest clear-missing` mutate the store
   from a second process, where `Store.mu` does not reach and `busy_timeout` is a
   retry rather than a serializer. Both now refuse while a bridge answers on the
   admin port, probing again immediately before the destructive call because one
   can start while a confirmation prompt waits. That NARROWS the window; closing
-  it needs an interprocess lock `bridge serve` also holds, deliberately not
-  added — a stale lockfile after an unclean exit blocks `restore` at exactly the
-  moment an operator needs `restore`.
+  it needs them to hold the lock `bridge serve` holds (the bullet above), which
+  they do not take. This bullet said until 2026-10-02 that such a lock was
+  deliberately not added because a stale lockfile after an unclean exit blocks
+  `restore` at exactly the moment an operator needs `restore`: true of a lock
+  FILE, and not of serve's kernel lock, which goes with its process.
 - **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
   It fails closed on anything but connection-refused, which is right; but
   `adminAddress: …:0` names no port to dial, so the default produced "a bridge

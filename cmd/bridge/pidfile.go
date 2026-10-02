@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
@@ -45,7 +46,14 @@ func writeServerPIDFile(dataDir string) (path string, err error) {
 	return path, nil
 }
 
-// removeServerPIDFile clears the pidfile on graceful shutdown.
+// removeServerPIDFile clears the pidfile on graceful shutdown, and only
+// while it still names this process (backlog B208). Removed whoever's pid
+// it held, a second serve of the same data dir took the live bridge's
+// record with it as it exited, and `bridge doctor` then failed the live
+// bridge's own ports. The data dir lock (lockServeDataDir) keeps a second
+// serve from writing the file at all; this check is for a serve that ran
+// without the lock (a filesystem that keeps none), whose file a serve
+// started after it may have written.
 //
 // doctor does not take a leftover file on trust: checkPort asks the OS
 // whether that PID actually holds the port (isPIDListeningOnPort). A PID
@@ -61,6 +69,10 @@ func writeServerPIDFile(dataDir string) (path string, err error) {
 // case clean, and leaves a stale file only after an exit that skipped this.
 func removeServerPIDFile(path string) {
 	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(b)) != strconv.Itoa(os.Getpid()) {
 		return
 	}
 	_ = os.Remove(path)

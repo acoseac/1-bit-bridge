@@ -64,6 +64,23 @@ func TestRemoveServerPIDFile(t *testing.T) {
 	removeServerPIDFile("")
 }
 
+// TestRemoveServerPIDFileKeepsAnotherProcesssRecord requires a pid file
+// that names another process to survive this one's exit (backlog B208): a
+// serve that removed it whoever it named took a live bridge's record with
+// it, and `bridge doctor` then failed that bridge's own ports.
+func TestRemoveServerPIDFileKeepsAnotherProcesssRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, serverPIDFileName)
+	other := strconv.Itoa(os.Getpid() + 1)
+	if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeServerPIDFile(path)
+	if raw, err := os.ReadFile(path); err != nil || string(raw) != other {
+		t.Errorf("a pid file naming pid %s was removed or changed by pid %d: %q, %v", other, os.Getpid(), raw, err)
+	}
+}
+
 // Overwriting must work: a bridge restarting into the same data dir
 // finds the previous run's file there.
 func TestServerPIDFileOverwritesAStaleOne(t *testing.T) {
