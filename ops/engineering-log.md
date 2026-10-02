@@ -36022,3 +36022,153 @@ again, without the owner the precreate gave it), and a render stalled ten
 minutes on a hung mount, whose rename then fails. Sampling the start before
 the listing rather than after it is not pinned: no test can stretch a
 listing past the grace.
+
+## 2026-10-02 — the macOS library watcher keeps to a share of the open-file limit and releases what fsnotify keeps open (backlog B212)
+
+### The defect
+
+fsnotify watches through kqueue on macOS (never FSEvents, which the watcher's
+`Run` docstring and `internal/doctor/inotify_other.go` both claimed), and
+kqueue makes every watch an open file: asked to watch a folder, fsnotify v1.10.1
+opens the folder, then lists it and opens every entry in it, files included
+(`watchDirectoryFiles`). Measured through the real `Watcher` on the dev Mac:
+132 descriptors for 12 folders holding 120 files, one each. They come out of the
+process's open-file limit, which every socket, SQLite file, pipe and scan of the
+bridge comes out of, so a library past that limit left the rest nothing: every
+later open and accept failed, the periodic scan's included. The watcher's
+EMFILE branch logged "periodic scan covers the gap" and kept every descriptor it
+had, which was false on macOS for exactly that reason. The doctor's pre-flight
+was a no-op there.
+
+Two leaks, both fsnotify's own and both unfixed upstream (v1.10.1 is the latest;
+its changelog fixes neither):
+
+- **A renamed folder's entries.** `readEvents` answers a folder's NOTE_RENAME
+  with `remove(name, false)`: the folder's own watch goes, and the watch on every
+  entry in it stays, under paths that no longer exist, for good (nothing names
+  them again; `Close` closes only what its path map still holds, and it does hold
+  them, so they go at Close, not before). Measured: each round of renaming 10
+  album folders of 12 files left 130 more open files (lsof named every file of
+  the new folders twice, through the old descriptors).
+- **A new folder opened twice.** fsnotify answers a parent's NOTE_WRITE by
+  listing it and, for a new entry, SENDS the Create and THEN watches the entry
+  itself (`sendCreateIfNew` → `internalWatch`), on its own goroutine, while the
+  bridge's handler of that Create asked for the same folder at once
+  (`addTree` → `Add`). Both found the folder unwatched, both opened it, and
+  fsnotify kept the second in its path map and the first only in its wd map,
+  which nothing closes, its `Close` included. Measured: 9 or 10 of every 10 new
+  folders, three runs.
+
+And a third path, which no event marks: fsnotify reads a folder's kevent with
+NOTE_WRITE and NOTE_RENAME together (an entry changed, then the folder was
+renamed, before fsnotify read either) as a folder write, calls `dirChange` on the
+old path, and sends nothing, while it has already dropped the folder's own watch.
+Measured with a raw watcher whose events nobody read: a folder that gained a file
+and was then renamed reached the reader as no event at all; `WatchList` lost the
+folder, and its entries' descriptors stayed. The bridge's loop is busy, and
+fsnotify blocked on its send, whenever it adds a large new folder, so this is
+the shape a busy rename-and-retag session takes.
+
+### The limits, measured
+
+Go raises RLIMIT_NOFILE at start (`syscall.init`, go1.26.6) to the hard limit
+less one, and on macOS to `kern.maxfilesperproc` at most (`adjustFileLimit`).
+Measured with a probe binary: soft 61,440 under launchd's default (256 soft,
+unlimited hard; `launchctl limit maxfiles`), and the same from a shell; 4,095
+under a hard limit of 4,096; 299 under 300. The bridge's launchd plist sets no
+file limit. `kern.maxfiles` is 122,880 on this Mac, `kern.num_files` 8,611 in
+use. A real `bridge serve` (no watcher, 330 files) holds 41 open files idle:
+26 regular files (SQLite, its WAL and SHM, logs), 6 sockets, its kqueue and
+pipes; the rest of the bridge's needs are bounded by its pools.
+
+### The share
+
+Half of the process's effective limit, and a quarter of `kern.maxfiles` at most
+(`WatchFDLimits.Budget`): 30,720 with the macOS defaults, where the two caps
+agree. Not the 80% Linux grants inotify: inotify's watches are a kernel budget of
+their own, while every kqueue watch is a slot in the table the bridge opens
+everything else into, and a spike there (a full scan on every worker, a burst
+of clients, render pipes) must not find it full; half leaves the rest two
+orders of magnitude more than it uses. The system cap binds only where
+`kern.maxfilesperproc` is raised toward `kern.maxfiles`, where half of the
+process's limit would be half of every process's table.
+
+### The fix
+
+`internal/manifest/watcher_fds.go`, kept only where `kqueueBackend` (a build tag
+matching fsnotify's backend_kqueue.go) says so; Linux and Windows run the loop
+they ran.
+
+- **An account of what fsnotify holds** (`watchFDs`): every path, by the folder
+  it was listed in. A Rename or Remove releases the path's subtree and removes
+  each from fsnotify (`releaseTree`); a Create holds the new path; the count is
+  what the budget is checked against.
+- **The budget, two layers.** `Run` counts the library first with
+  `CountWatchSet`, the walk doctor counts with (both through `walkWatchTree`,
+  which `addTree` now walks with too), and stays off with one warning naming the
+  counts, the budget and the limits when the library needs more. A tree that
+  would take the watcher past the budget (`planWatches`, before any `Add`), a
+  file Create that does, and an `Add` that meets EMFILE or ENFILE release every
+  watch (`stopWatching`: fsnotify's Close) with one warning; `Run` then waits for
+  its context, so a scan an event already asked for still runs. Doctor's
+  `watcher-fd-budget` row (macOS; Linux keeps `inotify-watch-limit`) warns past
+  the budget and over 80% of it.
+- **A new folder waits for its watch** (`pending`, `flushPendingAdds`) until
+  fsnotify sends another event (it sends one only after watching every folder
+  it sent a Create for before) or for `deferredAddWait`, 250 ms, kept under the
+  shortest scan debounce (a second) so the folder is watched before the scan its
+  Create asked for walks it.
+- **A reconcile every 30 s** (`reconcileWatches`) releases what is recorded
+  under a folder fsnotify no longer lists in its `WatchList`.
+
+The docstrings that said FSEvents, "on non-Linux platforms the watch budget is
+effectively unlimited", and that inotify raises EMFILE arming a watch (it opens
+no file) are corrected, and `LibraryWatchConfig`'s docstring now says what the
+watcher costs on macOS.
+
+### Reproduced red-first
+
+On main af4f4569 (`git checkout origin/main -- internal/manifest/watcher.go`, a
+reduced test file using only main's names, `flushPendingAdds` absent from the
+tree): the rename round held 273 open files where 142 were expected; 10 folders
+of 12 files moved in held 141 where 130 were expected; and each of three
+children that lowered their own hard limit to 160 (a library of 162 open files
+at start; 34 growing by a folder of 150; 44 with 20 files left to the process)
+could no longer open `/dev/null` once the watcher had run ("too many open
+files"). On the fix: 142, 130 and every child opens ten files, with one warning
+each.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: a Rename or Remove releases nothing | the rename test (262 open files, want 142) |
+| NC2: a new folder added from its Create handler | the moved-in test, 20 runs of 20 with 200 one-file folders (12 of 20 with 10 folders of 12, which is why it has 200); the rename test |
+| NC3: the reconcile releases nothing | the dropped-event test (37, want 25) |
+| NC4: no refusal at start | the at-start child: "stays off" logged 0 times (the plan's check stopped it instead) |
+| NC5: the plan never refuses | the growing child: it ran out of files instead (its wait stops on that line; it waited for its deadline until it did) |
+| NC6: EMFILE not out-of-files on kqueue | the out-of-files child: the watcher finished its walk holding what it had |
+| NC7: a file Create never trips the budget | the files-past-the-budget test |
+| NC8: `Run` returns when it stops | the same test: the scan the drops asked for never ran |
+| NC9: the runtime dot-folder exemption back | `TestWatcherRuntimeDotDirGetsNoRootExemption`, on macOS through the flush it now calls |
+| NC10, NC11: doctor's two thresholds | their cases |
+| NC12: no system cap | the budget table's raised-limit case; doctor's system-capped case |
+
+### Not covered
+
+- A new folder whose Create is the last event for `deferredAddWait` is added
+  then; if fsnotify's goroutine is stalled that long between sending the Create
+  and watching the folder, the two can still race (one descriptor).
+- The account counts what fsnotify does not open quietly (a dangling link, an
+  entry it may not read), which only lowers the budget left, and does not see
+  entries fsnotify watched in a listing that failed partway for a reason other
+  than EMFILE.
+- Doctor grades its own process's limits, which `bridge serve` shares unless its
+  launchd job or shell sets another hard limit.
+- The BSDs share the code (fsnotify's kqueue backend) and are no build target;
+  the package builds for freebsd, netbsd and openbsd, and not for dragonfly,
+  where modernc's libc does not.
+
+No wire change, and no iOS twin: the app watches no folder (its source holds no
+file-system dispatch source, FSEvents stream or file presenter; its one mention
+of kqueue is a comment on network-path monitoring).
