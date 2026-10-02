@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -77,11 +78,13 @@ func requireASecondServeChangesNothing(t *testing.T, ownPorts bool) {
 
 // liveBridgeState is what a second serve of a live bridge's data dir must
 // leave as it found it: the bridge's pid file, a batch it is running, and
-// its token file.
+// its token file, by identity (every writer of it renames a new file into
+// place) and by content (a write in place would keep the identity).
 type liveBridgeState struct {
 	dataDir, pidPath, wantPID, tokensPath string
 	batch                                 uuid.UUID
 	tokens                                os.FileInfo
+	tokenBytes                            []byte
 }
 
 // recordLiveBridge pairs a device with the bridge serving dataDir (so its
@@ -106,12 +109,16 @@ func recordLiveBridge(t *testing.T, cfgPath, dataDir string) liveBridgeState {
 	if s.tokens, err = os.Stat(s.tokensPath); err != nil {
 		t.Fatal(err)
 	}
+	if s.tokenBytes, err = os.ReadFile(s.tokensPath); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
 // requireUnchanged requires the live bridge's state to be as
 // recordLiveBridge found it: the same pid file, the batch still running,
-// and the same token file, not one rewritten in its place.
+// and the same token file, not one rewritten in its place, holding the
+// same bytes.
 func (s liveBridgeState) requireUnchanged(t *testing.T) {
 	t.Helper()
 	if got := readTrimmed(t, s.pidPath); got != s.wantPID {
@@ -122,6 +129,9 @@ func (s liveBridgeState) requireUnchanged(t *testing.T) {
 	}
 	if after, err := os.Stat(s.tokensPath); err != nil || !os.SameFile(s.tokens, after) {
 		t.Errorf("the second serve rewrote %s (err %v)", tokensFileName, err)
+	}
+	if after, err := os.ReadFile(s.tokensPath); err != nil || !bytes.Equal(s.tokenBytes, after) {
+		t.Errorf("the second serve changed what %s holds (err %v)", tokensFileName, err)
 	}
 }
 

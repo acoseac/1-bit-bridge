@@ -12,6 +12,11 @@ import (
 func tryLock(f *os.File) error {
 	return controlFD(f, "flock", func(fd uintptr) error {
 		err := flockRetryingEINTR(fd, unix.LOCK_EX|unix.LOCK_NB)
+		// EWOULDBLOCK is what flock(2) answers for a held lock, and on
+		// every GOOS this file builds for it is the same Errno as EAGAIN
+		// (Linux's pair is arch-independent, MIPS included; the BSDs and
+		// macOS give both 35), so this matches an NFS server's EAGAIN as
+		// well.
 		if errors.Is(err, unix.EWOULDBLOCK) {
 			return ErrLocked
 		}

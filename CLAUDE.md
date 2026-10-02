@@ -6708,7 +6708,12 @@ mentions across the four `ops/audit-*.md` files.
   and rewrote `tokens.json`, and a second serve on ports of its own (`--addr`,
   another config naming the data dir) never failed at all: two bridges served
   one database. Now it exits 1 at once, naming the data dir and the pid
-  `server.pid` records, having written nothing. **Only a lock another serve
+  `server.pid` records, having written nothing in the data dir. **The lock
+  needs the data dir, which comes from the config**, so the one write that
+  can come before it is `--init-if-missing`'s seed config, made only where
+  no config file exists, which is never the config a live bridge loaded;
+  building the seed in memory to lock first would copy `Load`'s env and
+  path resolution (declined on #1140). **Only a lock another serve
   HOLDS refuses**: any other failure (a filesystem that keeps no locks answers
   ENOLCK or EOPNOTSUPP; a lock file this user cannot open) prints one line and
   serves without the check, since a lock that cannot be taken must not stop a

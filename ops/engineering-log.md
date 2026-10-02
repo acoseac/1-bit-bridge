@@ -36501,6 +36501,30 @@ panic in the error's `f.Name()`.
 | NC8: the lock file opened by its path, not through the root | `TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed` (no error, and the link's target created) |
 | NC9: no nil guard in `TryLock` / `Unlock` | `TestTryLockAnswersErrInvalidForNoFile` (a nil pointer panic) |
 
+### Review (#1140)
+
+Taken: the `os.Root` open and the nil guard (above), and a second check on
+`tokens.json` in the second-serve test, its bytes beside its identity
+(CodeRabbit: every writer renames a new file into place, so the identity
+is what caught main's rewrite, and the bytes would catch a write in
+place). Declined, with the evidence in each thread:
+
+- **`Precreate`'s `dst` should be the data dir** (Gemini): `dst` may be the
+  file itself (`targetOwnerFrom` falls back to `stat` of its directory while
+  nothing is there), the as-root test passes, and `lstat` of a data dir
+  that is a link would take the link's owner.
+- **Check `EAGAIN` beside `EWOULDBLOCK`** (Gemini, twice, for MIPS and then
+  for NFS): x/sys defines them as one `Errno` on every GOOS the file builds
+  for, so `errors.Is(err, unix.EWOULDBLOCK)` already matches an `EAGAIN`; a
+  comment at the check says so now.
+- **Lock before `--init-if-missing` writes its seed config** (CodeRabbit):
+  the lock needs the data dir, which comes from the config, and the seed is
+  written only where no config file exists, never over the config a live
+  bridge loaded; locking first would copy `Load`'s env overrides and path
+  resolution into the seed path. CLAUDE.md and the PR body said the
+  refused serve had "written nothing", which overstated it; CLAUDE.md now
+  says "nothing in the data dir" and names the seed config.
+
 ### Residuals
 
 A data dir on a filesystem that keeps no locks gets no check (the startup
