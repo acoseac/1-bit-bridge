@@ -3194,6 +3194,7 @@ no failing test — which is the shape to expect in this area.
   `TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
   `TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync`,
   `TestMarkOutputFaultMarksOnlyTheOutputSidesCauses`,
+  `TestMarkOutputFaultReturnsEveryOtherErrorAsItIs`,
   `TestMarkOutputFaultReadsWhatTheOSReports`; the positive control is still
   `TestAToolThatRanAndRefusedTheFileStillStrikesIt`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms

@@ -36669,9 +36669,10 @@ with `failedJobs=3`), `TestMarkOutputFaultReadsWhatTheOSReports` (real
 operations: EACCES from a mkdir and a create in a locked folder is marked,
 ENAMETOOLONG from a 300-byte name and EEXIST are not), all POSIX and skipped
 as root; and on every platform `TestMarkOutputFaultMarksOnlyTheOutputSidesCauses`
-(the table pinned to its written-out twin, every cause marked with its kind,
-the name-dependent causes and the pool's other classified errors returned
-unchanged), `TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
+(the table pinned to its written-out twin, every cause marked with its kind),
+`TestMarkOutputFaultReturnsEveryOtherErrorAsItIs` (the name-dependent causes
+and the pool's other classified errors returned unchanged),
+`TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
 `TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync`,
 `TestAnOutputOutageThatOutlastsADayIsReportedAgain`, and an "output
 unavailable" row in both terminal-order tables. The tool report's own tests
@@ -36689,7 +36690,8 @@ Run's mkdir unmarked (shape 1 alone red); renderDSD's scratch mkdir unmarked
 red); a permission proven by any success, a volume fault only in its own
 folder, the DSD scratch proof dropped (the report test red each time); the
 proof taken before the fsync (the fsync test red); ENAMETOOLONG added to the
-unix table (both classifier tests red).
+unix table (the three classifier tests red: the table check, the error
+returned as it is, and the real 300-byte name).
 
 ### Review
 

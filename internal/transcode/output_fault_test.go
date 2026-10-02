@@ -25,8 +25,8 @@ func outputFaultFailure(dir string, errno syscall.Errno) error {
 // TestMarkOutputFaultMarksOnlyTheOutputSidesCauses pins the classification:
 // a cause in the platform's table, or a permission, is marked with its kind
 // and the directory it was met in, and the mark changes nothing the error
-// says; every other error is returned as it is, so it strikes. The table
-// itself is pinned per platform (outputFaultErrnosWant).
+// says. The table itself is pinned per platform (outputFaultErrnosWant);
+// every other error is TestMarkOutputFaultReturnsEveryOtherErrorAsItIs's.
 func TestMarkOutputFaultMarksOnlyTheOutputSidesCauses(t *testing.T) {
 	const dir = "/srv/variants/Music/Album"
 	if !maps.Equal(outputFaultErrnos, outputFaultErrnosWant()) {
@@ -59,6 +59,14 @@ func TestMarkOutputFaultMarksOnlyTheOutputSidesCauses(t *testing.T) {
 		f.reason != fs.ErrPermission.Error() {
 		t.Errorf("a permission with no errno in its chain: marked %+v, %v; want a permission fault", f, ok)
 	}
+}
+
+// TestMarkOutputFaultReturnsEveryOtherErrorAsItIs is the other half: a cause
+// the source's name produces, an entry in the way, a cancelled context, a
+// tool's refusal, a changed source and a missing tool are returned exactly as
+// they came, so the pool goes on striking, or classifying, them as before.
+func TestMarkOutputFaultReturnsEveryOtherErrorAsItIs(t *testing.T) {
+	const dir = "/srv/variants/Music/Album"
 	for _, err := range append(notOutputFaultCauses(),
 		context.Canceled,
 		context.DeadlineExceeded,
