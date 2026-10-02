@@ -28,6 +28,10 @@ const outageRewarnAfter = 24 * time.Hour
 type outageStreaks[K comparable, F any] struct {
 	mu   sync.Mutex
 	open map[K]*outageStreak[F]
+	// order is the open streaks' keys in the order they started, so that
+	// end looks at them, and its owner reports them over, in one order every
+	// time rather than in the map's.
+	order []K
 }
 
 // outageStreak is one key's streak: when it started, when it was last
@@ -59,6 +63,7 @@ func (o *outageStreaks[K, F]) note(key K, f F, now time.Time) (s outageStreak[F]
 	if cur == nil {
 		cur = &outageStreak[F]{since: now, first: f}
 		o.open[key] = cur
+		o.order = append(o.order, key)
 	}
 	cur.failed++
 	warn = cur.warnedAt.IsZero() || now.Sub(cur.warnedAt) >= outageRewarnAfter
@@ -68,26 +73,48 @@ func (o *outageStreaks[K, F]) note(key K, f F, now time.Time) (s outageStreak[F]
 	return *cur, warn
 }
 
-// end closes the open streaks, among the keys candidates names and in its
-// order, that over reports proven by the job, and returns them. candidates is
-// called only while a streak is open, so a success on a healthy host costs a
-// lock and a length check.
-func (o *outageStreaks[K, F]) end(candidates func() []K, over func(K, F) bool) []endedOutage[K, F] {
+// end closes the open streaks that over reports proven by the job (given
+// each one's key and the failure that started it), and returns them in the
+// order they started. over is called only while a streak is open, so a
+// success on a healthy host costs a lock and a length check; an owner that
+// needs something worked out from the job to answer works it out in over,
+// once (lazily).
+func (o *outageStreaks[K, F]) end(over func(K, F) bool) []endedOutage[K, F] {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if len(o.open) == 0 {
 		return nil
 	}
 	var ended []endedOutage[K, F]
-	for _, key := range candidates() {
-		s, ok := o.open[key]
-		if !ok || !over(key, s.first) {
+	kept := o.order[:0]
+	for _, key := range o.order {
+		s := o.open[key]
+		if !over(key, s.first) {
+			kept = append(kept, key)
 			continue
 		}
 		ended = append(ended, endedOutage[K, F]{key: key, outageStreak: *s})
 		delete(o.open, key)
 	}
+	clear(o.order[len(kept):])
+	o.order = kept
 	return ended
+}
+
+// lazily returns a function that calls f the first time it is called and
+// returns that answer every time: what end's over needs from the job, worked
+// out only when a streak is open.
+func lazily[T any](f func() T) func() T {
+	var (
+		done bool
+		v    T
+	)
+	return func() T {
+		if !done {
+			v, done = f(), true
+		}
+		return v
+	}
 }
 
 // clockNow is now, or time.Now when now is nil: the reports' test seam.

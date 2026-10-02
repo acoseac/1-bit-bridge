@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -230,9 +231,10 @@ func (o *toolOutages) fail(t missingTool, path, msg string) {
 // each at Info with how many jobs it cost. Free when no outage is open, which
 // is every success on a healthy host.
 func (o *toolOutages) proven(settings string) {
-	ended := o.streaks.end(
-		func() []string { return toolsProvenBy(settings) },
-		func(string, missingTool) bool { return true })
+	ran := lazily(func() []string { return toolsProvenBy(settings) })
+	ended := o.streaks.end(func(tool string, _ missingTool) bool {
+		return slices.Contains(ran(), tool)
+	})
 	for _, b := range ended {
 		logger.Info(logToolBack, "tool", b.key, "failedJobs", b.failed, "since", b.since)
 	}

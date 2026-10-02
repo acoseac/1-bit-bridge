@@ -221,37 +221,22 @@ func writtenBy(spec JobSpec, sidecarPath, settings string) []outputWrite {
 	return w
 }
 
-// outputFaultKinds lists every kind, the candidates an outage's end is
-// looked for among.
-var outputFaultKinds = []outputFaultKind{outputDenied, outputReadOnly, outputFull, outputQuota, outputGone}
-
 // proven ends the outages a successful job's writes prove over, logging each
 // at Info with how many jobs it cost. A write proves its place's volume back,
 // which ends every kind but a permission there; a permission outage ends only
 // when a job writes in the directory that refused it. Free when no outage is
 // open, which is every success on a healthy host: written is called only
-// then.
+// then, and once.
 func (o *outputOutages) proven(written func() []outputWrite) {
-	var wrote []outputWrite
-	ended := o.streaks.end(
-		func() []outputKey {
-			wrote = written()
-			var keys []outputKey
-			for _, w := range wrote {
-				for _, kind := range outputFaultKinds {
-					keys = append(keys, outputKey{where: w.where, kind: kind})
-				}
+	wrote := lazily(written)
+	ended := o.streaks.end(func(key outputKey, first outputFault) bool {
+		for _, w := range wrote() {
+			if w.where == key.where && (key.kind != outputDenied || w.dir == first.dir) {
+				return true
 			}
-			return keys
-		},
-		func(key outputKey, first outputFault) bool {
-			for _, w := range wrote {
-				if w.where == key.where && (key.kind != outputDenied || w.dir == first.dir) {
-					return true
-				}
-			}
-			return false
-		})
+		}
+		return false
+	})
 	for _, e := range ended {
 		logger.Info(logOutputBack, "output", e.key.where, "reason", e.first.reason, "failedJobs", e.failed, "since", e.since)
 	}
