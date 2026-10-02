@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -232,7 +233,7 @@ func TestGCEmptyCatalogProceedsOverNothingItWouldRemove(t *testing.T) {
 func TestGCEmptyCatalogRemovesAWaveformScratchFileWithoutARefusal(t *testing.T) {
 	dir := t.TempDir()
 	scratch := filepath.Join(dir, "Artist", "Album", "01.flac"+analyze.WaveformExt+analyze.AnalysisTmpSuffix)
-	writeFixtureFile(t, scratch, 1)
+	writeAgedFile(t, scratch, time.Hour)
 	rc, out := emptyCatalogSweeps[1].run(t, dir, false, false)
 	if rc != 0 || strings.Contains(out, emptyCatalogRefusalSays) {
 		t.Fatalf("an empty catalog over one scratch file: rc=%d, want 0 and no refusal:\n%s", rc, out)
@@ -336,10 +337,10 @@ func TestGCEmptyCatalogOverrideNamesEveryFlagTheRunNeeds(t *testing.T) {
 		t.Run(sw.name, func(t *testing.T) {
 			few, many := t.TempDir(), t.TempDir()
 			for i := 0; i < 3; i++ {
-				writeFixtureFile(t, filepath.Join(few, "Album", fmt.Sprintf("%02d", i), sw.candidate), 1)
+				writeAgedFile(t, filepath.Join(few, "Album", fmt.Sprintf("%02d", i), sw.candidate), time.Hour)
 			}
 			for i := 0; i < 12; i++ {
-				writeFixtureFile(t, filepath.Join(many, "Album", fmt.Sprintf("%02d", i), sw.candidate), 1)
+				writeAgedFile(t, filepath.Join(many, "Album", fmt.Sprintf("%02d", i), sw.candidate), time.Hour)
 			}
 
 			rc, out := sw.run(t, few, false, false)

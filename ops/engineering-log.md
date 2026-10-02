@@ -35860,6 +35860,169 @@ green, since a projection that drops `CreatedAt` then compares 0 with 0.
 does, and NC6 is red again. The controls were rerun after every change to a
 test, which is what caught it.
 
+## 2026-10-02 — `--gc` beside a running bridge: the forward sweeps take a grace and re-check each path, and the reverse sweep deletes only the row it listed (backlog B205, B250)
+
+B205 was found by the pre-v0.2.1 operations review (2026-09-30), whose scratch
+test left 11 of 21 renditions published during a `bridge upscale --gc` run
+with a row and no file. B250 was found by the B204 session (#1137) reading
+`runGCReverseSweep` after fixing the watcher's twin.
+
+### The defect
+
+`bridge upscale --gc` (and `optimize --gc`, `render --gc`, which reach the
+same `runGC`) and `bridge analyze --gc` list the catalog first, then classify
+the rows, walk the tree, run their refusals and unlink. Every verdict is taken
+from that one listing. `bridge doctor`'s variants-index hint names
+`bridge upscale --gc`, and nothing says to stop the bridge first, so a run
+beside a serving bridge is the expected case. Its pools keep writing:
+
+- **Forward sweeps (B205).** A render renames its rendition into place and
+  then commits the row (the pool's processJob); an analysis does the same with
+  a waveform; each writes a `.tmp` first. A file whose row committed after the
+  listing is, to the walk, a file no row names, and both sweeps unlinked it
+  with a bare `os.Remove`: the row is left with no file (a 410 on every play
+  until a reap), and a waveform's skip gate reads the row, so its curve never
+  comes back without `bridge analyze --force`. `upscale --gc`'s inventory has
+  a nil Consider, so a render's `<sidecar>.<token>.tmp` is an orphan to it:
+  unlinked while sox writes it, the render fails at its rename and the pool
+  strikes a good file. `analyze --gc` removed its own `.waveform.bin.tmp`
+  scratch unconditionally, a live analysis's included.
+- **Reverse sweep (B250).** The rows classified missing at both locations were
+  deleted through `DeleteVariant`, which deletes whatever the row records by
+  then: a row `bridge variants move` relocated after the listing (read, as
+  listed, as gone at its old path and at its canonical place, neither of which
+  is the move's destination), or one a render rewrote after the
+  classification, was deleted on a verdict about the row it used to be.
+
+### Reproduced red-first
+
+`runGC` and `runAnalyzeGC` took a `*manifest.Store`, so nothing could act
+between their listing and their sweeps. Commit 82571c62 gives them the
+interfaces of what they use (`gcVariantStore`: `AllVariants`,
+`UpdateVariantSidecarPath`, `DeleteVariant`; `analysisRowLister`:
+`AllAnalysisRows`), `*manifest.Store` the one production implementation, and
+changes no behaviour (the GC suite passed on it). The tests wrap the real
+store: `gcListThenAct` runs a hook once the listing returns, `gcDeleteThenAct`
+before the first row delete. On that commit (main 5aa8dbb3's behaviour), all
+four red:
+
+- `TestAGCRunBesideALiveRenderKeepsWhatTheRenderWrites`: after the listing a
+  render publishes a rendition and commits its row, and another writes its
+  `.tmp`. `GC forward sweep: removed 4 orphan file(s)`: both live files and the
+  two hour-old controls.
+- `TestAnAnalyzeGCRunBesideALiveAnalysisKeepsWhatTheAnalysisWrites`: the
+  waveform twin, `removed 4 orphan sidecar(s)`, the published curve and the
+  live `.tmp` among them.
+- `TestAGCRunDuringAMoveKeepsTheRowsTheMoveRelocated`: forty rows, six moved to
+  X by the real `moveOneVariant` on a second store after the listing, two
+  sidecars removed by hand. `GC reverse sweep: removed 8 orphan row(s)`, the
+  six moved rows among them, their files at X, 32 rows left.
+- `TestAGCRunKeepsARowARenderRewroteAfterTheRunJudgedItMissing`: two rows'
+  sidecars gone at classification; before the first delete a render
+  re-renders one at the path and size it records and commits its row. The
+  re-rendered row was deleted.
+
+### The fix
+
+- **The forward sweeps' re-check and grace.** `integrity.ReclaimOrphan`
+  (the background sweep's `reclaimOrphan`, exported with `OrphanOutcome` and
+  `OrphanGracePeriod`, which was `gcGracePeriod`) is now the one re-check all
+  three forward sweeps make before an unlink: a fresh Lstat of the walked
+  path, the inventory's own `classifyWalkEntry` (a link to a directory or a
+  junction is left; a directory in the list is no longer removed), and no
+  file modified less than the grace before the sweep started. The CLI
+  sweeps take their start BEFORE the catalog listing, since what comes
+  between the listing and the unlinks (the classification of every row, the
+  whole walk, the refusals) can take minutes on a large tree over a network
+  mount, and a file whose row committed just after the listing must still
+  read as recent at the end. `cmd/bridge`'s `gcReclaimTally.reclaim` maps the
+  outcomes for both: removed (gone counts, as ENOENT always did), recent (no
+  failure; the summary's `left N recent file(s)`, and one line saying why),
+  failed (an unlink the filesystem refuses, a path the re-check cannot
+  stat), and a path no longer a file named and left. The scratch `.tmp`
+  takes the grace as an orphan does; it is still outside the ratio.
+- **The reverse sweep's conditional delete.** `deleteMissingGCRows` deletes
+  through `Store.DeleteVariantIfUnchanged` (#1137) with the row as listed,
+  counts `ErrVariantChanged` as `changed` (kept, named, no failure, a summary
+  clause) and leaves the row for the next run.
+- `bridge doctor`'s hint says `--gc` reclaims the orphans "all but any
+  modified in the 10 minutes before it starts".
+
+With the fix all four reproductions are green, and the hour-old leftovers of
+a crashed render and a crashed analysis are still removed.
+
+### Alternatives weighed
+
+- **Refuse while a bridge answers on the admin port** (`probeBridge`, the
+  entry's first idea, as `restore` and `manifest clear-missing` do).
+  Declined: every shape a live bridge makes here is closed by the grace and
+  the conditional delete; a probe is a guard, not mutual exclusion (a
+  bridge started during the run is not seen, and an ephemeral admin port
+  cannot be probed at all); and the doctor sends operators to `--gc` on a
+  live install, which a refusal would turn into a stop-the-bridge
+  procedure.
+- **A longer grace for `.tmp` files** (the 12 h `renderScratchMaxAge`, past
+  the 4 h job cap). Declined for one grace: on a bridge that is not root a
+  render's `.tmp` exists only while sox writes it, so its mtime moves with
+  every write (`fsutil.Precreate` is a no-op unless euid is 0), and an
+  analysis writes its `.tmp` in one go at the end. What one grace leaves
+  open is the residual below, and `upscale --gc` has no scratch predicate
+  to tell a `.tmp` from an orphan by (adding one would move it out of the
+  ratio and out of the doctor's view, a separate decision).
+- **A grace override in `gcOptions` for the tests.** Declined: the zero
+  value of the options would be the unsafe one, and CLAUDE.md's rule is that
+  a fixture omitting a live gate describes a bridge production never runs.
+  The fixtures that stand for what a lost index or a crash left date their
+  files an hour back (`ageFiles` in `strandedTree`, `waveformTree`,
+  `flatLegacyTree`, and in four tests' own orphans), and a direct test of
+  `runGCForwardSweep` or `removeAnalysisGCFiles` passes a start an hour
+  ahead (`gcStartAfterTheGrace`), the integrity tests' "the tick starts an
+  hour ahead". Fourteen existing tests failed on the fix before that, every
+  one over a fresh orphan it expected removed.
+- **Leave recent files out of the refusals' counts.** Not done: the refusals
+  decide whether to unlink anything at all, and over-counting only refuses
+  (a batch rendering into a small catalog during a run can trip the
+  mass-orphan check, which unlinks nothing and passes on a later run).
+
+### Tests
+
+- The four above, each with a positive control: what a render and an
+  analysis that crashed an hour ago left (a rendition or waveform with no
+  row, a `.tmp`) is removed; a row gone at both places is still deleted.
+  The two forward tests also commit, in the hook, the row of a file renamed
+  into place a minute BEFORE the run: the window between a rename and its
+  commit straddling the run's start, which is what pins the grace's value
+  (a file written after the start is recent at any grace).
+- `TestAGCForwardSweepCountsAnUnlinkTheFilesystemRefuses`: an unlink the
+  filesystem refuses (Windows: the file held open, since `os.Open` grants
+  no delete sharing; elsewhere: a directory without write permission,
+  skipped as root) is counted and named by both sweeps.
+- `TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved` changed: its "a real
+  failure must still be one" half handed the sweep a directory, which
+  `os.Remove` failed with ENOTEMPTY. The re-check now leaves a directory (not
+  a failure); the real failure there is a path no stat can read (a NUL
+  byte, EINVAL on every platform), and the refused unlink has its own test.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: `reclaim` passes a grace of 0 | both forward tests, on the file renamed into place a minute before the run (the files written after the start stay, as expected) |
+| NC2: `reclaim` is a bare `os.Remove` again | both forward tests (published, straddling and live `.tmp` all unlinked); the vanished-orphan test (`failed=2`: the directory's ENOTEMPTY) |
+| NC3: `deleteMissingGCRows` deletes through `DeleteVariant` | both reverse tests (the six moved rows, 32 left; the re-rendered row) |
+| NC4: `ErrVariantChanged` counted as a failure | both reverse tests (`runGC exit=1`) |
+| NC5: a grace of two hours | both forward tests' positive controls (the hour-old leftovers kept) |
+
+### Residuals
+
+A writer that has written nothing for the whole grace: a DSD render on a
+bridge run as root precreates its `.tmp` before Stages A and B and the album
+survey (unlinking it then costs nothing: Stage C's sox creates the file
+again, without the owner the precreate gave it), and a render stalled ten
+minutes on a hung mount, whose rename then fails. Sampling the start before
+the listing rather than after it is not pinned: no test can stretch a
+listing past the grace.
+
 ## 2026-10-02 — the macOS library watcher keeps to a share of the open-file limit and releases what fsnotify keeps open (backlog B212)
 
 ### The defect

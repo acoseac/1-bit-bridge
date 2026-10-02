@@ -3377,7 +3377,7 @@ no failing test — which is the shape to expect in this area.
   the sweep would remove BY ITS OWN Consider, or an entry the walk could not
   stat, weighed as one; never a directory it could not list (the partial
   walk's refusal) nor a scratch `.tmp`, which is removed whatever the catalog
-  says. So `upscale --gc`, whose nil Consider removes every file, still
+  says (once past the forward sweeps' grace, backlog B205). So `upscale --gc`, whose nil Consider removes every file, still
   refuses over a lone `.DS_Store` (the refusal names it), while `analyze --gc`
   passes over one. **Don't count only rendition-shaped files there while the
   sweep goes on removing every file**: the refusal would wave through a run
@@ -3760,15 +3760,35 @@ no failing test — which is the shape to expect in this area.
   refusal of `variants move` while a bridge answers**: it would make the
   migration the console documents need downtime, and a probe is a guard,
   not mutual exclusion (the restore bullet under The CLI and the serve
-  wiring). `DeleteVariant` keeps its unconditional delete for the
-  `upscale --gc` reverse sweep, the serve reap and `DELETE
-  /v1/upscale/variants`; its docblock said it had no production callers
-  (#156), false since #209. `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`
+  wiring). `DeleteVariant` keeps its unconditional delete for the serve
+  reap and `DELETE /v1/upscale/variants` (the `upscale --gc` reverse
+  sweep's went with B250, the next bullet); its docblock said it had no
+  production callers (#156), false since #209. `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`
   (cmd/bridge; two hand-removed sidecars are the positive control),
   `TestVariantWatcherKeepsARowThatChangedSinceItsListing`,
   `TestVariantWatcherSaysNothingAtWarnWhenEveryMissingRowChanged`,
   `TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged` (a case per
   writer and per compared column).
+- **…and so does `upscale --gc`'s reverse sweep** (2026-10-02, backlog
+  B250). `runGCReverseSweep` deleted the rows its classification judged
+  missing through the unconditional `DeleteVariant`, so a row a `bridge
+  variants move` relocated after the run's listing (gone, as listed, at
+  both places the run looks) or one a render rewrote after the
+  classification was deleted on a verdict about the row it used to be:
+  through the real `runGC`, with the real move on a second store, the six
+  moved rows of forty went with their files intact at the destination, and
+  a re-rendered row went from under its new rendition. It deletes through
+  `DeleteVariantIfUnchanged` with the row as listed
+  (`deleteMissingGCRows`); `ErrVariantChanged` is counted as `changed`
+  (the summary's clause, and a `keep … the row changed` line), is no
+  failure (a cron'd `--gc` beside a move is a healthy state, as a
+  mismatched row is), and the next run judges the row as it is then.
+  `runGC` takes its store through `gcVariantStore` and `runAnalyzeGC`
+  through `analysisRowLister`, the interfaces of what each uses, so a test
+  can act between the listing and the sweeps (`gcListThenAct`,
+  `gcDeleteThenAct`). `TestAGCRunDuringAMoveKeepsTheRowsTheMoveRelocated`,
+  `TestAGCRunKeepsARowARenderRewroteAfterTheRunJudgedItMissing` (each with
+  a positive control: a row gone at both places is still deleted).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
@@ -3879,8 +3899,11 @@ no failing test — which is the shape to expect in this area.
   the background `OrphanSidecarSweeper` for its own change, which is the
   next bullet. `analyze --gc` shares both
   halves and gained the dot-directory prune and a fail-closed walk error
-  with them; its `.tmp` scratch is removed unconditionally and kept OUT of
-  the ratio, or a crashed run trips the guard on the next one. (#940)
+  with them; its `.tmp` scratch is removed whatever the catalog says and
+  kept OUT of the ratio, or a crashed run trips the guard on the next one.
+  (#940) "Unconditionally", this said until backlog B205: the scratch
+  takes the forward sweeps' grace now, like an orphan (the B205 bullet
+  below).
 - **…and the background `OrphanSidecarSweeper` makes the same decision
   every tick, with no override** (2026-09-28). It unlinked INSIDE a walk
   chunked at 5,000 entries, with a cursor across ticks, and its only guard
@@ -3994,6 +4017,61 @@ no failing test — which is the shape to expect in this area.
   A Gemini consult was attempted for the `lost+found` trade-off and
   refused by the API's spending cap; the rule is the narrow one, decided
   here.
+- **…and a CLI forward sweep removes a file only once it is older than
+  the grace, asked again just before its unlink: `--gc` is safe beside a
+  running bridge** (2026-10-02, backlog B205). `upscale --gc` (optimize,
+  render) and `analyze --gc` list the catalog first and judge every file
+  by that listing, and `bridge doctor`'s variants-index hint names `--gc`,
+  so it runs beside a serving bridge, whose pools keep writing: a render
+  renames its rendition into place and then commits the row, an analysis
+  the same with a waveform, each writing a `.tmp` first. Both sweeps
+  unlinked what their walk found and the listing did not name, with a bare
+  `os.Remove`. Measured through the real `runGC` and `runAnalyzeGC`, with
+  a store whose listing hook does what the live bridge does then: a
+  rendition published after the listing, one renamed into place a minute
+  before the run whose row committed after the listing, and a `.tmp`
+  still being written were all unlinked (a row with no file; the render
+  still writing fails at its rename and strikes a good file), and the
+  waveforms likewise, which nothing brings back but `bridge analyze
+  --force` (the skip gate reads the row). The review's scratch test left
+  11 of 21 renditions published during a run with a row and no file.
+  Both sweeps now hand each listed path, by its walked spelling, to
+  `integrity.ReclaimOrphan`, the background sweep's re-check, exported
+  with `OrphanOutcome` and `OrphanGracePeriod` (the old `gcGracePeriod`),
+  so the three forward sweeps decide alike (`gcReclaimTally.reclaim`): a
+  fresh Lstat, the inventory's `classifyWalkEntry` (a link to a directory
+  put there since is left alone, and a directory in the list is no longer
+  removed), and **no file modified less than `OrphanGracePeriod` (10
+  minutes) before the run started**, sampled BEFORE the catalog listing,
+  since the classification and the walk after it take minutes on a large
+  tree over a network mount. **The `.tmp` scratch takes the grace too**:
+  `analyze --gc` removed its scratch unconditionally, and `upscale --gc`
+  (nil Consider) every `.tmp` as an orphan; a recent one may be a live
+  job's, whose mtime moves with every write. A recent file is no failure:
+  the summary counts it (`left N recent file(s)`) and one line says why.
+  Gone is still a success; an unlink the filesystem refuses, or a path the
+  re-check cannot stat, is still a failure. **The refusals still weigh
+  every file the walk found**, recent ones included, so a batch rendering
+  into a small catalog during the run can make it refuse, which unlinks
+  nothing. **Preferred to refusing while a bridge answers** (`probeBridge`,
+  as `restore` and `clear-missing` do): the shapes a live bridge makes are
+  closed this way, a probe narrows a window and closes none (the restore
+  bullet under The CLI and the serve wiring), and the doctor sends
+  operators to `--gc` on a live install. **Residuals**: a writer that has
+  written nothing for the whole grace, which is a DSD render on a bridge
+  run as root, whose `.tmp` is precreated before Stages A and B and the
+  album survey (unlinking it costs nothing: Stage C's sox creates the file
+  again, without the owner the precreate gave it), and a render stalled on
+  a hung mount for ten minutes, whose rename then fails; and sampling the
+  start BEFORE the listing is not pinned (no test can stretch a listing
+  past the grace). The fixtures that stand for what a lost index or a
+  crash left date their files an hour back (`ageFiles`, `writeAgedFile`),
+  and a direct test of a sweep helper passes a start an hour ahead
+  (`gcStartAfterTheGrace`, the integrity tests' convention).
+  `TestAGCRunBesideALiveRenderKeepsWhatTheRenderWrites`,
+  `TestAnAnalyzeGCRunBesideALiveAnalysisKeepsWhatTheAnalysisWrites` (each
+  with a crashed job's leftovers an hour old as the positive control),
+  `TestAGCForwardSweepCountsAnUnlinkTheFilesystemRefuses`.
 - **The Jobs card shows the background orphan sweep's refusal**
   (2026-09-28). The "Orphan sidecar GC" line read "on" whenever the
   interval was positive, while every tick refused and only the journal

@@ -52,6 +52,9 @@ func flatLegacyTree(t *testing.T, dir string, reapable, orphans int) (*manifest.
 		paths[i] = filepath.Join(dir, fmt.Sprintf("%040x-upscaled-v1-88200-24.flac", 0xbeef+i))
 		writeFixtureFile(t, paths[i], 1000)
 	}
+	// A superseded generation is old: dated past the forward sweep's grace,
+	// which leaves a recent file for a later run (integrity.OrphanGracePeriod).
+	ageFiles(t, paths...)
 	return store, paths
 }
 
