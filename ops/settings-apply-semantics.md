@@ -142,7 +142,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `listenAddress` | D | `restart` | The `/v1` listener bind. |
 | `adminAddress` | D | `restart` | The admin listener bind, and the loopback-only enforcement point. |
 | `scanIntervalSec` | **A** | `live` | `RunPeriodic` and the analysis sweeper both re-read a provider before each wait; the cadence rearm wakes them so the new value binds now. |
-| `backupIntervalHours` | **A** | `live` | Provider re-read before each wait. The ticker goroutine is now started **unconditionally** and parks when the interval is 0, which is what makes `0 → N` observable. |
+| `backupIntervalHours` | **A** | `live` | Provider re-read before the startup snapshot and before each wait. The ticker goroutine is now started **unconditionally** and parks when the interval is 0, which is what makes `0 → N` observable; at 0 from boot it parks before its startup snapshot too, so it writes and prunes nothing. Until 2026-10-02 the shared loop swept before it read the interval, so `intervalHours: 0` took a snapshot and pruned at every boot (backlog B209). `TestServeWithBackupsOffTakesNoSnapshotAndFollowsItsCadenceLive` checks the loop itself, not the report: armed after `0 → N`, parked after `N → 0`, no snapshot. |
 | `backupKeep` | **A** | `live` | Read at prune time, which is the only moment retention means anything. No rearm — there is no parked wait to disturb. |
 | `retentionPlaybackHistoryDays` | **A** | `live` | The daily sweeper reads `cfg` through the holder at the top of every pass, so the next tick sees the change. No rearm: the interval is a compile-time const, not a config field, so there is no parked wait to disturb — the same shape as `backupKeep` above. Validation refuses 1–89 (the bounded smart-mix windows run to 90 days) and anything above `MaxRetentionDays` (past ~349 years the cutoff timestamp overflows and the reap deletes the whole table). |
 | `retentionDeviceRegistrationDays` | **A** | `live` | Same loop, same pass. Orphaned registrations — rows bound to a revoked token — are reaped regardless of this setting; this is the policy half only. |
@@ -209,6 +209,20 @@ ending it, and the backup ticker is started unconditionally. The old shape
 returned outright — so "disabled" was terminal for the process, and setting
 `backupIntervalHours` back to 24 had no loop alive to notice. Costs one parked
 goroutine on a bridge with backups off.
+
+**A dormant loop parks before its boot pass, too.** The boot pass is the first
+pass of the schedule, so a loop whose cadence is 0 when its settle delay ends
+takes none, and a nudge from that window is served rather than drained (backlog
+B209). The shared loop swept first and read the interval after until 2026-10-02,
+and since the conversion above started the backup ticker on every bridge, that
+was a snapshot and a prune at every boot of a bridge whose backups were off. A
+`0 → N` rearm still only arms the wait, so the first pass after it comes N later
+and is a scheduled one, never the startup snapshot (whose skip-if-recent rule
+would otherwise apply): the loop tells each pass whether it is the boot pass.
+Of the five loops on `runSweepLoop`, only the backup ticker's cadence can be 0:
+the analysis and auto-optimize cadences follow `scanIntervalSec` (1 s or more,
+by `Validate`), and the fingerprint and smart-mix ones read a 0 as their
+default (6 h and 24 h).
 
 ### `updateAutoInstall` is symmetric, deliberately
 
@@ -539,7 +553,8 @@ rewritten around a hook that parks a dispatch at exactly the right instant.
 | `TestPacingFollowsTheLiveBase` | The politeness interval re-derives with the base — the one mistake in this area that reaches a third party. |
 | `TestSweepLoopRereadsIntervalEveryIteration` | The provider is consulted per iteration, not cached — a provider read once is exactly as restart-bound as the duration it replaced. |
 | `TestSweepLoopRearmDoesNotSweep` | A rearm re-reads the schedule and never runs the work. |
-| `TestSweepLoopDormantIntervalIsResumable` | `0 → N` is observable, i.e. the loop parks rather than exits. |
+| `TestSweepLoopDormantIntervalIsResumable` | `0 → N` is observable, i.e. the loop parks rather than exits, and a loop dormant from the start takes no boot pass (it asserted one until 2026-10-02, backlog B209). |
+| `TestSweepLoopDormantServesANudgeFromTheSettleWindow` | A nudge from the settle window is drained only by a boot pass that covers it; a dormant loop serves it instead. |
 | `TestSweepLoopDormantClearsScheduledNext` | No stale "next run at …" after the cadence is disabled. |
 | `TestCadenceChangeFiresTheRearm` | Which fields fire the rearm, and which correctly do not. |
 | `TestUnchangedCadenceDoesNotFireTheRearm` | A same-value save cannot push the next run out by a full interval. |

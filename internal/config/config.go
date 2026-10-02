@@ -2475,8 +2475,10 @@ func (l LibraryWatchConfig) EffectiveDebounceSeconds() int {
 //
 // Default state (section absent): IntervalHours=24, Keep=7 (one
 // snapshot per day, a week retained). Setting `intervalHours: 0`
-// explicitly disables the periodic ticker; the operator can still
-// snapshot on-demand via the CLI or the admin console. To preserve
+// explicitly disables the periodic ticker, its startup snapshot and its
+// prune included (it took both at every boot until 2026-10-02, backlog
+// B209); the operator can still snapshot on-demand via the CLI or the
+// admin console. To preserve
 // the "omitted vs explicit-zero" distinction across YAML round-trips,
 // `IntervalHours` is a `*int` — nil means "absent, use default", a
 // pointer to 0 means "explicitly disabled".

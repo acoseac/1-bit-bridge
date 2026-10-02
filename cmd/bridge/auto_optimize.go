@@ -571,7 +571,7 @@ var autoOptimizeSettleDelay = 3 * time.Minute
 // nudge is buffered-1; senders use a non-blocking send so a pending
 // nudge coalesces with the sweep about to run. status is nil-safe.
 func runAutoOptimizeSweeper(ctx context.Context, sw *autoOptimizeSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AutoOptimizeSweepCounts]) {
-	sweep := func() {
+	sweep := func(bool) {
 		status.sweepStarted()
 		var counts *admin.AutoOptimizeSweepCounts
 		defer func() {

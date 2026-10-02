@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,6 +249,91 @@ func TestABackupThatFailsIsStillReported(t *testing.T) {
 				t.Errorf("stderr = %q, want a line starting %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestABackupTickerWhoseCadenceIsOffTakesNoPassUntilItIsSwitchedOn starts
+// the ticker on the real snapshot code with its cadence at 0, as a bridge
+// whose operator set `backup.intervalHours: 0` reads it (backlog B209). It
+// took its startup pass anyway, before it read the interval: a snapshot,
+// then a prune of the backups root down to backup.keep. Two old snapshots
+// and a keep of 1 make both visible.
+//
+// Then the cadence is switched on as the settings PATCH does it, a new
+// interval and a rearm. The first pass that follows is a scheduled one, not
+// the startup one, so the startup pass's skip for a recent snapshot does not
+// apply to it: a snapshot an hour old is put there first, and a pass that
+// took itself for the startup one would skip instead of writing.
+func TestABackupTickerWhoseCadenceIsOffTakesNoPassUntilItIsSwitchedOn(t *testing.T) {
+	dataDir := t.TempDir()
+	src := backup.Sources{DataDir: dataDir, ManifestDB: filepath.Join(dataDir, "bridge.db")}
+	backuptest.WriteSource(t, src.ManifestDB)
+	root := filepath.Join(dataDir, backup.BackupsDirName)
+	now := time.Now().UTC()
+	old := []string{
+		writeSnapshotDir(t, root, now.Add(-72*time.Hour)),
+		writeSnapshotDir(t, root, now.Add(-96*time.Hour)),
+	}
+
+	var cadence, reads atomic.Int64 // cadence 0: switched off
+	interval := func() time.Duration {
+		reads.Add(1)
+		return time.Duration(cadence.Load())
+	}
+	rearm := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+	stdout := holdOn("backup (scheduled): wrote ")
+	t.Cleanup(stdout.letGo) // before the drain waits: LIFO
+	var stderr safeBuffer
+	status := &sweepStatus[struct{}]{}
+	go func() {
+		defer close(done)
+		runBackupTicker(ctx, src, func() int { return 1 }, interval, rearm, stdout, &stderr, status)
+	}()
+
+	// The loop reads its cadence where it decides on its boot pass and
+	// again where it parks, so a second read says it has parked.
+	waitFor(t, func() bool { return reads.Load() >= 2 }, "the backup ticker to park")
+	if got := stdout.String(); got != "" {
+		t.Errorf("with its cadence off, the ticker printed %q", got)
+	}
+	for _, dir := range old {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("with its cadence off, the ticker pruned %s: %v", filepath.Base(dir), err)
+		}
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != len(old) {
+		t.Errorf("with its cadence off, the backups root holds %d entries (err %v), want the %d it was given",
+			len(entries), err, len(old))
+	}
+	if _, lastStart, _, next, _ := status.snapshot(); !lastStart.IsZero() || !next.IsZero() {
+		t.Errorf("with its cadence off, the run state shows a pass started at %v and one due at %v, want neither",
+			lastStart, next)
+	}
+
+	writeSnapshotDir(t, root, now.Add(-time.Hour))
+	cadence.Store(int64(20 * time.Millisecond))
+	rearm <- struct{}{}
+	stdout.wait(t)
+	// Off again before the held pass goes on, so that it is the only one.
+	cadence.Store(0)
+	select {
+	case rearm <- struct{}{}:
+	default:
+	}
+	stdout.letGo()
+	cancel()
+	waitClosed(t, done, "the backup ticker")
+
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr = %q, want nothing", got)
+	}
+	first, _, _ := strings.Cut(stdout.String(), "\n")
+	if !strings.HasPrefix(first, "backup (scheduled): wrote ") {
+		t.Errorf("the first pass after the cadence was switched on printed %q, want a scheduled snapshot: "+
+			"a pass after a rearm is never the startup one", first)
 	}
 }
 

@@ -258,18 +258,20 @@ func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[a
 }
 
 // runSweepLoop is the shared cadence every background sweeper follows:
-// settle delay → one sweep → then a sweep per `interval` tick or per
-// `nudge`, until ctx is done. Extracted because the analysis, fingerprint
-// and auto-optimize loops were byte-identical, and the subtle part
-// deserves one home rather than three.
+// settle delay → one sweep, the BOOT pass, if the cadence is on → then a
+// sweep per `interval` tick or per `nudge`, until ctx is done. Extracted
+// because the analysis, fingerprint and auto-optimize loops were
+// byte-identical, and the subtle part deserves one home rather than three.
 //
 // **The single nudge drain is that subtle part.** A nudge that landed
 // DURING the settle window (typically the startup scan's post-scan hook)
-// is covered by the sweep about to run, so it is drained once. That is the
-// ONLY drain: a nudge arriving while a sweep is EXECUTING must stay
-// buffered, so the select below fires a follow-up for whatever the running
-// sweep was too early to see. Dropping it would lose exactly the
-// freshly-scanned files the nudge exists to catch.
+// is covered by the boot pass about to run, so it is drained once, and
+// only when that pass runs: with no boot pass it is a request nothing has
+// covered, and the select below serves it. That is the ONLY drain: a
+// nudge arriving while a sweep is EXECUTING must stay buffered, so the
+// select below fires a follow-up for whatever the running sweep was too
+// early to see. Dropping it would lose exactly the freshly-scanned files
+// the nudge exists to catch.
 //
 // # interval is a provider, and the loop re-reads it every iteration
 //
@@ -290,6 +292,14 @@ func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[a
 //     had to go. A parked loop with no nudge and no rearm blocks on
 //     ctx.Done alone, which costs one goroutine and is what lets the
 //     0 → N transition ever be observed.
+//   - The loop parks BEFORE its boot pass too: the boot pass is the first
+//     pass of the schedule, so a cadence that is off when the settle
+//     window ends takes none. It took one until 2026-10-02 (backlog B209):
+//     the loop swept before it read the interval, and since #769 started
+//     the backup ticker on every bridge, `backup.intervalHours: 0` wrote a
+//     snapshot, and pruned the backups to backup.keep, at every boot. A
+//     0 → N rearm then arms the timer and runs nothing (the rearm rule
+//     below), so the first pass is N later and is not the boot pass.
 //
 // # rearm
 //
@@ -306,8 +316,11 @@ func autoOptimizeStateClosure(enabled, active func() bool, status *sweepStatus[a
 //
 // `sweep` owns its own status bookkeeping (sweepStarted / sweepFinished);
 // the loop only arms `scheduleNext`, so a caller keeps whatever
-// counts-on-failure semantics it needs.
-func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay time.Duration, interval func() time.Duration, nudge, rearm <-chan struct{}, sweep func()) {
+// counts-on-failure semantics it needs. It is told whether it is the boot
+// pass, which only the loop knows: the backup ticker's startup snapshot
+// skips when a recent one exists, and a flag of the ticker's own ("the
+// first call") took the first pass after a dormant boot for it.
+func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay time.Duration, interval func() time.Duration, nudge, rearm <-chan struct{}, sweep func(boot bool)) {
 	// time.NewTimer + defer Stop, NOT time.After: `time.After` keeps its
 	// timer alive until it fires even when ctx.Done() wins the select, and
 	// runServe is re-entered every time the launcher menu restarts the
@@ -320,14 +333,14 @@ func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDela
 		return
 	case <-settle.C:
 	}
-	select {
-	case <-nudge:
-	default:
-	}
 	if d := intervalOf(interval); d > 0 {
+		select {
+		case <-nudge:
+		default:
+		}
 		status.scheduleNext(time.Now().Add(d))
+		sweep(true)
 	}
-	sweep()
 	for {
 		d := intervalOf(interval)
 		var tickC <-chan time.Time
@@ -347,10 +360,10 @@ func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDela
 			stopTimer(t)
 			return
 		case <-tickC:
-			sweep()
+			sweep(false)
 		case <-nudge:
 			stopTimer(t)
-			sweep()
+			sweep(false)
 		case <-rearm:
 			// Cadence changed. Re-read it on the next iteration; do NOT
 			// sweep — a settings save is not a request to do the work.

@@ -3182,8 +3182,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// are best-effort — failures are logged but never crash serve.
 	//
 	// `EffectiveIntervalHours` returns 0 when the operator has explicitly
-	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
-	// that case. The on-demand CLI path stays available regardless.
+	// disabled the ticker (`intervalHours: 0`); the loop then parks before
+	// its startup snapshot, so it writes and prunes nothing (backlog B209:
+	// it took that snapshot, and pruned, at every boot until 2026-10-02).
+	// The on-demand CLI path stays available regardless.
 	backupSources := buildBackupSources(cfg, *configPath)
 	// Started UNCONDITIONALLY, unlike the pre-hot-cadence shape which
 	// only spawned it when the interval was > 0. A dormant loop is what
