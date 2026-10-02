@@ -21,8 +21,10 @@ func WatchFileLimits() (WatchFDLimits, error) {
 	}
 	// Cur is a uint64 on macOS and an int64 on FreeBSD.
 	l := WatchFDLimits{Process: clampFileLimit(uint64(max(rl.Cur, 0)))}
-	if n, err := unix.SysctlUint32("kern.maxfilesperproc"); err == nil && n > 0 && int(n) < l.Process {
-		l.Process = int(n)
+	// Through clampFileLimit, as Cur goes: a uint32 past what a 32-bit int
+	// holds would turn negative and take the budget below zero.
+	if n, err := unix.SysctlUint32("kern.maxfilesperproc"); err == nil && n > 0 {
+		l.Process = min(l.Process, clampFileLimit(uint64(n)))
 	}
 	if n, err := unix.SysctlUint32("kern.maxfiles"); err == nil && n > 0 {
 		l.System = clampFileLimit(uint64(n))
