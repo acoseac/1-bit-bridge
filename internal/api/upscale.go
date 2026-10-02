@@ -46,6 +46,9 @@ import (
 //     non-DSD source for `pcm`; already at/above target rate;
 //     a fresh sidecar already cached). Counted as "rejected"
 //     silently — the user can't take action.
+//   - `ErrUpscaleNoRoom` (typed): a volume the rendition would be
+//     written on has no room for it. Counted as "rejected", with one
+//     Warn per request.
 //   - any other error: treated as a server fault; the handler
 //     logs and counts as rejected.
 type UpscaleEnqueuer interface {
@@ -100,6 +103,14 @@ var ErrUpscaleSourceMissing = errors.New("upscale source path missing on disk")
 // has no remediation, so we don't surface it in the wire
 // response beyond the rejected count.
 var ErrUpscaleIneligible = errors.New("upscale source is ineligible")
+
+// ErrUpscaleNoRoom is returned by the enqueue methods when a volume the
+// rendition would be written on has no room for it: the variants volume
+// for the projected rendition, or a DSD render's scratch volume for its
+// Stage A intermediate. The batch and the auto-optimize sweep make the same
+// check before they queue; nothing is queued. Counted as rejected, with one
+// log line per request (an operator can free space; the client cannot).
+var ErrUpscaleNoRoom = errors.New("not enough free space for the rendition")
 
 // UpscaleRequest is the wire shape POST /v1/upscale accepts.
 // `path` may be a track file or a folder; the handler stat()s
@@ -377,6 +388,11 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	enqueued := 0
 	rejected := 0
 	queueFull := false
+	// noRoom is the first candidate refused for want of free space, and
+	// how many were: one line for the request, not one per track of an
+	// album that cannot fit.
+	var noRoom error
+	noRoomCount := 0
 	for _, c := range candidates {
 		var err error
 		switch kind {
@@ -399,10 +415,21 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			// the response stays honest about how many
 			// candidates the handler actually moved.
 			rejected++
+		case errors.Is(err, ErrUpscaleNoRoom):
+			rejected++
+			noRoomCount++
+			if noRoom == nil {
+				noRoom = err
+			}
 		default:
 			logger.Error("upscale: enqueue failed", "path", c, "err", err)
 			rejected++
 		}
+	}
+
+	if noRoom != nil {
+		logger.Warn("upscale: not enough free space for the rendition; nothing queued for it",
+			"refused", noRoomCount, "err", noRoom)
 	}
 
 	if enqueued == 0 && queueFull {

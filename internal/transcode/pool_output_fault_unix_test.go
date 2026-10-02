@@ -16,10 +16,12 @@ import (
 
 // standInSoxWritesItsOutputs writes every output a run hands it, the way a
 // run that gets as far as writing leaves them: a DSD render's Stage A
-// scratch, and the temp file of the sidecar in every chain.
-const standInSoxWritesItsOutputs = standInSoxHelp + `for a in "$@"; do
+// scratch, and the temp file of the sidecar in every chain, a whole FLAC
+// at the target sourceFile and dsdSource ask for.
+var standInSoxWritesItsOutputs = standInSoxHelp + `for a in "$@"; do
   case "$a" in
-    *` + renderScratchSuffix + `|*` + sidecarTmpSuffix + `) printf 'x' > "$a" || exit 2 ;;
+    *` + renderScratchSuffix + `) printf 'x' > "$a" || exit 2 ;;
+    *` + sidecarTmpSuffix + `) ` + shWrites("$a", stereoFLAC(176400, 24)) + ` || exit 2 ;;
   esac
 done
 `
@@ -28,9 +30,9 @@ done
 // succeeds does, and then takes its folder's write bit away: the folder
 // refuses the publish rename, the last step that writes there. /bin/chmod
 // by its path, since PATH holds nothing but the stand-ins.
-const standInSoxLocksItsFolder = standInSoxHelp + `for a in "$@"; do
+var standInSoxLocksItsFolder = standInSoxHelp + `for a in "$@"; do
   case "$a" in
-    *` + sidecarTmpSuffix + `) printf 'fLaC' > "$a" || exit 2; /bin/chmod 555 "${a%/*}" ;;
+    *` + sidecarTmpSuffix + `) ` + shWrites("$a", stereoFLAC(176400, 24)) + ` || exit 2; /bin/chmod 555 "${a%/*}" ;;
   esac
 done
 `

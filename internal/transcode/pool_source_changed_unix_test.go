@@ -18,8 +18,9 @@ import (
 // fakeRenderingSox stands in for sox(1): it marks that it ran, changes the
 // file FAKE_SOX_CHANGE names when that is set (a tagger writing the source
 // while the render reads it), and writes a rendition to its output argument,
-// the argv entry after `-t flac`.
-const fakeRenderingSox = `#!/bin/sh
+// the argv entry after `-t flac`: a whole FLAC at the 48 kHz / 16-bit target
+// the test's jobs ask for.
+var fakeRenderingSox = `#!/bin/sh
 out=""; prev=""; prev2=""
 for a in "$@"; do
   if [ "$prev2" = "-t" ] && [ "$prev" = "flac" ]; then out="$a"; break; fi
@@ -28,7 +29,7 @@ done
 [ -n "$out" ] || { echo "fake sox: no output argument" >&2; exit 1; }
 : > "$FAKE_SOX_RAN"
 if [ -n "$FAKE_SOX_CHANGE" ]; then printf 'retag' >> "$FAKE_SOX_CHANGE"; fi
-printf 'fLaC' > "$out"
+` + shWrites("$out", stereoFLAC(48000, 16)) + `
 exit 0
 `
 

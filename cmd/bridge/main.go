@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -913,6 +914,14 @@ type upscaleEnqueuerAdapter struct {
 	// records). Nil-safe: unwired, a refused file waits for the periodic
 	// scan.
 	rescan func(rel string)
+	// diskFree probes a volume's free space for the pre-flight
+	// (roomForRendition); nil is quietDiskFree. A seam, as the auto-optimize
+	// sweeper's diskFree is.
+	diskFree func(dir string) (int64, error)
+	// sameVolume answers whether the variants directory and the render
+	// scratch are on one volume, for the same pre-flight; nil is
+	// transcode.SameVolume.
+	sameVolume func(a, b string) (bool, error)
 }
 
 // renditionQueue is the one transcode.Pool method the adapter calls. It is
@@ -1044,6 +1053,9 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 	if existing != nil && existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
 		return api.ErrUpscaleIneligible
 	}
+	if err := a.roomForRendition(spec); err != nil {
+		return err
+	}
 	enqueueErr := a.pool.Enqueue(spec)
 	switch {
 	case errors.Is(enqueueErr, transcode.ErrQueueFull):
@@ -1060,6 +1072,76 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 		return fmt.Errorf("enqueue: %w", enqueueErr)
 	}
 	return nil
+}
+
+// roomForRendition refuses a job whose volumes have no room for it, before it
+// is queued: the variants volume for the projected rendition, and for a DSD
+// render the scratch volume for its Stage A intermediate. The batch and the
+// auto-optimize sweep check before they queue too (ProjectedSize and
+// RequiredBytesWithMargin with DefaultDiskSafetyMargin; RenderScratchBytes);
+// the on-demand path made no check, so on a full volume every request queued
+// a render that could only fail, and a phone's requests kept coming (backlog
+// B264). A DSD render holds its scratch while it writes the rendition (Stage
+// C reads the one into the other), so where the two directories are on one
+// volume it needs the sum there. A probe that cannot read a volume refuses
+// too, as theirs do.
+func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
+	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
+		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
+	scratch := spec.RenderScratchBytes()
+	if scratch <= 0 {
+		return a.roomOn(spec.OutputDir, projected)
+	}
+	scratchDir := transcode.RenderScratchDir(spec.TempDir)
+	same := a.sameVolume
+	if same == nil {
+		same = transcode.SameVolume
+	}
+	shared, err := same(spec.OutputDir, scratchDir)
+	if err != nil {
+		return fmt.Errorf("check free space for the rendition: %w", err)
+	}
+	if shared {
+		need := projected + scratch
+		if need < projected { // ProjectedSize saturates at MaxInt64; a wrapped sum would pass
+			need = math.MaxInt64
+		}
+		return a.roomOn(spec.OutputDir, need)
+	}
+	if err := a.roomOn(spec.OutputDir, projected); err != nil {
+		return err
+	}
+	return a.roomOn(scratchDir, scratch)
+}
+
+// roomOn answers whether dir's volume has room for need bytes and the
+// safety margin: nil, api.ErrUpscaleNoRoom wrapping the numbers, or the
+// probe's own failure. A need of 0 (a projection with an unknown factor)
+// passes once the probe has read the volume.
+func (a *upscaleEnqueuerAdapter) roomOn(dir string, need int64) error {
+	free := a.diskFree
+	if free == nil {
+		free = quietDiskFree
+	}
+	have, err := free(dir)
+	if err != nil {
+		return fmt.Errorf("check free space for the rendition: %w", err)
+	}
+	if want := transcode.RequiredBytesWithMargin(need, transcode.DefaultDiskSafetyMargin); want > have {
+		return fmt.Errorf("%w: %w", api.ErrUpscaleNoRoom, &transcode.InsufficientDiskSpaceError{
+			ProjectedBytes: need, RequiredBytes: want, AvailableBytes: have, Dir: dir,
+		})
+	}
+	return nil
+}
+
+// quietDiskFree is transcode.AvailableDiskSpaceNearest without its warning
+// about a missing directory: the on-demand pre-flight runs per request, and
+// a variants directory or a render scratch nothing has written yet is missing
+// on every request until the first render makes it. The sweep and the batch,
+// which probe once a pass, keep the warning.
+func quietDiskFree(dir string) (int64, error) {
+	return transcode.AvailableDiskSpace(transcode.NearestExistingDir(dir))
 }
 
 // buildOptimizeSpec runs the optimize-kind eligibility gate against

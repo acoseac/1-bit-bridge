@@ -3279,11 +3279,11 @@ no failing test — which is the shape to expect in this area.
   one is fixed Warns at its next failure, as a new outage. Proven after the
   fsync, since a volume failing its writes can still take a rename; a DSD
   success proves the scratch too (the
-  settings' `decoder`, as for the tools). **Not covered**: a write a tool
-  makes after its output exists (a volume that fills during the render),
-  which the bridge does not see and this change does not classify; measured
-  on a full HFS+ image, a mkdir and an empty create both succeed on a volume
-  full of data, so a full volume seldom reaches a marked step.
+  settings' `decoder`, as for the tools). A write a tool makes after its
+  output exists (a volume that fills during the render) was not covered
+  until B264 (the next bullet); measured on a full HFS+ image, a mkdir and
+  an empty create both succeed on a volume full of data, so a full volume
+  seldom reaches a marked step.
   `TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource` (six shapes, the
   real pool and `Run` with stand-in tools; POSIX, skipped as root),
   `TestFixingTheOutputDirectoryBringsTheSourceBackAtTheNextJob`,
@@ -3293,6 +3293,75 @@ no failing test — which is the shape to expect in this area.
   `TestMarkOutputFaultReturnsEveryOtherErrorAsItIs`,
   `TestMarkOutputFaultReadsWhatTheOSReports`; the positive control is still
   `TestAToolThatRanAndRefusedTheFileStillStrikesIt`.
+- **…and a rendition is published only WHOLE, read from its frames, whatever
+  the tool's exit status** (2026-10-02, backlog B264). sox 14.4.2 does not
+  fail when a write to its output fails: it prints "error writing output file:
+  No space left on device" and EXITS 0, leaving the file it began (Homebrew's
+  and Debian's). Through the real pool and tools on a full volume (main
+  95c894c3 on an HFS+ image, 6e9f5fc3 on a Linux tmpfs), the sox-direct, ALAC
+  and DSD Stage C routes announced `done` over a truncated rendition, stamped
+  fresh, so nothing rendered it again; and a DSD Stage A on a full scratch
+  volume held its worker until the job's timeout: `runFFmpegPipe` kept this
+  process's copy of the pipe's read end, so ffmpeg never met EPIPE when sox
+  stopped reading with status 0 (closed now, once sox has started). **The
+  header is no witness**: sox writes the expected length into STREAMINFO
+  before the audio and only a finished stream rewrites it, so a cut sox-direct
+  stream declared all 3,840,000 samples over a third of them and ffprobe
+  reported the full 20 s; a piped encode declares 0, ffprobe reports no
+  duration, and the ALAC guard read that as no verdict. `readFLACStream`
+  (flac_stream.go) reads STREAMINFO and the file's tail: the frame that ends
+  the file, by its header (sync, CRC-8, agreeing with STREAMINFO) and its
+  CRC-16 to the last byte. **Whole is that frame ending at the sample
+  STREAMINFO declares (> 0)**; `wholeRendition` also wants the job's rate, in
+  `Run` and `renderDSD` before every publish. Then the length, two-sided:
+  sox-direct against ffprobe's duration of the source and the ALAC pipe
+  against `geo.Duration`, both within `durationTolerance` (measured exact: 72
+  sox-direct renders within half a sample of N×out/in, 32 ALAC within 1e-6),
+  and Stage C EXACTLY the scratch's samples (its gain and dither keep the
+  length). **Not `sox --i` for the source**: it takes a streaming WAV's
+  0xFFFFFFFF data size at its word (1,073,741,823 samples) while sox renders
+  every sample. **A stream cut short is the output side's** (B211's marking):
+  only a tool that EXITED 0 is read (a crash, a kill or a failure is the run's
+  failure first): a write it made failed, and nothing in a source fails a
+  write but its size, so the volume is asked with a 64 KiB write past the
+  file's end (`probeVolumeRoom`, not zeros, which a compressing filesystem
+  stores as nothing): a cause `hostOutputFault` names is that fault, EFBIG or
+  any other refusal keeps the strike, and **a volume that takes the bytes is
+  the output side's too** (`reasonWriteFailedThenRoom`): sox frees its `-G`
+  temporary file as it exits, which on a volume the variants share is most of
+  the room, and a concurrent job's cleanup frees its partial, so room after
+  the fact is no evidence the source failed. **A whole stream of the wrong
+  length strikes**, as any tool that finished what it read does. **Stage A's
+  scratch is no witness either way**: sox rewrites a `.sox` file's length when
+  it closes it, so a scratch a full volume cut and a source that decoded short
+  look alike; a Stage A that failed (its pipe, or a short scratch) asks the
+  scratch volume (`scratchOutput`), and only a refusal `hostOutputFault` names
+  is the scratch's. **The on-demand enqueue checks room before it queues**,
+  as the batch and the sweep check theirs (`roomForRendition`:
+  `ProjectedSize` and `RequiredBytesWithMargin` on the variants volume,
+  `RenderScratchBytes` on the scratch volume, and **their sum where the two
+  are one volume**, `transcode.SameVolume`, each judged where the probe judges
+  it: a DSD render holds its scratch while Stage C writes the rendition;
+  CodeRabbit on #1145); a refusal is `api.ErrUpscaleNoRoom`, rejected, one
+  Warn per request, no wire change. **It probes without the missing-directory
+  warning** (`quietDiskFree`, `transcode.NearestExistingDir`): it runs per
+  request, and a variants directory or a render scratch nothing has written
+  yet is missing on every request until the first render makes it; the sweep
+  and the batch, which probe once a pass, keep it. **A stand-in sox that "renders" writes a whole
+  FLAC** (`internal/flactest`, `shWrites`): a payload like `fLaC` is refused
+  now. Tests: `TestARenditionThatCouldNotBeWrittenWholeIsNotPublished` (real
+  tools on a full volume: an HFS+ image on macOS, `BRIDGE_TEST_SMALL_VOLUME`
+  elsewhere, CI's dsd-measure job mounts a tmpfs),
+  `TestRunPublishesOnlyAWholeRendition` and
+  `TestACutRenditionStrikesNothingAndAShortOneStrikes` (the test binary as sox
+  and ffprobe, every platform), `TestADSDRenditionHoldsWhatItsScratchHeld`,
+  `TestAStageAThatLeftAShortScratchAsksTheScratchVolume`,
+  `TestACutStreamIsClassifiedByWhatTheVolumeAnswers`,
+  `TestACutStreamIsNotWhole`,
+  `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+  `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+  `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`,
+  `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,

@@ -53,12 +53,12 @@ import (
 // decode: a DSD render no longer spends its Stage A on a sidecar that could
 // never be written.
 //
-// Not covered: a write a tool makes after its output exists (a volume that
-// fills during the render). The bridge does not see that write, and this
-// change does not classify it. On Windows the tool still creates its own
-// output (createOutput does nothing there), so a directory whose ACL refuses
-// new files keeps its strike; making a directory and the publish rename are
-// marked on every platform.
+// A write a tool makes after its output exists (a volume that fills during
+// the render) the bridge does not see; since B264 it reads the output the
+// tool left and asks the volume (rendition_complete.go). On Windows the tool
+// still creates its own output (createOutput does nothing there), so a
+// directory whose ACL refuses new files keeps its strike; making a directory
+// and the publish rename are marked on every platform.
 
 // The two places a job writes, as the outage report names them.
 const (

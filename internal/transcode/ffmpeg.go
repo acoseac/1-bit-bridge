@@ -233,13 +233,21 @@ func probeSourceGeometry(ctx context.Context, srcAbs string) (sourceGeometry, er
 	return g, nil
 }
 
-// probeOutputDuration reads the duration of the sidecar sox just wrote.
+// probeDuration reads a file's duration as ffprobe reads its container: a
+// sox-direct render's source, the reference its rendition's length is held
+// to (rendition_complete.go). ffprobe rather than `sox --i -D`, whose header
+// read takes a streaming writer's 0xFFFFFFFF data size at its word: for such
+// a WAV, sox renders every sample while `sox --i -s` reports 1,073,741,823,
+// and ffprobe reads the length the data has (measured, backlog B264).
+// Returns 0 on any failure, ffprobe missing included, which the caller
+// treats as "no verdict".
 //
-// ffprobe rather than `sox --i -D` because the temp path ends in `.tmp`, and
-// sox picks its handler from the extension — the same reason SoxArgs has to
-// force `-t flac` on the output. ffprobe sniffs content. Returns 0 on any
-// failure, which the caller treats as "skip the check".
-func probeOutputDuration(ctx context.Context, path string) float64 {
+// It read the sidecar sox had just written, for the ALAC route's guard,
+// until B264: sox writes the expected length into a FLAC's header before the
+// audio and the header of a piped encode not at all until the stream
+// finishes, so for a stream cut short this read the full length, or nothing
+// (no verdict). The rendition is read from its frames now (flac_stream.go).
+func probeDuration(ctx context.Context, path string) float64 {
 	out, err := exec.CommandContext(ctx, resolveBin(ffprobeLookPath, "ffprobe"),
 		"-v", "error", "-show_entries", "format=duration",
 		"-of", "default=nw=1:nk=1", path).Output()
@@ -360,11 +368,21 @@ func runFFmpegPipe(ctx context.Context, soxArgs, ffmpegArgs []string) (soxStderr
 		_ = ff.Wait()
 		return "", fmt.Errorf("start sox: %w", err)
 	}
+	// sox holds its own descriptor for the pipe now. This process's copy
+	// (exec keeps it to close in ff.Wait) is another reader, so while it is
+	// open a sox that stops reading early leaves ffmpeg blocked on a full
+	// pipe instead of failing with EPIPE. sox does stop early with status 0:
+	// after a write it could not make (a full render scratch, its own -G
+	// temporary file), which until B264 held the worker until the job's
+	// timeout. Closed here, ffmpeg's next write fails, and ff.Wait's second
+	// close is ignored.
+	_ = pipe.Close()
 
 	// Wait on the READER first: os/exec documents that calling Wait on the
-	// writer before the pipe is drained is a race. If sox died early ffmpeg
-	// takes EPIPE and exits on its own; the Kill below is the belt for a
-	// build that ignores it.
+	// writer before the pipe is drained is a race. If sox stopped early
+	// ffmpeg takes EPIPE and exits on its own (its last reader is gone: this
+	// process's copy is closed above, which until B264 it was not); the Kill
+	// below is the belt for a sox that failed.
 	soxWaitErr := sx.Wait()
 	if soxWaitErr != nil && ff.Process != nil {
 		_ = ff.Process.Kill()

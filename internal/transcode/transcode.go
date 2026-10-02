@@ -1071,15 +1071,6 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		if _, err := runFFmpegPipe(ctx, args, ffmpegDecodeArgs(j.SourceAbsPath)); err != nil {
 			return RunResult{}, err
 		}
-		// ffmpeg exits 0 on a truncated-but-openable source, so the exit
-		// code above cannot tell a partial decode from a whole one. Compare
-		// what was produced against what the container claims. Nothing is
-		// committed on a mismatch, so the candidate re-flows once the source
-		// is whole — the same self-healing shape internal/analyze uses.
-		if produced := probeOutputDuration(ctx, tmpPath); decodeLengthDisagrees(geo.Duration, produced) {
-			return RunResult{}, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
-				ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
-		}
 	default:
 		// routeNone lands here too: sox is given the source and refuses
 		// it with its own diagnostic, which is a better error than one
@@ -1102,6 +1093,9 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 			return RunResult{}, err
 		}
 	}
+	if err := j.verifyRendition(ctx, route, geo, tmpPath, sidecarDir); err != nil {
+		return RunResult{}, err
+	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy. Refused for a source that changed while it
 	// rendered (source_version.go).
@@ -1115,6 +1109,31 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		"variant", j.VariantID(),
 		"sidecar_bytes", size)
 	return RunResult{SizeBytes: size, Settings: settings}, nil
+}
+
+// verifyRendition proves the rendition sox wrote at tmpPath whole before
+// Run publishes it. sox exits 0 after a write it could not make (a variants
+// volume that filled, or its own -G temporary file), so its exit status says
+// nothing about the file: it is read, and published only whole, at the
+// length its source implies (rendition_complete.go).
+func (j JobSpec) verifyRendition(ctx context.Context, route decodeRoute, geo sourceGeometry, tmpPath, sidecarDir string) error {
+	whole, err := j.wholeRendition(tmpPath, sidecarDir)
+	if err != nil {
+		return err
+	}
+	if route != routeFFmpegPipe {
+		return j.renditionLengthDisagrees(probeDuration(ctx, j.SourceAbsPath), whole)
+	}
+	// ffmpeg exits 0 on a truncated-but-openable source too, so the pipe's
+	// reference is what the container claims: a whole stream shorter than
+	// that is a partial decode. Nothing is committed on a mismatch, so the
+	// candidate re-flows once the source is whole — the same self-healing
+	// shape internal/analyze uses.
+	if produced := whole.seconds(); decodeLengthDisagrees(geo.Duration, produced) {
+		return fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+			ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
+	}
+	return nil
 }
 
 // SoxInfo is the result of ProbeSox: where sox lives, its version, and —
