@@ -957,7 +957,7 @@ The bridge groups tracks by the iOS client's own duplicate-collapse identity and
 - **`internal/dupes` is a VERBATIM MIRROR of iOS `MetadataNormalizer` + `CrossSourceTrackDedup.ContentKey` — the fourth DO-NOT-UNIFY entry in matchfold.go.** Its output must equal the client's partition; a fix that makes it "better" than the client makes it WRONG. Test literals are lifted verbatim from `MetadataNormalizerTests.swift` (an iOS rule change trips a test here). Honoured divergences: whitespace is `unicode.IsSpace` hand-rolled (Swift regex `\s` is Unicode, Go's is ASCII); the filename track rule accepts a BARE SPACE (`"07 Song.flac"` → 7) because Swift's does — `parseLeadingTrackNumber` is deliberately NOT reused; the KeyFor filename split is `/`-only (mirrors `NSString.lastPathComponent`; store paths are ToSlash'd anyway — Gemini's LastIndexAny suggestion declined). **Disc+track stay in the key**: dropping them inflates version-token false-positives 2.2%→19.3% (measured, pinned).
 - **Tiers are evidence claims**: `different-format` = different masters (NEVER framed as redundant; renders per-member geometry inline), `same-format` = inference, `identical-audio`/`different-audio` = STREAMINFO-MD5-proven (v32; the ONLY tier allowed to say "reclaimable" is identical-audio), `inconclusive` absorbs every uncertainty and is NEVER suppressed, `self-nested` = upload accidents detected by **collapsed-path equality** (an eponymous album's run-of-2 can never read as one). `classify()` has a len<2 inconclusive floor.
 - **Winner election** (`dupes.PlanSuppression`): lossless > bits > rate > size > shallower/shorter/lexicographic path — a strict total order so winners never flap (flapping = indexed_at churn). Self-nested keeps the shallowest per twin class. **DSD and PCM are NEVER cross-suppressed** (user decision 2026-08-05: both editions serve; ranking applies within each domain). `different-audio` (proven remasters) never suppresses under any mode, and a previously-suppressed copy AUTO-UN-SUPPRESSES when MD5 evidence lands (restamp diff + bump). Every suppression unit serves exactly one winner. The dupes-side lossy set mirrors `manifest.IsLossyCodec` (import cycle forbids calling it); `TestDupesLossyCodecsMirrorIsLossyCodec` is the lockstep pin.
-- **Stamping pass = pass #6 of Scan's success tail** (`Scanner.RestampDuplicates`), AFTER all metadata reconciliation so keys see reconciled tags. v31 columns `dupe_group_id`/`dupe_tier`/`dupe_suppressed` are COLUMN-ONLY (v25/v28 rule — no json tags, never spliced to wire); upserts deliberately DON'T touch them (fresh INSERT = served; the same scan's tail re-stamps). Diff-vs-current → zero writes on a stable library. **Corrected 2026-08-06 — "the tail" is THREE successful exits, and ScanSubtree is a writer too.** Scan now dispatches the pass from a `defer` (scanOK-gated, registered after the post-scan-hook defer so LIFO runs stamps first) because the ctx-done skip and the routed-exclusion-set failure both `return count, nil` AFTER the deletion pass has committed — reached inline at the bottom, a reaped winner left its twin `dupe_suppressed = 1` with no served copy in its group, i.e. an album invisible to every client. `ScanSubtree` (the watcher's path) gained the same tail: its upserts retag rows out of / into groups and its bounded deletion pass reaps winners, and the upsert comment's premise ("the full-scan tail runs in the SAME scan as these upserts") was never true there — a de-duplicated row stayed hidden until the next full scan, up to `ScanIntervalSec` (6h) away. Its pass is whole-library like Scan's: duplicates group ACROSS directories, so a subtree-scoped election cannot see the twin in another folder. **The ctx-done leg is the one exit that still can't restamp** (a cancelled context cannot write) — documented, heals on the next scan. **Best-effort here is NOT symmetric: an unstamped row is served (fail-open), a STALE SUPPRESSION hides one (fail-closed) and only another stamping pass clears it.** `ScanSubtree`'s pass is gated on that scan having committed or reaped a row (the stamps derive only from `tracks`, and unlike Scan this runs per debounced watcher event — an unconditional pass would put two full-table `json_extract` streams on every noise event). Locked by `TestScanSubtree_RestampsAfterReapingTheServedWinner` + `TestScan_RestampsWhenTheReconciliationTailBailsEarly`. `ApplyDupeStamps` never touches `enriched_at`/`tags_json`; **`indexed_at` strict-advances ONLY on suppressed→served transitions** — reappearing rows MUST bump or deltas never see them. Don't add a bump on suppression; don't move the pass before reconciliation. **The suppression→delta story CHANGED with the deletion journal** (2026-08-19 sync-redesign batch): a served→suppressed transition now writes a `manifest_deletions` tombstone (`DupeStamp.JournalDelete`, same transaction as the stamp) and the since-leg emits it as `deleted: [paths]`, so suppressed copies no longer linger on synced clients until a full sync — the pre-journal sentence that stood here ("iOS deltas never delete; suppressed rows linger invisibly…") described the v0.1.9–v1.9 behaviour. `indexed_at` is STILL never bumped on suppression; the tombstone is the delta signal, and any non-suppressed stamp clears the path's tombstone (see `deletion_journal.go`'s header for the coverage/retention/mass-op contract).
+- **Stamping pass = pass #6 of Scan's success tail** (`Scanner.RestampDuplicates`), AFTER all metadata reconciliation so keys see reconciled tags. v31 columns `dupe_group_id`/`dupe_tier`/`dupe_suppressed` are COLUMN-ONLY (v25/v28 rule — no json tags, never spliced to wire); upserts deliberately DON'T touch them (fresh INSERT = served; the same scan's tail re-stamps). Diff-vs-current → zero writes on a stable library. **Corrected 2026-08-06 — "the tail" is THREE successful exits, and ScanSubtree is a writer too.** Scan now dispatches the pass from a `defer` (scanOK-gated, registered after the post-scan-hook defer so LIFO runs stamps first) because the ctx-done skip and the routed-exclusion-set failure both `return count, nil` AFTER the deletion pass has committed — reached inline at the bottom, a reaped winner left its twin `dupe_suppressed = 1` with no served copy in its group, i.e. an album invisible to every client. `ScanSubtree` (the watcher's path) gained the same tail: its upserts retag rows out of / into groups and its bounded deletion pass reaps winners, and the upsert comment's premise ("the full-scan tail runs in the SAME scan as these upserts") was never true there — a de-duplicated row stayed hidden until the next full scan, up to `ScanIntervalSec` (6h) away. Its pass is whole-library like Scan's: duplicates group ACROSS directories, so a subtree-scoped election cannot see the twin in another folder. **The ctx-done leg is the one exit that still can't restamp** (a cancelled context cannot write) — documented, heals on the next scan. **Best-effort here is NOT symmetric: an unstamped row is served (fail-open), a STALE SUPPRESSION hides one (fail-closed) and only another stamping pass clears it.** `ScanSubtree`'s pass is gated on that scan having committed or reaped a row (the stamps derive only from `tracks`, and unlike Scan this runs per debounced watcher event — an unconditional pass would put two full-table `json_extract` streams on every noise event). (Since 2026-10-02 the gate also opens when a row that carried a stamp was deleted since the last pass, wherever it was deleted, and a full `Scan` then restamps before its walk too: the console's delete retires its rows before its subtree scan, which left the gate shut, backlog B218.) Locked by `TestScanSubtree_RestampsAfterReapingTheServedWinner` + `TestScan_RestampsWhenTheReconciliationTailBailsEarly`. `ApplyDupeStamps` never touches `enriched_at`/`tags_json`; **`indexed_at` strict-advances ONLY on suppressed→served transitions** — reappearing rows MUST bump or deltas never see them. Don't add a bump on suppression; don't move the pass before reconciliation. **The suppression→delta story CHANGED with the deletion journal** (2026-08-19 sync-redesign batch): a served→suppressed transition now writes a `manifest_deletions` tombstone (`DupeStamp.JournalDelete`, same transaction as the stamp) and the since-leg emits it as `deleted: [paths]`, so suppressed copies no longer linger on synced clients until a full sync — the pre-journal sentence that stood here ("iOS deltas never delete; suppressed rows linger invisibly…") described the v0.1.9–v1.9 behaviour. `indexed_at` is STILL never bumped on suppression; the tombstone is the delta signal, and any non-suppressed stamp clears the path's tombstone (see `deletion_journal.go`'s header for the coverage/retention/mass-op contract).
 - **The stamping pass re-checks for an in-flight scan immediately BEFORE `ApplyDupeStamps`, not just at the top.** `runDuplicatesSweeper` gates on `IsScanning()` and then calls `RestampDuplicates` WITHOUT `s.mu`, so a scan starting in that gap runs its own tail from fresher state while the sweeper is still mid-snapshot (two full-library streams + the election) — and the stale commit lands after it, un-suppressing rows the scan just suppressed. `Scanner.activeScans` (an `atomic.Int64` incremented by BOTH `Scan` and `ScanSubtree`) is the predicate; the exported `RestampDuplicates` abandons at the commit point when it is non-zero, while the scan tails call the unexported `restampDuplicates(ctx, insideScan=true)` and are exempt — they ARE what makes it non-zero. **Don't take `s.mu` instead** (deadlocks the in-scan callers; for external ones it blocks the scan for two library walks) and **don't widen the public `IsScanning`** to cover subtree scans — it drives the admin badge, the SSE fast tick and the booklet-GC skip. Residual, accepted: a scan that starts AND finishes inside one pass is undetectable. Locked by `TestRestampDuplicates_AbandonsWhenAScanStartsMidPass` (via the `beforeApplyDupeStampsHookForTests` seam, which is what pins the guard's POSITION) + `TestScanSubtree_MarksItselfScanInFlight`.
 - **Served-population rule**: every number leaving `/v1` describes the served set. `ListServedTracks`/`StreamServedTracks`/`ListServedTracksPage`/`CountServedTracks` power the manifest (stream+page+total), `enrichmentProgress` (EnrichmentCounts' numerator gained `AND dupe_suppressed = 0`; `MAX(enriched_at)` deliberately unscoped), health `tracksIndexed`, the DLNA adapter (one `ListServedTracks` call filters the whole CDS surface), and the smart-playlist pools (predicate baked into `trackFeatureSelect`'s WHERE — callers append with AND — because mixes PERSIST paths and serve them verbatim). **The full-store readers stay unfiltered on purpose and MUST keep seeing suppressed rows**: `TrackPaths`/`TrackPathsUnder` (deletion-pass snapshots — filtering them would REAP suppressed rows), `ListTracks`/`StreamTracks` (reconciliation passes, fingerprint sweeper, upscale CLI), `UnenrichedTracks`, `GetTrack`, admin rollups/browse/composition (operator truth — the admin dashboard's TracksIndexed deliberately re-diverges from the wire count). `/v1/list`/`stat`/`read`/`download` are fs/path-keyed and unfiltered (stale clients keep working; suppressed files stay downloadable).
 - **`duplicates.filter` is the one HOT-APPLYING feature setting** (highest-quality default | same-format | off; TailscaleMode-style resolver, validated at load). The settings PATCH fires `Deps.TriggerDuplicatesPass` → buffered-1 nudge → `runDuplicatesSweeper` (bgWriters-joined, nudge-only — no tick, no startup run; DEFERS when a scan is in flight because the scan's own tail reads the policy closure at runtime). `RestartRequired` stays false. **`SetDupePolicy` MUST be wired BEFORE `RunPeriodic` starts** — an unwired scanner stamps with FilterOff, which on boot would CLEAR every suppression (mass indexed_at bumps → iOS delta churn) before the next pass re-suppressed; main.go late-binds the live config holder through an atomic pointer with the boot snapshot as fallback. Unwired (tests/CLI) = groups still stamped, NOTHING suppressed (fail-open; stats work with filter off).
@@ -36886,3 +36886,145 @@ unused) and was rerun with the call kept and its answer overwritten.
   `noserverino`) a spelling other than the listed one would be refused, and
   the commit or delete would fall back to a full scan; a path spelled as
   listed is unaffected.
+
+## 2026-10-02 — A deleted row that carried a duplicate stamp is counted where it is deleted, and the next scan restamps for it (backlog B218)
+
+Found by the pre-v0.2.1 data review (2026-09-30), read-only: the real
+`POST /api/library/trash` under the default duplicates filter served one copy
+of a duplicated track before the delete of that copy, and neither after.
+
+### The defect
+
+The duplicate stamps of a group are derived from all its members, by a pass
+that runs in a scan's tail: always in a full `Scan`, and in `ScanSubtree` only
+when that scan committed, settled, reaped or renamed a row, or its deletion
+pass failed (two full-table `json_extract` streams per debounced watcher event
+are what that gate saves). The console's delete retires its rows itself
+(`retireAndRescan`, `IncrementMissingTracksAndDeleteAtThreshold` at threshold
+1) and THEN runs a subtree scan of the folders it touched, which finds nothing
+to write or reap, so the gate stayed shut. Delete the served copy of a
+duplicate and the copy it suppressed stayed `dupe_suppressed = 1`, with no
+served member in its group, while every device was sent the deleted copy's
+tombstone: the track vanished from every phone until the next full scan, 6 h
+away by default. The gate's own comment named that scan "the safety net for
+staleness from anywhere else".
+
+### Reproduced red-first
+
+On main at 6e9f5fc3, through the real handler, trash manager and scanner
+(`newTestServer`, the dupe policy wired from the live config as serve wires
+it): two copies of one track (FLAC, 44.1 kHz, 16 bits, 900 and 1000 bytes) and
+a third track, rows under their files' stat, stamped by a full scan; then
+`POST /api/library/trash` of the larger copy.
+`TestTrashingTheServedCopyOfADuplicateServesTheOther`:
+
+    served after the delete: ["Other/Album/02 Other.flac"], want ["CopyA/Album/01 Song.flac" "Other/Album/02 Other.flac"]
+    delta since the delete: [], want ["CopyA/Album/01 Song.flac"]
+
+The deleted copy's tombstone was there; the other copy was not served and not
+in the delta.
+
+### Every path that deletes tracks rows where no pass follows
+
+| Path | Deletes through | Followed by | On main | Now |
+|---|---|---|---|---|
+| Console delete (`POST /api/library/trash`) | `IncrementMissingTracksAndDeleteAtThreshold(…, 1)` | a subtree scan per folder, up to 8; past that, or for a spelling it could not read, a full scan | subtree tail gate shut: hidden until the next full scan | the subtree tail restamps; the full scan restamps before its walk |
+| Root removal with two or more roots left (`DELETE /api/roots`) | `DeleteTracksByPrefix` | a full scan | healed at that scan's tail, after its walk | healed before the walk |
+| Root add 1→N, removal N→1, and their CLI forms | `WipeFilesystemTracks` | a full scan | every stamped row is deleted, so nothing is left suppressed | the same; the count costs one pass over what is left |
+| `bridge manifest clear-missing` (refuses a live bridge) | `ClearMissingCounts` | the next `bridge serve`'s startup scan | healed at that scan's tail | healed before its walk: the count is in the database |
+| `bridge library remove`, offline | `DeleteTracksByPrefix` or `WipeFilesystemTracks` | the next startup scan | as clear-missing | as clear-missing |
+| SACD container read whole as junk inside a subtree scan (`processSACDISO`) | `IncrementMissingTracksAndDeleteAtThreshold(…, 1)` | that scan's tail | none of the gate's terms counts the retire (read from the code, not measured) | counted, so the tail restamps |
+| UPnP ingest reap | `DeleteTracksBatch` of routed rows | none | routed rows are never stamped | not counted, no pass |
+| A scan's own deletion pass, a case-only rename | the threshold reap, `DeleteTracksBatch` | its own tail | restamped already | unchanged |
+| Upload commit, trash restore | nothing deleted (their rescans write rows) | a subtree scan | restamped already | unchanged |
+
+### The fix
+
+- **Migration v51**: a one-row table `dupe_stamp_deletions(deleted,
+  covered)` and a trigger, `tracks_stamped_row_deleted`, `AFTER DELETE ON
+  tracks WHEN` the old row carried a stamp (group, tier or suppression, the
+  restamp's own "carries a stamp"), that adds one to `deleted` in the deleting
+  statement's transaction.
+- **The pass**: `restampDuplicates` reads `deleted` BEFORE its two streams and
+  records it as `covered` (`noteRestampCovered`, a `MAX`) only after
+  `ApplyDupeStamps` returns nil. A pass that stands down for a scan (the
+  external restamp's abandon guard, untouched) or whose stamps fail records
+  nothing. A failed record is a Warn and costs one more pass.
+- **The gates**: `deleted > covered` (`stampsBehindDeletions`, a read error
+  answers yes) opens `ScanSubtree`'s tail gate, and runs a pass at the head of
+  `Scan`, before the walk, said in one Info line (it is the one scan that stamps
+  twice). The head pass runs on the tags the last pass grouped, which is what
+  the deletion changed; the tail's pass still runs last, after reconciliation.
+- Nothing in `retireAndRescan` or any other deleter changed.
+
+### Alternatives weighed
+
+- **A restamp in the trash handler** (the external `RestampDuplicates`): it
+  races the subtree scan the handler spawns, abandons while that scan runs,
+  and the scan's gate is shut, so no pass runs at all; and it covers one
+  deleter.
+- **A Go counter bumped in each Store deleter**: seven functions, in this
+  process and in the CLI's (which an in-memory counter cannot see), one added
+  later forgotten; and telling a stamped row from another needs a SELECT per
+  statement, so the simple form counts every deletion and costs a pass for each
+  delete of a track that is no copy and each UPnP reap.
+- **An ungated restamp in every subtree tail**: the two streams on every
+  watcher event the gate exists to avoid.
+- **The trigger** (taken): one statement where every deletion passes, in its
+  own transaction, in any process, counting only stamped rows.
+- **Tail only, no head pass**: correct, but a root removal, the delete's
+  full-scan fallback and clear-missing then heal only after a full walk
+  (minutes on a NAS library), during which every syncing device misses the
+  track.
+
+### Tests
+
+- `TestTrashingTheServedCopyOfADuplicateServesTheOther` (internal/admin): the
+  reproduction above, green: both rows served, the copy in the delta, the
+  deleted copy's tombstone.
+- `TestTrashingATrackThatIsNoCopyRunsNoStampingPass`: the positive control; the
+  dupe summary's stamp time does not move, the delta is empty, the tombstone is
+  there.
+- `TestEveryDeletionOfAStampedRowIsCounted`: all seven Store deleters count a
+  stamped row and only a stamped row.
+- `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`: one pass after
+  a stamped deletion, none after an unstamped one.
+- `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`: the console's
+  delete, a prefix delete, and `ClearMissingCounts` through a second store on
+  the same file; the copy is served when the walk extracts a probe file
+  (`afterExtractHookForTests`).
+- `TestAFullScanWithNoStampedRowDeletedStampsOnce`.
+- `TestAStampingPassThatDoesNotApplyLeavesTheDeletionUncovered`: abandoned for
+  a scan, and failed by an abort trigger on the stamp write.
+- `TestADeletionDuringAStampingPassIsLeftForTheNext`: a stamped row deleted
+  between the snapshot and the commit stays uncovered.
+- `TestMigration51CountsFromZeroOnAnUpgradedLibrary`: an upgraded library is not
+  behind; v51's sql runs twice unharmed.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Control | Red |
+|---|---|
+| `ScanSubtree`'s gate without the count term | the admin reproduction (both lines), the subtree test's stamped case (0 passes) |
+| No head pass in `Scan` | all three cases of the full-scan test ("still suppressed while the scan walked") |
+| Trigger counting every deleted row (`WHEN 1`) | every deleter case, the subtree test's unstamped case (1 pass), the admin positive control (the stamp time moved) |
+| Recorded in the abandon branch | the abandoned case |
+| Recorded before the abandon check | both not-applied cases |
+| Count read at the commit instead of before the streams | the mid-pass deletion test |
+
+### Measured
+
+On the dev Mac, under load: a 5,000-row `WipeFilesystemTracks` with 500
+stamped rows took 50 and 59 ms with the trigger and 52 and 58 ms without it
+(the FTS delete trigger dropped in both, to isolate this one); the gate's read
+is 4 to 5 µs. With the FTS delete trigger in place the same wipe took 5.1 to
+6.4 s, and a 20,000-row one 44 to 81 s, with or without this trigger: a
+pre-existing cost of `tracks_fts_ad`, reported as a follow-up.
+
+### Residuals
+
+- A pass the shutdown stops records nothing, so the next scan restamps for its
+  deletions: before its walk if it is a full scan.
+- An older binary run against a v51 database keeps counting (the trigger is in
+  the database) and never reads the count; the first scan of the newer binary
+  then restamps once.
