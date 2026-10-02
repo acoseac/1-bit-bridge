@@ -1793,6 +1793,52 @@ lost my library."
   byte-exact form is case-sensitive on macOS/Windows where the filesystem isn't.
   Linux watch-limit handling is two-layer (runtime fallback to periodic-only, plus
   a `bridge doctor` pre-flight at 80% of the budget).
+- **…and on macOS every watch is an open file, so the watcher keeps to a
+  budget and releases what fsnotify keeps** (2026-10-02, backlog B212).
+  fsnotify watches through kqueue there, never FSEvents (the watcher's
+  docstring and the doctor said FSEvents until then): asked to watch a folder,
+  it opens the folder and every entry in it, files included (measured: 132
+  descriptors for 12 folders and 120 files). They come out of the open-file
+  limit every socket, SQLite file and pipe comes out of, so a library past it
+  broke every later open and accept, the periodic scan's included, and "the
+  periodic scan covers the gap" was false there. **Two layers, as on Linux**:
+  `Run` counts the library first (`CountWatchSet`, the walk doctor counts
+  with) and stays off, with one warning naming the counts and the limits, when
+  it needs more than the budget (`WatchFDLimits.Budget`: half of the effective
+  RLIMIT_NOFILE, which Go raises at start to min(hard−1,
+  kern.maxfilesperproc), 61,440 by default, and a quarter of kern.maxfiles at
+  most); a library that grows past it, or a process that runs out of files
+  while the watcher adds watches, has every watch released (`stopWatching`,
+  fsnotify's Close) with one warning, and `Run` then waits for its context, so
+  a scan an event already asked for still runs; doctor's `watcher-fd-budget`
+  row warns past the budget and over 80% of it. **Not Linux's 80%**: inotify's
+  watches are a budget of their own, kqueue's are slots in the table
+  everything else opens into (the idle bridge holds 41 open files, its pools
+  bound the rest). **fsnotify v1.10.1 leaks on its own, and the watcher works
+  around it** (no upstream fix): a renamed or moved-away folder's watch is
+  dropped and its entries' kept, under paths that are gone (`readEvents`'
+  `remove(name, false)`), so the watcher keeps an account of what fsnotify
+  holds, by folder (`watchFDs`), and removes the subtree on a Rename or Remove
+  (measured: 130 descriptors leaked per round of renaming 10 folders of 12
+  files, 0 after); and fsnotify sends a new folder's Create and THEN watches
+  the folder itself, on its own goroutine, so an Add from the handler races it
+  and fsnotify loses one descriptor for good, its Close included (9 or 10 new
+  folders of 10). **Never Add a folder from its Create handler on kqueue**: it
+  waits (`pending`) until fsnotify sends another event, which it sends only
+  once it has watched the folder, or `deferredAddWait` (250 ms, under the
+  shortest scan debounce, so the folder is watched before the scan its Create
+  asked for walks it). And fsnotify SENDS NOTHING for a folder renamed after
+  an entry of it changed and before it read that change (measured: no event at
+  all), so `reconcileWatches` releases, every 30 s, what is recorded under a
+  folder fsnotify no longer watches (its `WatchList`). Linux and Windows keep
+  no account (`kqueueBackend`). `TestKqueueWatcherReleasesARenamedFoldersFiles`,
+  `TestKqueueWatcherOpensAFolderMovedInOnce` (200 small folders: a watcher
+  that walks a folder before adding it at once still loses the race in some),
+  `TestKqueueWatcherReleasesAFolderFsnotifyDroppedWithoutAnEvent`,
+  `TestKqueueWatcherStopsWhenFilesTakeItPastItsBudget`,
+  `TestKqueueWatcherLeavesTheProcessOpenFiles` (children that lower their own
+  hard limit to 160: on main each could no longer open a file once the watcher
+  had run).
 - **A WalkDir-resume cursor compares in TRAVERSAL order, not raw string order.**
   `WalkDir` orders by base name and visits a directory before its children, so
   `A-Bonus/…` sorts BEFORE `A/…` as a raw string while being walked after —

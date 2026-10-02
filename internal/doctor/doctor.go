@@ -212,10 +212,12 @@ type Deps struct {
 	// run writes.
 	AbandonedPorts []int
 	// LibraryWatchEnabled mirrors cfg.LibraryWatch.Enabled. When
-	// true on Linux, the doctor's inotify watch-limit check
-	// activates — the operator gets a warning if their kernel
-	// budget would be exhausted by the configured roots before
-	// the bridge tries to register watches at runtime.
+	// true, the doctor's watch-limit check activates (checkWatchLimit):
+	// on Linux the operator gets a warning if their kernel inotify
+	// budget would be exhausted by the configured roots before the
+	// bridge tries to register watches at runtime, and on macOS one if
+	// the library needs more open files than the watcher's share of the
+	// open-file limit, past which the watcher stays off.
 	LibraryWatchEnabled bool
 	// UpscaleEnabled / AnalysisEnabled mirror cfg.Upscale.Enabled /
 	// cfg.Analysis.Enabled. When either is true, checkAudioToolchain
@@ -352,7 +354,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkLibraryRoots,
 		checkServiceManager,
 		checkBrowserOpener,
-		checkInotifyLimit,
+		checkWatchLimit,
 		checkAudioToolchain,
 		checkDSDRenderToolchain,
 		checkFingerprintToolchain,
