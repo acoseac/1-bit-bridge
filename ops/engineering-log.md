@@ -36022,3 +36022,136 @@ again, without the owner the precreate gave it), and a render stalled ten
 minutes on a hung mount, whose rename then fails. Sampling the start before
 the listing rather than after it is not pinned: no test can stretch a
 listing past the grace.
+
+## 2026-10-02 — A second `bridge serve` of a live data dir refuses before it changes anything (backlog B208)
+
+Found by the pre-v0.2.1 operations review (2026-09-30), whose scratch test
+(`…ZZSecondServeClobbersTheLiveBridge`) failed on the pid file and on a
+running batch.
+
+### The defect
+
+runServe ran all of its wiring between the config load and the API's
+`net.Listen` (some 2,700 lines), and a second serve of a data dir a live
+bridge serves found out only at the bind. Writes in that span, each one to
+state the live bridge owns:
+
+- `auth.OpenStore` and its deferred `FlushLastUsed`, which rewrites
+  `tokens.json` on every exit (a re-read and a rename, a new file);
+- `writeServerPIDFile` over the live bridge's record, and its deferred
+  removal, which removed the file whoever's pid it held;
+- `manifest.OpenStore`: the migrations, which a NEWER binary run by hand
+  applies under a live older bridge;
+- `maybeRollbackOnBoot`, which acts on the update marker in the data dir
+  (stamps it, clears it, deletes or restores `.bak`);
+- `transcode.NewCoordinator`, whose `RecoverInterruptedBatches` marks every
+  pending and running batch `interrupted`, for good: the live coordinator's
+  in-memory state never writes it back;
+- the startup scan, the enricher, the backup ticker, the retention, analysis,
+  fingerprint, duplicates and artwork-cache sweepers, and the console's
+  goroutine, all started before the bind.
+
+On ports of its own (`--addr`, another config naming the same data dir, a
+`:0` listen address) the second serve never failed at all: two bridges
+served one database.
+
+### Reproduced red-first
+
+`TestASecondServeOfALiveDataDirChangesNothing` boots a bridge on fixed
+ports, pairs a device (`bridge pair`, so `tokens.json` exists), records a
+running batch through a store of its own, and runs a second serve of the
+same data dir, once on the live bridge's ports and once on `127.0.0.1:0`.
+On main at 9b410235:
+
+| Check | On the live bridge's ports | On ports of its own |
+|---|---|---|
+| second serve's exit | 1, `listen 127.0.0.1:32189: … bind: address already in use` | served (banner on https://127.0.0.1:63275, its backup ticker ran); 0 once the test stopped it |
+| live bridge's `server.pid` | removed | removed |
+| the running batch | `interrupted` | `interrupted` |
+| `tokens.json` | rewritten (not `os.SameFile`) | rewritten |
+
+The two serves run in one process, so both write the same pid: the file's
+presence, not its content, is what the pid check can see.
+
+### The fix
+
+- **`lockServeDataDir`** (cmd/bridge/serve_lock.go) runs right after the
+  config checks that only read (the roots, the managed-controls warning,
+  `--addr`) and before the TLS load: it makes the data dir if it is missing
+  (`fsutil.MkdirAll`, 0700, as `atomicwrite` makes it), creates
+  `<dataDir>/server.lock` (`fsutil.Precreate` first, so a serve run as root
+  gives it the data dir's owner), and takes `fsutil.TryLock` on it. Held by
+  another open: runServe prints `serve: another bridge serve (pid N, from
+  server.pid) is already running on the data dir …; stop it first, or give
+  this serve a data dir of its own` and returns 1. Any other error: one
+  stderr line, and serve goes on. Released by a defer registered there, so
+  after everything registered below it.
+- **`fsutil.TryLock` / `Unlock`** (internal/fsutil/lock*.go): flock
+  `LOCK_EX|LOCK_NB` on unix (EINTR retried, EWOULDBLOCK is `ErrLocked`),
+  `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY)` over the
+  whole range on Windows (`ERROR_LOCK_VIOLATION` is `ErrLocked`),
+  `errors.ErrUnsupported` elsewhere. Through `SyscallConn().Control`, not
+  `Fd()`.
+- **`removeServerPIDFile`** removes the file only while it names this
+  process.
+
+### Alternatives weighed
+
+- **Bind the listeners first** (the entry's first idea): refuses nothing on
+  ports of its own, which the test measured serving in full, and would
+  reorder runServe deeply (the console binds inside its Serve goroutine,
+  HTTP/3 and tsnet bind last).
+- **A lock FILE, whose presence is the lock**: the objection CLAUDE.md
+  records against an interprocess lock for `bridge restore` (one left by a
+  crash blocks the next start and the restore) is about this, and holds. A
+  kernel lock goes with the process: `TestALockDiesWithTheProcessThatHeldIt`
+  kills the holder (SIGKILL; TerminateProcess on Windows) and finds the lock
+  free, on macOS, on Linux (dido, Ubuntu 26.04, the host) and on Windows 11
+  (nomos), 0.00 to 0.01 s after the kill.
+- **fcntl record locks**: per process, so a second open in the same process
+  shares them and closing any descriptor drops them. The launcher menu and
+  every serve test run serve in-process; with flock and LockFileEx a second
+  runServe in the same process is refused (`TestTryLockRefusesASecondOpenOfTheFile`).
+- **Locking `server.pid` itself**: it is written by a rename (a new file each
+  time, so a lock on it does not outlive the write), and doctor reads it at
+  any moment, so an in-place write would show it a half-written pid.
+- **Refusing on any lock error**: a data dir on a filesystem that keeps no
+  locks would stop the bridge from starting after the update. Only a lock
+  another open HOLDS refuses (`TestServeStartsWhereTheDataDirCannotBeLocked`,
+  a directory standing where the lock file goes).
+- **Leaving the release to the file's finalizer**: an `*os.File` nothing
+  references is closed by its finalizer, which releases the lock, at
+  whatever collection finds it. The first form of the release test passed
+  with the defer removed, because a collection ran between the two boots;
+  it now runs with automatic collection off, and fails without the defer.
+
+### Tests
+
+`TestASecondServeOfALiveDataDirChangesNothing` (both shapes),
+`TestServeFreesTheDataDirWhenItReturns` (an in-process restart on the same
+data dir starts), `TestServeStartsWhereTheDataDirCannotBeLocked`,
+`TestRemoveServerPIDFileKeepsAnotherProcesssRecord`, and fsutil's
+`TestTryLockRefusesASecondOpenOfTheFile`,
+`TestALockIsReleasedWhenItsFileCloses` and
+`TestALockDiesWithTheProcessThatHeldIt`. All of them pass on macOS, on
+Linux (dido) and on Windows 11 (nomos), from test binaries built with
+go1.26.6.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Mutation | Red |
+|---|---|
+| NC1: runServe takes no lock | both shapes of the second-serve test, every check (as on main) |
+| NC2: any lock error refuses | `TestServeStartsWhereTheDataDirCannotBeLocked` (serve exits 1) |
+| NC3: the release is not deferred | `TestServeFreesTheDataDirWhenItReturns` (the second boot is refused); green before automatic collection was turned off there |
+| NC4: `removeServerPIDFile` ignores whose pid it holds | `TestRemoveServerPIDFileKeepsAnotherProcesssRecord` |
+| NC5: `TryLock` takes no lock | both fsutil refusal tests, and the second-serve test |
+| NC6: the lock taken after the token store and `server.pid` | the second-serve test, on the pid file and `tokens.json` in both shapes |
+
+### Residuals
+
+A data dir on a filesystem that keeps no locks gets no check (the startup
+line says so, every start). On a Linux NFS mount flock is carried out as a
+POSIX record lock, so two serves in one process there are not refused. And
+`bridge restore` and `bridge manifest clear-missing` still gate on the admin
+port alone: taking this lock there is a change of its own.
