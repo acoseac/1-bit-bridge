@@ -3187,6 +3187,7 @@ no failing test — which is the shape to expect in this area.
   real pool and `Run` with stand-in tools; POSIX, skipped as root),
   `TestFixingTheOutputDirectoryBringsTheSourceBackAtTheNextJob`,
   `TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
+  `TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync`,
   `TestMarkOutputFaultMarksOnlyTheOutputSidesCauses`,
   `TestMarkOutputFaultReadsWhatTheOSReports`; the positive control is still
   `TestAToolThatRanAndRefusedTheFileStillStrikesIt`.
