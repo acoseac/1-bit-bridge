@@ -36713,6 +36713,6 @@ classifier test now carries the case, red with the check back on the errno
 alone), and `lazily` runs on a `sync.Once`. Its third round said the
 x/sys/windows codes would not compile as `syscall.Errno` keys: declined,
 since x/sys/windows declares `type Errno = syscall.Errno` and each code as
-`syscall.Errno` (this file's bot-review section records the same claim), and
+`syscall.Errno` (CLAUDE.md's bot-review section records the same claim), and
 the Windows leg was green on those files. CodeRabbit asked for the start
 order and the lazy proof in the rule itself, which it now carries.
