@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // maxSubtreeScans caps how many discrete ScanSubtree calls one commit triggers
@@ -78,6 +80,39 @@ func planScanDirs(dirs []string, cap int) (scan []string, fullScan bool) {
 		return nil, true
 	}
 	return cur, false
+}
+
+// spellScanDirs maps the directories a commit is about to scan, relative to
+// root, onto the spelling their parents list them under (fsutil.Speller),
+// and plans them again: two spellings of one folder, or of a folder and its
+// parent, are one scan once spelled.
+//
+// The commit renamed each file into the folder the client's spelling OPENS,
+// and on a volume that opens a name under more than one spelling (APFS: case
+// and Unicode composition; NTFS and SMB: case) that is the folder already on
+// disk. The scanner makes each row's path from the spelling of the directory
+// it is handed, so the scan of the client's spelling indexed every file of
+// that folder a second time (backlog B219). Called with the planned dirs, so
+// a commit spelling at most maxSubtreeScans folders lists at most that many
+// paths.
+//
+// A directory that cannot be spelled (it names a link to a directory, which a
+// walk from the root does not descend, or it is gone, or its parent cannot be
+// listed) is left to a full scan, which finds whatever is on disk as the walk
+// spells it.
+func spellScanDirs(root string, dirs []string) (spelled []string, fullScan bool) {
+	sp := fsutil.NewSpeller(root)
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		s, err := sp.Spell(d)
+		if err != nil {
+			logger.Warn("post-upload scan: a folder's spelling on disk cannot be read; scanning the whole library",
+				"dir", d, "err", err)
+			return nil, true
+		}
+		out = append(out, s)
+	}
+	return planScanDirs(out, maxSubtreeScans)
 }
 
 func scanDirKeys(m map[string]struct{}) []string {

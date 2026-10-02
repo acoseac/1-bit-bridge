@@ -407,6 +407,9 @@ func (s *Server) apiUploadCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	if res.Committed > 0 {
 		dirs, full := planScanDirs(res.ScanDirs, maxSubtreeScans)
+		if !full {
+			dirs, full = spellScanDirs(res.Root, dirs)
+		}
 		out.ScanDirs, out.FullScan = dirs, full
 		if full {
 			s.spawnBackgroundScan("post-upload scan")

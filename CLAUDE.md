@@ -302,7 +302,7 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Sixteen claims in this list have been wrong and been corrected** — the
+**Seventeen claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -318,8 +318,9 @@ force a re-extraction", (2026-09-29) "the app's SSDP path has no
 LOCATION-versus-source check", (2026-09-29) "Go binds a multicast
 listener to the group address", (2026-09-29) "`isLossyCodec` gates every
 `BitsPerSample` write site", (2026-09-29) "reconciliation never
-crosses directories", and (2026-09-29) "`os.SameFile` answers [a
-directory's identity] portably". The first five cost a later session real
+crosses directories", (2026-09-29) "`os.SameFile` answers [a
+directory's identity] portably", and (2026-10-02) "an explicit delete
+path list sidesteps the case-fold class entirely". The first five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -358,6 +359,9 @@ the delete handler's directory identity, kept from an `os.Stat`, and the
 first version built the same way passed on macOS and deleted 39 rows of 40
 on Windows, where `os.Stat` reads a directory's identity only when it is
 compared.
+The seventeenth was true of a PREFIX and read as true of a path: a delete
+naming a track in another case moved it on a case-insensitive volume,
+retired no row and rescanned its folder a second time (B219).
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
@@ -1236,6 +1240,54 @@ lost my library."
   rather than selects. Anything that joins manifest-form dirs onto a
   caller-supplied root has the same bug one layer up — `spawnBackgroundSubtreeScan`
   did, so a batch spanning roots resolves per-dir instead.
+- **A path a CLIENT names is scanned, retired and recorded under the spelling
+  its folders list, never the client's: `fsutil.Speller`** (2026-10-02,
+  backlog B219). The scanner makes each row's path from the spelling of the
+  directory it is handed (B53's bullet under **Job pools**), and a volume
+  that opens a name under more than one spelling (APFS: case and Unicode
+  composition; NTFS, SMB: case) takes a client's spelling to a folder listed
+  under another. Measured on main 7e324642 through the real handlers on
+  APFS: an upload into `artist/ALBUM` (the folder `Artist/Album`), or into
+  `Café` sent in NFD (listed NFC), landed in the existing folder, and its
+  subtree scan indexed every file there a second time under the client's
+  spelling, both copies served; a delete of `artist/ALBUM/01.flac` moved the
+  track, retired no row (the retire is byte-exact) and indexed the folder's
+  other files a second time, and its trash entry kept the client's spelling,
+  so the restore did it again; an upload or a delete through a link to a
+  directory scanned through the link (`Linked/Album/*` beside
+  `Real/Album/*`). The upload commit (`spellScanDirs`, on the planned dirs,
+  then planned again: two spellings of one folder are one scan) and the
+  trash (`spellRel`: before the move for a delete, after it for a restore)
+  map the path first; the B53 rescanner is handed a row's path and needs
+  nothing. **Matched by identity, never by a fold of the name**: the entry
+  the listing names exactly, else the one `os.SameFile` (both sides
+  Lstat'd) says the client's spelling opens; a case-and-NFC fold only picks
+  the candidates worth a stat, and a name it does not relate (a Windows
+  short name) is still found over the whole listing. A fold alone calls a
+  case-sensitive volume's `Artist` and `artist` one folder. **Every
+  component above the last must be a directory by Lstat**: a walk does not
+  descend a link or a junction, so a path through one has no on-disk
+  spelling, and nothing is listed through a link. **A path that cannot be
+  spelled is left to a full scan** (the commit's `fullScan`,
+  `trash.Result.FullScan`), which finds its files as the walk spells them;
+  the trash still retires it under the client's spelling, as before. A path
+  spelled as listed costs one Lstat per component (the listing is read in
+  directory order and stops at the exact name), and a Speller lists each
+  folder once per batch. **Don't respell inside `ScanSubtree`**: its
+  deletion scope is a byte range over the spelling it is handed, and the
+  watcher and the rescanner hand it the walk's own. Rows an older build
+  already wrote heal at full scans, measured at the production threshold:
+  the case-only rename reap takes the case variants at the next one, and
+  the composition variants, which that reap does not relate, go at the
+  third. Tests: `TestAnUploadRescanIndexesNoSecondSpellingOfTheFolder`,
+  `TestAnUploadThroughALinkedFolderIsIndexedWhereTheWalkFindsIt`,
+  `TestAnUploadOfOneFolderUnderTwoSpellingsScansItOnce`,
+  `TestATrackTrashedUnderAnotherSpellingLeavesNoSecondSpelling`,
+  `TestARestoreOfAnEntryTrashedUnderAnotherSpellingIndexesNoSecondSpelling`,
+  `TestATrackTrashedThroughALinkedFolderLeavesNoRowsUnderTheLink`
+  (the spelling variants skip on a volume that tells them apart: both on
+  Linux, the composition one on Windows), and the `TestSpeller…` tests over
+  a fake volume that folds as APFS does.
 - **A single↔multi root flip calls `WipeFilesystemTracks`, never
   `WipeAllTracks`** — the latter CASCADE-deletes `upnp_track_routing`,
   destroying an entire upstream library and its cached enrichment on a mere
@@ -3243,7 +3295,10 @@ no failing test — which is the shape to expect in this area.
   the rescanner resolves the directory itself**: the scanner makes each row's
   path from the spelling of the directory it is handed, and on main a request
   naming a changed file in lower case, on a filesystem that opens it, left the
-  rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. **Still open**: a
+  rows `Fixture/DSD/01.dsf` and `fixture/dsd/01.dsf`. A path that comes from
+  a client and may name no row (an upload's folder, a delete's track) is
+  mapped through `fsutil.Speller` instead (the B219 bullet under
+  **Scanner**). **Still open**: a
   watcher-driven subtree scan nudges neither the sweep nor the player's
   catalog, nor drops the album-gain index (B83; `player_wiring.go` said it
   nudged the catalog until B53). This said a stale rendition whose row has
@@ -7935,7 +7990,13 @@ its twin.** The top list is older, shorter, and read first.
   age comes from the `<stamp>` DIRECTORY NAME — `os.Rename` preserves mtime, so
   an mtime-driven sweeper purges oldest-content-first the instant it lands.
 - **Deleting takes an explicit path list, never a prefix** — that sidesteps the
-  case-fold class entirely rather than getting it right.
+  case-fold class of a PREFIX (a `LIKE` scope reaching a case-twin folder)
+  rather than getting it right. It did not sidestep a path in the list
+  spelled otherwise than its row, which a case- or normalization-insensitive
+  volume moves all the same: this bullet said "entirely" until backlog B219,
+  whose delete of `artist/ALBUM/01.flac` retired no row and rescanned the
+  folder a second time. The trash spells each path as its folders list it
+  first (the B219 bullet under **Scanner**).
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`
