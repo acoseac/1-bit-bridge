@@ -197,12 +197,13 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 const startupBackupSkipThreshold = 24 * time.Hour
 
 // runBackupTicker is the periodic snapshot loop wired into serveCmd.
-// Runs an immediate snapshot on startup unless a recent one already
-// exists (so an operator who just finished `bridge init` has a
-// baseline before any pairings, but a debugging restart loop doesn't
-// cost one snapshot per boot), and then on the configured interval.
-// All errors are logged to stderr — never fatal, since a failed
-// backup must never take down the running bridge.
+// With the cadence on, it runs an immediate snapshot on startup unless a
+// recent one already exists (so an operator who just finished `bridge
+// init` has a baseline before any pairings, but a debugging restart loop
+// doesn't cost one snapshot per boot), and then on the configured
+// interval. With the cadence off at boot it takes no snapshot and prunes
+// nothing (backlog B209). All errors are logged to stderr — never fatal,
+// since a failed backup must never take down the running bridge.
 // runBackupTicker takes its cadence AND its retention as providers,
 // re-read per use rather than captured once.
 //
@@ -210,11 +211,12 @@ const startupBackupSkipThreshold = 24 * time.Hour
 // anything: retention is not a lifecycle, it is an argument to a function
 // that runs on a schedule, and capturing it was never buying anything.
 //
-// `interval` is read before each wait. A provider returning <= 0 parks
-// the loop instead of ending it — the operator disabled the cadence, and
-// re-enabling it must not require a restart. That is why the goroutine is
-// now started UNCONDITIONALLY by the caller: the old shape only spawned
-// it when hours > 0, so 0 → N had no loop alive to notice the change.
+// `interval` is read before the startup snapshot and before each wait. A
+// provider returning <= 0 parks the loop instead of ending it — the
+// operator disabled the cadence, and re-enabling it must not require a
+// restart. That is why the goroutine is now started UNCONDITIONALLY by the
+// caller: the old shape only spawned it when hours > 0, so 0 → N had no
+// loop alive to notice the change.
 //
 // `rearm` wakes the wait so a changed cadence is re-read immediately
 // rather than after the old interval — up to a day, on the 24 h default.
@@ -261,19 +263,20 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	}
 
 	// The startup snapshot and the scheduled ones differ, so the loop's
-	// single `sweep` closure distinguishes the first call from the rest.
+	// single `sweep` closure takes the loop's word for which pass is the
+	// boot one. Never "the first call": with the cadence off at boot the
+	// loop takes no boot pass, and the first call is a scheduled pass after
+	// a 0 → N rearm, which the throttle below would have skipped.
 	//
-	// Throttle on the first: if a snapshot exists within the skip
+	// Throttle on the boot pass: if a snapshot exists within the skip
 	// threshold, the startup one is redundant. List errors are non-fatal
 	// (rare; surfaces a misconfig or disk problem the user should see)
 	// and fall through to writing the snapshot anyway.
-	first := true
-	sweep := func() {
-		if !first {
+	sweep := func(boot bool) {
+		if !boot {
 			doSnapshot("scheduled")
 			return
 		}
-		first = false
 		skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
 		switch {
 		case err != nil:
@@ -290,14 +293,14 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	// The SHARED loop, not a second hand-rolled ticker.
 	//
 	// It already carries every property this needs — re-read the interval
-	// before each wait, park (never exit) when it is non-positive, clear
-	// the scheduled-next while dormant, and re-arm without doing the work
-	// — and a private copy here would be a second place to get the
-	// 0 -> N transition wrong. Settle delay 0: the startup snapshot is
-	// the point of running at boot, and deferring it would change what an
-	// operator gets from a short-lived process. No nudge: there is no
-	// "back up now" button on this path (the CLI's `bridge backup` runs
-	// its own snapshot).
+	// before the boot pass and each wait, park (never exit) when it is
+	// non-positive, clear the scheduled-next while dormant, and re-arm
+	// without doing the work — and a private copy here would be a second
+	// place to get the 0 -> N transition wrong. Settle delay 0: the startup
+	// snapshot is the point of running at boot, and deferring it would
+	// change what an operator gets from a short-lived process. No nudge:
+	// there is no "back up now" button on this path (the CLI's `bridge
+	// backup` runs its own snapshot).
 	runSweepLoop(ctx, status, 0, interval, nil, rearm, sweep)
 }
 

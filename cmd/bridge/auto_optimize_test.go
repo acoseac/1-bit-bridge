@@ -424,9 +424,12 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// interval 0 → nudge-only, so the loop parks on the nudge instead
-		// of racing a ticker.
-		runAutoOptimizeSweeper(ctx, f.sweeper, staticInterval(0), nudge, nil, nil)
+		// 1 h interval: the ticker cannot fire inside this test, so any
+		// sweep after the post-settle one is the nudge's. Not 0: a cadence
+		// that is off takes no post-settle sweep (backlog B209), and the
+		// sweeper's own cadence is never 0 (AutoOptimizeInterval inherits
+		// scanIntervalSec, which Validate keeps at 1 s or more).
+		runAutoOptimizeSweeper(ctx, f.sweeper, staticInterval(time.Hour), nudge, nil, nil)
 	}()
 	drainLoopOnCleanup(t, cancel, done, "runAutoOptimizeSweeper")
 
