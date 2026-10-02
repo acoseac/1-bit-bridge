@@ -312,11 +312,13 @@ func TestRun_FullReportShape(t *testing.T) {
 		AdminPort:    mustFreePort(t),
 	})
 
-	// The watch-limit row is named for what it grades: macOS grades the open
-	// files its kqueue watches take, Linux its inotify budget, and Windows
-	// keeps the inotify row as not applicable.
+	// The watch-limit row is named for what it grades: where fsnotify
+	// watches through kqueue (macOS, the BSDs) the open files its watches
+	// take, on Linux its inotify budget, and Windows keeps the inotify row
+	// as not applicable. The list is watchbudget_kqueue.go's build tag.
 	watchLimitRow := "inotify-watch-limit"
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin", "dragonfly", "freebsd", "netbsd", "openbsd":
 		watchLimitRow = "watcher-fd-budget"
 	}
 	wantNames := []string{
