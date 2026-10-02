@@ -6658,8 +6658,10 @@ mentions across the four `ops/audit-*.md` files.
   `TestASecondServeOfALiveDataDirChangesNothing` (both shapes, red on main on
   every check), `TestServeStartsWhereTheDataDirCannotBeLocked`,
   `TestServeFreesTheDataDirWhenItReturns`,
-  `TestRemoveServerPIDFileKeepsAnotherProcesssRecord`, and fsutil's
-  `TestTryLockRefusesASecondOpenOfTheFile` and
+  `TestRemoveServerPIDFileKeepsAnotherProcesssRecord`,
+  `TestServeLockFileKeepsTheInstallOwnerAsRoot` (as root, on dido: a lock
+  file `sudo bridge serve` left root's would lock the service user out of
+  the check), and fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
   `TestALockDiesWithTheProcessThatHeldIt`.
 - **A write gate on a second process is a GUARD, not mutual exclusion — say
   which.** `bridge restore` and `bridge manifest clear-missing` mutate the store

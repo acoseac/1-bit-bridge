@@ -59,17 +59,24 @@ func (e *serveDataDirHeldError) Error() string {
 // needed: the kernel drops this lock with the process however it exits, so
 // a supervisor's restart after a SIGKILL finds it free.
 func lockServeDataDir(dataDir string) (release func(), err error) {
-	release = func() {}
+	release = func() {
+		// Nothing to release: no lock has been taken.
+	}
 	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
 		return release, err
 	}
 	path := filepath.Join(dataDir, serveLockFileName)
 	// Run as root over an install another user owns, the file takes the
 	// data dir's owner, as every other file serve writes there does: left
-	// root's, the service user could not open it again.
+	// root's, the service user could not open it again. dst is the file
+	// itself, which Precreate reads as "the owner of the directory it is
+	// created in" while it does not exist yet.
 	if err := fsutil.Precreate(path, 0o600, path); err != nil && !errors.Is(err, os.ErrExist) {
 		return release, err
 	}
+	// Open for writing though nothing is written: on a Linux NFS mount
+	// flock is carried out as a POSIX record lock, whose exclusive form
+	// wants a descriptor open for writing.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return release, err

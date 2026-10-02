@@ -36285,7 +36285,13 @@ data dir starts), `TestServeStartsWhereTheDataDirCannotBeLocked`,
 `TestALockIsReleasedWhenItsFileCloses` and
 `TestALockDiesWithTheProcessThatHeldIt`. All of them pass on macOS, on
 Linux (dido) and on Windows 11 (nomos), from test binaries built with
-go1.26.6.
+go1.26.6. `TestServeLockFileKeepsTheInstallOwnerAsRoot` runs only as root
+(dido's container; CI skips it): over a data dir uid 4242 owns, the lock
+file `lockServeDataDir` creates is 4242:4243. `Precreate` is handed the
+lock file itself as `dst`, which it reads, while nothing is there, as the
+directory the file is created in (`targetOwnerFrom`), the shape
+`manifest.OpenStore` uses for the database; a review bot read that as a
+failed lookup, and the test, run as root, says otherwise.
 
 ### Negative controls (each on the committed fix, restored after)
 
@@ -36297,6 +36303,7 @@ go1.26.6.
 | NC4: `removeServerPIDFile` ignores whose pid it holds | `TestRemoveServerPIDFileKeepsAnotherProcesssRecord` |
 | NC5: `TryLock` takes no lock | both fsutil refusal tests, and the second-serve test |
 | NC6: the lock taken after the token store and `server.pid` | the second-serve test, on the pid file and `tokens.json` in both shapes |
+| NC7: no `Precreate` before the open | `TestServeLockFileKeepsTheInstallOwnerAsRoot`, as root on dido (the lock file is 0:0) |
 
 ### Residuals
 

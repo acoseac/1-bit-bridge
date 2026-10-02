@@ -29,71 +29,98 @@ import (
 // tokens.json; on ports of its own it never failed at all, and two
 // bridges served one database.
 func TestASecondServeOfALiveDataDirChangesNothing(t *testing.T) {
-	for _, c := range []struct {
-		name     string
-		ownPorts bool
-	}{
-		{"on the live bridge's ports", false},
-		{"on ports of its own", true},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			lib := filepath.Join(dir, "Music")
-			if err := os.MkdirAll(lib, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			dataDir := filepath.Join(dir, "data")
-			adminAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
-			liveCfg := writeServeConfig(t, filepath.Join(dir, "live.yaml"), lib, dataDir,
-				freeLoopbackTCPAndUDPAddr(t), adminAddr)
-			live := bootServe(t, "--config", liveCfg)
-			waitForAdminReady(t, adminAddr, live.done, live.stderr)
+	t.Run("on the live bridge's ports", func(t *testing.T) { requireASecondServeChangesNothing(t, false) })
+	t.Run("on ports of its own", func(t *testing.T) { requireASecondServeChangesNothing(t, true) })
+}
 
-			// A device paired with the live bridge, and a batch it is running.
-			if out, errOut, code := runCapture(t, "pair", "--config", liveCfg, "--name", "Phone"); code != 0 {
-				t.Fatalf("pair exited %d: %s%s", code, out, errOut)
-			}
-			batch := seedRunningBatch(t, dataDir)
-			pidPath := filepath.Join(dataDir, serverPIDFileName)
-			wantPID := strconv.Itoa(os.Getpid())
-			if got := readTrimmed(t, pidPath); got != wantPID {
-				t.Fatalf("the live bridge's %s holds %q, want %q", serverPIDFileName, got, wantPID)
-			}
-			tokensPath := filepath.Join(dataDir, tokensFileName)
-			tokensBefore, err := os.Stat(tokensPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+// requireASecondServeChangesNothing boots a live bridge with a paired
+// device and a running batch, runs a second serve of its data dir (on the
+// live bridge's ports, or on ports of its own), and requires the second to
+// refuse and the live bridge's state to be as it was.
+func requireASecondServeChangesNothing(t *testing.T, ownPorts bool) {
+	t.Helper()
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(dir, "data")
+	adminAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort(t))
+	liveCfg := writeServeConfig(t, filepath.Join(dir, "live.yaml"), lib, dataDir,
+		freeLoopbackTCPAndUDPAddr(t), adminAddr)
+	live := bootServe(t, "--config", liveCfg)
+	waitForAdminReady(t, adminAddr, live.done, live.stderr)
+	before := recordLiveBridge(t, liveCfg, dataDir)
 
-			secondCfg := liveCfg
-			if c.ownPorts {
-				secondCfg = writeServeConfig(t, filepath.Join(dir, "second.yaml"), lib, dataDir,
-					"127.0.0.1:0", "127.0.0.1:0")
-			}
-			code, stdout, stderr := runSecondServe(t, "--config", secondCfg)
+	secondCfg := liveCfg
+	if ownPorts {
+		secondCfg = writeServeConfig(t, filepath.Join(dir, "second.yaml"), lib, dataDir,
+			"127.0.0.1:0", "127.0.0.1:0")
+	}
+	code, stdout, stderr := runSecondServe(t, "--config", secondCfg)
 
-			if code != 1 {
-				t.Errorf("the second serve exited %d, want 1; stderr=%s", code, stderr)
-			}
-			if strings.Contains(stdout, "listening on") {
-				t.Errorf("the second serve served the live bridge's data dir; stdout=%s", stdout)
-			}
-			if !strings.Contains(stderr, "already running") || !strings.Contains(stderr, dataDir) {
-				t.Errorf("the second serve's refusal does not say another serve holds %s; stderr=%s", dataDir, stderr)
-			}
-			if got := readTrimmed(t, pidPath); got != wantPID {
-				t.Errorf("after the second serve, the live bridge's %s holds %q, want %q", serverPIDFileName, got, wantPID)
-			}
-			if got := batchStatus(t, dataDir, batch); got != "running" {
-				t.Errorf("after the second serve, the live bridge's running batch is %q", got)
-			}
-			if tokensAfter, err := os.Stat(tokensPath); err != nil || !os.SameFile(tokensBefore, tokensAfter) {
-				t.Errorf("the second serve rewrote %s (err %v)", tokensFileName, err)
-			}
-			if !waitForListen(adminAddr, 2*time.Second) {
-				t.Errorf("the live bridge's console stopped answering after the second serve; stderr=%s", live.stderr.String())
-			}
-		})
+	if code != 1 {
+		t.Errorf("the second serve exited %d, want 1; stderr=%s", code, stderr)
+	}
+	if strings.Contains(stdout, "listening on") {
+		t.Errorf("the second serve served the live bridge's data dir; stdout=%s", stdout)
+	}
+	if !strings.Contains(stderr, "already running") || !strings.Contains(stderr, dataDir) {
+		t.Errorf("the second serve's refusal does not say another serve holds %s; stderr=%s", dataDir, stderr)
+	}
+	before.requireUnchanged(t)
+	if !waitForListen(adminAddr, 2*time.Second) {
+		t.Errorf("the live bridge's console stopped answering after the second serve; stderr=%s", live.stderr.String())
+	}
+}
+
+// liveBridgeState is what a second serve of a live bridge's data dir must
+// leave as it found it: the bridge's pid file, a batch it is running, and
+// its token file.
+type liveBridgeState struct {
+	dataDir, pidPath, wantPID, tokensPath string
+	batch                                 uuid.UUID
+	tokens                                os.FileInfo
+}
+
+// recordLiveBridge pairs a device with the bridge serving dataDir (so its
+// token file exists), records a batch it is running, and returns that
+// state with the pid file it found.
+func recordLiveBridge(t *testing.T, cfgPath, dataDir string) liveBridgeState {
+	t.Helper()
+	if out, errOut, code := runCapture(t, "pair", "--config", cfgPath, "--name", "Phone"); code != 0 {
+		t.Fatalf("pair exited %d: %s%s", code, out, errOut)
+	}
+	s := liveBridgeState{
+		dataDir:    dataDir,
+		pidPath:    filepath.Join(dataDir, serverPIDFileName),
+		wantPID:    strconv.Itoa(os.Getpid()),
+		tokensPath: filepath.Join(dataDir, tokensFileName),
+		batch:      seedRunningBatch(t, dataDir),
+	}
+	if got := readTrimmed(t, s.pidPath); got != s.wantPID {
+		t.Fatalf("the live bridge's %s holds %q, want %q", serverPIDFileName, got, s.wantPID)
+	}
+	var err error
+	if s.tokens, err = os.Stat(s.tokensPath); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// requireUnchanged requires the live bridge's state to be as
+// recordLiveBridge found it: the same pid file, the batch still running,
+// and the same token file, not one rewritten in its place.
+func (s liveBridgeState) requireUnchanged(t *testing.T) {
+	t.Helper()
+	if got := readTrimmed(t, s.pidPath); got != s.wantPID {
+		t.Errorf("after the second serve, the live bridge's %s holds %q, want %q", serverPIDFileName, got, s.wantPID)
+	}
+	if got := batchStatus(t, s.dataDir, s.batch); got != "running" {
+		t.Errorf("after the second serve, the live bridge's running batch is %q", got)
+	}
+	if after, err := os.Stat(s.tokensPath); err != nil || !os.SameFile(s.tokens, after) {
+		t.Errorf("the second serve rewrote %s (err %v)", tokensFileName, err)
 	}
 }
 
