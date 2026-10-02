@@ -144,6 +144,41 @@ func TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack(t *testing.
 	}
 }
 
+// TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync pins where the
+// proof is taken: after the sidecar's fsync. A volume failing its writes can
+// still take a rename, so a job whose rename landed and whose fsync then
+// failed has shown nothing about the volume, and the outage stays open until
+// a job's sidecar is durable.
+func TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync(t *testing.T) {
+	const rel = "Music/Album/01.flac"
+	a := newAnnouncingPool(t, rel)
+	s := &scripted{}
+	a.pool.runner = s.run
+	fsyncs := 0
+	a.pool.fsyncFn = func(string) error {
+		fsyncs++
+		if fsyncs == 1 {
+			return errors.New("synthetic EIO at fsync")
+		}
+		return nil
+	}
+	spec := sourceFile(t, rel)
+	readOnly := func() (RunResult, error) {
+		return RunResult{}, outputFaultFailure(filepath.Dir(spec.SidecarPath()), readOnlyVolumeErrno())
+	}
+
+	s.then(readOnly, succeededVia(routeSoxDirect))
+	a.run(t, spec, 2)
+	if back := a.lines("INFO", logOutputBack); len(back) != 0 {
+		t.Fatalf("recovery lines after a job whose fsync failed:\n%s\nwant none", strings.Join(back, "\n"))
+	}
+	s.then(succeededVia(routeSoxDirect))
+	a.run(t, spec, 1)
+	if back := a.lines("INFO", logOutputBack); len(back) != 1 || !strings.Contains(back[0], "failedJobs=1") {
+		t.Errorf("recovery lines:\n%s\nwant one, once a job's sidecar was durable", strings.Join(back, "\n"))
+	}
+}
+
 // TestAnOutputOutageThatOutlastsADayIsReportedAgain pins the re-warn for the
 // output report: a folder that refused a job and is not written again keeps
 // its outage open, so a day of silence is broken by one more Warn carrying
