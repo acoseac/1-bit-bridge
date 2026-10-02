@@ -1096,7 +1096,16 @@ func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]stru
 // the mass-orphan ratio and the doctor's variants-index count are the
 // walk's Known and Orphans, so a fold moves a file from the second to the
 // first and both read fewer orphans.
+//
+// An empty path keys to "": it names no file, and filepath.Clean would
+// spell it ".", the working directory (Gemini on #1141). No caller passes
+// one today (each skips a row with no path, and a walked path is under a
+// root the walk refused to take empty), so this keeps a key that is a
+// path from ever meaning the working directory.
 func KnownSidecarKey(path string) string {
+	if path == "" {
+		return ""
+	}
 	return strings.ToLower(manifest.NFCCompose(filepath.Clean(path)))
 }
 

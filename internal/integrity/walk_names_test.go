@@ -334,4 +334,9 @@ func TestKnownSidecarKeyIsOneKeyPerName(t *testing.T) {
 			t.Errorf("KnownSidecarKey keys %+q and %+q alike: two names", p[0], p[1])
 		}
 	}
+	// An empty path names no file, never the working directory, which is
+	// what filepath.Clean spells it.
+	if got := KnownSidecarKey(""); got != "" {
+		t.Errorf("KnownSidecarKey(\"\") = %q, want \"\"", got)
+	}
 }
