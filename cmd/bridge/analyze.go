@@ -289,11 +289,25 @@ type analyzeGCOptions struct {
 	allowEmpty, allowMassOrphans, allowPartialWalk bool
 }
 
+// analysisRowLister is the store as runAnalyzeGC uses it: the listing its
+// known set is built from. *manifest.Store is the one production
+// implementation. An interface so a test can act between the listing and
+// the sweep, where a live bridge's analysis pool publishes a waveform and
+// commits its row.
+type analysisRowLister interface {
+	AllAnalysisRows(ctx context.Context) ([]manifest.AnalysisRow, error)
+}
+
 // runAnalyzeGC removes orphan waveform sidecars — files under the
 // waveform output dir that no `track_analysis` row points at (plus
 // stale `.tmp` debris from interrupted runs). Mirrors the forward sweep
-// of `bridge upscale --gc`, refusals included.
-func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, opts analyzeGCOptions) int {
+// of `bridge upscale --gc`, refusals and grace included: no file modified
+// less than integrity.OrphanGracePeriod before the run started is removed,
+// so a waveform the analysis pool of a running bridge publishes after the
+// listing, and a `.tmp` it is writing, stay (backlog B205).
+func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisRowLister, outputDir string, opts analyzeGCOptions) int {
+	// Taken BEFORE the listing, as runGC takes it: see there.
+	start := time.Now()
 	rows, err := store.AllAnalysisRows(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
@@ -376,7 +390,8 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// a different rule. Decided from the inventory, so it passes over what
 	// this sweep never removes (a .DS_Store, empty folders, the
 	// filesystem's lost+found) and over its own `.tmp` scratch, which it
-	// removes whatever the catalog says.
+	// removes whatever the catalog says (once it is older than the grace:
+	// removeAnalysisGCFiles).
 	if !opts.allowEmpty {
 		massOrphansToo := !opts.allowMassOrphans &&
 			integrity.MassOrphanRefusalFor(inv, len(rows), analysisGCMaxOrphanPercent) != ""
@@ -406,12 +421,14 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		}
 	}
 
-	removed, failed, code := removeAnalysisGCFiles(ctx, stderr, inv)
+	tally, code := removeAnalysisGCFiles(ctx, stderr, inv, start)
 	if code != 0 {
 		return code
 	}
 	kept := inv.Known
-	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
+	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, left %d recent file(s), %d failure(s)\n",
+		tally.removed, kept, tally.recent, tally.failed)
+	tally.explainRecent(stdout, "analyze --gc")
 	// Exit 0 even with per-file failures, as this command always has —
 	// unlike `upscale --gc`, which exits 1. Reported rather than silent
 	// (it was neither counted nor printed before), but promoting it to a
@@ -420,21 +437,27 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	return 0
 }
 
-// removeAnalysisGCFiles unlinks the scratch files and orphans an analyze
-// --gc inventory listed and reports each failure by base name. code is the
-// exit status to stop with, 0 to go on: 130 when ctx ended the loop, with
-// the files before it already gone, and 1 when it refused an inventory
-// whose listed and walked paths do not pair up
+// removeAnalysisGCFiles removes the scratch files and orphans an analyze
+// --gc inventory listed, each only if, asked again just before its unlink,
+// it is still a file and was last modified at least
+// integrity.OrphanGracePeriod before start, the instant the run began
+// (gcReclaimTally.reclaim, the re-check `upscale --gc` and the background
+// sweep make), and reports each failure by base name. code is the exit
+// status to stop with, 0 to go on: 130 when ctx ended the loop, with the
+// files before it already gone, and 1 when it refused an inventory whose
+// listed and walked paths do not pair up
 // (integrity.SidecarInventory.CheckPaired), before removing anything. It
 // reads only the walked paths, so an unpaired inventory would not panic
 // here; it would remove whatever the walked lists hold and report the
 // rest as never there, which is the silent shape the check exists to
 // refuse.
 //
-// The scratch half is unconditional and outside the ratio: a
-// `.waveform.bin.tmp` is this sweep's own half-written litter, never the
-// operator's data, so a crashed run must not be able to trip the guard on
-// the next one.
+// The scratch half is removed whatever the catalog says, and stays outside
+// the ratio: a `.waveform.bin.tmp` is this sweep's own half-written litter,
+// never the operator's data, so a crashed run must not be able to trip the
+// guard on the next one. It was removed unconditionally until backlog B205
+// (2026-10-02), the `.tmp` of an analysis a running bridge was writing
+// included; it takes the grace now, as an orphan does.
 //
 // Each file is unlinked by the path the walk VISITED
 // (integrity.SidecarInventory.OrphanWalkedPaths and ScratchWalkedPaths),
@@ -442,26 +465,21 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 // a symlink, repointed between the walk and the unlinks, the configured
 // spelling reaches a tree the guard never counted. A base name is the
 // same under both.
-func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory) (removed, failed, code int) {
+func removeAnalysisGCFiles(ctx context.Context, stderr io.Writer, inv integrity.SidecarInventory, start time.Time) (tally gcReclaimTally, code int) {
 	if err := inv.CheckPaired(); err != nil {
 		fmt.Fprintf(stderr, "analyze --gc: refusing to run — %v. Nothing was removed.\n", err)
-		return 0, 0, 1
+		return tally, 1
 	}
 	for _, set := range [][]string{inv.ScratchWalkedPaths, inv.OrphanWalkedPaths} {
 		for _, path := range set {
 			if ctx.Err() != nil {
 				fmt.Fprintln(stderr, "analyze --gc: interrupted")
-				return removed, failed, 130
+				return tally, 130
 			}
-			if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-				fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
-				failed++
-				continue
-			}
-			removed++
+			tally.reclaim(stderr, "analyze --gc: ", filepath.Base(path), path, start)
 		}
 	}
-	return removed, failed, 0
+	return tally, 0
 }
 
 // analysisGCMaxOrphanPercent is the mass-orphan threshold for waveforms.

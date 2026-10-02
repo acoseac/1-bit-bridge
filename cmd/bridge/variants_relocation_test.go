@@ -95,6 +95,7 @@ func TestRunGCAdoptsARelocatedCatalogAndKeepsItsFiles(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	ageFiles(t, orphan)
 	if err := store.UpsertTrack(ctx, &manifest.Track{Path: "Artist/Gone/01.flac", Size: 1, ModTime: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +166,7 @@ func TestRunGCRefusesAMassDeleteUntilAllowed(t *testing.T) {
 		if err := os.Rename(p, moved[i]); err != nil {
 			t.Fatal(err)
 		}
+		ageFiles(t, moved[i])
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -342,6 +344,7 @@ func TestRunAnalyzeGCKeepsARelocatedWaveform(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	ageFiles(t, orphan)
 	if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
 		SourcePath:   source,
 		WaveformPath: analyze.AnalyzeSpec{OutputDir: oldWaveforms, SourceLibraryRel: source}.SidecarPath(),

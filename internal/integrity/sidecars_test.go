@@ -849,28 +849,28 @@ func TestReclaimOrphanRechecksThePathBeforeUnlinkingIt(t *testing.T) {
 		name        string
 		lstat, stat func(string) (fs.FileInfo, error)
 		noFile      bool // the path holds nothing on disk
-		want        orphanOutcome
+		want        OrphanOutcome
 		wantErr     bool
 		wantRemoved bool
 	}{
 		{name: "an old regular file is unlinked", lstat: lstatOf(0, old), stat: toFile,
-			want: orphanUnlinked, wantRemoved: true},
+			want: OrphanUnlinked, wantRemoved: true},
 		{name: "a Windows junction to a directory is left", lstat: lstatOf(fs.ModeIrregular, old), stat: toDir,
-			want: orphanNotAFile},
+			want: OrphanNotAFile},
 		{name: "a symlink to a directory is left", lstat: lstatOf(fs.ModeSymlink, old), stat: toDir,
-			want: orphanNotAFile},
+			want: OrphanNotAFile},
 		{name: "a link it cannot stat is left", lstat: lstatOf(fs.ModeSymlink, old), stat: failing(fs.ErrPermission),
-			want: orphanUnreadable, wantErr: true},
+			want: OrphanUnreadable, wantErr: true},
 		{name: "an lstat that fails leaves the path", lstat: failing(fs.ErrPermission), stat: toFile,
-			want: orphanUnreadable, wantErr: true},
+			want: OrphanUnreadable, wantErr: true},
 		{name: "a dangling link is junk, and unlinked", lstat: lstatOf(fs.ModeSymlink, old), stat: failing(fs.ErrNotExist),
-			want: orphanUnlinked, wantRemoved: true},
+			want: OrphanUnlinked, wantRemoved: true},
 		{name: "a file inside the grace is left", lstat: lstatOf(0, tickStart.Add(-time.Second)), stat: toFile,
-			want: orphanInGrace},
+			want: OrphanInGrace},
 		{name: "a path that vanished before the re-check counts as done", lstat: failing(fs.ErrNotExist), stat: toFile,
-			noFile: true, want: orphanGone},
+			noFile: true, want: OrphanGone},
 		{name: "a path that vanished before the unlink counts as done", lstat: lstatOf(0, old), stat: toFile,
-			noFile: true, want: orphanGone},
+			noFile: true, want: OrphanGone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "x.upscaled-v2-176400-24.flac")
@@ -918,8 +918,8 @@ func TestReclaimOrphanLeavesALinkToADirectory(t *testing.T) {
 	}
 
 	got, err := reclaimOrphan(link, time.Now().Add(time.Hour), time.Nanosecond, os.Lstat, os.Stat)
-	if got != orphanNotAFile || err != nil {
-		t.Fatalf("reclaimOrphan = (%d, %v), want (%d, nil)", got, err, orphanNotAFile)
+	if got != OrphanNotAFile || err != nil {
+		t.Fatalf("reclaimOrphan = (%d, %v), want (%d, nil)", got, err, OrphanNotAFile)
 	}
 	if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
 		t.Errorf("the link was removed or replaced: %v", err)
@@ -929,8 +929,8 @@ func TestReclaimOrphanLeavesALinkToADirectory(t *testing.T) {
 	}
 
 	gone, err := reclaimOrphan(filepath.Join(base, "variants", "never-there.flac"), time.Now(), time.Nanosecond, os.Lstat, os.Stat)
-	if gone != orphanGone || err != nil {
-		t.Errorf("a path with nothing at it = (%d, %v), want (%d, nil)", gone, err, orphanGone)
+	if gone != OrphanGone || err != nil {
+		t.Errorf("a path with nothing at it = (%d, %v), want (%d, nil)", gone, err, OrphanGone)
 	}
 }
 
@@ -1227,8 +1227,8 @@ func TestOrphanSidecarSweeperEffectiveOverrides(t *testing.T) {
 		chunkOverride int
 		wantChunkSize int
 	}{
-		{"zero-uses-production", 0, gcGracePeriod, 0, gcChunkSize},
-		{"negative-uses-production", -1 * time.Second, gcGracePeriod, -5, gcChunkSize},
+		{"zero-uses-production", 0, OrphanGracePeriod, 0, gcChunkSize},
+		{"negative-uses-production", -1 * time.Second, OrphanGracePeriod, -5, gcChunkSize},
 		{"positive-override-wins", 250 * time.Millisecond, 250 * time.Millisecond, 250, 250},
 	}
 	for _, c := range cases {

@@ -72,9 +72,12 @@ type SidecarInventory struct {
 	// the first tree (CodeRabbit on #1063).
 	OrphanWalkedPaths []string
 	// ScratchPaths holds every scratch file, uncapped: the callers that
-	// ask for them remove them unconditionally. They are in the
-	// configured spelling, and ScratchWalkedPaths is to them what
-	// OrphanWalkedPaths is to OrphanPaths.
+	// ask for them remove them whatever the catalog says, once they are
+	// older than the grace (ReclaimOrphan, OrphanGracePeriod: a scratch
+	// file younger than that may be a live job's, and was removed
+	// unconditionally until backlog B205). They are in the configured
+	// spelling, and ScratchWalkedPaths is to them what OrphanWalkedPaths
+	// is to OrphanPaths.
 	ScratchPaths       []string
 	ScratchWalkedPaths []string
 	// Unreadable counts entries the walk could not resolve: a directory
@@ -532,8 +535,9 @@ func MassOrphanRefusalFor(inv SidecarInventory, rows, maxOrphanPercent int) stri
 // because nothing else is a file the sweep would remove as an orphan: a
 // directory, empty or not, a file its Consider rejects, anything under a
 // pruned dot-directory, the filesystem's lost+found, and a scratch file,
-// which the sweep that has any removes whatever the catalog says, so an
-// empty catalog puts none at risk. What the Consider takes is each sweep's
+// which the sweep that has any removes whatever the catalog says (once it
+// is older than the grace, OrphanGracePeriod), so an empty catalog puts
+// none at risk. What the Consider takes is each sweep's
 // own: the background sweep takes `.flac` files and `analyze --gc`
 // waveforms, while `upscale --gc` takes EVERY file, so a `.DS_Store` in the
 // variants directory is a file it would remove and still refuses there.
