@@ -125,18 +125,30 @@ func trashResultDTOOf(res *trash.Result) trashResultDTO {
 	return out
 }
 
-// retireAndRescan retires the rows for changed paths and rescans their folders.
+// retireAndRescan retires the rows for changed paths and rescans the folders
+// res touched.
 //
 // Retirement is IMMEDIATE (threshold 1), not the missing-count debounce: an
 // explicit operator delete should not linger for three scans. That path already
 // unlinks sidecars and writes manifest_deletions tombstones, so synced clients
 // drop the tracks too — no new deletion machinery.
-func (s *Server) retireAndRescan(r *http.Request, label string, paths, dirs []string) {
+//
+// Both use the spelling the trash read off disk (trash.Result's Paths and
+// Dirs), never the client's: a row is retired only under the path its walk
+// wrote, and a rescan under another spelling indexes the folder a second time
+// (backlog B219). A path whose spelling could not be read leaves the rescan to
+// the whole library (res.FullScan).
+func (s *Server) retireAndRescan(r *http.Request, label string, paths []string, res *trash.Result) {
 	if len(paths) > 0 && s.deps.Manifest != nil {
 		if _, err := s.deps.Manifest.IncrementMissingTracksAndDeleteAtThreshold(r.Context(), paths, 1); err != nil {
 			logger.Error("retire trashed rows", "err", err)
 		}
 	}
+	if res.FullScan {
+		s.spawnBackgroundScan(label)
+		return
+	}
+	dirs := res.Dirs
 	if len(dirs) == 0 {
 		return
 	}
@@ -175,7 +187,7 @@ func (s *Server) apiTrashAdd(w http.ResponseWriter, r *http.Request) {
 		writeTrashError(w, err)
 		return
 	}
-	s.retireAndRescan(r, "post-delete scan", res.Paths, res.Dirs)
+	s.retireAndRescan(r, "post-delete scan", res.Paths, res)
 	dto := trashResultDTOOf(res)
 	dto.Outcomes = append(dto.Outcomes, refused...)
 	dto.Failed += len(refused)
@@ -230,9 +242,7 @@ func (s *Server) apiTrashRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	// A restored file is new to the manifest again; the subtree scan indexes
 	// it. Nothing to retire.
-	if len(res.Dirs) > 0 {
-		s.retireAndRescan(r, "post-restore scan", nil, res.Dirs)
-	}
+	s.retireAndRescan(r, "post-restore scan", nil, res)
 	writeJSON(w, http.StatusOK, trashResultDTOOf(res))
 }
 

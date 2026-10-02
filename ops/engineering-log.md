@@ -36723,3 +36723,166 @@ since x/sys/windows declares `type Errno = syscall.Errno` and each code as
 `syscall.Errno` (CLAUDE.md's bot-review section records the same claim), and
 the Windows leg was green on those files. CodeRabbit asked for the start
 order and the lazy proof in the rule itself, which it now carries.
+
+## 2026-10-02 — A path a client names is scanned, retired and recorded under the spelling its folders list (backlog B219)
+
+Found by the pre-v0.2.1 data review (2026-09-30) on APFS: an upload into
+"Café" in the other normalization duplicated the folder's rows.
+
+### The defect
+
+The scanner makes each row's path from the spelling of the directory it is
+handed: `ScanSubtree` walks from that directory, and `relPath` turns every
+path the walk visits (the start's spelling, then the names readdir gives
+below it) into a row. Three console routes handed it a spelling a CLIENT
+sent:
+
+- `POST /api/upload/sessions/{sid}/commit`: `spawnBackgroundSubtreeScan`
+  over the directories of the files as the session declared them;
+- `POST /api/library/trash`: `retireAndRescan` over the paths as the
+  request named them, which the trash also recorded its entry under;
+- `POST /api/library/trash/restore`: the same, with the paths the entry
+  recorded.
+
+A volume that opens a name under more than one spelling (APFS: case and
+Unicode composition; NTFS and SMB: case) takes a client's spelling to a
+folder its parent lists under another, so the commit's rename, the trash's
+move and the restore's rename all reached the real folder, and only the
+bookkeeping after them used the client's spelling.
+
+### Reproduced red-first
+
+On main at 7e324642, on APFS (macOS 27), through the real handlers and the
+real scanner (`newTestServer`), each folder seeded and fully scanned first:
+
+| Route, as the client spelled it | Rows after, on main | Want |
+|---|---|---|
+| upload `artist/ALBUM/02.flac` (folder `Artist/Album`) | `Artist/Album/01.flac`, `artist/ALBUM/01.flac`, `artist/ALBUM/02.flac` | `Artist/Album/01.flac`, `Artist/Album/02.flac` |
+| upload `Café/Album/02.flac` in NFD (folder in NFC) | `Café/Album/01.flac`, `Café/Album/02.flac`, `Café/Album/01.flac` | the two NFC rows |
+| upload `Linked/Album/02.flac`, `Linked` a link to `Real` | `Linked/Album/01.flac`, `Linked/Album/02.flac`, `Real/Album/01.flac` | `Real/Album/01.flac`, `Real/Album/02.flac` |
+| delete `artist/ALBUM/01.flac` | `Artist/Album/01.flac` (not retired), `Artist/Album/02.flac`, `artist/ALBUM/02.flac` | `Artist/Album/02.flac` |
+| then restore it | both spellings of both files | the two `Artist/Album` rows |
+| restore an entry recorded as `artist/ALBUM/01.flac` | `Artist/Album/02.flac`, `artist/ALBUM/01.flac`, `artist/ALBUM/02.flac` | the two `Artist/Album` rows |
+| delete `Linked/Album/01.flac` | `Linked/Album/02.flac` beside the `Real/Album` rows | no row under `Linked/` |
+
+and the NFD twins of the trash rows. The commit answered
+`scanDirs: ["artist/ALBUM"]`; the trash listing showed `originalPath:
+"artist/ALBUM/01.flac"`. Both copies of each file were served at the
+default settings (`ListServedTracks` listed all four rows of a two-file
+folder), so every paired device listed the folder twice.
+
+What happens to such rows later, measured with the scanner at the
+production threshold (3) over the state main's commit left: the next full
+scan's case-only rename reap takes the case variants; the composition
+variants are not related by that reap (`caseOnlyRenames` folds case alone)
+and went at the third full scan, eighteen hours at the default cadence.
+Rows an older build wrote heal that way; this change does not touch them.
+
+### What B53 had, and why it is not the resolution here
+
+The backlog entry described B53's fix (the render rescanner) as listing
+each parent and matching with `os.SameFile`. It is not: B53 resolves the
+directory from the ROW's path through `fs.Resolver`, which is the walk's
+spelling by construction. No listing resolution existed anywhere in the
+tree. An upload's folder may have no row yet, and a delete's path is
+exactly the thing that may not match its row, so neither can take B53's
+route. `fsutil.Speller` is the one listing resolution, and the rescanner
+keeps its row path, which needs none.
+
+### The fix
+
+`fsutil.Speller` (internal/fsutil/spelling.go) answers a slash path below a
+root with every component spelled as the directory holding it lists it:
+
+- **identity, not names**: the entry the listing names exactly, else the
+  one `os.SameFile` says the client's spelling opens, both sides Lstat'd so
+  a link is matched as the link; a fold (`cases.Fold`, then NFC) picks the
+  candidates worth a stat, and when none is the entry, every listed name is
+  tried by identity (a Windows 8.3 short name opens an entry whose name no
+  fold relates);
+- every component above the last must be a directory by Lstat, so a link
+  or a junction is never descended and nothing is listed through one; the
+  last component is spelled whatever it is;
+- a component that is not one name (empty, `.`, `..`, a separator or a
+  volume on Windows, a NUL) is refused before anything is stat'd;
+- the listing is read in directory order through `OpenDir` and stops at the
+  exact name, so a path spelled as listed costs one Lstat per component; a
+  Speller remembers each directory it resolved, for one batch;
+- a refusal wraps an unexported sentinel and names the path relative to the
+  root (an `*fs.PathError`'s absolute path is dropped).
+
+Callers: the commit's `spellScanDirs` runs on the dirs `planScanDirs`
+planned (at most `maxSubtreeScans` resolutions) and plans the answer again,
+so two spellings of one folder are one scan; any refusal makes it a full
+scan. The trash's `spellRel` spells the part below the root before the move
+(the entry, the retire and the rescan take the folders' spelling) and after
+a restore's rename (an entry an earlier build recorded under a client's
+spelling is rescanned as listed); a refusal keeps the client's spelling for
+the retire, as before, and sets `trash.Result.FullScan`, which
+`retireAndRescan` honours.
+
+### Alternatives weighed
+
+- **Respelling inside `ScanSubtree`**, which would cover every caller at
+  once: its deletion scope is a byte range over the spelling it is handed,
+  and the watcher and the rescanner hand it the walk's own spelling, so the
+  change would move that scope for callers that have no defect. The three
+  routes are mapped where the client's spelling enters.
+- **A name rule** (fold case and composition, compare): calls a
+  case-sensitive volume's `Artist` and `artist` one folder, and misses a
+  short name. Kept as the candidate filter only.
+- **Spelling through links**: the walk does not descend a link below a root
+  (B74), so a row spelled through one is reaped by the next full scans; a
+  path through one is refused and its files left to a full scan.
+- **`F_GETPATH` (macOS) or `GetFinalPathNameByHandle` (Windows)**: both
+  resolve links, so they answer the target's path, not the walk's spelling,
+  and Linux has no such call for a case-insensitive mount (ext4 casefold,
+  CIFS).
+
+### Tests
+
+internal/admin/client_spelling_test.go, through the real handlers and
+scanner: `TestAnUploadRescanIndexesNoSecondSpellingOfTheFolder` (case,
+normalization), `TestAnUploadThroughALinkedFolderIsIndexedWhereTheWalkFindsIt`,
+`TestAnUploadOfOneFolderUnderTwoSpellingsScansItOnce`,
+`TestATrackTrashedUnderAnotherSpellingLeavesNoSecondSpelling` (delete, the
+recorded spelling, restore), `TestARestoreOfAnEntryTrashedUnderAnotherSpellingIndexesNoSecondSpelling`,
+`TestATrackTrashedThroughALinkedFolderLeavesNoRowsUnderTheLink`. The
+spelling variants skip where the volume tells them apart (both on ext4, the
+composition one on NTFS), so they run on CI's macOS leg and, for case, its
+Windows leg. internal/fsutil/spelling_test.go drives the matching on every
+platform over a fake volume that folds as APFS does and follows a link
+above the last component as a kernel does: `TestSpellerReadsTheSpellingTheListingCarries`,
+`TestSpellerMatchesByIdentityNotByName`, `TestSpellerFindsANameTheFoldDoesNotRelate`,
+`TestSpellerAsksNoStatOfAPathAsListed`, `TestSpellerRefusesWhatAWalkDoesNotDescend`,
+`TestSpellerRefusals`, `TestSpellerListsAFolderOnceForABatch`, and
+`TestSpellerOnThisVolume` on the real filesystem.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Control | Red |
+|---|---|
+| the commit does not call `spellScanDirs` | the four upload tests |
+| `spellScanDirs` does not plan again | `…UnderTwoSpellingsScansItOnce` alone |
+| `spellScanDirs` keeps an unspellable dir | `…ThroughALinkedFolderIsIndexedWhereTheWalkFindsIt` alone |
+| `Trash` keeps the client's spelling | both trash-delete tests (spelling variants, link) |
+| `Restore` keeps the recorded spelling | `TestARestoreOfAnEntryTrashed…` (both variants) |
+| `retireAndRescan` ignores `FullScan` | `…TrashedThroughALinkedFolder…` alone |
+| a fold candidate accepted without identity | `TestSpellerMatchesByIdentityNotByName` |
+| a non-directory component descended | the fake's link test, `TestSpellerOnThisVolume`, both admin link tests |
+| no memo | `TestSpellerListsAFolderOnceForABatch` |
+| no identity scan over the whole listing | `TestSpellerFindsANameTheFoldDoesNotRelate`, the alias half of `…ByIdentityNotByName` |
+| fold-equal siblings stat'd on an exact path | `TestSpellerAsksNoStatOfAPathAsListed` (6 Lstats, want 3) |
+| `plainName` without its separator, volume and NUL checks | `TestSpellerRefusals` (a Lstat for a malformed path) |
+
+The first `Trash` control did not build (the batch's Speller map went
+unused) and was rerun with the call kept and its answer overwritten.
+
+### Residuals
+
+- Rows an older build already wrote heal at full scans (above).
+- The identity match needs stable file identities (read from the code, not
+  measured): on a mount that invents inode numbers per lookup (CIFS with
+  `noserverino`) a spelling other than the listed one would be refused, and
+  the commit or delete would fall back to a full scan; a path spelled as
+  listed is unaffected.

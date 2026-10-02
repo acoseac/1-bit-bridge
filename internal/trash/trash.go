@@ -116,10 +116,16 @@ type Result struct {
 	Bytes    int64
 	OK       int
 	Failed   int
-	// Paths that changed state, for the caller to retire or re-scan.
+	// Paths that changed state, for the caller to retire or re-scan, spelled
+	// as their folders list them (spellRel).
 	Paths []string
-	// Dirs are the library-relative parents touched, for a subtree scan.
+	// Dirs are the library-relative parents touched, for a subtree scan,
+	// spelled the same way.
 	Dirs []string
+	// FullScan reports a path whose on-disk spelling could not be read: the
+	// caller rescans the library rather than a folder under a spelling the
+	// walk may not use.
+	FullScan bool
 }
 
 // Manager owns the trash for every configured root.
@@ -210,6 +216,28 @@ func rootMatches(root, want string) bool {
 		filepath.Base(root) == want
 }
 
+// spellRel returns rel, a manifest-form path whose part below root is
+// suffix, with that part spelled as the folders below root list it
+// (fsutil.Speller, one per root for the batch, in spellers). The leading root
+// segment of a multi-root path stays as rel names it: the resolver matched it
+// to the root's basename exactly. On a refusal it returns rel as it came, with
+// the error.
+func spellRel(spellers map[string]*fsutil.Speller, root, rel, suffix string) (string, error) {
+	if !strings.HasSuffix(rel, suffix) {
+		return rel, fmt.Errorf("%w: %q does not end with its part below the root", ErrInvalidPath, rel)
+	}
+	sp := spellers[root]
+	if sp == nil {
+		sp = fsutil.NewSpeller(root)
+		spellers[root] = sp
+	}
+	spelled, err := sp.Spell(suffix)
+	if err != nil {
+		return rel, err
+	}
+	return rel[:len(rel)-len(suffix)] + spelled, nil
+}
+
 // Trash moves the given library-relative paths into the trash.
 //
 // `rootWant` constrains rather than selects: each path names its own root (see
@@ -226,6 +254,7 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 	stamp := strconv.FormatInt(m.now().UTC().UnixNano(), 10)
 	res := &Result{}
 	dirs := map[string]struct{}{}
+	spellers := map[string]*fsutil.Speller{}
 
 	for _, raw := range rels {
 		out := Outcome{Path: raw}
@@ -278,7 +307,17 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		dst := filepath.Join(m.trashRoot(root), stamp, filepath.FromSlash(rel))
+		// The track as its folder lists it, which is how its row and the
+		// walk spell it. The delete names it as the client spelled it, and a
+		// volume that opens that spelling (APFS: case and Unicode
+		// composition; NTFS: case) moves the track all the same, so the
+		// trash recorded, retired and rescanned it under the client's
+		// spelling: the retire named no row and the rescan indexed the
+		// folder's other files a second time (backlog B219). A path that
+		// cannot be spelled keeps the client's spelling, and once it is
+		// trashed the library is rescanned instead of its folder.
+		spelled, spellErr := spellRel(spellers, root, rel, suffix)
+		dst := filepath.Join(m.trashRoot(root), stamp, filepath.FromSlash(spelled))
 		if mkErr := os.MkdirAll(filepath.Dir(dst), 0o700); mkErr != nil {
 			out.Status, out.Reason = "failed", mkErr.Error()
 			res.Failed++
@@ -291,11 +330,16 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
+		if spellErr != nil {
+			res.FullScan = true
+			logger.Warn("trash: the path's spelling on disk cannot be read; the library will be rescanned",
+				"path", rel, "err", spellErr)
+		}
 		out.Status, out.Bytes = "trashed", info.Size()
 		res.OK++
 		res.Bytes += info.Size()
-		res.Paths = append(res.Paths, rel)
-		if d := path.Dir(rel); d != "." {
+		res.Paths = append(res.Paths, spelled)
+		if d := path.Dir(spelled); d != "." {
 			dirs[d] = struct{}{}
 		}
 		res.Outcomes = append(res.Outcomes, out)

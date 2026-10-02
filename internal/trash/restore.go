@@ -21,6 +21,7 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 	}
 	res := &Result{}
 	dirs := map[string]struct{}{}
+	spellers := map[string]*fsutil.Speller{}
 	for _, id := range ids {
 		out := Outcome{Path: id}
 		stamp, rel, err := splitID(id)
@@ -98,10 +99,21 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			out.Bytes = info.Size()
 			res.Bytes += info.Size()
 		}
+		// The file back as its folder lists it. An entry an earlier build
+		// trashed is recorded under the spelling its delete was sent with,
+		// and the rename above lands in the folder that spelling opens, so a
+		// rescan under the recorded spelling indexed the folder's every file
+		// a second time (backlog B219).
+		spelled, spellErr := spellRel(spellers, root, rel, suffix)
+		if spellErr != nil {
+			res.FullScan = true
+			logger.Warn("trash: the restored path's spelling on disk cannot be read; the library will be rescanned",
+				"path", rel, "err", spellErr)
+		}
 		out.Status = "restored"
 		res.OK++
-		res.Paths = append(res.Paths, rel)
-		if d := path.Dir(rel); d != "." {
+		res.Paths = append(res.Paths, spelled)
+		if d := path.Dir(spelled); d != "." {
 			dirs[d] = struct{}{}
 		}
 		res.Outcomes = append(res.Outcomes, out)
