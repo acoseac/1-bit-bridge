@@ -28,8 +28,8 @@ printf 'RENDITION' > "$out"
 
 // TestRunAsRootKeepsTheInstallOwner pins that a job run as root gives the
 // album directories it makes (fsutil.MkdirAll) and the sidecar sox writes
-// (precreated by fsutil.Precreate, with the owner of the rendition it
-// replaces or of its directory) the install's owner, so a `sudo bridge
+// (created before sox runs by createOutput, with the owner of the rendition
+// it replaces or of its directory) the install's owner, so a `sudo bridge
 // upscale` over a service install leaves renditions the service can
 // replace. A stand-in sox writes the sidecar, and what Run publishes is
 // what it wrote. Driven through fsutil.SimulateRootForTest, since the
@@ -64,7 +64,7 @@ func TestRunAsRootKeepsTheInstallOwner(t *testing.T) {
 		{Dst: out, UID: 4242, GID: 4243},
 		{Dst: filepath.Join(out, "Artist"), UID: 4242, GID: 4243},
 		{Dst: filepath.Join(out, "Artist", "Album"), UID: 4242, GID: 4243},
-		{Dst: final, UID: 4242, GID: 4243}, // the sidecar, precreated for sox
+		{Dst: final, UID: 4242, GID: 4243}, // the sidecar, created for sox
 	}
 	got := changes()
 	if len(got) != len(want) {
@@ -85,7 +85,9 @@ func TestRunAsRootKeepsTheInstallOwner(t *testing.T) {
 // under the temp dir (JobSpec.mkdirScratch, fsutil.MkdirAllShared). Which
 // owner a scratch directory in a shared temp dir takes (the variants
 // directory's) is fsutil's TestCreatingAsRootKeepsTheOwner; this pins that
-// the chain asks. It needs the real toolchain, so CI's race legs skip it.
+// the chain asks. The scratch FILE, which the chain creates before Stage A
+// (createOutput) so a directory that refuses it fails by type, takes its
+// directory's owner. It needs the real toolchain, so CI's race legs skip it.
 func TestRunDSDAsRootKeepsTheInstallOwner(t *testing.T) {
 	requireDSDToolchain(t)
 	root := t.TempDir()
@@ -113,7 +115,8 @@ func TestRunDSDAsRootKeepsTheInstallOwner(t *testing.T) {
 		{Dst: filepath.Join(out, "Album"), UID: 4242, GID: 4243},
 		{Dst: tmp, UID: 4242, GID: 4243},
 		{Dst: renderScratchDir(tmp), UID: 4242, GID: 4243},
-		{Dst: spec.SidecarPath(), UID: 4242, GID: 4243}, // the rendition, precreated for Stage C
+		{Dst: spec.SidecarPath(), UID: 4242, GID: 4243},    // the rendition, created for Stage C
+		{Dst: renderScratchDir(tmp), UID: 4242, GID: 4243}, // the Stage A scratch file, its directory's owner
 	}
 	got := changes()
 	if len(got) != len(want) {

@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -76,12 +75,6 @@ const (
 	logToolUnavailable = "pool: tool unavailable"
 	logToolBack        = "pool: tool available again"
 )
-
-// toolOutageRewarnAfter bounds the silence while an outage lasts. The outage
-// ends when a job proves the tool back, and one can be missed: the tool comes
-// back and goes again before any job that needs it succeeds, and the second
-// outage would otherwise be reported by the first one's Warn alone.
-const toolOutageRewarnAfter = 24 * time.Hour
 
 // missingTool is what a failure says this host lacks: the tool, by the name
 // the outage report keys on, and why, in the report's words.
@@ -199,55 +192,28 @@ func toolsProvenBy(settings string) []string {
 // M-SEARCH rule (discovery.SendFailureLog) applied per tool: one Warn when a
 // tool's outage starts, one Info when a job proves the tool back, and the jobs
 // between at Debug. A queue of 5,000 jobs (the default QueueCap) behind a
-// missing sox logged 5,000 identical WARNs; it logs one.
+// missing sox logged 5,000 identical WARNs; it logs one. The streaks are kept
+// by outageStreaks, which the output report (outputOutages) shares.
 //
 // Keyed per tool because tools come and go apart: with ffmpeg missing and sox
 // present, a FLAC job succeeds between two DSD failures, and ending every
 // outage on any success would report ffmpeg back, then missing again, once
 // per DSD job. A success ends only the outages of the tools its own chain ran.
 type toolOutages struct {
-	mu   sync.Mutex
-	open map[string]*toolOutage
+	streaks outageStreaks[string, missingTool]
 	// now is the clock, time.Now when nil. A test drives the re-warn with
 	// it; set it before any job runs.
 	now func() time.Time
 }
 
-// toolOutage is one tool's outage: when it started, when it was last
-// reported at Warn, and how many jobs have failed for want of the tool since.
-type toolOutage struct {
-	since, warnedAt time.Time
-	failed          int
-}
-
 // fail records one job that failed for want of t, and logs it: the Warn when
-// the outage starts (or has been silent for toolOutageRewarnAfter), Debug
+// the outage starts (or has been silent for outageRewarnAfter), Debug
 // otherwise. msg is the job's redacted failure reason; path is its
 // library-relative source.
 func (o *toolOutages) fail(t missingTool, path, msg string) {
-	now := time.Now()
-	if o.now != nil {
-		now = o.now()
-	}
-	o.mu.Lock()
-	if o.open == nil {
-		o.open = map[string]*toolOutage{}
-	}
-	out := o.open[t.name]
-	if out == nil {
-		out = &toolOutage{since: now}
-		o.open[t.name] = out
-	}
-	out.failed++
-	warn := out.warnedAt.IsZero() || now.Sub(out.warnedAt) >= toolOutageRewarnAfter
-	if warn {
-		out.warnedAt = now
-	}
-	failed, since := out.failed, out.since
-	o.mu.Unlock()
-
+	s, warn := o.streaks.note(t.name, t, clockNow(o.now))
 	if !warn {
-		logger.Debug(logToolUnavailable, "tool", t.name, "path", path, "failedJobs", failed)
+		logger.Debug(logToolUnavailable, "tool", t.name, "path", path, "failedJobs", s.failed)
 		return
 	}
 	logger.Warn(logToolUnavailable,
@@ -255,8 +221,8 @@ func (o *toolOutages) fail(t missingTool, path, msg string) {
 		"reason", t.reason,
 		"path", path,
 		"err", msg,
-		"failedJobs", failed,
-		"since", since,
+		"failedJobs", s.failed,
+		"since", s.since,
 		"note", "every job that needs it fails without a strike against its source; the next line is when a job proves it back")
 }
 
@@ -264,23 +230,10 @@ func (o *toolOutages) fail(t missingTool, path, msg string) {
 // each at Info with how many jobs it cost. Free when no outage is open, which
 // is every success on a healthy host.
 func (o *toolOutages) proven(settings string) {
-	type ended struct {
-		name   string
-		failed int
-		since  time.Time
-	}
-	var back []ended
-	o.mu.Lock()
-	if len(o.open) > 0 {
-		for _, name := range toolsProvenBy(settings) {
-			if out, ok := o.open[name]; ok {
-				back = append(back, ended{name: name, failed: out.failed, since: out.since})
-				delete(o.open, name)
-			}
-		}
-	}
-	o.mu.Unlock()
-	for _, b := range back {
-		logger.Info(logToolBack, "tool", b.name, "failedJobs", b.failed, "since", b.since)
+	ended := o.streaks.end(
+		func() []string { return toolsProvenBy(settings) },
+		func(string, missingTool) bool { return true })
+	for _, b := range ended {
+		logger.Info(logToolBack, "tool", b.key, "failedJobs", b.failed, "since", b.since)
 	}
 }

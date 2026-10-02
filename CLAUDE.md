@@ -3104,10 +3104,11 @@ no failing test — which is the shape to expect in this area.
   happened), and #988's ordered tail is unchanged; the exit is a row in both
   terminal-order tables. **The default is the opposite of the analysis
   pool's**, which strikes only on a classified verdict: this debounce predates
-  classification, so everything not classified as the host's (or, since
-  B53, as a source newer than its row, `ErrSourceChanged`: the B53 bullet
-  below) still strikes, a tool that ran and refused the file included,
-  which is what it is for. **The
+  classification, so everything not classified as the host's (a tool it
+  lacks, or since B211 an output folder it will not let the job write: the
+  next bullet), or, since B53, as a source newer than its row
+  (`ErrSourceChanged`: the B53 bullet below), still strikes, a tool that
+  ran and refused the file included, which is what it is for. **The
   outage is reported per TOOL, once**: one Warn when it starts, the jobs after
   it at Debug under the same message, one Info when a job whose chain ran the
   tool succeeds (read from the settings' `decoder`, the route the run took),
@@ -3127,6 +3128,68 @@ no failing test — which is the shape to expect in this area.
   empty PATH), `TestAToolThatRanAndRefusedTheFileStillStrikesIt` (the positive
   control), `TestAToolOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
   `TestMigration48ExpiresEverySuppressionOnceAndKeepsTheCount`.
+- **…and a directory this host will not let a job WRITE strikes nothing
+  either** (2026-10-02, backlog B211). A render writes in two places the
+  source has no say in: the sidecar's folder under the variants directory,
+  and a DSD render's Stage A scratch under the temp dir. `processJob` struck
+  the source for every failure not classified as the host's, so a folder
+  this user may not write struck every file rendered into it: measured
+  through the real pool and `Run` on main 5f033c02, one source suppressed
+  after three jobs in each of five shapes (the variants directory
+  read-only, an album folder in it read-only for a PCM and a DSD render, a
+  temp dir the scratch cannot be made in, the scratch made and read-only).
+  The ordinary way there is a `sudo bridge render` before v0.2.1, which left
+  root-owned album folders and a root-owned `1-bit-bridge-render` (the B17
+  bullet): every file of those albums, and every DSD source, suppressed for
+  30 days past the chown. **Each step that writes to the output side marks
+  its own failure** (`markOutputFault`, output_fault.go,
+  `toolUnavailableError`'s shape, so the error says what it said): making
+  the sidecar's folder and the scratch directory, creating the sidecar's
+  temp file and the scratch file, and the publish rename and the stat after
+  it. The pool asks `unwritableOutput` after `unavailableTool`, counts and
+  announces the job, and strikes nothing; the exit is a row in both
+  terminal-order tables. **By type, a closed set**: the first
+  `syscall.Errno` in the chain, either a permission (`fs.ErrPermission`:
+  EACCES, EPERM, ERROR_ACCESS_DENIED) or a cause of the volume's in the
+  platform's table (`outputFaultErrnos`: EROFS, ENOSPC, EDQUOT, EIO,
+  ENOTCONN, ESTALE; on Windows the write protect, the two disk-full codes,
+  the quota and a device or share gone). **A cause the source's NAME
+  produces is not in it and keeps its strike** (ENAMETOOLONG, EILSEQ,
+  EINVAL), and so does EFBIG, a file too large for the volume: retrying
+  never fixes either. **The bridge creates the tool's output before the
+  tool runs** (`createOutput`: `O_EXCL`, then `fsutil.KeepOwner`; it was
+  `fsutil.Precreate`, which created nothing unless root): a folder that
+  exists and refuses new files failed in sox's own open, a message the pool
+  cannot classify, and now fails in the bridge's, before any decode, so a
+  DSD render no longer spends its Stage A on a sidecar it can never write.
+  As root, the scratch file takes its directory's owner. **Not on
+  Windows**, where the tool still creates its output (`createOutput` does
+  nothing): a file freshly closed there can be held by Defender or the
+  indexer (`atomicwrite.RenameWithRetry`), and whether that fails a tool's
+  open of it for writing is not measured, so an ACL that refuses new files
+  in an existing folder keeps its strike there; making a folder and the
+  publish rename are marked on every platform. **The outage is reported per
+  output and kind** through the streak record the tool report now shares
+  (`outageStreaks`): one Warn when it starts, Debug after, one Info when a
+  job proves it over, a re-Warn after 24 h, the error redacted as every job
+  failure is. **A volume fault is proven over by any job that writes on the
+  volume; a permission only by a job that writes in the folder that refused
+  it**: in a variants tree where one album folder is root's, every other
+  album still renders, and ending the outage on any success would Warn again
+  at the next failure. Proven after the fsync, since a volume failing its
+  writes can still take a rename; a DSD success proves the scratch too (the
+  settings' `decoder`, as for the tools). **Not covered**: a write a tool
+  makes after its output exists (a volume that fills during the render),
+  which the bridge does not see and this change does not classify; measured
+  on a full HFS+ image, a mkdir and an empty create both succeed on a volume
+  full of data, so a full volume seldom reaches a marked step.
+  `TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource` (six shapes, the
+  real pool and `Run` with stand-in tools; POSIX, skipped as root),
+  `TestFixingTheOutputDirectoryBringsTheSourceBackAtTheNextJob`,
+  `TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
+  `TestMarkOutputFaultMarksOnlyTheOutputSidesCauses`,
+  `TestMarkOutputFaultReadsWhatTheOSReports`; the positive control is still
+  `TestAToolThatRanAndRefusedTheFileStillStrikesIt`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,
@@ -4134,10 +4197,11 @@ no failing test — which is the shape to expect in this area.
   closed this way, a probe narrows a window and closes none (the restore
   bullet under The CLI and the serve wiring), and the doctor sends
   operators to `--gc` on a live install. **Residuals**: a writer that has
-  written nothing for the whole grace, which is a DSD render on a bridge
-  run as root, whose `.tmp` is precreated before Stages A and B and the
-  album survey (unlinking it costs nothing: Stage C's sox creates the file
-  again, without the owner the precreate gave it), and a render stalled on
+  written nothing for the whole grace, which is a DSD render, whose `.tmp`
+  the bridge creates before Stages A and B and the album survey (as root
+  only until B211, on POSIX since; unlinking it costs nothing: Stage C's sox
+  creates the file again, without the owner it was created with as root),
+  and a render stalled on
   a hung mount for ten minutes, whose rename then fails; and sampling the
   start BEFORE the listing is not pinned (no test can stretch a listing
   past the grace). The fixtures that stand for what a lost index or a
@@ -5503,7 +5567,10 @@ no failing test — which is the shape to expect in this area.
   Files the bridge stages take `fsutil.KeepOwner` (a cover, a curve, a
   snapshot's copies and manifest, a restored file). **A file another writer
   creates is precreated** (`fsutil.Precreate`: `O_EXCL`, the owner looked
-  up BEFORE the file exists): sox fills its output with `O_TRUNC`, SQLite
+  up BEFORE the file exists; a render's sidecar and scratch since B211 by
+  `transcode.createOutput`, `O_EXCL` then `KeepOwner`, which creates them
+  for every user so a folder that refuses them fails by type, the
+  output-fault bullet under **Job pools**): sox fills its output with `O_TRUNC`, SQLite
   opens an existing empty database, `VACUUM INTO` writes into an empty
   file, and each keeps the owner (all measured). **Two directories take a
   reference's owner, because there the parent's says nothing about who uses

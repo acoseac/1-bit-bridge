@@ -470,16 +470,20 @@ func soxFileDuration(ctx context.Context, path string) float64 {
 // does not describe, and the serve path would refuse the result anyway. The
 // caller's deferred cleanup removes the temp. A method, and the only publish
 // helper, so a chain cannot publish without the check.
+//
+// The rename and the stat after it touch the variants directory alone, so
+// each marks its failure as the output side's (output_fault.go).
 func (j JobSpec) publishSidecar(ctx context.Context, tmpPath, finalPath string) (int64, error) {
 	if err := j.sourceChanged("it changed while it rendered, so the rendition was discarded"); err != nil {
 		return 0, err
 	}
+	sidecarDir := filepath.Dir(finalPath)
 	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
-		return 0, fmt.Errorf("rename sidecar: %w", err)
+		return 0, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("rename sidecar: %w", err))
 	}
 	info, err := os.Stat(finalPath)
 	if err != nil {
-		return 0, fmt.Errorf("stat sidecar: %w", err)
+		return 0, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("stat sidecar: %w", err))
 	}
 	return info.Size(), nil
 }
@@ -556,11 +560,14 @@ func MeasureDSDPeak(ctx context.Context, j JobSpec) (*float64, error) {
 	}
 	scratchDir := renderScratchDir(j.TempDir)
 	if err := j.mkdirScratch(scratchDir); err != nil {
-		return nil, fmt.Errorf("mkdir render scratch dir: %w", err)
+		return nil, markOutputFault(outputScratch, scratchDir, fmt.Errorf("mkdir render scratch dir: %w", err))
 	}
 	scratchPath := filepath.Join(scratchDir, nextSidecarTmpToken()+renderScratchSuffix)
 	_ = os.Remove(scratchPath)
 	defer func() { _ = os.Remove(scratchPath) }()
+	if err := createOutput(scratchPath, scratchDir); err != nil {
+		return nil, markOutputFault(outputScratch, scratchDir, fmt.Errorf("create render scratch: %w", err))
+	}
 	return j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
 }
 
@@ -598,15 +605,18 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	}
 
 	finalPath := j.SidecarPath()
+	sidecarDir := filepath.Dir(finalPath)
 	token := nextSidecarTmpToken()
 	tmpPath := finalPath + "." + token + sidecarTmpSuffix
-	if err := fsutil.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-		return RunResult{}, fmt.Errorf("mkdir sidecar dir: %w", err)
+	// Every step that writes to the variants directory or the render
+	// scratch marks its own failure, as in Run (output_fault.go).
+	if err := fsutil.MkdirAll(sidecarDir, 0o755); err != nil {
+		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("mkdir sidecar dir: %w", err))
 	}
 	_ = os.Remove(tmpPath)
 	scratchDir := renderScratchDir(j.TempDir)
 	if err := j.mkdirScratch(scratchDir); err != nil {
-		return RunResult{}, fmt.Errorf("mkdir render scratch dir: %w", err)
+		return RunResult{}, markOutputFault(outputScratch, scratchDir, fmt.Errorf("mkdir render scratch dir: %w", err))
 	}
 	scratchPath := filepath.Join(scratchDir, token+renderScratchSuffix)
 	_ = os.Remove(scratchPath)
@@ -617,11 +627,17 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	// Stage C's sox writes the rendition: precreated as the install's
-	// owner, as in Run, so a `sudo bridge render` leaves one the service
-	// can replace. A no-op when this process is not root.
-	if err := fsutil.Precreate(tmpPath, 0o666, finalPath); err != nil {
-		return RunResult{}, fmt.Errorf("create sidecar: %w", err)
+	// Stage C's sox writes the rendition and Stage A's the scratch: both
+	// created here, before Stage A, so a directory that refuses new files
+	// fails now, by type, and not after minutes of decoding in a sox
+	// message. The rendition takes the install's owner, as in Run, so a
+	// `sudo bridge render` leaves one the service can replace; the scratch
+	// takes its directory's. Nothing on Windows (createOutput).
+	if err := createOutput(tmpPath, finalPath); err != nil {
+		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("create sidecar: %w", err))
+	}
+	if err := createOutput(scratchPath, scratchDir); err != nil {
+		return RunResult{}, markOutputFault(outputScratch, scratchDir, fmt.Errorf("create render scratch: %w", err))
 	}
 
 	// Stages A and B — decode into the scratch and measure it at unity.
