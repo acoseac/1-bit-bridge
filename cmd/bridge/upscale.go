@@ -1345,7 +1345,7 @@ func gcRefuseRelocationInProgress(stderr io.Writer, outputDir string, verdicts g
 // the serve-time VariantWatcher acts on, so the two reapers cannot
 // disagree about what a relocated row is; the relocation guard has
 // already run over them (gcRefuseRelocationInProgress).
-func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, verdicts gcRowVerdicts) (int, int, int, int) {
+func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, verdicts gcRowVerdicts) (int, int, int, int) {
 	// Per-row `DeleteVariant` (one transaction per orphan) over a
 	// bulk-delete API: `--gc` is operator-initiated and infrequent,
 	// orphan counts are typically <100 in practice, and a new bulk
@@ -1438,6 +1438,19 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 	return rowsRemoved, rowsKept, rowsFailed, 0
 }
 
+// gcVariantStore is the store as runGC uses it: the listing every verdict
+// of the run is taken from, and the two writes its reverse sweep makes.
+// *manifest.Store is the one production implementation. An interface so a
+// test can act between the listing and the sweeps, where a live bridge's
+// writers act on the same database: a render committing the row of a
+// rendition it has just published, a `bridge variants move` rewriting a
+// row the run has listed.
+type gcVariantStore interface {
+	AllVariants(ctx context.Context) ([]manifest.VariantRow, error)
+	UpdateVariantSidecarPath(ctx context.Context, sourcePath, variantID, newSidecarPath string) error
+	DeleteVariant(ctx context.Context, sourcePath, variantID string) error
+}
+
 // Both sweeps run unconditionally under `--gc` because they share
 // the same semantic: keep the on-disk inventory and the DB-row
 // inventory consistent with each other. Splitting into separate
@@ -1499,7 +1512,7 @@ type gcOptions struct {
 //     play even after the stale-variant fallback ships (acoseac/1-bit
 //     PR #351) — the next manifest rescan re-pulls the same dead ID
 //     and the loop restarts.
-func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir, tempDir string, opts gcOptions) int {
+func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, outputDir, tempDir string, opts gcOptions) int {
 	// DSD-render scratch first: the crash-orphan case the render's
 	// deferred remove cannot cover. Independent of the sidecar sweeps and
 	// bounded to the bridge-owned subdirectory, so it runs whatever they

@@ -289,11 +289,20 @@ type analyzeGCOptions struct {
 	allowEmpty, allowMassOrphans, allowPartialWalk bool
 }
 
+// analysisRowLister is the store as runAnalyzeGC uses it: the listing its
+// known set is built from. *manifest.Store is the one production
+// implementation. An interface so a test can act between the listing and
+// the sweep, where a live bridge's analysis pool publishes a waveform and
+// commits its row.
+type analysisRowLister interface {
+	AllAnalysisRows(ctx context.Context) ([]manifest.AnalysisRow, error)
+}
+
 // runAnalyzeGC removes orphan waveform sidecars — files under the
 // waveform output dir that no `track_analysis` row points at (plus
 // stale `.tmp` debris from interrupted runs). Mirrors the forward sweep
 // of `bridge upscale --gc`, refusals included.
-func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, opts analyzeGCOptions) int {
+func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisRowLister, outputDir string, opts analyzeGCOptions) int {
 	rows, err := store.AllAnalysisRows(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
