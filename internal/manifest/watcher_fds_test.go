@@ -121,6 +121,16 @@ func TestTheWatchAccountReleasesAFoldersWholeSubtree(t *testing.T) {
 	if got := f.release(p("/lib/never")); !slices.Equal(got, []string{p("/lib/never")}) || f.n != 2 {
 		t.Errorf("release of a path never held = %q with %d held, want just the path and 2", got, f.n)
 	}
+
+	// A folder waiting for its watch goes with a renamed folder at or above
+	// it, and not with a sibling whose name merely starts the same.
+	for _, d := range []string{p("/lib/Music"), p("/lib/Music/Disc 1"), p("/lib/MusicAndMore")} {
+		f.wait(d)
+	}
+	f.dropPending(p("/lib/Music"))
+	if got := f.pendingInOrder(); !slices.Equal(got, []string{p("/lib/MusicAndMore")}) {
+		t.Errorf("after dropping /lib/Music the waiting folders are %q, want only /lib/MusicAndMore", got)
+	}
 }
 
 // TestCountWatchSetCountsWhatTheWatcherHolds counts a tree the way the

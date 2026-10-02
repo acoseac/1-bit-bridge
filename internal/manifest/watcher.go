@@ -193,29 +193,45 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	}()
 	defer wt.w.Close()
 
-	roots := wt.scanner.Roots()
-	if wt.fds != nil {
-		if !wt.watchRootsWithinBudget(roots) {
-			// Logged: the watcher stays off, holding nothing, and the
-			// periodic scan picks up changes. No scan is pending yet.
-			return nil
-		}
-	} else {
-		for _, root := range roots {
-			if err := wt.addTree(root, true); err != nil {
-				watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
-					"root", root, "err", err)
-			}
-		}
+	if !wt.watchRoots(wt.scanner.Roots()) {
+		// Logged: the watcher stays off, holding nothing, and the
+		// periodic scan picks up changes. No scan is pending yet.
+		return nil
 	}
 	if hook := wt.afterInitialWalkHookForTests; hook != nil {
 		hook()
 	}
+	return wt.loop(ctx)
+}
 
+// watchRoots adds every configured root's tree and reports whether the
+// watcher is on. Where fsnotify holds an open file per watched entry the
+// library must fit the watcher's budget first (watchRootsWithinBudget); a
+// root that cannot be walked is logged and the others are watched, on
+// every platform.
+func (wt *Watcher) watchRoots(roots []string) bool {
+	if wt.fds != nil {
+		return wt.watchRootsWithinBudget(roots)
+	}
+	for _, root := range roots {
+		if err := wt.addTree(root, true); err != nil {
+			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
+				"root", root, "err", err)
+		}
+	}
+	return true
+}
+
+// loop handles fsnotify's events and errors until ctx is done or fsnotify
+// closes them. Where fsnotify holds an open file per watched entry it also
+// adds the new folders waiting for their watch once deferredAddWait has
+// passed with no event (quiet), reconciles the account on its schedule,
+// and, once the watches are released, waits for ctx alone, so a scan an
+// event already asked for still runs and still finishes before the caller
+// closes the store. Elsewhere quiet and reconcile stay nil, and the loop is
+// what it was.
+func (wt *Watcher) loop(ctx context.Context) error {
 	events, errs := wt.w.Events, wt.w.Errors
-	// quiet fires when new folders have waited deferredAddWait for their
-	// watch, and reconcile on the account's schedule; both stay nil where
-	// fsnotify holds no file per watch, so the loop there is what it was.
 	var quiet, reconcile <-chan time.Time
 	if wt.fds != nil {
 		t := time.NewTicker(wt.reconcileEvery)
@@ -230,21 +246,14 @@ func (wt *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			// fsnotify sends each event only after it has watched every
-			// new folder it sent a Create for before, so the folders
-			// waiting for their watch can have it now.
-			wt.flushPendingAdds()
 			quiet = nil
-			if drop := wt.dropEventForTests; drop != nil && drop(ev) {
-				break
-			}
-			wt.handleEvent(ctx, ev)
+			wt.receive(ctx, ev)
 		case err, ok := <-errs:
 			if !ok {
 				return nil
 			}
-			wt.flushPendingAdds()
 			quiet = nil
+			wt.flushPendingAdds()
 			watcherLogger.Warn("fsnotify error", "err", err)
 		case <-quiet:
 			quiet = nil
@@ -252,19 +261,25 @@ func (wt *Watcher) Run(ctx context.Context) error {
 		case <-reconcile:
 			wt.reconcileWatches()
 		}
-		if f := wt.fds; f != nil {
-			if f.off {
-				// Every watch is released. Run stays until ctx is done,
-				// so a scan an event already asked for still runs, and
-				// still finishes before the caller closes the store.
-				events, errs, quiet, reconcile = nil, nil, nil, nil
-				continue
-			}
-			if len(f.pending) > 0 && quiet == nil {
-				quiet = time.After(wt.deferredAddWait)
-			}
+		switch {
+		case wt.fds == nil:
+		case wt.fds.off:
+			events, errs, quiet, reconcile = nil, nil, nil, nil
+		case quiet == nil && len(wt.fds.pending) > 0:
+			quiet = time.After(wt.deferredAddWait)
 		}
 	}
+}
+
+// receive handles one event fsnotify sent. fsnotify sends an event only
+// after it has watched every new folder it sent a Create for before, so the
+// folders waiting for their watch can have it first (flushPendingAdds).
+func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
+	wt.flushPendingAdds()
+	if drop := wt.dropEventForTests; drop != nil && drop(ev) {
+		return
+	}
+	wt.handleEvent(ctx, ev)
 }
 
 // addTree adds a watch on every directory of the tree at root, as

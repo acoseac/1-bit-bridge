@@ -3,11 +3,12 @@
 package manifest
 
 import (
-	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -224,7 +225,7 @@ func TestKqueueWatcherLeavesTheProcessOpenFiles(t *testing.T) {
 		runKqueueChild(t, scenario)
 		return
 	}
-	for _, scenario := range []string{"past-the-budget-at-start", "grows-past-the-budget", "runs-out-of-files"} {
+	for _, scenario := range slices.Sorted(maps.Keys(kqueueChildScenarios)) {
 		t.Run(scenario, func(t *testing.T) {
 			// The child's own timeout bounds a wait that goes wrong, which
 			// would otherwise run to the default ten minutes.
@@ -241,10 +242,23 @@ func TestKqueueWatcherLeavesTheProcessOpenFiles(t *testing.T) {
 	}
 }
 
+// kqueueChildScenarios are the libraries the children put the watcher
+// through. Each makes its library, runs the watcher over it, and answers
+// the warning the watcher must log, once.
+var kqueueChildScenarios = map[string]func(t *testing.T, libDir string, w *Watcher, rec *loggingtest.Recorder) string{
+	"past-the-budget-at-start": childPastTheBudgetAtStart,
+	"grows-past-the-budget":    childGrowsPastTheBudget,
+	"runs-out-of-files":        childRunsOutOfFiles,
+}
+
 // runKqueueChild runs one scenario of TestKqueueWatcherLeavesTheProcessOpenFiles
 // in the child: the watcher must say why it holds nothing, once, and the
 // process must be able to open files afterwards.
 func runKqueueChild(t *testing.T, scenario string) {
+	run, ok := kqueueChildScenarios[scenario]
+	if !ok {
+		t.Fatalf("no scenario %q", scenario)
+	}
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: 159, Max: 160}); err != nil {
 		t.Fatalf("lowering the open-file limit: %v", err)
 	}
@@ -253,64 +267,7 @@ func runKqueueChild(t *testing.T, scenario string) {
 		t.Fatalf("the watcher's budget under a limit of 159 is %+v, want 79", w.fds)
 	}
 	rec := loggingtest.Record(t)
-	var msg string
-	var hoard []*os.File
-	defer func() {
-		for _, f := range hoard {
-			_ = f.Close()
-		}
-	}()
-
-	switch scenario {
-	case "past-the-budget-at-start":
-		// 2 + 10 + 150 open files, past the budget and past what the
-		// process has left.
-		msg = msgWatcherStaysOff
-		makeAlbums(t, filepath.Join(libDir, "Artist"), 10, 15)
-		runUntilItReturns(t, w)
-
-	case "grows-past-the-budget":
-		// 2 + 2 + 30 open files, within the budget; then a folder of 150
-		// moved in, past the budget and past what the process has left.
-		msg = msgWatcherStopped
-		makeAlbums(t, filepath.Join(libDir, "Artist"), 2, 15)
-		staged := makeAlbums(t, t.TempDir(), 1, 150)
-		startWatcher(t, w)
-		if err := os.Rename(staged[0], filepath.Join(libDir, "Artist", "Moved")); err != nil {
-			t.Fatal(err)
-		}
-		// Running out of files first is the fallback catching what the
-		// budget should have, which stops the wait at once.
-		ranOut := func() string {
-			if lines := rec.Lines(msgWatcherOutOfFiles); len(lines) > 0 {
-				return "the watcher ran out of open files instead: " + lines[0]
-			}
-			return ""
-		}
-		watchWaitUntil(t, func() bool { return len(rec.Lines(msg)) > 0 }, ranOut,
-			"the watcher never stopped for a library grown past its budget")
-
-	case "runs-out-of-files":
-		// 2 + 2 + 40 open files, within the budget, with 20 left to the
-		// whole process.
-		msg = msgWatcherOutOfFiles
-		makeAlbums(t, filepath.Join(libDir, "Artist"), 2, 20)
-		for {
-			f, err := os.Open(os.DevNull)
-			if err != nil {
-				break
-			}
-			hoard = append(hoard, f)
-		}
-		for _, f := range hoard[len(hoard)-20:] {
-			_ = f.Close()
-		}
-		hoard = hoard[:len(hoard)-20]
-		runUntilItReturns(t, w)
-
-	default:
-		t.Fatalf("no scenario %q", scenario)
-	}
+	msg := run(t, libDir, w, rec)
 
 	if lines := rec.Lines(msg); len(lines) != 1 {
 		t.Errorf("the watcher logged %q %d times, want once: %q", msg, len(lines), rec.All())
@@ -325,24 +282,78 @@ func runKqueueChild(t *testing.T, scenario string) {
 		if err != nil {
 			t.Fatalf("after the watcher ran, this process could not open a file: %v", err)
 		}
+		t.Cleanup(func() { _ = f.Close() })
+	}
+}
+
+// childPastTheBudgetAtStart: 2 + 10 + 150 open files, past the budget and
+// past what the process has left, so the watcher stays off.
+func childPastTheBudgetAtStart(t *testing.T, libDir string, w *Watcher, _ *loggingtest.Recorder) string {
+	makeAlbums(t, filepath.Join(libDir, "Artist"), 10, 15)
+	runUntilItReturns(t, w)
+	return msgWatcherStaysOff
+}
+
+// childGrowsPastTheBudget: 2 + 2 + 30 open files, within the budget; then a
+// folder of 150 moved in, past the budget and past what the process has
+// left, so the watcher stops.
+func childGrowsPastTheBudget(t *testing.T, libDir string, w *Watcher, rec *loggingtest.Recorder) string {
+	makeAlbums(t, filepath.Join(libDir, "Artist"), 2, 15)
+	staged := makeAlbums(t, t.TempDir(), 1, 150)
+	startWatcher(t, w)
+	if err := os.Rename(staged[0], filepath.Join(libDir, "Artist", "Moved")); err != nil {
+		t.Fatal(err)
+	}
+	// Running out of files first is the fallback catching what the budget
+	// should have, which stops the wait at once.
+	ranOut := func() string {
+		if lines := rec.Lines(msgWatcherOutOfFiles); len(lines) > 0 {
+			return "the watcher ran out of open files instead: " + lines[0]
+		}
+		return ""
+	}
+	watchWaitUntil(t, func() bool { return len(rec.Lines(msgWatcherStopped)) > 0 }, ranOut,
+		"the watcher never stopped for a library grown past its budget")
+	return msgWatcherStopped
+}
+
+// childRunsOutOfFiles: 2 + 2 + 40 open files, within the budget, with 20
+// left to the whole process, so an Add runs out of files and the watcher
+// stops.
+func childRunsOutOfFiles(t *testing.T, libDir string, w *Watcher, _ *loggingtest.Recorder) string {
+	makeAlbums(t, filepath.Join(libDir, "Artist"), 2, 20)
+	var hoard []*os.File
+	for {
+		f, err := os.Open(os.DevNull)
+		if err != nil {
+			break
+		}
 		hoard = append(hoard, f)
 	}
+	for _, f := range hoard[len(hoard)-20:] {
+		_ = f.Close()
+	}
+	t.Cleanup(func() {
+		for _, f := range hoard[:len(hoard)-20] {
+			_ = f.Close()
+		}
+	})
+	runUntilItReturns(t, w)
+	return msgWatcherOutOfFiles
 }
 
 // runUntilItReturns runs w and waits for Run to return, which it does at
 // start when the watcher stays off. A watcher that finishes its initial walk
-// instead is watching the library, which fails the test.
+// instead is watching the library, which fails the test. Run gets the test's
+// context, which ends before the cleanups run, the one that waits for Run
+// included.
 func runUntilItReturns(t *testing.T, w *Watcher) {
 	t.Helper()
 	walked := make(chan struct{})
 	w.afterInitialWalkHookForTests = func() { close(walked) }
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); _ = w.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	go func() { defer close(done); _ = w.Run(t.Context()) }()
+	t.Cleanup(func() { <-done })
 	select {
 	case <-done:
 	case <-walked:

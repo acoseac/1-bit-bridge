@@ -35835,7 +35835,8 @@ they ran.
 
 The docstrings that said FSEvents, "on non-Linux platforms the watch budget is
 effectively unlimited", and that inotify raises EMFILE arming a watch (it opens
-no file) are corrected, and the config's.
+no file) are corrected, and `LibraryWatchConfig`'s docstring now says what the
+watcher costs on macOS.
 
 ### Reproduced red-first
 
