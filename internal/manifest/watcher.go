@@ -40,6 +40,10 @@ type pendingScan struct {
 // net regardless: missed events (kernel limit hit, watcher crash,
 // rapid rename storm) get reconciled on the next tick. The watcher
 // is a "good UX in the common case" layer, not a correctness path.
+// That holds only while the watcher leaves the rest of the bridge the
+// files it needs: on kqueue (macOS) every watched folder AND every file
+// in it is an open file, so the watcher there keeps to a budget and
+// releases what fsnotify would otherwise keep open (watcher_fds.go).
 //
 // Concurrency: Run() owns one goroutine for the fsnotify event
 // loop and spawns one fire-and-forget goroutine per debounced
@@ -95,6 +99,25 @@ type Watcher struct {
 	// Written by Run's initial walk and read by handleEvent, both on Run's
 	// goroutine, so no lock.
 	aliases []rootAlias
+
+	// fds is the account of the open files the watches hold where fsnotify
+	// holds one per watched folder and per entry in it (kqueue,
+	// watcher_fds.go), read and written on Run's goroutine alone; nil
+	// elsewhere.
+	fds *watchFDs
+	// deferredAddWait and reconcileEvery are the package constants of those
+	// names, per instance so a test can shorten them before Run starts.
+	deferredAddWait time.Duration
+	reconcileEvery  time.Duration
+
+	// dropEventForTests, when it answers true, has Run act as though
+	// fsnotify had never sent the event: a test stands in that way for an
+	// event fsnotify swallows (a folder renamed while its listing changed
+	// drops the folder's watch and sends nothing). afterReconcileForTests
+	// fires after each reconcile pass. Both per instance and set before Run
+	// starts, for afterDispatchHookForTests' reason; nil in production.
+	dropEventForTests      func(fsnotify.Event) bool
+	afterReconcileForTests func()
 }
 
 // rootAlias pairs the directory a linked configured root resolves to with
@@ -120,19 +143,29 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Watcher{
-		scanner:  scanner,
-		debounce: debounce,
-		w:        w,
-		pending:  make(map[string]*pendingScan),
-	}, nil
+	wt := &Watcher{
+		scanner:         scanner,
+		debounce:        debounce,
+		w:               w,
+		pending:         make(map[string]*pendingScan),
+		deferredAddWait: deferredAddWait,
+		reconcileEvery:  reconcileEvery,
+	}
+	if kqueueBackend {
+		wt.fds = newWatchFDs(WatchFileLimits())
+	}
+	return wt, nil
 }
 
 // Run starts the watch loop. Walks every configured root, adds a
-// watch on every directory under each root (fsnotify is non-
-// recursive on Linux/Windows; macOS coalesces fsevents at the
-// kernel but the explicit per-dir watch keeps cross-platform
-// behaviour uniform), then loops on events until ctx is cancelled.
+// watch on every directory under each root (one Add per directory on
+// every platform: the watcher asks fsnotify for no recursive watch),
+// then loops on events until ctx is cancelled. On macOS fsnotify
+// watches through kqueue, not FSEvents, and kqueue makes every
+// watched directory and every entry in one an open file of this
+// process, so there the watcher first counts what the library would
+// hold open and stays off, with one warning, when that is more than
+// its budget (watchRootsWithinBudget, watcher_fds.go).
 //
 // Linux watch-limit handling: any fsnotify Add() that fails with
 // ENOSPC ("too many watches") logs a single Error with the
@@ -161,38 +194,129 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	defer wt.w.Close()
 
 	roots := wt.scanner.Roots()
-	for _, root := range roots {
-		if err := wt.addTree(root, true); err != nil {
-			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
-				"root", root, "err", err)
+	if wt.fds != nil {
+		if !wt.watchRootsWithinBudget(roots) {
+			// Logged: the watcher stays off, holding nothing, and the
+			// periodic scan picks up changes. No scan is pending yet.
+			return nil
+		}
+	} else {
+		for _, root := range roots {
+			if err := wt.addTree(root, true); err != nil {
+				watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
+					"root", root, "err", err)
+			}
 		}
 	}
 	if hook := wt.afterInitialWalkHookForTests; hook != nil {
 		hook()
 	}
 
+	events, errs := wt.w.Events, wt.w.Errors
+	// quiet fires when new folders have waited deferredAddWait for their
+	// watch, and reconcile on the account's schedule; both stay nil where
+	// fsnotify holds no file per watch, so the loop there is what it was.
+	var quiet, reconcile <-chan time.Time
+	if wt.fds != nil {
+		t := time.NewTicker(wt.reconcileEvery)
+		defer t.Stop()
+		reconcile = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev, ok := <-wt.w.Events:
+		case ev, ok := <-events:
 			if !ok {
 				return nil
+			}
+			// fsnotify sends each event only after it has watched every
+			// new folder it sent a Create for before, so the folders
+			// waiting for their watch can have it now.
+			wt.flushPendingAdds()
+			quiet = nil
+			if drop := wt.dropEventForTests; drop != nil && drop(ev) {
+				break
 			}
 			wt.handleEvent(ctx, ev)
-		case err, ok := <-wt.w.Errors:
+		case err, ok := <-errs:
 			if !ok {
 				return nil
 			}
+			wt.flushPendingAdds()
+			quiet = nil
 			watcherLogger.Warn("fsnotify error", "err", err)
+		case <-quiet:
+			quiet = nil
+			wt.flushPendingAdds()
+		case <-reconcile:
+			wt.reconcileWatches()
+		}
+		if f := wt.fds; f != nil {
+			if f.off {
+				// Every watch is released. Run stays until ctx is done,
+				// so a scan an event already asked for still runs, and
+				// still finishes before the caller closes the store.
+				events, errs, quiet, reconcile = nil, nil, nil, nil
+				continue
+			}
+			if len(f.pending) > 0 && quiet == nil {
+				quiet = time.After(wt.deferredAddWait)
+			}
 		}
 	}
 }
 
-// addTree adds a recursive watch over root. Stops walking on the
-// first ENOSPC ("watch limit reached") to avoid spamming the log
-// once per directory — the operator gets one clear signal that
-// the kernel limit needs raising.
+// addTree adds a watch on every directory of the tree at root, as
+// walkWatchTree walks it. Stops walking on the first ENOSPC ("watch
+// limit reached") to avoid spamming the log once per directory — the
+// operator gets one clear signal that the kernel limit needs raising.
+// Where fsnotify holds an open file per watched entry (kqueue) the tree
+// is planned and checked against the watcher's budget first
+// (addTreeWithinBudget, watcher_fds.go).
+func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
+	if wt.fds != nil {
+		return wt.addTreeWithinBudget(root, isConfiguredRoot)
+	}
+	limitHit := false
+	rootWatch, err := walkWatchTree(root, isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
+		if !watch {
+			return nil
+		}
+		if limitHit {
+			// Every subsequent Add would fail the same way, so there
+			// is nothing left to do — SkipAll stops the walk instead
+			// of stat-ing the rest of the tree for no benefit.
+			// (SkipDir would be wrong: it only prunes descendants and
+			// the walk would continue through every sibling.) The
+			// periodic full scan covers the gap.
+			return filepath.SkipAll
+		}
+		res, _ := wt.addWatch(path)
+		limitHit = res == watchLimitReached
+		return nil
+	})
+	wt.noteAlias(root, rootWatch)
+	return err
+}
+
+// noteAlias records a configured root that is watched where it resolves to,
+// so an event under it is named back under the root (configuredName).
+func (wt *Watcher) noteAlias(root, rootWatch string) {
+	if rootWatch != "" && rootWatch != root {
+		wt.aliases = append(wt.aliases, rootAlias{resolved: rootWatch, configured: root})
+	}
+}
+
+// walkWatchTree walks the tree the watcher watches from root and hands visit
+// every path it reaches: watch is true for a directory the watcher asks
+// fsnotify to watch, and false for everything else the walk reaches in such a
+// directory (a file, a link, a folder ShouldSkipDir names, which it does not
+// enter). It is the one walk: addTree, the kqueue budget's plan
+// (planWatches) and CountWatchSet (bridge doctor's pre-flight) all go through
+// it, so what the watcher watches and what it counts cannot disagree. visit
+// may answer filepath.SkipAll to stop the walk, or an error to end it with
+// that error. It returns the path the root's own watch is registered as.
 //
 // `isConfiguredRoot` says whether `root` is an operator-configured
 // library root (Run's startup pass) or a directory the watcher just
@@ -238,19 +362,15 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // path, which ReadDirectoryChangesW follows. Only a configured root is
 // followed: a directory that appears at runtime is walked as the scanner
 // walks it, and the scanner walks no link below a root.
-func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
+func walkWatchTree(root string, isConfiguredRoot bool, visit func(path string, d fs.DirEntry, watch bool) error) (string, error) {
 	walkFrom, rootWatch, err := watchWalkStart(root, isConfiguredRoot)
 	if err != nil {
 		// The root cannot be seen through: the caller logs it as a
 		// failed initial watch, which is the "root-level walk failure
 		// surfaces" rule above.
-		return err
+		return "", err
 	}
-	if rootWatch != root {
-		wt.aliases = append(wt.aliases, rootAlias{resolved: rootWatch, configured: root})
-	}
-	limitHit := false
-	return filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
+	return rootWatch, filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == walkFrom {
 				// Failure to even open the root — surface so the
@@ -265,7 +385,7 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 			return nil
 		}
 		if !d.IsDir() {
-			return nil
+			return visit(path, d, false)
 		}
 		// `isConfiguredRoot && path == walkFrom` is the ONLY exemption.
 		// Without it a configured root whose basename starts with a dot
@@ -279,30 +399,26 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 		// separator WalkableRoot appended). A runtime-discovered
 		// directory gets no exemption — see the docblock.
 		if (!isConfiguredRoot || path != walkFrom) && ShouldSkipDir(d.Name()) {
+			// Not entered, but fsnotify's kqueue backend opens it as an
+			// entry of the folder that holds it.
+			if err := visit(path, d, false); err != nil {
+				return err
+			}
 			return filepath.SkipDir
 		}
 		watchPath := path
 		if path == walkFrom {
 			watchPath = rootWatch
 		}
-		if limitHit {
-			// Every subsequent Add would fail the same way, so there
-			// is nothing left to do — SkipAll stops the walk instead
-			// of stat-ing the rest of the tree for no benefit.
-			// (SkipDir would be wrong: it only prunes descendants and
-			// the walk would continue through every sibling.) The
-			// periodic full scan covers the gap.
-			return filepath.SkipAll
-		}
-		limitHit = wt.addWatch(watchPath)
-		return nil
+		return visit(watchPath, d, true)
 	})
 }
 
-// watchWalkStart is where addTree's walk starts, and the path the root's own
-// watch is registered as. A directory that appeared at runtime, and a
-// configured root that is a directory, are both as they are. A configured
-// root that is a link to a directory is watched at the directory the link
+// watchWalkStart is where the watcher's walk starts (walkWatchTree), and
+// the path the root's own watch is registered as. A directory that
+// appeared at runtime, and a configured root that is a directory, are
+// both as they are. A configured root that is a link to a directory is
+// watched at the directory the link
 // resolves to, when filepath.EvalSymlinks answers one: registered as the
 // link itself, fsnotify's kqueue backend (macOS, the BSDs) follows one level
 // of it, so a link to a link got a watch that sees the root as a file. What
@@ -361,30 +477,56 @@ func pathAtOrUnder(p, dir string) bool {
 	return strings.HasPrefix(p, dir)
 }
 
-// addWatch registers one directory's watch, and reports whether the attempt
-// met a kernel limit that every later Add would meet too.
-func (wt *Watcher) addWatch(path string) (limitHit bool) {
+// watchAddResult is how asking fsnotify to watch one directory went.
+type watchAddResult int
+
+const (
+	// watchAdded: fsnotify watches the directory.
+	watchAdded watchAddResult = iota
+	// watchAddFailed: this directory could not be watched (logged), and the
+	// walk goes on.
+	watchAddFailed
+	// watchLimitReached: a limit every later Add would meet too (logged), and
+	// the walk stops.
+	watchLimitReached
+	// watchOutOfFiles: on kqueue, this process ran out of open files, which
+	// its watches are; the caller releases every watch and says so
+	// (stopWatching).
+	watchOutOfFiles
+)
+
+// addWatch registers one directory's watch, and says how it went, with the
+// error that answered a failure.
+func (wt *Watcher) addWatch(path string) (watchAddResult, error) {
 	addErr := wt.w.Add(path)
 	switch {
 	case addErr == nil:
-		return false
+		return watchAdded, nil
+	case wt.fds != nil && isOpenFileLimitError(addErr):
+		// kqueue: what ran out is the table every other open of this
+		// process goes into, so keeping the watches it has would leave
+		// the periodic scan nothing to open files with either.
+		return watchOutOfFiles, addErr
 	case isWatchLimitError(addErr):
 		watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
 			"path", path, "err", addErr,
 			"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
-		return true
+		return watchLimitReached, addErr
 	case isOpenFileLimitError(addErr):
 		// fd-exhaustion (EMFILE) is a DIFFERENT limit from the
 		// watch budget — pointing the operator at
 		// max_user_watches here would send them down the wrong
 		// path. Same degrade-to-periodic fallback, different hint.
+		// A backstop: no Add outside kqueue opens a file per watch
+		// (inotify_add_watch reports no EMFILE, and Windows words its
+		// handle exhaustion otherwise), and kqueue takes the case above.
 		watcherLogger.Error("open-file limit reached — periodic scan covers the gap; raise the open-files limit to fix",
 			"path", path, "err", addErr,
 			"hint", "raise the process open-files limit (ulimit -n, or LimitNOFILE= in the systemd unit) or the system-wide fs.file-max")
-		return true
+		return watchLimitReached, addErr
 	default:
 		watcherLogger.Warn("watch add", "path", path, "err", addErr)
-		return false
+		return watchAddFailed, addErr
 	}
 }
 
@@ -395,8 +537,13 @@ func (wt *Watcher) addWatch(path string) (limitHit bool) {
 //
 // On directory Create we also add a watch over the new subtree so
 // drops into freshly-mkdir'd folders inside already-watched
-// libraries get seen.
+// libraries get seen. On kqueue the event is accounted for first
+// (accountEvent), and the new folder waits for its watch
+// (flushPendingAdds).
 func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
+	if wt.fds != nil {
+		wt.accountEvent(ev)
+	}
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
 	}
@@ -411,7 +558,14 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 			// under a linked root is the resolved spelling its parent's
 			// watch uses (kqueue already holds an entry watch under
 			// that name, and another spelling would be a second one).
-			_ = wt.addTree(ev.Name, false)
+			if wt.fds != nil {
+				// kqueue: fsnotify watches the folder itself right after
+				// sending this event, on its own goroutine, and an Add of
+				// it now races that and loses a descriptor for good.
+				wt.fds.wait(ev.Name)
+			} else {
+				_ = wt.addTree(ev.Name, false)
+			}
 		}
 	}
 	// The scan is asked for in the configured spelling, which is the one
@@ -519,8 +673,10 @@ func dirStat(path string) (fs.FileInfo, error) {
 // isWatchLimitError matches the inotify WATCH-budget exhaustion errors
 // fsnotify surfaces — ENOSPC ("no space left on device", the
 // fs.inotify.max_user_watches ceiling) and the documented "watch limit
-// reached". On non-Linux platforms the watch budget is effectively
-// unlimited so false is the right default. We rely on the error string
+// reached". Elsewhere no Add reports either: Windows has no such budget,
+// and kqueue's budget is this process's open files, which is
+// isOpenFileLimitError's and the watcher's own account (watcher_fds.go).
+// We rely on the error string
 // match rather than syscall.ENOSPC so the helper compiles cleanly on
 // Windows / macOS where ENOSPC isn't relevant to the watcher budget.
 // The match is conservative — only the canonical strings — so it
@@ -544,12 +700,15 @@ func isWatchLimitError(err error) bool {
 }
 
 // isOpenFileLimitError matches fd-exhaustion (EMFILE / ENFILE, surfaced
-// as "too many open files") which inotify raises when the process- or
-// system-wide open-file limit is hit while arming a watch. Distinct
-// from isWatchLimitError: the remedy is raising the open-files limit
-// (ulimit -n / systemd LimitNOFILE / fs.file-max), NOT
-// fs.inotify.max_user_watches. Same degrade-to-periodic fallback, but a
-// different operator hint — pointing an fd-exhausted host at
+// as "too many open files"). An Add meets it on kqueue (macOS), where
+// every watched folder and every entry in one is an open file of this
+// process, once the process's or the system's open-file limit is
+// reached; there the watcher releases every watch (addWatch,
+// stopWatching), since keeping them would leave the periodic scan, and
+// everything else the bridge opens, no file to open. inotify_add_watch
+// opens no file and reports no EMFILE. Distinct from isWatchLimitError:
+// the remedy is raising the open-files limit, NOT
+// fs.inotify.max_user_watches — pointing an fd-exhausted host at
 // max_user_watches would send the operator down the wrong path.
 func isOpenFileLimitError(err error) bool {
 	if err == nil {

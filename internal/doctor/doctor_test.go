@@ -312,11 +312,18 @@ func TestRun_FullReportShape(t *testing.T) {
 		AdminPort:    mustFreePort(t),
 	})
 
+	// The watch-limit row is named for what it grades: macOS grades the open
+	// files its kqueue watches take, Linux its inotify budget, and Windows
+	// keeps the inotify row as not applicable.
+	watchLimitRow := "inotify-watch-limit"
+	if runtime.GOOS == "darwin" {
+		watchLimitRow = "watcher-fd-budget"
+	}
 	wantNames := []string{
 		"platform", "config-file", "config-dir", "tls-cert", "tls-cert-sans",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
-		"inotify-watch-limit", "audio-toolchain", "dsd-render-toolchain",
+		watchLimitRow, "audio-toolchain", "dsd-render-toolchain",
 		"fingerprint-toolchain", "log-file-size", "sidecar-paths",
 		"variants-index",
 	}

@@ -562,7 +562,11 @@ func TestWatcherRuntimeDotDirGetsNoRootExemption(t *testing.T) {
 	}
 
 	// The watcher sees the directory appear under an already-watched root.
+	// On kqueue the new folder's watch waits for fsnotify to have watched
+	// the folder itself (flushPendingAdds), which Run would ask for at the
+	// next event; elsewhere the flush has nothing to do.
 	w.handleEvent(context.Background(), fsnotify.Event{Name: trash, Op: fsnotify.Create})
+	w.flushPendingAdds()
 
 	for _, p := range w.w.WatchList() {
 		if p == trash || strings.HasPrefix(p, trash+string(os.PathSeparator)) {

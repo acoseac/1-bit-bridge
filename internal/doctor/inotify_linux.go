@@ -25,7 +25,7 @@ var errCountCapReached = errors.New("countDirs: cap reached")
 // budget check. Six call sites in this file across the ok/warn paths.
 const checkNameInotifyWatchLimit = "inotify-watch-limit"
 
-// checkInotifyLimit warns when fs.inotify.max_user_watches looks
+// checkWatchLimit, on Linux, warns when fs.inotify.max_user_watches looks
 // too low for the configured library roots and the operator has
 // LibraryWatch enabled. We count directories under each root and
 // compare against 80 % of the kernel limit — the budget is shared
@@ -39,7 +39,7 @@ const checkNameInotifyWatchLimit = "inotify-watch-limit"
 //   - We can't read /proc/sys/fs/inotify/max_user_watches (rare on
 //     a real Linux box; unit tests in container with /proc mounted
 //     ro might trip this — non-fatal)
-func checkInotifyLimit(_ context.Context, d Deps) Check {
+func checkWatchLimit(_ context.Context, d Deps) Check {
 	if !d.LibraryWatchEnabled {
 		return ok(checkNameInotifyWatchLimit, "library watcher disabled — check skipped")
 	}
@@ -111,7 +111,7 @@ func countDirs(roots []string, stopAt int) (int, error) {
 		err = filepath.WalkDir(walkFrom, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if path == walkFrom {
-					// Root unreadable — bubble up so checkInotifyLimit's
+					// Root unreadable — bubble up so checkWatchLimit's
 					// caller produces a Warn instead of a misleading OK.
 					return err
 				}

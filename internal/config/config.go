@@ -2441,7 +2441,12 @@ const defaultVariantsSubdir = "transcoded"
 //
 // Linux deployments with very large libraries should also raise
 // `fs.inotify.max_user_watches` — `bridge doctor` warns when the
-// kernel limit looks too low for the configured roots.
+// kernel limit looks too low for the configured roots. On macOS the
+// watcher holds an open file for every watched folder and every file
+// in one (kqueue), so it takes at most half of the bridge's open-file
+// limit (a quarter of the system's), stays off for a library that
+// needs more, and stops when the library grows past that; `bridge
+// doctor` warns before either.
 type LibraryWatchConfig struct {
 	// Enabled is the master toggle. Default false.
 	Enabled bool `yaml:"enabled,omitempty"`
