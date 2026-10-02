@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 )
 
 const checkNameVariantsIndex = "variants-index"
@@ -224,7 +227,13 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 		hint.WriteString("Whether `bridge upscale --gc` reclaims these or refuses them cannot be told from a partial walk — " +
 			"run it and read what it says; it walks the whole tree and unlinks nothing when it refuses. ")
 	default:
-		hint.WriteString("`bridge upscale --gc` reclaims them. ")
+		// All but the recent ones (backlog B205): `--gc` leaves a file
+		// modified in the grace before it starts for a later run, since a
+		// running bridge may still be writing it or recording its row, and
+		// this count includes such files.
+		fmt.Fprintf(&hint, "`bridge upscale --gc` reclaims them, all but any modified in the %d minutes before it starts, "+
+			"which a running bridge may still be writing and a later run reclaims. ",
+			int(integrity.OrphanGracePeriod/time.Minute))
 	}
 	hint.WriteString("Unreferenced so far: ")
 	hint.WriteString(strings.Join(idx.OrphanSample, ", "))

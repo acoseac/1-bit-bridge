@@ -8599,14 +8599,14 @@ func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]V
 // is unchanged and a manifest-churn-inducing indexed_at bump would be
 // false signal to iOS clients (CodeRabbit + Gemini on PR #156).
 //
-// It deletes whatever the row records NOW. Three callers delete a row they
-// judged from a read: `bridge upscale --gc`'s reverse sweep
-// (runGCReverseSweep), the serve reap of a rendition whose file a download
+// It deletes whatever the row records NOW. Two callers delete a row they
+// judged from a read: the serve reap of a rendition whose file a download
 // found missing (api's files.go) and DELETE /v1/upscale/variants. The
-// VariantWatcher deletes through DeleteVariantIfUnchanged instead, which
-// keeps a row another writer changed since it was listed. This docblock
-// said there were no production callers until backlog B204 (2026-10-02),
-// with four of them in the tree.
+// VariantWatcher and `bridge upscale --gc`'s reverse sweep
+// (deleteMissingGCRows, backlog B250) delete through
+// DeleteVariantIfUnchanged instead, which keeps a row another writer
+// changed since it was listed. This docblock said there were no production
+// callers until backlog B204 (2026-10-02), with four of them in the tree.
 //
 // Holds `s.mu`. Caller is responsible for removing the on-disk sidecar
 // file — same separation-of-concerns as DeleteTrack pre-cleanup.
@@ -8622,7 +8622,8 @@ func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string)
 // move` gave it its new path, a render rewrote it, a sweep adopted it), or
 // removed it. Nothing was written. DeleteVariantIfUnchanged returns it, and
 // the VariantWatcher then leaves the row for its next tick, which lists it
-// again and judges it as it is then.
+// again and judges it as it is then; `bridge upscale --gc` keeps it the same
+// way, for its next run (backlog B250).
 var ErrVariantChanged = errors.New("manifest: variant changed since it was listed")
 
 // DeleteVariantIfUnchanged is DeleteVariant for a row the caller judged from

@@ -71,36 +71,61 @@ const gcChunkSize = 5000
 // them.
 const gcRetainedPerUnlink = 4
 
-// gcGracePeriod gates orphan detection on file modification time:
-// files newer than this threshold are skipped during the sweep so a
-// concurrent `UpsertVariant` writer that lands the sidecar on disk
-// BEFORE its row commits to the manifest store doesn't get treated
-// as orphan and unlinked behind its in-flight transaction. Gemini
-// HIGH on PR #282 caught the race — SQLite WAL gives the SELECT a
-// consistent snapshot, but the snapshot reflects state AT THE MOMENT
-// the SELECT runs, while the filesystem walk happens AFTER. The
-// window between `INSERT INTO track_variants` (file already on
-// disk) and the COMMIT (snapshot now includes the row) is bounded
-// by the transaction duration — typically <100 ms even on slow
-// SQLite hosts, but a contending writer could push it to seconds.
+// OrphanGracePeriod gates every forward sweep's unlink on file
+// modification time: a file modified less than this before the sweep
+// started is left for a later one. Three sweeps read it, each through
+// ReclaimOrphan: the background OrphanSidecarSweeper, `bridge upscale
+// --gc` (optimize, render) and `bridge analyze --gc`.
+//
+// A sweep lists the catalog first and walks the tree after, and a writer
+// puts its file on disk BEFORE its row commits: a render renames its
+// rendition into place and the pool then commits the row, an analysis does
+// the same with a waveform. So a file whose row committed after the
+// listing reads to the walk as an orphan, and without the grace was
+// unlinked behind its row. Gemini HIGH on PR #282 caught the race for the
+// background sweep — SQLite WAL gives the SELECT a consistent snapshot,
+// but the snapshot reflects state AT THE MOMENT the SELECT runs, while the
+// filesystem walk happens AFTER. The window between the file's last write
+// and the COMMIT (snapshot now includes the row) is the pool's fsync and
+// the transaction — typically <100 ms even on slow SQLite hosts, but a
+// contending writer could push it to seconds.
+//
+// The CLI sweeps had no grace at all until backlog B205 (2026-10-02). Run
+// beside a live bridge, which `bridge doctor`'s variants-index hint invites
+// (it names `bridge upscale --gc`), they unlinked the renditions and
+// waveforms published after their listing, and the `.tmp` a render or an
+// analysis was writing: they remove every file their walk did not find in
+// the catalog, the `.tmp` scratch included. A `.tmp` a job is writing is
+// spared by the same rule, since its mtime moves with every write. Not a
+// writer that has written nothing for the whole grace: on a bridge run as
+// root, a DSD render's `.tmp` precreated before Stages A and B and the
+// album survey (unlinking it then costs nothing: Stage C's sox creates the
+// file again, without the owner the precreate kept), and a writer stalled
+// on its input for ten minutes (a hung mount), whose rename then fails.
 //
 // 10 minutes is chosen as the safe-by-construction overshoot:
 // orders of magnitude longer than any plausible transaction
 // window, short enough that an actually-orphan file lingers for
-// at most one extra sweep cycle (operator-tolerable for the opt-in
-// feature), and uniform across deploys regardless of disk speed.
+// at most one extra sweep (operator-tolerable), and uniform across
+// deploys regardless of disk speed.
 //
-// Measured against the TICK's start (sampled after the catalog listing,
-// before the walk), not against the moment of the unlink: the walk
-// between them makes every file look older, and the earlier instant is
-// the conservative one.
+// Measured against the instant the sweep STARTED, not against the moment
+// of the unlink: the walk between them makes every file look older, and
+// the earlier instant is the conservative one. The background sweep takes
+// its tick's start, after its catalog listing and before its walk; the CLI
+// sweeps take theirs before their listing, since what comes between the
+// listing and the unlinks there (the row classification, the walk, the
+// refusals' checks) can take minutes on a large tree over a network mount,
+// and a file whose row committed just after the listing must still read as
+// recent at the end of it.
 //
 // **Test seam**: production reads the constant; the
 // `gracePeriodForTest` field on OrphanSidecarSweeper overrides it
 // per-instance so the regression test can use a millisecond-scale
 // grace without sleeping 10 minutes. Same DI shape `Pool.runner`
-// uses for the sox subprocess.
-const gcGracePeriod = 10 * time.Minute
+// uses for the sox subprocess. The CLI sweeps have no seam: a test of
+// theirs dates the files it means them to remove.
+const OrphanGracePeriod = 10 * time.Minute
 
 // orphanRefusalExamples bounds how many orphan paths the refusal line
 // names — enough to recognise the files as renditions, few enough to keep
@@ -218,7 +243,7 @@ type OrphanSidecarSweeper struct {
 	// sync without polling internal state.
 	onTickComplete func(unlinked int)
 
-	// gracePeriodForTest overrides gcGracePeriod when positive. The
+	// gracePeriodForTest overrides OrphanGracePeriod when positive. The
 	// regression test for the race-condition contract injects a
 	// millisecond-scale grace; the unrelated tests that just need
 	// "no grace floor" set it to `1 * time.Nanosecond`. Same DI
@@ -255,7 +280,7 @@ func (s *OrphanSidecarSweeper) effectiveGracePeriod() time.Duration {
 	if s.gracePeriodForTest > 0 {
 		return s.gracePeriodForTest
 	}
-	return gcGracePeriod
+	return OrphanGracePeriod
 }
 
 // effectiveChunkSize returns the per-instance chunk size override
@@ -633,27 +658,27 @@ func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarIn
 		}
 		outcome, err := reclaimOrphan(walked[i], tickStart, grace, os.Lstat, os.Stat)
 		switch outcome {
-		case orphanUnlinked:
+		case OrphanUnlinked:
 			tally.unlinked++
 			sample.log(slog.LevelInfo, "orphan sidecar sweep: unlinked orphan",
 				slog.String("path", p),
 			)
-		case orphanGone:
+		case OrphanGone:
 			tally.gone++
-		case orphanInGrace:
+		case OrphanInGrace:
 			tally.inGrace++
-		case orphanNotAFile:
+		case OrphanNotAFile:
 			tally.notAFile++
 			sample.log(slog.LevelInfo, "orphan sidecar sweep: left an orphan that is no longer a file",
 				slog.String("path", p),
 			)
-		case orphanUnreadable:
+		case OrphanUnreadable:
 			tally.failed++
 			sample.log(slog.LevelWarn, "orphan sidecar sweep: stat failed",
 				slog.String("path", p),
 				slog.Any("err", err),
 			)
-		case orphanUnlinkFailed:
+		case OrphanUnlinkFailed:
 			tally.failed++
 			sample.log(slog.LevelWarn, "orphan sidecar sweep: unlink failed",
 				slog.String("path", p),
@@ -664,59 +689,78 @@ func (s *OrphanSidecarSweeper) reclaimOrphans(ctx context.Context, inv SidecarIn
 	return tally, nil
 }
 
-// orphanOutcome is what reclaimOrphan did with one path the inventory
-// classified as an orphan.
-type orphanOutcome uint8
+// OrphanOutcome is what ReclaimOrphan did with one path a sweep's
+// inventory classified as an orphan (or, for the CLI sweeps, as its own
+// `.tmp` scratch).
+type OrphanOutcome uint8
 
 const (
-	// orphanUnlinked — removed.
-	orphanUnlinked orphanOutcome = iota
-	// orphanGone — not there when it was re-checked or removed: something
+	// OrphanUnlinked — removed.
+	OrphanUnlinked OrphanOutcome = iota
+	// OrphanGone — not there when it was re-checked or removed: something
 	// else took it between the walk and the unlink, which is the outcome
 	// the sweep wanted, so it is done rather than failed (`upscale --gc`
-	// reads ENOENT the same way). Not counted as unlinked: this sweep did
-	// not remove it.
-	orphanGone
-	// orphanInGrace — modified inside the grace period of the tick's
-	// start: a writer may have put the file down before its row committed
-	// (gcGracePeriod). Left for a later tick.
-	orphanInGrace
-	// orphanNotAFile — no longer something this sweep may unlink: a link
+	// reads ENOENT the same way). The background sweep does not count it
+	// as unlinked, since it did not remove it; the CLI sweeps count it
+	// among the files they removed, as they always have.
+	OrphanGone
+	// OrphanInGrace — modified less than the grace before the sweep
+	// started: a writer may have put the file down before its row
+	// committed, or may still be writing it (OrphanGracePeriod). Left for
+	// a later sweep.
+	OrphanInGrace
+	// OrphanNotAFile — no longer something this sweep may unlink: a link
 	// to a directory, or a Windows junction, stands at the path now (the
 	// #969 rule, asked again). Left alone.
-	orphanNotAFile
-	// orphanUnreadable — the re-check could not tell what is at the path.
+	OrphanNotAFile
+	// OrphanUnreadable — the re-check could not tell what is at the path.
 	// Left alone: "could not find out" is not "junk".
-	orphanUnreadable
-	// orphanUnlinkFailed — the re-check passed and os.Remove failed.
-	orphanUnlinkFailed
+	OrphanUnreadable
+	// OrphanUnlinkFailed — the re-check passed and os.Remove failed.
+	OrphanUnlinkFailed
 )
 
-// reclaimOrphan re-checks one path the tick's inventory classified as an
-// orphan, and removes it only if it is still a file this sweep may reclaim.
+// ReclaimOrphan re-checks one path a sweep's inventory listed for removal,
+// by the path the walk VISITED (SidecarInventory.OrphanWalkedPaths or
+// ScratchWalkedPaths), and removes it only if it is still a file the sweep
+// may reclaim and was last modified at least grace before start, the
+// instant the sweep started (OrphanGracePeriod has which instant each
+// sweep takes, and why).
+//
+// It is the one re-check every forward sweep makes before an unlink: the
+// background OrphanSidecarSweeper, `bridge upscale --gc` (optimize,
+// render) and `bridge analyze --gc`. The CLI sweeps unlinked what their
+// inventory listed with a bare os.Remove until backlog B205 (2026-10-02),
+// so a file published or rewritten at a listed path after the walk, and
+// any file a live bridge wrote after their listing, went.
+func ReclaimOrphan(path string, start time.Time, grace time.Duration) (OrphanOutcome, error) {
+	return reclaimOrphan(path, start, grace, os.Lstat, os.Stat)
+}
+
+// reclaimOrphan is ReclaimOrphan with the two stats as parameters.
 //
 // The inventory and the unlink are separate steps, as in `upscale --gc`,
 // because the refusal has to see the whole tree before anything goes; so
 // the path is asked again, freshly, before os.Remove. An Lstat first (and
-// the tick needs one anyway: the inventory keeps no mtimes), then the SAME
+// the sweep needs one anyway: the inventory keeps no mtimes), then the SAME
 // classifyWalkEntry the inventory used, so the two cannot disagree about
 // what a candidate is: an entry that is not a REGULAR file is stat'd, and
 // a link to a directory or a Windows junction (ModeIrregular without
 // ModeDir, since Go 1.23) is never unlinked, because it may be the only
 // reference to an album parked on another volume. A dangling link still
 // classifies, as in the walk: it is junk in this tree. Then the grace
-// check against the tick's start (gcGracePeriod), then os.Remove.
+// check against the sweep's start (OrphanGracePeriod), then os.Remove.
 //
 // lstat and stat are parameters so the Windows junction shape, which no
 // other platform can construct, is drivable on every CI leg; production
 // passes os.Lstat and os.Stat.
-func reclaimOrphan(path string, tickStart time.Time, grace time.Duration, lstat, stat func(string) (fs.FileInfo, error)) (orphanOutcome, error) {
+func reclaimOrphan(path string, tickStart time.Time, grace time.Duration, lstat, stat func(string) (fs.FileInfo, error)) (OrphanOutcome, error) {
 	info, err := lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return orphanGone, nil
+		return OrphanGone, nil
 	case err != nil:
-		return orphanUnreadable, err
+		return OrphanUnreadable, err
 	}
 	var statErr error
 	switch classifyWalkEntry(info.Mode(), func() (fs.FileInfo, error) {
@@ -725,24 +769,24 @@ func reclaimOrphan(path string, tickStart time.Time, grace time.Duration, lstat,
 		return target, err
 	}) {
 	case walkEntrySkip:
-		return orphanNotAFile, nil
+		return OrphanNotAFile, nil
 	case walkEntryUnreadable:
-		return orphanUnreadable, statErr
+		return OrphanUnreadable, statErr
 	}
 	if tickStart.Sub(info.ModTime()) < grace {
-		return orphanInGrace, nil
+		return OrphanInGrace, nil
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return orphanGone, nil
+			return OrphanGone, nil
 		}
-		return orphanUnlinkFailed, err
+		return OrphanUnlinkFailed, err
 	}
-	return orphanUnlinked, nil
+	return OrphanUnlinked, nil
 }
 
 // orphanTally counts what reclaimOrphans did with a tick's orphans, one
-// field per outcome; failed covers orphanUnreadable and orphanUnlinkFailed.
+// field per outcome; failed covers OrphanUnreadable and OrphanUnlinkFailed.
 type orphanTally struct {
 	unlinked, gone, inGrace, notAFile, failed int
 }

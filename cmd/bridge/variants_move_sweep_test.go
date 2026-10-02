@@ -88,60 +88,89 @@ func runOneVariantSweep(t *testing.T, store *manifest.Store, lister integrity.Va
 // deletes their rows. On main the six moved rows were deleted with them.
 func TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated(t *testing.T) {
 	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), "variants")
-	to := filepath.Join(t.TempDir(), "new-disk", "variants")
-	dbPath := filepath.Join(t.TempDir(), "bridge.db")
-	store, _ := relocatedStoreAt(t, dbPath, dir, dir, 40)
-
-	listed, err := store.AllVariants(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gone := []manifest.VariantRow{listed[3], listed[31]}
-	for _, v := range gone {
-		if err := os.Remove(v.SidecarPath); err != nil {
-			t.Fatal(err)
-		}
-	}
-	moved := listed[10:16]
-
-	// The move's own store, over the same database, as the CLI opens one.
-	mover, err := manifest.OpenStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = mover.Close() })
+	m := newMoveShape(t)
 	var moveErr error
-	lister := &listThenAct{inner: &integrityVariantListerAdapter{store: store}, act: func() {
-		moveErr = moveRows(ctx, mover, moved, to)
+	lister := &listThenAct{inner: &integrityVariantListerAdapter{store: m.store}, act: func() {
+		moveErr = moveRows(ctx, m.mover, m.moved, m.to)
 	}}
 
-	r, published := runOneVariantSweep(t, store, lister, dir)
+	r, published := runOneVariantSweep(t, m.store, lister, m.dir)
 	if moveErr != nil {
 		t.Fatal(moveErr)
 	}
-	requireMovedRowsAt(t, store, moved, to)
-	requireRowsGone(t, store, gone)
-	if r.Deleted != len(gone) || r.Changed != len(moved) {
+	m.requireOnlyTheGoneRowsDeleted(t)
+	if r.Deleted != len(m.gone) || r.Changed != len(m.moved) {
 		t.Errorf("report %+v, want %d deleted (the hand-removed sidecars' rows only) and %d changed (the moved ones)",
-			r, len(gone), len(moved))
+			r, len(m.gone), len(m.moved))
 	}
-	if len(published) != len(gone) {
-		t.Errorf("published %v as deleted, want only the %d hand-removed sidecars' sources", published, len(gone))
-	}
-	rows, err := store.AllVariants(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 40-len(gone) {
-		t.Errorf("%d rows after the sweep, want %d", len(rows), 40-len(gone))
+	if len(published) != len(m.gone) {
+		t.Errorf("published %v as deleted, want only the %d hand-removed sidecars' sources", published, len(m.gone))
 	}
 
 	// The next tick lists the moved rows as they are now, at X, and finds
 	// their sidecars there, while the variants directory is still the old one.
-	next, published := runOneVariantSweep(t, store, &integrityVariantListerAdapter{store: store}, dir)
-	if next.Deleted != 0 || next.Changed != 0 || next.Present != 40-len(gone) || len(published) != 0 {
-		t.Errorf("the next tick: report %+v, published %v; want every one of the %d rows present", next, published, 40-len(gone))
+	next, published := runOneVariantSweep(t, m.store, &integrityVariantListerAdapter{store: m.store}, m.dir)
+	if next.Deleted != 0 || next.Changed != 0 || next.Present != moveShapeRows-len(m.gone) || len(published) != 0 {
+		t.Errorf("the next tick: report %+v, published %v; want every one of the %d rows present", next, published, moveShapeRows-len(m.gone))
+	}
+}
+
+// moveShapeRows is how many rows newMoveShape seeds.
+const moveShapeRows = 40
+
+// moveShape is the review's shape for a sweep during a move: moveShapeRows
+// rows with their sidecars under dir; two of them (gone) with their sidecar
+// removed by hand, the positive control, gone at both of the places a sweep
+// looks; six (moved) for the move to relocate to `to` once the sweep has
+// listed them, under the mass-delete floor; and the move's own store
+// (mover), over the same database, as the CLI opens one.
+type moveShape struct {
+	store, mover *manifest.Store
+	dir, to      string
+	gone, moved  []manifest.VariantRow
+}
+
+// newMoveShape builds a moveShape in temporary directories of t.
+func newMoveShape(t *testing.T) moveShape {
+	t.Helper()
+	m := moveShape{
+		dir: filepath.Join(t.TempDir(), "variants"),
+		to:  filepath.Join(t.TempDir(), "new-disk", "variants"),
+	}
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	m.store, _ = relocatedStoreAt(t, dbPath, m.dir, m.dir, moveShapeRows)
+	listed, err := m.store.AllVariants(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.gone = []manifest.VariantRow{listed[3], listed[31]}
+	for _, v := range m.gone {
+		if err := os.Remove(v.SidecarPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.moved = listed[10:16]
+	m.mover, err = manifest.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.mover.Close() })
+	return m
+}
+
+// requireOnlyTheGoneRowsDeleted fails the test unless the moved rows record
+// their place under to, with their sidecars there, the gone rows are deleted,
+// and every other row is still in the store.
+func (m moveShape) requireOnlyTheGoneRowsDeleted(t *testing.T) {
+	t.Helper()
+	requireMovedRowsAt(t, m.store, m.moved, m.to)
+	requireRowsGone(t, m.store, m.gone)
+	rows, err := m.store.AllVariants(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := moveShapeRows - len(m.gone); len(rows) != want {
+		t.Errorf("%d rows after the sweep, want %d", len(rows), want)
 	}
 }
 

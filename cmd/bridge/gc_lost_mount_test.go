@@ -156,7 +156,7 @@ func TestTheReverseGuardCountsOnlyTheRenditionsThisRunUnlinked(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	removed, _, failed, exitCode, unlinked := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
+	removed, _, failed, exitCode, unlinked := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace())
 	if exitCode != 0 || failed != 0 || removed != len(stranded) {
 		t.Fatalf("forward sweep: exit %d, %d removed, %d failed; want every unlink of a file already gone read as removed", exitCode, removed, failed)
 	}
@@ -198,7 +198,7 @@ func TestTheForwardSweepCountsARenditionOnlyWhenItUnlinkedIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(lockedDir, 0o755) })
-	removed, _, failed, exitCode, unlinked := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
+	removed, _, failed, exitCode, unlinked := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace())
 	if exitCode != 0 || removed != 3 || failed != 1 {
 		t.Fatalf("forward sweep: exit %d, %d removed, %d failed; want 0, 3 (the unlinked two and the one already gone), 1\n%s", exitCode, removed, failed, stderr.String())
 	}

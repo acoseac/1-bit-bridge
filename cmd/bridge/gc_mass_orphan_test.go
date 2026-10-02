@@ -66,6 +66,9 @@ func strandedTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Stor
 		paths[i] = transcode.VariantSidecarPath(dir, source, variant)
 		writeFixtureFile(t, paths[i], 1000)
 	}
+	// What a lost index leaves is old: dated past the forward sweep's grace,
+	// which leaves a recent file for a later run (integrity.OrphanGracePeriod).
+	ageFiles(t, paths...)
 	return store, paths
 }
 
@@ -98,6 +101,7 @@ func waveformTree(t *testing.T, dir string, fresh, stranded int) (*manifest.Stor
 		paths[i] = analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: fmt.Sprintf("Artist/Album %d/%02d.flac", i%4, i)}.SidecarPath()
 		writeFixtureFile(t, paths[i], 20)
 	}
+	ageFiles(t, paths...) // old, as strandedTree's are
 	return store, paths
 }
 
@@ -224,7 +228,7 @@ func TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed(t *testing.T) {
 	// references, and one half-written scratch file.
 	store, stranded := waveformTree(t, dir, 2, 40)
 	scratch := filepath.Join(dir, "half-written.waveform.bin.tmp")
-	writeFixtureFile(t, scratch, 3)
+	writeAgedFile(t, scratch, time.Hour)
 
 	var stdout, stderr bytes.Buffer
 	if rc := runAnalyzeGC(ctx, &stdout, &stderr, store, dir, analyzeGCOptions{}); rc == 0 {
@@ -357,7 +361,7 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	removed, _, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
+	removed, _, failed, exitCode, _ := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv, gcStartAfterTheGrace())
 	if failed != 0 || exitCode != 0 {
 		t.Fatalf("a file that vanished before the unlink counted as a failure (failed=%d exit=%d): %s",
 			failed, exitCode, stderr.String())
@@ -368,15 +372,24 @@ func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
 	if _, err := os.Stat(stays); !os.IsNotExist(err) {
 		t.Errorf("control: the orphan that was still there survived (%v)", err)
 	}
-	// A real failure must still be one. A directory in the orphan list
-	// (which the walk never produces, but the loop cannot know that) fails
-	// with ENOTEMPTY, not ENOENT.
+	// A real failure must still be one: a path the re-check cannot stat (a
+	// NUL byte, which no file name holds: EINVAL, not ENOENT). A directory
+	// in the orphan list (which the walk never produces) is no failure, and
+	// is left: the unlink asks what is at the path first now
+	// (integrity.ReclaimOrphan), where os.Remove alone failed on this one
+	// with ENOTEMPTY and took an empty one. An unlink the filesystem refuses
+	// is TestAGCForwardSweepCountsAnUnlinkTheFilesystemRefuses.
 	sub := filepath.Join(dir, "sub")
 	writeFixtureFile(t, filepath.Join(sub, "child.flac"), 1)
+	bad := filepath.Join(dir, "bad\x00name.flac")
 	stderr.Reset()
 	_, _, failed, _, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
-		integrity.SidecarInventory{OrphanPaths: []string{sub}, OrphanWalkedPaths: []string{sub}})
+		integrity.SidecarInventory{OrphanPaths: []string{sub, bad}, OrphanWalkedPaths: []string{sub, bad}},
+		gcStartAfterTheGrace())
 	if failed != 1 {
-		t.Errorf("a genuine remove failure was swallowed (failed=%d): %s", failed, stderr.String())
+		t.Errorf("failed=%d, want 1 (the path no stat can read): %s", failed, stderr.String())
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Errorf("the directory in the orphan list was removed: %v", err)
 	}
 }

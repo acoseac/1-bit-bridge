@@ -39,7 +39,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"runtime"
 	"strings"
@@ -840,11 +839,14 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 	}
 }
 
-// runGCForwardSweep unlinks every file the inventory classified as an
-// orphan. Returns `(removed, kept, failed, exitCode, renditionsUnlinked)` —
+// runGCForwardSweep removes every file the inventory classified as an
+// orphan that is, asked again just before its unlink, still a file and
+// was last modified at least integrity.OrphanGracePeriod before start, the
+// instant runGC began, before it listed the catalog (gcReclaimTally.reclaim).
+// Returns `(removed, kept, failed, exitCode, renditionsUnlinked)` —
 // `exitCode != 0` signals a SIGINT, or an inventory it refused, and runGC
 // bails immediately. renditionsUnlinked counts the renditions by name
-// (SidecarInventory.OrphanIsRendition) this run's own os.Remove unlinked:
+// (SidecarInventory.OrphanIsRendition) this run's own unlink removed:
 // never one whose unlink failed, and never one already gone (ENOENT, a
 // success to the exit code), since a volume unmounted between the
 // inventory and the unlinks makes every unlink under the mountpoint
@@ -866,8 +868,11 @@ func cliAlbumMateSpec(store *manifest.Store, resolver *bridgefs.Resolver, p runU
 // counted. An inventory whose two lists do not pair up is refused before
 // anything is removed (integrity.SidecarInventory.CheckPaired), never
 // indexed past its end nor unlinked by the configured spelling.
-func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int, int) {
-	var removed, failed, renditionsUnlinked int
+func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory, start time.Time) (int, int, int, int, int) {
+	var (
+		tally              gcReclaimTally
+		renditionsUnlinked int
+	)
 	if err := inv.CheckPaired(); err != nil {
 		fmt.Fprintf(stderr, "GC forward sweep: refusing to run — %v. Nothing was removed.\n", err)
 		return 0, inv.Known, 0, 1, 0
@@ -878,26 +883,79 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integr
 		// it finished the list. CodeRabbit Major on PR #217.
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return removed, inv.Known, failed, 1, renditionsUnlinked
+			return tally.removed, inv.Known, tally.failed, 1, renditionsUnlinked
 		}
-		// ENOENT is a success: the inventory and the unlink are separate
-		// steps now, so a file another process removed in between is gone,
-		// which is the outcome asked for. Counting it as a failure would
-		// exit 1 and report a cron'd --gc as failed for doing its job.
-		// `analyze --gc` has always read it this way.
-		err := os.Remove(inv.OrphanWalkedPaths[i])
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
-			failed++
-			continue
-		}
-		removed++
-		if err == nil && inv.OrphanIsRendition(i) {
+		if tally.reclaim(stderr, "", path, inv.OrphanWalkedPaths[i], start) && inv.OrphanIsRendition(i) {
 			renditionsUnlinked++
 		}
 	}
-	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, inv.Known, failed)
-	return removed, inv.Known, failed, 0, renditionsUnlinked
+	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), left %d recent file(s), %d failure(s).\n",
+		tally.removed, inv.Known, tally.recent, tally.failed)
+	tally.explainRecent(stdout, "GC forward sweep")
+	return tally.removed, inv.Known, tally.failed, 0, renditionsUnlinked
+}
+
+// gcReclaimTally counts what a CLI forward sweep (`upscale --gc`'s, and
+// `analyze --gc`'s) did with the files its inventory listed for removal,
+// by integrity.ReclaimOrphan's outcome: removed (gone already counts, as
+// it always has), recent, failed.
+type gcReclaimTally struct {
+	removed, recent, failed int
+}
+
+// reclaim re-checks one listed file by the path the walk visited (walked)
+// and removes it unless it is no longer a file or was modified less than
+// integrity.OrphanGracePeriod before start (integrity.ReclaimOrphan),
+// counts the outcome, and names on stderr, as shown and after prefix, a
+// failure or a path it left because it is no longer a file. It reports
+// whether this call unlinked the file.
+//
+// The grace is what makes a `--gc` run safe beside a live bridge (backlog
+// B205): the run lists the catalog before anything else, and a render or
+// an analysis that renames its file into place and commits its row after
+// that listing left the walk an "orphan" to unlink behind its row, and a
+// `.tmp` still being written went the same way, failing its job at the
+// rename. Both are recent by their mtime, which a stale crash leftover is
+// not. The re-check is the background sweep's, so the three forward
+// sweeps decide alike: a file rewritten at a listed path after the walk
+// is judged by its new mtime, and a link to a directory put there since
+// is left alone.
+//
+// ENOENT is a success: the inventory and the unlink are separate steps,
+// so a file another process removed in between is gone, which is the
+// outcome asked for. Counting it as a failure would exit 1 and report a
+// cron'd --gc as failed for doing its job. `analyze --gc` has always read
+// it this way.
+func (t *gcReclaimTally) reclaim(stderr io.Writer, prefix, shown, walked string, start time.Time) bool {
+	outcome, err := integrity.ReclaimOrphan(walked, start, integrity.OrphanGracePeriod)
+	switch outcome {
+	case integrity.OrphanUnlinked:
+		t.removed++
+		return true
+	case integrity.OrphanGone:
+		t.removed++
+	case integrity.OrphanInGrace:
+		t.recent++
+	case integrity.OrphanNotAFile:
+		fmt.Fprintf(stderr, "%sleft %s: no longer a file (a directory, or a link or junction to one, stands there now)\n", prefix, shown)
+	case integrity.OrphanUnreadable:
+		fmt.Fprintf(stderr, "%sstat %s: %v\n", prefix, shown, err)
+		t.failed++
+	case integrity.OrphanUnlinkFailed:
+		fmt.Fprintf(stderr, "%sremove %s: %v\n", prefix, shown, err)
+		t.failed++
+	}
+	return false
+}
+
+// explainRecent says, once per run and only when the sweep left any, why
+// the recent files are still there and what removes them.
+func (t gcReclaimTally) explainRecent(stdout io.Writer, label string) {
+	if t.recent == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "%s: the %d recent file(s) were modified less than %d minutes before this run started; a running bridge may still be writing them, or recording them in its catalog. A later run removes those that are still orphans then.\n",
+		label, t.recent, int(integrity.OrphanGracePeriod/time.Minute))
 }
 
 // gcTakeInventory is the forward sweep's read-only half: one walk of
@@ -1335,10 +1393,11 @@ func gcRefuseRelocationInProgress(stderr io.Writer, outputDir string, verdicts g
 // place under outputDir with the recorded size) is adopted — its
 // sidecar_path rewritten by the store's UpdateVariantSidecarPath, which
 // deliberately bumps no indexed_at — and every row MISSING at both
-// locations is deleted via DeleteVariant (which bumps indexed_at).
+// locations is deleted, while it is still the row the run listed
+// (deleteMissingGCRows; the delete bumps indexed_at).
 // Returns `(rowsRemoved, rowsKept, rowsFailed, exitCode)`; exitCode is 1
 // on SIGINT-during-sweep, 0 otherwise — bot-reviewed cancellation shape
-// from PR #217 (ctx cancel during the inner DeleteVariant surfaces as
+// from PR #217 (ctx cancel during the inner delete surfaces as
 // interrupted, real DB fault is logged and counted).
 //
 // The verdicts come from classifyGCRows, the same integrity.LocateSidecar
@@ -1346,11 +1405,11 @@ func gcRefuseRelocationInProgress(stderr io.Writer, outputDir string, verdicts g
 // disagree about what a relocated row is; the relocation guard has
 // already run over them (gcRefuseRelocationInProgress).
 func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, verdicts gcRowVerdicts) (int, int, int, int) {
-	// Per-row `DeleteVariant` (one transaction per orphan) over a
+	// Per-row deletes (one transaction per orphan) over a
 	// bulk-delete API: `--gc` is operator-initiated and infrequent,
 	// orphan counts are typically <100 in practice, and a new bulk
 	// path on the Store would duplicate the `indexed_at`-bump
-	// machinery `DeleteVariant` already provides. CLAUDE.md "no
+	// machinery the per-row delete already provides. CLAUDE.md "no
 	// premature abstractions" — revisit if a future call site
 	// proves the volume out.
 	//
@@ -1402,40 +1461,65 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store gcVa
 		fmt.Fprintf(stdout, "adopted %s → %s\n", rel.row.SidecarPath, rel.canonical)
 		rowsAdopted++
 	}
-	for _, r := range verdicts.missing {
-		if ctx.Err() != nil {
-			return interrupted()
-		}
-		if err := store.DeleteVariant(ctx, r.SourcePath, r.VariantID); err != nil {
-			// Two cancellation shapes get different
-			// treatment (CodeRabbit Major round-3 on
-			// PR #217):
-			//
-			//   - ctx-cancellation: return interrupted
-			//     status immediately. Falling through to
-			//     the success summary would hide the
-			//     interrupt — the operator's Ctrl-C
-			//     wouldn't show up in the exit code on
-			//     the last-row case. The top-of-loop gate
-			//     catches THIS row's cancellation on the
-			//     next iteration, but if this IS the last
-			//     row the loop exits and the summary
-			//     reports success.
-			//
-			//   - Real DB fault: log + count + continue
-			//     (same legacy degrade policy).
-			if ctx.Err() != nil {
-				return interrupted()
-			}
-			fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
-			rowsFailed++
-			continue
-		}
-		rowsRemoved++
+	removed, changed, failed, stopped := deleteMissingGCRows(ctx, stderr, store, verdicts.missing)
+	rowsRemoved += removed
+	rowsFailed += failed
+	if stopped {
+		return interrupted()
 	}
-	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), adopted %d relocated row(s), kept %d row(s) with live sidecar, %d row(s) with a mismatched sidecar, %d failure(s).\n",
-		rowsRemoved, rowsAdopted, rowsKept, rowsMismatched, rowsFailed)
+	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), adopted %d relocated row(s), kept %d row(s) with live sidecar, %d row(s) with a mismatched sidecar, %d row(s) changed since this run listed them, %d failure(s).\n",
+		rowsRemoved, rowsAdopted, rowsKept, rowsMismatched, changed, rowsFailed)
 	return rowsRemoved, rowsKept, rowsFailed, 0
+}
+
+// deleteMissingGCRows deletes the rows the run classified as missing at
+// both locations, each only while it is still the row the run LISTED
+// (Store.DeleteVariantIfUnchanged: the same sidecar path, size and
+// created_at, compared in the DELETE itself). It returns how many it
+// removed, how many another writer had changed since the listing (kept,
+// and named on stderr), how many failed, and whether ctx ended the loop.
+//
+// The run judges every row as AllVariants listed it, and a live bridge
+// writes rows meanwhile: `bridge variants move` gives a row the path of
+// its new home, a render rewrites a row whole. Through the unconditional
+// DeleteVariant such a row was deleted on a verdict about the row it used
+// to be (backlog B250, 2026-10-02): a moved row with its file intact at the
+// move's destination, a rendered one with the rendition its render had
+// just published. A changed row is not a failure, as a mismatched one is
+// not: a `--gc` run from cron beside a move is a healthy state. The next
+// run lists it as it is then. The VariantWatcher deletes the same way
+// (backlog B204).
+//
+// Two cancellation shapes get different treatment (CodeRabbit Major
+// round-3 on PR #217): a cancelled ctx returns interrupted at once,
+// because falling through to the success summary would hide the
+// operator's Ctrl-C from the exit code on the last row (the top-of-loop
+// gate catches a cancellation only on the next row); a real DB fault is
+// logged, counted, and the loop goes on (the legacy degrade policy).
+// ErrVariantChanged is a definite answer, never a cancellation: the
+// store returns it only for a DELETE that ran, matched nothing and
+// committed.
+func deleteMissingGCRows(ctx context.Context, stderr io.Writer, store gcVariantStore, missing []manifest.VariantRow) (removed, changed, failed int, interrupted bool) {
+	for _, r := range missing {
+		if ctx.Err() != nil {
+			return removed, changed, failed, true
+		}
+		err := store.DeleteVariantIfUnchanged(ctx, r)
+		switch {
+		case err == nil:
+			removed++
+		case errors.Is(err, manifest.ErrVariantChanged):
+			fmt.Fprintf(stderr, "keep %s / %s: the row changed after this run listed it (a render or a `bridge variants move` rewrote it); not deleted\n",
+				r.SourcePath, r.VariantID)
+			changed++
+		case ctx.Err() != nil:
+			return removed, changed, failed, true
+		default:
+			fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
+			failed++
+		}
+	}
+	return removed, changed, failed, false
 }
 
 // gcVariantStore is the store as runGC uses it: the listing every verdict
@@ -1448,7 +1532,7 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store gcVa
 type gcVariantStore interface {
 	AllVariants(ctx context.Context) ([]manifest.VariantRow, error)
 	UpdateVariantSidecarPath(ctx context.Context, sourcePath, variantID, newSidecarPath string) error
-	DeleteVariant(ctx context.Context, sourcePath, variantID string) error
+	DeleteVariantIfUnchanged(ctx context.Context, v manifest.VariantRow) error
 }
 
 // Both sweeps run unconditionally under `--gc` because they share
@@ -1512,6 +1596,13 @@ type gcOptions struct {
 //     play even after the stale-variant fallback ships (acoseac/1-bit
 //     PR #351) — the next manifest rescan re-pulls the same dead ID
 //     and the loop restarts.
+//
+// It is safe beside a running bridge (backlog B205, B250, 2026-10-02):
+// every verdict is taken from one listing, which a live bridge's writers
+// overtake, so the forward sweep removes no file modified less than
+// integrity.OrphanGracePeriod before the run started (sampled before the
+// listing), and the reverse sweep deletes a row only while it is still the
+// row the listing returned.
 func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, outputDir, tempDir string, opts gcOptions) int {
 	// DSD-render scratch first: the crash-orphan case the render's
 	// deferred remove cannot cover. Independent of the sidecar sweeps and
@@ -1522,6 +1613,11 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, 
 	} else {
 		fmt.Fprintf(stdout, "GC render scratch: removed %d stale file(s).\n", n)
 	}
+	// The instant the forward sweep's grace is measured from, taken BEFORE
+	// the listing: a file whose row committed just after it must still read
+	// as recent once the classification and the walk are done, which on a
+	// large tree over a network mount takes minutes.
+	start := time.Now()
 	allRows, err := store.AllVariants(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list variants: %v\n", err)
@@ -1585,7 +1681,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store gcVariantStore, 
 		}
 	}
 
-	_, _, failed, exitCode, renditionsUnlinked := runGCForwardSweep(ctx, stdout, stderr, inv)
+	_, _, failed, exitCode, renditionsUnlinked := runGCForwardSweep(ctx, stdout, stderr, inv, start)
 	if exitCode != 0 {
 		return exitCode
 	}
