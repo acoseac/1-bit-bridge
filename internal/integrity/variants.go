@@ -15,6 +15,7 @@ package integrity
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 var logger = logging.Component("integrity")
@@ -52,9 +54,12 @@ var stopGrace = 5 * time.Second
 // on the wire, because nothing changed for a client). Only a row
 // whose file is at neither location is removed via the supplied
 // reconciler (bumps `tracks.indexed_at` so iOS delta-sync sees
-// the disappearance), and a single batched `upscale.deleted` SSE
-// event is published per tick — iOS reconciles immediately
-// without waiting for a manifest re-sync.
+// the disappearance), and only while the row is still the one the
+// tick listed (VariantReconciler.DeleteVariantIfUnchanged: a row
+// `bridge variants move` relocated during the tick, or a render
+// rewrote, is left for the next tick; backlog B204), and a single
+// batched `upscale.deleted` SSE event is published per tick — iOS
+// reconciles immediately without waiting for a manifest re-sync.
 //
 // Two guards sit between "missing" and "deleted", and each is a kind of
 // refusal (VariantRefusalKind). The mount-loss guard
@@ -150,11 +155,22 @@ type VariantLister interface {
 // VariantReconciler is the write half the sweep needs, both arms
 // keyed by (source_path, variant_id).
 //
-// DeleteVariant removes one row. The Store's DeleteVariant
-// transactionally bumps `tracks.indexed_at` so iOS delta-sync
-// observes the removal on the next manifest fetch. Per-row error
-// tolerance: a tick logs and continues on per-row failure, but
-// still publishes the events for the rows that DID delete.
+// DeleteVariantIfUnchanged removes the row r was listed from, only while
+// the row still records r.SidecarPath, r.SizeBytes and r.CreatedAt, and
+// otherwise writes nothing and returns an error wrapping
+// manifest.ErrVariantChanged. The Store's DeleteVariantIfUnchanged makes
+// that comparison in the DELETE itself and transactionally bumps
+// `tracks.indexed_at` so iOS delta-sync observes the removal on the next
+// manifest fetch. Conditional because the tick judges the rows as it
+// LISTED them, and another writer can change one in between: a `bridge
+// variants move` run while the bridge serves (what the console and
+// `bridge doctor` tell an operator to do) relocates rows to a directory
+// that is not the variants directory yet, so a row it moved after the
+// listing reads as gone at both places the tick looks, and an
+// unconditional delete removed it with its file intact at the move's
+// destination (backlog B204). Per-row error tolerance: a tick logs and
+// continues on per-row failure, but still publishes the events for the
+// rows that DID delete.
 //
 // AdoptVariantSidecar rewrites one row's `sidecar_path` to the
 // canonical location LocateSidecar found the file at. The Store's
@@ -168,7 +184,7 @@ type VariantLister interface {
 // a deletion while a test fake that did satisfy it stayed green.
 // The compiler enforces the wiring instead.
 type VariantReconciler interface {
-	DeleteVariant(sourcePath, variantID string) error
+	DeleteVariantIfUnchanged(r VariantSnapshot) error
 	AdoptVariantSidecar(sourcePath, variantID, newSidecarPath string) error
 }
 
@@ -201,6 +217,12 @@ type VariantSnapshot struct {
 	// relocation probe compares against a file found at the canonical
 	// location so a partial copy is never adopted (LocateSidecar).
 	SizeBytes int64
+	// CreatedAt is the row's created_at, the time its render completed.
+	// The watcher's delete compares it with SidecarPath and SizeBytes, so
+	// a row re-rendered during a tick, which a render can leave at the
+	// same path with the same size, is not deleted on the strength of the
+	// row the tick listed (DeleteVariantIfUnchanged).
+	CreatedAt int64
 }
 
 // SweepReport is what one tick did, in rows. Rows is the catalog
@@ -217,6 +239,11 @@ type SweepReport struct {
 	// on — each kept as it was, each logged, none a deletion.
 	Failed  int
 	Refused int
+	// Changed counts rows pass two found missing whose delete found the
+	// row no longer the one the tick listed (manifest.ErrVariantChanged):
+	// another writer moved, re-rendered or removed it during the tick.
+	// Kept, for the next tick to judge as it is then (backlog B204).
+	Changed int
 	// Skipped is true when the tick did not sweep at all — the
 	// mount-loss guard fired, or the catalog query failed.
 	Skipped bool
@@ -504,6 +531,12 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	// each delete, and deletes only a row still at neither location; any
 	// other answer is counted as pass one would have counted it
 	// (CodeRabbit on #1127).
+	//
+	// That recheck, like pass one, judges the row as the tick LISTED it,
+	// and the delete removes the row only while it is still that row
+	// (deleteMissing, DeleteVariantIfUnchanged): a row another writer
+	// changed since the listing, `bridge variants move` above all, is a row
+	// this tick never judged, whatever its listed verdict (backlog B204).
 	if changed := variantsDirChanged(dir, start); changed != "" {
 		return w.refuseChangedDir(tickStart, dir, changed, len(missing), report)
 	}
@@ -698,8 +731,14 @@ func (w *VariantWatcher) adoptRelocated(ctx context.Context, r VariantSnapshot, 
 // counting and logging the outcome in report and recording a deletion in
 // gone. It reports whether the shutdown stopped the delete, which ends the
 // tick rather than counting as a failure.
+//
+// The delete is conditional (DeleteVariantIfUnchanged): a row that is no
+// longer the one the tick listed is kept and counted as changed, with no
+// event, since the tick's verdict was about the row as listed. The next
+// tick lists it again and judges it as it is then. Logged at Info and
+// sampled: another writer at work is no fault.
 func (w *VariantWatcher) deleteMissing(ctx context.Context, r VariantSnapshot, report *SweepReport, sample *logSampler, gone *deletions) (stopped bool) {
-	err := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID)
+	err := w.reconciler.DeleteVariantIfUnchanged(r)
 	switch {
 	case err == nil:
 		report.Deleted++
@@ -709,6 +748,13 @@ func (w *VariantWatcher) deleteMissing(ctx context.Context, r VariantSnapshot, r
 			slog.String("recorded", r.SidecarPath),
 		)
 		gone.add(r)
+	case errors.Is(err, manifest.ErrVariantChanged):
+		report.Changed++
+		sample.log(slog.LevelInfo, msgVariantRowChanged,
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("listed", r.SidecarPath),
+		)
 	case ctxerr.WithoutCancellation(ctx, err) == nil:
 		return true
 	default:
@@ -858,6 +904,9 @@ const (
 	msgVariantsDirUnavailable = "integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog"
 	msgVariantRefusalLifted   = "integrity variant sweep: no longer refusing — this tick's rows pass the mount-loss and relocation checks"
 	msgVariantSweepSummary    = "integrity variant sweep: summary"
+	// msgVariantRowChanged is deleteMissing's line for a row another writer
+	// changed between the tick's listing and its delete.
+	msgVariantRowChanged = "integrity variant sweep: row changed since this sweep listed it; kept for the next sweep"
 )
 
 // logSummary writes the one line per tick that the 2026-09-20 sweep
@@ -891,6 +940,7 @@ func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
 		slog.Int("mismatched", r.Mismatched),
 		slog.Int("failed", r.Failed),
 		slog.Int("refused", r.Refused),
+		slog.Int("changed", r.Changed),
 		slog.Bool("skipped", r.Skipped),
 		slog.Bool("cancelled", r.Cancelled),
 		slog.String("variants_dir", dir),
