@@ -4,11 +4,13 @@ package manifest
 
 import (
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -25,15 +27,58 @@ import (
 // one (backlog B212). macOS is the kqueue platform the bridge ships for and
 // the one CI runs; the account they pin is watcher_fds.go's.
 
-// openFiles is the number of files this process holds open, read from its
-// /dev/fd, less the descriptor the listing itself takes.
-func openFiles(t *testing.T) int {
+// libraryFiles is the number of descriptors this process holds open on what
+// is under root now: the descriptors /dev/fd names whose device and inode
+// are those of an entry a walk of root finds. A descriptor fsnotify kept
+// after a rename still counts (a renamed file keeps its inode), and every
+// other descriptor of the test process (the store's, the runtime's, one
+// another test's goroutine opens or closes meanwhile) counts for nothing.
+// Measured on the macOS CI runner, the whole-process count was not stable:
+// os.ReadDir of /dev/fd failed there with fstatat's EBADF, a descriptor
+// closed between the listing and its stat. Names only, for that reason, and
+// a descriptor closed before its fstat is skipped.
+func libraryFiles(t *testing.T, root string) int {
 	t.Helper()
-	ents, err := os.ReadDir("/dev/fd")
+	type id struct{ dev, ino uint64 }
+	under := make(map[id]bool)
+	err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		var st syscall.Stat_t
+		if err := syscall.Lstat(p, &st); err != nil {
+			return err
+		}
+		under[id{uint64(st.Dev), st.Ino}] = true
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(ents) - 1
+	d, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		if err != nil {
+			continue
+		}
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) != nil {
+			continue
+		}
+		if under[id{uint64(st.Dev), st.Ino}] {
+			n++
+		}
+	}
+	return n
 }
 
 // makeAlbums makes n album folders in dir, each holding files files, and
@@ -83,7 +128,7 @@ func TestKqueueWatcherReleasesARenamedFoldersFiles(t *testing.T) {
 	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
 	albums := makeAlbums(t, filepath.Join(libDir, "Artist"), 10, 12)
 	startWatcher(t, w)
-	base := openFiles(t)
+	base := libraryFiles(t, libDir)
 
 	for round := 1; round <= 3; round++ {
 		for i, a := range albums {
@@ -94,8 +139,8 @@ func TestKqueueWatcherReleasesARenamedFoldersFiles(t *testing.T) {
 		}
 		syncWatcher(t, w, libDir, round)
 		// Each round adds the sync folder, and nothing else.
-		if got, want := openFiles(t), base+round; got != want {
-			t.Fatalf("after round %d of renaming 10 folders of 12 files the process holds %d open files, want %d", round, got, want)
+		if got, want := libraryFiles(t, libDir), base+round; got != want {
+			t.Fatalf("after round %d of renaming 10 folders of 12 files the watcher holds %d open files on the library, want %d", round, got, want)
 		}
 	}
 }
@@ -113,7 +158,7 @@ func TestKqueueWatcherOpensAFolderMovedInOnce(t *testing.T) {
 	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
 	staged := makeAlbums(t, t.TempDir(), 200, 1)
 	startWatcher(t, w)
-	base := openFiles(t)
+	base := libraryFiles(t, libDir)
 
 	for _, a := range staged {
 		if err := os.Rename(a, filepath.Join(libDir, filepath.Base(a))); err != nil {
@@ -121,7 +166,7 @@ func TestKqueueWatcherOpensAFolderMovedInOnce(t *testing.T) {
 		}
 	}
 	syncWatcher(t, w, libDir, 1)
-	if got, want := openFiles(t), base+200*(1+1)+1; got != want {
+	if got, want := libraryFiles(t, libDir), base+200*(1+1)+1; got != want {
 		t.Fatalf("200 folders of 1 file moved in hold %d open files, want %d", got-base-1, want-base-1)
 	}
 }
@@ -153,7 +198,7 @@ func TestKqueueWatcherReleasesAFolderFsnotifyDroppedWithoutAnEvent(t *testing.T)
 	}
 	w.reconcileEvery = 20 * time.Millisecond
 	startWatcher(t, w)
-	base := openFiles(t)
+	base := libraryFiles(t, libDir)
 
 	if err := os.Rename(album, album+"r"); err != nil {
 		t.Fatal(err)
@@ -173,8 +218,8 @@ func TestKqueueWatcherReleasesAFolderFsnotifyDroppedWithoutAnEvent(t *testing.T)
 	}
 	// The renamed folder and its 12 files in place of the old ones, and the
 	// sync folder.
-	if got, want := openFiles(t), base+1; got != want {
-		t.Fatalf("after a rename fsnotify never sent and a reconcile, the process holds %d open files, want %d", got, want)
+	if got, want := libraryFiles(t, libDir), base+1; got != want {
+		t.Fatalf("after a rename fsnotify never sent and a reconcile, the watcher holds %d open files on the library, want %d", got, want)
 	}
 }
 
