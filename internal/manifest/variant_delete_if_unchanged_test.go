@@ -76,14 +76,13 @@ func TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged(t *testing.T) {
 	cases := []struct {
 		name   string
 		change func(t *testing.T, s *Store, listed VariantRow)
-		kept   bool
 	}{
 		{"moved (bridge variants move, an adoption)", func(t *testing.T, s *Store, listed VariantRow) {
 			if err := s.UpdateVariantSidecarPath(ctx, listed.SourcePath, listed.VariantID,
 				"/mnt/new-disk/variants/Music/A/1.flac.upscaled-v2-176400-24.flac"); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
+		}},
 		// The size alone, created_at kept: no writer does that, and it is
 		// here because the size is half of what the caller's verdict was
 		// taken from (LocateSidecar), so the comparison holds it apart.
@@ -93,51 +92,55 @@ func TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged(t *testing.T) {
 			if err := s.UpsertVariant(ctx, again); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
+		}},
 		{"re-rendered at the same path and size", func(t *testing.T, s *Store, listed VariantRow) {
 			again := listed
 			again.CreatedAt = listed.CreatedAt + 1
 			if err := s.UpsertVariant(ctx, again); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
+		}},
 		{"deleted", func(t *testing.T, s *Store, listed VariantRow) {
 			if err := s.DeleteVariant(ctx, listed.SourcePath, listed.VariantID); err != nil {
 				t.Fatal(err)
 			}
-		}, false},
+		}},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			s := openTempStore(t)
-			t.Cleanup(func() { _ = s.Close() })
-			listed := listedVariant(t, s)
-			c.change(t, s, listed)
-			before := parentIndexedAt(t, s)
-			want, err := s.GetVariant(ctx, listed.SourcePath, listed.VariantID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// A clock that would move indexed_at if the delete bumped it.
-			s.now = func() time.Time { return time.Unix(0, before+time.Hour.Nanoseconds()) }
+		t.Run(c.name, func(t *testing.T) { requireDeleteRefusedAfter(t, c.change) })
+	}
+}
 
-			err = s.DeleteVariantIfUnchanged(ctx, listed)
-			if !errors.Is(err, ErrVariantChanged) {
-				t.Fatalf("DeleteVariantIfUnchanged after the row changed: err %v, want ErrVariantChanged", err)
-			}
-			got, err := s.GetVariant(ctx, listed.SourcePath, listed.VariantID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if c.kept && (got == nil || *got != *want) {
-				t.Errorf("the changed row is %+v after the delete, want it as the writer left it: %+v", got, want)
-			}
-			if !c.kept && got != nil {
-				t.Errorf("a row came back: %+v", got)
-			}
-			if after := parentIndexedAt(t, s); after != before {
-				t.Errorf("indexed_at moved from %d to %d on a delete that wrote nothing", before, after)
-			}
-		})
+// requireDeleteRefusedAfter lists a row, lets change rewrite or remove it,
+// and fails the test unless DeleteVariantIfUnchanged of the row as listed
+// then answers ErrVariantChanged, leaves the row as change left it (or
+// absent), and leaves the parent's indexed_at where it was.
+func requireDeleteRefusedAfter(t *testing.T, change func(t *testing.T, s *Store, listed VariantRow)) {
+	t.Helper()
+	ctx := context.Background()
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	listed := listedVariant(t, s)
+	change(t, s, listed)
+	before := parentIndexedAt(t, s)
+	want, err := s.GetVariant(ctx, listed.SourcePath, listed.VariantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A clock that would move indexed_at if the delete bumped it.
+	s.now = func() time.Time { return time.Unix(0, before+time.Hour.Nanoseconds()) }
+
+	if err := s.DeleteVariantIfUnchanged(ctx, listed); !errors.Is(err, ErrVariantChanged) {
+		t.Fatalf("DeleteVariantIfUnchanged after the row changed: err %v, want ErrVariantChanged", err)
+	}
+	got, err := s.GetVariant(ctx, listed.SourcePath, listed.VariantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+		t.Errorf("the row is %+v after the delete, want it as the writer left it: %+v", got, want)
+	}
+	if after := parentIndexedAt(t, s); after != before {
+		t.Errorf("indexed_at moved from %d to %d on a delete that wrote nothing", before, after)
 	}
 }

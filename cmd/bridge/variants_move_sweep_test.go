@@ -43,8 +43,9 @@ func (l *listThenAct) AllVariants() ([]integrity.VariantSnapshot, error) {
 
 // runOneVariantSweep starts a watcher over store, through the serve wiring's
 // adapters, with lister in front of the store's, and returns the report of
-// its boot tick and the paths it published as deleted. The watcher is
-// stopped, and joined, before the store's cleanup closes the store.
+// its boot tick and the paths it published as deleted. The watcher's context
+// is cancelled once that tick has reported, and the watcher joined before
+// the store's cleanup closes the store.
 func runOneVariantSweep(t *testing.T, store *manifest.Store, lister integrity.VariantLister, dir string) (integrity.SweepReport, []string) {
 	t.Helper()
 	var (
@@ -67,11 +68,8 @@ func runOneVariantSweep(t *testing.T, store *manifest.Store, lister integrity.Va
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := w.Start(ctx)
-	t.Cleanup(func() {
-		cancel()
-		stop()
-	})
+	defer cancel()
+	t.Cleanup(w.Start(ctx))
 	select {
 	case r := <-reports:
 		mu.Lock()
@@ -115,40 +113,15 @@ func TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated(t *testing.T) {
 	t.Cleanup(func() { _ = mover.Close() })
 	var moveErr error
 	lister := &listThenAct{inner: &integrityVariantListerAdapter{store: store}, act: func() {
-		for _, v := range moved {
-			if err := moveOneVariant(ctx, mover, v, computeNewSidecarPath(to, v)); err != nil && moveErr == nil {
-				moveErr = fmt.Errorf("move %s: %w", v.SourcePath, err)
-			}
-		}
+		moveErr = moveRows(ctx, mover, moved, to)
 	}}
 
 	r, published := runOneVariantSweep(t, store, lister, dir)
 	if moveErr != nil {
 		t.Fatal(moveErr)
 	}
-
-	for _, v := range moved {
-		row, err := store.GetVariant(ctx, v.SourcePath, v.VariantID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := computeNewSidecarPath(to, v)
-		if row == nil {
-			t.Errorf("the sweep deleted the row of %s, which the move had relocated to %s", v.SourcePath, want)
-			continue
-		}
-		if row.SidecarPath != want {
-			t.Errorf("row %s records %s, want the move's %s", v.SourcePath, row.SidecarPath, want)
-		}
-		if _, err := os.Stat(want); err != nil {
-			t.Errorf("the moved sidecar of %s: %v", v.SourcePath, err)
-		}
-	}
-	for _, v := range gone {
-		if row, err := store.GetVariant(ctx, v.SourcePath, v.VariantID); err != nil || row != nil {
-			t.Errorf("control: the row of %s, whose sidecar is gone at both locations, was kept (row %v, err %v)", v.SourcePath, row, err)
-		}
-	}
+	requireMovedRowsAt(t, store, moved, to)
+	requireRowsGone(t, store, gone)
 	if r.Deleted != len(gone) || r.Changed != len(moved) {
 		t.Errorf("report %+v, want %d deleted (the hand-removed sidecars' rows only) and %d changed (the moved ones)",
 			r, len(gone), len(moved))
@@ -169,5 +142,50 @@ func TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated(t *testing.T) {
 	next, published := runOneVariantSweep(t, store, &integrityVariantListerAdapter{store: store}, dir)
 	if next.Deleted != 0 || next.Changed != 0 || next.Present != 40-len(gone) || len(published) != 0 {
 		t.Errorf("the next tick: report %+v, published %v; want every one of the %d rows present", next, published, 40-len(gone))
+	}
+}
+
+// moveRows moves each of rows to its place under to with the move's own
+// per-row pipeline, over the move's store, and returns the first failure.
+// It runs on the watcher's goroutine, inside a tick, so it reports rather
+// than failing the test.
+func moveRows(ctx context.Context, mover *manifest.Store, rows []manifest.VariantRow, to string) error {
+	for _, v := range rows {
+		if err := moveOneVariant(ctx, mover, v, computeNewSidecarPath(to, v)); err != nil {
+			return fmt.Errorf("move %s: %w", v.SourcePath, err)
+		}
+	}
+	return nil
+}
+
+// requireMovedRowsAt fails the test for each of moved whose row is gone,
+// does not record its place under to, or whose sidecar is not there.
+func requireMovedRowsAt(t *testing.T, store *manifest.Store, moved []manifest.VariantRow, to string) {
+	t.Helper()
+	for _, v := range moved {
+		want := computeNewSidecarPath(to, v)
+		row, err := store.GetVariant(context.Background(), v.SourcePath, v.VariantID)
+		switch {
+		case err != nil:
+			t.Fatal(err)
+		case row == nil:
+			t.Errorf("the sweep deleted the row of %s, which the move had relocated to %s", v.SourcePath, want)
+		case row.SidecarPath != want:
+			t.Errorf("row %s records %s, want the move's %s", v.SourcePath, row.SidecarPath, want)
+		}
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("the moved sidecar of %s: %v", v.SourcePath, err)
+		}
+	}
+}
+
+// requireRowsGone fails the test for each of gone whose row is still there:
+// the positive control, rows whose sidecar is gone at both locations.
+func requireRowsGone(t *testing.T, store *manifest.Store, gone []manifest.VariantRow) {
+	t.Helper()
+	for _, v := range gone {
+		if row, err := store.GetVariant(context.Background(), v.SourcePath, v.VariantID); err != nil || row != nil {
+			t.Errorf("control: the row of %s, whose sidecar is gone at both locations, was kept (row %v, err %v)", v.SourcePath, row, err)
+		}
 	}
 }
