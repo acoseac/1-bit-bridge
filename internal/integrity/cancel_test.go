@@ -267,7 +267,7 @@ type stoppingReconciler struct {
 	fail   error
 }
 
-func (s stoppingReconciler) DeleteVariant(string, string) error { return s.stop() }
+func (s stoppingReconciler) DeleteVariantIfUnchanged(VariantSnapshot) error { return s.stop() }
 
 func (s stoppingReconciler) AdoptVariantSidecar(string, string, string) error { return s.stop() }
 
