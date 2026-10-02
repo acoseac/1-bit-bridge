@@ -148,7 +148,8 @@ type Store struct {
 const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
 
 // bumpIndexedAtByPathSQL is the whole statement for the six writers whose
-// ONLY job is the bump (UpsertVariant / DeleteVariant / UpsertAnalysis /
+// ONLY job is the bump (UpsertVariant / deleteVariantRow, the body of
+// DeleteVariant and DeleteVariantIfUnchanged / UpsertAnalysis /
 // DeleteAnalysis / writeLyricsRowTx / UpsertAtlasLyrics) — one const, six
 // callers, so those six cannot drift from each other at all. Binds:
 // (clock, path).
@@ -8598,44 +8599,111 @@ func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]V
 // is unchanged and a manifest-churn-inducing indexed_at bump would be
 // false signal to iOS clients (CodeRabbit + Gemini on PR #156).
 //
-// Currently has no production callers (the `bridge upscale --gc` path
-// in cmd/bridge/upscale.go walks the filesystem and removes orphan
-// sidecar files; it does not touch DB rows). Defensive plumbing for the
-// case a future caller does delete a variant — the bump symmetry
-// matches UpsertVariant so iOS doesn't miss the disappearance.
+// It deletes whatever the row records NOW. Three callers delete a row they
+// judged from a read: `bridge upscale --gc`'s reverse sweep
+// (runGCReverseSweep), the serve reap of a rendition whose file a download
+// found missing (api's files.go) and DELETE /v1/upscale/variants. The
+// VariantWatcher deletes through DeleteVariantIfUnchanged instead, which
+// keeps a row another writer changed since it was listed. This docblock
+// said there were no production callers until backlog B204 (2026-10-02),
+// with four of them in the tree.
 //
 // Holds `s.mu`. Caller is responsible for removing the on-disk sidecar
 // file — same separation-of-concerns as DeleteTrack pre-cleanup.
 func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string) error {
+	_, err := s.deleteVariantRow(ctx, sourcePath,
+		`DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
+		sourcePath, variantID)
+	return err
+}
+
+// ErrVariantChanged answers a delete of a variant row that is no longer the
+// row the caller listed: another writer changed it since (a `bridge variants
+// move` gave it its new path, a render rewrote it, a sweep adopted it), or
+// removed it. Nothing was written. DeleteVariantIfUnchanged returns it, and
+// the VariantWatcher then leaves the row for its next tick, which lists it
+// again and judges it as it is then.
+var ErrVariantChanged = errors.New("manifest: variant changed since it was listed")
+
+// DeleteVariantIfUnchanged is DeleteVariant for a row the caller judged from
+// a listing: it deletes v's row (by v.SourcePath and v.VariantID) only while
+// the row still records v.SidecarPath, v.SizeBytes and v.CreatedAt, and
+// otherwise writes nothing and returns ErrVariantChanged. Every other field
+// of v is ignored.
+//
+// Those three are what a writer moves. A move and an adoption rewrite
+// sidecar_path (UpdateVariantSidecarPath), and a render rewrites the whole
+// row (UpsertVariant), created_at with it: the time the render completed, in
+// nanoseconds, so a render that wrote the same path and the same size (an
+// unchanged source renders the same bytes) still reads as another row. The
+// first two are also what the caller's verdict was taken from
+// (integrity.LocateSidecar reads the recorded path and size), so a row that
+// still records them is a row the verdict is about.
+//
+// The comparison is in the DELETE itself, one statement in the
+// transaction that bumps the parent, so nothing a writer commits between
+// the caller's last look and this delete can be deleted on the strength of
+// that look, a writer in another process included (`bridge variants move`
+// opens a store of its own, which s.mu does not reach). Until backlog B204
+// (2026-10-02) the VariantWatcher deleted through DeleteVariant: a row the
+// move relocated after the tick listed it read as gone at both places the
+// tick looks, its old path and its canonical place under the variants
+// directory (which is not the move's destination), and the tick deleted it
+// with its file intact at the destination.
+//
+// Holds `s.mu`.
+func (s *Store) DeleteVariantIfUnchanged(ctx context.Context, v VariantRow) error {
+	n, err := s.deleteVariantRow(ctx, v.SourcePath, `
+		DELETE FROM track_variants
+		 WHERE source_path = ? AND variant_id = ?
+		   AND sidecar_path = ? AND size_bytes = ? AND created_at = ?`,
+		v.SourcePath, v.VariantID, v.SidecarPath, v.SizeBytes, v.CreatedAt)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrVariantChanged
+	}
+	return nil
+}
+
+// deleteVariantRow runs one DELETE of a track_variants row (query, bound to
+// args) and, when it removed the row, bumps sourcePath's indexed_at in the
+// same transaction, returning how many rows it removed. The one body behind
+// DeleteVariant and DeleteVariantIfUnchanged, which differ only in the
+// statement's WHERE: two copies of the bump are the copy that drifts.
+// Holds `s.mu`.
+func (s *Store) deleteVariantRow(ctx context.Context, sourcePath, query string, args ...any) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `DELETE FROM track_variants WHERE source_path = ? AND variant_id = ?`,
-		sourcePath, variantID)
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if rows > 0 {
-		// Strictly-advancing indexed_at update — see UpsertVariant
-		// for the full rationale. Same CASE WHEN form so a clock
-		// equality (test injection, low-resolution wall clock,
-		// rapid back-to-back variant writes) still produces a
-		// strictly-greater indexed_at, keeping
-		// `delta-sync WHERE indexed_at > since` reliable.
+		// Strictly-advancing indexed_at update, bumpIndexedAtByPathSQL —
+		// see UpsertVariant for the full rationale. It clears the
+		// library-wide max, so a clock equality (test injection,
+		// low-resolution wall clock, rapid back-to-back variant writes)
+		// still produces a strictly-greater indexed_at, keeping
+		// `delta-sync WHERE indexed_at > since` reliable. (This comment
+		// called it "the same CASE WHEN form" until 2026-10-02, the form
+		// indexedAtAdvanceSQL's docblock records as dead.)
 		now := s.now().UnixNano()
 		if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, sourcePath); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	return rows, tx.Commit()
 }
 
 // UpdateVariantSidecarPath rewrites the `sidecar_path` of a single

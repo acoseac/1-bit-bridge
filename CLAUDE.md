@@ -3683,6 +3683,46 @@ no failing test — which is the shape to expect in this area.
   `TestSidecarStoreStateReadsAMountpointHoldingNoRenditionAsUnavailable`,
   `TestTheVariantsDirProbeReadsLinksAndDirectoriesItCannotList`,
   `TestUpscaleDeleteAsksAnUnavailableStoreOnceUntilItUnlinksFromIt`.
+- **…and the watcher deletes a row only while it is still the row it
+  LISTED: the DELETE itself compares the columns a writer moves**
+  (2026-10-02, backlog B204). The tick judges every row as `AllVariants`
+  listed it, and deleted through `DeleteVariant`, which removes the row
+  whatever it records by then. `bridge variants move --to X`, which the
+  console's variants panel and `bridge doctor` tell an operator to run
+  beside a serving bridge, rewrites rows the tick has listed, from a store
+  of its own: a row moved after the listing reads as gone at both places
+  the tick looks (its old path, and its canonical place under the variants
+  directory, which is not X), arrives under the mass-delete floor, and was
+  deleted with its file intact at X (the real watcher, the serve wiring's
+  adapters and the real `moveOneVariant` on a second store: 6 of 6). The
+  adapter deletes through `Store.DeleteVariantIfUnchanged`: one `DELETE
+  … WHERE source_path AND variant_id AND sidecar_path AND size_bytes AND
+  created_at`, in the transaction that bumps the parent
+  (`deleteVariantRow`, the one body behind both deletes), so a write that
+  commits between the listing and the delete keeps the row, from whichever
+  process (`Store.mu` reaches no other). **Those three are what the
+  writers move**: a move or an adoption rewrites `sidecar_path`, a render
+  the whole row, `created_at` with it (the completion time in nanoseconds,
+  so an unchanged source rendered again at the same path and size still
+  compares as another row), and the path and size are what `LocateSidecar`
+  judged. A miss writes nothing and answers `manifest.ErrVariantChanged`;
+  the tick counts the row `changed` (the summary's attribute), logs it at
+  Info, publishes nothing for it, and the next tick judges it as it is
+  then. `VariantSnapshot.CreatedAt` carries the third column
+  (`integritySnapshotsFromRows`). **Not a re-read before the delete**: a
+  write between the read and the DELETE is the window again. **Nor a
+  refusal of `variants move` while a bridge answers**: it would make the
+  migration the console documents need downtime, and a probe is a guard,
+  not mutual exclusion (the restore bullet under The CLI and the serve
+  wiring). `DeleteVariant` keeps its unconditional delete for the
+  `upscale --gc` reverse sweep, the serve reap and `DELETE
+  /v1/upscale/variants`; its docblock said it had no production callers
+  (#156), false since #209. `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`
+  (cmd/bridge; two hand-removed sidecars are the positive control),
+  `TestVariantWatcherKeepsARowThatChangedSinceItsListing`,
+  `TestVariantWatcherSaysNothingAtWarnWhenEveryMissingRowChanged`,
+  `TestDeleteVariantIfUnchangedKeepsARowAnotherWriterChanged` (a case per
+  writer and per compared column).
 - **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
   be described as a list of files that are gone** (#972).
   `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure

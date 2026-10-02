@@ -423,9 +423,11 @@ func TestUpsertVariantDeltaManifestSurfacesNewVariant(t *testing.T) {
 // iOS picker offer a variant whose sidecar no longer exists, and
 // the next `/v1/download?variant=` would 404.
 //
-// DeleteVariant has no production callers today (the GC sweep is
-// filesystem-only — see runGC in cmd/bridge/upscale.go), so this
-// is forward-looking coverage. Bump symmetry matches UpsertVariant.
+// Bump symmetry matches UpsertVariant. The bump is deleteVariantRow's,
+// which DeleteVariantIfUnchanged shares (its own test is
+// TestDeleteVariantIfUnchangedDeletesARowStillAsListed). This docblock
+// called the coverage forward-looking, DeleteVariant having no
+// production callers, until 2026-10-02; it has had them since #209.
 func TestDeleteVariantBumpsParentIndexedAt(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })

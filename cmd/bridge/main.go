@@ -790,7 +790,10 @@ func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapsh
 // the integrity package's snapshot, shared by both listers so the
 // reverse and forward sweeps see the same fields — SizeBytes included,
 // which the relocation probe compares against a file found at the
-// canonical location.
+// canonical location, and CreatedAt, which the watcher's conditional
+// delete compares, with SidecarPath and SizeBytes, against the row as it
+// is when the delete runs
+// (integrityVariantReconcilerAdapter.DeleteVariantIfUnchanged).
 func integritySnapshotsFromRows(rows []manifest.VariantRow) []integrity.VariantSnapshot {
 	out := make([]integrity.VariantSnapshot, len(rows))
 	for i, r := range rows {
@@ -799,17 +802,21 @@ func integritySnapshotsFromRows(rows []manifest.VariantRow) []integrity.VariantS
 			VariantID:   r.VariantID,
 			SidecarPath: r.SidecarPath,
 			SizeBytes:   r.SizeBytes,
+			CreatedAt:   r.CreatedAt,
 		}
 	}
 	return out
 }
 
 // integrityVariantReconcilerAdapter implements integrity.VariantReconciler
-// on top of a manifest.Store: DeleteVariant is the same one-line
-// passthrough as variantDeleterAdapter's, AdoptVariantSidecar is the
-// path-only UPDATE `bridge variants move` uses (no `indexed_at` bump —
-// nothing changed for a client). Lives separately so the integrity
-// package stays decoupled from internal/api's VariantSummary type.
+// on top of a manifest.Store: DeleteVariantIfUnchanged deletes the row the
+// watcher listed only while it is still that row (Store.
+// DeleteVariantIfUnchanged; backlog B204), where variantDeleterAdapter's
+// DeleteVariant deletes whatever the row records now, and
+// AdoptVariantSidecar is the path-only UPDATE `bridge variants move` uses
+// (no `indexed_at` bump — nothing changed for a client). Lives separately
+// so the integrity package stays decoupled from internal/api's
+// VariantSummary type.
 type integrityVariantReconcilerAdapter struct {
 	store *manifest.Store
 	// baseCtx is runServe's scanCtx. The integrity interfaces take no
@@ -828,8 +835,14 @@ func (a *integrityVariantReconcilerAdapter) ctx() context.Context {
 	return context.Background()
 }
 
-func (a *integrityVariantReconcilerAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(a.ctx(), sourcePath, variantID)
+func (a *integrityVariantReconcilerAdapter) DeleteVariantIfUnchanged(r integrity.VariantSnapshot) error {
+	return a.store.DeleteVariantIfUnchanged(a.ctx(), manifest.VariantRow{
+		SourcePath:  r.SourcePath,
+		VariantID:   r.VariantID,
+		SidecarPath: r.SidecarPath,
+		SizeBytes:   r.SizeBytes,
+		CreatedAt:   r.CreatedAt,
+	})
 }
 
 func (a *integrityVariantReconcilerAdapter) AdoptVariantSidecar(sourcePath, variantID, newSidecarPath string) error {

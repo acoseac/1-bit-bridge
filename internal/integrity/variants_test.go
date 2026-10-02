@@ -53,13 +53,13 @@ type fakeDeleter struct {
 	adoptErr  error
 }
 
-func (f *fakeDeleter) DeleteVariant(sourcePath, variantID string) error {
+func (f *fakeDeleter) DeleteVariantIfUnchanged(r VariantSnapshot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
-	f.deletes = append(f.deletes, sourcePath+"|"+variantID)
+	f.deletes = append(f.deletes, r.SourcePath+"|"+r.VariantID)
 	return nil
 }
 
