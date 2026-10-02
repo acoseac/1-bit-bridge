@@ -302,7 +302,7 @@ func TestAToolOutageThatOutlastsADayIsReportedAgain(t *testing.T) {
 
 	s.then(soxMissing, soxMissing, soxMissing)
 	a.run(t, spec, 1)
-	clock = clock.Add(toolOutageRewarnAfter - time.Minute)
+	clock = clock.Add(outageRewarnAfter - time.Minute)
 	a.run(t, spec, 1)
 	clock = clock.Add(time.Minute)
 	a.run(t, spec, 1)

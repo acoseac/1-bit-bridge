@@ -36533,6 +36533,197 @@ POSIX record lock, so two serves in one process there are not refused. And
 `bridge restore` and `bridge manifest clear-missing` still gate on the admin
 port alone: taking this lock there is a change of its own.
 
+## 2026-10-02 — a directory this host will not let a job write strikes no source (backlog B211)
+
+The transcode pool's strike (`manifest.RecordVariantFailure`; three on one
+file version suppress it from every candidate query for 30 days) is meant for
+a tool that ran and refused the file. #1067 took a missing tool out of it and
+B53 a source newer than its row. What remained struck everything else,
+including a render that failed because this host would not let it WRITE: the
+sidecar's folder under the variants directory, or a DSD render's Stage A
+scratch under the temp dir. Neither says anything about the source, and the
+suppression is keyed on the source's size and mtime, which fixing the
+directory does not change. The pre-v0.2.1 sanity reviews' ops review found it
+with two scratch tests (a read-only variants volume, an unwritable scratch
+directory: one source suppressed after three jobs each).
+
+### The defect, reproduced
+
+Through the real pool and the real runner (`Run`), with stand-in sox, ffmpeg
+and ffprobe as the whole of PATH and a real store holding the track's row, on
+main 5f033c02 (`TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource`,
+written first, as this user, macOS): each of five shapes logged three
+`pool: sox failed` WARNs and ended with "1 source(s) suppressed and 1 strike
+record(s)":
+
+1. the variants directory read-only, the album folder not made yet:
+   `mkdir sidecar dir: mkdir Music: permission denied`;
+2. the album folder made and read-only, a PCM render: sox's own open of its
+   output, `exit status 2 (stderr: … Permission denied)`;
+3. the same folder, a DSD render: Stage C's sox, after Stages A and B had run;
+4. a temp dir the scratch directory cannot be made in:
+   `mkdir render scratch dir: mkdir <render-scratch>: permission denied`;
+5. the scratch directory made and read-only: Stage A's sox.
+
+The ordinary way to get there is a `sudo bridge render` (or `upscale`,
+`optimize`) before v0.2.1, which left root-owned album folders in the variants
+tree and a root-owned 0700 `1-bit-bridge-render` in the shared temp dir
+(B17's measurement): B17 stopped new ones, and the ones already there kept
+striking every file of those albums, and every DSD source, through every sweep
+after.
+
+What the volume answers was measured on a 4 MiB HFS+ image (hdiutil, no root):
+attached read-only, a mkdir, a create and a rename each failed with EROFS; full
+of data (4 KiB free), a mkdir and an empty create both SUCCEEDED. So a
+read-only or unwritable directory reaches the steps the bridge itself takes,
+and a full one mostly does not.
+
+### The fix
+
+`tool_unavailable.go`'s rule, for the output side (internal/transcode
+`output_fault.go`): classify where the fact is known, by the error's type.
+Each step that writes to the output side marks its own failure
+(`markOutputFault`): making the sidecar's folder (Run, renderDSD) and the
+scratch directory (renderDSD, MeasureDSDPeak), creating the sidecar's temp
+file and the scratch file, and the publish rename and the stat after it
+(`publishSidecar`). The mark (`outputFaultError`) wraps the error and changes
+nothing it says, so the batch row, the `jobFailed` event and the log read as
+before. `processJob` asks `unwritableOutput` after `unavailableTool`: the job
+is counted and announced like any failure, through #988's ordered tail, and
+strikes nothing.
+
+**The bridge creates the tool's output before the tool runs** (`createOutput`,
+POSIX: `O_EXCL`, then `fsutil.KeepOwner`). It was `fsutil.Precreate`, which
+creates nothing unless the process is root, so for the service a folder that
+existed and refused new files failed in sox's own open, whose message is all
+the pool sees, and which this change will not parse. Created by the bridge, it
+fails in the bridge's open, by type, and before any decode: a DSD render no
+longer spends Stage A (the decode and resample of the whole track) on a
+sidecar it can never write. The scratch file is created the same way; as root it takes its
+directory's owner, where sox made it root's.
+
+### Decisions
+
+- **A closed set of causes, read by type.** A permission, asked of the
+  whole chain (`fs.ErrPermission`, which names EACCES and EPERM on unix and
+  ERROR_ACCESS_DENIED on Windows, and which a wrapper that reports one keeps
+  even without an errno: Gemini's round 2), or the first `syscall.Errno` in
+  the chain, a cause of the volume's in the
+  platform's table (`outputFaultErrnos`: EROFS, ENOSPC, EDQUOT, EIO, ENOTCONN,
+  ESTALE; ERROR_WRITE_PROTECT, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL,
+  ERROR_DISK_QUOTA_EXCEEDED, ERROR_IO_DEVICE, ERROR_NOT_READY,
+  ERROR_DEV_NOT_EXIST, ERROR_NETNAME_DELETED). Not "every error at an output
+  step": the source's NAME reaches these steps too (the sidecar is named for
+  it), and a name the filesystem refuses (ENAMETOOLONG, EILSEQ, EINVAL)
+  fails the same way on every retry, which is what the strike is for; so does
+  EFBIG. An entry in the way (EEXIST, ENOTDIR) is debris an operator put in
+  the tree, rare, and keeps its strike. The default stays the transcode
+  pool's: strike unless classified.
+- **Not on Windows, the creation.** There a file takes its directory's ACL,
+  Precreate did nothing, and a freshly closed file can be held by Defender or
+  the Search Indexer (`atomicwrite.RenameWithRetry` exists for it). Whether
+  such a hold makes a tool's open of the file for writing fail was not
+  measured, and the cost of guessing wrong is a new failure on every render,
+  so on Windows the tool still creates its output. There a folder whose ACL
+  refuses new files keeps its strike; making a folder and the rename are
+  marked on every platform.
+- **One report per output and kind, proven the way the fault scopes.** The
+  outage report is `toolOutages`' (one Warn when it starts, Debug after, one
+  Info when a job proves it over, a re-Warn after 24 h), now kept by one
+  streak record both reports share (`outageStreaks`, the constant renamed
+  `outageRewarnAfter`), so the two cannot drift on when a streak warns or
+  ends. A volume fault (read-only, full, quota, gone) is over at the first job
+  that writes on that output, whichever folder. A permission is a fact about
+  one folder: where one album folder is root's, every other album still
+  renders, and a proof by any success would Warn again at every failure that
+  followed a success elsewhere; so it ends only when a job writes in the
+  folder that refused it, and the 24 h re-warn bounds what a stale one can
+  hide. Not keyed per folder (CodeRabbit proposed it on #1142, for a second
+  refusing folder B whose outage the example folder A's recovery closes):
+  the ordinary cause, a sudo run before v0.2.1, left EVERY album folder it
+  touched root-owned, and a key per folder Warns once per folder at the first
+  sweep (hundreds, after a library-wide run) and again every 24 h while the
+  files, no longer struck, are re-offered. B is not lost: its next failure
+  starts a new outage, which Warns at once and names B in its error. Keyed
+  by kind as well as output, so a read-only volume and a
+  root-owned folder are reported apart. The proof is taken after the
+  sidecar's fsync (a volume failing its writes can still take a rename) and
+  before the store write (whose failure says nothing about the volume); a DSD
+  success proves the scratch too, read from the settings' `decoder` as the
+  tool report reads it.
+- **No check of the volume after a tool fails.** For a volume that fills
+  while the tool writes, a free-space check against the job's need (or a
+  probe write) was weighed and not taken: it infers the cause from the
+  volume's state afterwards where every step above reads it from the error,
+  and the need is an estimate for every output but the Stage A scratch. That
+  write is the tool's own, which the bridge does not see; this change does
+  not classify it.
+
+### Not covered
+
+A write a tool makes after its output exists (a volume that fills during the
+render). On Windows, an existing folder whose ACL refuses new files. Debris in
+the tree (EEXIST, ENOTDIR).
+
+### Tests and controls
+
+`TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource` (the five shapes
+above, red on main and then green, and a sixth added with the fix: a folder
+the stand-in sox locks once it has written, which refuses the publish rename),
+`TestFixingTheOutputDirectoryBringsTheSourceBackAtTheNextJob` (the real
+runner: after the chmod the next job renders, and reports the output back
+with `failedJobs=3`), `TestMarkOutputFaultReadsWhatTheOSReports` (real
+operations: EACCES from a mkdir and a create in a locked folder is marked,
+ENAMETOOLONG from a 300-byte name and EEXIST are not), all POSIX and skipped
+as root; and on every platform `TestMarkOutputFaultMarksOnlyTheOutputSidesCauses`
+(the table pinned to its written-out twin, every cause marked with its kind),
+`TestMarkOutputFaultReturnsEveryOtherErrorAsItIs` (the name-dependent causes
+and the pool's other classified errors returned unchanged),
+`TestAnOutputOutageIsReportedWhenItStartsAndWhenAJobProvesItBack`,
+`TestAnOutputOutageIsNotOverAtAJobWhoseSidecarFailedItsFsync`,
+`TestAnOutputOutageThatOutlastsADayIsReportedAgain`, and an "output
+unavailable" row in both terminal-order tables. The tool report's own tests
+pass unchanged over the shared record, and
+`TestAToolThatRanAndRefusedTheFileStillStrikesIt` is the positive control.
+`TestRunDSDAsRootKeepsTheInstallOwner` gained the scratch file's owner change.
+
+Negative controls, each on the committed fix and restored after: the pool's
+new exit disabled (all six shapes, the recovery test, the report tests and
+the parked terminal-order row red); `createOutput` a no-op (the three
+"made" shapes and the locked folder red, the two "not made yet" shapes green
+on their mkdir marks, and the real-operation test's create half red);
+Run's mkdir unmarked (shape 1 alone red); renderDSD's scratch mkdir unmarked
+(shape 4 alone red); the publish rename unmarked (the locked folder alone
+red); a permission proven by any success, a volume fault only in its own
+folder, the DSD scratch proof dropped (the report test red each time); the
+proof taken before the fsync (the fsync test red); ENAMETOOLONG added to the
+unix table (the three classifier tests red: the table check, the error
+returned as it is, and the real 300-byte name).
+
+### Review
+
+Gemini's first round on #1142: `outageStreaks.end` took a candidate-key
+generator beside its predicate, and `outputOutages.proven` shared a variable
+between the two callbacks. Taken, with one change: `end` now takes the one
+predicate and walks the open streaks in the order they STARTED (a slice kept
+beside the map), not the map's, so the lines one proof logs come out in one
+order every time; callers work out what they need from the job through
+`lazily`, once, and only while a streak is open
+(`TestOutageStreaksEndInTheOrderTheyStarted`, red with the loop over the map
+in 3 runs of 3). Declined: replacing `golang.org/x/sys/windows`'s error codes
+with the standard library's, which on Windows defines none of them but
+`ERROR_NETNAME_DELETED` (go1.26.6: `undefined: syscall.ERROR_WRITE_PROTECT`
+and the rest); the package already imports x/sys/windows. Its second round:
+a permission is asked of the whole chain, so one a wrapper reports without an
+errno is still classified (no output step builds such an error today; the
+classifier test now carries the case, red with the check back on the errno
+alone), and `lazily` runs on a `sync.Once`. Its third round said the
+x/sys/windows codes would not compile as `syscall.Errno` keys: declined,
+since x/sys/windows declares `type Errno = syscall.Errno` and each code as
+`syscall.Errno` (CLAUDE.md's bot-review section records the same claim), and
+the Windows leg was green on those files. CodeRabbit asked for the start
+order and the lazy proof in the rule itself, which it now carries.
+
 ## 2026-10-02 — A path a client names is scanned, retired and recorded under the spelling its folders list (backlog B219)
 
 Found by the pre-v0.2.1 data review (2026-09-30) on APFS: an upload into

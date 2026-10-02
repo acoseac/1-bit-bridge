@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -125,6 +126,16 @@ func TestACountedTranscodeFailureHasAlreadyReleasedItsPath(t *testing.T) {
 			logMsg: logToolUnavailable,
 			seed:   true,
 			runner: failRunner(soxLookupFailure()),
+			fsync:  noopFsync,
+			landed: requireStrikes(0),
+		},
+		{
+			// Parked in the output outage's Warn, as the tool case is: a
+			// folder the bridge may not write strikes nothing.
+			name:   "output unavailable",
+			logMsg: logOutputUnavailable,
+			seed:   true,
+			runner: failRunner(outputFaultFailure("/srv/variants/Music/Album", syscall.EACCES)),
 			fsync:  noopFsync,
 			landed: requireStrikes(0),
 		},
@@ -308,6 +319,7 @@ func TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath(t *testing.T) {
 		{name: "sox failed", seed: true, finish: failRunner(errors.New("sox FAIL formats: bad header")), fsync: noopFsync},
 		{name: "sox timed out", seed: true, finish: waitForTimeoutRunner, fsync: noopFsync, timeout: 20 * time.Millisecond},
 		{name: "tool unavailable", seed: true, finish: failRunner(soxLookupFailure()), fsync: noopFsync},
+		{name: "output unavailable", seed: true, finish: failRunner(outputFaultFailure("/srv/variants/Music/Album", syscall.EACCES)), fsync: noopFsync},
 		{name: "fsync failed", seed: true, finish: writeSidecarRunner, fsync: failingFsync},
 		{name: "store failed", finish: writeSidecarRunner, fsync: noopFsync},
 		{name: "source changed", seed: true, finish: failRunner(sourceChangedFailure()), fsync: noopFsync},
