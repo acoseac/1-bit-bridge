@@ -3181,8 +3181,13 @@ no failing test — which is the shape to expect in this area.
   volume; a permission only by a job that writes in the folder that refused
   it**: in a variants tree where one album folder is root's, every other
   album still renders, and ending the outage on any success would Warn again
-  at the next failure. Proven after the fsync, since a volume failing its
-  writes can still take a rename; a DSD success proves the scratch too (the
+  at the next failure. **Don't key a permission outage per folder**: a
+  pre-v0.2.1 sudo run left every album folder it touched root's, and a key
+  per folder Warns once per folder, and again every 24 h while the unstruck
+  files are re-offered; another folder that still refuses after the example
+  one is fixed Warns at its next failure, as a new outage. Proven after the
+  fsync, since a volume failing its writes can still take a rename; a DSD
+  success proves the scratch too (the
   settings' `decoder`, as for the tools). **Not covered**: a write a tool
   makes after its output exists (a volume that fills during the render),
   which the bridge does not see and this change does not classify; measured

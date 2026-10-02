@@ -36638,7 +36638,14 @@ directory's owner, where sox made it root's.
   renders, and a proof by any success would Warn again at every failure that
   followed a success elsewhere; so it ends only when a job writes in the
   folder that refused it, and the 24 h re-warn bounds what a stale one can
-  hide. Keyed by kind as well as output, so a read-only volume and a
+  hide. Not keyed per folder (CodeRabbit proposed it on #1142, for a second
+  refusing folder B whose outage the example folder A's recovery closes):
+  the ordinary cause, a sudo run before v0.2.1, left EVERY album folder it
+  touched root-owned, and a key per folder Warns once per folder at the first
+  sweep (hundreds, after a library-wide run) and again every 24 h while the
+  files, no longer struck, are re-offered. B is not lost: its next failure
+  starts a new outage, which Warns at once and names B in its error. Keyed
+  by kind as well as output, so a read-only volume and a
   root-owned folder are reported apart. The proof is taken after the
   sidecar's fsync (a volume failing its writes can still take a rename) and
   before the store write (whose failure says nothing about the volume); a DSD
