@@ -70,16 +70,7 @@ func readOnlyDir(t *testing.T, dir string) {
 // change. The pool struck on every such failure.
 func TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource(t *testing.T) {
 	skipAsRoot(t)
-	for _, tc := range []struct {
-		name, rel string
-		spec      func(*testing.T, string) JobSpec
-		// lock makes the spec's output side refuse this user.
-		lock func(*testing.T, JobSpec)
-		// where is the output side the report must name.
-		where string
-		// sox is the stand-in sox, standInSoxWritesItsOutputs when empty.
-		sox string
-	}{
+	for _, tc := range []outputFaultShape{
 		{
 			name: "variants directory, album folder not made yet", rel: "Music/Album/01.flac", spec: sourceFile,
 			lock: func(t *testing.T, s JobSpec) { readOnlyDir(t, s.OutputDir) }, where: outputVariants,
@@ -111,48 +102,72 @@ func TestAnOutputDirectoryTheBridgeCannotWriteStrikesNoSource(t *testing.T) {
 			where: outputVariants, sox: standInSoxLocksItsFolder,
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			sox := tc.sox
-			if sox == "" {
-				sox = standInSoxWritesItsOutputs
-			}
-			a := newToolFreePool(t, standInTools(t, map[string]string{
-				"sox": sox, "ffmpeg": standInFFmpeg, "ffprobe": standInFFprobe,
-			}), tc.rel)
-			spec := tc.spec(t, tc.rel)
-			tc.lock(t, spec)
-			got := a.run(t, spec, 3)
+		t.Run(tc.name, func(t *testing.T) { runOutputFaultShape(t, tc) })
+	}
+}
 
-			if st := a.pool.Stats(); st.Failed != 3 || st.Done != 0 || st.Inflight != 0 {
-				t.Errorf("Stats() = %+v, want 3 failed and nothing in flight: the jobs still fail", st)
-			}
-			for i, g := range got {
-				if !strings.HasPrefix(g, "failed: ") {
-					t.Errorf("job #%d announced %q, want a failure", i+1, g)
-				}
-			}
-			if suppressed, records := a.strikes(t, tc.rel); suppressed != 0 || records != 0 {
-				t.Errorf("after three jobs that could not write their output: %d source(s) suppressed and %d "+
-					"strike record(s), want none: a directory the bridge may not write says nothing about the file",
-					suppressed, records)
-			}
-			warns := a.log.Failures()
-			if len(warns) != 1 || !strings.Contains(warns[0], logOutputUnavailable) ||
-				!strings.Contains(warns[0], "output="+tc.where) || !strings.Contains(warns[0], "reason=permission denied") {
-				t.Errorf("three jobs that could not write their output logged these warnings:\n%s\n"+
-					"want exactly one, the output fault's, naming the %s and the permission it was refused",
-					strings.Join(warns, "\n"), tc.where)
-			}
-			// The report names the bridge's own directories by placeholder or
-			// relative to the variants directory, as every job failure does.
-			for _, l := range a.log.Lines(logOutputUnavailable) {
-				for _, dir := range []string{spec.OutputDir, spec.TempDir} {
-					if strings.Contains(l, dir) {
-						t.Errorf("report line names %s by its absolute path:\n%s", dir, l)
-					}
-				}
-			}
-		})
+// outputFaultShape is one way a job's output side refuses this user.
+type outputFaultShape struct {
+	name, rel string
+	spec      func(*testing.T, string) JobSpec
+	// lock makes the spec's output side refuse this user.
+	lock func(*testing.T, JobSpec)
+	// where is the output side the report must name.
+	where string
+	// sox is the stand-in sox, standInSoxWritesItsOutputs when empty.
+	sox string
+}
+
+// runOutputFaultShape sends the shape's job three times through the real
+// pool and runner, and requires what every shape owes: three counted and
+// announced failures, no strike, and one report.
+func runOutputFaultShape(t *testing.T, tc outputFaultShape) {
+	t.Helper()
+	sox := tc.sox
+	if sox == "" {
+		sox = standInSoxWritesItsOutputs
+	}
+	a := newToolFreePool(t, standInTools(t, map[string]string{
+		"sox": sox, "ffmpeg": standInFFmpeg, "ffprobe": standInFFprobe,
+	}), tc.rel)
+	spec := tc.spec(t, tc.rel)
+	tc.lock(t, spec)
+	got := a.run(t, spec, 3)
+
+	if st := a.pool.Stats(); st.Failed != 3 || st.Done != 0 || st.Inflight != 0 {
+		t.Errorf("Stats() = %+v, want 3 failed and nothing in flight: the jobs still fail", st)
+	}
+	for i, g := range got {
+		if !strings.HasPrefix(g, "failed: ") {
+			t.Errorf("job #%d announced %q, want a failure", i+1, g)
+		}
+	}
+	if suppressed, records := a.strikes(t, tc.rel); suppressed != 0 || records != 0 {
+		t.Errorf("after three jobs that could not write their output: %d source(s) suppressed and %d "+
+			"strike record(s), want none: a directory the bridge may not write says nothing about the file",
+			suppressed, records)
+	}
+	requireOneOutputReport(t, a, spec, tc.where)
+}
+
+// requireOneOutputReport requires exactly one Warn, the output fault's,
+// naming where and the permission it was refused, and no report line naming
+// the bridge's own directories by their absolute paths: the error is
+// redacted as every job failure's is.
+func requireOneOutputReport(t *testing.T, a *announcingPool, spec JobSpec, where string) {
+	t.Helper()
+	warns := a.log.Failures()
+	if len(warns) != 1 || !strings.Contains(warns[0], logOutputUnavailable) ||
+		!strings.Contains(warns[0], "output="+where) || !strings.Contains(warns[0], "reason=permission denied") {
+		t.Errorf("three jobs that could not write their output logged these warnings:\n%s\n"+
+			"want exactly one, the output fault's, naming the %s and the permission it was refused",
+			strings.Join(warns, "\n"), where)
+	}
+	report := strings.Join(a.log.Lines(logOutputUnavailable), "\n")
+	for _, dir := range []string{spec.OutputDir, spec.TempDir} {
+		if strings.Contains(report, dir) {
+			t.Errorf("report names %s by its absolute path:\n%s", dir, report)
+		}
 	}
 }
 
