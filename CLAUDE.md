@@ -3459,7 +3459,13 @@ no failing test — which is the shape to expect in this area.
   (`IsFilesystemLostFound`, the partial-walk bullet below: the filesystem's
   own at the top is not counted, a readable one is walked, a locked one
   deeper is unlisted); don't fold it into the prune, which turns that
-  bullet's tests red. **The cost, accepted**: in multi-root mode the tree's
+  bullet's tests red. **A recycle bin is no rendition to the probe, though
+  it proves the volume is mounted**: its files are not the tree's, the
+  reading `.Trashes` already had, so a tree whose every rendition went into
+  one (deleted by hand over the share) holds none and is refused as B223
+  refuses any tree deleted by hand (`--allow-mass-delete` is the way past),
+  where main took them for renditions and reaped the rows of a small
+  catalog. **The cost, accepted**: in multi-root mode the tree's
   first level is a library root's BASENAME, which the scanner walks
   whatever its name, so a root named like one of these directories has its
   renditions passed over, as a dot-named root's always were (a library AT a

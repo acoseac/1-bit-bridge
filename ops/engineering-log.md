@@ -36290,6 +36290,20 @@ would queue, and a link to a directory).
   nothing vouching for it. Pruning lost+found by name turns
   `TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut` and
   `TestTreeHoldsVariantSidecars` red (a negative control), so it stays out.
+- **A recycle bin is evidence of the mount and not of renditions.** The probe
+  answers two questions with one walk (B223: the mount-loss probe and the
+  relocation guard must not disagree about what a tree holds). A recycle bin
+  or a snapshot exists only on the mounted volume, so for the first question
+  its renditions were sound evidence; for the second they are deleted files or
+  copies, not the tree's. The walk takes the second reading, the one
+  `.Trashes` (which also exists only at a volume's root) already had. The
+  cost: a tree whose every rendition an operator deleted over the share, into
+  its recycle bin, now holds none, and the watcher refuses every tick as B223
+  refuses any tree deleted by hand (`bridge upscale --gc --allow-mass-delete`
+  is the way past), where main took the recycle bin's files for renditions
+  and reaped a small catalog's rows (a large one met the relocation refusal,
+  "while the variants directory still holds sidecar files", about files that
+  were deleted, not moved).
 - **The first level in multi-root mode.** There the tree's first segment is a
   library root's BASENAME, which the scanner walks whatever its name. A root
   named like one of these directories therefore has its renditions passed
