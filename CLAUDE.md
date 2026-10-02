@@ -1120,6 +1120,43 @@ lost my library."
   it deadlocks the in-scan callers and, for external ones, blocks the scan for
   two library walks; and **don't widen the public `IsScanning`** to cover subtree
   scans, which drives the admin badge, the SSE fast tick and the booklet-GC skip.
+- **A row deleted where no stamping pass follows reaches the duplicate stamps
+  through a COUNT kept where every deletion passes** (2026-10-02, backlog
+  B218). The console's delete retires its rows (`retireAndRescan`, threshold 1)
+  BEFORE the subtree scan it runs, which then wrote and reaped nothing, so its
+  restamp gate stayed shut: delete a duplicate's served copy and the copy it
+  suppressed stayed hidden on every device, which had been sent the served
+  copy's tombstone, until the next full scan (measured through the real
+  `POST /api/library/trash` under the default filter: one copy of the track
+  served before the delete, neither after, and an empty delta). Migration
+  v51's trigger (`tracks_stamped_row_deleted`) counts each deleted row that
+  carried a stamp into `dupe_stamp_deletions.deleted`, in the deleting
+  statement's own transaction; a stamping pass reads the count BEFORE its
+  snapshot and records
+  it as `covered` only once its stamps commit (`noteRestampCovered`), and
+  `deleted > covered` (`stampsBehindDeletions`) opens `ScanSubtree`'s tail gate
+  and runs a pass at the HEAD of a full `Scan`, before the walk, where the
+  root removal, the delete's full-scan fallback, `bridge manifest
+  clear-missing` (while the bridge is stopped) and a scan whose tail pass did
+  not finish all land: each was healed only by a full scan's tail, after a walk
+  of minutes. **Count in the trigger, never in each deleter**: seven Store
+  functions delete tracks rows, in this process and in the CLI's, and one added
+  later is counted without anyone remembering to. **Only a row that carried a
+  stamp counts**, so the delete of a track that is no copy of anything, and
+  every UPnP-routed reap (never stamped), costs no pass
+  (`TestTrashingATrackThatIsNoCopyRunsNoStampingPass`). **Read the count before
+  the snapshot and record it only after the commit**: read at the commit, a
+  deletion during the pass is recorded as seen
+  (`TestADeletionDuringAStampingPassIsLeftForTheNext`); recorded by a pass that
+  stood down for a scan (the external restamp still does, and records nothing)
+  or whose stamps failed, it is never restamped for
+  (`TestAStampingPassThatDoesNotApplyLeavesTheDeletionUncovered`).
+  `WipeFilesystemTracks` deletes every stamped row, so it leaves nothing
+  suppressed; its count costs the next scan one pass over what is left.
+  `TestTrashingTheServedCopyOfADuplicateServesTheOther`,
+  `TestEveryDeletionOfAStampedRowIsCounted`,
+  `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`,
+  `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`.
 - **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
   the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
   Both terms are load-bearing: the clock term anchors to wall-clock because the

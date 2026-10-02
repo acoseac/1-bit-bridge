@@ -582,6 +582,22 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.takeHeldReconciles()
 	defer s.settleHeldUnreconciled(ctx)
 
+	// A row that carried a duplicate stamp was deleted since the last
+	// stamping pass, where none followed: a root removal, the console's
+	// delete of more folders than it rescans one by one, `bridge manifest
+	// clear-missing` while the bridge was stopped, or a scan whose tail
+	// pass did not finish. Each is followed by a full scan, whose tail
+	// restamps, but after the walk, which on a large library is minutes,
+	// while the copy of a duplicate whose served twin went stays hidden on
+	// every device. So the pass runs here as well, before the walk, on the
+	// tags the last pass grouped (backlog B218); the tail's pass still runs
+	// last, on this scan's own changes. Said, because it is the one scan
+	// that stamps twice.
+	if ctx.Err() == nil && s.stampsBehindDeletions(ctx) {
+		scanLogger.Info(msgDupeStampingBeforeWalk)
+		s.restampDuplicatesNonFatal(ctx)
+	}
+
 	// Snapshot of paths we knew about BEFORE this scan. At the end we drop
 	// rows whose paths weren't touched during the walk — that's the
 	// "deleted from disk" pass. Folders snapshot the same way so the
@@ -2577,10 +2593,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// see the twin that lives in another. But the pass is two full-table
 	// json_extract streams (the StreamTrackDupeRefsUnderPrefix cost
 	// class), and unlike Scan this runs per debounced watcher event — so
-	// it is gated on the scan having actually touched a row. The stamps
-	// derive only from `tracks`: if this scan committed nothing and reaped
-	// nothing, no input to them moved, and the periodic full Scan remains
-	// the safety net for staleness from anywhere else.
+	// it is gated on an input to the stamps having moved: a row this scan
+	// touched, or a stamped row deleted anywhere since the last pass
+	// (stampsBehindDeletions). The second term is not a nicety. The
+	// console's delete retires its rows BEFORE the subtree scan it runs,
+	// which then writes and reaps nothing, and until backlog B218 this
+	// gate stayed shut there: delete a duplicate's served copy and the
+	// copy it suppressed stayed hidden on every device until the next
+	// full scan (6 h by default), which this comment called the safety
+	// net. A deletion of a row that carried no stamp moves nothing, and
+	// costs no pass.
 	//
 	// The error term is the TRACKS pass's specifically. The folders pass
 	// writes a different table that is not an input to the stamps at all,
@@ -2595,7 +2617,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// pass then fails at its first read on the same cancelled context, and
 	// restampDuplicatesNonFatal does not report that.
 	settled := s.settleSubtreeHeldReconciles(ctx)
-	if committed.Load() > 0 || settled > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil {
+	if committed.Load() > 0 || settled > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil ||
+		s.stampsBehindDeletions(ctx) {
 		s.restampDuplicatesNonFatal(ctx)
 	}
 

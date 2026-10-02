@@ -2197,6 +2197,43 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		// v51 counts the deletions of rows that carried a duplicate stamp
+		// (v31), so a stamping pass can tell whether the stamps still
+		// describe the table (backlog B218). A group's stamps are derived
+		// from all its members, and a row deleted where no stamping pass
+		// followed left them as they were: the console's delete retires its
+		// rows before the subtree scan it runs, which then wrote and reaped
+		// nothing and skipped its restamp, so the copy of a duplicate the
+		// delete left behind stayed suppressed, on every device, until the
+		// next full scan.
+		//
+		// The trigger counts where every deletion passes, in the deleting
+		// statement's own transaction, so no deleter in any process (the
+		// console's delete, a root removal, `bridge manifest clear-missing`,
+		// an SACD container retired inside a subtree scan, one added later) can
+		// forget to; and only a row that carried a stamp counts, so a delete
+		// of a track that is no copy of anything, or of a UPnP-routed row
+		// (never stamped), costs no pass. `covered` is the count the last
+		// applied stamping pass read before its snapshot
+		// (Store.noteRestampCovered): deleted > covered is a deletion the
+		// stamps have not seen (Scanner.stampsBehindDeletions).
+		version: 51,
+		name:    "dupe_stamp_deletions (deleted rows that carried a duplicate stamp, against the last stamping pass)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS dupe_stamp_deletions (
+			id        INTEGER PRIMARY KEY CHECK (id = 1),
+			deleted   INTEGER NOT NULL DEFAULT 0,
+			covered   INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT OR IGNORE INTO dupe_stamp_deletions(id) VALUES (1);
+		CREATE TRIGGER IF NOT EXISTS tracks_stamped_row_deleted AFTER DELETE ON tracks
+		WHEN old.dupe_group_id != '' OR old.dupe_tier != '' OR old.dupe_suppressed != 0
+		BEGIN
+			UPDATE dupe_stamp_deletions SET deleted = deleted + 1 WHERE id = 1;
+		END;
+		`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
