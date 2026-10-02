@@ -233,6 +233,38 @@ func (s *Store) LoadDupeSummary(ctx context.Context) (*DupeSummary, error) {
 	return &sum, nil
 }
 
+// stampedDeletions reads how many rows that carried a duplicate stamp have
+// been deleted, ever: migration v51's trigger counts them in each deleting
+// statement's own transaction.
+func (s *Store) stampedDeletions(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT deleted FROM dupe_stamp_deletions WHERE id = 1`).Scan(&n)
+	return n, err
+}
+
+// noteRestampCovered records that an applied stamping pass saw every deletion
+// of a stamped row up to deleted, the count it read before its snapshot. MAX,
+// so a pass that read an older count never moves the record back.
+//
+// Holds `s.mu` per the writer contract on Store.
+func (s *Store) noteRestampCovered(ctx context.Context, deleted int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE dupe_stamp_deletions SET covered = MAX(covered, ?) WHERE id = 1`, deleted)
+	return err
+}
+
+// stampsBehindDeletions reports whether a row that carried a duplicate stamp
+// has been deleted since the last applied stamping pass read the count: the
+// stamps may then suppress a copy whose served twin is gone.
+func (s *Store) stampsBehindDeletions(ctx context.Context) (bool, error) {
+	var behind bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT deleted > covered FROM dupe_stamp_deletions WHERE id = 1`).Scan(&behind)
+	return behind, err
+}
+
 // DupeGroupMemberRow / DupeGroupRow are the admin Duplicates page's
 // group-listing projection — store row structs, NO json tags (the wire
 // DTO lives in internal/admin per the wire-type discipline).

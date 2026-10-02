@@ -53,6 +53,25 @@ var dupeSummaryTierOrder = []dupes.Tier{
 // afterExtractHookForTests; production code MUST NOT set it.
 var beforeApplyDupeStampsHookForTests func()
 
+// msgDupeStampsCovered is the warning of a stamping pass whose stamps applied
+// and whose record of the deletions they cover did not (noteRestampCovered).
+const msgDupeStampsCovered = "duplicate stamping: could not record the deletions the stamps cover"
+
+// msgDupeStampingBeforeWalk opens the pass a full scan runs before its walk
+// (stampsBehindDeletions), so its "duplicate stamping" line is not taken for
+// the tail's.
+const msgDupeStampingBeforeWalk = "duplicate stamping before the walk: rows that carried a stamp were deleted since the last pass"
+
+// stampsBehindDeletions reports whether a row that carried a duplicate stamp
+// has been deleted since the last applied stamping pass (migration v51), so
+// the stamps may suppress a copy whose served twin is gone (backlog B218). A
+// read that fails answers yes: a needless pass costs one DB-only pass, a
+// missed one a group with no served copy.
+func (s *Scanner) stampsBehindDeletions(ctx context.Context) bool {
+	behind, err := s.store.stampsBehindDeletions(ctx)
+	return behind || err != nil
+}
+
 // restampDuplicatesNonFatal runs one stamping pass on behalf of a scan
 // and logs the outcome instead of failing the scan — one pass failing
 // must not turn an otherwise-good scan into an error.
@@ -125,6 +144,14 @@ func (s *Scanner) RestampDuplicates(ctx context.Context) (int, error) {
 // authoritative one and must never abandon.
 func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, error) {
 	policy := s.currentDupePolicy()
+
+	// How many stamped rows have been deleted, read BEFORE the snapshot
+	// below and recorded once the stamps commit (stampsBehindDeletions). A
+	// deletion that lands between this read and the streams is seen by them
+	// and still reads as uncovered, costing one needless pass later; one
+	// that lands after the streams is not seen, and reads as uncovered, as
+	// it must. A failed read records nothing, so the next scan asks again.
+	deleted, deletedErr := s.store.stampedDeletions(ctx)
 
 	c := dupes.NewCollector()
 	if err := s.store.StreamTrackDupeRefsUnderPrefix(ctx, "", false, func(r dupes.Row, _ DupeStampState) error {
@@ -232,6 +259,17 @@ func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, 
 	n, err := s.store.ApplyDupeStamps(ctx, stamps)
 	if err != nil {
 		return 0, err
+	}
+	// Recorded only by a pass that applied: an abandoned one above leaves
+	// the deletions it saw uncovered, for the scan it stood down for. A
+	// failed record costs one more pass, so it is a warning, and one the
+	// shutdown stopped is not reported.
+	if deletedErr == nil {
+		if cerr := s.store.noteRestampCovered(ctx, deleted); cerr != nil {
+			if failure := ctxerr.WithoutCancellation(ctx, cerr); failure != nil {
+				scanLogger.Warn(msgDupeStampsCovered, "err", failure)
+			}
+		}
 	}
 
 	sum := DupeSummary{

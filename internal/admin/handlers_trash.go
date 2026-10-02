@@ -133,6 +133,13 @@ func trashResultDTOOf(res *trash.Result) trashResultDTO {
 // unlinks sidecars and writes manifest_deletions tombstones, so synced clients
 // drop the tracks too — no new deletion machinery.
 //
+// The retirement deletes rows outside a scan, so the scan after it writes and
+// reaps nothing of its own. A deleted row that carried a duplicate stamp is
+// counted where it is deleted (migration v51), and that count is what makes
+// the rescan restamp: a subtree scan in its tail, a full scan before its walk,
+// so the copy a deleted duplicate's served twin suppressed is served again
+// (backlog B218). Nothing here has to ask for it.
+//
 // Both use the spelling the trash read off disk (trash.Result's Paths and
 // Dirs), never the client's: a row is retired only under the path its walk
 // wrote, and a rescan under another spelling indexes the folder a second time
