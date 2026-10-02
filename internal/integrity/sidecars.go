@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // gcChunkSize bounds how many orphans ONE tick of the background sweep
@@ -487,10 +488,12 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		}
 		return 0
 	}
-	// Case-fold + clean the known-set keys so a casing delta between the
-	// DB SidecarPath and the on-disk WalkDir path can't misclassify a live
-	// sidecar as orphan (and unlink it) on a case-insensitive FS — the same
-	// hazard fixed in `bridge upscale --gc` (CodeRabbit on PR #477).
+	// The known-set keys are KnownSidecarKey's (cleaned, composed,
+	// case-folded), so a case or normalization delta between the DB
+	// SidecarPath and the on-disk WalkDir path can't misclassify a live
+	// sidecar as orphan (and unlink it): a case-insensitive FS (CodeRabbit
+	// on PR #477), or an HFS+ volume handing back the name decomposed
+	// (backlog B206).
 	//
 	// Both spellings of every row go in: the recorded path AND the canonical
 	// one under the tree being walked (KnownSidecarSet). A relocated catalog
@@ -1032,21 +1035,65 @@ const (
 // KnownSidecarSet is the forward sweeps' "this file has a row" set:
 // every row's recorded `sidecar_path` AND its canonical path under
 // `variantsDir` (CanonicalSidecarPath — empty, and skipped, for a row
-// with no source identity), each case-folded and cleaned to match the
-// walk's on-disk spelling on a case-insensitive filesystem. Shared by
-// OrphanSidecarSweeper and `bridge upscale --gc` so the two forward
-// sweeps cannot disagree about which files a relocated catalog owns.
+// with no source identity), each keyed by KnownSidecarKey, the spelling
+// TakeSidecarInventory looks every walked file up in. Shared by
+// OrphanSidecarSweeper, `bridge upscale --gc` and `bridge doctor`'s
+// variants-index, so they cannot disagree about which files a relocated
+// catalog owns.
 func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]struct{} {
 	known := make(map[string]struct{}, 2*len(rows))
 	for _, r := range rows {
 		if r.SidecarPath != "" {
-			known[strings.ToLower(filepath.Clean(r.SidecarPath))] = struct{}{}
+			known[KnownSidecarKey(r.SidecarPath)] = struct{}{}
 		}
 		if c := CanonicalSidecarPath(variantsDir, r); c != "" {
-			known[strings.ToLower(filepath.Clean(c))] = struct{}{}
+			known[KnownSidecarKey(c)] = struct{}{}
 		}
 	}
 	return known
+}
+
+// KnownSidecarKey is the one spelling a forward sweep compares a path in:
+// cleaned, composed (NFC) and lowercased. KnownSidecarSet keys every row
+// by it, TakeSidecarInventory looks every file it walks up by it, and
+// `bridge analyze --gc` keys its waveform rows by it, so none of them can
+// read a file its row names as an orphan to unlink.
+//
+// Lowercased, because on a case-insensitive filesystem (APFS, NTFS by
+// default) the walk hands back the name as the directory holds it, which
+// can differ in case from the path the row recorded (CodeRabbit on #477).
+//
+// Composed, because an HFS+ volume stores every name decomposed (NFD),
+// whatever spelling created it, and a walk hands it back that way, while
+// the row records the spelling the file was written by: the library's
+// relative path as the scanner read it, composed (NFC) on most
+// filesystems. APFS keeps the spelling a name was created with and looks
+// either one up, so a tree copied there from HFS+ keeps its decomposed
+// names. Keyed by the case alone, a live rendition on either was an
+// orphan to the forward sweeps while LocateSidecar's stat of the composed
+// path reached it, so `upscale --gc`, `analyze --gc` and the background
+// sweep unlinked it, and it was rendered again (backlog B206, measured on
+// an HFS+ disk image and on APFS). Composed BEFORE it is lowercased:
+// strings.ToLower maps rune by rune, which does not commute with
+// decomposition (U+0130 İ lowers to "i", its decomposition I+U+0307 to
+// "i"+U+0307), so lowercasing first leaves such a name keyed two ways,
+// while two spellings of one name compose to the same string, whose key
+// is then one. manifest.NFCCompose is the composer `unicode_lower` calls,
+// never a second copy.
+//
+// Both folds only make MORE files known, never fewer, which is the safe
+// direction for a sweep that unlinks what is not known: on a filesystem
+// that looks a name up by its bytes (ext4, and NTFS for normalization), a
+// file whose name differs from a row's only by case or by normalization is
+// kept, though no row's path opens it.
+// That costs at most a file a sweep would have removed (the reverse sweep
+// reaps such a row, after which its file is an orphan again); reading a
+// live file as an orphan costs the rendition. Nothing else reads the keys:
+// the mass-orphan ratio and the doctor's variants-index count are the
+// walk's Known and Orphans, so a fold moves a file from the second to the
+// first and both read fewer orphans.
+func KnownSidecarKey(path string) string {
+	return strings.ToLower(manifest.NFCCompose(filepath.Clean(path)))
 }
 
 // shouldConsiderSidecarFile is the background sweep's Consider: whether

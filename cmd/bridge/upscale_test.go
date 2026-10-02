@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -143,10 +144,10 @@ func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Known-set keyed exactly as runGC keys it: case-folded + cleaned.
+	// Known-set keyed exactly as runGC keys it: integrity.KnownSidecarKey.
 	// The lowercase key vs the mixed-case on-disk walk path is the casing
 	// delta the fix bridges.
-	known := map[string]struct{}{strings.ToLower(filepath.Clean(sidecar)): {}}
+	known := map[string]struct{}{integrity.KnownSidecarKey(sidecar): {}}
 
 	inv, exitCode := gcTakeInventory(context.Background(), &bytes.Buffer{}, outputDir, known)
 	if exitCode != 0 {
