@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,7 +100,15 @@ func TestASecondServeOfALiveDataDirChangesNothing(t *testing.T) {
 // TestServeFreesTheDataDirWhenItReturns stops a serve and starts another
 // on the same data dir in this process, as the launcher menu does: the
 // lock goes with the runServe that took it, not with the process.
+//
+// No automatic collection runs meanwhile. An *os.File nothing references
+// is closed by its finalizer, which releases its lock, so a serve that
+// dropped its lock file instead of releasing it at return would pass here
+// whenever a collection happened to run first, and would let a second
+// serve in while the first still served.
 func TestServeFreesTheDataDirWhenItReturns(t *testing.T) {
+	gcPercent := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(gcPercent) })
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "Music")
 	if err := os.MkdirAll(lib, 0o755); err != nil {
