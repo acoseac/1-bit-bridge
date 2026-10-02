@@ -4,8 +4,6 @@ package transcode
 
 import (
 	"context"
-	"errors"
-	"os"
 	"strconv"
 	"testing"
 
@@ -51,19 +49,13 @@ func TestADSDRenditionHoldsWhatItsScratchHeld(t *testing.T) {
 			t.Cleanup(resetFFmpegSnapshotForTest)
 			spec := dsdSource(t, "Album/01.dsf")
 			_, err := Run(context.Background(), spec)
-			_, statErr := os.Stat(spec.SidecarPath())
+			// A whole rendition of the wrong length is the run's fault, never
+			// the output side's.
+			var want []byte
 			if tc.ok {
-				if err != nil || statErr != nil {
-					t.Fatalf("Run = %v, stat %v; want the rendition published", err, statErr)
-				}
-				return
+				want = tc.stageC
 			}
-			if !errors.Is(err, ErrRenditionIncomplete) || !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("Run = %v, stat %v; want ErrRenditionIncomplete and nothing published", err, statErr)
-			}
-			if _, marked := unwritableOutput(err); marked {
-				t.Errorf("Run = %v: marked the output side's; a whole rendition of the wrong length is the run's", err)
-			}
+			checkRunVerdict(t, spec, err, want, false)
 		})
 	}
 }

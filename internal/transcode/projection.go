@@ -133,35 +133,58 @@ func ProjectedSize(
 // the wrong (parent) volume.
 func AvailableDiskSpaceNearest(dir string) (int64, error) {
 	dir = filepath.Clean(dir)
-	probe := dir
-	for {
-		_, err := os.Stat(probe)
-		if err == nil {
-			break
-		}
-		if !os.IsNotExist(err) {
-			// Only NON-EXISTENCE walks up: any other stat failure
-			// (permission flap, transient I/O) means the path may
-			// well exist — walking past it would grade the wrong
-			// parent volume and mask the real fault. Stat the
-			// configured dir itself so AvailableDiskSpace surfaces
-			// the genuine error to the caller.
-			probe = dir
-			break
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			// Volume root — stat it anyway and let AvailableDiskSpace
-			// surface the real error if even the root is unreadable.
-			break
-		}
-		probe = parent
-	}
+	probe := nearestExisting(dir)
 	if probe != dir {
 		logger.Warn("disk probe: directory missing; probing nearest existing ancestor",
 			"dir", dir, "ancestor", probe)
 	}
 	return AvailableDiskSpace(probe)
+}
+
+// nearestExisting is the directory a probe of the cleaned dir reads: dir
+// itself, or its closest existing ancestor while dir does not exist.
+func nearestExisting(dir string) string {
+	probe := dir
+	for {
+		_, err := os.Stat(probe)
+		if err == nil {
+			return probe
+		}
+		if !os.IsNotExist(err) {
+			// Only NON-EXISTENCE walks up: any other stat failure
+			// (permission flap, transient I/O) means the path may
+			// well exist — walking past it would grade the wrong
+			// parent volume and mask the real fault. Probe the
+			// configured dir itself so the probe surfaces the
+			// genuine error to the caller.
+			return dir
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			// Volume root — probe it anyway and let the probe surface
+			// the real error if even the root is unreadable.
+			return probe
+		}
+		probe = parent
+	}
+}
+
+// SameVolume reports whether a and b are on one volume, each judged where
+// AvailableDiskSpaceNearest probes it (the directory, or its closest
+// existing ancestor while it does not exist): the device on POSIX, the
+// volume serial number on Windows. A pre-flight that budgets two needs (a
+// DSD render's Stage A scratch and its rendition, which it holds at once)
+// adds them on one volume.
+func SameVolume(a, b string) (bool, error) {
+	va, err := volumeID(nearestExisting(filepath.Clean(a)))
+	if err != nil {
+		return false, err
+	}
+	vb, err := volumeID(nearestExisting(filepath.Clean(b)))
+	if err != nil {
+		return false, err
+	}
+	return va == vb, nil
 }
 
 // ErrInsufficientDiskSpace is returned by DiskHasHeadroom when the

@@ -9,8 +9,23 @@ package transcode
 
 import (
 	"fmt"
+	"os"
 	"syscall"
 )
+
+// volumeID is the device holding dir, for SameVolume. Dev is an int32 on
+// darwin and a uint64 on linux; widened, equal devices stay equal.
+func volumeID(dir string) (uint64, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return 0, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat %q: no device", dir)
+	}
+	return uint64(st.Dev), nil
+}
 
 // AvailableDiskSpace returns the number of bytes available to a
 // non-privileged caller on the volume that holds `dir`. The probe is

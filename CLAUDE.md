@@ -3299,11 +3299,14 @@ no failing test — which is the shape to expect in this area.
   it closes it, so a scratch a full volume cut and a source that decoded short
   look alike; a Stage A that failed (its pipe, or a short scratch) asks the
   scratch volume (`scratchOutput`), and only a refusal `hostOutputFault` names
-  is the scratch's. **The on-demand enqueue checks room before it queues**
-  (`roomForRendition`: `ProjectedSize` and `RequiredBytesWithMargin` on the
-  variants volume, `RenderScratchBytes` on the scratch), as the batch and the
-  sweep do; a refusal is `api.ErrUpscaleNoRoom`, rejected, one Warn per
-  request, no wire change. **A stand-in sox that "renders" writes a whole
+  is the scratch's. **The on-demand enqueue checks room before it queues**,
+  as the batch and the sweep check theirs (`roomForRendition`:
+  `ProjectedSize` and `RequiredBytesWithMargin` on the variants volume,
+  `RenderScratchBytes` on the scratch volume, and **their sum where the two
+  are one volume**, `transcode.SameVolume`, each judged where the probe judges
+  it: a DSD render holds its scratch while Stage C writes the rendition;
+  CodeRabbit on #1145); a refusal is `api.ErrUpscaleNoRoom`, rejected, one
+  Warn per request, no wire change. **A stand-in sox that "renders" writes a whole
   FLAC** (`internal/flactest`, `shWrites`): a payload like `fLaC` is refused
   now. Tests: `TestARenditionThatCouldNotBeWrittenWholeIsNotPublished` (real
   tools on a full volume: an HFS+ image on macOS, `BRIDGE_TEST_SMALL_VOLUME`
@@ -3314,7 +3317,9 @@ no failing test — which is the shape to expect in this area.
   `TestAStageAThatLeftAShortScratchAsksTheScratchVolume`,
   `TestACutStreamIsClassifiedByWhatTheVolumeAnswers`,
   `TestACutStreamIsNotWhole`,
-  `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`.
+  `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+  `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition`,
+  `TestSameVolumeJudgesEachDirectoryWhereTheProbeDoes`.
 - **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
   that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
   terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,

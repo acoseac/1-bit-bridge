@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -917,6 +918,10 @@ type upscaleEnqueuerAdapter struct {
 	// (roomForRendition); nil is transcode.AvailableDiskSpaceNearest. A
 	// seam, as the auto-optimize sweeper's diskFree is.
 	diskFree func(dir string) (int64, error)
+	// sameVolume answers whether the variants directory and the render
+	// scratch are on one volume, for the same pre-flight; nil is
+	// transcode.SameVolume.
+	sameVolume func(a, b string) (bool, error)
 }
 
 // renditionQueue is the one transcode.Pool method the adapter calls. It is
@@ -1072,21 +1077,41 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 // roomForRendition refuses a job whose volumes have no room for it, before it
 // is queued: the variants volume for the projected rendition, and for a DSD
 // render the scratch volume for its Stage A intermediate. The batch and the
-// auto-optimize sweep make the same check before they queue (ProjectedSize
-// and RequiredBytesWithMargin with DefaultDiskSafetyMargin; RenderScratchBytes);
-// the on-demand path made none, so on a full volume every request queued a
-// render that could only fail, and a phone's requests kept coming (backlog
-// B264). A probe that cannot read a volume refuses too, as theirs do.
+// auto-optimize sweep check before they queue too (ProjectedSize and
+// RequiredBytesWithMargin with DefaultDiskSafetyMargin; RenderScratchBytes);
+// the on-demand path made no check, so on a full volume every request queued
+// a render that could only fail, and a phone's requests kept coming (backlog
+// B264). A DSD render holds its scratch while it writes the rendition (Stage
+// C reads the one into the other), so where the two directories are on one
+// volume it needs the sum there. A probe that cannot read a volume refuses
+// too, as theirs do.
 func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
 	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
 		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
+	scratch := spec.RenderScratchBytes()
+	if scratch <= 0 {
+		return a.roomOn(spec.OutputDir, projected)
+	}
+	scratchDir := transcode.RenderScratchDir(spec.TempDir)
+	same := a.sameVolume
+	if same == nil {
+		same = transcode.SameVolume
+	}
+	shared, err := same(spec.OutputDir, scratchDir)
+	if err != nil {
+		return fmt.Errorf("check free space for the rendition: %w", err)
+	}
+	if shared {
+		need := projected + scratch
+		if need < projected { // ProjectedSize saturates at MaxInt64; a wrapped sum would pass
+			need = math.MaxInt64
+		}
+		return a.roomOn(spec.OutputDir, need)
+	}
 	if err := a.roomOn(spec.OutputDir, projected); err != nil {
 		return err
 	}
-	if scratch := spec.RenderScratchBytes(); scratch > 0 {
-		return a.roomOn(transcode.RenderScratchDir(spec.TempDir), scratch)
-	}
-	return nil
+	return a.roomOn(scratchDir, scratch)
 }
 
 // roomOn answers whether dir's volume has room for need bytes and the

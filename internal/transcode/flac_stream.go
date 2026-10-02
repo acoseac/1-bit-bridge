@@ -215,73 +215,20 @@ var flacSampleSizes = [8]int{0, 8, 12, -1, 16, 20, 24, 32}
 // depth agree with STREAMINFO, its block is no larger than STREAMINFO's
 // largest, and its CRC-8 is right. ok is false for anything else.
 func parseFLACFrameHeader(b []byte, info flacStreamInfo) (h flacFrameHeader, ok bool) {
-	if len(b) < 6 || b[0] != 0xFF || b[1]&0xFE != 0xF8 || b[3]&0x01 != 0 {
+	if !flacHeaderMatchesStream(b, info) {
 		return h, false
 	}
 	h.variable = b[1]&0x01 == 1
-	bsCode, srCode := int(b[2]>>4), int(b[2]&0x0F)
-	chCode, ssCode := int(b[3]>>4), int(b[3]>>1&0x07)
-	if bsCode == 0 || srCode == 15 || chCode > 10 || flacSampleSizes[ssCode] < 0 {
-		return h, false
-	}
-	channels := chCode + 1
-	if chCode >= 8 {
-		channels = 2
-	}
-	bits := flacSampleSizes[ssCode]
-	if bits == 0 {
-		bits = info.bitsPerSample
-	}
-	if channels != info.channels || bits != info.bitsPerSample {
-		return h, false
-	}
 	i, number, ok := flacCodedNumber(b, 4, h.variable)
 	if !ok {
 		return h, false
 	}
 	h.number = number
-	switch {
-	case bsCode == 1:
-		h.blockSize = 192
-	case bsCode <= 5:
-		h.blockSize = 576 << (bsCode - 2)
-	case bsCode <= 7:
-		// The block size less one, after the coded number: one byte for
-		// code 6, two for code 7.
-		n := bsCode - 5
-		if i+n > len(b) {
-			return h, false
-		}
-		v := 0
-		for _, x := range b[i : i+n] {
-			v = v<<8 | int(x)
-		}
-		h.blockSize = v + 1
-		i += n
-	default:
-		h.blockSize = 256 << (bsCode - 8)
+	if h.blockSize, i, ok = flacFrameBlockSize(b, i, int(b[2]>>4)); !ok || h.blockSize > info.maxBlock {
+		return h, false
 	}
-	rate := info.sampleRate
-	switch {
-	case srCode >= 1 && srCode <= 11:
-		rate = flacSampleRates[srCode]
-	case srCode == 12:
-		if i+1 > len(b) {
-			return h, false
-		}
-		rate = int(b[i]) * 1000
-		i++
-	case srCode == 13 || srCode == 14:
-		if i+2 > len(b) {
-			return h, false
-		}
-		rate = int(b[i])<<8 | int(b[i+1])
-		if srCode == 14 {
-			rate *= 10
-		}
-		i += 2
-	}
-	if rate != info.sampleRate || h.blockSize > info.maxBlock {
+	rate, i, ok := flacFrameSampleRate(b, i, int(b[2]&0x0F), info.sampleRate)
+	if !ok || rate != info.sampleRate {
 		return h, false
 	}
 	if i >= len(b) || flacCRC8(b[:i]) != b[i] {
@@ -289,6 +236,83 @@ func parseFLACFrameHeader(b []byte, info flacStreamInfo) (h flacFrameHeader, ok 
 	}
 	h.length = i + 1
 	return h, true
+}
+
+// flacHeaderMatchesStream reads a frame header's first four bytes: the sync
+// code, a clear reserved bit, no reserved or forbidden code, and the channel
+// count and bit depth STREAMINFO gives.
+func flacHeaderMatchesStream(b []byte, info flacStreamInfo) bool {
+	if len(b) < 6 || b[0] != 0xFF || b[1]&0xFE != 0xF8 || b[3]&0x01 != 0 {
+		return false
+	}
+	bsCode, srCode := b[2]>>4, b[2]&0x0F
+	chCode, ssCode := int(b[3]>>4), int(b[3]>>1&0x07)
+	if bsCode == 0 || srCode == 15 || chCode > 10 || flacSampleSizes[ssCode] < 0 {
+		return false
+	}
+	channels := chCode + 1
+	if chCode >= 8 {
+		channels = 2 // left/side, right/side, mid/side
+	}
+	bits := flacSampleSizes[ssCode]
+	if bits == 0 {
+		bits = info.bitsPerSample
+	}
+	return channels == info.channels && bits == info.bitsPerSample
+}
+
+// flacFrameBlockSize reads the block size a frame header codes as bsCode,
+// for codes 6 and 7 from the bytes at b[i] after the coded number, and
+// returns the index past what it read.
+func flacFrameBlockSize(b []byte, i, bsCode int) (size, next int, ok bool) {
+	switch {
+	case bsCode < 1:
+		return 0, i, false
+	case bsCode == 1:
+		return 192, i, true
+	case bsCode <= 5:
+		return 576 << (bsCode - 2), i, true
+	case bsCode <= 7:
+		// The block size less one: one byte for code 6, two for code 7.
+		n := bsCode - 5
+		if i+n > len(b) {
+			return 0, i, false
+		}
+		v := 0
+		for _, x := range b[i : i+n] {
+			v = v<<8 | int(x)
+		}
+		return v + 1, i + n, true
+	}
+	return 256 << (bsCode - 8), i, true
+}
+
+// flacFrameSampleRate reads the sample rate a frame header codes as srCode:
+// STREAMINFO's for 0, a table entry for 1 to 11, and for 12 to 14 the bytes
+// at b[i] after the block size (kHz, Hz, tens of Hz). It returns the index
+// past what it read; 15 is forbidden.
+func flacFrameSampleRate(b []byte, i, srCode, streamRate int) (rate, next int, ok bool) {
+	switch {
+	case srCode == 0:
+		return streamRate, i, true
+	case srCode <= 11:
+		return flacSampleRates[srCode], i, true
+	case srCode == 12:
+		if i+1 > len(b) {
+			return 0, i, false
+		}
+		return int(b[i]) * 1000, i + 1, true
+	case srCode <= 14:
+		if i+2 > len(b) {
+			return 0, i, false
+		}
+		rate = int(b[i])<<8 | int(b[i+1])
+		if srCode == 14 {
+			rate *= 10
+		}
+		return rate, i + 2, true
+	}
+	return 0, i, false
 }
 
 // flacCodedNumber reads the frame or sample number coded at b[i] in the

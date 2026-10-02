@@ -132,6 +132,36 @@ func runTool(t *testing.T, name string, args ...string) {
 	}
 }
 
+// fullVolumeCase is one row of
+// TestARenditionThatCouldNotBeWrittenWholeIsNotPublished: a source rendered
+// onto a volume with no room for one of the files its render writes.
+type fullVolumeCase struct {
+	name, src string
+	seconds   float64
+	// fullScratch puts the render scratch, not the variants directory, on
+	// the full volume.
+	fullScratch bool
+	need        func(*testing.T)
+	spec        func(src, outDir, tempDir string) JobSpec
+	where       string
+}
+
+// pcmUpscaleSpec is the job a 44.1 kHz / 16-bit row at rel asks for: 192 kHz
+// / 24 bit.
+func pcmUpscaleSpec(rel string) func(src, outDir, tempDir string) JobSpec {
+	return func(src, outDir, tempDir string) JobSpec {
+		return JobSpec{SourceAbsPath: src, SourceLibraryRel: rel, SourceSampleRate: 44100, SourceBits: 16,
+			TargetSampleRate: 192000, TargetBits: 24, Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir}
+	}
+}
+
+// dsdFaithfulSpec is the faithful tier's job for a 3 s DSD64 stereo source.
+func dsdFaithfulSpec(src, outDir, tempDir string) JobSpec {
+	return JobSpec{SourceAbsPath: src, SourceLibraryRel: "Album/01.dsf", SourceSampleRate: 2822400,
+		SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: 3, TargetSampleRate: 176400, TargetBits: 24,
+		Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir, Kind: JobKindPCMRender}
+}
+
 // TestARenditionThatCouldNotBeWrittenWholeIsNotPublished renders through the
 // real tools and the real pool onto a volume with no room for the rendition:
 // sox 14.4.2 prints "error writing output file: No space left on device"
@@ -143,78 +173,62 @@ func runTool(t *testing.T, name string, args ...string) {
 // for the last case.
 func TestARenditionThatCouldNotBeWrittenWholeIsNotPublished(t *testing.T) {
 	requireSox(t)
-	for _, tc := range []struct {
-		name, src string
-		seconds   float64
-		// fullScratch puts the render scratch, not the variants directory,
-		// on the full volume.
-		fullScratch bool
-		need        func(*testing.T)
-		spec        func(src, outDir, tempDir string) JobSpec
-		where       string
-	}{
+	for _, tc := range []fullVolumeCase{
 		{name: "sox-direct", src: "01.flac", seconds: 8, need: requireSox, where: outputVariants,
-			spec: func(src, outDir, tempDir string) JobSpec {
-				return JobSpec{SourceAbsPath: src, SourceLibraryRel: "Album/01.flac", SourceSampleRate: 44100, SourceBits: 16,
-					TargetSampleRate: 192000, TargetBits: 24, Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir}
-			}},
+			spec: pcmUpscaleSpec("Album/01.flac")},
 		{name: "ALAC pipe", src: "01.m4a", seconds: 8, need: requireSoxAndFFmpeg, where: outputVariants,
-			spec: func(src, outDir, tempDir string) JobSpec {
-				return JobSpec{SourceAbsPath: src, SourceLibraryRel: "Album/01.m4a", SourceSampleRate: 44100, SourceBits: 16,
-					TargetSampleRate: 192000, TargetBits: 24, Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir}
-			}},
+			spec: pcmUpscaleSpec("Album/01.m4a")},
 		{name: "DSD stage C", src: "01.dsf", seconds: 3, need: requireDSDToolchain, where: outputVariants,
-			spec: func(src, outDir, tempDir string) JobSpec {
-				return JobSpec{SourceAbsPath: src, SourceLibraryRel: "Album/01.dsf", SourceSampleRate: 2822400,
-					SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: 3, TargetSampleRate: 176400, TargetBits: 24,
-					Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir, Kind: JobKindPCMRender}
-			}},
+			spec: dsdFaithfulSpec},
 		{name: "DSD stage A", src: "01.dsf", seconds: 3, fullScratch: true, need: requireDSDToolchain, where: outputScratch,
-			spec: func(src, outDir, tempDir string) JobSpec {
-				return JobSpec{SourceAbsPath: src, SourceLibraryRel: "Album/01.dsf", SourceSampleRate: 2822400,
-					SourceIsDSD: true, SourceChannels: 2, SourceDurationSec: 3, TargetSampleRate: 176400, TargetBits: 24,
-					Quality: QualityVeryHigh, OutputDir: outDir, TempDir: tempDir, Kind: JobKindPCMRender}
-			}},
+			spec: dsdFaithfulSpec},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.need(t)
-			full := smallVolume(t, 16)
-			roomy := t.TempDir()
-			src := realSource(t, t.TempDir(), tc.src, tc.seconds)
-			outDir, tempDir := filepath.Join(full, "variants"), filepath.Join(roomy, "tmp")
-			if tc.fullScratch {
-				outDir, tempDir = filepath.Join(roomy, "variants"), filepath.Join(full, "tmp")
-			}
-			spec := stampedAsScanned(tc.spec(src, outDir, tempDir))
-			fillVolume(t, full, 256<<10)
+		t.Run(tc.name, tc.run)
+	}
+}
 
-			resetFFmpegSnapshotForTest()
-			t.Cleanup(resetFFmpegSnapshotForTest)
-			a := newAnnouncingPool(t, spec.SourceLibraryRel)
-			got := a.run(t, spec, 1)
+func (tc fullVolumeCase) run(t *testing.T) {
+	tc.need(t)
+	full := smallVolume(t, 16)
+	roomy := t.TempDir()
+	src := realSource(t, t.TempDir(), tc.src, tc.seconds)
+	outDir, tempDir := filepath.Join(full, "variants"), filepath.Join(roomy, "tmp")
+	if tc.fullScratch {
+		outDir, tempDir = filepath.Join(roomy, "variants"), filepath.Join(full, "tmp")
+	}
+	spec := stampedAsScanned(tc.spec(src, outDir, tempDir))
+	fillVolume(t, full, 256<<10)
 
-			if _, err := os.Stat(spec.SidecarPath()); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("a rendition was published at its sidecar path (stat err %v): the tool could not write it whole", err)
-			}
-			if len(got) != 1 || !strings.HasPrefix(got[0], "failed: ") {
-				t.Fatalf("job announced %q, want a failure", got)
-			}
-			if suppressed, records := a.strikes(t, spec.SourceLibraryRel); records != 0 {
-				t.Errorf("%d strike record(s) (%d suppressed), want none: a volume with no room is a fact about the host", records, suppressed)
-			}
-			// The volume still has no room when the bridge asks (the file
-			// the tool left holds it), so the reason is the operating
-			// system's own.
-			warns := a.lines("WARN", logOutputUnavailable)
-			if len(warns) != 1 || !strings.Contains(warns[0], "output="+tc.where) ||
-				!strings.Contains(warns[0], "reason="+syscall.ENOSPC.Error()) {
-				t.Errorf("%q warnings:\n%s\nwant one naming output=%s and the reason %q",
-					logOutputUnavailable, strings.Join(warns, "\n"), tc.where, syscall.ENOSPC.Error())
-			}
-			t.Logf("announced: %s", got[0])
-			if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(spec.SidecarPath()), "*"+sidecarTmpSuffix)); len(leftovers) != 0 {
-				t.Errorf("temp sidecars left behind: %v", leftovers)
-			}
-		})
+	resetFFmpegSnapshotForTest()
+	t.Cleanup(resetFFmpegSnapshotForTest)
+	a := newAnnouncingPool(t, spec.SourceLibraryRel)
+	tc.check(t, a, spec, a.run(t, spec, 1))
+}
+
+// check asserts that the render published nothing and left no temp sidecar,
+// that its job failed without striking the source, and that the outage was
+// reported once, naming the output and the operating system's reason: the
+// volume still has no room when the bridge asks (the file the tool left
+// holds it).
+func (tc fullVolumeCase) check(t *testing.T, a *announcingPool, spec JobSpec, got []string) {
+	t.Helper()
+	if _, err := os.Stat(spec.SidecarPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a rendition was published at its sidecar path (stat err %v): the tool could not write it whole", err)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], "failed: ") {
+		t.Fatalf("job announced %q, want a failure", got)
+	}
+	t.Logf("announced: %s", got[0])
+	if suppressed, records := a.strikes(t, spec.SourceLibraryRel); records != 0 {
+		t.Errorf("%d strike record(s) (%d suppressed), want none: a volume with no room is a fact about the host", records, suppressed)
+	}
+	warns := a.lines("WARN", logOutputUnavailable)
+	if len(warns) != 1 || !strings.Contains(warns[0], "output="+tc.where) ||
+		!strings.Contains(warns[0], "reason="+syscall.ENOSPC.Error()) {
+		t.Errorf("%q warnings:\n%s\nwant one naming output=%s and the reason %q",
+			logOutputUnavailable, strings.Join(warns, "\n"), tc.where, syscall.ENOSPC.Error())
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(spec.SidecarPath()), "*"+sidecarTmpSuffix)); len(leftovers) != 0 {
+		t.Errorf("temp sidecars left behind: %v", leftovers)
 	}
 }

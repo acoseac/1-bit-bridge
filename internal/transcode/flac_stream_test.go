@@ -170,3 +170,65 @@ func TestReadFLACStreamOnBytesNoEncoderWrote(t *testing.T) {
 		}
 	}
 }
+
+// TestFLACBlockSizeCodesReadAsTheRFCGivesThem pins every block size code a
+// frame header can carry to RFC 9639 section 9.1.1. The fixtures write two
+// of them (4096, and a size after the coded number), and a header the
+// reader misreads makes a whole rendition read as cut.
+func TestFLACBlockSizeCodesReadAsTheRFCGivesThem(t *testing.T) {
+	for code, want := range map[int]int{1: 192, 2: 576, 3: 1152, 4: 2304, 5: 4608, 8: 256, 9: 512,
+		10: 1024, 11: 2048, 12: 4096, 13: 8192, 14: 16384, 15: 32768} {
+		if size, next, ok := flacFrameBlockSize(nil, 7, code); !ok || size != want || next != 7 {
+			t.Errorf("block size code %d = %d, %d, %v; want %d, 7, true", code, size, next, ok, want)
+		}
+	}
+	for _, tc := range []struct {
+		code       int
+		b          []byte
+		size, next int
+		ok         bool
+	}{
+		{code: 6, b: []byte{0x7F}, size: 128, next: 1, ok: true},
+		{code: 7, b: []byte{0x01, 0x00}, size: 257, next: 2, ok: true},
+		{code: 6, b: nil},
+		{code: 7, b: []byte{0x01}},
+		{code: 0, b: []byte{0x01, 0x00}},
+	} {
+		size, next, ok := flacFrameBlockSize(tc.b, 0, tc.code)
+		if ok != tc.ok || size != tc.size || next != tc.next {
+			t.Errorf("block size code %d over %x = %d, %d, %v; want %d, %d, %v", tc.code, tc.b, size, next, ok, tc.size, tc.next, tc.ok)
+		}
+	}
+}
+
+// TestFLACSampleRateCodesReadAsTheRFCGivesThem pins every sample rate code a
+// frame header can carry to RFC 9639 section 9.1.2; the fixtures write only
+// STREAMINFO's (code 0) and the codes libFLAC picks for 44.1, 96 and
+// 176.4 kHz.
+func TestFLACSampleRateCodesReadAsTheRFCGivesThem(t *testing.T) {
+	for code, want := range map[int]int{0: 12345, 1: 88200, 2: 176400, 3: 192000, 4: 8000, 5: 16000, 6: 22050,
+		7: 24000, 8: 32000, 9: 44100, 10: 48000, 11: 96000} {
+		if rate, next, ok := flacFrameSampleRate(nil, 3, code, 12345); !ok || rate != want || next != 3 {
+			t.Errorf("sample rate code %d = %d, %d, %v; want %d, 3, true", code, rate, next, ok, want)
+		}
+	}
+	for _, tc := range []struct {
+		code       int
+		b          []byte
+		rate, next int
+		ok         bool
+	}{
+		{code: 12, b: []byte{44}, rate: 44000, next: 1, ok: true},
+		{code: 13, b: []byte{0xAC, 0x44}, rate: 44100, next: 2, ok: true},
+		{code: 14, b: []byte{0x11, 0x3A}, rate: 44100, next: 2, ok: true},
+		{code: 12, b: nil},
+		{code: 13, b: []byte{0xAC}},
+		{code: 14, b: []byte{0x11}},
+		{code: 15, b: []byte{0x11, 0x3A}},
+	} {
+		rate, next, ok := flacFrameSampleRate(tc.b, 0, tc.code, 12345)
+		if ok != tc.ok || rate != tc.rate || next != tc.next {
+			t.Errorf("sample rate code %d over %x = %d, %d, %v; want %d, %d, %v", tc.code, tc.b, rate, next, ok, tc.rate, tc.next, tc.ok)
+		}
+	}
+}

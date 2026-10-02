@@ -31,17 +31,29 @@ func TestACutStreamIsTheOutputSidesUnlessTheVolumeSaysOtherwise(t *testing.T) {
 			if !errors.Is(err, cut) {
 				t.Errorf("classifyCut = %v, want the cut wrapped", err)
 			}
-			f, marked := unwritableOutput(err)
-			if marked != (tc.kind != 0) || (marked && (f.kind != tc.kind || f.where != outputVariants || f.dir != "/variants/Album")) {
-				t.Errorf("marked %v as %+v, want kind %v", marked, f, tc.kind)
-			}
-			if tc.reason != "" && f.reason != tc.reason {
-				t.Errorf("reason %q, want %q", f.reason, tc.reason)
-			}
+			checkOutputFault(t, err, tc.kind, tc.reason, outputVariants, "/variants/Album")
 			if tc.probe != nil && !strings.Contains(err.Error(), tc.probe.Error()) {
 				t.Errorf("%q does not say what the volume answered (%v)", err, tc.probe)
 			}
 		})
+	}
+}
+
+// checkOutputFault asserts err is marked as the output side's fault of kind
+// at where and dir, with reason when one is given, or is not marked when
+// kind is 0.
+func checkOutputFault(t *testing.T, err error, kind outputFaultKind, reason, where, dir string) {
+	t.Helper()
+	f, marked := unwritableOutput(err)
+	if marked != (kind != 0) {
+		t.Errorf("%v: marked = %v, want kind %v", err, marked, kind)
+		return
+	}
+	if marked && (f.kind != kind || f.where != where || f.dir != dir) {
+		t.Errorf("marked as %+v, want kind %v at %s %s", f, kind, where, dir)
+	}
+	if reason != "" && f.reason != reason {
+		t.Errorf("reason %q, want %q", f.reason, reason)
 	}
 }
 

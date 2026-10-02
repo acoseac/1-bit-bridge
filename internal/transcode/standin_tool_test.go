@@ -132,6 +132,66 @@ func writeScript(t *testing.T, script, name string, b []byte) {
 	}
 }
 
+// standInsWriting makes the stand-ins the whole of PATH, sox writing
+// rendition and ffprobe printing probe ("" fails it).
+func standInsWriting(t *testing.T, rendition []byte, probe string) {
+	t.Helper()
+	script := standInToolsScripted(t)
+	writeScript(t, script, standInRendition, rendition)
+	if probe != "" {
+		writeScript(t, script, standInProbe, []byte(probe))
+	}
+}
+
+// checkRunVerdict asserts what a Run left: want published at the sidecar
+// path when want is not nil, and otherwise ErrRenditionIncomplete, nothing
+// at the sidecar path or in a temp sidecar, and the failure marked as the
+// output side's exactly when outputs.
+func checkRunVerdict(t *testing.T, spec JobSpec, err error, want []byte, outputs bool) {
+	t.Helper()
+	got, statErr := os.ReadFile(spec.SidecarPath())
+	if want != nil {
+		if err != nil || statErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("Run = %v, published %d bytes (%v); want the rendition published", err, len(got), statErr)
+		}
+		return
+	}
+	if !errors.Is(err, ErrRenditionIncomplete) {
+		t.Fatalf("Run = %v, want ErrRenditionIncomplete", err)
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a rendition was published (%d bytes, err %v): Run returned %v", len(got), statErr, err)
+	}
+	if _, marked := unwritableOutput(err); marked != outputs {
+		t.Errorf("Run = %v: the output side's fault = %v, want %v", err, marked, outputs)
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(spec.SidecarPath()), "*"+sidecarTmpSuffix)); len(left) != 0 {
+		t.Errorf("temp sidecars left behind: %v", left)
+	}
+}
+
+// checkStruck asserts the jobs a pool ran all failed, that they struck the
+// source (one record, suppressed) exactly when struck and left no record
+// otherwise, and that an output outage was reported exactly when they did not.
+func checkStruck(t *testing.T, a *announcingPool, rel string, announced []string, struck bool) {
+	t.Helper()
+	for i, g := range announced {
+		if !strings.HasPrefix(g, "failed: ") {
+			t.Errorf("job #%d announced %q, want a failure", i+1, g)
+		}
+	}
+	want := 0
+	if struck {
+		want = 1
+	}
+	if suppressed, records := a.strikes(t, rel); suppressed != want || records != int64(want) {
+		t.Errorf("%d suppressed, %d strike record(s); want struck = %v", suppressed, records, struck)
+	}
+	if warns := a.lines("WARN", logOutputUnavailable); (len(warns) == 1) == struck {
+		t.Errorf("%q warnings:\n%s\nwant one exactly when the output side failed", logOutputUnavailable, strings.Join(warns, "\n"))
+	}
+}
+
 // TestRunPublishesOnlyAWholeRendition drives Run with a sox that exits 0
 // whatever it wrote, on every platform. Only the positive control may be
 // published. A stream cut short (what a full volume left) is the output
@@ -163,32 +223,14 @@ func TestRunPublishesOnlyAWholeRendition(t *testing.T) {
 		{name: "not FLAC", rendition: []byte("fLaC")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			script := standInToolsScripted(t)
-			writeScript(t, script, standInRendition, tc.rendition)
-			if tc.probe != "" {
-				writeScript(t, script, standInProbe, []byte(tc.probe))
-			}
+			standInsWriting(t, tc.rendition, tc.probe)
 			spec := sourceFile(t, "Album/01.flac") // sox-direct, to 176.4 kHz / 24 bit
 			_, err := Run(context.Background(), spec)
-			got, statErr := os.ReadFile(spec.SidecarPath())
+			var want []byte
 			if tc.published {
-				if err != nil || statErr != nil || !bytes.Equal(got, tc.rendition) {
-					t.Fatalf("Run = %v, published %d bytes (%v); want the rendition published", err, len(got), statErr)
-				}
-				return
+				want = tc.rendition
 			}
-			if !errors.Is(err, ErrRenditionIncomplete) {
-				t.Fatalf("Run = %v, want ErrRenditionIncomplete", err)
-			}
-			if !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("a rendition was published (%d bytes, err %v): Run returned %v", len(got), statErr, err)
-			}
-			if _, marked := unwritableOutput(err); marked != tc.outputs {
-				t.Errorf("Run = %v: the output side's fault = %v, want %v", err, marked, tc.outputs)
-			}
-			if left, _ := filepath.Glob(filepath.Join(filepath.Dir(spec.SidecarPath()), "*"+sidecarTmpSuffix)); len(left) != 0 {
-				t.Errorf("temp sidecars left behind: %v", left)
-			}
+			checkRunVerdict(t, spec, err, want, tc.outputs)
 		})
 	}
 }
@@ -209,25 +251,10 @@ func TestACutRenditionStrikesNothingAndAShortOneStrikes(t *testing.T) {
 		{name: "whole and short", rendition: block, probe: "1.000000\n", struck: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			script := standInToolsScripted(t)
-			writeScript(t, script, standInRendition, tc.rendition)
-			if tc.probe != "" {
-				writeScript(t, script, standInProbe, []byte(tc.probe))
-			}
+			standInsWriting(t, tc.rendition, tc.probe)
 			spec := sourceFile(t, "Album/01.flac")
 			a := newAnnouncingPool(t, spec.SourceLibraryRel)
-			for i, g := range a.run(t, spec, 3) {
-				if !strings.HasPrefix(g, "failed: ") {
-					t.Errorf("job #%d announced %q, want a failure", i+1, g)
-				}
-			}
-			suppressed, records := a.strikes(t, spec.SourceLibraryRel)
-			if struck := suppressed == 1 && records == 1; struck != tc.struck || (!tc.struck && records != 0) {
-				t.Errorf("%d suppressed, %d strike record(s); want struck = %v", suppressed, records, tc.struck)
-			}
-			if warns := a.lines("WARN", logOutputUnavailable); (len(warns) == 1) != !tc.struck {
-				t.Errorf("%q warnings:\n%s\nwant one exactly when the output side failed", logOutputUnavailable, strings.Join(warns, "\n"))
-			}
+			checkStruck(t, a, spec.SourceLibraryRel, a.run(t, spec, 3), tc.struck)
 		})
 	}
 }

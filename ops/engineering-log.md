@@ -36965,11 +36965,13 @@ source's duration for a DSD job, at least the base).
   started; `ff.Wait`'s second close is ignored (`closeDescriptors`).
 - The on-demand enqueue (`finalizeAndEnqueue`) checks room before it queues
   (`roomForRendition`), as the batch's `diskPreflight` and the sweep's
-  running budget do: `ProjectedSize` with `RequiredBytesWithMargin` on the
-  variants volume and, for a DSD render, `RenderScratchBytes` on the scratch.
-  A refusal is `api.ErrUpscaleNoRoom`: counted as rejected, one Warn per
-  request (`refused=N`), the 202 unchanged. The stale-download heal forgets
-  its minute on it, as on a full queue.
+  running budget check theirs: `ProjectedSize` with `RequiredBytesWithMargin`
+  on the variants volume and, for a DSD render, `RenderScratchBytes` on the
+  scratch, or the sum of the two where the variants directory and the
+  scratch are one volume (review round 1, below). A refusal is
+  `api.ErrUpscaleNoRoom`: counted as rejected, one Warn per request
+  (`refused=N`), the 202 unchanged. The stale-download heal forgets its
+  minute on it, as on a full queue.
 
 ### Measured before choosing the tolerance
 
@@ -37077,3 +37079,32 @@ held exactly because its reference is the chain's own intermediate.
 | no on-demand pre-flight | every refused case, and the scratch-probed cases |
 | no scratch half | the DSD scratch cases |
 | the handler without its case | the no-room handler test |
+| one volume checked as two (round 1) | room for each need and not both refused only on two volumes; one volume with room for both probes the scratch |
+| `SameVolume` always true (round 1) | another volume (`/dev`) |
+| `SameVolume` without the ancestor walk (round 1) | a directory that does not exist yet |
+
+### Review round 1
+
+- CodeRabbit (on 2ef7abaf): the pre-flight checked the variants volume for
+  the rendition and the scratch volume for the scratch apart, and a DSD
+  render holds its scratch while Stage C writes the rendition, so where the
+  two directories are one volume it needs their sum there. Taken:
+  `roomForRendition` asks `transcode.SameVolume` (the device on POSIX, the
+  volume serial number on Windows, each directory judged where
+  `AvailableDiskSpaceNearest` probes it: its closest existing ancestor while
+  it does not exist) and checks the sum, saturating, on one volume; a pair
+  it cannot compare refuses, as a probe that cannot read a volume does.
+  `TestADSDRenderOnOneVolumeNeedsRoomForItsScratchAndItsRendition` reports
+  the free space each need alone takes (a 300 s DSD64 render to 44.1 kHz:
+  105,840,000 bytes of scratch, 144,179 of rendition) and requires a refusal
+  on one volume and a queued job on two.
+- SonarCloud's nine S3776 (cognitive complexity) smells on the new code:
+  `parseFLACFrameHeader` reads its codes through `flacHeaderMatchesStream`,
+  `flacFrameBlockSize` and `flacFrameSampleRate`, which two tables pin code
+  by code (`TestFLACBlockSizeCodesReadAsTheRFCGivesThem`,
+  `TestFLACSampleRateCodesReadAsTheRFCGivesThem`), since the fixtures write
+  few of the codes; `Run`'s completeness check is `verifyRendition`;
+  `renderDSD`'s gain and Stage C are `renderGain` and `renderStageC`; the
+  tests share `standInsWriting`, `checkRunVerdict`, `checkStruck` and
+  `checkOutputFault`. No behaviour moved: every B264 test passes before and
+  after.
