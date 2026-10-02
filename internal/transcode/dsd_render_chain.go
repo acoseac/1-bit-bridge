@@ -629,8 +629,8 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	}()
 	// Stage C's sox writes the rendition and Stage A's the scratch: both
 	// created here, before Stage A, so a directory that refuses new files
-	// fails now, by type, and not after minutes of decoding in a sox
-	// message. The rendition takes the install's owner, as in Run, so a
+	// fails now, by type, and not after the decode, in a sox message. The
+	// rendition takes the install's owner, as in Run, so a
 	// `sudo bridge render` leaves one the service can replace; the scratch
 	// takes its directory's. Nothing on Windows (createOutput).
 	if err := createOutput(tmpPath, finalPath); err != nil {
