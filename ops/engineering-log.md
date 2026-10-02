@@ -36243,6 +36243,13 @@ the old expression).
   Known and Orphans (and `len(known)`, which a fold can only shrink by merging
   two spellings of one row's paths, never to zero), so they read fewer
   orphans, and nothing else reads the keys.
+- **The cost, measured** (a benchmark on the dev Mac, under load): a key of
+  a 100-byte ASCII path took 289 ns against 250 ns, no allocation more
+  (`norm.NFC`'s quick check passes ASCII through); one of a decomposed path
+  856 ns against 320 ns and 4 allocations against 1. Over 100,000 files
+  that is 4 ms more per walk for an ASCII tree and 54 ms for one decomposed
+  throughout, beside the 128 ms the orphan sweep's walk of 100,001 files
+  measured warm.
 
 ### B207: the defect, re-measured
 
