@@ -35851,3 +35851,11 @@ form" comment over a bump that has been `bumpIndexedAtByPathSQL` since #711.
 | NC5: the tick reads `ErrVariantChanged` as a failed delete | both watcher tests (`failed=3` and `failed=5`, a Warn per row); the reproduction (`failed=6`) |
 | NC6: `integritySnapshotsFromRows` drops `CreatedAt` | the reproduction: every delete refused, the two controls kept |
 | NC7: `DeleteVariantIfUnchanged` answers nil on a miss | every changed-row case; the reproduction (the 6 kept rows counted as deleted and published) |
+
+Rerun after the reproduction moved onto the existing `relocatedStore`
+fixture (split as `relocatedStoreAt`, to take a database path the move's
+second store can open), whose rows all carried `created_at` 0: NC6 went
+green, since a projection that drops `CreatedAt` then compares 0 with 0.
+`relocatedStoreAt` gives each row a `created_at` of its own, as a render
+does, and NC6 is red again. The controls were rerun after every change to a
+test, which is what caught it.
