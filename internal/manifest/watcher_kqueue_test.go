@@ -375,6 +375,12 @@ func childRunsOutOfFiles(t *testing.T, libDir string, w *Watcher, _ *loggingtest
 		}
 		hoard = append(hoard, f)
 	}
+	if len(hoard) < 20 {
+		for _, f := range hoard {
+			_ = f.Close()
+		}
+		t.Fatalf("only %d descriptors were free under the limit, want 20 or more for the watcher to run out in", len(hoard))
+	}
 	for _, f := range hoard[len(hoard)-20:] {
 		_ = f.Close()
 	}

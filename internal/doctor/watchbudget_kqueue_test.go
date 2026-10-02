@@ -81,9 +81,14 @@ func TestTheWatchBudgetCheckSaysWhyItGradesNothing(t *testing.T) {
 
 // standInWatchFileLimits has checkWatchLimit read limits and err for the rest
 // of the test. The check runs on the test's goroutine, so nothing reads the
-// seam when it is put back.
+// seam when it is put back. The seam is a package variable, so two tests
+// swapping it at once would put back each other's: t.Setenv, called first,
+// panics in a parallel test or one with a parallel ancestor, and makes a
+// later t.Parallel panic too (loggingtest.SetDefault's guard, for its
+// reason).
 func standInWatchFileLimits(t *testing.T, limits manifest.WatchFDLimits, err error) {
 	t.Helper()
+	t.Setenv("DOCTOR_TEST_WATCH_FILE_LIMITS", t.Name())
 	prev := watchFileLimits
 	watchFileLimits = func() (manifest.WatchFDLimits, error) { return limits, err }
 	t.Cleanup(func() { watchFileLimits = prev })
