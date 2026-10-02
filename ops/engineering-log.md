@@ -36604,9 +36604,11 @@ directory's owner, where sox made it root's.
 
 ### Decisions
 
-- **A closed set of causes, read from the first `syscall.Errno` in the
-  chain.** A permission (`fs.ErrPermission`, which names EACCES and EPERM on
-  unix and ERROR_ACCESS_DENIED on Windows), or a cause of the volume's in the
+- **A closed set of causes, read by type.** A permission, asked of the
+  whole chain (`fs.ErrPermission`, which names EACCES and EPERM on unix and
+  ERROR_ACCESS_DENIED on Windows, and which a wrapper that reports one keeps
+  even without an errno: Gemini's round 2), or the first `syscall.Errno` in
+  the chain, a cause of the volume's in the
   platform's table (`outputFaultErrnos`: EROFS, ENOSPC, EDQUOT, EIO, ENOTCONN,
   ESTALE; ERROR_WRITE_PROTECT, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL,
   ERROR_DISK_QUOTA_EXCEEDED, ERROR_IO_DEVICE, ERROR_NOT_READY,
@@ -36688,3 +36690,22 @@ red); a permission proven by any success, a volume fault only in its own
 folder, the DSD scratch proof dropped (the report test red each time); the
 proof taken before the fsync (the fsync test red); ENAMETOOLONG added to the
 unix table (both classifier tests red).
+
+### Review
+
+Gemini's first round on #1142: `outageStreaks.end` took a candidate-key
+generator beside its predicate, and `outputOutages.proven` shared a variable
+between the two callbacks. Taken, with one change: `end` now takes the one
+predicate and walks the open streaks in the order they STARTED (a slice kept
+beside the map), not the map's, so the lines one proof logs come out in one
+order every time; callers work out what they need from the job through
+`lazily`, once, and only while a streak is open
+(`TestOutageStreaksEndInTheOrderTheyStarted`, red with the loop over the map
+in 3 runs of 3). Declined: replacing `golang.org/x/sys/windows`'s error codes
+with the standard library's, which on Windows defines none of them but
+`ERROR_NETNAME_DELETED` (go1.26.6: `undefined: syscall.ERROR_WRITE_PROTECT`
+and the rest); the package already imports x/sys/windows. Its second round:
+a permission is asked of the whole chain, so one a wrapper reports without an
+errno is still classified (no output step builds such an error today; the
+classifier test now carries the case), and `lazily` runs on a `sync.Once`.
+CodeRabbit had nothing actionable on the first round's head.

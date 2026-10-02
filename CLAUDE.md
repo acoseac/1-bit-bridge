@@ -3148,9 +3148,9 @@ no failing test — which is the shape to expect in this area.
   temp file and the scratch file, and the publish rename and the stat after
   it. The pool asks `unwritableOutput` after `unavailableTool`, counts and
   announces the job, and strikes nothing; the exit is a row in both
-  terminal-order tables. **By type, a closed set**: the first
-  `syscall.Errno` in the chain, either a permission (`fs.ErrPermission`:
-  EACCES, EPERM, ERROR_ACCESS_DENIED) or a cause of the volume's in the
+  terminal-order tables. **By type, a closed set**: a permission, asked of
+  the whole chain (`fs.ErrPermission`: EACCES, EPERM, ERROR_ACCESS_DENIED),
+  or the first `syscall.Errno` in the chain, a cause of the volume's in the
   platform's table (`outputFaultErrnos`: EROFS, ENOSPC, EDQUOT, EIO,
   ENOTCONN, ESTALE; on Windows the write protect, the two disk-full codes,
   the quota and a device or share gone). **A cause the source's NAME

@@ -103,16 +103,15 @@ func (o *outageStreaks[K, F]) end(over func(K, F) bool) []endedOutage[K, F] {
 
 // lazily returns a function that calls f the first time it is called and
 // returns that answer every time: what end's over needs from the job, worked
-// out only when a streak is open.
+// out only when a streak is open. Safe to call from more than one goroutine,
+// though end calls it from one.
 func lazily[T any](f func() T) func() T {
 	var (
-		done bool
+		once sync.Once
 		v    T
 	)
 	return func() T {
-		if !done {
-			v, done = f(), true
-		}
+		once.Do(func() { v = f() })
 		return v
 	}
 }

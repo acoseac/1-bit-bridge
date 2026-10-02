@@ -128,20 +128,25 @@ func unwritableOutput(err error) (outputFault, bool) {
 	return outputFault{}, false
 }
 
-// hostOutputFault classifies the operating system's cause of err, read by
-// type: the first syscall.Errno in its chain. A permission is asked through
-// fs.ErrPermission, which names EACCES and EPERM on unix and
-// ERROR_ACCESS_DENIED on Windows; the volume's faults come from the
-// platform's table (outputFaultErrnos). An error with no Errno in it (a
-// cancelled context, a refusal the bridge itself wrote) is no fault of the
-// output side.
+// hostOutputFault classifies the cause of err, read by type. A permission is
+// asked of the whole chain through fs.ErrPermission, which names EACCES and
+// EPERM on unix and ERROR_ACCESS_DENIED on Windows, and which any wrapper
+// that reports a permission keeps; the reason is the operating system's
+// words when the chain carries a syscall.Errno. The volume's faults are the
+// first syscall.Errno in the chain, looked up in the platform's table
+// (outputFaultErrnos). Any other error (a cancelled context, a cause outside
+// the table) is no fault of the output side.
 func hostOutputFault(err error) (kind outputFaultKind, reason string, ok bool) {
 	var errno syscall.Errno
-	if !errors.As(err, &errno) {
-		return 0, "", false
+	hasErrno := errors.As(err, &errno)
+	if errors.Is(err, fs.ErrPermission) {
+		if hasErrno {
+			return outputDenied, errno.Error(), true
+		}
+		return outputDenied, fs.ErrPermission.Error(), true
 	}
-	if errors.Is(errno, fs.ErrPermission) {
-		return outputDenied, errno.Error(), true
+	if !hasErrno {
+		return 0, "", false
 	}
 	if kind, ok := outputFaultErrnos[errno]; ok {
 		return kind, errno.Error(), true

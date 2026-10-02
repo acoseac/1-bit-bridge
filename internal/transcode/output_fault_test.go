@@ -52,6 +52,13 @@ func TestMarkOutputFaultMarksOnlyTheOutputSidesCauses(t *testing.T) {
 			t.Errorf("errno %d (%v): the mark changed the error: %q, or does not unwrap to its cause", int(errno), errno, got)
 		}
 	}
+	// A permission a wrapper reports without the operating system's errno in
+	// its chain is still a permission (Gemini on #1142).
+	bare := fmt.Errorf("create sidecar: %w", fs.ErrPermission)
+	if f, ok := unwritableOutput(markOutputFault(outputVariants, dir, bare)); !ok || f.kind != outputDenied ||
+		f.reason != fs.ErrPermission.Error() {
+		t.Errorf("a permission with no errno in its chain: marked %+v, %v; want a permission fault", f, ok)
+	}
 	for _, err := range append(notOutputFaultCauses(),
 		context.Canceled,
 		context.DeadlineExceeded,
