@@ -198,9 +198,12 @@ func TestOrphanSidecarSweeperLeavesARecycleBinAndASnapshotAlone(t *testing.T) {
 // LocateSidecar's stat of the composed one reached the file, so a live
 // rendition was an orphan to the forward sweeps and present to the reverse
 // one: unlinked, its row reaped, rendered again, and so on. Planted here
-// in both spellings on any filesystem; the last case writes the file by the
-// row's own spelling, as the pool does, which only an HFS+ volume
-// decomposes (TMPDIR on an hdiutil HFS+ image reproduces it there).
+// in both spellings on any filesystem; the third case writes the file by
+// the row's own spelling, as the pool does, which only an HFS+ volume
+// decomposes (TMPDIR on an hdiutil HFS+ image reproduces it there). The
+// last, a row recorded decomposed (a library scanned from HFS+) over a file
+// written by it, every build kept: it fails if the known set is keyed
+// without composing, since the walk's lookup composes what it walks.
 func TestTheKnownSetMatchesASidecarInEitherNormalization(t *testing.T) {
 	const source = "Beyoncé/Café Tacvba/01 Révolución.flac"
 	const id = "upscaled-v2-176400-24"
@@ -212,6 +215,7 @@ func TestTheKnownSetMatchesASidecarInEitherNormalization(t *testing.T) {
 		{name: "the row composed, the walk decomposed (an HFS+ volume)", recorded: norm.NFC, onDisk: norm.NFD},
 		{name: "the row decomposed, the walk composed", recorded: norm.NFD, onDisk: norm.NFC},
 		{name: "written by the row's own spelling, as the pool writes it", recorded: norm.NFC, writtenAsRecord: true},
+		{name: "recorded decomposed and written by it", recorded: norm.NFD, writtenAsRecord: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

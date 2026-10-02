@@ -148,20 +148,26 @@ func seedVariantCopies(t *testing.T, variantsDir, to string) {
 // as the pool writes it, which only an HFS+ volume decomposes (TMPDIR on an
 // hdiutil HFS+ image reproduces it there). On a filesystem that does not
 // normalize, the planted file's row names no file, which the reverse sweep
-// may reap, so the FILE is the assertion.
+// may reap, so the FILE is the assertion. The last placement is a row
+// recorded decomposed (a library scanned from HFS+) over a file written by
+// it, which every build kept: it fails if any known set is keyed without
+// composing, since the inventory composes what it walks.
 func TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization(t *testing.T) {
-	const source = "Beyoncé/Café Tacvba/01 Révolución.flac"
+	const spelt = "Beyoncé/Café Tacvba/01 Révolución.flac"
 	ctx := context.Background()
 	for _, placement := range []struct {
-		name   string
-		onDisk func(recorded, decomposed string) string
+		name     string
+		recorded norm.Form
+		onDisk   func(recorded, decomposed string) string
 		// rowOpensIt: the row's own path names the file on every
 		// filesystem, so the reverse sweep keeps the row too.
 		rowOpensIt bool
 	}{
-		{"planted decomposed", func(_, decomposed string) string { return decomposed }, false},
-		{"written by its row's path", func(recorded, _ string) string { return recorded }, true},
+		{"planted decomposed", norm.NFC, func(_, decomposed string) string { return decomposed }, false},
+		{"written by its row's path", norm.NFC, func(recorded, _ string) string { return recorded }, true},
+		{"recorded decomposed, written by its row's path", norm.NFD, func(recorded, _ string) string { return recorded }, true},
 	} {
+		source := placement.recorded.String(spelt)
 		t.Run("upscale --gc, "+placement.name, func(t *testing.T) {
 			dir := t.TempDir()
 			store := emptyCatalogStore(t)
@@ -176,7 +182,7 @@ func TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization(t *testing.T) 
 			}); err != nil {
 				t.Fatal(err)
 			}
-			onDisk := placement.onDisk(recorded, transcode.VariantSidecarPath(dir, norm.NFD.String(source), variant))
+			onDisk := placement.onDisk(recorded, transcode.VariantSidecarPath(dir, norm.NFD.String(spelt), variant))
 			writeFixtureFile(t, onDisk, 50)
 			ageFiles(t, onDisk)
 			runGCExpectingSuccess(t, store, dir, "--gc over a rendition its row spells in another normalization")
@@ -199,7 +205,7 @@ func TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization(t *testing.T) 
 			}); err != nil {
 				t.Fatal(err)
 			}
-			onDisk := placement.onDisk(recorded, analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: norm.NFD.String(source)}.SidecarPath())
+			onDisk := placement.onDisk(recorded, analyze.AnalyzeSpec{OutputDir: dir, SourceLibraryRel: norm.NFD.String(spelt)}.SidecarPath())
 			writeFixtureFile(t, onDisk, 20)
 			ageFiles(t, onDisk)
 			var stdout, stderr bytes.Buffer
