@@ -3,11 +3,14 @@
 package transcode
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/flactest"
 )
 
 // fakeSoxScript stands in for sox(1). It writes a payload to its output
@@ -19,14 +22,16 @@ import (
 // They self-assign roles instead: `mkdir` is atomic, so exactly one invocation
 // wins the claim and becomes A.
 //
-//	A: write "AAAA" -> signal a-wrote -> wait b-wrote -> exit
-//	B: wait a-wrote -> write "BBBB"   -> signal b-wrote -> wait b-may-exit -> exit
+//	A: write stream A -> signal a-wrote -> wait b-wrote -> exit
+//	B: wait a-wrote -> write stream B   -> signal b-wrote -> wait b-may-exit -> exit
 //
 // A therefore cannot exit (and RunSox(A) cannot rename) until B has written,
 // which is what makes the pre-fix theft reproducible on every run.
 //
-// The output path is the argv entry right after `-t flac`.
-const fakeSoxScript = `#!/bin/sh
+// The output path is the argv entry right after `-t flac`. Each writes a
+// whole FLAC, as Run publishes nothing else (rendition_complete.go): A's
+// samples are all 1 and B's all 2, so the published bytes say whose they are.
+var fakeSoxScript = `#!/bin/sh
 state="$FAKE_SOX_STATE"
 out=""; prev=""; prev2=""
 for a in "$@"; do
@@ -45,17 +50,24 @@ waitfor() {
 }
 
 if mkdir "$state/claim-a" 2>/dev/null; then
-  printf 'AAAA' > "$out"
+  ` + shWrites("$out", streamA) + `
   : > "$state/a-wrote"
   waitfor "$state/b-wrote"
 else
   waitfor "$state/a-wrote"
-  printf 'BBBB' > "$out"
+  ` + shWrites("$out", streamB) + `
   : > "$state/b-wrote"
   waitfor "$state/b-may-exit"
 fi
 exit 0
 `
+
+// streamA and streamB are what the two stand-ins write: whole FLACs at the
+// test job's 192 kHz / 24-bit target, told apart by their samples.
+var (
+	streamA = flactest.Stream(192000, 2, 24, flactest.Block, 1)
+	streamB = flactest.Stream(192000, 2, 24, flactest.Block, 2)
+)
 
 // TestRunSoxConcurrentSameSpecDoesNotStealTmp is the F2 harm pin.
 //
@@ -134,11 +146,11 @@ func TestRunSoxConcurrentSameSpecDoesNotStealTmp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read published sidecar: %v", err)
 	}
-	if string(got) != "AAAA" {
-		t.Errorf("published sidecar = %q, want %q — RunSox returned success and its "+
+	if !bytes.Equal(got, streamA) {
+		t.Errorf("published sidecar is not A's stream (B's: %v) — RunSox returned success and its "+
 			"caller commits a track_variants row for this path, but the bytes are the "+
 			"OTHER concurrent job's: on a shared deterministic temp path B unlinked A's "+
-			"in-progress output and A renamed B's file into place", got, "AAAA")
+			"in-progress output and A renamed B's file into place", bytes.Equal(got, streamB))
 	}
 
 	// Release B and drain it. Post-fix B renames its OWN temp and succeeds

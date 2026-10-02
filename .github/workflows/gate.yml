@@ -31,7 +31,9 @@ name: gate
 # numbers as what settled the decimation design. They take under three
 # seconds once the toolchain is installed, and they SKIP rather than fail on
 # a host without it — which is exactly why they have to be run somewhere on
-# purpose.
+# purpose. Since backlog B264 it also renders through the real tools onto a
+# full volume (a 16 MB tmpfs it mounts), which skips everywhere else but
+# macOS.
 #
 # It did not start that way. Windows had 30 pre-existing failures the
 # moment it was first run — the largest test package had literally never
@@ -223,6 +225,18 @@ jobs:
           ffmpeg -hide_banner -decoders | grep -E 'dsd_|dst ' || true
       - name: measure
         run: make measure-dsd
+      - name: renditions onto a full volume
+        # sox exits 0 after a write it could not make, so a render onto a
+        # full volume leaves a stream cut short that the bridge must not
+        # publish (backlog B264). The test fills the small tmpfs this step
+        # mounts; it skips on a host with neither this nor hdiutil, which is
+        # why it runs here, beside the real toolchain.
+        run: |
+          sudo mkdir -p /mnt/b264-small
+          sudo mount -t tmpfs -o size=16m tmpfs /mnt/b264-small
+          sudo chown "$(id -u):$(id -g)" /mnt/b264-small
+          BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test ./internal/transcode/ \
+            -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v
 
   build-all:
     name: build-all

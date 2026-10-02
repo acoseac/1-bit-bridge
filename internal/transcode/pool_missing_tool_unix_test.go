@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/flactest"
 )
 
 // Stand-in tools, for the cases that need a tool to be THERE: shell scripts,
@@ -24,15 +26,26 @@ fi
 `
 
 // standInSoxWrites writes its output argument (the one after -t flac), the
-// way a run that succeeds leaves its temp file.
-const standInSoxWrites = standInSoxHelp + `out=""; prev=""; prev2=""
+// way a run that succeeds leaves its temp file: a whole FLAC at the target
+// sourceFile and dsdSource ask for, which is what Run reads before it
+// publishes (rendition_complete.go).
+var standInSoxWrites = standInSoxHelp + `out=""; prev=""; prev2=""
 for a in "$@"; do
   if [ "$prev2" = "-t" ] && [ "$prev" = "flac" ]; then out="$a"; break; fi
   prev2="$prev"; prev="$a"
 done
 [ -n "$out" ] || { echo "stand-in sox: no output argument" >&2; exit 1; }
-printf 'fLaC' > "$out"
-`
+` + shWrites("$out", stereoFLAC(176400, 24)) + "\n"
+
+// shWrites is a sh command, builtins only, that writes b to the file the
+// shell word file names.
+func shWrites(file string, b []byte) string {
+	return `printf '` + flactest.ShPrintf(b) + `' > "` + file + `"`
+}
+
+// stereoFLAC is a whole stereo FLAC of one block at rate and bits: what a
+// stand-in sox writes as the rendition a job at that target asks for.
+func stereoFLAC(rate, bits int) []byte { return flactest.Stream(rate, 2, bits, flactest.Block, 0) }
 
 // standInSoxRefuses refuses its input, as sox refuses a file it cannot read.
 const standInSoxRefuses = standInSoxHelp + `echo "sox FAIL formats: can't open input file: bad header" >&2

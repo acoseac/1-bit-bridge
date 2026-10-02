@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // stubEnqueuer is a test double for api.UpscaleEnqueuer. Records
@@ -356,6 +358,31 @@ func TestUpscaleQueueFullEverythingReturns503(t *testing.T) {
 		t.Errorf("status: got %d, want 503", resp.StatusCode)
 	}
 	assertWireErrorCode(t, resp, "queue_full")
+}
+
+// TestUpscaleWithNoRoomRejectsAndSaysSoOnce — candidates refused for want
+// of free space (ErrUpscaleNoRoom: the enqueuer's pre-flight, backlog B264)
+// count as rejected, the response stays 202 as for any other refusal (no
+// wire change), and the request logs one line for the whole folder, not
+// one per track.
+func TestUpscaleWithNoRoomRejectsAndSaysSoOnce(t *testing.T) {
+	log := loggingtest.Record(t)
+	hs, tok, _, stub := upscaleFixture(t, true)
+	stub.defaultErr = fmt.Errorf("%w: needs 2 GB, 1 GB free", ErrUpscaleNoRoom)
+
+	resp := postJSON(t, hs, "/v1/upscale", tok, UpscaleRequest{Path: "Artist/Album"})
+	defer resp.Body.Close()
+	if resp.StatusCode != 202 {
+		t.Fatalf("status: got %d, want 202", resp.StatusCode)
+	}
+	body := decodeUpscaleResponse(t, resp)
+	if body.Enqueued != 0 || body.Rejected != 2 || body.QueueFull {
+		t.Errorf("response: got %+v, want {Enqueued: 0, Rejected: 2, QueueFull: false}", body)
+	}
+	warns := log.Failures()
+	if len(warns) != 1 || !strings.Contains(warns[0], "not enough free space") || !strings.Contains(warns[0], "refused=2") {
+		t.Errorf("warnings:\n%s\nwant one, for the request, counting both tracks", strings.Join(warns, "\n"))
+	}
 }
 
 // TestUpscaleIneligibleSilentlyRejects — DSD / already-at-target

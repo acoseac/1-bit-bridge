@@ -461,6 +461,23 @@ func soxFileDuration(ctx context.Context, path string) float64 {
 	return parseProbeDuration(strings.TrimSpace(string(out)))
 }
 
+// soxFileSamples reads how many samples per channel a `.sox` scratch holds,
+// through sox (`sox --i -s`). sox rewrites the scratch's length when it
+// closes it, so this is what Stage A wrote, a failed write included
+// (measured, backlog B264). 0 on any failure: unknown.
+func soxFileSamples(ctx context.Context, path string) uint64 {
+	out, err := exec.CommandContext(ctx, resolveBin(func() (string, error) { return soxLookPath("sox") }, "sox"),
+		"--i", "-s", path).Output()
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // publishSidecar is the atomic publish both chains share: rename the temp
 // onto the final path (same filesystem, so rename(2)) and stat the result.
 //
@@ -508,33 +525,44 @@ func (j JobSpec) dsdGeometry(ctx context.Context) (sourceGeometry, error) {
 
 // decodeAndMeasure runs Stage A into scratchPath and Stage B over it,
 // returning the true peak at UNITY decode — nil for a digitally silent
-// source. The caller owns scratchPath and removes it on every exit; a
-// render keeps it for Stage C, a measurement discards it.
-func (j JobSpec) decodeAndMeasure(ctx context.Context, geo sourceGeometry, scratchDir, scratchPath string) (*float64, error) {
+// source — and the samples per channel the scratch holds (0 when sox could
+// not say), which Stage C's rendition must hold too. The caller owns
+// scratchPath and removes it on every exit; a render keeps it for Stage C, a
+// measurement discards it.
+//
+// A Stage A that did not leave a whole scratch is asked of the scratch's
+// volume (scratchOutput): sox exits 0 after a write it could not make, and
+// stops reading, so a full scratch volume ends in ffmpeg's broken pipe or a
+// short scratch, which a source that decoded short also leaves.
+func (j JobSpec) decodeAndMeasure(ctx context.Context, geo sourceGeometry, scratchDir, scratchPath string) (*float64, uint64, error) {
 	// Stage A — decode at unity (×0.5 on the pipe), decimate into the scratch.
 	soxStderr, err := runFFmpegPipe(ctx, j.dsdStageAArgs(geo, scratchDir, scratchPath), ffmpegDSDDecodeArgs(j.SourceAbsPath))
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, 0, err
+		}
+		return nil, 0, scratchOutput(scratchDir, scratchPath, err)
 	}
 	if soxReportedClipping(soxStderr) {
-		return nil, fmt.Errorf("%w in stage A (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(soxStderr))
+		return nil, 0, fmt.Errorf("%w in stage A (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(soxStderr))
 	}
 	expected := dsdExpectedDurationSec(geo.Duration, j.SourceDurationSec)
-	if produced := soxFileDuration(ctx, scratchPath); decodeLengthDisagrees(expected, produced) {
-		return nil, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
-			ErrFFmpegDecodeIncomplete, expected, produced, j.SourceLibraryRel)
+	samples := soxFileSamples(ctx, scratchPath)
+	if produced := float64(samples) / float64(j.TargetSampleRate); decodeLengthDisagrees(expected, produced) {
+		return nil, 0, scratchOutput(scratchDir, scratchPath, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+			ErrFFmpegDecodeIncomplete, expected, produced, j.SourceLibraryRel))
 	}
 
 	// Stage B — true peak of the scratch, back at unity.
 	tp, measured, err := analyze.TruePeakDBTP(ctx, scratchPath, geo.Channels)
 	if err != nil {
-		return nil, fmt.Errorf("dsd render: true peak of %s: %w", j.SourceLibraryRel, err)
+		return nil, 0, fmt.Errorf("dsd render: true peak of %s: %w", j.SourceLibraryRel, err)
 	}
 	if !measured {
-		return nil, nil
+		return nil, samples, nil
 	}
 	u := tp + dsdPreAttenuationDB
-	return &u, nil
+	return &u, samples, nil
 }
 
 // MeasureDSDPeak runs Stages A and B for j and returns the source's true
@@ -568,7 +596,8 @@ func MeasureDSDPeak(ctx context.Context, j JobSpec) (*float64, error) {
 	if err := createOutput(scratchPath, scratchDir); err != nil {
 		return nil, markOutputFault(outputScratch, scratchDir, fmt.Errorf("create render scratch: %w", err))
 	}
-	return j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
+	peak, _, err := j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
+	return peak, err
 }
 
 // mkdirScratch creates the Stage A scratch directory. Its default home is
@@ -641,7 +670,7 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	}
 
 	// Stages A and B — decode into the scratch and measure it at unity.
-	truePeakUnity, err := j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
+	truePeakUnity, scratchSamples, err := j.decodeAndMeasure(ctx, geo, scratchDir, scratchPath)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -673,6 +702,18 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	}
 	if soxReportedClipping(string(out)) {
 		return RunResult{}, fmt.Errorf("%w in stage C (%s): %s", ErrDSDClipped, j.SourceLibraryRel, firstLine(string(out)))
+	}
+	// Stage C exits 0 after a write it could not make, as every sox does,
+	// so the rendition is read (rendition_complete.go). Its gain and dither
+	// keep the scratch's length to the sample, so a whole rendition holds
+	// exactly what the scratch held (measured, backlog B264).
+	whole, err := j.wholeRendition(tmpPath, sidecarDir)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if scratchSamples > 0 && whole.held != scratchSamples {
+		return RunResult{}, fmt.Errorf("%w: the scratch holds %d samples, the rendition %d (%s)",
+			ErrRenditionIncomplete, scratchSamples, whole.held, j.SourceLibraryRel)
 	}
 	settings, err := j.dsdSettings(geo, gain, truePeakUnity, gainScope, trackGain)
 	if err != nil {

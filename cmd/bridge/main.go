@@ -913,6 +913,10 @@ type upscaleEnqueuerAdapter struct {
 	// records). Nil-safe: unwired, a refused file waits for the periodic
 	// scan.
 	rescan func(rel string)
+	// diskFree probes a volume's free space for the pre-flight
+	// (roomForRendition); nil is transcode.AvailableDiskSpaceNearest. A
+	// seam, as the auto-optimize sweeper's diskFree is.
+	diskFree func(dir string) (int64, error)
 }
 
 // renditionQueue is the one transcode.Pool method the adapter calls. It is
@@ -1044,6 +1048,9 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 	if existing != nil && existing.SourceMTimeNS == spec.SourceMTimeNS && existing.SourceSize == spec.SourceSize {
 		return api.ErrUpscaleIneligible
 	}
+	if err := a.roomForRendition(spec); err != nil {
+		return err
+	}
 	enqueueErr := a.pool.Enqueue(spec)
 	switch {
 	case errors.Is(enqueueErr, transcode.ErrQueueFull):
@@ -1058,6 +1065,47 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 		return nil
 	case enqueueErr != nil:
 		return fmt.Errorf("enqueue: %w", enqueueErr)
+	}
+	return nil
+}
+
+// roomForRendition refuses a job whose volumes have no room for it, before it
+// is queued: the variants volume for the projected rendition, and for a DSD
+// render the scratch volume for its Stage A intermediate. The batch and the
+// auto-optimize sweep make the same check before they queue (ProjectedSize
+// and RequiredBytesWithMargin with DefaultDiskSafetyMargin; RenderScratchBytes);
+// the on-demand path made none, so on a full volume every request queued a
+// render that could only fail, and a phone's requests kept coming (backlog
+// B264). A probe that cannot read a volume refuses too, as theirs do.
+func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
+	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
+		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
+	if err := a.roomOn(spec.OutputDir, projected); err != nil {
+		return err
+	}
+	if scratch := spec.RenderScratchBytes(); scratch > 0 {
+		return a.roomOn(transcode.RenderScratchDir(spec.TempDir), scratch)
+	}
+	return nil
+}
+
+// roomOn answers whether dir's volume has room for need bytes and the
+// safety margin: nil, api.ErrUpscaleNoRoom wrapping the numbers, or the
+// probe's own failure. A need of 0 (a projection with an unknown factor)
+// passes once the probe has read the volume.
+func (a *upscaleEnqueuerAdapter) roomOn(dir string, need int64) error {
+	free := a.diskFree
+	if free == nil {
+		free = transcode.AvailableDiskSpaceNearest
+	}
+	have, err := free(dir)
+	if err != nil {
+		return fmt.Errorf("check free space for the rendition: %w", err)
+	}
+	if want := transcode.RequiredBytesWithMargin(need, transcode.DefaultDiskSafetyMargin); want > have {
+		return fmt.Errorf("%w: %w", api.ErrUpscaleNoRoom, &transcode.InsufficientDiskSpaceError{
+			ProjectedBytes: need, RequiredBytes: want, AvailableBytes: have, Dir: dir,
+		})
 	}
 	return nil
 }

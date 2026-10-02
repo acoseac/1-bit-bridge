@@ -431,6 +431,13 @@ func (h *staleRenditionHeal) render(ctx context.Context, track *manifest.Track, 
 	case errors.Is(err, api.ErrUpscaleQueueFull):
 		// Nothing was queued: the next download may ask again.
 		h.forget(h.rendered, key)
+	case errors.Is(err, api.ErrUpscaleNoRoom):
+		// Nothing was queued, for want of free space, and a probe costs
+		// little to ask again: the first download after room is made
+		// renders. At Debug: every download of the rendition asks, and a
+		// full volume is the Jobs card's to report (the sweep's disk floor).
+		h.forget(h.rendered, key)
+		logger.Debug("a download found a rendition stale; no room to render it again", "path", rel, "variant", variantID, "err", err)
 	case errors.Is(err, errSourceAheadOfRow):
 		// The file changed again between the check here and the one in the
 		// enqueue, and the enqueue asked for a rescan. The render waits for

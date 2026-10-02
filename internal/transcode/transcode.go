@@ -1071,15 +1071,6 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		if _, err := runFFmpegPipe(ctx, args, ffmpegDecodeArgs(j.SourceAbsPath)); err != nil {
 			return RunResult{}, err
 		}
-		// ffmpeg exits 0 on a truncated-but-openable source, so the exit
-		// code above cannot tell a partial decode from a whole one. Compare
-		// what was produced against what the container claims. Nothing is
-		// committed on a mismatch, so the candidate re-flows once the source
-		// is whole — the same self-healing shape internal/analyze uses.
-		if produced := probeOutputDuration(ctx, tmpPath); decodeLengthDisagrees(geo.Duration, produced) {
-			return RunResult{}, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
-				ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
-		}
 	default:
 		// routeNone lands here too: sox is given the source and refuses
 		// it with its own diagnostic, which is a better error than one
@@ -1101,6 +1092,27 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 			}
 			return RunResult{}, err
 		}
+	}
+	// sox exits 0 after a write it could not make (a variants volume that
+	// filled, or its own -G temporary file), so the exit status above says
+	// nothing about the file: it is read, and published only whole, at the
+	// length its source implies (rendition_complete.go).
+	whole, err := j.wholeRendition(tmpPath, sidecarDir)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if route == routeFFmpegPipe {
+		// ffmpeg exits 0 on a truncated-but-openable source too, so the
+		// pipe's reference is what the container claims: a whole stream
+		// shorter than that is a partial decode. Nothing is committed on a
+		// mismatch, so the candidate re-flows once the source is whole — the
+		// same self-healing shape internal/analyze uses.
+		if produced := whole.seconds(); decodeLengthDisagrees(geo.Duration, produced) {
+			return RunResult{}, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+				ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
+		}
+	} else if err := j.renditionLengthDisagrees(probeDuration(ctx, j.SourceAbsPath), whole); err != nil {
+		return RunResult{}, err
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy. Refused for a source that changed while it

@@ -36886,3 +36886,194 @@ unused) and was rerun with the call kept and its answer overwritten.
   `noserverino`) a spelling other than the listed one would be refused, and
   the commit or delete would fall back to a full scan; a path spelled as
   listed is unaffected.
+
+## 2026-10-02 — a rendition is published only whole, read from its frames, whatever the tool's exit status (backlog B264)
+
+Found by the B211 session (#1142) measuring sox on a full volume: sox 14.4.2
+prints `sox FAIL sox: '…' error writing output file: No space left on
+device` and EXITS 0, leaving the file it began. Every rendition route trusted
+that exit status.
+
+### The defect
+
+`Run` (sox-direct and the ALAC ffmpeg|sox pipe) and `renderDSD` (Stage C)
+published whatever the tool left once it exited 0. The ALAC route's guard
+read the output's duration with ffprobe, from the FLAC's header, and the DSD
+Stage C had no check at all. A published rendition carries the source's row
+version, so nothing renders it again: the phone downloads and plays the cut
+file as the rendition.
+
+### Measured (macOS, Homebrew sox and ffmpeg 9.0.2; then Linux)
+
+On a 6 MiB HFS+ image (`hdiutil`), the bridge's own argv:
+
+| Route | Exit | What the file says | What it holds |
+|---|---|---|---|
+| sox-direct, 20 s 44.1/16 → 192/24 | 0 | STREAMINFO 3,840,000 samples (the full ESTIMATE), MD5 0, frame sizes 0; ffprobe 20.000000 | 6,111,232 bytes, the last intact frame near sample 2,813,952 |
+| ALAC pipe, same source as .m4a | ffmpeg 0, sox 0 | STREAMINFO 0 samples; ffprobe `N/A` | the same 6,111,232 bytes |
+| DSD Stage C, 1 s DSD64 → 176.4/24 | 0 | STREAMINFO 176,400 (the estimate), MD5 0; ffprobe 1.000000 | 98,304 of ~258,000 bytes |
+| DSD Stage A onto a full scratch | sox 0, ffmpeg 224 (EPIPE in a shell) | the `.sox` header REWRITTEN to 62,458 samples | 499,712 bytes, consistent with that header |
+
+So the header is no witness: sox writes the length it expects into STREAMINFO
+before the audio and only a finished stream rewrites it. `probeOutputDuration` read 0 (`N/A`) for the
+ALAC route's cut file, which `decodeLengthDisagrees` treats as no verdict.
+
+sox's `-G` (the gain guard on the PCM routes) keeps the whole post-rate signal
+in a temporary file (`sox -V4`: `libsox_i: tmpfile()`); with `--temp` pointed
+at the full image sox printed `gain: error writing temporary file: No space
+left on device`, exited 0 and FINISHED a shorter FLAC: 768,000 of 3,840,000
+samples, MD5 set. A check of the stream alone cannot see that one; the length
+check against the source can.
+
+Reproduced red-first through the real pool and the real tools with
+`TestARenditionThatCouldNotBeWrittenWholeIsNotPublished` (a variants
+directory, or for Stage A the render scratch, on a volume filled to 256 KiB):
+on main 95c894c3 on the HFS+ image, and on main 6e9f5fc3 on a 16 MB tmpfs in
+the golang:1.26.6 image on dido with Debian's sox 14.4.2 and ffmpeg (four
+`dsd_*` decoders), run as uid 1000. Both: the sox-direct, ALAC and DSD Stage C
+jobs announced `done` with the cut file published, and the DSD Stage A job
+announced nothing within 30 s. That last one is a hang: `runFFmpegPipe` hands
+sox the read end exec's `StdoutPipe` returns and keeps its own copy, which
+`ff.Wait` closes only after ffmpeg exits, so a sox that stops reading with
+status 0 leaves ffmpeg blocked on a full pipe until the job's timeout (2 × the
+source's duration for a DSD job, at least the base).
+
+### The fix
+
+- `readFLACStream` (flac_stream.go): STREAMINFO from the head, and the frame
+  that ends the file from the tail (at most `flacMaxFrameBytes`, about 25 KiB
+  for sox's 4,096-sample 24-bit stereo blocks): a header at some offset with
+  the sync code, a valid CRC-8 and fields agreeing with STREAMINFO, whose
+  CRC-16 over the bytes to the last two is those two. Whole is that frame
+  ending at the sample STREAMINFO declares, which must be > 0.
+- `wholeRendition` (rendition_complete.go) requires a whole stream at the
+  job's target rate, in `Run` and `renderDSD`, before the publish. Not its
+  bit depth, which says nothing about whether the stream is whole. Then the length: sox-direct against ffprobe's duration of the
+  source (`probeDuration`, which until now read the output), the ALAC route
+  against `geo.Duration` as before, both within `durationTolerance`; Stage C
+  exactly the scratch's sample count (`soxFileSamples`, `sox --i -s`).
+- A stream cut short is the output side's (`cutOutput`): the volume is asked
+  with a 64 KiB write past the file's end (`probeVolumeRoom`, xorshift bytes,
+  so a compressing filesystem cannot store it as nothing), and
+  `hostOutputFault` reads the answer: a named cause is that outage (B211's
+  marking, report and proof), EFBIG or another refusal keeps the strike, and
+  a volume that takes the bytes is the output side's too, under the reason
+  `reasonWriteFailedThenRoom`.
+- Stage A: a failed pipe or a short scratch asks the scratch volume the same
+  way (`scratchOutput`); only a named refusal is the scratch's.
+- `runFFmpegPipe` closes this process's copy of the read end once sox has
+  started; `ff.Wait`'s second close is ignored (`closeDescriptors`).
+- The on-demand enqueue (`finalizeAndEnqueue`) checks room before it queues
+  (`roomForRendition`), as the batch's `diskPreflight` and the sweep's
+  running budget do: `ProjectedSize` with `RequiredBytesWithMargin` on the
+  variants volume and, for a DSD render, `RenderScratchBytes` on the scratch.
+  A refusal is `api.ErrUpscaleNoRoom`: counted as rejected, one Warn per
+  request (`refused=N`), the 202 unchanged. The stale-download heal forgets
+  its minute on it, as on a full queue.
+
+### Measured before choosing the tolerance
+
+- sox-direct, the bridge's argv, 72 complete renders (sources at 44.1, 48,
+  88.2, 96, 176.4 and 192 kHz, two odd lengths, each to all six rates): every
+  output within 0.5 samples of N_in × r_out / r_in.
+- ALAC pipe, 32 complete renders (44.1, 48, 96, 192 kHz sources, mono and
+  stereo, to 44.1, 48, 176.4, 192 kHz): every output within 1e-6 of
+  ffprobe's container duration × r_out, which is ffprobe's six decimals.
+- DSD: the 1 s DSF fixture's container says 1.010068 s (its last 4 KiB block
+  padded), and Stage A decodes exactly 176,400 samples at 176.4 kHz, so the
+  container reference is 1 % off on that fixture and the existing 2 % bound
+  stays. Stage C held exactly the scratch's 176,400.
+
+The shared bound stays `durationTolerance` (2 %, two-sided): the references
+are container durations, and one of them counts block padding. Stage C is
+held exactly because its reference is the chain's own intermediate.
+
+### Alternatives weighed
+
+- **STREAMINFO's total against the source** (the first idea): passes the cut
+  sox-direct and Stage C files, which declare the full estimate.
+- **ffprobe of the output** (the old ALAC guard): reads the same header; for a
+  piped encode it reads `N/A`, which is no verdict.
+- **MD5 zero means unfinished**: true of libFLAC's finish, but a property of
+  the encoder rather than of the file, and a complete stream from an encoder
+  that computes no MD5 would be refused for ever.
+- **Decoding the whole output to count samples**: the answer the frame walk
+  gives, at the cost of a decode (a full read of a multi-GB rendition on a
+  NAS) per job; the tail read is two small reads.
+- **`sox --i -s` for the source's length**: a WAV written by a streaming
+  writer carries 0xFFFFFFFF as its data size; `sox --i -s` reported
+  1,073,741,823 samples for one while sox rendered all 91,878 of its frames
+  (183,756 at 88.2 kHz), and ffprobe reported the 91,878 (measured, with a WAV
+  of data size 0 and a truncated one).
+- **Matching sox's "error writing" line**: the classify-by-type rule
+  (tool_unavailable.go, output_fault.go), and the line is `strerror`'s, in the
+  process locale.
+- **A cut stream with room after the fact strikes**: rejected. A write the
+  tool made failed, and a source can make a write fail only through its size
+  (EFBIG, which the probe meets as itself and strikes). Room after the fact
+  is ordinary: sox frees its `-G` temporary file as it exits, which on a
+  volume the variants share is most of what filled it, and a concurrent
+  job's cleanup frees its partial before this job asks. Neither would a
+  statfs of free space against the rendition's remaining need tell them
+  apart, for the same two reasons. A Gemini consult (gemini-3.8-flash)
+  called the room case unsound, for a source that crashes sox (SIGSEGV, an
+  abort, `lsx_fail`'s exit 2) or gets it killed (the job's timeout, the OOM
+  killer) mid-stream: libFLAC never finishes, the volume has room, and the
+  file would retry for ever. Declined on the code: each of those exits
+  non-zero, and a non-zero exit is the run's failure before anything reads
+  the output, as it always was, so `cutOutput` sees only a tool that exited
+  0, which after a cut stream is the swallowed write error. Its proposed
+  discriminator, sox's "error writing" line on stderr, is the
+  message-matching the classify-by-type rule forbids, and the line is
+  `strerror`'s, in the process locale.
+
+### Tests
+
+- `TestARenditionThatCouldNotBeWrittenWholeIsNotPublished`: the real tools
+  and the real pool onto a full volume, four routes; nothing published, no
+  strike, one `pool: rendition output unavailable` Warn naming the output and
+  `reason=no space left on device`. An HFS+ image on macOS; elsewhere the
+  directory `BRIDGE_TEST_SMALL_VOLUME` names, which gate.yml's `dsd-measure`
+  job mounts (a 16 MB tmpfs).
+- `TestRunPublishesOnlyAWholeRendition`, `TestACutRenditionStrikesNothingAndAShortOneStrikes`:
+  the test binary as sox and ffprobe (TestMain dispatches on
+  `TRANSCODE_TEST_STAND_IN`), so every platform runs them, Windows included.
+- `TestADSDRenditionHoldsWhatItsScratchHeld`, `TestAStageAThatLeftAShortScratchAsksTheScratchVolume`:
+  sh stand-ins, POSIX.
+- `TestACutStreamIsTheOutputSidesUnlessTheVolumeSaysOtherwise`,
+  `TestACutStreamIsClassifiedByWhatTheVolumeAnswers`,
+  `TestAShortScratchIsTheOutputSidesOnlyWhenItsVolumeRefuses`: the decisions,
+  by table.
+- `TestReadFLACStreamReadsWhatLibFLACWrote` (three streams libFLAC 1.5.0
+  wrote through sox, committed under testdata/flac), `TestACutStreamIsNotWhole`
+  (every cut of the last 300 bytes), `TestAStreamCutBetweenFramesHoldsWhatItsFramesHold`,
+  `TestAFinishedStreamDeclaresItsLength`, `TestReadFLACStreamRefusesWhatIsNotFLAC`,
+  `TestReadFLACStreamOnBytesNoEncoderWrote` (random tails and cuts),
+  `TestFLACChecksumsAreTheFormatsOwn` (the published check values).
+- `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom`,
+  `TestUpscaleWithNoRoomRejectsAndSaysSoOnce`.
+- `internal/flactest` writes whole streams for the stand-ins (its CRCs bit by
+  bit, apart from the bridge's tables, pinned to the same check values).
+  Every stand-in sox that "rendered" wrote `fLaC`, `x`, `RENDITION` or
+  `AAAA`; each writes a whole stream at its job's target now.
+
+### Negative controls (each on the committed fix, restored after)
+
+| Control | Red |
+|---|---|
+| `Run` without `wholeRendition` | full-volume sox-direct and ALAC; stand-in cut, other rate, not FLAC; the pool's cut case |
+| `renderDSD` without `wholeRendition` | full-volume Stage C (refused by the length, but struck) |
+| Stage A's pipe failure unclassified | full-volume Stage A (struck) |
+| the pipe's read end kept | full-volume Stage A (nothing announced in 30 s) |
+| a cut stream with room unmarked | stand-in cut cases; the pool's cut case |
+| the probe's answer ignored | full-volume cases (`reason` not ENOSPC) |
+| no rate check | stand-in other rate |
+| no sox-direct length check | stand-in shorter and longer; the pool's short case |
+| whole = any intact last frame | cut between frames, undeclared length, random cuts |
+| no CRC-16 | every cut test |
+| no Stage C exact check | Stage C a block short, a sample long |
+| Stage A's short scratch unclassified | the locked short scratch |
+| EFBIG marked as the host's | both classification tables |
+| no on-demand pre-flight | every refused case, and the scratch-probed cases |
+| no scratch half | the DSD scratch cases |
+| the handler without its case | the no-room handler test |

@@ -11,20 +11,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/flactest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // fakeRenderingSoxCLI stands in for sox(1): it writes a rendition to its
-// output argument, the argv entry after `-t flac`, whatever its input is.
-const fakeRenderingSoxCLI = `#!/bin/sh
+// output argument, the argv entry after `-t flac`, whatever its input is: a
+// whole FLAC at the 48 kHz / 16-bit target the test's job asks for, which
+// transcode.Run reads before it publishes.
+var fakeRenderingSoxCLI = `#!/bin/sh
 out=""; prev=""; prev2=""
 for a in "$@"; do
   if [ "$prev2" = "-t" ] && [ "$prev" = "flac" ]; then out="$a"; break; fi
   prev2="$prev"; prev="$a"
 done
 [ -n "$out" ] || { echo "fake sox: no output argument" >&2; exit 1; }
-printf 'fLaC' > "$out"
+printf '` + flactest.ShPrintf(flactest.Stream(48000, 2, 16, flactest.Block, 0)) + `' > "$out"
 exit 0
 `
 

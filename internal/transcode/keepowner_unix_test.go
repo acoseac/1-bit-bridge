@@ -3,6 +3,7 @@
 package transcode
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -12,19 +13,19 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// fakeSoxWritingInPlace stands in for sox(1): it writes a payload to its
-// output argument (the argv entry right after `-t flac`) through a shell
-// redirection, which opens the file O_TRUNC and so keeps a precreated one,
-// as sox does.
-const fakeSoxWritingInPlace = `#!/bin/sh
+// fakeSoxWritingInPlace stands in for sox(1): it writes a whole FLAC (the
+// rendition the test's 192 kHz / 24-bit job asks for, which Run reads before
+// it publishes) to its output argument (the argv entry right after
+// `-t flac`) through a shell redirection, which opens the file O_TRUNC and so
+// keeps a precreated one, as sox does.
+var fakeSoxWritingInPlace = `#!/bin/sh
 out=""; prev=""; prev2=""
 for a in "$@"; do
   if [ "$prev2" = "-t" ] && [ "$prev" = "flac" ]; then out="$a"; break; fi
   prev2="$prev"; prev="$a"
 done
 [ -n "$out" ] || { echo "fake sox: no output arg in argv" >&2; exit 1; }
-printf 'RENDITION' > "$out"
-`
+` + shWrites("$out", stereoFLAC(192000, 24)) + "\n"
 
 // TestRunAsRootKeepsTheInstallOwner pins that a job run as root gives the
 // album directories it makes (fsutil.MkdirAll) and the sidecar sox writes
@@ -75,8 +76,8 @@ func TestRunAsRootKeepsTheInstallOwner(t *testing.T) {
 			t.Fatalf("owner changes = %+v, want exactly %+v", got, want)
 		}
 	}
-	if b, err := os.ReadFile(final); err != nil || string(b) != "RENDITION" {
-		t.Fatalf("published %q (%v), want what sox wrote into the precreated file", b, err)
+	if b, err := os.ReadFile(final); err != nil || !bytes.Equal(b, stereoFLAC(192000, 24)) {
+		t.Fatalf("published %d bytes (%v), want what sox wrote into the precreated file", len(b), err)
 	}
 }
 
