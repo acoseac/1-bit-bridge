@@ -906,7 +906,9 @@ lost my library."
   candidate; it walks the folder the request names whatever its name, as
   the watcher walks a dot-named root
   (`TestUpscaleFolderRequestSkipsWhatTheScannerSkips`,
-  `TestUpscaleFolderRequestWalksADotNamedRoot`).
+  `TestUpscaleFolderRequestWalksADotNamedRoot`). So do the sidecar walks
+  of the variants and waveform trees, all but lost+found, since 2026-10-02
+  (the B207 bullet under **Job pools**).
   `TestScanner_AnEmptiedRootHoldingOnlyNoiseSparesItsRows`,
   `TestScanner_ASubtreeScanBelowARootHoldingOnlyNoiseIsRefused`,
   `TestScanner_OSAndNASDetritusIsNotLibraryContent`.
@@ -1196,8 +1198,10 @@ lost my library."
   NFC-composes, the scanner stores the on-disk form (NFD from HFS+ or a
   Linux/NAS sync) while clients send NFC, and dropping it answers
   `deletedCount: 0` for every accented album, silently.
-  `acceptCaseExactVariants` re-uses the same `nfcCompose` the scalar itself
-  calls, so generator and acceptance cannot disagree about composition and
+  `acceptCaseExactVariants` re-uses the same `NFCCompose` the scalar itself
+  calls (`nfcCompose` until 2026-10-02, exported then for the sidecar walks'
+  known set, `integrity.KnownSidecarKey`: the B206 bullet under **Job
+  pools**), so generator and acceptance cannot disagree about composition and
   acceptance adds case and nothing else. This is the enricher's rule —
   *relaxations in the query, strictness in the acceptance* — on a delete.
   **Every OTHER `unicode_lower` predicate is a READ and already failed closed**
@@ -3431,13 +3435,75 @@ no failing test — which is the shape to expect in this area.
   `no_image` and nothing fetches it again, a `local-` cover included (the
   cap's docblock said a 202 and a re-enrichment until 2026-09-29; backlog
   B84).
-- **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
-  its own volume, `.Trashes/<uid>/` and `.Trash-1000/` sit under the walk root,
-  so any `.flac` inside one is missing from the catalog and older than the grace
-  — files an operator put in the Trash to get back. Gate on `d.IsDir()`:
-  `SkipDir` returned for a FILE skips the rest of its parent directory and ends
-  the sweep early. `filepath.WalkDir` does not follow symlinks, so a symlinked
-  `.Trashes` needs nothing extra.
+- **A sidecar walk passes over, at the WALK, every directory a library walk
+  skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it
+  lists it** (2026-10-02, backlog B207). With `variantsDir` on its own
+  volume, `.Trashes/<uid>/` and `.Trash-1000/` sit under the walk root; on a
+  NAS share, the share's `#recycle` or `@Recycle` (files an operator deleted
+  to get back), its `#snapshot`, `@Recently-Snapshot` or `~snapshot` (a copy
+  of the whole tree per snapshot) and Synology's `@eaDir` beside every
+  folder; on a Windows drive root, `$RECYCLE.BIN` and `System Volume
+  Information`. The walks pruned dot-directories alone until then.
+  Measured on main: `upscale --gc` unlinked a recycle bin's renditions, a
+  snapshot's copies and the @eaDir metadata (exit 0), `analyze --gc` the
+  recycle bin's waveforms, the background sweep emptied a recycle bin under
+  the floor of ten and, beside a visible snapshot, refused every tick as a
+  lost index; `bridge doctor` called a healthy bridge with visible
+  snapshots one that lost its index; a tree holding renditions only in such
+  a directory, or a link named `#snapshot`, read to the mount-loss probe as
+  healthy; and a recycle bin this user cannot list made every walk partial.
+  `skipsSidecarDir` is the one predicate, asked by `TakeSidecarInventory`
+  and by `scanForRenditions` at both of its sites (a directory, and a link
+  to one), so the forward sweeps and the probe behind the mount-loss and
+  relocation guards cannot disagree. **lost+found keeps its own rule**
+  (`IsFilesystemLostFound`, the partial-walk bullet below: the filesystem's
+  own at the top is not counted, a readable one is walked, a locked one
+  deeper is unlisted); don't fold it into the prune, which turns that
+  bullet's tests red. **The cost, accepted**: in multi-root mode the tree's
+  first level is a library root's BASENAME, which the scanner walks
+  whatever its name, so a root named like one of these directories has its
+  renditions passed over, as a dot-named root's always were (a library AT a
+  recycle bin or snapshot listing; a set of names to spare would need the
+  catalog, which the probe does not have). Gate on `d.IsDir()`: `SkipDir`
+  returned for a FILE skips the rest of its parent directory and ends the
+  sweep early. `filepath.WalkDir` does not follow symlinks, so a symlinked
+  `.Trashes` needs nothing extra
+  (`TestSidecarInventoryPassesOverTheDirectoriesALibraryWalkSkips`,
+  `TestTheRenditionProbeCountsNoRenditionInADirectoryALibraryWalkSkips`,
+  `TestOrphanSidecarSweeperLeavesARecycleBinAndASnapshotAlone`,
+  `TestSidecarWalksListNoDirectoryALibraryWalkSkips`,
+  `TestEveryGCSweepPassesOverADirectoryALibraryWalkSkips`,
+  `TestDoctorVariantsIndexPassesOverASnapshot`).
+- **…and a forward sweep compares a walked file with its rows in ONE
+  spelling, `integrity.KnownSidecarKey`: cleaned, NFC-composed, THEN
+  lowercased** (2026-10-02, backlog B206). HFS+ stores every name
+  decomposed (NFD) whatever spelling created it, and APFS keeps a
+  decomposed name it is given (a tree copied from HFS+) while looking
+  either spelling up, so a walk handed back NFD where the row recorded the
+  composed spelling the file was written by: `LocateSidecar`'s stat reached
+  the file and the forward sweeps read it as an orphan. Measured on an
+  hdiutil HFS+ image: the background sweep, `upscale --gc` and `analyze
+  --gc` each unlinked a live file written by its row's own path, and `--gc`
+  then reaped the row, so it was rendered again. **Every known set and the
+  lookup go through it**: `KnownSidecarSet`, `TakeSidecarInventory`'s
+  lookup and `analyze --gc`'s waveform keys. A set keyed any other way
+  misses a row recorded decomposed (a library scanned from HFS+), because
+  the lookup composes what it walks: with analyze's keys reverted, only that
+  placement of `TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization`
+  goes red. **The composer is `manifest.NFCCompose`**, the one
+  `unicode_lower` calls, never a second copy. **Compose BEFORE lowercasing**:
+  `strings.ToLower` maps rune by rune and does not commute with
+  decomposition (U+0130 lowers to "i", I+U+0307 to "i"+U+0307), so the
+  other order keys one name two ways (`TestKnownSidecarKeyIsOneKeyPerName`).
+  **A fold only makes more files known**, the safe direction for a sweep
+  that unlinks the rest: where a name is looked up by its bytes (ext4, NTFS)
+  a file spelt like a row's in the other form is kept until the reverse
+  sweep reaps that row, whose path opens nothing; the mass-orphan ratio and
+  the doctor's count read the walk's Known and Orphans, so they read fewer
+  orphans. To reproduce the class, run a COMPILED test binary with TMPDIR on
+  an `hdiutil create -fs HFS+` image (`go test` builds in TMPDIR too, and a
+  small image fills: the linker's `ftruncate` failed with ENOSPC)
+  (`TestTheKnownSetMatchesASidecarInEitherNormalization`).
 - **No server-side transcoding, ever.** Conversion is offline; `/v1/download`
   serves bit-exact via `http.ServeContent`. The DSD → PCM renditions (PR #863)
   are conversion in exactly that sense — a sidecar the job pool built earlier,
@@ -3687,8 +3753,9 @@ no failing test — which is the shape to expect in this area.
   own work. The serve reap and the delete handler read the same probe.
   **One walk behind the probe and `TreeHoldsVariantSidecars`**,
   `scanForRenditions`: a rendition is a file `looksLikeVariantSidecar`
-  names (regular, or a link to one) outside a dot-directory; the
-  filesystem's lost+found counts as nothing; a link to a directory, which
+  names (regular, or a link to one) outside a directory the sidecar walks
+  skip (a dot-directory until 2026-10-02, every `skipsSidecarDir` name since:
+  the B207 bullet above); the filesystem's lost+found counts as nothing; a link to a directory, which
   it does not follow, keeps the directory healthy (it cannot say what is
   behind it); it reads each directory a batch at a time and stops at the
   first rendition (never `filepath.WalkDir`: a whole sorted listing per
