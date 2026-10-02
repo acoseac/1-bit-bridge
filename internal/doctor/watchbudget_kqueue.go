@@ -57,7 +57,10 @@ func checkWatchLimit(_ context.Context, d Deps) Check {
 	}
 	summary := fmt.Sprintf("%d open files (%d folders and %d entries in them) of the watcher's %d (%s)",
 		count.OpenFiles(), count.Folders, count.Entries, budget, share)
-	if count.OpenFiles()*5 > budget*4 {
+	// In int64: a budget near what a 32-bit int holds would overflow the
+	// products (no 32-bit build ships, but the BSDs this file builds for
+	// have one).
+	if int64(count.OpenFiles())*5 > int64(budget)*4 {
 		return warn(checkNameWatcherFDBudget,
 			summary+": over 80% of it, and the watcher stops, releasing every watch, once the library grows past it",
 			watchBudgetHint)
