@@ -33,7 +33,7 @@ func seedTree(t *testing.T, root string, rels ...string) []string {
 func knownOf(paths ...string) map[string]struct{} {
 	k := make(map[string]struct{}, len(paths))
 	for _, p := range paths {
-		k[strings.ToLower(filepath.Clean(p))] = struct{}{}
+		k[KnownSidecarKey(p)] = struct{}{}
 	}
 	return k
 }
@@ -390,7 +390,7 @@ func TestSidecarInventoryUsesTheSameKnownSetAsTheSweeps(t *testing.T) {
 	// file of the moved tree is an orphan — the 2026-09-20 shape.
 	recordedOnly := make(map[string]struct{}, len(rows))
 	for _, r := range rows {
-		recordedOnly[strings.ToLower(filepath.Clean(r.SidecarPath))] = struct{}{}
+		recordedOnly[KnownSidecarKey(r.SidecarPath)] = struct{}{}
 	}
 	inv, err = TakeSidecarInventory(context.Background(), newDir, recordedOnly, SidecarInventoryOptions{})
 	if err != nil {

@@ -6324,7 +6324,7 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 // rows genuinely exist: on Linux a filename is an arbitrary byte
 // string, nothing between filepath.WalkDir and UpsertTrackBatch
 // validates it, and SQLite does not validate TEXT either — the
-// utf8.ValidString fallback in sqlfunc.go's nfcCompose is in the
+// utf8.ValidString fallback in sqlfunc.go's NFCCompose is in the
 // codebase for the same reason.
 //
 // Callers must route `illFormed` through a per-path bound predicate
@@ -8444,7 +8444,7 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 // So the query stays the relaxed CANDIDATE GENERATOR and the strictness
 // moves here — the rule this repo already states for the enricher:
 // relaxations belong in the query, strictness in the acceptance. Both
-// sides go through the same `nfcCompose` that `unicodeLowerScalar`
+// sides go through the same `NFCCompose` that `unicodeLowerScalar`
 // itself calls, so the generator and the acceptance cannot disagree
 // about composition; the only thing acceptance adds is case.
 //
@@ -8464,7 +8464,7 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 func acceptCaseExactVariants(rows []VariantRow, match func(composedPath string) bool) []VariantRow {
 	out := rows[:0:0]
 	for _, v := range rows {
-		if match(nfcCompose(v.SourcePath)) {
+		if match(NFCCompose(v.SourcePath)) {
 			out = append(out, v)
 		}
 	}
@@ -8541,7 +8541,7 @@ func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]
 	// must not reap `jazz/` and `JAZZ/`, which are different real
 	// directories on a case-sensitive filesystem — Linux, so the VPS,
 	// the tenants and the Docker image.
-	base := nfcCompose(strings.TrimRight(prefix, "/")) + "/"
+	base := NFCCompose(strings.TrimRight(prefix, "/")) + "/"
 	return acceptCaseExactVariants(out, func(p string) bool {
 		return strings.HasPrefix(p, base)
 	}), nil
@@ -8585,7 +8585,7 @@ func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]V
 	// `?path=<rel>` as "the variants of ONE EXACT SOURCE TRACK"; the
 	// folded query answered for `album/t.flac` as well as
 	// `Album/T.flac`, and the handler unlinks every row it is handed.
-	want := nfcCompose(sourcePath)
+	want := NFCCompose(sourcePath)
 	return acceptCaseExactVariants(out, func(p string) bool { return p == want }), nil
 }
 

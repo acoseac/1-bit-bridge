@@ -313,11 +313,15 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
 		return 1
 	}
-	// Key on the lowercased clean path so a case difference between the
-	// DB-recorded path and the on-disk path (case-insensitive macOS /
-	// Windows filesystems) can't make `--gc` delete a live waveform.
-	// On case-sensitive Linux the worst case is a false-keep of a rare
-	// same-name-different-case orphan — safe (no data loss). Gemini on #395.
+	// Key on integrity.KnownSidecarKey (the clean path, composed and
+	// lowercased), the key the inventory looks every walked file up by, so
+	// a case difference between the DB-recorded path and the on-disk path
+	// (case-insensitive macOS / Windows filesystems; Gemini on #395), or a
+	// normalization one (an HFS+ volume hands every name back decomposed;
+	// backlog B206), can't make `--gc` delete a live waveform. On a
+	// filesystem that keeps the spellings apart the worst case is a
+	// false-keep of a rare orphan spelt like a live one — safe (no data
+	// loss).
 	//
 	// BOTH spellings of every row go in: the recorded `waveform_path` and
 	// the canonical path under outputDir (analyze.AnalyzeSpec.SidecarPath,
@@ -336,11 +340,11 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 	known := make(map[string]struct{}, 2*len(rows))
 	for _, r := range rows {
 		if r.WaveformPath != "" {
-			known[strings.ToLower(filepath.Clean(r.WaveformPath))] = struct{}{}
+			known[integrity.KnownSidecarKey(r.WaveformPath)] = struct{}{}
 		}
 		if r.SourcePath != "" {
 			canonical := analyze.AnalyzeSpec{OutputDir: outputDir, SourceLibraryRel: r.SourcePath}.SidecarPath()
-			known[strings.ToLower(filepath.Clean(canonical))] = struct{}{}
+			known[integrity.KnownSidecarKey(canonical)] = struct{}{}
 		}
 	}
 

@@ -79,14 +79,14 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 		// SQLite NULL → NULL, matching LOWER()'s pass-through.
 		return nil, nil
 	case string:
-		return nfcCompose(caser.String(v)), nil
+		return NFCCompose(caser.String(v)), nil
 	case []byte:
 		// LOWER() accepts text that arrived as a BLOB and returns
 		// it lowered; mirror that for compat. The folded form is
 		// returned as a string (driver.Value supports both, and
 		// string is the canonical representation for the indexed
 		// expression `unicode_lower(path)` on a TEXT column).
-		return nfcCompose(caser.String(string(v))), nil
+		return NFCCompose(caser.String(string(v))), nil
 	default:
 		// Non-text input → nil, matching SQLite LOWER()'s
 		// behaviour on numeric / blob inputs that aren't text-
@@ -97,13 +97,20 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 	}
 }
 
-// nfcCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8
+// NFCCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8
 // falls back to the uncomposed fold: `norm.NFC.String` never fails
 // (it passes ill-formed input through unchanged), but the explicit
 // guard keeps that edge deterministic instead of depending on norm's
 // pass-through internals. Manifest paths are always valid UTF-8 —
 // they originate from the FS scan — so the guard is defensive.
-func nfcCompose(s string) string {
+//
+// Exported (it was nfcCompose until 2026-10-02) for the sidecar walks'
+// known set, integrity.KnownSidecarKey, which compares a walked file
+// with the paths its rows record and must compose them as this
+// package's path lookups do: one composer, so the walks and the
+// lookups cannot disagree about which spellings are one name (backlog
+// B206).
+func NFCCompose(s string) string {
 	if !utf8.ValidString(s) {
 		return s
 	}

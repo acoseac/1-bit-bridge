@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // The forward sweeps delete FILES, and until now the only thing standing
@@ -48,8 +50,8 @@ type SidecarInventory struct {
 	// Files is every candidate the walk classified — the ones Consider
 	// accepted. Scratch files are NOT among them.
 	Files int
-	// Known and Orphans partition Files: a file whose cleaned, folded path
-	// is in the known set, and one that is not.
+	// Known and Orphans partition Files: a file whose KnownSidecarKey is
+	// in the known set, and one whose key is not.
 	Known   int
 	Orphans int
 	// OrphanPaths holds the orphans in walk order, capped by
@@ -196,12 +198,15 @@ type SidecarInventoryOptions struct {
 // known (build it with KnownSidecarSet, so a relocated catalog's canonical
 // spellings are in it).
 //
-// Dot-directories below the root are pruned, the rule every sidecar walk
-// in this tree follows: with a variants directory on its own volume,
-// `.Trashes/<uid>/` and `.Trash-1000/` sit under the walk root, and the
-// files inside are ones an operator put in the Trash to get back. The
-// prune is gated on d.IsDir() because SkipDir returned for a FILE skips
-// the rest of its parent directory and would end the walk early.
+// Below the root, every directory a library walk skips is passed over
+// (skipsSidecarDir: a dot-directory, a NAS recycle bin or snapshot,
+// Synology's @eaDir, Windows' recycle bin and System Volume Information),
+// the rule every sidecar walk in this tree follows: with a variants
+// directory on its own volume or share, `.Trashes/<uid>/`, `#recycle/` and
+// `$RECYCLE.BIN/` sit under the walk root holding files an operator
+// deleted to get back, and `#snapshot/` a copy of the tree per snapshot.
+// The prune is gated on d.IsDir() because SkipDir returned for a FILE
+// skips the rest of its parent directory and would end the walk early.
 //
 // The root is RESOLVED before the walk (resolveSidecarRoot) and paths are
 // REPORTED under the configured one. Both halves are load-bearing:
@@ -307,7 +312,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			traversed++
 		}
 		if d.IsDir() {
-			if path != walkRoot && strings.HasPrefix(d.Name(), ".") {
+			if path != walkRoot && skipsSidecarDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -353,7 +358,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		}
 		inv.Files++
 		reported := reportPath(path)
-		if _, ok := known[strings.ToLower(filepath.Clean(reported))]; ok {
+		if _, ok := known[KnownSidecarKey(reported)]; ok {
 			inv.Known++
 			return nil
 		}
@@ -438,6 +443,53 @@ func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkE
 		return walkEntryUnreadable
 	}
 	return walkEntryClassify
+}
+
+// skipsSidecarDir reports whether a sidecar walk passes over a directory
+// of this name below its root, without listing it: every directory a
+// library walk skips (manifest.ShouldSkipDir, the scanner's own rule: a
+// dot-directory, a NAS recycle bin or snapshot, Synology's @eaDir,
+// Windows' recycle bin and System Volume Information), except lost+found.
+// TakeSidecarInventory and scanForRenditions ask it, so the forward sweeps
+// and the probe behind the mount-loss and relocation guards cannot
+// disagree about what the tree holds.
+//
+// They pruned dot-directories alone until 2026-10-02 (backlog B207). A
+// variants directory on a NAS share holds the share's recycle bin and
+// snapshots at its top, and Synology's @eaDir beside every folder the NAS
+// indexes, and the walks took their files for the tree's own: `upscale
+// --gc` unlinked a recycle bin's renditions (files an operator deleted to
+// get back), a snapshot's copies and the @eaDir metadata, the background
+// sweep emptied a recycle bin, a visible snapshot (a copy of the whole
+// tree) made the sweeps refuse and the doctor report a lost index on a
+// healthy bridge, and a tree whose renditions were only in such a
+// directory read to the mount-loss probe as one holding renditions.
+// Decided from the NAME, before the directory is listed, so one this user
+// may not list (a root-owned recycle bin; Windows keeps System Volume
+// Information from everyone but SYSTEM) is no unlisted directory either.
+//
+// Nothing the bridge renders is in one: the tree mirrors library-relative
+// paths, and the scanner indexes no file below a directory it skips, so no
+// row names one. The exception is the tree's first level in multi-root
+// mode, a library root's BASENAME, which the scanner walks whatever its
+// name: a root named like one of these directories has its renditions
+// passed over, as the dot rule has always passed over a dot-named root's.
+// Such a root would be a library AT a recycle bin, a snapshot listing or
+// NAS metadata, and is left to that residual rather than handed to the
+// walks as a set of names to spare, which a probe without the catalog
+// could not read the same way.
+//
+// lost+found keeps the rule these walks already had for it
+// (IsFilesystemLostFound): the filesystem's own at the top of the walk
+// root, which this user cannot list, is not counted, and any other is
+// walked. One this user can list at the top is a multi-root library root
+// of that name, whose renditions the bridge made, or one a CLI run as
+// root can read, and one further down that cannot be listed is a volume
+// mounted inside the tree, which nothing about the walk root vouches for
+// (PartialWalkRefusal). It holds what fsck recovered from the volume, not
+// a NAS's or an operating system's copies of the tree.
+func skipsSidecarDir(name string) bool {
+	return name != "lost+found" && manifest.ShouldSkipDir(name)
 }
 
 // IsFilesystemLostFound reports whether a directory the walk could not

@@ -36172,3 +36172,186 @@ each.
 No wire change, and no iOS twin: the app watches no folder (its source holds no
 file-system dispatch source, FSEvents stream or file presenter; its one mention
 of kqueue is a comment on network-path monitoring).
+
+## 2026-10-02 — the sidecar walks compare names in one normalization, and pass over the directories a library walk skips (backlog B206, B207)
+
+Both were found by the pre-v0.2.1 operations review (2026-09-30): B206 on an
+HFS+ disk image, B207 in a report cut off after its first sentence, so its
+consequences were re-measured here, walk by walk.
+
+### B206: the defect
+
+The forward sweeps (the background `OrphanSidecarSweeper`, `bridge upscale
+--gc` with optimize and render, `bridge analyze --gc`, and `bridge doctor`'s
+variants-index count) build a known set from the rows and look every walked
+file up in it. The keys were `strings.ToLower(filepath.Clean(p))`: case-folded,
+for case-insensitive filesystems (CodeRabbit on #477, Gemini on #395), and
+nothing else. An HFS+ volume stores every name decomposed whatever spelling
+created it (its own canonical decomposition: NFD but for the ranges Apple's
+TN1150 leaves as they are, U+2000 to U+2FFF, U+F900 to U+FAFF and U+2F800 to
+U+2FAFF; CodeRabbit on #1141), and a walk hands it back that way; the row
+records the spelling the file was written by, the library-relative path as the
+scanner read it, composed (NFC) wherever the library is not itself on HFS+.
+Every such spelling is canonically equivalent to the name, and NFC turns
+canonically equivalent strings into one, so the ranges HFS+ leaves alone need
+nothing of their own (a CJK compatibility ideograph HFS+ keeps composes to the
+unified ideograph its row's spelling composes to). Measured with a
+probe on this Mac: a name created composed lists decomposed on the HFS+ image,
+composed on APFS, and a stat of the composed spelling finds the file on both.
+APFS keeps whatever bytes a name was created with, so a tree copied there from
+HFS+ keeps its decomposed names, and its lookups take either spelling too.
+
+So the rendition was present to the reverse sweep (`LocateSidecar` stats the
+recorded, composed path, which reaches the file) and an orphan to the forward
+sweeps. Measured on main (1ce01f20) through the real code, with a compiled test
+binary and TMPDIR on an `hdiutil create -fs HFS+` image (64 MB): the background
+sweep's tick unlinked a live rendition written by its row's own path (the
+inventory: known=0 orphans=1); `upscale --gc` unlinked it and then reaped its
+row, the forward sweep running first; `analyze --gc` unlinked the waveform.
+B205's grace (#1139) does not cover it: a rendition is old. On APFS the same
+three unlinked a file planted decomposed under a composed row, which a stat of
+the composed path also reaches there.
+
+### B206: the fix
+
+`integrity.KnownSidecarKey` is the one key: `filepath.Clean`, then
+`manifest.NFCCompose`, then `strings.ToLower`. `KnownSidecarSet` keys both of
+a row's spellings by it, `TakeSidecarInventory` looks each walked file up by
+it, and `analyze --gc` keys its waveform rows by it (it built its own set by
+the old expression).
+
+- **The composer is the manifest's.** `nfcCompose`, the composer
+  `unicode_lower` calls, is exported as `manifest.NFCCompose` (renamed; the
+  log entries above keep the old name, as written). A second copy is what
+  CLAUDE.md's `unicode_lower` bullet warns against.
+- **Composed before it is lowercased.** `strings.ToLower` maps rune by rune
+  (the simple mapping), which does not commute with decomposition: U+0130
+  lowers to "i" while its decomposition, I and U+0307, lowers to "i" and
+  U+0307, which composes to nothing else. Lowercased first, that name keys two
+  ways. Composed first, two spellings of one name are one string before
+  anything else is done to it. `unicode_lower` lowercases first and is right
+  to: `cases.Lower` uses the full mappings (U+0130 to "i" and U+0307), which
+  commute. Keeping `strings.ToLower` keeps every existing key of a composed
+  path byte for byte.
+- **Every builder of a known set must use it.** The lookup now composes what
+  it walks, so a set keyed the old way misses a row recorded DECOMPOSED (a
+  library scanned from HFS+, the pool writing the file by that path), which
+  every build had kept, since the bytes were identical. That was found by a
+  negative control that stayed green: reverting `analyze --gc`'s keys alone
+  passed every test then written, because a composed row's old key equals its
+  new one. A placement with the row recorded decomposed was added to both
+  tests, and the control then turned exactly that placement red.
+- **A fold only makes more files known.** Where a name is looked up by its
+  bytes (ext4; NTFS for normalization), a file spelt like a row's in the other
+  form is now kept, though the row's path opens nothing; the reverse sweep
+  reaps that row, and the file is an orphan the next run. The mass-orphan
+  ratio, the empty-catalog refusal and the doctor's count read the walk's
+  Known and Orphans (and `len(known)`, which a fold can only shrink by merging
+  two spellings of one row's paths, never to zero), so they read fewer
+  orphans, and nothing else reads the keys.
+- **The cost, measured** (a benchmark on the dev Mac, under load): a key of
+  a 100-byte ASCII path took 289 ns against 250 ns, no allocation more
+  (`norm.NFC`'s quick check passes ASCII through); one of a decomposed path
+  856 ns against 320 ns and 4 allocations against 1. Over 100,000 files
+  that is 4 ms more per walk for an ASCII tree and 54 ms for one decomposed
+  throughout, beside the 128 ms the orphan sweep's walk of 100,001 files
+  measured warm.
+
+### B207: the defect, re-measured
+
+Both sidecar walks, `TakeSidecarInventory` and the rendition probe
+`scanForRenditions` (behind `VariantsDirSweepBlock` and
+`TreeHoldsVariantSidecars`), pruned dot-directories alone. The scanner, the
+doctor's inotify count and the upscale folder walk skip by
+`manifest.ShouldSkipDir`, which also names `$RECYCLE.BIN`, `$Recycle.Bin`,
+`System Volume Information`, `lost+found`, `@eaDir`, `#recycle`, `#snapshot`,
+`@Recycle`, `@Recently-Snapshot` and `~snapshot`. Measured on main, each
+through the real code:
+
+- The inventory counted every file below them: a tree of 2 live renditions,
+  5 albums beside such directories and 18 files inside 9 of them gave
+  files=22 orphans=20.
+- `upscale --gc` (nil Consider) unlinked a recycle bin's renditions, a
+  snapshot's copies, a `$RECYCLE.BIN`'s and the `@eaDir` metadata, exit 0;
+  `analyze --gc` the recycle bin's, snapshot's and `$RECYCLE.BIN`'s waveforms.
+- The background sweep emptied a `#recycle` of 3 renditions (under the floor
+  of ten), and beside a `#snapshot` holding a copy of the tree refused the tick
+  as a lost index ("30 of 50 file(s) on disk (60%) are referenced by no row"),
+  every tick, reclaiming none of the tree's own 5 orphans.
+- `bridge doctor` reported a healthy bridge (6 rows, 6 files) with three
+  visible snapshots as a lost index: "18 of 24 sidecar file(s) … are
+  referenced by no row", REFUSES.
+- The probe answered "holds a rendition" for a tree whose renditions were all
+  in such a directory, top or nested, and a link to a directory named
+  `#snapshot` kept the directory healthy.
+- A `#recycle` this user cannot list was an unlisted directory: the inventory's
+  partial-walk refusal, and the probe's "cannot read".
+
+### B207: the fix, and the decision at the tree's first level
+
+`skipsSidecarDir(name)` is `name != "lost+found" && manifest.ShouldSkipDir(name)`,
+asked by the inventory (as the dot rule was, gated on `d.IsDir()`, before the
+directory is listed) and by the probe at both of its sites (a directory it
+would queue, and a link to a directory).
+
+- **lost+found keeps its own rule.** `IsFilesystemLostFound` was decided for
+  the root-owned lost+found of an ext4 volume mounted as the variants
+  directory (2026-09-28): the one at the top that this user cannot list is not
+  counted, a readable one is walked (a multi-root library root of that name,
+  whose renditions the bridge made, or a CLI run as root), and one deeper that
+  cannot be listed is unlisted, since a volume mounted inside the tree has
+  nothing vouching for it. Pruning lost+found by name turns
+  `TestTakeSidecarInventoryLeavesTheFilesystemsLostFoundOut` and
+  `TestTreeHoldsVariantSidecars` red (a negative control), so it stays out.
+- **A recycle bin is evidence of the mount and not of renditions.** The probe
+  answers two questions with one walk (B223: the mount-loss probe and the
+  relocation guard must not disagree about what a tree holds). A recycle bin
+  or a snapshot exists only on the mounted volume, so for the first question
+  its renditions were sound evidence; for the second they are deleted files or
+  copies, not the tree's. The walk takes the second reading, the one
+  `.Trashes` (which also exists only at a volume's root) already had. The
+  cost: a tree whose every rendition an operator deleted over the share, into
+  its recycle bin, now holds none, and the watcher refuses every tick as B223
+  refuses any tree deleted by hand (`bridge upscale --gc --allow-mass-delete`
+  is the way past), where main took the recycle bin's files for renditions
+  and reaped a small catalog's rows (a large one met the relocation refusal,
+  "while the variants directory still holds sidecar files", about files that
+  were deleted, not moved).
+- **The first level in multi-root mode.** There the tree's first segment is a
+  library root's BASENAME, which the scanner walks whatever its name. A root
+  named like one of these directories therefore has its renditions passed
+  over by the sweeps and the probe, exactly as the dot rule has always passed
+  over a dot-named root's. Sparing the names the catalog holds was weighed and
+  not taken: the inventory has the known set and could, the probe has none,
+  and the two would then disagree about the one tree they share. Such a root
+  is a library at a recycle bin, a snapshot listing or NAS metadata. Below the
+  first level nothing the bridge renders is in such a directory: the scanner
+  indexes no file below one, so no row names one.
+
+### Tests and controls
+
+Red on main first, then green: `TestSidecarInventoryPassesOverTheDirectoriesALibraryWalkSkips`,
+`TestTheRenditionProbeCountsNoRenditionInADirectoryALibraryWalkSkips`,
+`TestOrphanSidecarSweeperLeavesARecycleBinAndASnapshotAlone`,
+`TestSidecarWalksListNoDirectoryALibraryWalkSkips`,
+`TestTheKnownSetMatchesASidecarInEitherNormalization`,
+`TestKnownSidecarKeyIsOneKeyPerName` (internal/integrity),
+`TestEveryGCSweepPassesOverADirectoryALibraryWalkSkips`,
+`TestDoctorVariantsIndexPassesOverASnapshot` and
+`TestEveryGCSweepKeepsAFileItsRowSpellsInAnotherNormalization` (cmd/bridge).
+The HFS+ placements ("written by the row's own spelling") pass on every other
+filesystem and were run red, then green, on the image. Negative controls, each
+on the committed fix and restored after: the inventory's prune back to the dot
+rule (the five inventory-side B207 tests red, the probe's green); the probe's
+directory site (the probe tests red); its link site alone (the link assertion
+alone red); the inventory's lookup uncomposed (the decomposed-walk cases red);
+the key without composing (every B206 test red); lowercased before composing
+(the U+0130 pair alone red); `analyze --gc`'s keys reverted (its
+recorded-decomposed placement alone red); `KnownSidecarSet` keyed uncomposed
+(the recorded-decomposed cases red); lost+found pruned too (the two existing
+lost+found tests red).
+
+No wire change and no iOS twin: the app's one file sweep
+(`OfflineStorage.sweepOrphanedTrackFiles`) names its files
+`<shareID>/<trackID>.<ext>` in its own container, where neither a library
+name nor a NAS directory appears.
