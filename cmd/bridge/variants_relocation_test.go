@@ -42,7 +42,9 @@ func relocatedStore(t *testing.T, oldDir, newDir string, n int) (*manifest.Store
 // relocatedStoreAt is relocatedStore over the database at dbPath, for a test
 // that opens a second store over it, as a CLI run beside a serving bridge
 // does. With oldDir and newDir the same, every row records its sidecar where
-// the file is.
+// the file is. Each row carries a created_at of its own, as a render's does,
+// which the variant sweep's delete compares (DeleteVariantIfUnchanged): at 0
+// on every row, a projection that dropped it would compare equal.
 func relocatedStoreAt(t *testing.T, dbPath, oldDir, newDir string, n int) (*manifest.Store, []string) {
 	t.Helper()
 	store, err := manifest.OpenStore(dbPath)
@@ -69,7 +71,7 @@ func relocatedStoreAt(t *testing.T, dbPath, oldDir, newDir string, n int) (*mani
 			SourcePath: source, VariantID: variant,
 			SidecarPath: transcode.VariantSidecarPath(oldDir, source, variant), Format: "flac",
 			SampleRate: 176400, BitsPerSample: 24, SizeBytes: int64(1000 + i),
-			SourceMTimeNS: 1, SourceSize: 100,
+			SourceMTimeNS: 1, SourceSize: 100, CreatedAt: int64(1_000_000 + i),
 		}); err != nil {
 			t.Fatal(err)
 		}
