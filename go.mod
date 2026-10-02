@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/mdns v1.0.7
 	github.com/mewkiz/flac v1.0.14
-	github.com/miekg/dns v1.1.72
+	github.com/miekg/dns v1.1.73
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/quic-go v0.62.0
@@ -75,7 +75,6 @@ require (
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
