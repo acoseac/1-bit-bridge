@@ -11,7 +11,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 // A `bridge variants move --to X` run while a bridge serves (what the
@@ -25,49 +24,6 @@ import (
 // These tests run the real watcher over the real store, through the serve
 // wiring's adapters, and the real move code, on a second store over the
 // same database, as the CLI opens its own.
-
-// moveSweepVariant is the variant every row here names.
-const moveSweepVariant = "upscaled-v2-176400-24"
-
-// moveSweepSource names row i's source file.
-func moveSweepSource(i int) string {
-	return fmt.Sprintf("Artist/Album %d/%02d - Track.flac", i%3, i)
-}
-
-// moveSweepStore seeds n tracks, each with a variant row whose sidecar is at
-// its canonical place under dir, in a database of its own. It returns the
-// database's path, for the move's second store, and the serving store.
-func moveSweepStore(t *testing.T, dir string, n int) (string, *manifest.Store) {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "bridge.db")
-	store, err := manifest.OpenStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ctx := context.Background()
-	for i := 0; i < n; i++ {
-		source := moveSweepSource(i)
-		if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 100, ModTime: time.Now().Add(-time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
-		sidecar := transcode.VariantSidecarPath(dir, source, moveSweepVariant)
-		if err := os.MkdirAll(filepath.Dir(sidecar), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(sidecar, make([]byte, 1000+i), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.UpsertVariant(ctx, manifest.VariantRow{
-			SourcePath: source, VariantID: moveSweepVariant, SidecarPath: sidecar,
-			Format: "flac", SampleRate: 176400, BitsPerSample: 24, SizeBytes: int64(1000 + i),
-			SourceMTimeNS: 1, SourceSize: 100, CreatedAt: int64(i + 1),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dbPath, store
-}
 
 // listThenAct is the serve wiring's lister with a hook that runs once, after
 // the first listing and before the tick sees it: the moment inside a tick at
@@ -136,7 +92,8 @@ func TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "variants")
 	to := filepath.Join(t.TempDir(), "new-disk", "variants")
-	dbPath, store := moveSweepStore(t, dir, 40)
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	store, _ := relocatedStoreAt(t, dbPath, dir, dir, 40)
 
 	listed, err := store.AllVariants(ctx)
 	if err != nil {

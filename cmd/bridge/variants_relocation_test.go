@@ -36,7 +36,16 @@ import (
 // paths, in track order.
 func relocatedStore(t *testing.T, oldDir, newDir string, n int) (*manifest.Store, []string) {
 	t.Helper()
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	return relocatedStoreAt(t, filepath.Join(t.TempDir(), "bridge.db"), oldDir, newDir, n)
+}
+
+// relocatedStoreAt is relocatedStore over the database at dbPath, for a test
+// that opens a second store over it, as a CLI run beside a serving bridge
+// does. With oldDir and newDir the same, every row records its sidecar where
+// the file is.
+func relocatedStoreAt(t *testing.T, dbPath, oldDir, newDir string, n int) (*manifest.Store, []string) {
+	t.Helper()
+	store, err := manifest.OpenStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
