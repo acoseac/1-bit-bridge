@@ -36709,5 +36709,10 @@ with the standard library's, which on Windows defines none of them but
 and the rest); the package already imports x/sys/windows. Its second round:
 a permission is asked of the whole chain, so one a wrapper reports without an
 errno is still classified (no output step builds such an error today; the
-classifier test now carries the case), and `lazily` runs on a `sync.Once`.
-CodeRabbit had nothing actionable on the first round's head.
+classifier test now carries the case, red with the check back on the errno
+alone), and `lazily` runs on a `sync.Once`. Its third round said the
+x/sys/windows codes would not compile as `syscall.Errno` keys: declined,
+since x/sys/windows declares `type Errno = syscall.Errno` and each code as
+`syscall.Errno` (this file's bot-review section records the same claim), and
+the Windows leg was green on those files. CodeRabbit asked for the start
+order and the lazy proof in the rule itself, which it now carries.
