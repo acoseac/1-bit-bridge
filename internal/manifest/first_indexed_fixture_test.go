@@ -58,10 +58,10 @@ func scanSeededAlbum(t *testing.T, at time.Time) (string, *Store, *Scanner) {
 
 // recordAndWipe saves the dates for a root flip and wipes the filesystem
 // rows, the two steps that sit next to each other before a rescan.
-func recordAndWipe(t *testing.T, store *Store, toMulti bool, base string) {
+func recordAndWipe(t *testing.T, store *Store, fromMultiRoot bool, base string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := store.RecordFirstIndexedCarry(ctx, toMulti, base); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, fromMultiRoot, base); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
