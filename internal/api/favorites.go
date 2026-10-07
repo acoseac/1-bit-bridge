@@ -17,13 +17,13 @@ import (
 // (feature-off). *manifest.Store satisfies it in production.
 //
 // Favorites are a USER-WIDE SINGLETON document (the playlists convention:
-// every paired device belongs to the bridge operator), replaced wholesale
-// per PUT under the client-wall-clock LWW guard. The deviceToken on the
-// upsert records last-writer provenance only.
+// every paired device belongs to the bridge operator). A PUT that carries
+// baseRevision is a compare-and-swap on that revision; a PUT without one
+// is additions only and never conflicts. The deviceToken records
+// last-writer provenance.
 type FavoritesStore interface {
-	UpsertFavorites(ctx context.Context, deviceToken string, lastModifiedAt int64,
-		tracks []manifest.FavoriteTrackRow, albums []manifest.FavoriteAlbumRow) error
-	GetFavorites(ctx context.Context) (*manifest.FavoritesMeta, []manifest.FavoriteTrackRow, []manifest.FavoriteAlbumRow, error)
+	ReadFavorites(ctx context.Context) (manifest.FavoritesDocument, error)
+	SaveFavorites(ctx context.Context, deviceToken string, save manifest.FavoritesSave) (manifest.FavoritesSaveResult, error)
 }
 
 // WithFavoritesStore wires the favorites-backup feature. Advertises the
@@ -147,14 +147,59 @@ type favoriteAlbumDTO struct {
 	FavoritedAt int64  `json:"favoritedAt"`    // UnixNano UTC
 }
 
+type favoriteTombstoneDTO struct {
+	Path              string `json:"path,omitempty"`
+	OriginFingerprint string `json:"originFingerprint,omitempty"`
+	OriginPath        string `json:"originPath,omitempty"`
+	RemovedAt         int64  `json:"removedAt"`
+}
+
+type favoriteAlbumTombstoneDTO struct {
+	AlbumArtist string `json:"albumArtist,omitempty"`
+	Album       string `json:"album"`
+	Year        int    `json:"year,omitempty"`
+	RemovedAt   int64  `json:"removedAt"`
+}
+
+// cappedFavoriteTombstones shares the track cap so a removal list cannot
+// outgrow the live list it is paired with.
+type cappedFavoriteTombstones []favoriteTombstoneDTO
+
+func (c *cappedFavoriteTombstones) UnmarshalJSON(data []byte) error {
+	items, err := decodeCappedArray[favoriteTombstoneDTO](data, maxFavoriteTracks, errTooManyFavoriteTracks)
+	if err != nil {
+		return err
+	}
+	*c = items
+	return nil
+}
+
+type cappedFavoriteAlbumTombstones []favoriteAlbumTombstoneDTO
+
+func (c *cappedFavoriteAlbumTombstones) UnmarshalJSON(data []byte) error {
+	items, err := decodeCappedArray[favoriteAlbumTombstoneDTO](data, maxFavoriteAlbums, errTooManyFavoriteAlbums)
+	if err != nil {
+		return err
+	}
+	*c = items
+	return nil
+}
+
 type favoritesDTO struct {
-	LastModifiedAt int64                `json:"lastModifiedAt"` // UnixNano UTC (LWW guard key)
-	Tracks         cappedFavoriteTracks `json:"tracks"`
-	Albums         cappedFavoriteAlbums `json:"albums"`
+	Epoch           string                        `json:"epoch"`
+	Revision        int64                         `json:"revision"`
+	LastModifiedAt  int64                         `json:"lastModifiedAt"`
+	Tracks          cappedFavoriteTracks          `json:"tracks"`
+	Albums          cappedFavoriteAlbums          `json:"albums"`
+	Tombstones      cappedFavoriteTombstones      `json:"tombstones"`
+	AlbumTombstones cappedFavoriteAlbumTombstones `json:"albumTombstones"`
+	BaseRevision    *int64                        `json:"baseRevision,omitempty"`
 }
 
 type favoritesStoredResponse struct {
-	Stored bool `json:"stored"`
+	Stored   bool   `json:"stored"`
+	Epoch    string `json:"epoch"`
+	Revision int64  `json:"revision"`
 }
 
 // favoritesStaleResponse is the 409 body: the error envelope plus the FULL
@@ -167,18 +212,19 @@ type favoritesStaleResponse struct {
 	Server  favoritesDTO `json:"server"`
 }
 
-func toFavoritesDTO(meta *manifest.FavoritesMeta,
-	tracks []manifest.FavoriteTrackRow, albums []manifest.FavoriteAlbumRow) favoritesDTO {
+func toFavoritesDTO(doc manifest.FavoritesDocument) favoritesDTO {
 	out := favoritesDTO{
+		Epoch:    doc.Epoch,
+		Revision: doc.Revision,
 		// Empty slices, not nil — the wire arrays must encode as [] so the
 		// never-stored empty doc is shape-identical to a stored-empty one.
-		Tracks: make(cappedFavoriteTracks, 0, len(tracks)),
-		Albums: make(cappedFavoriteAlbums, 0, len(albums)),
+		Tracks:          make(cappedFavoriteTracks, 0, len(doc.Tracks)),
+		Albums:          make(cappedFavoriteAlbums, 0, len(doc.Albums)),
+		Tombstones:      make(cappedFavoriteTombstones, 0, len(doc.Tombstones)),
+		AlbumTombstones: make(cappedFavoriteAlbumTombstones, 0, len(doc.AlbumTombstones)),
+		LastModifiedAt:  doc.LastModifiedAt,
 	}
-	if meta != nil {
-		out.LastModifiedAt = meta.LastModifiedAt
-	}
-	for _, t := range tracks {
+	for _, t := range doc.Tracks {
 		out.Tracks = append(out.Tracks, favoriteTrackDTO{
 			Path:              t.Path,
 			OriginFingerprint: t.OriginFingerprint,
@@ -188,12 +234,28 @@ func toFavoritesDTO(meta *manifest.FavoritesMeta,
 			FavoritedAt:       t.FavoritedAt,
 		})
 	}
-	for _, a := range albums {
+	for _, a := range doc.Albums {
 		out.Albums = append(out.Albums, favoriteAlbumDTO{
 			AlbumArtist: a.AlbumArtist,
 			Album:       a.Album,
 			Year:        a.Year,
 			FavoritedAt: a.FavoritedAt,
+		})
+	}
+	for _, t := range doc.Tombstones {
+		out.Tombstones = append(out.Tombstones, favoriteTombstoneDTO{
+			Path:              t.Path,
+			OriginFingerprint: t.OriginFingerprint,
+			OriginPath:        t.OriginPath,
+			RemovedAt:         t.RemovedAt,
+		})
+	}
+	for _, a := range doc.AlbumTombstones {
+		out.AlbumTombstones = append(out.AlbumTombstones, favoriteAlbumTombstoneDTO{
+			AlbumArtist: a.AlbumArtist,
+			Album:       a.Album,
+			Year:        a.Year,
+			RemovedAt:   a.RemovedAt,
 		})
 	}
 	return out
@@ -226,13 +288,19 @@ func (s *Server) getFavorites(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireFavoritesFeature(w, r); !ok {
 		return
 	}
-	meta, tracks, albums, err := s.favoritesStore.GetFavorites(r.Context())
+	doc, err := s.favoritesStore.ReadFavorites(r.Context())
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to read favorites", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toFavoritesDTO(meta, tracks, albums))
+	etag := favoritesETag(doc.Epoch, doc.Revision)
+	if noneMatch(r.Header.Get("If-None-Match"), etag, doc.Stored) {
+		writeNotModified(w, etag)
+		return
+	}
+	setETag(w, etag)
+	writeJSON(w, http.StatusOK, toFavoritesDTO(doc))
 }
 
 // putFavorites handles PUT /v1/favorites — wholesale replace under the
@@ -274,6 +342,12 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 			"lastModifiedAt must be a positive UnixNano value")
 		return
 	}
+	if body.BaseRevision != nil && *body.BaseRevision < 0 {
+		writeError(w, http.StatusBadRequest, "base_revision_required",
+			"baseRevision must not be negative")
+		return
+	}
+	legacy := body.BaseRevision == nil
 
 	// Validate + normalize tracks, then dedup last-wins. Dedup is KEPT
 	// even with the DB's partial UNIQUE indexes — a duplicate-bearing
@@ -368,35 +442,126 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 		albums = append(albums, row)
 	}
 
-	switch err := s.favoritesStore.UpsertFavorites(r.Context(), dt, body.LastModifiedAt, tracks, albums); {
+	var trackTombs []manifest.FavoriteTombstone
+	var albumTombs []manifest.FavoriteAlbumTombstone
+	if !legacy {
+		tombByKey := make(map[trackKey]int, len(body.Tombstones))
+		trackTombs = make([]manifest.FavoriteTombstone, 0, len(body.Tombstones))
+		for _, t := range body.Tombstones {
+			isLocal := t.Path != "" && t.OriginFingerprint == "" && t.OriginPath == ""
+			isForeign := t.Path == "" && t.OriginFingerprint != "" && t.OriginPath != ""
+			if !isLocal && !isForeign {
+				writeError(w, http.StatusBadRequest, "bad_request",
+					"each favorite tombstone must set either path (local) or both originFingerprint and originPath (foreign), and not mix them")
+				return
+			}
+			row := manifest.FavoriteTombstone{
+				Path:              strings.ReplaceAll(t.Path, `\`, "/"),
+				OriginFingerprint: t.OriginFingerprint,
+				OriginPath:        strings.ReplaceAll(t.OriginPath, `\`, "/"),
+			}
+			if row.Path != "" {
+				row.Path = strings.TrimPrefix(row.Path, "/")
+				if row.Path == "" {
+					writeError(w, http.StatusBadRequest, "bad_request",
+						"favorite tombstone path must not be empty after normalization")
+					return
+				}
+			}
+			var key trackKey
+			if row.Path != "" {
+				key.path = row.Path
+			} else {
+				key.originFingerprint = row.OriginFingerprint
+				key.originPath = row.OriginPath
+			}
+			if _, live := trackByKey[key]; live {
+				writeError(w, http.StatusBadRequest, "bad_request",
+					"a favorite cannot be both listed and removed")
+				return
+			}
+			if idx, dup := tombByKey[key]; dup {
+				trackTombs[idx] = row
+				continue
+			}
+			tombByKey[key] = len(trackTombs)
+			trackTombs = append(trackTombs, row)
+		}
+		albumTombByKey := make(map[albumKey]int, len(body.AlbumTombstones))
+		albumTombs = make([]manifest.FavoriteAlbumTombstone, 0, len(body.AlbumTombstones))
+		for _, a := range body.AlbumTombstones {
+			if a.Album == "" {
+				writeError(w, http.StatusBadRequest, "bad_request", "favorite album tombstone name is required")
+				return
+			}
+			if a.Year < 0 {
+				writeError(w, http.StatusBadRequest, "bad_request", "favorite album tombstone year must not be negative")
+				return
+			}
+			row := manifest.FavoriteAlbumTombstone{AlbumArtist: a.AlbumArtist, Album: a.Album, Year: a.Year}
+			key := albumKey{albumArtist: row.AlbumArtist, album: row.Album, year: row.Year}
+			if _, live := albumByKey[key]; live {
+				writeError(w, http.StatusBadRequest, "bad_request",
+					"a favorite cannot be both listed and removed")
+				return
+			}
+			if idx, dup := albumTombByKey[key]; dup {
+				albumTombs[idx] = row
+				continue
+			}
+			albumTombByKey[key] = len(albumTombs)
+			albumTombs = append(albumTombs, row)
+		}
+		if len(tracks)+len(trackTombs) > maxFavoriteTracks {
+			writeError(w, http.StatusBadRequest, "bad_request", "favorites has too many tracks")
+			return
+		}
+		if len(albums)+len(albumTombs) > maxFavoriteAlbums {
+			writeError(w, http.StatusBadRequest, "bad_request", "favorites has too many albums")
+			return
+		}
+	}
+
+	save := manifest.FavoritesSave{
+		Legacy:          legacy,
+		BaseRevision:    body.BaseRevision,
+		Tracks:          tracks,
+		Albums:          albums,
+		Tombstones:      trackTombs,
+		AlbumTombstones: albumTombs,
+	}
+	res, err := s.favoritesStore.SaveFavorites(r.Context(), dt, save)
+	switch {
 	case errors.Is(err, manifest.ErrFavoritesStale):
-		// Re-read the server copy so iOS can union-merge in one round-trip
-		// (the load-bearing half of the 409 contract). A FAILED re-read is a
-		// database error, not a conflict — 500 it honestly rather than
-		// emitting a 409 whose body violates the full-server-copy contract
-		// (Gemini + CodeRabbit on PR #695). meta == nil (stale yet nothing
-		// stored — practically unreachable) degrades to a body-less 409;
-		// iOS treats the undecodable stale body as a transport failure and
-		// stays dirty for the next sweep.
-		meta, sTracks, sAlbums, gerr := s.favoritesStore.GetFavorites(r.Context())
+		// Re-read the server copy so a revisioned client can merge in one
+		// round-trip. A failed re-read is a database error, not a conflict.
+		doc, gerr := s.favoritesStore.ReadFavorites(r.Context())
 		if gerr != nil {
 			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 				"failed to read favorites for conflict resolution", gerr)
 			return
 		}
-		if meta == nil {
-			writeError(w, http.StatusConflict, "stale", "server copy is newer")
-			return
-		}
+		setETag(w, favoritesETag(doc.Epoch, doc.Revision))
 		writeJSON(w, http.StatusConflict, favoritesStaleResponse{
 			Error: "stale", Message: "server copy is newer",
-			Server: toFavoritesDTO(meta, sTracks, sAlbums),
+			Server: toFavoritesDTO(doc),
 		})
+		return
+	case errors.Is(err, manifest.ErrFavoriteBoth):
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"a favorite cannot be both listed and removed")
+		return
+	case errors.Is(err, manifest.ErrFavoritesBaseRevision):
+		writeError(w, http.StatusBadRequest, "base_revision_required",
+			"baseRevision must not be negative")
 		return
 	case err != nil:
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to store favorites", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, favoritesStoredResponse{Stored: true})
+	setETag(w, favoritesETag(res.Epoch, res.Revision))
+	writeJSON(w, http.StatusOK, favoritesStoredResponse{
+		Stored: true, Epoch: res.Epoch, Revision: res.Revision,
+	})
 }

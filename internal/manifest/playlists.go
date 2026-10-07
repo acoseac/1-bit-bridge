@@ -71,85 +71,8 @@ type PlaylistSummary struct {
 // device_token=the writing device (last-writer provenance), and its items
 // are fully replaced. Holds s.mu; timestamps via s.now().
 func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p PlaylistRow, items []PlaylistItemRow) error {
-	if deviceToken == "" {
-		return errors.New("manifest: UpsertPlaylist requires a device token")
-	}
-	if p.ID == "" {
-		return errors.New("manifest: UpsertPlaylist requires a playlist id")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit; unwind guard otherwise
-
-	var existingLMA int64
-	row := tx.QueryRowContext(ctx, `SELECT last_modified_at FROM playlists WHERE id = ?`, p.ID)
-	switch err := row.Scan(&existingLMA); {
-	case errors.Is(err, sql.ErrNoRows):
-		// fresh insert — fall through
-	case err != nil:
-		return err
-	default:
-		if existingLMA > p.LastModifiedAt {
-			return ErrPlaylistStale
-		}
-	}
-
-	now := s.now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO playlists (id, device_token, name, last_modified_at, updated_at, deleted)
-		VALUES (?, ?, ?, ?, ?, 0)
-		ON CONFLICT(id) DO UPDATE SET
-			device_token     = excluded.device_token,
-			name             = excluded.name,
-			last_modified_at = excluded.last_modified_at,
-			updated_at       = excluded.updated_at,
-			deleted          = 0,
-			-- Cleared WITH the flag, exactly as RestorePlaylist does it.
-			-- deleted_by is provenance for a tombstone, and this arm is
-			-- the client's own revive-by-PUT: leaving it behind means a
-			-- LIVE row carrying the token of a device whose delete has
-			-- already been undone. Nothing reads it on a live row today
-			-- (every reader filters deleted = 1) and the next tombstone
-			-- overwrites it, so this is latent rather than live — but
-			-- the burst warning and the Recently-deleted panel both
-			-- attribute FROM this column, and a stale value on a revived
-			-- row is the kind that names the wrong device once something
-			-- does read it. The 2026-09-20 incident is on record
-			-- precisely because attribution was the half that was
-			-- missing.
-			deleted_by       = ''
-	`, p.ID, deviceToken, p.Name, p.LastModifiedAt, now); err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_items WHERE playlist_id = ?`, p.ID); err != nil {
-		return err
-	}
-	// One prepared statement reused across the item loop (same shape as
-	// InsertHistoryBatch) — per-item ExecContext re-prepares the SQL on
-	// every row, which is measurable at the 50k-item cap.
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO playlist_items
-			(playlist_id, position, path, origin_fingerprint, origin_path, title, artist)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, it := range items {
-		if _, err := stmt.ExecContext(ctx, p.ID, it.Position, nullable(it.Path),
-			nullable(it.OriginFingerprint), nullable(it.OriginPath),
-			nullable(it.Title), nullable(it.Artist)); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	_, err := s.PutPlaylist(ctx, deviceToken, p, items, nil)
+	return err
 }
 
 // GetPlaylist returns a playlist + ordered items, or (nil, nil, nil) when

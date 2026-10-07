@@ -8,11 +8,12 @@ import (
 
 // Favorites sentinels surfaced to the API handler.
 var (
-	// ErrFavoritesStale signals an inbound PUT whose client wall-clock
-	// lastModifiedAt is strictly older than the stored document's. The
-	// handler re-reads the server copy and returns it in the 409 body so
-	// iOS can union-merge without a second GET. Equal is accepted
-	// (idempotent re-push after a partial multi-bridge flush).
+	// ErrFavoritesStale signals a write the server refused. UpsertFavorites
+	// raises it when the client wall-clock is strictly older than the
+	// stored document. SaveFavorites raises it when a revisioned PUT's
+	// baseRevision is not the stored revision and the body differs. The
+	// handler re-reads the server copy and returns it in the 409 body.
+	// An equal body is accepted either way.
 	ErrFavoritesStale = errors.New("manifest: favorites are stale (server copy is newer)")
 )
 
@@ -90,12 +91,13 @@ func (s *Store) UpsertFavorites(ctx context.Context, deviceToken string, lastMod
 
 	now := s.now().UnixNano()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO favorites_meta (id, last_modified_at, device_token, updated_at)
-		VALUES (1, ?, ?, ?)
+		INSERT INTO favorites_meta (id, last_modified_at, device_token, updated_at, revision)
+		VALUES (1, ?, ?, ?, 1)
 		ON CONFLICT(id) DO UPDATE SET
 			last_modified_at = excluded.last_modified_at,
 			device_token     = excluded.device_token,
-			updated_at       = excluded.updated_at
+			updated_at       = excluded.updated_at,
+			revision         = favorites_meta.revision + 1
 	`, lastModifiedAt, deviceToken, now); err != nil {
 		return err
 	}

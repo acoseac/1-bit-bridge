@@ -48,6 +48,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -286,6 +287,19 @@ func Restore(snapshotDir string, dst Targets) error {
 		}
 		if err := copyFile(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
+		}
+		if name == ManifestDBFileName {
+			// A restored library is a new backup generation. Minting
+			// after the copy, then dropping the WAL the mint left,
+			// keeps the epoch in the main file.
+			if err := manifest.ResetBackupEpoch(target); err != nil {
+				return fmt.Errorf("mint backup epoch: %w", err)
+			}
+			for _, sidecar := range []string{target + "-wal", target + "-shm"} {
+				if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("remove epoch sidecar %s: %w", sidecar, err)
+				}
+			}
 		}
 	}
 	return nil

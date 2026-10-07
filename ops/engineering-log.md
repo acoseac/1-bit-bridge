@@ -37385,3 +37385,44 @@ held exactly because its reference is the chain's own intermediate.
   `SameVolume` share);
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`
   went red with the warning probe put back.
+
+## 2026-10-07 — cross-device sync phase 1 (favorites revisions, playlist bases)
+
+The bridge half of `docs/CrossDeviceSync.md` §12 phase 1 (iOS spec
+acoseac/1-bit#2077). `ProtocolVersion` stays 1. No manifest field, so the
+golden fixture does not move. No `ExtractorVersion` bump and no new fuzz
+target.
+
+Migration v52 adds `backup_epoch`, `favorites_meta.revision` (an existing
+meta row moves to 1; a missing row stays 0), `favorite_tombstones`,
+`favorite_album_tombstones` and `favorite_sync_devices`. The wire path is
+`SaveFavorites` / `ReadFavorites`. `UpsertFavorites` stays the wholesale
+writer the store tests and the admin seeders call, and it bumps `revision`
+too, so a seeded document is never left at 0. A revisioned PUT whose base
+is stale and whose body differs returns `ErrFavoritesStale` before any
+device-row write. An equal body is accepted either way and does not bump.
+A PUT with no base merges additions only and never conflicts. Garbage
+collection commits in its own transaction, still under `Store.mu`, before
+the compare-and-swap, so a stale `409` cannot roll a collection back.
+Eligible is `removed_at` ≤ now−90d, and `legacy_put_at` blocks only when
+it is strictly newer than that cutoff. Collection bumps `revision` once
+when it deletes. The admin export lists tombstones and per-device clocks
+and still omits the device token. `bridge restore` opens the copied
+database, replaces the epoch, and checkpoints before it deletes the WAL,
+so the mint survives the sidecar removal.
+
+Playlists keep one stamp per row. `baseLastModifiedAt` equal to that stamp
+skips the guard: a different body stores the client stamp when it is
+strictly greater and one nanosecond above the stored stamp otherwise; an
+equal body writes nothing. A base that is not the stored stamp is `409`
+`base_mismatch`, not `stale`. An identical body never revives a deleted
+playlist. Because `DELETE` does not move `last_modified_at`, a matching
+base is the pre-deletion version and does not revive while it is older
+than `updated_at`. A matching base that is not older than the delete, with
+a different body, does. The list `ETag` is `<epoch>.<sha256>` of the
+canonical summaries, `imageHash` included, and `deletedIds`.
+
+The two-client clobber, the legacy `200`, the behind-clock accept, the
+equal-body no-op and the epoch reset each fail when the check they name
+is removed. `TestABaseThatDoesNotPredateTheDeletionRevives` is the other
+half of the revive rule: the matching-base refusal is not "never revive".

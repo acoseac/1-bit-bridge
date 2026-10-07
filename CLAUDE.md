@@ -2007,6 +2007,34 @@ lost my library."
   rows — hence `playlists.deleted_by` (v45), cleared on restore so a stale
   value cannot attribute the next delete. The custom cover does NOT come back:
   the DELETE unlinks the JPEG (`api.pruneCover`) and nothing keeps a copy.
+- **Favorites revisions are compare-and-swap, and a legacy PUT is additions
+  only** (2026-10-07). `PUT /v1/favorites` with `baseRevision` stores the
+  body when that revision is current, or when the normalized body already
+  equals the stored document; any other base whose body differs is `409`
+  `stale` and writes nothing, including no device row. A PUT with no
+  `baseRevision` — what 2.1 sends — inserts or keeps the earlier
+  `favoritedAt`, leaves a tombstone tombstoned, leaves an omitted key
+  alone, and answers `200`. A `409` that decodes as `stale` re-arms the
+  2.1 flush, so that path never returns one. `revision` bumps only when
+  the document changes, including tombstone collection. Collection runs
+  in its own transaction before the compare-and-swap, under the store
+  lock: a tombstone is eligible at `removed_at` ≤ now−90d, and one
+  `legacy_put_at` later than that cutoff blocks every collection. After
+  collection a legacy save can insert the key again, and a client whose
+  base predates the collection reads that as a re-heart. `bridge restore`
+  replaces `backup_epoch` after the database copy. Playlist
+  `baseLastModifiedAt` is a different code, `base_mismatch`, and only
+  when the base is not the stored stamp; a matching base skips the stamp
+  guard, an equal body writes nothing, and a behind clock stores one
+  nanosecond above the stored stamp. An identical playlist body never
+  revives a deleted row, and a matching base that predates the deletion
+  (`updated_at` is the delete time; `DELETE` does not move
+  `last_modified_at`) does not either.
+  (`TestTwoClientsCannotClobberFavorites`,
+  `TestLegacyFavoritesPutNeverConflicts`,
+  `TestPlaylistMatchingBaseAcceptsABehindClock`,
+  `TestIdenticalPlaylistBodyDoesNotRevive`,
+  `TestRestoreMintsANewBackupEpoch`.)
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process
   ring**, and fires ONE LINE PER TOMBSTONE past the threshold
   (`manifest.PlaylistDeleteBurstThreshold` = 5 within

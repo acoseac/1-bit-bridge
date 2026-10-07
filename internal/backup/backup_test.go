@@ -1,6 +1,7 @@
 package backup_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	_ "modernc.org/sqlite"
 )
 
@@ -238,10 +240,51 @@ func TestRestoreRemovesStaleWALSHM(t *testing.T) {
 		t.Errorf("stale %s survived Restore", shmPath)
 	}
 
-	// The restored main DB must match the snapshot's clean copy.
-	snapDB := readBytes(t, filepath.Join(dst, backup.ManifestDBFileName))
-	if got := readBytes(t, src.ManifestDB); string(got) != string(snapDB) {
-		t.Errorf("restored bridge.db (%d bytes) != snapshot bridge.db (%d bytes)", len(got), len(snapDB))
+	// Restore mints a new backup epoch, so the main file is no longer
+	// byte-identical to the snapshot. The stale frames must still be gone.
+	if bytes.Contains(readBytes(t, src.ManifestDB), []byte("stale-wal-frames")) {
+		t.Error("restored bridge.db still holds the stale WAL bytes")
+	}
+}
+
+// Restore replaces the backup epoch. A client holding the old epoch
+// treats its next read as a reset. Removing the mint leaves the
+// snapshot's epoch in place and this assertion fails.
+func TestRestoreMintsANewBackupEpoch(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	live, err := manifest.OpenStore(src.ManifestDB)
+	if err != nil {
+		t.Fatalf("open live: %v", err)
+	}
+	before, err := live.BackupEpoch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := t.TempDir()
+	db := filepath.Join(restored, "bridge.db")
+	if err := backup.Restore(snap, backup.Targets{ManifestDB: db}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	got, err := manifest.OpenStore(db)
+	if err != nil {
+		t.Fatalf("open restored: %v", err)
+	}
+	t.Cleanup(func() { got.Close() })
+	after, err := got.BackupEpoch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == "" || after == before {
+		t.Fatalf("restored epoch %q, live %q", after, before)
 	}
 }
 

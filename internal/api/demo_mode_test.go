@@ -63,7 +63,7 @@ func TestDemoModeHealthDropsUserDataFlags(t *testing.T) {
 	if !feats["demoMode"] {
 		t.Errorf("features should advertise demoMode, got %v", got.Features)
 	}
-	for _, absent := range []string{"playlistBackup", "playlistsCrossDevice", "favorites", "playbackHistory", "playbackHistoryRead"} {
+	for _, absent := range []string{"playlistBackup", "playlistListRevision", "playlistsCrossDevice", "favorites", "favoritesRevisions", "playbackHistory", "playbackHistoryRead"} {
 		if feats[absent] {
 			t.Errorf("features should NOT advertise %q in demo mode, got %v", absent, got.Features)
 		}

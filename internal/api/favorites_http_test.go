@@ -75,7 +75,8 @@ func TestFavoritesPutGetRoundTrip(t *testing.T) {
 		t.Fatalf("get: status %d", get.StatusCode)
 	}
 	dto := decodeFavoritesBody(t, get)
-	if dto.LastModifiedAt != 1000 || len(dto.Tracks) != 2 || len(dto.Albums) != 1 {
+	if dto.LastModifiedAt <= 0 || dto.Revision < 1 || dto.Epoch == "" ||
+		len(dto.Tracks) != 2 || len(dto.Albums) != 1 {
 		t.Fatalf("round-trip mismatch: %+v", dto)
 	}
 	if dto.Tracks[0].Path != "Pink Floyd/DSOTM/Money.flac" || dto.Tracks[0].FavoritedAt != 300 {
@@ -109,6 +110,12 @@ func TestFavoritesGetNeverStoredReturnsEmptyDoc(t *testing.T) {
 	if string(raw["tracks"]) != "[]" || string(raw["albums"]) != "[]" {
 		t.Errorf("want [] arrays, got tracks=%s albums=%s", raw["tracks"], raw["albums"])
 	}
+	if string(raw["tombstones"]) != "[]" || string(raw["albumTombstones"]) != "[]" {
+		t.Errorf("want [] tombstones, got %s %s", raw["tombstones"], raw["albumTombstones"])
+	}
+	if string(raw["revision"]) != "0" || len(raw["epoch"]) < 2 {
+		t.Errorf("want revision 0 and an epoch, got revision=%s epoch=%s", raw["revision"], raw["epoch"])
+	}
 }
 
 // A strictly-older PUT 409s WITH the full server copy in the body — the
@@ -123,7 +130,7 @@ func TestFavoritesPutStaleCarriesFullServerCopy(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	stale := `{"lastModifiedAt": 1999,
+	stale := `{"lastModifiedAt": 1999, "baseRevision": 0,
 		"tracks": [{"path": "c/d.flac", "favoritedAt": 20}], "albums": []}`
 	resp2 := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt, stale)
 	if resp2.StatusCode != http.StatusConflict {
@@ -134,7 +141,8 @@ func TestFavoritesPutStaleCarriesFullServerCopy(t *testing.T) {
 	if err := json.NewDecoder(resp2.Body).Decode(&staleResp); err != nil {
 		t.Fatalf("decode stale body: %v", err)
 	}
-	if staleResp.Error != "stale" || staleResp.Server.LastModifiedAt != 2000 ||
+	if staleResp.Error != "stale" || staleResp.Server.LastModifiedAt <= 0 ||
+		staleResp.Server.Revision < 1 || staleResp.Server.Epoch == "" ||
 		len(staleResp.Server.Tracks) != 1 || staleResp.Server.Tracks[0].Path != "a/b.flac" {
 		t.Errorf("409 body must carry the full server copy: %+v", staleResp)
 	}
@@ -200,7 +208,7 @@ func TestFavoritesPutEmptySetStores(t *testing.T) {
 	resp.Body.Close()
 	get := doReq(t, srv, http.MethodGet, "/v1/favorites", token, dt, "")
 	dto := decodeFavoritesBody(t, get)
-	if dto.LastModifiedAt != 1000 || len(dto.Tracks) != 0 || len(dto.Albums) != 0 {
+	if dto.LastModifiedAt <= 0 || dto.Revision != 1 || len(dto.Tracks) != 0 || len(dto.Albums) != 0 {
 		t.Errorf("empty doc mismatch: %+v", dto)
 	}
 }
