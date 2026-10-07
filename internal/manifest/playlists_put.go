@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"slices"
 	"sort"
 )
 
@@ -163,7 +162,26 @@ func playlistBodyEqual(storedName string, stored []PlaylistItemRow, name string,
 	b := append([]PlaylistItemRow(nil), items...)
 	sort.Slice(a, func(i, j int) bool { return a[i].Position < a[j].Position })
 	sort.Slice(b, func(i, j int) bool { return b[i].Position < b[j].Position })
-	return slices.Equal(a, b)
+	for i := range a {
+		if !playlistItemWireEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// playlistItemWireEqual is body equality for one item. The fields are
+// the ones PUT and the row scan write: Position, Path, OriginFingerprint,
+// OriginPath, Title and Artist. A field added to PlaylistItemRow later
+// is not part of this comparison until it is named here, so it cannot
+// turn a repeat PUT into a write.
+func playlistItemWireEqual(a, b PlaylistItemRow) bool {
+	return a.Position == b.Position &&
+		a.Path == b.Path &&
+		a.OriginFingerprint == b.OriginFingerprint &&
+		a.OriginPath == b.OriginPath &&
+		a.Title == b.Title &&
+		a.Artist == b.Artist
 }
 
 func writePlaylist(ctx context.Context, tx *sql.Tx, s *Store, deviceToken string, p PlaylistRow, items []PlaylistItemRow, stamp int64) error {

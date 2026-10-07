@@ -59,10 +59,11 @@ func playlistListETag(epoch string, canon playlistListCanon) (string, error) {
 	return epoch + "." + hex.EncodeToString(sum[:]), nil
 }
 
-// noneMatch reports whether If-None-Match matches etag. Comparison is
-// weak: a W/ prefix is stripped. "*" matches only when starMatches is
-// set (a favorites document that has been stored, or any playlist list).
-func noneMatch(header, etag string, starMatches bool) bool {
+// ifNoneMatchHits reports whether If-None-Match matches etag. True is a
+// hit: the handler answers 304. Comparison is weak: a W/ prefix is
+// stripped. "*" matches only when starMatches is set (a favorites
+// document that has been stored, or any playlist list).
+func ifNoneMatchHits(header, etag string, starMatches bool) bool {
 	if header == "" {
 		return false
 	}

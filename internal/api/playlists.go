@@ -299,7 +299,7 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 			"failed to hash the playlist list", err)
 		return
 	}
-	if noneMatch(strings.Join(r.Header.Values("If-None-Match"), ","), etag, true) {
+	if ifNoneMatchHits(strings.Join(r.Header.Values("If-None-Match"), ","), etag, true) {
 		writeNotModified(w, etag)
 		return
 	}

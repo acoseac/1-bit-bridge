@@ -291,7 +291,7 @@ func (s *Server) getFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	match := strings.Join(r.Header.Values("If-None-Match"), ",")
 	doc, notModified, err := s.favoritesStore.ReadFavoritesIfUnchanged(r.Context(), func(epoch string, revision int64, stored bool) bool {
-		return noneMatch(match, favoritesETag(epoch, revision), stored)
+		return ifNoneMatchHits(match, favoritesETag(epoch, revision), stored)
 	})
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",

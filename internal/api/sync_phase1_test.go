@@ -78,11 +78,11 @@ func TestFavoritesConditionalGet(t *testing.T) {
 		t.Fatalf("weak match: %d etag %q, want 304 %q", weak.StatusCode, weak.Header.Get("ETag"), stored)
 	}
 	weak.Body.Close()
-	any := doReqMatch(t, srv, http.MethodGet, "/v1/favorites", token, dt, "*", "")
-	if any.StatusCode != http.StatusNotModified {
-		t.Fatalf("* once stored: %d, want 304", any.StatusCode)
+	wildcard := doReqMatch(t, srv, http.MethodGet, "/v1/favorites", token, dt, "*", "")
+	if wildcard.StatusCode != http.StatusNotModified {
+		t.Fatalf("* once stored: %d, want 304", wildcard.StatusCode)
 	}
-	any.Body.Close()
+	wildcard.Body.Close()
 }
 
 func TestPlaylistListConditionalGet(t *testing.T) {

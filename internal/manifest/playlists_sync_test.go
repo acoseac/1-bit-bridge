@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -229,5 +230,80 @@ func TestTwoBridgesAcceptARePushOfTheOlderCopy(t *testing.T) {
 	got, _, err := b.GetPlaylist(ctx, older.ID)
 	if err != nil || got == nil || got.Name != "A copy" || got.LastModifiedAt != 5001 {
 		t.Fatalf("stored %+v err %v", got, err)
+	}
+}
+
+// playlistItemWireFields are the fields playlistItemWireEqual reads.
+// notCompared is empty: PlaylistItemRow has no field beyond the wire.
+// A later internal field is named there and left out of the helper.
+var (
+	playlistItemWireFields = []string{
+		"Position", "Path", "OriginFingerprint", "OriginPath", "Title", "Artist",
+	}
+	playlistItemFieldsNotCompared []string
+)
+
+func TestPlaylistItemWireEqual(t *testing.T) {
+	item := PlaylistItemRow{
+		Position: 1, Path: "a.flac", OriginFingerprint: "fp",
+		OriginPath: "origin/a.flac", Title: "Title", Artist: "Artist",
+	}
+	if !playlistItemWireEqual(item, item) {
+		t.Fatal("a row equals itself")
+	}
+	diffs := []struct {
+		name string
+		edit func(*PlaylistItemRow)
+	}{
+		{"position", func(r *PlaylistItemRow) { r.Position++ }},
+		{"path", func(r *PlaylistItemRow) { r.Path = "b.flac" }},
+		{"origin fingerprint", func(r *PlaylistItemRow) { r.OriginFingerprint = "other" }},
+		{"origin path", func(r *PlaylistItemRow) { r.OriginPath = "other" }},
+		{"title", func(r *PlaylistItemRow) { r.Title = "Other" }},
+		{"artist", func(r *PlaylistItemRow) { r.Artist = "Other" }},
+	}
+	for _, tc := range diffs {
+		other := item
+		tc.edit(&other)
+		if playlistItemWireEqual(item, other) {
+			t.Errorf("%s is a wire field", tc.name)
+		}
+	}
+
+	// The production row has no non-wire field. The stand-in keeps one
+	// beside the row; the helper is handed the embedded row, so the
+	// extra value stays out of the comparison.
+	type withInternal struct {
+		PlaylistItemRow
+		internalID int
+	}
+	left := withInternal{PlaylistItemRow: item, internalID: 1}
+	right := withInternal{PlaylistItemRow: item, internalID: 9}
+	if left.internalID == right.internalID {
+		t.Fatal("the stand-in ids match")
+	}
+	if !playlistItemWireEqual(left.PlaylistItemRow, right.PlaylistItemRow) {
+		t.Fatal("rows that match on the wire fields compare equal")
+	}
+
+	seen := map[string]bool{}
+	for _, name := range playlistItemWireFields {
+		seen[name] = true
+	}
+	for _, name := range playlistItemFieldsNotCompared {
+		if seen[name] {
+			t.Fatalf("%s is both compared and left out", name)
+		}
+		seen[name] = true
+	}
+	rt := reflect.TypeOf(PlaylistItemRow{})
+	if rt.NumField() != len(seen) {
+		t.Fatalf("PlaylistItemRow has %d fields and the lists name %d", rt.NumField(), len(seen))
+	}
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		if !seen[name] {
+			t.Fatalf("PlaylistItemRow.%s is unclassified: add it to playlistItemWireEqual and playlistItemWireFields when a repeat PUT should see it, or to playlistItemFieldsNotCompared when it must not", name)
+		}
 	}
 }

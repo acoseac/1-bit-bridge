@@ -318,7 +318,11 @@ func TestRestoreMintsANewBackupEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open restored: %v", err)
 	}
-	t.Cleanup(func() { got.Close() })
+	t.Cleanup(func() {
+		if err := got.Close(); err != nil {
+			t.Errorf("close restored store: %v", err)
+		}
+	})
 	after, err := got.BackupEpoch(t.Context())
 	if err != nil {
 		t.Fatal(err)
