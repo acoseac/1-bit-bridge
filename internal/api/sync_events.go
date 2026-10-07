@@ -59,34 +59,38 @@ func (wallClock) AfterFunc(d time.Duration, fn func()) func() {
 // SyncEventPublisher turns committed user-data notes into the three
 // topics. It publishes only when enabled, which serve leaves false for
 // the demo. library.changed is suppressed while scanning() is true — the
-// same flag /v1/health reports as scanState.isScanning — and emitted once
-// from ScanEnded after that flag has cleared. Every other indexed_at note
-// shares one trailing debounce.
+// scan /v1/health reports as scanState.isScanning, Scanner.AdvertisedScanning
+// — and emitted once from ScanEnded after that flag has cleared. Every
+// other library note shares one trailing debounce.
 type SyncEventPublisher struct {
 	pub       EventPublisher
 	scanning  func() bool
-	watermark func(context.Context) (int64, bool)
+	watermark func(context.Context) (int64, bool, error)
 	clk       clock
 	debounce  time.Duration
 	enabled   bool
 
-	mu        sync.Mutex
-	stopTimer func()
-	pendingNS int64
+	mu         sync.Mutex
+	stopTimer  func()
+	pendingNS  int64
+	generation uint64
 }
 
 // NewSyncEventPublisher publishes all three topics. scanning is
-// Scanner.IsScanning. watermark is Store.LibraryWatermark.
-func NewSyncEventPublisher(pub EventPublisher, scanning func() bool, watermark func(context.Context) (int64, bool)) *SyncEventPublisher {
+// Scanner.AdvertisedScanning, the scan /v1/health reports. watermark is
+// Store.LibraryWatermark: the later of indexed_at and a journaled
+// deletion. An error from watermark publishes nothing. An empty library
+// (no watermark, no error) publishes the publisher clock from ScanEnded.
+func NewSyncEventPublisher(pub EventPublisher, scanning func() bool, watermark func(context.Context) (int64, bool, error)) *SyncEventPublisher {
 	return newSyncEventPublisher(pub, scanning, watermark, wallClock{}, libraryChangeDebounce, true)
 }
 
-func newSyncEventPublisher(pub EventPublisher, scanning func() bool, watermark func(context.Context) (int64, bool), clk clock, debounce time.Duration, enabled bool) *SyncEventPublisher {
+func newSyncEventPublisher(pub EventPublisher, scanning func() bool, watermark func(context.Context) (int64, bool, error), clk clock, debounce time.Duration, enabled bool) *SyncEventPublisher {
 	if scanning == nil {
 		scanning = func() bool { return false }
 	}
 	if watermark == nil {
-		watermark = func(context.Context) (int64, bool) { return 0, false }
+		watermark = func(context.Context) (int64, bool, error) { return 0, false, nil }
 	}
 	return &SyncEventPublisher{
 		pub:       pub,
@@ -141,7 +145,9 @@ func (p *SyncEventPublisher) NoteLibrary(ns int64) {
 	}
 	p.stopTimerLocked()
 	p.pendingNS = ns
-	p.stopTimer = p.clk.AfterFunc(p.debounce, p.fireDebounce)
+	p.generation++
+	gen := p.generation
+	p.stopTimer = p.clk.AfterFunc(p.debounce, func() { p.fireDebounce(gen) })
 }
 
 // ScanEnded publishes one library.changed for the watermark at the end of
@@ -165,12 +171,17 @@ func (p *SyncEventPublisher) stopTimerLocked() {
 }
 
 func (p *SyncEventPublisher) cancelTimerLocked() {
+	p.generation++
 	p.stopTimerLocked()
 	p.pendingNS = 0
 }
 
-func (p *SyncEventPublisher) fireDebounce() {
+func (p *SyncEventPublisher) fireDebounce(gen uint64) {
 	p.mu.Lock()
+	if gen != p.generation {
+		p.mu.Unlock()
+		return
+	}
 	ns := p.pendingNS
 	p.pendingNS = 0
 	p.stopTimer = nil
@@ -183,8 +194,14 @@ func (p *SyncEventPublisher) fireDebounce() {
 }
 
 func (p *SyncEventPublisher) publishWatermark(ctx context.Context) {
-	ns, ok := p.watermark(ctx)
+	ns, ok, err := p.watermark(ctx)
+	if err != nil {
+		return
+	}
 	if !ok || ns <= 0 {
+		ns = p.clk.Now().UnixNano()
+	}
+	if ns <= 0 {
 		return
 	}
 	p.publishLibrary(ns)

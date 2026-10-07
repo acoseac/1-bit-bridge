@@ -2096,23 +2096,34 @@ lost my library."
   `eventBroker.Publish`, so they carry `id:` and take part in
   `Last-Event-ID` replay. The store notifies from a hook installed by
   serve, and the hook runs only after `Commit` has returned nil and only
-  when the write changed the document, the playlist list, or `indexed_at`.
-  A rolled-back write, a `409`, and a no-op publish nothing. Tombstone
-  collection commits before the favorites compare-and-swap and publishes
-  its own revision when it removed a row. `library.changed` is suppressed
-  while `scanState.isScanning` is true (`Scanner.IsScanning`, not
-  `ScanInFlight`: a subtree scan stays on the debounce). The scan-end
+  when the write changed the document, the playlist list, or what a
+  delta client sees (`indexed_at`, or a journaled deletion or
+  suppression). A rolled-back write, a `409`, and a no-op publish
+  nothing. Tombstone collection commits before the favorites
+  compare-and-swap and publishes its own revision when it removed a row.
+  `library.changed` is suppressed while health's
+  `scanState.isScanning` is true (`Scanner.AdvertisedScanning`:
+  `IsScanning` and not stalled, not `ScanInFlight`: a subtree scan stays
+  on the debounce, and a stalled scan does not suppress). The scan-end
   callback is a defer registered ahead of `scanning.Store(false)`, so it
   runs once the flag is clear, once, on a successful scan whose context
   is still live, and that one event covers every `indexed_at` write the
-  scan made, enrichment included. Every other `indexed_at` writer shares
-  one trailing 30s debounce; a note during a scan cancels a timer already
+  scan made, enrichment included. Every other library change shares one
+  trailing 30s debounce, including a journaled deletion or suppression
+  outside a full scan; a note during a scan cancels a timer already
   armed, and the scan-end event cancels one that is still pending. The
-  payload watermark is `MAX(indexed_at)` rendered as millisecond UTC
-  RFC3339, which `GET /v1/manifest?since=` parses. The demo wires none of
+  payload watermark is the later of `MAX(indexed_at)` and
+  `MAX(manifest_deletions.deleted_at)`, rendered as millisecond UTC
+  RFC3339, which `GET /v1/manifest?since=` parses. An empty library at
+  scan end publishes the publisher clock when neither watermark exists;
+  a query error publishes nothing. A sidecar lyrics bump on the
+  version-stamp leg notes after its commit; a refusal skips lyrics.
+  A smart-mix cover and a cover pruned from an already-tombstoned
+  playlist publish no `playlists.changed`. The demo wires none of
   this and does not advertise `syncEvents`. `bridge restore` replaces the
-  epoch in its own process, which has no broker; the serving process
-  publishes `playlists.changed` only from a store that holds the hooks.
+  epoch in its own process, which has no broker and publishes nothing;
+  the serving process publishes `playlists.changed` only from a store
+  that holds the hooks.
   (`TestFavoritesRevisionPutPublishesTheNewRevisionAfterCommit`,
   `TestFavoriteTombstoneCollectionPublishesAfterItsCommit`,
   `TestPlaylistPutDeleteRestoreAndCoverPublishAfterCommit`,

@@ -114,7 +114,7 @@ func TestLibraryChangedIsSuppressedWhileAScanRunsAndEmittedOnceAtTheEnd(t *testi
 	wm := time.Date(2026, 10, 7, 10, 15, 4, 0, time.UTC).UnixNano()
 	pub := newSyncEventPublisher(b,
 		func() bool { return scanning },
-		func(context.Context) (int64, bool) { return wm, true },
+		func(context.Context) (int64, bool, error) { return wm, true, nil },
 		clk, libraryChangeDebounce, true)
 	pub.NoteLibrary(wm)
 	clk.Advance(time.Minute)
@@ -136,7 +136,7 @@ func TestAScanEndSupersedesAPendingLibraryDebounce(t *testing.T) {
 	clk := &manualClock{}
 	wm := int64(1_700_000_000_000_000_000)
 	pub := newSyncEventPublisher(b, func() bool { return false },
-		func(context.Context) (int64, bool) { return wm, true },
+		func(context.Context) (int64, bool, error) { return wm, true, nil },
 		clk, libraryChangeDebounce, true)
 	pub.NoteLibrary(wm)
 	pub.ScanEnded(context.Background())
@@ -197,7 +197,7 @@ func TestADisabledPublisherEmitsNoneOfTheThreeTopics(t *testing.T) {
 	b := startBroker(t)
 	clk := &manualClock{}
 	pub := newSyncEventPublisher(b, func() bool { return false },
-		func(context.Context) (int64, bool) { return 5, true },
+		func(context.Context) (int64, bool, error) { return 5, true, nil },
 		clk, libraryChangeDebounce, false)
 	pub.FavoritesChanged(8)
 	pub.PlaylistsChanged("abc")

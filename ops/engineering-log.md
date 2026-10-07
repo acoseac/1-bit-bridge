@@ -37595,3 +37595,18 @@ The serving process publishes `playlists.changed` from
 `ReplaceBackupEpochAndNotify` when a store in that process replaces the
 epoch. `ProtocolVersion` stays 1. The iOS mirror of this PROTOCOL.md
 text is a later PR.
+
+2026-10-07, review of #1159. The sentences above that name
+`Scanner.IsScanning` as the scan and `ReplaceBackupEpochAndNotify` as a
+publisher are the first draft. Health reports a scan only while it is
+in progress and not stalled (`manifest.AdvertisedScan`), and the
+publisher follows that same predicate. `ReplaceBackupEpochAndNotify`
+had no production caller and is gone: `bridge restore` publishes
+nothing. A journaled deletion or suppression outside a full scan is a
+library change on the same trailing debounce. The watermark is the
+later of `MAX(indexed_at)` and `MAX(manifest_deletions.deleted_at)`;
+an empty library at scan end uses the publisher clock, and a query
+error publishes nothing. A sidecar lyrics bump on the version-stamp
+leg notes after that commit. A smart-mix cover does not publish
+`playlists.changed`, and a cover pruned after the playlist is already
+tombstoned does not publish a second time.

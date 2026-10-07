@@ -266,25 +266,6 @@ func TestAnIdenticalPlaylistBodyAndAMismatchPublishNothing(t *testing.T) {
 	}
 }
 
-func TestReplaceBackupEpochPublishesTheNewEpoch(t *testing.T) {
-	s, _, notes := openNotifyingStore(t)
-	ctx := context.Background()
-	before, err := s.BackupEpoch(ctx)
-	if err != nil || before == "" {
-		t.Fatal(err)
-	}
-	if _, err := s.ReplaceBackupEpochAndNotify(ctx); err != nil {
-		t.Fatal(err)
-	}
-	after, err := s.BackupEpoch(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after == before || len(notes.pl) != 1 || notes.pl[0] != after {
-		t.Fatalf("before %s after %s notes %v", before, after, notes.pl)
-	}
-}
-
 func TestAnIndexedAtBumpPublishesTheWatermarkAndAMissPublishesNothing(t *testing.T) {
 	s, path, notes := openNotifyingStore(t)
 	ctx := context.Background()
@@ -297,8 +278,8 @@ func TestAnIndexedAtBumpPublishesTheWatermarkAndAMissPublishesNothing(t *testing
 			return
 		}
 		defer other.Close()
-		got, ok := other.LibraryWatermark(ctx)
-		if !ok || got != ns {
+		got, ok, werr := other.LibraryWatermark(ctx)
+		if werr != nil || !ok || got != ns {
 			t.Errorf("watermark %d ok %v, hook was given %d", got, ok, ns)
 			return
 		}
