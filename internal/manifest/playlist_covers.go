@@ -109,6 +109,14 @@ func (s *Store) SetPlaylistCover(ctx context.Context, c PlaylistCover) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var prev sql.NullString
+	switch err := s.db.QueryRowContext(ctx,
+		`SELECT image_hash FROM playlist_covers WHERE scope = ? AND key = ?`, c.Scope, c.Key).Scan(&prev); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	}
+	changed := !prev.Valid || prev.String != c.ImageHash
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO playlist_covers (scope, key, image_hash, ext, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -117,7 +125,13 @@ func (s *Store) SetPlaylistCover(ctx context.Context, c PlaylistCover) error {
 			ext        = excluded.ext,
 			updated_at = excluded.updated_at
 	`, c.Scope, c.Key, c.ImageHash, c.Ext, c.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if changed {
+		s.notePlaylists(ctx)
+	}
+	return nil
 }
 
 // GetPlaylistCover returns the cover mapping for (scope,key); ok=false when
@@ -155,6 +169,7 @@ func (s *Store) DeletePlaylistCover(ctx context.Context, scope, key string) (has
 		`DELETE FROM playlist_covers WHERE scope = ? AND key = ?`, scope, key); e != nil {
 		return "", "", false, e
 	}
+	s.notePlaylists(ctx)
 	return hash, ext, true, nil
 }
 

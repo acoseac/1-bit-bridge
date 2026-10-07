@@ -37557,3 +37557,41 @@ a 2.1 client ignores the returned stamp, so an identical older stamp
 must stay `409` `stale` and an identical newer stamp must be stored.
 The identical-body early return stays when a base is present or the row
 is deleted.
+
+## 2026-10-07 — sync phase 2 change events
+
+`GET /v1/events` gained `favorites.changed`, `playlists.changed` and
+`library.changed`. Each is published through the existing broker after
+the transaction that changed the document, the playlist list, or
+`indexed_at` has committed. A stale favorites PUT and an identical
+playlist body publish nothing; a second connection opened from the hook
+sees the committed revision, playlist row, or watermark, which is what
+fails if the hook moves back ahead of `Commit`.
+
+`library.changed` follows the resolved reading of the phase-2 spec. A
+full scan is `scanState.isScanning` (`Scanner.IsScanning`). Writes
+during that scan, including enrichment, produce no event of their own.
+One event is published at the end, after the flag clears, from a defer
+registered ahead of `scanning.Store(false)`. Other `indexed_at` writers
+share one trailing 30s debounce. The first draft of `NoteLibrary`
+stored the watermark and then cancelled the timer, and the cancel
+zeroed the watermark, so the quiet period published nothing; the cancel
+that re-arms only stops the previous timer. A scan-end event cancels a
+debounce that is still pending. `indexedAt` is millisecond UTC RFC3339
+(`2026-10-07T10:15:04.000Z`), which `time.RFC3339Nano` parses and which
+`since=` already accepts. Subtree scans do not set `IsScanning`, so
+their writes take the debounce; widening that flag would move the admin
+badge and the booklet-GC skip. A delete that does not bump `indexed_at`
+is not its own `library.changed`: a full scan's deletions are in the
+scan-end event because the next delta reads the journal.
+
+The demo does not construct the publisher and does not set
+`syncEvents`. The health complete-set fixture sets the flag beside
+`demoMode` because that fixture's job is every key the builder can
+emit; production serve sets it only in the non-demo branch.
+`bridge restore` still replaces the epoch from the CLI process, which
+holds no broker. Clients learn that epoch from the next playlist GET.
+The serving process publishes `playlists.changed` from
+`ReplaceBackupEpochAndNotify` when a store in that process replaces the
+epoch. `ProtocolVersion` stays 1. The iOS mirror of this PROTOCOL.md
+text is a later PR.

@@ -130,7 +130,14 @@ func (s *Store) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag 
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
+	return n, nil
 }
 
 // nullifyEmpty maps "" to SQL NULL so a cleared tag stores NULL (matching

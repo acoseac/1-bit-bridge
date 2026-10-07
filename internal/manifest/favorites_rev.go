@@ -489,7 +489,16 @@ func (s *Store) collectFavoriteTombstonesLocked(ctx context.Context) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if removed > 0 {
+		var rev int64
+		if err := s.db.QueryRowContext(ctx, `SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&rev); err == nil {
+			s.noteFavorites(rev)
+		}
+	}
+	return nil
 }
 
 func (s *Store) noteFavoriteDevice(ctx context.Context, deviceToken string, nowNS int64, legacy bool) error {
@@ -561,7 +570,11 @@ func (s *Store) writeFavoritesDocument(ctx context.Context, deviceToken string, 
 	if err := noteFavoriteDeviceTx(ctx, tx, deviceToken, nowNS, legacy); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteFavorites(revision)
+	return nil
 }
 
 func insertFavoriteTracks(ctx context.Context, tx *sql.Tx, tracks []FavoriteTrackRow) error {

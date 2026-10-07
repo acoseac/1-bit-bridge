@@ -88,6 +88,10 @@ type Store struct {
 	// can do so without racing the wall clock.
 	now func() time.Time
 
+	// syncHooks publishes user-data change events after commit. Nil
+	// publishes nothing. See sync_notify.go.
+	syncHooks *SyncHooks
+
 	// ftsAvailable caches whether the `tracks_fts` virtual table exists,
 	// probed once in OpenStore after migrate(). The FTS5 module is either
 	// compiled into the driver or not for the process lifetime, and the
@@ -2888,6 +2892,7 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 		return err
 	}
 	t.rowVersion = wrote
+	s.noteLibrary(ctx)
 	return nil
 }
 
@@ -3162,6 +3167,9 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	if err := tx.Commit(); err != nil {
 		return 0, err // rollback on failed commit → nothing persisted.
 	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
 	return n, nil
 }
 
@@ -3384,6 +3392,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 		return err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
+	s.noteLibrary(ctx)
 	return nil
 }
 
@@ -3541,7 +3550,11 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	if _, err := tx.ExecContext(ctx, clearAllServedTombstonesSQL); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // DeleteTrack removes a track by path. Missing rows are not an error.
@@ -8315,7 +8328,11 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, v.SourcePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // setArtworkVersionSQL binds (version, clock, artworkMBID, version). The
@@ -8355,7 +8372,14 @@ func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, 
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		s.noteLibrary(ctx)
+	}
+	return n, nil
 }
 
 // variantRowSelect is the column list EVERY VariantRow reader selects
@@ -8820,7 +8844,13 @@ func (s *Store) deleteVariantRow(ctx context.Context, sourcePath, query string, 
 			return 0, err
 		}
 	}
-	return rows, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if rows > 0 {
+		s.noteLibrary(ctx)
+	}
+	return rows, nil
 }
 
 // UpdateVariantSidecarPath rewrites the `sidecar_path` of a single
@@ -9377,7 +9407,13 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if !visibleSame {
+		s.noteLibrary(ctx)
+	}
+	return nil
 }
 
 // GetAnalysis fetches one analysis row by exact source_path. Returns
@@ -9579,7 +9615,11 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, sourcePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteLibrary(ctx)
+	return nil
 }
 
 // AnalysisCoverage is the whole-library analysed-vs-eligible breakdown

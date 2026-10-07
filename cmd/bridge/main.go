@@ -3922,6 +3922,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	stopBroker := apiSrv.StartEventBroker()
 	defer stopBroker()
 
+	// The three user-data topics. Wired only outside the demo: a demo
+	// token is public, and these events describe one operator's library.
+	// The publisher is not constructed there, and syncEvents stays absent
+	// from /v1/health. SetLibraryScanEnded is separate from the single
+	// post-scan hook below.
+	if !cfg.Demo.Enabled {
+		syncPub := api.NewSyncEventPublisher(apiSrv.EventPublisher(), scanner.IsScanning, manifestStore.LibraryWatermark)
+		manifestStore.SetSyncHooks(syncPub.Hooks())
+		scanner.SetLibraryScanEnded(func() { syncPub.ScanEnded(context.Background()) })
+		apiSrv.EnableSyncEvents()
+	}
+
 	// postScanNudges collects every buffered-1 nudge channel that wants a
 	// non-blocking poke after each successful scan. ONE SetPostScanHook
 	// registration (below, once every sweeper has appended) fans out to

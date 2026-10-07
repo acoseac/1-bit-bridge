@@ -47,6 +47,7 @@ var wantAllHealthFeatures = []string{
 	"rendererDiscovery",
 	"smartPlaylists",
 	"spectrum",
+	"syncEvents",
 	"trackQuality",
 	"upscaleCompleteEvents",
 	"variantBumpsIndex",
@@ -101,6 +102,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithSmartPlaylistStore(mstore).
 		WithDemoMode(true).
 		WithPairing(newPairingStoreForFeaturesTest(t, authStore))
+	srv.EnableSyncEvents()
 	t.Cleanup(srv.StartEventBroker())
 	return srv
 }

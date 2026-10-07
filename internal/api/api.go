@@ -127,6 +127,7 @@ type Server struct {
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
 	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
+	syncEvents             bool                         // favorites.changed, playlists.changed and library.changed are published
 	variantStore           VariantStore                 // nil unless WithUpscale wired one; production wires it whatever the gate says
 	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
 	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
@@ -1171,6 +1172,16 @@ func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
 // pre-this-PR bridges) the returned publisher silently drops
 // publishes — same back-compat shape every upstream path already
 // handles.
+// EnableSyncEvents advertises syncEvents and is the serve-side statement
+// that all three user-data topics are published. The demo leaves it unset:
+// a demo bridge still has a broker for upscale events, and that broker
+// does not make these topics exist. The complete-set health fixture sets
+// it on its own, beside demoMode, because that fixture's job is every key
+// the builder can emit.
+func (s *Server) EnableSyncEvents() {
+	s.syncEvents = true
+}
+
 func (s *Server) EventPublisher() EventPublisher {
 	if s.eventBroker == nil {
 		return nopEventPublisher{}
@@ -1793,20 +1804,20 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 30 covers the current maximum
+	// appends in lex order. Capacity 31 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// favorites + favoritesRevisions + keyTempo + loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// search + smartPlaylists + spectrum + trackQuality +
+	// search + smartPlaylists + spectrum + syncEvents + trackQuality +
 	// upscaleCompleteEvents + variantBumpsIndex + waveform).
 	// `trackQuality` was missing from this enumeration — and so from the
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 30)
+	feats := make([]string, 0, 31)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1982,6 +1993,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// between smartPlaylists and trackQuality (sm < sp < t).
 	if s.analysisActive() {
 		feats = append(feats, "spectrum")
+	}
+	// `syncEvents` advertises that favorites.changed, playlists.changed and
+	// library.changed are published on GET /v1/events. It is set only where
+	// serve wires that publisher. A demo bridge leaves it unset. Alpha-sorted
+	// between spectrum and trackQuality.
+	if s.syncEvents {
+		feats = append(feats, "syncEvents")
 	}
 	// `trackQuality` advertises the wf4 quality scalars —
 	// Track.truePeakDB (48 kHz-rendering true peak), Track.drScore

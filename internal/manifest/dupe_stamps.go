@@ -108,6 +108,7 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 	defer clearTombstone.Close()
 	now := s.now().UnixNano()
 	n := 0
+	libraryBumped := false
 	for _, st := range stamps {
 		suppressed := 0
 		if st.Suppressed {
@@ -141,10 +142,16 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		}
 		if affected, _ := res.RowsAffected(); affected > 0 {
 			n++
+			if st.BumpIndexed {
+				libraryBumped = true
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if libraryBumped {
+		s.noteLibrary(ctx)
 	}
 	return n, nil
 }
