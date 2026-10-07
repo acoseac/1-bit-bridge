@@ -1165,13 +1165,6 @@ func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
 	return s.tailscaleStatusCache
 }
 
-// EventPublisher returns the broker as the Server-facing
-// `EventPublisher` interface so upstream services (transcode pool,
-// pairing store) can publish events without taking a hard dependency
-// on the api package. When the broker isn't wired (test harnesses,
-// pre-this-PR bridges) the returned publisher silently drops
-// publishes — same back-compat shape every upstream path already
-// handles.
 // EnableSyncEvents advertises syncEvents and is the serve-side statement
 // that all three user-data topics are published. The demo leaves it unset:
 // a demo bridge still has a broker for upscale events, and that broker
@@ -1182,6 +1175,13 @@ func (s *Server) EnableSyncEvents() {
 	s.syncEvents = true
 }
 
+// EventPublisher returns the broker as the Server-facing
+// `EventPublisher` interface so upstream services (transcode pool,
+// pairing store) can publish events without taking a hard dependency
+// on the api package. When the broker isn't wired (test harnesses,
+// pre-this-PR bridges) the returned publisher silently drops
+// publishes — same back-compat shape every upstream path already
+// handles.
 func (s *Server) EventPublisher() EventPublisher {
 	if s.eventBroker == nil {
 		return nopEventPublisher{}
