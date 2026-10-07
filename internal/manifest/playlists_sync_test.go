@@ -162,6 +162,33 @@ func TestPlaylistBaseMismatchCarriesTheStoredPlaylist(t *testing.T) {
 	}
 }
 
+func TestLegacyIdenticalPlaylistPutKeepsTheStampGuard(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	p, items := samplePlaylist("pl-legacy-same", "Favorites", 5000)
+	if err := s.UpsertPlaylist(ctx, "devA", p, items); err != nil {
+		t.Fatal(err)
+	}
+	older := p
+	older.LastModifiedAt = 1000
+	if _, err := s.PutPlaylist(ctx, "devA", older, items, nil); !errors.Is(err, ErrPlaylistStale) {
+		t.Fatalf("older identical: %v, want ErrPlaylistStale", err)
+	}
+	newer := p
+	newer.LastModifiedAt = 9000
+	res, err := s.PutPlaylist(ctx, "devA", newer, items, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Unchanged || res.LastModifiedAt != 9000 {
+		t.Fatalf("newer identical %+v, want stored 9000", res)
+	}
+	got, _, err := s.GetPlaylist(ctx, p.ID)
+	if err != nil || got == nil || got.LastModifiedAt != 9000 {
+		t.Fatalf("stored %+v err %v", got, err)
+	}
+}
+
 func TestIdenticalPlaylistBodyWithAStaleBaseWritesNothing(t *testing.T) {
 	s := newDeviceTestStore(t)
 	ctx := context.Background()

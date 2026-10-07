@@ -31,9 +31,12 @@ func (e *PlaylistBaseMismatch) Error() string {
 // A nil base keeps the stamp guard. A base equal to the stored stamp
 // skips that guard: a behind-clock client is accepted, and a stamp that
 // is not strictly greater becomes the stored stamp plus one nanosecond.
-// An identical body writes nothing, live or deleted, and is decided
-// before the base is compared, so a stale base on the same body does
-// not answer 409. A matching base with a different body is stored, which
+// An identical body writes nothing when a base is present, or when the
+// row is deleted, and that is decided before the base is compared, so a
+// stale base on the same body does not answer 409 and a repeat does not
+// revive. A live playlist with no base stays on the stamp guard even
+// when the body already matches: an older stamp is stale and a newer
+// one is stored. A matching base with a different body is stored, which
 // revives a deleted row: DELETE does not move last_modified_at, so that
 // base is the pre-deletion version, and dropping the edit would leave
 // the client believing the old playlist was accepted.
@@ -78,11 +81,10 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 	}
 	same := playlistBodyEqual(name, stored, p.Name, items)
 
-	// An identical body writes nothing, live or deleted. It is decided
-	// before the base is compared so a stale base on the same body does
-	// not 409, and so a deleted row is never revived by a repeat of the
-	// body it already holds.
-	if same {
+	// An identical body writes nothing when a base is present or the row
+	// is deleted. A live playlist with no base keeps the stamp guard,
+	// including when the body already matches.
+	if same && (base != nil || deleted != 0) {
 		return PlaylistPutResult{LastModifiedAt: existingLMA, Unchanged: true}, nil
 	}
 

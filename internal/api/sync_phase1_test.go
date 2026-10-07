@@ -321,6 +321,43 @@ func TestIdenticalPlaylistBodyWithAStaleBaseIsUnchanged(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestLegacyIdenticalPlaylistPutKeepsTheStampGuard(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "9b3e6d80-2c65-407e-9f11-4d5c6b708f9e"
+	body := `{"id":"` + id + `","name":"Favs","lastModifiedAt":5000,"items":[{"position":0,"path":"a.flac"}]}`
+	if resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	older := `{"id":"` + id + `","name":"Favs","lastModifiedAt":1000,"items":[{"position":0,"path":"a.flac"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, older)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("older identical: %d, want 409", resp.StatusCode)
+	}
+	var stale playlistStaleResponse
+	if err := json.NewDecoder(resp.Body).Decode(&stale); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if stale.Error != "stale" {
+		t.Fatalf("409 %+v, want stale", stale)
+	}
+	newer := `{"id":"` + id + `","name":"Favs","lastModifiedAt":9000,"items":[{"position":0,"path":"a.flac"}]}`
+	resp = doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, newer)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("newer identical: %d, want 200", resp.StatusCode)
+	}
+	var stored playlistStoredResponse
+	if err := json.NewDecoder(resp.Body).Decode(&stored); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if stored.LastModifiedAt != 9000 {
+		t.Fatalf("stored stamp %d, want 9000", stored.LastModifiedAt)
+	}
+}
+
 func TestLegacyFavoritesPutOmitsTheBaseAndKeepsAnOmittedKey(t *testing.T) {
 	token, dt, srv, _, _ := newFavoritesHarness(t)
 	first := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,

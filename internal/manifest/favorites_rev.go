@@ -99,7 +99,9 @@ func albumKeyOf(artist, album string, year int) favAlbumKey {
 
 // maxFavoriteTracks and maxFavoriteAlbums match the API body caps. A
 // legacy merge adds a whole body onto what is already stored, so the
-// merged result is capped here. Existing keys are kept ahead of new ones.
+// merged result is capped here, leaving room for the tombstones already
+// stored: a revisioned echo counts live rows and tombstones together.
+// Existing keys are kept ahead of new ones.
 const (
 	maxFavoriteTracks = 50000
 	maxFavoriteAlbums = 10000
@@ -702,8 +704,8 @@ func mergeLegacyFavorites(doc FavoritesDocument, save FavoritesSave) FavoritesDo
 		}
 		albums[k] = a
 	}
-	next.Tracks = capFavoriteRows(doc.Tracks, save.Tracks, tracksFromIndex(tracks), maxFavoriteTracks, trackKeyOfRow)
-	next.Albums = capFavoriteRows(doc.Albums, save.Albums, albumsFromIndex(albums), maxFavoriteAlbums, albumKeyOfRow)
+	next.Tracks = capFavoriteRows(doc.Tracks, save.Tracks, tracksFromIndex(tracks), maxFavoriteTracks-len(doc.Tombstones), trackKeyOfRow)
+	next.Albums = capFavoriteRows(doc.Albums, save.Albums, albumsFromIndex(albums), maxFavoriteAlbums-len(doc.AlbumTombstones), albumKeyOfRow)
 	return next
 }
 

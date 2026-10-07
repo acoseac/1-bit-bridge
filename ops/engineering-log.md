@@ -37516,8 +37516,9 @@ strictly greater and one nanosecond above the stored stamp otherwise; an
 equal body writes nothing. A base that is not the stored stamp, with a
 different body, is `409` `base_mismatch`, not `stale`. An identical body
 never revives a deleted playlist, and that check comes before the base
-compare. A matching base with a different body revives, including when
-the base predates the deletion: `updated_at` is the bridge clock and
+compare when a base is present or the row is deleted. A live playlist
+with no base stays on the stamp guard. A matching base with a different
+body revives, including when the base predates the deletion: `updated_at` is the bridge clock and
 `last_modified_at` is the client clock, so comparing them refuses every
 base the client holds. The list `ETag` is `<epoch>.<sha256>` of the
 canonical summaries, `imageHash` included, and `deletedIds`.
@@ -37544,3 +37545,15 @@ merge stops at 50,000 tracks and 10,000 albums and still answers `200`.
 Both registration reaps also delete a `favorite_sync_devices` row whose
 token has no registration. `If-None-Match` joins every header line, and a
 tombstoned `base_mismatch` carries `server.deleted`.
+
+## 2026-10-07 — phase 1 review round 2
+
+A legacy favorites merge filled the live cap beside a tombstone, so the
+revisioned echo of that document (live rows plus the tombstone) was
+`400`. The cap is now the body cap minus the tombstones already stored,
+tracks and albums alike. An identical playlist body was decided before
+the stamp guard on every path, including a live playlist with no base:
+a 2.1 client ignores the returned stamp, so an identical older stamp
+must stay `409` `stale` and an identical newer stamp must be stored.
+The identical-body early return stays when a base is present or the row
+is deleted.

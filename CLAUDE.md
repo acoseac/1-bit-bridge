@@ -2060,13 +2060,18 @@ lost my library."
   row. After collection a legacy save can insert the key again, and a
   client whose base predates the collection reads that as a re-heart. A
   legacy merge that would pass 50,000 tracks or 10,000 albums stays `200`
-  and keeps existing keys first. `bridge restore` replaces `backup_epoch`
-  after the database copy, and the pre-copy WAL removal is what keeps a
+  and keeps existing keys first, leaving room for the tombstones already
+  stored so a revisioned echo of live rows plus those tombstones still
+  fits. `bridge restore` replaces `backup_epoch` after the database
+  copy, and the pre-copy WAL removal is what keeps a
   same-lineage WAL from replaying onto the restored file. Playlist
   `baseLastModifiedAt` is a different code, `base_mismatch`, and only
   when the base is not the stored stamp and the body differs; an identical
-  body is decided first, so a stale base on the same body is `200`
-  Unchanged, live or deleted. A matching base with a different body is
+  body is decided first when a base is present or the row is deleted, so
+  a stale base on the same body is `200` Unchanged, live or deleted. A
+  live playlist with no base stays on the stamp guard even when the body
+  already matches: an older stamp is `409` `stale` and a newer one stores
+  the client's stamp. A matching base with a different body is
   stored, which revives a deleted row even when that base predates the
   deletion: `updated_at` is the bridge clock and `last_modified_at` is the
   client clock, so comparing them refuses every base the client holds. A
@@ -2078,6 +2083,8 @@ lost my library."
   `TestLegacyFavoritesPutNeverConflicts`,
   `TestPlaylistMatchingBaseAcceptsABehindClock`,
   `TestIdenticalPlaylistBodyDoesNotRevive`,
+  `TestLegacyIdenticalPlaylistPutKeepsTheStampGuard`,
+  `TestACappedLegacyDocumentEchoes`,
   `TestMatchingBaseRevivesADeletedPlaylist`,
   `TestReadFavoritesDoesNotTakeTheWriterLock`,
   `TestFavorites304DoesNotReadTheRows`,

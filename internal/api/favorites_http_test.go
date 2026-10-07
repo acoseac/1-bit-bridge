@@ -443,6 +443,18 @@ func TestACappedLegacyDocumentEchoes(t *testing.T) {
 	if _, err := mstore.SaveFavorites(ctx, dt, manifest.FavoritesSave{Tracks: first}); err != nil {
 		t.Fatal(err)
 	}
+	seed, err := mstore.ReadFavorites(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := seed.Revision
+	if _, err := mstore.SaveFavorites(ctx, dt, manifest.FavoritesSave{
+		BaseRevision: &base,
+		Tracks:       first[1:],
+		Tombstones:   []manifest.FavoriteTombstone{{Path: first[0].Path}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	second := make([]manifest.FavoriteTrackRow, 30000)
 	for i := range second {
 		second[i] = manifest.FavoriteTrackRow{Path: fmt.Sprintf("n-%05d", i), FavoritedAt: 2}
@@ -454,20 +466,28 @@ func TestACappedLegacyDocumentEchoes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Tracks) != maxFavoriteTracks {
-		t.Fatalf("stored %d, want %d", len(doc.Tracks), maxFavoriteTracks)
+	if len(doc.Tombstones) != 1 {
+		t.Fatalf("tombstones %d, want 1", len(doc.Tombstones))
+	}
+	if len(doc.Tracks)+len(doc.Tombstones) != maxFavoriteTracks {
+		t.Fatalf("stored %d live + %d tombstones, want %d together", len(doc.Tracks), len(doc.Tombstones), maxFavoriteTracks)
 	}
 	wire := make([]favoriteTrackDTO, len(doc.Tracks))
 	for i, row := range doc.Tracks {
 		wire[i] = favoriteTrackDTO{Path: row.Path, FavoritedAt: row.FavoritedAt}
 	}
+	tombs := make([]favoriteTombstoneDTO, len(doc.Tombstones))
+	for i, row := range doc.Tombstones {
+		tombs[i] = favoriteTombstoneDTO{Path: row.Path, RemovedAt: row.RemovedAt}
+	}
 	rev := doc.Revision
 	raw, err := json.Marshal(struct {
-		LastModifiedAt int64              `json:"lastModifiedAt"`
-		BaseRevision   *int64             `json:"baseRevision"`
-		Tracks         []favoriteTrackDTO `json:"tracks"`
-		Albums         []favoriteAlbumDTO `json:"albums"`
-	}{LastModifiedAt: 1, BaseRevision: &rev, Tracks: wire, Albums: []favoriteAlbumDTO{}})
+		LastModifiedAt int64                  `json:"lastModifiedAt"`
+		BaseRevision   *int64                 `json:"baseRevision"`
+		Tracks         []favoriteTrackDTO     `json:"tracks"`
+		Albums         []favoriteAlbumDTO     `json:"albums"`
+		Tombstones     []favoriteTombstoneDTO `json:"tombstones"`
+	}{LastModifiedAt: 1, BaseRevision: &rev, Tracks: wire, Albums: []favoriteAlbumDTO{}, Tombstones: tombs})
 	if err != nil {
 		t.Fatal(err)
 	}
