@@ -45,6 +45,12 @@ func TestLibraryDebounceTrailsTheLastWrite(t *testing.T) {
 	clk.Advance(20 * time.Second)
 	pub.NoteLibrary(base + 1)
 	clk.Advance(15 * time.Second)
+	// Publish hands the broker a goroutine. Wait out one turn so a timer
+	// the second note failed to replace is in the buffer before the count.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && len(replayTopics(t, b)) < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := replayTopics(t, b); len(got) != 0 {
 		t.Fatalf("an event fired 15s after the last write: %v", got)
 	}
