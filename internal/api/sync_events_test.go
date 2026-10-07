@@ -142,6 +142,12 @@ func TestAScanEndSupersedesAPendingLibraryDebounce(t *testing.T) {
 	pub.ScanEnded(context.Background())
 	awaitReplay(t, b, 1)
 	clk.Advance(time.Minute)
+	// Publish hands the broker a goroutine. Wait out one turn so a debounce
+	// ScanEnded failed to cancel is in the buffer before the count.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && len(replayTopics(t, b)) < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := replayTopics(t, b); len(got) != 1 {
 		t.Fatalf("topics %v, the pending debounce also fired", got)
 	}
