@@ -2121,7 +2121,9 @@ lost my library."
   `GET /v1/manifest?since=` parses. A mass delete that resets that
   coverage publishes the new start, including when it deletes every
   track. An empty library at scan end publishes the publisher clock
-  when no watermark exists; a query error publishes nothing. A sidecar lyrics bump on the
+  when no watermark exists. A watermark query error at scan end is
+  logged and that event carries the publisher clock; a note outside a
+  scan still publishes nothing when the query fails. A sidecar lyrics bump on the
   version-stamp leg notes after its commit; a refusal skips lyrics.
   A smart-mix cover and a cover pruned from an already-tombstoned
   playlist publish no `playlists.changed`. The demo wires none of
@@ -2137,6 +2139,7 @@ lost my library."
   `TestLibraryChangedIsSuppressedWhileAScanRunsAndEmittedOnceAtTheEnd`,
   `TestLibraryChangedIsOneEventAfterAQuietThirtySeconds`,
   `TestAFullScanPublishesOneLibraryEvent`,
+  `TestAWatermarkQueryErrorPublishesTheScanEndClock`,
   `TestADemoBridgeDoesNotAdvertiseSyncEvents`,
   `TestSyncTopicsReplayOnLastEventID`.)
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process

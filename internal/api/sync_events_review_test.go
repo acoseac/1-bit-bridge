@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // raceClock models time.AfterFunc: Stop on a timer that has already fired
@@ -108,7 +110,8 @@ func TestAnEmptyLibraryStillPublishesAtScanEnd(t *testing.T) {
 	}
 }
 
-func TestAWatermarkQueryErrorPublishesNothing(t *testing.T) {
+func TestAWatermarkQueryErrorPublishesTheScanEndClock(t *testing.T) {
+	rec := loggingtest.Record(t)
 	b := startBroker(t)
 	when := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	clk := &manualClock{now: when}
@@ -116,8 +119,19 @@ func TestAWatermarkQueryErrorPublishesNothing(t *testing.T) {
 		func(context.Context) (int64, bool, error) { return 0, false, errors.New("db") },
 		clk, libraryChangeDebounce, true)
 	pub.ScanEnded(context.Background())
-	if got := replayTopics(t, b); len(got) != 0 {
-		t.Fatalf("a query error published %v", got)
+	awaitReplay(t, b, 1)
+	b.mu.Lock()
+	var got libraryChanged
+	err := json.Unmarshal(b.replayBuffer[0].Data, &got)
+	b.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IndexedAt != formatIndexedAt(when.UnixNano()) {
+		t.Fatalf("indexedAt %q, want the scan-end clock", got.IndexedAt)
+	}
+	if lines := rec.Failures("library watermark"); len(lines) != 1 {
+		t.Fatalf("watermark log %v", lines)
 	}
 }
 

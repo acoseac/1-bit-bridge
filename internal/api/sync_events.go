@@ -78,9 +78,12 @@ type SyncEventPublisher struct {
 
 // NewSyncEventPublisher publishes all three topics. scanning is
 // Scanner.AdvertisedScanning, the scan /v1/health reports. watermark is
-// Store.LibraryWatermark: the later of indexed_at and a journaled
-// deletion. An error from watermark publishes nothing. An empty library
-// (no watermark, no error) publishes the publisher clock from ScanEnded.
+// Store.LibraryWatermark: the later of indexed_at, a journaled deletion
+// and the deletion-journal coverage start. An error from watermark, at
+// scan end, is logged and the publisher clock is published: a delta from
+// an older cursor is idempotent. An empty library (no watermark, no
+// error) publishes the publisher clock from ScanEnded. A note outside a
+// scan still publishes nothing when the query fails.
 func NewSyncEventPublisher(pub EventPublisher, scanning func() bool, watermark func(context.Context) (int64, bool, error)) *SyncEventPublisher {
 	return newSyncEventPublisher(pub, scanning, watermark, wallClock{}, libraryChangeDebounce, true)
 }
@@ -196,7 +199,8 @@ func (p *SyncEventPublisher) fireDebounce(gen uint64) {
 func (p *SyncEventPublisher) publishWatermark(ctx context.Context) {
 	ns, ok, err := p.watermark(ctx)
 	if err != nil {
-		return
+		logger.Warn("library watermark", "err", err)
+		ok = false
 	}
 	if !ok || ns <= 0 {
 		ns = p.clk.Now().UnixNano()

@@ -37625,3 +37625,10 @@ hook — after the transaction is marked done, before that read — leaves
 the revision at 3 and publishes nothing (`notes` stay `[1 2]`). The
 read uses `context.WithoutCancel`. The save path already holds the
 revision and does not re-read it.
+
+A watermark query error at scan end used to publish nothing, so a
+client waiting on `library.changed` slept until the next write. Scan
+end now logs `library watermark` and publishes the publisher clock.
+A delta from an older cursor is idempotent. `noteLibrary` still
+publishes nothing when its own query fails. The sentences above that
+say a query error publishes nothing are that earlier scan-end reading.
