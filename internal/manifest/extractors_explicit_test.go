@@ -15,55 +15,105 @@ import (
 // either description, and a marker on the raw track title. Any signal
 // wins. The shared truth table is TestExplicitVerdict.
 
-func TestExplicit_MP4Rtng(t *testing.T) {
-	cases := []struct {
-		name string
-		item []byte
-		want bool
-	}{
-		{"1", atomBytes("rtng", dataAtom(21, []byte{1})), true},
-		{"2", atomBytes("rtng", dataAtom(21, []byte{2})), false},
-		{"4", atomBytes("rtng", dataAtom(21, []byte{4})), true},
-		{"0", atomBytes("rtng", dataAtom(21, []byte{0})), false},
-		{"padded", atomBytes("rtng", dataAtom(21, []byte{0, 0, 0, 1})), true},
-		{"absent", nil, false},
-	}
+// One built ilst and the explicit verdict it must produce. The MP4 cases
+// share this so each test states its atoms and its want, and the extract
+// plus the comparison live once.
+type mp4ExplicitCase struct {
+	name  string
+	items [][]byte
+	want  bool
+}
+
+type flacExplicitCase struct {
+	name string
+	tags map[string]string
+	want bool
+}
+
+func runMP4ExplicitCases(t *testing.T, cases []mp4ExplicitCase) {
+	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var items [][]byte
-			if tc.item != nil {
-				items = [][]byte{tc.item}
-			}
-			got := extractBytesAsM4A(t, buildMP4WithILST(true, items...))
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-			}
+			assertMP4Explicit(t, tc.want, tc.items...)
 		})
 	}
 }
 
-func TestExplicit_MP4Freeform(t *testing.T) {
-	cases := []struct {
-		value string
-		want  bool
-	}{
-		{"1", true},
-		{"4", true},
-		{"2", false},
-		{"0", false},
-		{" 1 ", true},
-		{"01", false},
-		{"true", true},
+func assertMP4Explicit(t *testing.T, want bool, items ...[]byte) *Track {
+	t.Helper()
+	got := extractBytesAsM4A(t, buildMP4WithILST(true, items...))
+	if got.Explicit != want {
+		t.Fatalf("Explicit = %v, want %v", got.Explicit, want)
 	}
+	return got
+}
+
+func runFLACExplicitCases(t *testing.T, cases []flacExplicitCase) {
+	t.Helper()
 	for _, tc := range cases {
-		t.Run(tc.value, func(t *testing.T) {
-			item := ilstFreeform("com.apple.iTunes", "ITUNESADVISORY", tc.value)
-			got := extractBytesAsM4A(t, buildMP4WithILST(true, item))
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-			}
+		t.Run(tc.name, func(t *testing.T) {
+			assertFLACExplicit(t, tc.tags, tc.want)
 		})
 	}
+}
+
+// extractFLACTags writes a minimal FLAC, reads it back and extracts it.
+// name is the file the extractor sees, so the extension stays the dispatch.
+func extractFLACTags(t *testing.T, name string, tags map[string]string) Track {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	writeMinimalFLAC(t, p, 44100, 16, tags)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return requireBoundedExtraction(t, name, raw, &ExtractContext{})
+}
+
+func assertFLACExplicit(t *testing.T, tags map[string]string, want bool) Track {
+	t.Helper()
+	got := extractFLACTags(t, "t.flac", tags)
+	if got.Explicit != want {
+		t.Fatalf("Explicit = %v, want %v (title %q)", got.Explicit, want, got.Title)
+	}
+	return got
+}
+
+func assertID3AdvisoryExplicit(t *testing.T, desc, value string, want bool) {
+	t.Helper()
+	got := extractID3Frames(t, 4, txxxFrame(4, 3, desc, value))
+	if got.Explicit != want {
+		t.Fatalf("Explicit = %v, want %v", got.Explicit, want)
+	}
+}
+
+func TestExplicit_MP4Rtng(t *testing.T) {
+	rtng := func(b []byte) [][]byte {
+		return [][]byte{atomBytes("rtng", dataAtom(21, b))}
+	}
+	runMP4ExplicitCases(t, []mp4ExplicitCase{
+		{"1", rtng([]byte{1}), true},
+		{"2", rtng([]byte{2}), false},
+		{"4", rtng([]byte{4}), true},
+		{"0", rtng([]byte{0}), false},
+		{"padded", rtng([]byte{0, 0, 0, 1}), true},
+		{"absent", nil, false},
+	})
+}
+
+func TestExplicit_MP4Freeform(t *testing.T) {
+	advisory := func(v string) [][]byte {
+		return [][]byte{ilstFreeform("com.apple.iTunes", "ITUNESADVISORY", v)}
+	}
+	runMP4ExplicitCases(t, []mp4ExplicitCase{
+		{"1", advisory("1"), true},
+		{"4", advisory("4"), true},
+		{"2", advisory("2"), false},
+		{"0", advisory("0"), false},
+		{" 1 ", advisory(" 1 "), true},
+		{"01", advisory("01"), false},
+		{"true", advisory("true"), true},
+	})
 }
 
 func TestExplicit_MP4AnySignalWins(t *testing.T) {
@@ -73,24 +123,12 @@ func TestExplicit_MP4AnySignalWins(t *testing.T) {
 	rtng := func(n byte) []byte {
 		return atomBytes("rtng", dataAtom(21, []byte{n}))
 	}
-	cases := []struct {
-		name  string
-		items [][]byte
-		want  bool
-	}{
+	runMP4ExplicitCases(t, []mp4ExplicitCase{
 		{"rtng2_does_not_cancel_advisory", [][]byte{rtng(2), freeform("1")}, true},
 		{"rtng1_with_clean_advisory", [][]byte{rtng(1), freeform("2")}, true},
 		{"rtng0_does_not_cancel_advisory", [][]byte{rtng(0), freeform("1")}, true},
 		{"text_atom_is_not_a_rating", [][]byte{atomBytes("rtng", dataAtom(1, []byte("1"))), freeform("1")}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractBytesAsM4A(t, buildMP4WithILST(true, tc.items...))
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-			}
-		})
-	}
+	})
 }
 
 // The first value of one freeform name wins, whichever mean wrote it.
@@ -98,11 +136,7 @@ func TestExplicit_MP4AnySignalWins(t *testing.T) {
 // there must not lose to a later com.apple.iTunes value of the same name.
 // A different name is a different signal.
 func TestExplicit_MP4FirstFreeformValueWins(t *testing.T) {
-	cases := []struct {
-		name  string
-		items [][]byte
-		want  bool
-	}{
+	runMP4ExplicitCases(t, []mp4ExplicitCase{
 		{"earlier_clean_mean_wins", [][]byte{
 			ilstFreeform("org.example", "ITUNESADVISORY", "2"),
 			ilstFreeform("com.apple.iTunes", "ITUNESADVISORY", "1"),
@@ -115,23 +149,11 @@ func TestExplicit_MP4FirstFreeformValueWins(t *testing.T) {
 			ilstFreeform("org.example", "ITUNESADVISORY", "2"),
 			ilstFreeform("org.example", "EXPLICIT", "1"),
 		}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractBytesAsM4A(t, buildMP4WithILST(true, tc.items...))
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-			}
-		})
-	}
+	})
 }
 
 func TestExplicit_Vorbis(t *testing.T) {
-	cases := []struct {
-		name string
-		tags map[string]string
-		want bool
-	}{
+	runFLACExplicitCases(t, []flacExplicitCase{
 		{"1", map[string]string{"ITUNESADVISORY": "1"}, true},
 		{"4", map[string]string{"ITUNESADVISORY": "4"}, true},
 		{"2", map[string]string{"ITUNESADVISORY": "2"}, false},
@@ -141,21 +163,7 @@ func TestExplicit_Vorbis(t *testing.T) {
 		{"odd_case", map[string]string{"ItunesAdvisory": "1"}, true},
 		{"padded_digits", map[string]string{"ITUNESADVISORY": "01"}, false},
 		{"true", map[string]string{"ITUNESADVISORY": "true"}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := filepath.Join(t.TempDir(), "t.flac")
-			writeMinimalFLAC(t, p, 44100, 16, tc.tags)
-			raw, err := os.ReadFile(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := requireBoundedExtraction(t, "t.flac", raw, &ExtractContext{})
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-			}
-		})
-	}
+	})
 }
 
 func TestExplicit_ID3TXXX(t *testing.T) {
@@ -236,13 +244,7 @@ func TestExplicit_OmittedFromTheWireUnlessTrue(t *testing.T) {
 
 func TestExplicit_OtherSpellingsAreNotRead(t *testing.T) {
 	for _, key := range []string{"ITUNESRATING", "rating"} {
-		p := filepath.Join(t.TempDir(), key+".flac")
-		writeMinimalFLAC(t, p, 44100, 16, map[string]string{key: "1"})
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := requireBoundedExtraction(t, key+".flac", raw, &ExtractContext{})
+		got := extractFLACTags(t, key+".flac", map[string]string{key: "1"})
 		if got.Explicit {
 			t.Fatalf("%s=1 marked the track explicit", key)
 		}
@@ -335,42 +337,22 @@ func TestExplicit_AdvisoryText(t *testing.T) {
 	} {
 		for _, tc := range values {
 			t.Run("mp4/"+field.name+"/"+tc.name, func(t *testing.T) {
-				item := ilstFreeform(field.mean, field.name, tc.value)
-				got := extractBytesAsM4A(t, buildMP4WithILST(true, item))
-				if got.Explicit != tc.want {
-					t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-				}
+				assertMP4Explicit(t, tc.want, ilstFreeform(field.mean, field.name, tc.value))
 			})
 			t.Run("vorbis/"+field.name+"/"+tc.name, func(t *testing.T) {
-				p := filepath.Join(t.TempDir(), "t.flac")
-				writeMinimalFLAC(t, p, 44100, 16, map[string]string{
+				assertFLACExplicit(t, map[string]string{
 					field.name: tc.value, "TITLE": "Plain",
-				})
-				raw, err := os.ReadFile(p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				got := requireBoundedExtraction(t, "t.flac", raw, &ExtractContext{})
-				if got.Explicit != tc.want {
-					t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-				}
+				}, tc.want)
 			})
 			t.Run("id3/"+field.name+"/"+tc.name, func(t *testing.T) {
-				got := extractID3Frames(t, 4, txxxFrame(4, 3, field.name, tc.value))
-				if got.Explicit != tc.want {
-					t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
-				}
+				assertID3AdvisoryExplicit(t, field.name, tc.value, tc.want)
 			})
 		}
 	}
 }
 
 func TestExplicit_TitleMarker(t *testing.T) {
-	cases := []struct {
-		name string
-		tags map[string]string
-		want bool
-	}{
+	runFLACExplicitCases(t, []flacExplicitCase{
 		{"vorbis_[E]", map[string]string{"TITLE": "Song [E]"}, true},
 		{"vorbis_[Explicit]", map[string]string{"TITLE": "Song [Explicit]"}, true},
 		{"vorbis_[Explicit_Version]", map[string]string{"TITLE": "Song [Explicit Version]"}, true},
@@ -386,25 +368,10 @@ func TestExplicit_TitleMarker(t *testing.T) {
 		{"vorbis_paren_mid", map[string]string{"TITLE": "Song (Explicit) Live"}, false},
 		{"vorbis_album_marker", map[string]string{"TITLE": "Song", "ALBUM": "Hits [Explicit]"}, false},
 		{"vorbis_advisory_with_plain_title", map[string]string{"TITLE": "Song", "ITUNESADVISORY": "1"}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := filepath.Join(t.TempDir(), "t.flac")
-			writeMinimalFLAC(t, p, 44100, 16, tc.tags)
-			raw, err := os.ReadFile(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := requireBoundedExtraction(t, "t.flac", raw, &ExtractContext{})
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v (title %q)", got.Explicit, tc.want, got.Title)
-			}
-		})
-	}
+	})
 
 	t.Run("mp4_nam", func(t *testing.T) {
-		item := ilstText("\xa9nam", "Cut [E]")
-		got := extractBytesAsM4A(t, buildMP4WithILST(true, item))
+		got := extractBytesAsM4A(t, buildMP4WithILST(true, ilstText("\xa9nam", "Cut [E]")))
 		if !got.Explicit || got.Title != "Cut [E]" {
 			t.Fatalf("title %q explicit %v", got.Title, got.Explicit)
 		}
@@ -416,11 +383,10 @@ func TestExplicit_TitleMarker(t *testing.T) {
 		}
 	})
 	t.Run("mp4_rtng2_with_title", func(t *testing.T) {
-		items := [][]byte{
+		got := extractBytesAsM4A(t, buildMP4WithILST(true,
 			atomBytes("rtng", dataAtom(21, []byte{2})),
 			ilstText("\xa9nam", "Cut [E]"),
-		}
-		got := extractBytesAsM4A(t, buildMP4WithILST(true, items...))
+		))
 		if !got.Explicit {
 			t.Fatal("a clean rtng cancelled the title marker")
 		}
