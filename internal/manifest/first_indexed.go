@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 )
 
 // firstIndexedBackfillChunk bounds one autocommit UPDATE so a library
@@ -254,7 +251,6 @@ func (s *Store) loadFirstIndexedSnap(ctx context.Context, multiRoot bool) (*firs
 		folded: map[string]int64{},
 		root:   map[string]int64{},
 	}
-	fold := cases.Lower(language.Und)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT path, first_indexed_at FROM tracks
 		WHERE first_indexed_at IS NOT NULL
@@ -275,7 +271,7 @@ func (s *Store) loadFirstIndexedSnap(ctx context.Context, multiRoot bool) (*firs
 		if ns <= 0 {
 			continue
 		}
-		key := fold.String(path)
+		key := pathFold(path)
 		if prev, ok := snap.folded[key]; !ok || ns < prev {
 			snap.folded[key] = ns
 		}
@@ -368,7 +364,7 @@ func (s *Scanner) noteFirstIndexed(ctx context.Context, t *Track, multiRoot bool
 			t.carryFirstIndexedNS = ns
 			return
 		}
-		if ns, ok := snap.folded[cases.Lower(language.Und).String(t.Path)]; ok && ns > 0 {
+		if ns, ok := snap.folded[pathFold(t.Path)]; ok && ns > 0 {
 			t.carryFirstIndexedNS = ns
 		}
 		return

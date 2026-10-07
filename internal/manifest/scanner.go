@@ -20,9 +20,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -3089,9 +3086,9 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 // threshold it would shadow the new row in /v1/manifest for up to
 // `threshold` scans, with both rows serving the same physical file.
 //
-// The fold is cases.Lower(language.Und), the same byte-for-byte fold
-// the store's unicode_lower() SQL function applies (sqlfunc.go). A
-// stored path that fold-matches a seen entry refers to a file the
+// The fold is pathFold, the same fold the store's unicode_lower()
+// SQL function applies (sqlfunc.go): a Unicode case fold, then NFC.
+// A stored path that fold-matches a seen entry refers to a file the
 // walker DID enumerate this pass, so reaping it can't confuse a
 // transient partial enumeration with a rename — the threshold's
 // silent-enumeration protection stays intact for genuinely-unseen
@@ -3099,17 +3096,16 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 // store_lookup_case_test.go); the fold applies ONLY to this
 // deletion-pass filter.
 func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
-	fold := cases.Lower(language.Und)
 	seenFolded := make(map[string]struct{}, len(seen))
 	for p := range seen {
-		seenFolded[fold.String(p)] = struct{}{}
+		seenFolded[pathFold(p)] = struct{}{}
 	}
 	renames := make(map[string]struct{})
 	for p := range before {
 		if _, ok := seen[p]; ok {
 			continue
 		}
-		if _, ok := seenFolded[fold.String(p)]; ok {
+		if _, ok := seenFolded[pathFold(p)]; ok {
 			renames[p] = struct{}{}
 		}
 	}

@@ -11,8 +11,8 @@ import (
 // beforeSet still carries the old one — the old-case row must be
 // reaped immediately rather than shadow the new row in /v1/manifest
 // until missing_count hits the delete threshold. The fold matches the
-// store's unicode_lower() SQL function (cases.Lower(language.Und))
-// byte-for-byte. Unit-level on purpose: a full case-insensitive-FS
+// store's unicode_lower() SQL function (pathFold). Unit-level on
+// purpose: a full case-insensitive-FS
 // integration test isn't portable (Linux CI filesystems are
 // case-sensitive), and GetTrack stays exact-key (pinned by
 // store_lookup_case_test.go).
