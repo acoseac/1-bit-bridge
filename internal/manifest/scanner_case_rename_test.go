@@ -48,6 +48,18 @@ func TestCaseOnlyRenames(t *testing.T) {
 			want:   []string{"Sigur Rós/Ágætis Byrjun/01.flac"},
 		},
 		{
+			name:   "accent-encoding rename flagged",
+			before: []string{"Cafe\u0301/01.flac"},
+			seen:   []string{"Caf\u00e9/01.flac"},
+			want:   []string{"Cafe\u0301/01.flac"},
+		},
+		{
+			name:   "both accent encodings live — nothing flagged",
+			before: []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
+			seen:   []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
+			want:   nil,
+		},
+		{
 			name:   "both cases live on case-sensitive FS — nothing flagged",
 			before: []string{"Album/01.flac", "album/01.flac"},
 			seen:   []string{"Album/01.flac", "album/01.flac"},

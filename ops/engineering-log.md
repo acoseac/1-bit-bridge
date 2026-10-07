@@ -37695,4 +37695,7 @@ wipe now commit in one transaction
 both back. Sidecar files are removed only after that commit.
 `TestACancelledCollapseKeepsTheDatesTheAddRecorded` is the case: the
 post-add scan keeps the date the add recorded. A save that fails after
-the wipe has committed still retargets that generation.
+the wipe has committed still retargets that generation. The case-only
+rename pairing folds accent encoding the same way. The old spelling is
+reaped, and both spellings left in place are not
+(`TestCaseOnlyRenames`).

@@ -1192,7 +1192,9 @@ lost my library."
  `idx_tracks_path_unicode_lower`. The in-memory date map and the
  case-only rename pairing fold with `pathFold`, the same case-fold-then-NFC
  `unicode_lower` applies, so a decomposed name and its precomposed
- spelling take one date on a full scan and a subtree scan. A failed
+ spelling take one date on a full scan and a subtree scan. An
+ accent-encoding rename is reaped the same way, and both spellings left
+ in place are not (`TestCaseOnlyRenames`). A failed
  or cancelled wipe rolls that transaction back, so it does not delete
  dates an earlier flip still has pending. A save that fails after the
  wipe commits retargets that generation at the form the library still
