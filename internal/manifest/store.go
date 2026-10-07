@@ -4392,6 +4392,51 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
+// scanListedTrack reads one row of the list, stream and page SELECT
+// (tags_json through first_indexed_at) into t, replacing whatever t held.
+func scanListedTrack(rows *sql.Rows, t *Track) error {
+	var raw []byte
+	var version int64
+	var enrichedAt int64
+	var variantsRaw []byte
+	var wfTag sql.NullString
+	var rg sql.NullFloat64
+	var ktRaw sql.NullString
+	var artVer sql.NullString
+	var bkTag sql.NullString
+	var lyTag sql.NullString
+	var firstNS sql.NullInt64
+	if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
+		return err
+	}
+	*t = Track{}
+	if err := json.Unmarshal(raw, t); err != nil {
+		return err
+	}
+	t.rowVersion, t.hasRowVersion = version, true
+	scanTrackVariants(t, variantsRaw)
+	t.Enriched = boolPtr(enrichedAt != 0)
+	t.WaveformTag = wfTag.String
+	t.ArtworkVersion = artVer.String
+	t.BookletTag = bkTag.String
+	t.LyricsTag = lyTag.String
+	spliceAnalysisReplayGain(t, rg)
+	spliceAnalysisScalars(t, ktRaw)
+	spliceFirstIndexedAt(t, firstNS)
+	return nil
+}
+
+func collectListedTracks(rows *sql.Rows, out []Track) ([]Track, error) {
+	for rows.Next() {
+		var t Track
+		if err := scanListedTrack(rows, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
 	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
@@ -4401,39 +4446,7 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Track{}
-	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		var firstNS sql.NullInt64
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
-			return nil, err
-		}
-		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return nil, err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		scanTrackVariants(&t, variantsRaw)
-		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
-		spliceFirstIndexedAt(&t, firstNS)
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return collectListedTracks(rows, []Track{})
 }
 
 // StreamTracks calls fn for every row matching the same predicate as
@@ -4490,39 +4503,14 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 	}
 	defer rows.Close()
 	// Hoisted outside the loop: the same Track is reused each
-	// iteration to honour the contract documented above. `t = Track{}`
-	// resets every field (including the spliced Enriched pointer) so
-	// stale data from row N never leaks into row N+1.
+	// iteration to honour the contract documented above.
+	// scanListedTrack replaces it before each callback, so stale
+	// fields from row N never leak into row N+1.
 	var t Track
 	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		var firstNS sql.NullInt64
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
+		if err := scanListedTrack(rows, &t); err != nil {
 			return err
 		}
-		t = Track{}
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		t.Enriched = boolPtr(enrichedAt != 0)
-		scanTrackVariants(&t, variantsRaw)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
-		spliceFirstIndexedAt(&t, firstNS)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -4580,39 +4568,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 	// and the sole caller clamps it to <=5001; min(...,8192) caps a
 	// hypothetical future caller passing an unbounded limit straight to the
 	// store, so the prealloc can't blow up memory on a near-empty table.
-	out := make([]Track, 0, min(limit, 8192))
-	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		var firstNS sql.NullInt64
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
-			return nil, err
-		}
-		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return nil, err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		scanTrackVariants(&t, variantsRaw)
-		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
-		spliceFirstIndexedAt(&t, firstNS)
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return collectListedTracks(rows, make([]Track, 0, min(limit, 8192)))
 }
 
 // HasTrackWithArtworkMBID reports whether at least one indexed track

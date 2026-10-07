@@ -1206,7 +1206,8 @@ lost my library."
  can hand the new spelling the old date even though the rename reap does
  not retire the old row; that residual is accepted. The wire field is
  `firstIndexedAt`, a `*time.Time` spliced at read time and stripped by
- `marshalForStorage`, omitted until the row has a date. `/v1/health`
+ `marshalForStorage`, omitted until the row has a date. The list, the
+ stream and the page splice it through one scan, `scanListedTrack`. `/v1/health`
  advertises `firstIndexedAt` only while no track row is NULL and the
  manifest serves the field, including on a demo bridge; the count is
  cached with the other health counts (ready sticks for the process, a miss

@@ -58,32 +58,80 @@ func carryCount(t *testing.T, dataDir string) int {
 	return n
 }
 
-func TestAddingARootKeepsTheOldFilesDateAndDatesTheNewRootAtTheScan(t *testing.T) {
-	srv, cfg, _ := newTestServer(t)
-	ctx := t.Context()
-	album := filepath.Join(cfg.LibraryRoots[0], "Artist", "Album")
+const singleRootSong = "Artist/Album/song.flac"
+
+func seedSingleRootTrack(t *testing.T) (srv *Server, dataDir, cfgPath, album, rootBase string, kept time.Time) {
+	t.Helper()
+	opened, cfg, path := newTestServer(t)
+	srv, cfgPath = opened, path
+	dataDir = cfg.DataDir
+	rootBase = filepath.Base(cfg.LibraryRoots[0])
+	album = filepath.Join(cfg.LibraryRoots[0], "Artist", "Album")
 	writeStubTrack(t, album)
-	kept := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "Artist/Album/song.flac", Size: 14, ModTime: kept,
+	kept = time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := srv.deps.Manifest.UpsertTrack(t.Context(), &manifest.Track{
+		Path: singleRootSong, Size: 14, ModTime: kept,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stampFirstIndexed(t, cfg.DataDir, "Artist/Album/song.flac", kept)
+	stampFirstIndexed(t, dataDir, singleRootSong, kept)
+	return
+}
 
-	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
+func emptyExtraRoot(t *testing.T, dataDir string) string {
+	t.Helper()
+	extra := filepath.Join(filepath.Dir(dataDir), "Extra")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return extra
+}
+
+func addExtraRoot(t *testing.T, srv *Server, dataDir string) string {
+	t.Helper()
+	extra := filepath.Join(filepath.Dir(dataDir), "Extra")
 	writeStubTrack(t, filepath.Join(extra, "Artist", "Album"))
 	if code := doJSON(t, srv.Handler(), http.MethodPost, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
 		t.Fatalf("add status %d", code)
 	}
 	srvBgScansWait(srv)
+	return extra
+}
 
-	music := filepath.Base(cfg.LibraryRoots[0]) + "/Artist/Album/song.flac"
-	got, err := srv.deps.Manifest.GetTrack(ctx, music)
+func requireKeptDate(t *testing.T, srv *Server, path string, kept time.Time, what string) {
+	t.Helper()
+	got, err := srv.deps.Manifest.GetTrack(t.Context(), path)
 	if err != nil || got == nil || got.FirstIndexedAt == nil || !got.FirstIndexedAt.Equal(kept) {
-		t.Fatalf("old root %v err %v", got, err)
+		t.Fatalf("%s %v err %v", what, got, err)
 	}
-	added, err := srv.deps.Manifest.GetTrack(ctx, "Extra/Artist/Album/song.flac")
+}
+
+func requireNoCarry(t *testing.T, dataDir, what string) {
+	t.Helper()
+	if n := carryCount(t, dataDir); n != 0 {
+		t.Errorf("%s left %d saved dates", what, n)
+	}
+}
+
+func cancelRootFlipAt(t *testing.T, stage string) context.Context {
+	t.Helper()
+	reqCtx, cancel := context.WithCancel(context.Background())
+	manifest.SetRootFlipStageHookForTest(func(got string) {
+		if got == stage {
+			cancel()
+		}
+	})
+	t.Cleanup(func() { manifest.SetRootFlipStageHookForTest(nil) })
+	return reqCtx
+}
+
+func TestAddingARootKeepsTheOldFilesDateAndDatesTheNewRootAtTheScan(t *testing.T) {
+	srv, dataDir, _, _, rootBase, kept := seedSingleRootTrack(t)
+	addExtraRoot(t, srv, dataDir)
+
+	music := rootBase + "/" + singleRootSong
+	requireKeptDate(t, srv, music, kept, "old root")
+	added, err := srv.deps.Manifest.GetTrack(t.Context(), "Extra/Artist/Album/song.flac")
 	if err != nil || added == nil || added.FirstIndexedAt == nil {
 		t.Fatalf("added root %v err %v", added, err)
 	}
@@ -151,57 +199,23 @@ func TestCollapsingSeveralRootsKeepsTheSurvivorsOwnDate(t *testing.T) {
 // scan and then dropped, so a file removed and put back is dated at that
 // later scan.
 func TestASaveFailureAfterAddingARootDropsTheSavedDates(t *testing.T) {
-	srv, cfg, cfgPath := newTestServer(t)
-	ctx := t.Context()
-	album := filepath.Join(cfg.LibraryRoots[0], "Artist", "Album")
-	writeStubTrack(t, album)
-	kept := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "Artist/Album/song.flac", Size: 14, ModTime: kept,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	stampFirstIndexed(t, cfg.DataDir, "Artist/Album/song.flac", kept)
-	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
-	if err := os.MkdirAll(extra, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	srv, dataDir, cfgPath, album, _, kept := seedSingleRootTrack(t)
+	extra := emptyExtraRoot(t, dataDir)
 	refuseConfigSave(t, cfgPath)
 	if code := doJSON(t, srv.Handler(), http.MethodPost, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
 	srvBgScansWait(srv)
-	got, err := srv.deps.Manifest.GetTrack(ctx, "Artist/Album/song.flac")
-	if err != nil || got == nil || got.FirstIndexedAt == nil || !got.FirstIndexedAt.Equal(kept) {
-		t.Fatalf("restored file %v err %v", got, err)
-	}
-	if n := carryCount(t, cfg.DataDir); n != 0 {
-		t.Errorf("save failure left %d saved dates", n)
-	}
-	if readdedKeeps(t, srv, album, "Artist/Album/song.flac", kept) {
+	requireKeptDate(t, srv, singleRootSong, kept, "restored file")
+	requireNoCarry(t, dataDir, "save failure")
+	if readdedKeeps(t, srv, album, singleRootSong, kept) {
 		t.Error("a file put back after the failed add kept the date recorded for the flip")
 	}
 }
 
 func TestASaveFailureAfterCollapsingRootsDropsTheSavedDates(t *testing.T) {
-	srv, cfg, cfgPath := newTestServer(t)
-	ctx := t.Context()
-	music := cfg.LibraryRoots[0]
-	album := filepath.Join(music, "Artist", "Album")
-	writeStubTrack(t, album)
-	kept := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "Artist/Album/song.flac", Size: 14, ModTime: kept,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	stampFirstIndexed(t, cfg.DataDir, "Artist/Album/song.flac", kept)
-	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
-	writeStubTrack(t, filepath.Join(extra, "Artist", "Album"))
-	if code := doJSON(t, srv.Handler(), http.MethodPost, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusCreated {
-		t.Fatalf("add status %d", code)
-	}
-	srvBgScansWait(srv)
+	srv, dataDir, cfgPath, album, _, kept := seedSingleRootTrack(t)
+	extra := addExtraRoot(t, srv, dataDir)
 
 	refuseConfigSave(t, cfgPath)
 	if code := doJSON(t, srv.Handler(), http.MethodDelete, "/api/roots", map[string]string{"path": extra}, nil); code != http.StatusInternalServerError {
@@ -209,13 +223,8 @@ func TestASaveFailureAfterCollapsingRootsDropsTheSavedDates(t *testing.T) {
 	}
 	srvBgScansWait(srv)
 	stored := "Music/Artist/Album/song.flac"
-	got, err := srv.deps.Manifest.GetTrack(ctx, stored)
-	if err != nil || got == nil || got.FirstIndexedAt == nil || !got.FirstIndexedAt.Equal(kept) {
-		t.Fatalf("restored file %v err %v", got, err)
-	}
-	if n := carryCount(t, cfg.DataDir); n != 0 {
-		t.Errorf("save failure left %d saved dates", n)
-	}
+	requireKeptDate(t, srv, stored, kept, "restored file")
+	requireNoCarry(t, dataDir, "save failure")
 	if readdedKeeps(t, srv, album, stored, kept) {
 		t.Error("a file put back after the failed collapse kept the date recorded for the flip")
 	}
@@ -225,39 +234,15 @@ func TestASaveFailureAfterCollapsingRootsDropsTheSavedDates(t *testing.T) {
 // finishes leaves the rows in place. The generation just recorded has
 // to go, or a later re-add copies the old date.
 func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
-	srv, cfg, _ := newTestServer(t)
-	ctx := t.Context()
-	album := filepath.Join(cfg.LibraryRoots[0], "Artist", "Album")
-	writeStubTrack(t, album)
-	kept := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "Artist/Album/song.flac", Size: 14, ModTime: kept,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	stampFirstIndexed(t, cfg.DataDir, "Artist/Album/song.flac", kept)
-	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
-	if err := os.MkdirAll(extra, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	reqCtx, cancel := context.WithCancel(context.Background())
-	manifest.SetRootFlipStageHookForTest(func(stage string) {
-		if stage == "record" {
-			cancel()
-		}
-	})
-	t.Cleanup(func() { manifest.SetRootFlipStageHookForTest(nil) })
+	srv, dataDir, _, album, _, kept := seedSingleRootTrack(t)
+	extra := emptyExtraRoot(t, dataDir)
+	reqCtx := cancelRootFlipAt(t, "record")
 	if code := doJSONContext(t, srv.Handler(), reqCtx, http.MethodPost, "/api/roots", map[string]string{"path": extra}); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
-	if n := carryCount(t, cfg.DataDir); n != 0 {
-		t.Errorf("cancelled wipe left %d saved dates", n)
-	}
-	got, err := srv.deps.Manifest.GetTrack(ctx, "Artist/Album/song.flac")
-	if err != nil || got == nil || got.FirstIndexedAt == nil || !got.FirstIndexedAt.Equal(kept) {
-		t.Fatalf("row after the cancelled wipe %v err %v", got, err)
-	}
-	if readdedKeeps(t, srv, album, "Artist/Album/song.flac", kept) {
+	requireNoCarry(t, dataDir, "cancelled wipe")
+	requireKeptDate(t, srv, singleRootSong, kept, "row after the cancelled wipe")
+	if readdedKeeps(t, srv, album, singleRootSong, kept) {
 		t.Error("a file put back after the cancelled wipe kept the date recorded for the flip")
 	}
 }
@@ -266,41 +251,17 @@ func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
 // the saved dates has to use a context that is not that one, or the
 // compensating scan never clears them.
 func TestACancelledSaveAfterTheWipeDropsTheSavedDates(t *testing.T) {
-	srv, cfg, cfgPath := newTestServer(t)
-	ctx := t.Context()
-	album := filepath.Join(cfg.LibraryRoots[0], "Artist", "Album")
-	writeStubTrack(t, album)
-	kept := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{
-		Path: "Artist/Album/song.flac", Size: 14, ModTime: kept,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	stampFirstIndexed(t, cfg.DataDir, "Artist/Album/song.flac", kept)
-	extra := filepath.Join(filepath.Dir(cfg.DataDir), "Extra")
-	if err := os.MkdirAll(extra, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	srv, dataDir, cfgPath, album, _, kept := seedSingleRootTrack(t)
+	extra := emptyExtraRoot(t, dataDir)
 	refuseConfigSave(t, cfgPath)
-	reqCtx, cancel := context.WithCancel(context.Background())
-	manifest.SetRootFlipStageHookForTest(func(stage string) {
-		if stage == "wipe" {
-			cancel()
-		}
-	})
-	t.Cleanup(func() { manifest.SetRootFlipStageHookForTest(nil) })
+	reqCtx := cancelRootFlipAt(t, "wipe")
 	if code := doJSONContext(t, srv.Handler(), reqCtx, http.MethodPost, "/api/roots", map[string]string{"path": extra}); code != http.StatusInternalServerError {
 		t.Fatalf("add status %d, want 500", code)
 	}
 	srvBgScansWait(srv)
-	got, err := srv.deps.Manifest.GetTrack(ctx, "Artist/Album/song.flac")
-	if err != nil || got == nil || got.FirstIndexedAt == nil || !got.FirstIndexedAt.Equal(kept) {
-		t.Fatalf("restored file %v err %v", got, err)
-	}
-	if n := carryCount(t, cfg.DataDir); n != 0 {
-		t.Errorf("cancelled save left %d saved dates", n)
-	}
-	if readdedKeeps(t, srv, album, "Artist/Album/song.flac", kept) {
+	requireKeptDate(t, srv, singleRootSong, kept, "restored file")
+	requireNoCarry(t, dataDir, "cancelled save")
+	if readdedKeeps(t, srv, album, singleRootSong, kept) {
 		t.Error("a file put back after the cancelled save kept the date recorded for the flip")
 	}
 }

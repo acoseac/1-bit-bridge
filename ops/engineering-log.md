@@ -37673,3 +37673,11 @@ prepared once per snapshot. Both track upserts run one statement, so
 the insert-only date is not written twice. The repeated album setup in
 the first-indexed tests lives in one fixture file; every test asserts
 what it asserted before.
+
+## 2026-10-08 — sync phase 3 review round 4
+
+The root-flip date tests repeated the same store, the same extra root
+and the same date check. Each of those now lives in one helper, and
+every scenario still asserts what it asserted. The list, the stream
+and the page read a track row through `scanListedTrack`, so the date
+splice is one scan.
