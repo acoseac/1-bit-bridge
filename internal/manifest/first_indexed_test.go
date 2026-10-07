@@ -200,15 +200,15 @@ func TestFirstIndexedAtIsOmittedUntilTheRowHasOneAndIsNotStoredInTags(t *testing
 func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	early := time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC)
-	late := time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
-	setStoreClock(s, early)
-	err := s.UpsertTrack(ctx, &Track{Path: "RootA/Album/a.flac", Size: 1, ModTime: early})
+	rootA := time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
+	rootB := time.Date(2005, 1, 1, 0, 0, 0, 0, time.UTC)
+	setStoreClock(s, rootA)
+	err := s.UpsertTrack(ctx, &Track{Path: "RootA/Album/a.flac", Size: 1, ModTime: rootA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	setStoreClock(s, late)
-	err = s.UpsertTrack(ctx, &Track{Path: "RootB/Album/a.flac", Size: 1, ModTime: late})
+	setStoreClock(s, rootB)
+	err = s.UpsertTrack(ctx, &Track{Path: "RootB/Album/a.flac", Size: 1, ModTime: rootB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, true); err != nil {
+	if err := s.RecordFirstIndexedCarry(ctx, true, "RootA"); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -234,8 +234,8 @@ func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || ns != early.UnixNano() {
-		t.Fatalf("carry rows %d earliest %d, want 1 and %d", n, ns, early.UnixNano())
+	if n != 1 || ns != rootA.UnixNano() {
+		t.Fatalf("carry rows %d date %d, want 1 and the survivor's %d", n, ns, rootA.UnixNano())
 	}
 	var key string
 	err = s.db.QueryRow(`SELECT path_key FROM first_indexed_carry`).Scan(&key)
@@ -256,19 +256,19 @@ func TestASecondRecordAfterTheWipeKeepsTheCarry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, false); err != nil {
+	if err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WipeFilesystemTracks(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, false); err != nil {
+	if err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
 		t.Fatal(err)
 	}
 	var ns int64
 	err = s.db.QueryRow(
 		`SELECT first_indexed_at FROM first_indexed_carry WHERE path_key = ?`,
-		"Artist/Album/song.flac",
+		"Music/Artist/Album/song.flac",
 	).Scan(&ns)
 	if err != nil {
 		t.Fatal(err)
@@ -322,14 +322,22 @@ func TestARowWithoutAFirstIndexedDateIsNotReady(t *testing.T) {
 	}
 }
 
-func TestRootFlipKeyStripsOnlyTheStoredForm(t *testing.T) {
-	if rootFlipKey("Artist/Album/a.flac", false) != "Artist/Album/a.flac" {
-		t.Fatal("single-root key changed")
+func TestPostFlipPathIsThePathAfterTheFlip(t *testing.T) {
+	got, ok := postFlipPath("Artist/Album/a.flac", false, "Music")
+	if !ok || got != "Music/Artist/Album/a.flac" {
+		t.Fatalf("adding a root: %q ok=%v", got, ok)
 	}
-	if rootFlipKey("Music/Artist/Album/a.flac", true) != "Artist/Album/a.flac" {
-		t.Fatal("multi-root key kept the basename")
+	got, ok = postFlipPath("Music/Artist/Album/a.flac", true, "Music")
+	if !ok || got != "Artist/Album/a.flac" {
+		t.Fatalf("collapse survivor: %q ok=%v", got, ok)
 	}
-	if rootFlipKey("noslash.flac", true) != "noslash.flac" {
-		t.Fatal("a path with no slash was rewritten")
+	if _, ok = postFlipPath("Jazz/Artist/Album/a.flac", true, "Music"); ok {
+		t.Fatal("a removed root's row was carried onto the survivor")
+	}
+	if _, ok = postFlipPath("Artist/Album/a.flac", false, ""); ok {
+		t.Fatal("an empty root name was accepted")
+	}
+	if _, ok = postFlipPath("noslash.flac", true, "Music"); ok {
+		t.Fatal("a path outside the survivor was carried")
 	}
 }

@@ -44,10 +44,13 @@ type healthCountsSnapshot struct {
 // caller's ctx (context.WithoutCancel) so a client hang-up mid-count can't
 // cache a synthesized-zero for the callers that joined the flight.
 type healthCountsCache struct {
-	mu      sync.Mutex
-	snap    healthCountsSnapshot
-	hasSnap bool
-	group   singleflight.Group
+	mu              sync.Mutex
+	snap            healthCountsSnapshot
+	hasSnap         bool
+	firstReady      bool
+	firstReadyAt    time.Time
+	firstReadyKnown bool
+	group           singleflight.Group
 }
 
 func newHealthCountsCache() *healthCountsCache { return &healthCountsCache{} }
@@ -121,4 +124,61 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 	})
 	snap := v.(healthCountsSnapshot)
 	return snap.tracksIndexed, snap.pendingDeletions
+}
+
+// firstIndexedAtReady reports whether every track row has a date. Ready
+// sticks for this process: an insert writes a date, so a later row cannot
+// reopen the count. A miss is rechecked on the health-count TTL. A
+// timeout is not stored. A nil cache asks the manifest directly.
+func (c *healthCountsCache) firstIndexedAtReady(ctx context.Context, manifest any) bool {
+	src, ok := manifest.(interface{ FirstIndexedAtReady(context.Context) bool })
+	if !ok {
+		return false
+	}
+	if c == nil {
+		return src.FirstIndexedAtReady(ctx)
+	}
+	c.mu.Lock()
+	if c.firstReady {
+		c.mu.Unlock()
+		return true
+	}
+	if c.firstReadyKnown && time.Since(c.firstReadyAt) < healthCountsTTL {
+		c.mu.Unlock()
+		return false
+	}
+	c.mu.Unlock()
+
+	v, _, _ := c.group.Do("firstIndexed", func() (any, error) {
+		c.mu.Lock()
+		if c.firstReady {
+			c.mu.Unlock()
+			return true, nil
+		}
+		if c.firstReadyKnown && time.Since(c.firstReadyAt) < healthCountsTTL {
+			c.mu.Unlock()
+			return false, nil
+		}
+		c.mu.Unlock()
+
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthCountsFetchTimeout)
+		defer cancel()
+		ready := src.FirstIndexedAtReady(fetchCtx)
+		if ready {
+			c.mu.Lock()
+			c.firstReady = true
+			c.mu.Unlock()
+			return true, nil
+		}
+		if fetchCtx.Err() != nil {
+			return false, nil
+		}
+		c.mu.Lock()
+		c.firstReadyKnown = true
+		c.firstReadyAt = time.Now()
+		c.mu.Unlock()
+		return false, nil
+	})
+	ready, _ := v.(bool)
+	return ready
 }

@@ -539,12 +539,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// shutdown-time completion stays quiet. scanOK is set ONLY
 	// immediately before the successful `return count, nil` sites below.
 	scanOK := false
+	carryClear := false
+	var carryGen int64
 	defer func() {
 		if !scanOK || ctx.Err() != nil {
 			return
 		}
-		if err := s.store.ClearFirstIndexedCarry(ctx); err != nil {
-			scanLogger.Warn("first-indexed carry", "err", err)
+		if carryClear {
+			if err := s.store.ClearFirstIndexedCarryGeneration(ctx, carryGen); err != nil {
+				scanLogger.Warn("first-indexed carry", "err", err)
+			}
 		}
 		if fn := s.postScanHook.Load(); fn != nil {
 			(*fn)()
@@ -782,6 +786,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	workersWG.Wait()
 	close(writes)
 	writerWG.Wait()
+	// The workers have finished reading the snapshot. Clear only the
+	// generation this scan loaded, and only when the library is already
+	// in the form that record was saving toward. An error return below
+	// leaves scanOK false, so the dates stay for the next scan.
+	carryClear, carryGen = s.releaseFirstIndexed()
 
 	count := int(committed.Load())
 	// A ctx cancel during the workers/writer Wait window (clean walk
@@ -1420,7 +1429,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			continue
 		}
 		for _, tw := range tracksToWrite {
-			s.noteFirstIndexed(tw)
+			s.noteFirstIndexed(ctx, tw)
 			select {
 			case writes <- tw:
 			case <-ctx.Done():
@@ -2295,7 +2304,6 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
-	s.publishFirstIndexed(ctx, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
@@ -2448,6 +2456,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	workersWG.Wait()
 	close(writes)
 	writerWG.Wait()
+	// A subtree scan looks each insert up on its own. It keeps no
+	// snapshot and does not clear saved dates.
+	s.firstIndexed = nil
 
 	// Surface cancellation so a partial subtree update doesn't
 	// look like a clean completion (CodeRabbit Major post-merge

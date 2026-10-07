@@ -1890,9 +1890,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "favorites", "favoritesRevisions")
 	}
 	// firstIndexedAt is a library fact. It is advertised once every
-	// track row has a date, including on a demo bridge, and omitted
-	// while any row is still null or the count cannot be read.
-	if src, ok := s.manifest.(interface{ FirstIndexedAtReady(context.Context) bool }); ok && src.FirstIndexedAtReady(r.Context()) {
+	// track row has a date, including on a demo bridge. The count is
+	// cached with the other health counts: ready sticks for the
+	// process, a miss is rechecked, and a timeout is not stored.
+	if s.healthCounts.firstIndexedAtReady(r.Context(), s.manifest) {
 		feats = append(feats, "firstIndexedAt")
 	}
 	if s.analysisActive() {

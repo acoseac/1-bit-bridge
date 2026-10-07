@@ -2328,6 +2328,22 @@ var migrations = []migration{
 			})
 		},
 	},
+	{
+		// v54 lets a scan clear only the saved dates it loaded, and lets
+		// the null-date fill use an index. The columns default so a table
+		// v53 created stays readable. The fill itself runs at the end of
+		// every open, not inside this step.
+		version: 54,
+		name:    "first_indexed_carry generation and null-date index",
+		sql: `CREATE INDEX IF NOT EXISTS idx_tracks_first_indexed_at_null
+			ON tracks(path) WHERE first_indexed_at IS NULL`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "first_indexed_carry",
+				tableColumn{name: "generation", ddl: `ALTER TABLE first_indexed_carry ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`},
+				tableColumn{name: "target_multi", ddl: `ALTER TABLE first_indexed_carry ADD COLUMN target_multi INTEGER NOT NULL DEFAULT 0`},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2597,13 +2613,6 @@ func (s *Store) migrate() error {
 				return fmt.Errorf("migration %d (%s) post-DDL: %w", m.version, m.name, err)
 			}
 		}
-		// The v53 fill uses this store's clock and touches only rows the
-		// column has not reached. A later open does not run it again.
-		if m.version == 53 {
-			if err := s.backfillFirstIndexedAt(ctx); err != nil {
-				return fmt.Errorf("migration %d (%s) backfill: %w", m.version, m.name, err)
-			}
-		}
 		// PRAGMA user_version doesn't accept parameter binding (it's a
 		// directive, not DML), so format the int into the literal SQL.
 		// The version comes from a hardcoded slice — never user input —
@@ -2611,6 +2620,11 @@ func (s *Store) migrate() error {
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, m.version)); err != nil {
 			return fmt.Errorf("set user_version to %d: %w", m.version, err)
 		}
+	}
+	// Every open fills rows a rolled-back binary left null. The fill
+	// touches only those rows and does not assign indexed_at.
+	if err := s.backfillFirstIndexedAt(ctx); err != nil {
+		return fmt.Errorf("first_indexed_at backfill: %w", err)
 	}
 	return nil
 }

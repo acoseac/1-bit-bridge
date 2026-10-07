@@ -95,3 +95,52 @@ func TestHealthCountsCache_NilSafe(t *testing.T) {
 		t.Errorf("nil provider = (%d,%d); want (0,0)", tr, pd)
 	}
 }
+
+type firstIndexedFake struct {
+	calls atomic.Int64
+	ready atomic.Bool
+}
+
+func (f *firstIndexedFake) FirstIndexedAtReady(context.Context) bool {
+	f.calls.Add(1)
+	return f.ready.Load()
+}
+
+func TestFirstIndexedAtReadySticksOnceTrueAndRechecksAMiss(t *testing.T) {
+	f := &firstIndexedFake{}
+	c := newHealthCountsCache()
+	if c.firstIndexedAtReady(context.Background(), f) {
+		t.Fatal("a miss was ready")
+	}
+	if c.firstIndexedAtReady(context.Background(), f) {
+		t.Fatal("a cached miss was ready")
+	}
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("calls %d, want 1 inside the ttl", got)
+	}
+	c.mu.Lock()
+	c.firstReadyAt = time.Now().Add(-healthCountsTTL - time.Second)
+	c.mu.Unlock()
+	f.ready.Store(true)
+	if !c.firstIndexedAtReady(context.Background(), f) {
+		t.Fatal("a recheck that found dates was not ready")
+	}
+	if got := f.calls.Load(); got != 2 {
+		t.Fatalf("calls %d, want 2", got)
+	}
+	f.ready.Store(false)
+	if !c.firstIndexedAtReady(context.Background(), f) {
+		t.Fatal("ready did not stick")
+	}
+	if got := f.calls.Load(); got != 2 {
+		t.Fatalf("calls %d after ready stuck, want 2", got)
+	}
+	if newHealthCountsCache().firstIndexedAtReady(context.Background(), nil) {
+		t.Fatal("a missing manifest was ready")
+	}
+	f.ready.Store(true)
+	var none *healthCountsCache
+	if !none.firstIndexedAtReady(context.Background(), f) {
+		t.Fatal("a nil cache did not ask the manifest")
+	}
+}

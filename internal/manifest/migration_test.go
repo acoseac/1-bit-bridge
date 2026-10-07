@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
@@ -286,6 +287,87 @@ func TestMigrationV51ToV52KeepsTrackClocks(t *testing.T) {
 	var revision int64
 	if err := s.db.QueryRow(`SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&revision); err != nil || revision != 1 {
 		t.Fatalf("revision %d err %v", revision, err)
+	}
+}
+
+func TestMigrationV52GainsAFirstIndexedDate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v52.db")
+	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = 52
+	for _, m := range migrations {
+		if m.version > head {
+			continue
+		}
+		if _, err := db.Exec(m.sql); err != nil {
+			t.Fatalf("apply migration %d (%s): %v", m.version, m.name, err)
+		}
+		if m.post != nil {
+			if err := m.post(db); err != nil {
+				t.Fatalf("migration %d (%s) post: %v", m.version, m.name, err)
+			}
+		}
+	}
+	const stored = int64(1577836800000000000)
+	if _, err := db.Exec(
+		`INSERT INTO tracks (path, size, mtime_ns, tags_json, indexed_at) VALUES ('Artist/Album/song.flac', 10, ?, '{}', 42)`,
+		stored,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var cols int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'first_indexed_at'`).Scan(&cols); err != nil {
+		t.Fatal(err)
+	}
+	if cols != 0 {
+		t.Fatal("a v52 schema already had first_indexed_at")
+	}
+	var carry string
+	err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'first_indexed_carry'`).Scan(&carry)
+	if err != sql.ErrNoRows {
+		t.Fatalf("v52 already had the carry table (%q, %v)", carry, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, head)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v := readUserVersion(t, s.db); v != migrations[len(migrations)-1].version {
+		t.Fatalf("user_version %d", v)
+	}
+	got, err := s.GetTrack(context.Background(), "Artist/Album/song.flac")
+	if err != nil || got == nil || got.FirstIndexedAt == nil {
+		t.Fatalf("track %v err %v", got, err)
+	}
+	want := time.Unix(0, stored).UTC()
+	if !got.FirstIndexedAt.Equal(want) {
+		t.Fatalf("first indexed %s, want %s", got.FirstIndexedAt, want)
+	}
+	var indexed int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = 'Artist/Album/song.flac'`).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != 42 {
+		t.Fatalf("indexed_at %d", indexed)
+	}
+	var def string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_tracks_first_indexed_at_null'`).Scan(&def); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(def, "first_indexed_at IS NULL") {
+		t.Fatalf("index %s", def)
+	}
+	var gen int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('first_indexed_carry') WHERE name IN ('generation', 'target_multi')`).Scan(&gen); err != nil || gen != 2 {
+		t.Fatalf("carry columns %d err %v", gen, err)
 	}
 }
 

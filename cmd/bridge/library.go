@@ -162,7 +162,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		// Spare UPnP-routed rows: only filesystem tracks change path
 		// form on the multi→single flip; the upstream library's
 		// lifecycle belongs to the ingest reconcile, not this wipe.
-		if err := store.RecordFirstIndexedCarry(ctx, true); err != nil {
+		if err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(newList[0])); err != nil {
 			fmt.Fprintf(stderr, "library remove: record added dates: %v\n", err)
 			return 1
 		}
@@ -307,7 +307,10 @@ func wipeManifest(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	defer store.Close()
-	if err := store.RecordFirstIndexedCarry(ctx, false); err != nil {
+	if len(cfg.LibraryRoots) == 0 {
+		return fmt.Errorf("first-indexed carry: no library root")
+	}
+	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(cfg.LibraryRoots[0])); err != nil {
 		return err
 	}
 	return store.WipeFilesystemTracks(ctx)

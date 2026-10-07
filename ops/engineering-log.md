@@ -37561,10 +37561,9 @@ is deleted.
 ## 2026-10-07 — sync phase 3, a set-once first-indexed date
 
 `tracks.first_indexed_at` is the added-date for a bridge library. v53
-adds the nullable column and `first_indexed_carry`. The backfill runs
-from `Store.migrate` after the v53 post, only while that version is
-being applied, and copies each NULL row's stored `mtime_ns`. A zero or
-future mtime becomes `s.now()` at migration. `indexed_at` is not the
+adds the nullable column and `first_indexed_carry`. Every open fills
+remaining NULL rows from the stored `mtime_ns`, in rowid chunks. A zero
+or future mtime becomes `s.now()` at that open. `indexed_at` is not the
 source and is not assigned: a since-delta is unpaginated, so moving
 every row would hand one library-sized manifest to every paired device.
 
@@ -37578,13 +37577,16 @@ The scanner copies a previous date onto an insert whose exact path is
 absent. A case-only rename is paired from the before-set fold, because
 the new-case row is inserted during the walk, before `caseOnlyRenames`
 reaps the old spelling. A root flip has no such pair. `RecordFirstIndexedCarry`
-snapshots filesystem rows (routed rows excluded; a collision keeps the
-earliest date) immediately before each `WipeFilesystemTracks` that
-changes the storage form, keyed with the root basename removed. The
-rescan looks that key up with the form it is about to write.
-`ScanSubtree` applies the table and leaves it. A successful full scan
-on a live context clears it. An empty snapshot does not replace a table
-already stored, so a retry after the wipe keeps the dates.
+snapshots filesystem rows (routed rows excluded) immediately before each
+`WipeFilesystemTracks` that changes the storage form. The key is the path
+the row will have afterwards: adding a root prefixes the existing root's
+folder name, and a collapse keeps only the surviving root's rows with
+that folder name removed. The same path recorded again keeps the earlier
+date. A record merges and moves every saved row onto the new generation
+and the form the library will have after the flip. An empty snapshot
+writes nothing. A full scan clears only the generation it loaded, and
+only when the library is already in that form. A subtree scan looks each
+insert up and does not clear.
 
 An outside folder move, and a file that returns after the missing-scan
 threshold, are re-adds and receive `s.now()`. That is accepted. So is
@@ -37595,7 +37597,24 @@ retire the old row.
 `/v1/health` advertises `firstIndexedAt` through an optional method on
 whatever manifest is wired, not a new method on `ManifestProvider`, so
 the existing fakes stay valid. The key is present only when the NULL
-count is zero, including an empty library and a demo bridge. A query
-error omits it. `ProtocolVersion` stays 1. `ExtractorVersion` stays 23.
+count is zero, including an empty library and a demo bridge. The count
+rides the health-count cache: ready sticks for the process, a miss is
+rechecked, and a timeout is not stored. A query error omits it.
+`ProtocolVersion` stays 1. `ExtractorVersion` stays 23.
 The assignment sweep skips `first_indexed_at` because the identifier
 contains `indexed_at`.
+
+## 2026-10-08 — sync phase 3 review, generation and the post-flip path
+
+Review of #1158. A scan that was already walking the previous roots
+cleared the saved dates before the post-flip scan read them, and a
+record replaced the table, so a second record after the wipe dropped
+them. v54 stores a generation and the target storage form on each saved
+row. A record merges and bumps that generation. A full scan deletes only
+the generation it loaded, and only when its own form matches. The key is
+the exact path after the flip, so two roots that share a relative path
+no longer share a date, and a collapse keeps the survivor's own date.
+NULL rows a rolled-back binary inserts are filled on every open, through
+`idx_tracks_first_indexed_at_null`. `/v1/health` reads that count through
+the health-count cache. A subtree scan looks each insert up and does not
+preload the library.

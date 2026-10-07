@@ -1707,7 +1707,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// every failure window lands in a state the scanner can heal.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
 	if willTransition {
-		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), false); err != nil {
+		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), false, filepath.Base(current[0])); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
@@ -1852,7 +1852,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// successful wipe means the next scan simply re-populates — every
 	// failure window lands in a state the scanner can heal.
 	if willCollapse {
-		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), true); err != nil {
+		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), true, filepath.Base(newList[0])); err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}

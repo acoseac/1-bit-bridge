@@ -60,6 +60,31 @@ func TestACaseOnlyRenameKeepsTheFirstIndexedDate(t *testing.T) {
 	}
 }
 
+func TestASubtreeScanCopiesACaseOnlyRename(t *testing.T) {
+	root := t.TempDir()
+	album := filepath.Join(root, "Artist", "Album")
+	seedTrackDirs(t, album)
+	store, sc := newScanFixture(t, root)
+	t1 := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	t2 := time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
+	store.now = func() time.Time { return t1 }
+	scanOnce(t, sc, "first")
+	renamed := filepath.Join(root, "Artist", "album")
+	if err := os.Rename(album, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if listedName(t, filepath.Join(root, "Artist"), "album") != "album" {
+		t.Skip("this volume did not store the renamed case")
+	}
+	store.now = func() time.Time { return t2 }
+	if _, err := sc.ScanSubtree(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if got := firstIndexedTime(t, store, "Artist/album/song.flac"); !got.Equal(t1) {
+		t.Fatalf("subtree renamed path dated %s, want %s", got, t1)
+	}
+}
+
 func TestAnOutsideFolderMoveInsertsANewFirstIndexedDate(t *testing.T) {
 	root := t.TempDir()
 	album := filepath.Join(root, "Artist", "Album")
@@ -97,7 +122,7 @@ func TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt(t *testing.T) {
 	t2 := time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
 	store.now = func() time.Time { return t1 }
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(context.Background(), false); err != nil {
+	if err := store.RecordFirstIndexedCarry(context.Background(), false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	seedTrackDirs(t, filepath.Join(root, "Artist", "Late"))
