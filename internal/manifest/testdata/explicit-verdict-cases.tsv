@@ -1,0 +1,63 @@
+# Explicit verdict cases: the ONE truth table both the iOS app and the bridge test against.
+# Byte-identical copies live in both repos; the iOS copy is canonical (change both in one Mirror-PR pair).
+# Columns are tab-separated: kind, input (a JSON string), expected.
+#   value: a tag field's text value          -> explicit | none
+#   rtng:  an MP4 rtng integer (as a string)  -> explicit | none
+#   field: a tag FIELD NAME, any container    -> read | ignored
+#   title: a RAW track title (tag or filename stem, before display cleaning) -> explicit | none
+kind	input	expected
+value	"1"	explicit
+value	"4"	explicit
+value	"true"	explicit
+value	"TRUE"	explicit
+value	"yes"	explicit
+value	"Yes"	explicit
+value	"explicit"	explicit
+value	"Explicit"	explicit
+value	"e"	explicit
+value	"E"	explicit
+value	" 1 "	explicit
+value	"\t4\n"	explicit
+value	"0"	none
+value	"2"	none
+value	"false"	none
+value	"no"	none
+value	"clean"	none
+value	""	none
+value	"01"	none
+value	"3"	none
+value	"1 4"	none
+rtng	"1"	explicit
+rtng	"4"	explicit
+rtng	"2"	none
+rtng	"0"	none
+rtng	"3"	none
+field	"ITUNESADVISORY"	read
+field	"itunesadvisory"	read
+field	"ItunesAdvisory"	read
+field	"EXPLICIT"	read
+field	"Explicit"	read
+field	"ITUNES_ADVISORY"	ignored
+field	"ITUNESRATING"	ignored
+field	"RATING"	ignored
+field	"ADVISORY"	ignored
+field	"CONTENTADVISORY"	ignored
+title	"Song [E]"	explicit
+title	"[E] Song"	explicit
+title	"Mid [E] Title"	explicit
+title	"Song [Explicit]"	explicit
+title	"Song [explicit]"	explicit
+title	"Song [EXPLICIT VERSION]"	explicit
+title	"Song (Explicit)"	explicit
+title	"Song (explicit)"	explicit
+title	"Song (Explicit Version)"	explicit
+title	"Song (Explicit) "	explicit
+title	"Song (Explicit) Remix"	none
+title	"Song [Clean]"	none
+title	"Song (Clean)"	none
+title	"Song (Clean Version)"	none
+title	"Explicit"	none
+title	"Explicit Content"	none
+title	"Song"	none
+title	""	none
+title	"Song [Ex]"	none

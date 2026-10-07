@@ -37385,3 +37385,102 @@ held exactly because its reference is the chain's own intermediate.
   `SameVolume` share);
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`
   went red with the warning probe put back.
+
+## 2026-10-07 — the iTunes content advisory reaches the wire as `explicit` (ExtractorVersion 23)
+
+The paired app reads the same mark from a file it scans itself (an MP4 `rtng`
+of 1 or 4, or `ITUNESADVISORY` trimmed to exactly `1` or `4`) and had no way
+to learn it from a bridge row. The field is additive: `omitempty`, only `true`
+is meaningful, `ProtocolVersion` stays 1.
+
+### Where the value lives
+
+dhowden's MP4 atom map has `cpil` and not `rtng`, so a rating atom never
+reached `m.Raw()`. The walk is the `gnre` one's, through one `findMP4Ilst`:
+class 21 or class 0, one to four big-endian bytes. A present integer,
+including 0 and 2, overrides the freeform advisory populate stored from
+`----:com.apple.iTunes:ITUNESADVISORY`. A missing atom, a text atom (class 1)
+or a payload outside that length is absence, and the freeform stands. A walk
+that fails logs and leaves the freeform too.
+
+Vorbis comments and the MP4 freeform land in the raw map under
+`itunesadvisory` (`normaliseRawTagKey`). An ID3v2 file has no frame of its
+own for the advisory: Picard and mutagen write a `TXXX` whose description is
+`ITUNESADVISORY`, which `namedValueOf` already returns first-in-tag-order.
+`TXXX:COMPILATION` stays unread. The comparison is the trimmed string equal
+to `1` or `4`, never a numeric parse (`01` is not `1`). No other spelling
+(`EXPLICIT`, `ITUNESRATING`, `rating`) is read. UPnP/DIDL has no such flag,
+so a routed row leaves the field unset.
+
+The bool is persisted in `tags_json`, the compilation precedent. It is not a
+column, and `marshalForStorage` does not zero it.
+
+### The delta
+
+ExtractorVersion 23 re-extracts every file once. A row whose tags now say
+explicit changes and joins the next delta; an unflagged row marshals as it
+did and is stamped. SACD ISO virtual rows re-expand on the bump, as they do
+on every one. `TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`
+rewinds two FLACs to version 22, strips `$.explicit`, and requires only the
+flagged row's `indexed_at` to move.
+
+### The negative control
+
+Dropping the `rtng` override (the read dhowden does not do) turns these red
+and leaves the freeform, Vorbis, ID3, wire and scanner tests green:
+
+- `TestExplicit_MP4Rtng/1`, `/4`, `/padded`
+- `Explicit_MP4RtngWinsOverTheFreeform/clean_beats_freeform` (rtng 2 + freeform `1` becomes true)
+- `Explicit_MP4RtngWinsOverTheFreeform/explicit_beats_freeform_clean` (rtng 1 + freeform `2` becomes false)
+- `Explicit_MP4RtngWinsOverTheFreeform/zero_beats_freeform` (rtng 0 + freeform `1` becomes true)
+
+That function was later renamed `TestExplicit_MP4AnySignalWins`; the prefix is elided here so the citation guard does not require the old name.
+
+`TestExplicit_MP4Rtng/2`, `/0`, `/absent` and `…/text_atom_is_not_a_rating` stay green: those atoms are not a 1 or a 4, or are not an integer the walk keeps.
+
+## 2026-10-07 — any explicit signal wins, and a raw-title marker counts (still ExtractorVersion 23)
+
+Round 1 let a present `rtng` override the freeform, so `rtng` 2 beside `ITUNESADVISORY` `1` read clean, and it read only the exact strings `1` and `4`. The paired app's widened rule is the opposite: any signal that says explicit wins, and a marker on the raw track title counts too. Nothing had shipped at 23, so the version stays 23 and that re-extract is the backfill. A row a round-1 build had already stamped at 23 without the title term would not be re-read; no such build left the machine.
+
+### The verdict
+
+`ExplicitVerdict` is the one decision (`TestExplicitVerdict`, the same rows the app's `ExplicitContent.verdict` is held to). A present `rtng` of 1 or 4 is explicit; a present 0 or 2 is not, and it does not clear another signal. `extractMP4` ORs the integer in after populate and never assigns false.
+
+`ITUNESADVISORY` and `EXPLICIT` are asked separately, so the first value of one field cannot hide the other. Within one field the first value still wins (two ID3 `TXXX` frames of the same description: `2` then `1` stays clean). The value, trimmed and case-folded, is explicit when it is exactly `1`, `4`, `true`, `yes`, `explicit` or `e`. `01` is still not `1`. An MP4 freeform of either name is read whatever its mean. dhowden keeps a `----` only for `com.apple.iTunes`, `com.mixedinkey.mixedinkey` and `com.serato.dj`, so populate does not take those two fields from the raw map on an MP4 file (a later kept mean would otherwise override an earlier one dhowden dropped) and `extractMP4FreeformAdvisory` walks the ilst. The first atom of a name wins (`TestExplicit_MP4FirstFreeformValueWins`: an earlier `org.example` value of `2` stays clean beside a later `com.apple.iTunes` value of `1`). `ITUNESRATING` and `rating` stay unread. `TXXX:COMPILATION` stays unread.
+
+The title is `m.Title()` — the raw `©nam`, Vorbis `TITLE` or `TIT2` — not `t.Title`, which `fillFromPath` may already have set from the filename. Bracket forms `[E]`, `[Explicit]` and `[Explicit Version]` match anywhere, case-insensitively. `(Explicit)` and `(Explicit Version)` match only as a suffix, after trim. Clean forms and the bare word do not. An album title is not an input. UPnP rows stay unset: the client applies the same markers to the DIDL title, and to a raw wire title when an older bridge omitted the field.
+
+The five `explicit-*.m4a` fixtures are byte-identical to the iOS app's `ExplicitAdvisoryFixtures`. `explicit-rtng2-advisory1.m4a` is explicit under this rule and was clean under the override.
+
+### The delta
+
+`TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps` rewinds a FLAC titled `Song [E]`, a plain title whose album is `Album [Explicit]`, and a file named `Song [E].flac` with no title tag, to version 22. Only the tagged title marker joins the delta. The path-derived title stays unflagged.
+
+### The negative control
+
+Dropping only the title-marker term (`return titleMarksExplicit(s.Title)` replaced with `return false`) turns these red. Every tag-only case stays green, including `rtng` 2 beside advisory `1`, the shared fixtures (their title is `One`), and the value table:
+
+- `TestExplicitVerdict/title_[E]`, `/title_[Explicit]`, `/title_[Explicit_Version]`, `/title_(Explicit)`, `/title_(Explicit_Version)`, `/title_mid_[E]`, `/title_case`, `/title_paren_trailing_space`, `/rtng2_does_not_cancel_a_title`, `/clean_advisory_does_not_cancel_a_title`, `/upnp_and_old_bridge_title`
+- `TestExplicit_TitleMarker/vorbis_[E]`, `/vorbis_[Explicit]`, `/vorbis_[Explicit_Version]`, `/vorbis_(Explicit)`, `/vorbis_(Explicit_Version)`, `/vorbis_mid_[E]`, `/vorbis_case`, `/mp4_nam`, `/id3_tit2`, `/mp4_rtng2_with_title`
+- `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`
+
+Measured 2026-10-07: `go test -count=1 -timeout 180s -run 'TestExplicit|TestScanner_V23_' .` in `internal/manifest` exited 1 in 0.695s. The `--- FAIL` lines were exactly those eleven verdict subtests, the ten title-marker subtests, and the title-marker scanner test, which stopped on the premise that the marker is stored (`Explicit:false`). No other failure. The term was restored before the suites.
+
+## 2026-10-07 — a filename stem counts, and the first Vorbis value wins (still ExtractorVersion 23)
+
+Round 4 of the explicit mark, still inside the unshipped v23 backfill. Three decisions, the same on both sides of the mirror.
+
+A title tag still wins. When none was read, the title is the filename stem `fillFromPath` already stored, and a marker on it counts. `explicitTrackTitle` is that choice. The FLAC comment walk calls it with the block's first TITLE, so a later recompute cannot put the stem back once a title tag was read. A DFF DIIN or WAV LIST/INFO title that replaces the stem recomputes the verdict from that title. A file dhowden reports as having no tags applies the stem there too. An album title still does not count. Ogg Vorbis and Opus still take dhowden's map, which keeps the last duplicate; the in-order read is the FLAC comment walk, which also covers Ogg FLAC.
+
+The field name is exact, ignoring case, with no separator folding. `explicitFieldName` is the one classifier the MP4 `----` walk and the shared table both use. `ITUNES_ADVISORY` is not the field.
+
+Within one Vorbis field the first non-empty value wins. dhowden's map keeps the last, so `ITUNESADVISORY=0` then `=1` was explicit; the comment walk now records the `0`. ExtractorVersion stays 23: nothing has shipped at 23, and this is the same backfill. A row an earlier unshipped build of this branch already stamped at 23 will not re-read the stem or the first value until the file changes.
+
+The shared rows are `testdata/explicit-verdict-cases.tsv`, byte-identical to the iOS file (sha256 `9d86474690827108…`), 55 data rows, loaded by `TestExplicitVerdictCases`. The sixteen `explicit-*.m4a` files are the iOS `ExplicitAdvisoryFixtures`, byte-identical; `TestExplicit_SharedM4AFixtures` runs all of them. `TestExplicit_APathDerivedTitleCounts` and `TestExplicit_VorbisFirstValueWins` pin the two new terms. `Song [E].flac` in `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps` now joins the delta; the plain title still only stamps. `ProtocolVersion` stays 1.
+
+Dropping only the path-derived title (`explicitTrackTitle` returns the tag title and ignores the stem) turns these red. The shared table, the sixteen fixtures (their title tag is `One`), the Vorbis first-value test and every tag-title marker stay green:
+
+- `TestExplicit_APathDerivedTitleCounts`
+- `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`
+
+Measured 2026-10-07: `go test -count=1 -timeout 180s -run 'TestExplicit|TestScanner_V23_' .` in `internal/manifest` exited 1 in 0.490s. The `--- FAIL` lines were exactly those two. The path test stopped on `filename stem should count; explicit false`. The scanner test stopped on the premise that the stem counts (`Explicit:false`, title still `Song [E]`). No other failure. The fallback was restored before the suites.
