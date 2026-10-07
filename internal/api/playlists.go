@@ -27,6 +27,8 @@ const errMsgPlaylistIDRequired = "playlist id is required"
 // upsert records last-writer provenance only.
 type PlaylistStore interface {
 	UpsertPlaylist(ctx context.Context, deviceToken string, p manifest.PlaylistRow, items []manifest.PlaylistItemRow) error
+	PutPlaylist(ctx context.Context, deviceToken string, p manifest.PlaylistRow, items []manifest.PlaylistItemRow, baseLastModifiedAt *int64) (manifest.PlaylistPutResult, error)
+	BackupEpoch(ctx context.Context) (string, error)
 	GetPlaylist(ctx context.Context, id string) (*manifest.PlaylistRow, []manifest.PlaylistItemRow, error)
 	ListPlaylists(ctx context.Context) ([]manifest.PlaylistSummary, error)
 	ListPlaylistTombstoneIDs(ctx context.Context) ([]string, error)
@@ -156,6 +158,13 @@ type playlistDTO struct {
 	// 'playlist', key = id), served at GET /v1/playlist-image/{id}. Omitted
 	// when none (iOS uses the auto-mosaic). Additive (no ProtocolVersion bump).
 	ImageHash string `json:"imageHash,omitempty"`
+	// BaseLastModifiedAt is the stamp the client last read. Present, it
+	// is the compare-and-swap key. Absent, the stamp guard stays.
+	BaseLastModifiedAt *int64 `json:"baseLastModifiedAt,omitempty"`
+	// Deleted is set on the server copy of a base_mismatch for a
+	// tombstoned row, so the client can tell a live playlist from one
+	// the bridge has already deleted.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 type playlistSummaryDTO struct {
@@ -167,6 +176,7 @@ type playlistSummaryDTO struct {
 }
 
 type playlistsListResponse struct {
+	Epoch     string               `json:"epoch"`
 	Playlists []playlistSummaryDTO `json:"playlists"`
 	// DeletedIds — ids of tombstoned playlists (deleted and not since
 	// revived). What makes a delete propagate: a client's sweep removes its
@@ -177,8 +187,9 @@ type playlistsListResponse struct {
 }
 
 type playlistStoredResponse struct {
-	ID     string `json:"id"`
-	Stored bool   `json:"stored"`
+	ID             string `json:"id"`
+	Stored         bool   `json:"stored"`
+	LastModifiedAt int64  `json:"lastModifiedAt"`
 }
 
 type playlistDeletedResponse struct {
@@ -195,7 +206,7 @@ type playlistStaleResponse struct {
 }
 
 func toPlaylistDTO(p *manifest.PlaylistRow, items []manifest.PlaylistItemRow) playlistDTO {
-	out := playlistDTO{ID: p.ID, Name: p.Name, LastModifiedAt: p.LastModifiedAt}
+	out := playlistDTO{ID: p.ID, Name: p.Name, LastModifiedAt: p.LastModifiedAt, Deleted: p.Deleted}
 	out.Items = make([]playlistItemDTO, 0, len(items))
 	for _, it := range items {
 		out.Items = append(out.Items, playlistItemDTO{
@@ -263,6 +274,37 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.DeletedIds = tombstones
+	epoch, err := s.playlistStore.BackupEpoch(r.Context())
+	if err != nil {
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"failed to read the backup epoch", err)
+		return
+	}
+	canon := playlistListCanon{
+		DeletedIDs: tombstones,
+		Playlists:  make([]playlistCanonItem, 0, len(resp.Playlists)),
+	}
+	if canon.DeletedIDs == nil {
+		canon.DeletedIDs = []string{}
+	}
+	for _, p := range resp.Playlists {
+		canon.Playlists = append(canon.Playlists, playlistCanonItem{
+			ID: p.ID, ImageHash: p.ImageHash, LastModifiedAt: p.LastModifiedAt,
+			Name: p.Name, TrackCount: p.TrackCount,
+		})
+	}
+	etag, err := playlistListETag(epoch, canon)
+	if err != nil {
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"failed to hash the playlist list", err)
+		return
+	}
+	if ifNoneMatchHits(strings.Join(r.Header.Values("If-None-Match"), ","), etag, true) {
+		writeNotModified(w, etag)
+		return
+	}
+	resp.Epoch = epoch
+	setETag(w, etag)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -381,7 +423,15 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := manifest.PlaylistRow{ID: id, DeviceToken: dt, Name: body.Name, LastModifiedAt: body.LastModifiedAt}
-	switch err := s.playlistStore.UpsertPlaylist(r.Context(), dt, row, items); {
+	res, err := s.playlistStore.PutPlaylist(r.Context(), dt, row, items, body.BaseLastModifiedAt)
+	var mismatch *manifest.PlaylistBaseMismatch
+	switch {
+	case errors.As(err, &mismatch):
+		writeJSON(w, http.StatusConflict, playlistStaleResponse{
+			Error: "base_mismatch", Message: "baseLastModifiedAt does not match the stored playlist",
+			Server: toPlaylistDTO(&mismatch.Row, mismatch.Items),
+		})
+		return
 	case errors.Is(err, manifest.ErrPlaylistStale):
 		// Re-read the server copy so iOS can reconcile in one round-trip.
 		sp, sItems, gerr := s.playlistStore.GetPlaylist(r.Context(), id)
@@ -398,7 +448,7 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 			"failed to store playlist", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, playlistStoredResponse{ID: id, Stored: true})
+	writeJSON(w, http.StatusOK, playlistStoredResponse{ID: id, Stored: true, LastModifiedAt: res.LastModifiedAt})
 }
 
 // deletePlaylist handles DELETE /v1/playlists/{id} — tombstone. User-wide:

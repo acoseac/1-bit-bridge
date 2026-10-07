@@ -37484,3 +37484,76 @@ Dropping only the path-derived title (`explicitTrackTitle` returns the tag title
 - `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`
 
 Measured 2026-10-07: `go test -count=1 -timeout 180s -run 'TestExplicit|TestScanner_V23_' .` in `internal/manifest` exited 1 in 0.490s. The `--- FAIL` lines were exactly those two. The path test stopped on `filename stem should count; explicit false`. The scanner test stopped on the premise that the stem counts (`Explicit:false`, title still `Song [E]`). No other failure. The fallback was restored before the suites.
+
+## 2026-10-07 — cross-device sync phase 1 (favorites revisions, playlist bases)
+
+The bridge half of `docs/CrossDeviceSync.md` §12 phase 1 (iOS spec
+acoseac/1-bit#2077). `ProtocolVersion` stays 1. No manifest field, so the
+golden fixture does not move. ExtractorVersion stays at 23 (the explicit-tag
+change on main); this change does not bump it, and it adds no fuzz target.
+
+Migration v52 adds `backup_epoch`, `favorites_meta.revision` (an existing
+meta row moves to 1; a missing row stays 0), `favorite_tombstones`,
+`favorite_album_tombstones` and `favorite_sync_devices`. The wire path is
+`SaveFavorites` / `ReadFavorites`. `UpsertFavorites` stays the wholesale
+writer the store tests and the admin seeders call, and it bumps `revision`
+too, so a seeded document is never left at 0. A revisioned PUT whose base
+is stale and whose body differs returns `ErrFavoritesStale` before any
+device-row write. An equal body is accepted either way and does not bump.
+A PUT with no base merges additions only and never conflicts. Garbage
+collection commits in its own transaction, still under `Store.mu`, before
+the compare-and-swap, so a stale `409` cannot roll a collection back.
+Eligible is `removed_at` ≤ now−90d, and `legacy_put_at` blocks only when
+it is strictly newer than that cutoff. Collection bumps `revision` once
+when it deletes. The admin export lists tombstones and per-device clocks
+and still omits the device token. `bridge restore` opens the copied
+database, replaces the epoch, and checkpoints before it deletes the WAL,
+so the mint survives the sidecar removal.
+
+Playlists keep one stamp per row. `baseLastModifiedAt` equal to that stamp
+skips the guard: a different body stores the client stamp when it is
+strictly greater and one nanosecond above the stored stamp otherwise; an
+equal body writes nothing. A base that is not the stored stamp, with a
+different body, is `409` `base_mismatch`, not `stale`. An identical body
+never revives a deleted playlist, and that check comes before the base
+compare when a base is present or the row is deleted. A live playlist
+with no base stays on the stamp guard. A matching base with a different
+body revives, including when the base predates the deletion: `updated_at` is the bridge clock and
+`last_modified_at` is the client clock, so comparing them refuses every
+base the client holds. The list `ETag` is `<epoch>.<sha256>` of the
+canonical summaries, `imageHash` included, and `deletedIds`.
+
+The two-client clobber, the legacy `200`, the behind-clock accept, the
+equal-body no-op and the epoch reset each fail when the check they name
+is removed. `TestABaseThatDoesNotPredateTheDeletionRevives` is the other
+half of the revive rule: a matching base that is not older than the
+delete still revives.
+
+## 2026-10-07 — phase 1 review round 1
+
+The matching-base arm compared the client's stamp with `updated_at`, the
+bridge's delete time, so a PUT with a base never revived. A matching base
+with a different body now revives. An identical body is still not written,
+and that decision is before the base compare, so a wrong base on the same
+body is `200` Unchanged. `GET /v1/favorites` and `ReadFavorites` do not
+collect and do not hold `Store.mu`. Collection stays in `SaveFavorites`.
+The conditional GET reads the epoch and the revision first and returns
+`304` before the track rows. The WAL restore test plants a same-lineage
+WAL (a `VACUUM INTO` snapshot plus a foreign WAL is ignored; measured
+donor rows 0) and asserts the donor row is absent after restore. A legacy
+merge stops at 50,000 tracks and 10,000 albums and still answers `200`.
+Both registration reaps also delete a `favorite_sync_devices` row whose
+token has no registration. `If-None-Match` joins every header line, and a
+tombstoned `base_mismatch` carries `server.deleted`.
+
+## 2026-10-07 — phase 1 review round 2
+
+A legacy favorites merge filled the live cap beside a tombstone, so the
+revisioned echo of that document (live rows plus the tombstone) was
+`400`. The cap is now the body cap minus the tombstones already stored,
+tracks and albums alike. An identical playlist body was decided before
+the stamp guard on every path, including a live playlist with no base:
+a 2.1 client ignores the returned stamp, so an identical older stamp
+must stay `409` `stale` and an identical newer stamp must be stored.
+The identical-body early return stays when a base is present or the row
+is deleted.

@@ -2234,6 +2234,85 @@ var migrations = []migration{
 		END;
 		`,
 	},
+	{
+		// v52 — cross-device sync phase 1. backup_epoch is one random
+		// 16-byte hex, minted once per install and again by bridge restore
+		// (a restored file is a new history). favorites_meta.revision is
+		// the compare-and-swap key. Tombstones and the per-device table
+		// are new; existing live rows stay, and a stored document moves
+		// from revision 0 to 1. Nothing here writes tracks.indexed_at or
+		// enriched_at.
+		version: 52,
+		name:    "sync_phase1 (backup epoch, favorites revision, tombstones, per-device)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS backup_epoch (
+			id    INTEGER PRIMARY KEY CHECK (id = 1),
+			epoch TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS favorite_tombstones (
+			path               TEXT,
+			origin_fingerprint TEXT,
+			origin_path        TEXT,
+			removed_at         INTEGER NOT NULL,
+			revision           INTEGER NOT NULL,
+			CHECK (
+				(path IS NOT NULL AND path <> ''
+					AND origin_fingerprint IS NULL AND origin_path IS NULL)
+				OR
+				(path IS NULL
+					AND origin_fingerprint IS NOT NULL AND origin_fingerprint <> ''
+					AND origin_path IS NOT NULL AND origin_path <> '')
+			)
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_fav_tomb_local
+			ON favorite_tombstones(path) WHERE path IS NOT NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_fav_tomb_foreign
+			ON favorite_tombstones(origin_fingerprint, origin_path)
+			WHERE origin_fingerprint IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS favorite_album_tombstones (
+			album_artist TEXT NOT NULL DEFAULT '',
+			album        TEXT NOT NULL,
+			year         INTEGER NOT NULL DEFAULT 0,
+			removed_at   INTEGER NOT NULL,
+			revision     INTEGER NOT NULL,
+			PRIMARY KEY (album_artist, album, year)
+		);
+
+		CREATE TABLE IF NOT EXISTS favorite_sync_devices (
+			device_token  TEXT PRIMARY KEY,
+			last_seen_at  INTEGER NOT NULL,
+			legacy_put_at INTEGER
+		);
+		`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "favorites_meta", tableColumn{
+				name: "revision",
+				ddl:  `ALTER TABLE favorites_meta ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`,
+			}); err != nil {
+				return err
+			}
+			// A document that already existed becomes revision 1. A re-run
+			// must not pull a later revision back (the WHERE is the guard).
+			if _, err := db.Exec(`UPDATE favorites_meta SET revision = 1 WHERE id = 1 AND revision = 0`); err != nil {
+				return err
+			}
+			var n int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM backup_epoch WHERE id = 1`).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				return nil
+			}
+			epoch, err := newEpoch()
+			if err != nil {
+				return err
+			}
+			_, err = db.Exec(`INSERT INTO backup_epoch (id, epoch) VALUES (1, ?)`, epoch)
+			return err
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

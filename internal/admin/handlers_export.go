@@ -87,8 +87,32 @@ type exportPlaylistItem struct {
 }
 
 type exportFavorites struct {
-	Tracks []exportFavoriteTrack `json:"tracks"`
-	Albums []exportFavoriteAlbum `json:"albums"`
+	Tracks          []exportFavoriteTrack          `json:"tracks"`
+	Albums          []exportFavoriteAlbum          `json:"albums"`
+	Tombstones      []exportFavoriteTombstone      `json:"tombstones,omitempty"`
+	AlbumTombstones []exportFavoriteAlbumTombstone `json:"albumTombstones,omitempty"`
+	SyncDevices     []exportFavoriteSyncDevice     `json:"syncDevices,omitempty"`
+}
+
+type exportFavoriteTombstone struct {
+	Path              string     `json:"path,omitempty"`
+	OriginFingerprint string     `json:"originFingerprint,omitempty"`
+	OriginPath        string     `json:"originPath,omitempty"`
+	RemovedAt         *time.Time `json:"removedAt,omitempty"`
+}
+
+type exportFavoriteAlbumTombstone struct {
+	AlbumArtist string     `json:"albumArtist,omitempty"`
+	Album       string     `json:"album,omitempty"`
+	Year        int        `json:"year,omitempty"`
+	RemovedAt   *time.Time `json:"removedAt,omitempty"`
+}
+
+// exportFavoriteSyncDevice is one device's sync clock. The token is not
+// here: an export must not carry a credential.
+type exportFavoriteSyncDevice struct {
+	LastSeenAt  *time.Time `json:"lastSeenAt,omitempty"`
+	LegacyPutAt *time.Time `json:"legacyPutAt,omitempty"`
 }
 
 type exportFavoriteTrack struct {
@@ -270,6 +294,40 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 			AlbumArtist: a.AlbumArtist, Album: a.Album, Year: a.Year,
 			FavoritedAt: nsTime(a.FavoritedAt),
 		})
+	}
+	trackTombs, albumTombs, err := st.ListFavoriteTombstones(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("favorite tombstones: %w", err)
+	}
+	if len(trackTombs) > 0 {
+		out.Favorites.Tombstones = make([]exportFavoriteTombstone, 0, len(trackTombs))
+		for _, t := range trackTombs {
+			out.Favorites.Tombstones = append(out.Favorites.Tombstones, exportFavoriteTombstone{
+				Path: t.Path, OriginFingerprint: t.OriginFingerprint, OriginPath: t.OriginPath,
+				RemovedAt: nsTime(t.RemovedAt),
+			})
+		}
+	}
+	if len(albumTombs) > 0 {
+		out.Favorites.AlbumTombstones = make([]exportFavoriteAlbumTombstone, 0, len(albumTombs))
+		for _, a := range albumTombs {
+			out.Favorites.AlbumTombstones = append(out.Favorites.AlbumTombstones, exportFavoriteAlbumTombstone{
+				AlbumArtist: a.AlbumArtist, Album: a.Album, Year: a.Year,
+				RemovedAt: nsTime(a.RemovedAt),
+			})
+		}
+	}
+	syncDevices, err := st.ListFavoriteSyncDevices(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("favorite sync devices: %w", err)
+	}
+	if len(syncDevices) > 0 {
+		out.Favorites.SyncDevices = make([]exportFavoriteSyncDevice, 0, len(syncDevices))
+		for _, d := range syncDevices {
+			out.Favorites.SyncDevices = append(out.Favorites.SyncDevices, exportFavoriteSyncDevice{
+				LastSeenAt: nsTime(d.LastSeenAt), LegacyPutAt: nsTime(d.LegacyPutAt),
+			})
+		}
 	}
 
 	// The whole history, paged. ListHistory caps a single call at 1000, so one

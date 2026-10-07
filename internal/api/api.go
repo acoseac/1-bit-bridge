@@ -1793,19 +1793,20 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 28 covers the current maximum
+	// appends in lex order. Capacity 30 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
-	// favorites + keyTempo + loudness + lyrics + operatorDrivenUpscale +
-	// pairingEventsSupported + playbackHistory + playbackHistoryRead +
-	// playlistBackup + playlistsCrossDevice + pushEventsSupported +
-	// rendererDiscovery + search + smartPlaylists + spectrum +
-	// trackQuality + upscaleCompleteEvents + variantBumpsIndex + waveform).
+	// favorites + favoritesRevisions + keyTempo + loudness + lyrics +
+	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
+	// playbackHistoryRead + playlistBackup + playlistListRevision +
+	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
+	// search + smartPlaylists + spectrum + trackQuality +
+	// upscaleCompleteEvents + variantBumpsIndex + waveform).
 	// `trackQuality` was missing from this enumeration — and so from the
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 28)
+	feats := make([]string, 0, 30)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1882,9 +1883,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// `favorites` advertises GET/PUT /v1/favorites (the user-wide track +
 	// album favorites backup singleton). Gated on the store being wired so
 	// a deploy without it advertises honestly and iOS hides the backup
-	// toggle. Alpha-sorted between `dlnaServer` and `keyTempo` (d < f < k).
+	// toggle. `favoritesRevisions` advertises the revision compare-and-swap,
+	// the tombstones and the favorites ETag. Alpha-sorted
+	// favorites < favoritesRevisions < keyTempo.
 	if s.favoritesStore != nil {
-		feats = append(feats, "favorites")
+		feats = append(feats, "favorites", "favoritesRevisions")
 	}
 	if s.analysisActive() {
 		// `keyTempo` advertises that this bridge fills Track.keyRoot /
@@ -1931,11 +1934,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// playlist (restore is initiable from any device), and the
 	// `playlist_conflict` 409 is never emitted. Both gated on
 	// `s.playlistStore != nil` so a deploy without the store advertises
-	// honestly and iOS hides the backup surface. Lexically
-	// pairingEventsSupported < playlistBackup < playlistsCrossDevice
-	// ('B' < 's') < pushEventsSupported, so the alpha-sort split holds.
+	// honestly and iOS hides the backup surface. `playlistListRevision`
+	// advertises the list ETag and baseLastModifiedAt. Lexically
+	// pairingEventsSupported < playlistBackup < playlistListRevision <
+	// playlistsCrossDevice ('B' < 'L' < 's') < pushEventsSupported.
 	if s.playlistStore != nil {
-		feats = append(feats, "playlistBackup", "playlistsCrossDevice")
+		feats = append(feats, "playlistBackup", "playlistListRevision", "playlistsCrossDevice")
 	}
 	if s.eventBroker != nil {
 		feats = append(feats, "pushEventsSupported")

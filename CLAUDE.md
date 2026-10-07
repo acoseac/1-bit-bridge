@@ -2042,6 +2042,53 @@ lost my library."
   rows — hence `playlists.deleted_by` (v45), cleared on restore so a stale
   value cannot attribute the next delete. The custom cover does NOT come back:
   the DELETE unlinks the JPEG (`api.pruneCover`) and nothing keeps a copy.
+- **Favorites revisions are compare-and-swap, and a legacy PUT is additions
+  only** (2026-10-07). `PUT /v1/favorites` with `baseRevision` stores the
+  body when that revision is current, or when the normalized body already
+  equals the stored document; any other base whose body differs is `409`
+  `stale` and writes nothing, including no device row. A PUT with no
+  `baseRevision` — what 2.1 sends — inserts or keeps the earlier
+  `favoritedAt`, leaves a tombstone tombstoned, leaves an omitted key
+  alone, and answers `200`. A `409` that decodes as `stale` re-arms the
+  2.1 flush, so that path never returns one. `revision` bumps only when
+  the document changes, including tombstone collection. Collection runs
+  in its own transaction before the compare-and-swap, under the store
+  lock: a tombstone is eligible at `removed_at` ≤ now−90d, and one
+  `legacy_put_at` later than that cutoff blocks every collection. A `GET`
+  does not collect and does not take `Store.mu`; it reads the epoch and
+  the revision in one read-only transaction and returns `304` before any
+  row. After collection a legacy save can insert the key again, and a
+  client whose base predates the collection reads that as a re-heart. A
+  legacy merge that would pass 50,000 tracks or 10,000 albums stays `200`
+  and keeps existing keys first, leaving room for the tombstones already
+  stored so a revisioned echo of live rows plus those tombstones still
+  fits. `bridge restore` replaces `backup_epoch` after the database
+  copy, and the pre-copy WAL removal is what keeps a
+  same-lineage WAL from replaying onto the restored file. Playlist
+  `baseLastModifiedAt` is a different code, `base_mismatch`, and only
+  when the base is not the stored stamp and the body differs; an identical
+  body is decided first when a base is present or the row is deleted, so
+  a stale base on the same body is `200` Unchanged, live or deleted. A
+  live playlist with no base stays on the stamp guard even when the body
+  already matches: an older stamp is `409` `stale` and a newer one stores
+  the client's stamp. A matching base with a different body is
+  stored, which revives a deleted row even when that base predates the
+  deletion: `updated_at` is the bridge clock and `last_modified_at` is the
+  client clock, so comparing them refuses every base the client holds. A
+  behind clock stores one nanosecond above the stored stamp. A
+  `base_mismatch` for a tombstoned row carries `server.deleted`. An
+  unregistered `favorite_sync_devices` row is deleted by both registration
+  reaps.
+  (`TestTwoClientsCannotClobberFavorites`,
+  `TestLegacyFavoritesPutNeverConflicts`,
+  `TestPlaylistMatchingBaseAcceptsABehindClock`,
+  `TestIdenticalPlaylistBodyDoesNotRevive`,
+  `TestLegacyIdenticalPlaylistPutKeepsTheStampGuard`,
+  `TestACappedLegacyDocumentEchoes`,
+  `TestMatchingBaseRevivesADeletedPlaylist`,
+  `TestReadFavoritesDoesNotTakeTheWriterLock`,
+  `TestFavorites304DoesNotReadTheRows`,
+  `TestRestoreRemovesStaleWALSHM`.)
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process
   ring**, and fires ONE LINE PER TOMBSTONE past the threshold
   (`manifest.PlaylistDeleteBurstThreshold` = 5 within

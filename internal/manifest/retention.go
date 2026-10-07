@@ -104,11 +104,37 @@ func (s *Store) ReapOrphanDeviceRegistrations(ctx context.Context, liveTokenIDs 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	// The sync-device row goes first, on the same predicate, so a
+	// registration that is leaving cannot keep a legacy_put_at that
+	// blocks tombstone collection.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token IN (
+		   SELECT device_token FROM device_registrations
+		    WHERE token_id NOT IN (SELECT value FROM json_each(?))
+		 )
+	`, string(blob)); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM device_registrations
 		 WHERE token_id NOT IN (SELECT value FROM json_each(?))
 	`, string(blob))
 	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token NOT IN (SELECT device_token FROM device_registrations)
+	`); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
@@ -129,9 +155,32 @@ func (s *Store) ReapStaleDeviceRegistrations(ctx context.Context, beforeNS int64
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token IN (
+		   SELECT device_token FROM device_registrations
+		    WHERE last_seen_at < ?
+		 )
+	`, beforeNS); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM device_registrations WHERE last_seen_at < ?`, beforeNS)
 	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token NOT IN (SELECT device_token FROM device_registrations)
+	`); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()

@@ -145,6 +145,62 @@ func TestExportIsADownloadAndSelfDescribing(t *testing.T) {
 	}
 }
 
+func TestExportCarriesFavoriteTombstonesWithoutTheDeviceToken(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	ctx := context.Background()
+	const token = "export-device-token-must-not-appear"
+	if err := st.UpsertDeviceRegistration(ctx, token, "tok-export", "Export Phone"); err != nil {
+		t.Fatal(err)
+	}
+	base := int64(0)
+	if _, err := st.SaveFavorites(ctx, token, manifest.FavoritesSave{
+		BaseRevision: &base,
+		Tracks: []manifest.FavoriteTrackRow{
+			{Path: "kept.flac", FavoritedAt: 1},
+			{OriginFingerprint: "fp", OriginPath: "other/gone.flac", FavoritedAt: 2},
+		},
+		Albums: []manifest.FavoriteAlbumRow{{Album: "Old", Year: 1999, FavoritedAt: 3}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next := int64(1)
+	if _, err := st.SaveFavorites(ctx, token, manifest.FavoritesSave{
+		BaseRevision:    &next,
+		Tracks:          []manifest.FavoriteTrackRow{{Path: "kept.flac", FavoritedAt: 1}},
+		Tombstones:      []manifest.FavoriteTombstone{{OriginFingerprint: "fp", OriginPath: "other/gone.flac"}},
+		AlbumTombstones: []manifest.FavoriteAlbumTombstone{{Album: "Old", Year: 1999}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/export", nil)
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.Host = testConsoleHost
+	srv.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export = %d: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), token) {
+		t.Fatal("the export names the device token")
+	}
+	var got exportBundle
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Favorites.Tombstones) != 1 || got.Favorites.Tombstones[0].OriginFingerprint != "fp" ||
+		got.Favorites.Tombstones[0].OriginPath != "other/gone.flac" || got.Favorites.Tombstones[0].RemovedAt == nil {
+		t.Fatalf("tombstones %+v", got.Favorites.Tombstones)
+	}
+	if len(got.Favorites.AlbumTombstones) != 1 || got.Favorites.AlbumTombstones[0].Album != "Old" {
+		t.Fatalf("album tombstones %+v", got.Favorites.AlbumTombstones)
+	}
+	if len(got.Favorites.SyncDevices) != 1 || got.Favorites.SyncDevices[0].LastSeenAt == nil {
+		t.Fatalf("sync devices %+v", got.Favorites.SyncDevices)
+	}
+}
+
 // Empty collections must marshal as [] and not null, so a consumer can iterate
 // without a nil check — the same rule the SSE snapshots follow.
 func TestExportEmptyCollectionsAreArrays(t *testing.T) {
