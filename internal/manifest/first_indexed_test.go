@@ -226,7 +226,7 @@ func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, true, "RootA"); err != nil {
+	if _, err := s.RecordFirstIndexedCarry(ctx, true, "RootA"); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -257,13 +257,13 @@ func TestASecondRecordAfterTheWipeKeepsTheCarry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
+	if _, err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WipeFilesystemTracks(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
+	if _, err := s.RecordFirstIndexedCarry(ctx, false, "Music"); err != nil {
 		t.Fatal(err)
 	}
 	var ns int64

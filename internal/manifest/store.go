@@ -5624,6 +5624,7 @@ func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	noteRootFlipStage("wipe")
 	removeSidecarFiles(doomedSidecars)
 	return nil
 }

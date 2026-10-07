@@ -16,13 +16,13 @@ func TestAFlipBackBeforeAnyRescanKeepsTheDate(t *testing.T) {
 	store, sc := newScanFixture(t, root)
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
@@ -56,7 +56,7 @@ func TestACollapseDuringThePostAddRescanKeepsBothAlbums(t *testing.T) {
 	store, sc := newScanFixture(t, root)
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(ctx, false, base); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, base); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
@@ -67,7 +67,7 @@ func TestACollapseDuringThePostAddRescanKeepsBothAlbums(t *testing.T) {
 	if _, err := sc.ScanSubtree(ctx, filepath.Join(root, "Artist", "X")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordFirstIndexedCarry(ctx, true, base); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, true, base); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
@@ -92,7 +92,7 @@ func TestACompensatingScanAfterAFailedSaveKeepsTheDate(t *testing.T) {
 	store, sc := newScanFixture(t, root)
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {

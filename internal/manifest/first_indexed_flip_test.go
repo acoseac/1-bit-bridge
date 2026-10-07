@@ -27,7 +27,7 @@ func TestAnInFlightScanLeavesTheCarryForThePostFlipScan(t *testing.T) {
 	store, sc := newScanFixture(t, root)
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
@@ -55,7 +55,7 @@ func TestAnAddedRootDoesNotInheritTheOldRootsDate(t *testing.T) {
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
 	seedTrackDirs(t, filepath.Join(other, "Artist", "Album"))
-	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {
@@ -86,7 +86,7 @@ func TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots(t *testing.T) {
 	if got := firstIndexedTime(t, store, filepath.Base(a)+"/Artist/Album/song.flac"); !got.Equal(reproT1) {
 		t.Fatalf("setup: a dated %s", got)
 	}
-	if err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(a)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(a)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WipeFilesystemTracks(ctx); err != nil {

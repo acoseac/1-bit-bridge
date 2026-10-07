@@ -1706,12 +1706,16 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// a successful wipe means the next scan simply re-populates —
 	// every failure window lands in a state the scanner can heal.
 	willTransition := len(current) == 1 // 1 → N: storage form flips
+	var carryGen int64
 	if willTransition {
-		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), false, filepath.Base(current[0])); err != nil {
+		gen, err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), false, filepath.Base(current[0]))
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
+		carryGen = gen
 		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
+			s.deps.Manifest.AbandonFirstIndexedCarry(r.Context(), carryGen)
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
@@ -1740,6 +1744,9 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 		// additional recovery attempt, so we log (not return) any
 		// error it produces for server-side observability.
 		if willTransition {
+			// The library is still one root. Point the saved dates at
+			// that form so this scan copies them and then clears them.
+			s.deps.Manifest.RetargetFirstIndexedCarry(r.Context(), carryGen, false)
 			s.spawnBackgroundScan("compensating-scan (add)")
 		}
 		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
@@ -1851,12 +1858,16 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// means the config file is untouched; a `Cfg.Save` failure after a
 	// successful wipe means the next scan simply re-populates — every
 	// failure window lands in a state the scanner can heal.
+	var carryGen int64
 	if willCollapse {
-		if err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), true, filepath.Base(newList[0])); err != nil {
+		gen, err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), true, filepath.Base(newList[0]))
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
+		carryGen = gen
 		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
+			s.deps.Manifest.AbandonFirstIndexedCarry(r.Context(), carryGen)
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
@@ -1885,6 +1896,12 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 		// returned) — the 500 the user sees is the real Save
 		// failure; a compensating-scan error is additional recovery
 		// and only matters for operator observability.
+		if willCollapse {
+			// The library is still several roots. Point the saved
+			// dates at that form before the scan that clears them.
+			// A prefix delete that stays multi-root recorded nothing.
+			s.deps.Manifest.RetargetFirstIndexedCarry(r.Context(), carryGen, true)
+		}
 		s.spawnBackgroundScan("compensating-scan (remove)")
 		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
 		return

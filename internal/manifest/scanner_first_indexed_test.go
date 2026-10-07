@@ -122,7 +122,7 @@ func TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt(t *testing.T) {
 	t2 := time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
 	store.now = func() time.Time { return t1 }
 	scanOnce(t, sc, "first")
-	if err := store.RecordFirstIndexedCarry(context.Background(), false, filepath.Base(root)); err != nil {
+	if _, err := store.RecordFirstIndexedCarry(context.Background(), false, filepath.Base(root)); err != nil {
 		t.Fatal(err)
 	}
 	seedTrackDirs(t, filepath.Join(root, "Artist", "Late"))

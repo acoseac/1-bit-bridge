@@ -96,17 +96,23 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 1
 	}
 	willTransition := len(cfg.LibraryRoots) == 1
+	var carryGen int64
 	if willTransition {
 		// 1 → N: stored path form changes from bare "Artist/…" to
 		// "<basename>/Artist/…". Wipe so the next scan repopulates
 		// in the new form. Same rationale as the admin API path.
-		if err := wipeManifest(ctx, cfg); err != nil {
+		gen, err := wipeManifest(ctx, cfg)
+		if err != nil {
 			fmt.Fprintf(stderr, "library add: wipe manifest: %v\n", err)
 			return 1
 		}
+		carryGen = gen
 	}
 	cfg.LibraryRoots = newList
 	if err := cfg.Save(resolvedCfgPath); err != nil {
+		if willTransition {
+			retargetAbandonedCarry(ctx, cfg, carryGen, false)
+		}
 		fmt.Fprintf(stderr, "library add: save config: %v\n", err)
 		return 1
 	}
@@ -158,15 +164,19 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	defer store.Close()
 
+	var carryGen int64
 	if willCollapse {
 		// Spare UPnP-routed rows: only filesystem tracks change path
 		// form on the multi→single flip; the upstream library's
 		// lifecycle belongs to the ingest reconcile, not this wipe.
-		if err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(newList[0])); err != nil {
+		gen, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(newList[0]))
+		if err != nil {
 			fmt.Fprintf(stderr, "library remove: record added dates: %v\n", err)
 			return 1
 		}
+		carryGen = gen
 		if err := store.WipeFilesystemTracks(ctx); err != nil {
+			store.AbandonFirstIndexedCarry(ctx, carryGen)
 			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
 			return 1
 		}
@@ -201,6 +211,9 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	cfg.LibraryRoots = newList
 	if err := cfg.Save(resolvedCfgPath); err != nil {
+		if willCollapse {
+			store.RetargetFirstIndexedCarry(ctx, carryGen, true)
+		}
 		fmt.Fprintf(stderr, "library remove: save config: %v\n", err)
 		return 1
 	}
@@ -301,19 +314,42 @@ func tryLibraryViaAdmin(ctx context.Context, cfg *config.Config, method, path st
 // wipeManifest opens the manifest store, wipes the filesystem tracks
 // (sparing UPnP-routed rows), and closes. Used by the offline library-add
 // path on a 1→N transition, where only filesystem rows change path form.
-func wipeManifest(ctx context.Context, cfg *config.Config) error {
+func wipeManifest(ctx context.Context, cfg *config.Config) (int64, error) {
 	store, err := openManifestStore(cfg)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer store.Close()
 	if len(cfg.LibraryRoots) == 0 {
-		return fmt.Errorf("first-indexed carry: no library root")
+		return 0, fmt.Errorf("first-indexed carry: no library root")
 	}
-	if err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(cfg.LibraryRoots[0])); err != nil {
-		return err
+	gen, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(cfg.LibraryRoots[0]))
+	if err != nil {
+		return 0, err
 	}
-	return store.WipeFilesystemTracks(ctx)
+	if err := store.WipeFilesystemTracks(ctx); err != nil {
+		store.AbandonFirstIndexedCarry(ctx, gen)
+		return 0, err
+	}
+	return gen, nil
+}
+
+// retargetAbandonedCarry points a generation at the form the library
+// still has when the config save after a wipe failed. The next scan
+// copies the dates and clears them. There is no compensating scan on
+// this path. An error opening the store is logged beside the save
+// error the caller prints; it does not replace that error.
+func retargetAbandonedCarry(ctx context.Context, cfg *config.Config, generation int64, toMulti bool) {
+	if generation <= 0 {
+		return
+	}
+	store, err := openManifestStore(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "library: retarget saved dates: %v\n", err)
+		return
+	}
+	defer store.Close()
+	store.RetargetFirstIndexedCarry(ctx, generation, toMulti)
 }
 
 // openManifestStore resolves the manifest DB path the same way

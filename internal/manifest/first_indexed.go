@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -117,13 +118,15 @@ func carryKey(path string, fromMultiRoot bool, rootBase string) (string, bool) {
 // root is added, and the surviving root's folder name when several roots
 // collapse to one. The saved key is that folder name plus the path
 // within the root, in either form. A snapshot with no rows writes
-// nothing when no dates are saved yet. When dates are already saved it
-// moves them onto the new generation and the form this flip is heading
-// toward, and does not delete the keys. A later record merges: it keeps
-// the earlier date for a key.
-func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) error {
+// nothing when no dates are saved yet, and the returned generation is 0.
+// When dates are already saved it moves them onto the new generation and
+// the form this flip is heading toward, and does not delete the keys. A
+// later record merges: it keeps the earlier date for a key. The returned
+// generation is the one this call wrote, so a wipe that then fails can
+// drop exactly that generation.
+func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
 	if rootBase == "" || strings.Contains(rootBase, "/") {
-		return fmt.Errorf("first-indexed carry: root name %q", rootBase)
+		return 0, fmt.Errorf("first-indexed carry: root name %q", rootBase)
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT path, first_indexed_at FROM tracks
@@ -132,7 +135,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		      SELECT 1 FROM upnp_track_routing WHERE source_path = tracks.path
 		  )`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rows.Close()
 	best := map[string]int64{}
@@ -140,7 +143,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		var path string
 		var ns int64
 		if err := rows.Scan(&path, &ns); err != nil {
-			return err
+			return 0, err
 		}
 		key, ok := carryKey(path, fromMultiRoot, rootBase)
 		if !ok || ns <= 0 {
@@ -151,7 +154,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	targetMulti := 0
 	if !fromMultiRoot {
@@ -162,27 +165,27 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 	if len(best) == 0 {
 		var n int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM first_indexed_carry`).Scan(&n); err != nil {
-			return err
+			return 0, err
 		}
 		if n == 0 {
-			return nil
+			return 0, nil
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	var maxGen sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT MAX(generation) FROM first_indexed_carry`).Scan(&maxGen); err != nil {
-		return err
+		return 0, err
 	}
 	next := int64(1)
 	if maxGen.Valid {
 		next = maxGen.Int64 + 1
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE first_indexed_carry SET generation = ?, target_multi = ?`, next, targetMulti); err != nil {
-		return err
+		return 0, err
 	}
 	const upsert = `INSERT INTO first_indexed_carry (path_key, first_indexed_at, generation, target_multi)
 		VALUES (?, ?, ?, ?)
@@ -192,10 +195,80 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 			target_multi = excluded.target_multi`
 	for key, ns := range best {
 		if _, err := tx.ExecContext(ctx, upsert, key, ns, next, targetMulti); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	noteRootFlipStage("record")
+	return next, nil
+}
+
+// rootFlipStage is a test hook. Production leaves it unset. A test
+// sets it to cancel the request once the carry has committed, or once
+// the wipe has committed, which is the window a client timeout hits.
+var rootFlipStage atomic.Value // func(string)
+
+// SetRootFlipStageHookForTest installs fn, called with "record" after
+// the carry commits and "wipe" after the filesystem wipe commits. The
+// hook runs under the store lock and must not touch the database.
+func SetRootFlipStageHookForTest(fn func(string)) {
+	if fn == nil {
+		rootFlipStage.Store((func(string))(nil))
+		return
+	}
+	rootFlipStage.Store(fn)
+}
+
+func noteRootFlipStage(stage string) {
+	fn, _ := rootFlipStage.Load().(func(string))
+	if fn != nil {
+		fn(stage)
+	}
+}
+
+// abandonCarryTimeout bounds the cleanup of a flip the request did not
+// finish. The request context may already be cancelled.
+const abandonCarryTimeout = 5 * time.Second
+
+// AbandonFirstIndexedCarry deletes the generation a flip recorded when
+// the wipe that was supposed to follow it failed. A later scan then has
+// nothing to copy onto a re-added file. A cleanup error is logged and
+// does not replace the wipe error the caller returns.
+func (s *Store) AbandonFirstIndexedCarry(ctx context.Context, generation int64) {
+	if s == nil || generation <= 0 {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonCarryTimeout)
+	defer cancel()
+	if err := s.ClearFirstIndexedCarryGeneration(cctx, generation); err != nil {
+		logger.Warn("first-indexed carry: could not drop an abandoned flip", "generation", generation, "err", err)
+	}
+}
+
+// RetargetFirstIndexedCarry points a generation at the form the library
+// still has, after the wipe succeeded and the config save did not. The
+// compensating scan, or the next scan, then copies the dates and clears
+// them. toMulti is false when the library is still a single root. A
+// cleanup error is logged and does not replace the save error.
+func (s *Store) RetargetFirstIndexedCarry(ctx context.Context, generation int64, toMulti bool) {
+	if s == nil || generation <= 0 {
+		return
+	}
+	target := 0
+	if toMulti {
+		target = 1
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonCarryTimeout)
+	defer cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.ExecContext(cctx,
+		`UPDATE first_indexed_carry SET target_multi = ? WHERE generation = ?`,
+		target, generation); err != nil {
+		logger.Warn("first-indexed carry: could not retarget an abandoned flip", "generation", generation, "err", err)
+	}
 }
 
 // ClearFirstIndexedCarryGeneration drops the saved dates of one
