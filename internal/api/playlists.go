@@ -161,6 +161,10 @@ type playlistDTO struct {
 	// BaseLastModifiedAt is the stamp the client last read. Present, it
 	// is the compare-and-swap key. Absent, the stamp guard stays.
 	BaseLastModifiedAt *int64 `json:"baseLastModifiedAt,omitempty"`
+	// Deleted is set on the server copy of a base_mismatch for a
+	// tombstoned row, so the client can tell a live playlist from one
+	// the bridge has already deleted.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 type playlistSummaryDTO struct {
@@ -202,7 +206,7 @@ type playlistStaleResponse struct {
 }
 
 func toPlaylistDTO(p *manifest.PlaylistRow, items []manifest.PlaylistItemRow) playlistDTO {
-	out := playlistDTO{ID: p.ID, Name: p.Name, LastModifiedAt: p.LastModifiedAt}
+	out := playlistDTO{ID: p.ID, Name: p.Name, LastModifiedAt: p.LastModifiedAt, Deleted: p.Deleted}
 	out.Items = make([]playlistItemDTO, 0, len(items))
 	for _, it := range items {
 		out.Items = append(out.Items, playlistItemDTO{
@@ -295,7 +299,7 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 			"failed to hash the playlist list", err)
 		return
 	}
-	if noneMatch(r.Header.Get("If-None-Match"), etag, true) {
+	if noneMatch(strings.Join(r.Header.Values("If-None-Match"), ","), etag, true) {
 		writeNotModified(w, etag)
 		return
 	}

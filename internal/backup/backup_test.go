@@ -1,7 +1,6 @@
 package backup_test
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -200,51 +199,92 @@ func TestRestoreRoundTripsSimpleFiles(t *testing.T) {
 	}
 }
 
-// Restore must delete any pre-restore -wal/-shm sidecars when it
-// replaces the manifest DB. Snapshot writes a clean VACUUM INTO db
-// (no WAL in the bundle); leaving the old WAL on disk would have
-// SQLite replay stale frames onto the restored file and corrupt it.
+// TestRestoreRemovesStaleWALSHM plants a WAL from the same database
+// lineage as the snapshot main. A VACUUM INTO snapshot has a different
+// salt, so a foreign WAL copied beside it is ignored and cannot see the
+// removal that has to happen before the copy. The donor row is what the
+// next open would replay; the file being gone is not, because the mint
+// removes the sidecars again after it.
 func TestRestoreRemovesStaleWALSHM(t *testing.T) {
-	dataDir := t.TempDir()
-	src := primeLiveState(t, dataDir)
-
-	dst, err := backup.Snapshot(t.Context(), src)
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	opened, err := manifest.OpenStore(dbPath)
 	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
+		t.Fatal(err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	mainBytes, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(`INSERT INTO favorite_sync_devices (device_token, last_seen_at) VALUES ('DONOR-ROW', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	walBytes, err := os.ReadFile(dbPath + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	holder.Close()
+
+	snapDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(snapDir, backup.ManifestDBFileName), mainBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotManifest(t, snapDir, backup.ManifestDBFileName)
+	if err := os.WriteFile(dbPath+"-wal", walBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath+"-shm", []byte("stale-shm"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	// Simulate a pre-restore WAL/SHM pair belonging to the live DB.
-	walPath := src.ManifestDB + "-wal"
-	shmPath := src.ManifestDB + "-shm"
-	if err := os.WriteFile(walPath, []byte("stale-wal-frames"), 0o600); err != nil {
-		t.Fatalf("write stale wal: %v", err)
-	}
-	if err := os.WriteFile(shmPath, []byte("stale-shm"), 0o600); err != nil {
-		t.Fatalf("write stale shm: %v", err)
-	}
-
-	if err := backup.Restore(dst, backup.Targets{
-		ManifestDB: src.ManifestDB,
-		TokensJSON: src.TokensJSON,
-		ServerCert: src.ServerCert,
-		ServerKey:  src.ServerKey,
-		BridgeYAML: src.BridgeYAML,
-	}); err != nil {
+	if err := backup.Restore(snapDir, backup.Targets{ManifestDB: dbPath}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
+	if pathExists(t, dbPath+"-wal") {
+		t.Errorf("stale WAL survived Restore")
+	}
+	if pathExists(t, dbPath+"-shm") {
+		t.Errorf("stale SHM survived Restore")
+	}
+	if n := donorRows(t, dbPath); n != 0 {
+		t.Fatalf("donor rows %d, want 0: the pre-copy WAL removal did not run", n)
+	}
+}
 
-	if pathExists(t, walPath) {
-		t.Errorf("stale %s survived Restore — SQLite would replay it onto the restored DB", walPath)
+func donorRows(t *testing.T, path string) int {
+	t.Helper()
+	s, err := manifest.OpenStore(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
 	}
-	if pathExists(t, shmPath) {
-		t.Errorf("stale %s survived Restore", shmPath)
+	defer s.Close()
+	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Restore mints a new backup epoch, so the main file is no longer
-	// byte-identical to the snapshot. The stale frames must still be gone.
-	if bytes.Contains(readBytes(t, src.ManifestDB), []byte("stale-wal-frames")) {
-		t.Error("restored bridge.db still holds the stale WAL bytes")
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM favorite_sync_devices WHERE device_token = 'DONOR-ROW'`).Scan(&n); err != nil {
+		t.Fatal(err)
 	}
+	return n
 }
 
 // Restore replaces the backup epoch. A client holding the old epoch

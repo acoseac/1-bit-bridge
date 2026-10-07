@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,12 @@ import (
 // behind the authed() middleware (the newPlaylistTestServer shape).
 func newFavoritesTestServer(t *testing.T) (string, string, *Server) {
 	t.Helper()
+	raw, dt, srv, _, _ := newFavoritesHarness(t)
+	return raw, dt, srv
+}
+
+func newFavoritesHarness(t *testing.T) (string, string, *Server, *manifest.Store, string) {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{
 		LibraryRoots:  []string{t.TempDir()},
@@ -32,13 +39,14 @@ func newFavoritesTestServer(t *testing.T) (string, string, *Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mstore, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	dbPath := filepath.Join(dir, "bridge.db")
+	mstore, err := manifest.OpenStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = mstore.Close() })
 	srv := New(cfg, authStore, nil, "fp").WithDeviceRegistrar(mstore).WithFavoritesStore(mstore)
-	return raw, "deadbeef", srv
+	return raw, "deadbeef", srv, mstore, dbPath
 }
 
 func decodeFavoritesBody(t *testing.T, resp *http.Response) favoritesDTO {
@@ -423,4 +431,49 @@ func TestHealthOmitsFavoritesWhenUnwired(t *testing.T) {
 	if containsString(got.Features, "favorites") {
 		t.Errorf("unwired store must not advertise favorites; got %v", got.Features)
 	}
+}
+
+func TestACappedLegacyDocumentEchoes(t *testing.T) {
+	token, dt, srv, mstore, _ := newFavoritesHarness(t)
+	ctx := context.Background()
+	first := make([]manifest.FavoriteTrackRow, 30000)
+	for i := range first {
+		first[i] = manifest.FavoriteTrackRow{Path: fmt.Sprintf("e-%05d", i), FavoritedAt: 1}
+	}
+	if _, err := mstore.SaveFavorites(ctx, dt, manifest.FavoritesSave{Tracks: first}); err != nil {
+		t.Fatal(err)
+	}
+	second := make([]manifest.FavoriteTrackRow, 30000)
+	for i := range second {
+		second[i] = manifest.FavoriteTrackRow{Path: fmt.Sprintf("n-%05d", i), FavoritedAt: 2}
+	}
+	if _, err := mstore.SaveFavorites(ctx, dt, manifest.FavoritesSave{Tracks: second}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := mstore.ReadFavorites(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Tracks) != maxFavoriteTracks {
+		t.Fatalf("stored %d, want %d", len(doc.Tracks), maxFavoriteTracks)
+	}
+	wire := make([]favoriteTrackDTO, len(doc.Tracks))
+	for i, row := range doc.Tracks {
+		wire[i] = favoriteTrackDTO{Path: row.Path, FavoritedAt: row.FavoritedAt}
+	}
+	rev := doc.Revision
+	raw, err := json.Marshal(struct {
+		LastModifiedAt int64              `json:"lastModifiedAt"`
+		BaseRevision   *int64             `json:"baseRevision"`
+		Tracks         []favoriteTrackDTO `json:"tracks"`
+		Albums         []favoriteAlbumDTO `json:"albums"`
+	}{LastModifiedAt: 1, BaseRevision: &rev, Tracks: wire, Albums: []favoriteAlbumDTO{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt, string(raw))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("echo: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

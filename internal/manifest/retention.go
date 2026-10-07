@@ -128,6 +128,12 @@ func (s *Store) ReapOrphanDeviceRegistrations(ctx context.Context, liveTokenIDs 
 	if err != nil {
 		return 0, err
 	}
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token NOT IN (SELECT device_token FROM device_registrations)
+	`); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -166,6 +172,12 @@ func (s *Store) ReapStaleDeviceRegistrations(ctx context.Context, beforeNS int64
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM device_registrations WHERE last_seen_at < ?`, beforeNS)
 	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM favorite_sync_devices
+		 WHERE device_token NOT IN (SELECT device_token FROM device_registrations)
+	`); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {

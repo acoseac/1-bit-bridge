@@ -9,8 +9,7 @@ import (
 )
 
 // PlaylistPutResult is the stamp a PUT left in place. Unchanged means the
-// statement wrote nothing: an equal body, or a matching base that must not
-// revive a deleted playlist.
+// statement wrote nothing because the body already matched.
 type PlaylistPutResult struct {
 	LastModifiedAt int64
 	Unchanged      bool
@@ -32,9 +31,12 @@ func (e *PlaylistBaseMismatch) Error() string {
 // A nil base keeps the stamp guard. A base equal to the stored stamp
 // skips that guard: a behind-clock client is accepted, and a stamp that
 // is not strictly greater becomes the stored stamp plus one nanosecond.
-// An identical body never revives a deleted playlist. A matching base
-// that predates the deletion (the stamp DELETE does not move, so a
-// matching base is the pre-deletion version) does not revive either.
+// An identical body writes nothing, live or deleted, and is decided
+// before the base is compared, so a stale base on the same body does
+// not answer 409. A matching base with a different body is stored, which
+// revives a deleted row: DELETE does not move last_modified_at, so that
+// base is the pre-deletion version, and dropping the edit would leave
+// the client believing the old playlist was accepted.
 func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistRow, items []PlaylistItemRow, base *int64) (PlaylistPutResult, error) {
 	if deviceToken == "" {
 		return PlaylistPutResult{}, errors.New("manifest: UpsertPlaylist requires a device token")
@@ -76,10 +78,11 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 	}
 	same := playlistBodyEqual(name, stored, p.Name, items)
 
-	// An identical body never revives, on either path, and it is decided
+	// An identical body writes nothing, live or deleted. It is decided
 	// before the base is compared so a stale base on the same body does
-	// not 409-loop a client that is only repeating the delete.
-	if deleted != 0 && same {
+	// not 409, and so a deleted row is never revived by a repeat of the
+	// body it already holds.
+	if same {
 		return PlaylistPutResult{LastModifiedAt: existingLMA, Unchanged: true}, nil
 	}
 
@@ -95,15 +98,6 @@ func (s *Store) PutPlaylist(ctx context.Context, deviceToken string, p PlaylistR
 				},
 				Items: stored,
 			}
-		}
-		if same {
-			return PlaylistPutResult{LastModifiedAt: existingLMA, Unchanged: true}, nil
-		}
-		// DELETE does not move last_modified_at, so a base that matches
-		// the stored stamp is the pre-deletion version whenever it is
-		// older than updated_at (the delete time).
-		if deleted != 0 && *base < updatedAt {
-			return PlaylistPutResult{LastModifiedAt: existingLMA, Unchanged: true}, nil
 		}
 		stamp := p.LastModifiedAt
 		if stamp <= existingLMA {

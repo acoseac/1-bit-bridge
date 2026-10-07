@@ -23,6 +23,7 @@ import (
 // last-writer provenance.
 type FavoritesStore interface {
 	ReadFavorites(ctx context.Context) (manifest.FavoritesDocument, error)
+	ReadFavoritesIfUnchanged(ctx context.Context, unchanged func(epoch string, revision int64, stored bool) bool) (manifest.FavoritesDocument, bool, error)
 	SaveFavorites(ctx context.Context, deviceToken string, save manifest.FavoritesSave) (manifest.FavoritesSaveResult, error)
 }
 
@@ -288,14 +289,17 @@ func (s *Server) getFavorites(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireFavoritesFeature(w, r); !ok {
 		return
 	}
-	doc, err := s.favoritesStore.ReadFavorites(r.Context())
+	match := strings.Join(r.Header.Values("If-None-Match"), ",")
+	doc, notModified, err := s.favoritesStore.ReadFavoritesIfUnchanged(r.Context(), func(epoch string, revision int64, stored bool) bool {
+		return noneMatch(match, favoritesETag(epoch, revision), stored)
+	})
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to read favorites", err)
 		return
 	}
 	etag := favoritesETag(doc.Epoch, doc.Revision)
-	if noneMatch(r.Header.Get("If-None-Match"), etag, doc.Stored) {
+	if notModified {
 		writeNotModified(w, etag)
 		return
 	}

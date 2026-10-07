@@ -37513,15 +37513,34 @@ so the mint survives the sidecar removal.
 Playlists keep one stamp per row. `baseLastModifiedAt` equal to that stamp
 skips the guard: a different body stores the client stamp when it is
 strictly greater and one nanosecond above the stored stamp otherwise; an
-equal body writes nothing. A base that is not the stored stamp is `409`
-`base_mismatch`, not `stale`. An identical body never revives a deleted
-playlist. Because `DELETE` does not move `last_modified_at`, a matching
-base is the pre-deletion version and does not revive while it is older
-than `updated_at`. A matching base that is not older than the delete, with
-a different body, does. The list `ETag` is `<epoch>.<sha256>` of the
+equal body writes nothing. A base that is not the stored stamp, with a
+different body, is `409` `base_mismatch`, not `stale`. An identical body
+never revives a deleted playlist, and that check comes before the base
+compare. A matching base with a different body revives, including when
+the base predates the deletion: `updated_at` is the bridge clock and
+`last_modified_at` is the client clock, so comparing them refuses every
+base the client holds. The list `ETag` is `<epoch>.<sha256>` of the
 canonical summaries, `imageHash` included, and `deletedIds`.
 
 The two-client clobber, the legacy `200`, the behind-clock accept, the
 equal-body no-op and the epoch reset each fail when the check they name
 is removed. `TestABaseThatDoesNotPredateTheDeletionRevives` is the other
-half of the revive rule: the matching-base refusal is not "never revive".
+half of the revive rule: a matching base that is not older than the
+delete still revives.
+
+## 2026-10-07 — phase 1 review round 1
+
+The matching-base arm compared the client's stamp with `updated_at`, the
+bridge's delete time, so a PUT with a base never revived. A matching base
+with a different body now revives. An identical body is still not written,
+and that decision is before the base compare, so a wrong base on the same
+body is `200` Unchanged. `GET /v1/favorites` and `ReadFavorites` do not
+collect and do not hold `Store.mu`. Collection stays in `SaveFavorites`.
+The conditional GET reads the epoch and the revision first and returns
+`304` before the track rows. The WAL restore test plants a same-lineage
+WAL (a `VACUUM INTO` snapshot plus a foreign WAL is ignored; measured
+donor rows 0) and asserts the donor row is absent after restore. A legacy
+merge stops at 50,000 tracks and 10,000 albums and still answers `200`.
+Both registration reaps also delete a `favorite_sync_devices` row whose
+token has no registration. `If-None-Match` joins every header line, and a
+tombstoned `base_mismatch` carries `server.deleted`.

@@ -220,6 +220,75 @@ func TestMigrationV25ToV26RebuildsUnicodeLowerIndexes(t *testing.T) {
 	}
 }
 
+func TestMigrationV51ToV52KeepsTrackClocks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v51.db")
+	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = 51
+	for _, m := range migrations {
+		if m.version > head {
+			continue
+		}
+		if _, err := db.Exec(m.sql); err != nil {
+			t.Fatalf("apply migration %d (%s): %v", m.version, m.name, err)
+		}
+		if m.post != nil {
+			if err := m.post(db); err != nil {
+				t.Fatalf("migration %d (%s) post: %v", m.version, m.name, err)
+			}
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT INTO tracks (path, size, mtime_ns, tags_json, indexed_at, enriched_at) VALUES ('a.flac', 1, 1, '{}', 42, 7)`,
+		`INSERT INTO favorites_meta (id, last_modified_at, device_token, updated_at) VALUES (1, 1, 'dev', 1)`,
+		`INSERT INTO favorite_tracks (path, favorited_at) VALUES ('a.flac', 9)`,
+		`INSERT INTO playlists (id, device_token, name, last_modified_at, updated_at) VALUES ('pl', 'dev', 'Kept', 1, 1)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed %s: %v", stmt, err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, head)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v := readUserVersion(t, s.db); v != migrations[len(migrations)-1].version {
+		t.Fatalf("user_version %d", v)
+	}
+	var indexed, enriched int64
+	if err := s.db.QueryRow(`SELECT indexed_at, enriched_at FROM tracks WHERE path = 'a.flac'`).Scan(&indexed, &enriched); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != 42 || enriched != 7 {
+		t.Fatalf("indexed_at %d enriched_at %d", indexed, enriched)
+	}
+	var fav int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM favorite_tracks WHERE path = 'a.flac'`).Scan(&fav); err != nil || fav != 1 {
+		t.Fatalf("favorite %d err %v", fav, err)
+	}
+	var name string
+	if err := s.db.QueryRow(`SELECT name FROM playlists WHERE id = 'pl'`).Scan(&name); err != nil || name != "Kept" {
+		t.Fatalf("playlist %q err %v", name, err)
+	}
+	epoch, err := s.BackupEpoch(context.Background())
+	if err != nil || epoch == "" {
+		t.Fatalf("epoch %q err %v", epoch, err)
+	}
+	var revision int64
+	if err := s.db.QueryRow(`SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&revision); err != nil || revision != 1 {
+		t.Fatalf("revision %d err %v", revision, err)
+	}
+}
+
 func readUserVersion(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var v int

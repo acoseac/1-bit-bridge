@@ -97,16 +97,84 @@ func albumKeyOf(artist, album string, year int) favAlbumKey {
 	return favAlbumKey{artist: artist, album: album, year: year}
 }
 
-// ReadFavorites returns the document and collects tombstones past the
-// retention first. The collection commits before the read, so a caller
-// that then conflicts still keeps the collection.
-func (s *Store) ReadFavorites(ctx context.Context) (FavoritesDocument, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.collectFavoriteTombstonesLocked(ctx); err != nil {
-		return FavoritesDocument{}, err
+// maxFavoriteTracks and maxFavoriteAlbums match the API body caps. A
+// legacy merge adds a whole body onto what is already stored, so the
+// merged result is capped here. Existing keys are kept ahead of new ones.
+const (
+	maxFavoriteTracks = 50000
+	maxFavoriteAlbums = 10000
+)
+
+func trackKeyOfRow(t FavoriteTrackRow) favTrackKey {
+	return trackKeyOf(t.Path, t.OriginFingerprint, t.OriginPath)
+}
+
+func albumKeyOfRow(a FavoriteAlbumRow) favAlbumKey {
+	return albumKeyOf(a.AlbumArtist, a.Album, a.Year)
+}
+
+// capFavoriteRows keeps existing keys first, then incoming keys, until
+// cap. The kept row is the merged one, so an earlier stamp still wins.
+// A result already within the cap is returned as given.
+func capFavoriteRows[T any, K comparable](existing, incoming, merged []T, cap int, key func(T) K) []T {
+	if len(merged) <= cap {
+		return merged
 	}
-	return s.readFavoritesLocked(ctx)
+	have := make(map[K]T, len(merged))
+	for _, row := range merged {
+		have[key(row)] = row
+	}
+	out := make([]T, 0, cap)
+	seen := make(map[K]bool, cap)
+	take := func(rows []T) {
+		for _, row := range rows {
+			if len(out) >= cap {
+				return
+			}
+			k := key(row)
+			got, ok := have[k]
+			if !ok || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, got)
+		}
+	}
+	take(existing)
+	take(incoming)
+	return out
+}
+
+// ReadFavorites returns the document from one read-only transaction. It
+// does not take s.mu and it does not collect tombstones: a GET must not
+// queue behind a writer, and collection runs in SaveFavorites.
+func (s *Store) ReadFavorites(ctx context.Context) (FavoritesDocument, error) {
+	doc, _, err := s.ReadFavoritesIfUnchanged(ctx, nil)
+	return doc, err
+}
+
+// ReadFavoritesIfUnchanged reads the epoch and the revision first. When
+// unchanged reports that those already match what the caller holds, it
+// returns that header and true without reading favorite rows. Otherwise
+// it returns the full document from the same transaction. It does not
+// take s.mu and it does not collect tombstones.
+func (s *Store) ReadFavoritesIfUnchanged(ctx context.Context, unchanged func(epoch string, revision int64, stored bool) bool) (FavoritesDocument, bool, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return FavoritesDocument{}, false, err
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only
+	if unchanged != nil {
+		epoch, rev, stored, err := readFavoritesHeader(ctx, tx)
+		if err != nil {
+			return FavoritesDocument{}, false, err
+		}
+		if unchanged(epoch, rev, stored) {
+			return FavoritesDocument{Epoch: epoch, Revision: rev, Stored: stored}, true, nil
+		}
+	}
+	doc, err := readFavoritesDocument(ctx, tx)
+	return doc, false, err
 }
 
 // SaveFavorites applies one PUT under s.mu. A revisioned save whose base
@@ -133,7 +201,7 @@ func (s *Store) SaveFavorites(ctx context.Context, deviceToken string, save Favo
 	if err := s.collectFavoriteTombstonesLocked(ctx); err != nil {
 		return FavoritesSaveResult{}, err
 	}
-	doc, err := s.readFavoritesLocked(ctx)
+	doc, err := readFavoritesDocument(ctx, s.db)
 	if err != nil {
 		return FavoritesSaveResult{}, err
 	}
@@ -165,7 +233,7 @@ func (s *Store) SaveFavorites(ctx context.Context, deviceToken string, save Favo
 }
 
 // ListFavoriteTombstones returns stored removals, including ones past the
-// retention until the next favorites read collects them.
+// retention until the next SaveFavorites collects them.
 func (s *Store) ListFavoriteTombstones(ctx context.Context) ([]FavoriteTombstone, []FavoriteAlbumTombstone, error) {
 	tracks, err := readTrackTombstones(ctx, s.db)
 	if err != nil {
@@ -205,14 +273,46 @@ func (s *Store) ListFavoriteSyncDevices(ctx context.Context) ([]FavoriteSyncDevi
 	return out, rows.Err()
 }
 
-func (s *Store) readFavoritesLocked(ctx context.Context) (FavoritesDocument, error) {
-	epoch, err := s.BackupEpoch(ctx)
+// sqlQueryer is the read surface *sql.DB and *sql.Tx share, so one
+// favorites read can stay inside a single transaction.
+type sqlQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readEpoch(ctx context.Context, q sqlQueryer) (string, error) {
+	var epoch string
+	err := q.QueryRowContext(ctx, `SELECT epoch FROM backup_epoch WHERE id = 1`).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("manifest: backup epoch is missing")
+	}
+	return epoch, err
+}
+
+func readFavoritesHeader(ctx context.Context, q sqlQueryer) (string, int64, bool, error) {
+	epoch, err := readEpoch(ctx, q)
+	if err != nil {
+		return "", 0, false, err
+	}
+	var rev int64
+	err = q.QueryRowContext(ctx, `SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&rev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return epoch, 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, err
+	}
+	return epoch, rev, true, nil
+}
+
+func readFavoritesDocument(ctx context.Context, q sqlQueryer) (FavoritesDocument, error) {
+	epoch, err := readEpoch(ctx, q)
 	if err != nil {
 		return FavoritesDocument{}, err
 	}
 	doc := FavoritesDocument{Epoch: epoch}
 	var rev int64
-	err = s.db.QueryRowContext(ctx, `
+	err = q.QueryRowContext(ctx, `
 		SELECT revision, last_modified_at, updated_at, device_token
 		  FROM favorites_meta WHERE id = 1
 	`).Scan(&rev, &doc.LastModifiedAt, &doc.UpdatedAt, &doc.DeviceToken)
@@ -229,7 +329,7 @@ func (s *Store) readFavoritesLocked(ctx context.Context) (FavoritesDocument, err
 	doc.Stored = true
 	doc.Revision = rev
 
-	trows, err := s.db.QueryContext(ctx, `
+	trows, err := q.QueryContext(ctx, `
 		SELECT COALESCE(path, ''), COALESCE(origin_fingerprint, ''),
 		       COALESCE(origin_path, ''), COALESCE(title, ''), COALESCE(artist, ''),
 		       favorited_at
@@ -252,7 +352,7 @@ func (s *Store) readFavoritesLocked(ctx context.Context) (FavoritesDocument, err
 		return FavoritesDocument{}, err
 	}
 
-	arows, err := s.db.QueryContext(ctx, `
+	arows, err := q.QueryContext(ctx, `
 		SELECT album_artist, album, year, favorited_at
 		  FROM favorite_albums
 		 ORDER BY favorited_at DESC
@@ -272,11 +372,11 @@ func (s *Store) readFavoritesLocked(ctx context.Context) (FavoritesDocument, err
 		return FavoritesDocument{}, err
 	}
 
-	doc.Tombstones, err = readTrackTombstones(ctx, s.db)
+	doc.Tombstones, err = readTrackTombstones(ctx, q)
 	if err != nil {
 		return FavoritesDocument{}, err
 	}
-	doc.AlbumTombstones, err = readAlbumTombstones(ctx, s.db)
+	doc.AlbumTombstones, err = readAlbumTombstones(ctx, q)
 	if err != nil {
 		return FavoritesDocument{}, err
 	}
@@ -289,7 +389,7 @@ func (s *Store) readFavoritesLocked(ctx context.Context) (FavoritesDocument, err
 	return doc, nil
 }
 
-func readTrackTombstones(ctx context.Context, db *sql.DB) ([]FavoriteTombstone, error) {
+func readTrackTombstones(ctx context.Context, db sqlQueryer) ([]FavoriteTombstone, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT COALESCE(path, ''), COALESCE(origin_fingerprint, ''),
 		       COALESCE(origin_path, ''), removed_at, revision
@@ -315,7 +415,7 @@ func readTrackTombstones(ctx context.Context, db *sql.DB) ([]FavoriteTombstone, 
 	return out, rows.Err()
 }
 
-func readAlbumTombstones(ctx context.Context, db *sql.DB) ([]FavoriteAlbumTombstone, error) {
+func readAlbumTombstones(ctx context.Context, db sqlQueryer) ([]FavoriteAlbumTombstone, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT album_artist, album, year, removed_at, revision
 		  FROM favorite_album_tombstones
@@ -586,7 +686,6 @@ func mergeLegacyFavorites(doc FavoritesDocument, save FavoritesSave) FavoritesDo
 		}
 		tracks[k] = t
 	}
-	next.Tracks = tracksFromIndex(tracks)
 
 	albums := indexAlbums(doc.Albums)
 	atombs := indexAlbumTombs(doc.AlbumTombstones)
@@ -603,7 +702,8 @@ func mergeLegacyFavorites(doc FavoritesDocument, save FavoritesSave) FavoritesDo
 		}
 		albums[k] = a
 	}
-	next.Albums = albumsFromIndex(albums)
+	next.Tracks = capFavoriteRows(doc.Tracks, save.Tracks, tracksFromIndex(tracks), maxFavoriteTracks, trackKeyOfRow)
+	next.Albums = capFavoriteRows(doc.Albums, save.Albums, albumsFromIndex(albums), maxFavoriteAlbums, albumKeyOfRow)
 	return next
 }
 

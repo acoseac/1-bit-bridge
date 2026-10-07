@@ -80,7 +80,7 @@ func TestIdenticalPlaylistBodyDoesNotRevive(t *testing.T) {
 	}
 }
 
-func TestMatchingBaseDoesNotReviveADeletedPlaylist(t *testing.T) {
+func TestMatchingBaseRevivesADeletedPlaylist(t *testing.T) {
 	s := newDeviceTestStore(t)
 	ctx := context.Background()
 	p, items := samplePlaylist("pl-base", "Favorites", 100)
@@ -96,15 +96,12 @@ func TestMatchingBaseDoesNotReviveADeletedPlaylist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("matching base on a deleted playlist: %v", err)
 	}
-	if !res.Unchanged || res.LastModifiedAt != 100 {
-		t.Fatalf("result %+v, want no write", res)
+	if res.Unchanged {
+		t.Fatal("a matching base with a different body must revive")
 	}
 	got, _, err := s.GetPlaylist(ctx, p.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Fatalf("matching base revived the playlist: %+v", got)
+	if err != nil || got == nil || got.Name != "Changed" || got.Deleted {
+		t.Fatalf("revived %+v err %v", got, err)
 	}
 }
 
@@ -162,5 +159,48 @@ func TestPlaylistBaseMismatchCarriesTheStoredPlaylist(t *testing.T) {
 	got, _, err := s.GetPlaylist(ctx, p.ID)
 	if err != nil || got == nil || got.Name != "Favorites" {
 		t.Fatalf("mismatch must write nothing: %+v err %v", got, err)
+	}
+}
+
+func TestIdenticalPlaylistBodyWithAStaleBaseWritesNothing(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	p, items := samplePlaylist("pl-same", "Favorites", 1000)
+	if err := s.UpsertPlaylist(ctx, "devA", p, items); err != nil {
+		t.Fatal(err)
+	}
+	base := int64(1)
+	res, err := s.PutPlaylist(ctx, "devA", p, items, &base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Unchanged || res.LastModifiedAt != 1000 {
+		t.Fatalf("result %+v, want unchanged at 1000", res)
+	}
+}
+
+func TestTwoBridgesAcceptARePushOfTheOlderCopy(t *testing.T) {
+	ctx := context.Background()
+	a := newDeviceTestStore(t)
+	b := newDeviceTestStore(t)
+	older, items := samplePlaylist("pl-repush", "A copy", 100)
+	if err := a.UpsertPlaylist(ctx, "devA", older, items); err != nil {
+		t.Fatal(err)
+	}
+	newer, _ := samplePlaylist("pl-repush", "B copy", 5000)
+	if err := b.UpsertPlaylist(ctx, "devB", newer, items); err != nil {
+		t.Fatal(err)
+	}
+	base := int64(5000)
+	res, err := b.PutPlaylist(ctx, "devA", older, items, &base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LastModifiedAt != 5001 {
+		t.Fatalf("stamp %d, want 5001", res.LastModifiedAt)
+	}
+	got, _, err := b.GetPlaylist(ctx, older.ID)
+	if err != nil || got == nil || got.Name != "A copy" || got.LastModifiedAt != 5001 {
+		t.Fatalf("stored %+v err %v", got, err)
 	}
 }

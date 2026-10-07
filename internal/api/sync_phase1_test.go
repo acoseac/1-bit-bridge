@@ -1,11 +1,15 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	_ "modernc.org/sqlite"
 )
 
 func doReqMatch(t *testing.T, srv *Server, method, path, token, deviceToken, match, body string) *http.Response {
@@ -161,6 +165,221 @@ func TestPlaylistMatchingBaseOnTheWire(t *testing.T) {
 	bad.Body.Close()
 	if stale.Error != "base_mismatch" || stale.Server.Name != "Later" {
 		t.Fatalf("409 %+v", stale)
+	}
+}
+
+func TestMatchingBaseRevivesADeletedPlaylistOnTheWire(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "7f1c4b6e-0a43-4e5c-9d99-2b3a4f5e6d7c"
+	body := `{"id":"` + id + `","name":"Favs","lastModifiedAt":100,"items":[{"position":0,"path":"a.flac"}]}`
+	if resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := doReq(t, srv, http.MethodDelete, "/v1/playlists/"+id, token, dt, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	revive := `{"id":"` + id + `","name":"Changed","lastModifiedAt":100,"baseLastModifiedAt":100,"items":[{"position":0,"path":"a.flac"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, revive)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("revive: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	got := doReq(t, srv, http.MethodGet, "/v1/playlists/"+id, token, dt, "")
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("get after revive: %d, want 200", got.StatusCode)
+	}
+	var dto playlistDTO
+	if err := json.NewDecoder(got.Body).Decode(&dto); err != nil {
+		t.Fatal(err)
+	}
+	got.Body.Close()
+	if dto.Name != "Changed" {
+		t.Fatalf("name %q, want Changed", dto.Name)
+	}
+}
+
+func TestFavorites304DoesNotReadTheRows(t *testing.T) {
+	token, dt, srv, _, dbPath := newFavoritesHarness(t)
+	put := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":1,"tracks":[{"path":"a.flac","favoritedAt":1}],"albums":[]}`)
+	if put.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d", put.StatusCode)
+	}
+	put.Body.Close()
+	db, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE favorite_tracks`); err != nil {
+		t.Fatal(err)
+	}
+	resp := doReqMatch(t, srv, http.MethodGet, "/v1/favorites", token, dt, "*", "")
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("conditional get: %d, want 304", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func doReqAddedValidators(t *testing.T, srv *Server, path, token, deviceToken string, validators ...string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, httpTestServer(t, srv)+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if deviceToken != "" {
+		req.Header.Set("X-Device-Token", deviceToken)
+	}
+	for _, v := range validators {
+		req.Header.Add("If-None-Match", v)
+	}
+	out, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestIfNoneMatchJoinsHeaderLines(t *testing.T) {
+	token, dt, fav, _, _ := newFavoritesHarness(t)
+	put := doReq(t, fav, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":1,"tracks":[{"path":"a.flac","favoritedAt":1}],"albums":[]}`)
+	if put.StatusCode != http.StatusOK {
+		t.Fatalf("favorites put: %d", put.StatusCode)
+	}
+	put.Body.Close()
+	got := doReq(t, fav, http.MethodGet, "/v1/favorites", token, dt, "")
+	etag := got.Header.Get("ETag")
+	got.Body.Close()
+	resp := doReqAddedValidators(t, fav, "/v1/favorites", token, dt, `"nope"`, etag)
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("favorites: %d, want 304", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	ptoken, pdt, play := newPlaylistTestServer(t)
+	list := doReq(t, play, http.MethodGet, "/v1/playlists", ptoken, pdt, "")
+	petag := list.Header.Get("ETag")
+	list.Body.Close()
+	presp := doReqAddedValidators(t, play, "/v1/playlists", ptoken, pdt, `"nope"`, petag)
+	if presp.StatusCode != http.StatusNotModified {
+		t.Fatalf("playlists: %d, want 304", presp.StatusCode)
+	}
+	presp.Body.Close()
+}
+
+func TestATombstonedBaseMismatchCarriesDeleted(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "7f1c4b6e-0a43-4e5c-9d99-2b3a4f5e6d7c"
+	body := `{"id":"` + id + `","name":"Favs","lastModifiedAt":100,"items":[{"position":0,"path":"a.flac"}]}`
+	if resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := doReq(t, srv, http.MethodDelete, "/v1/playlists/"+id, token, dt, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	mismatch := `{"id":"` + id + `","name":"Changed","lastModifiedAt":100,"baseLastModifiedAt":1,"items":[{"position":0,"path":"a.flac"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, mismatch)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status %d, want 409", resp.StatusCode)
+	}
+	var stale playlistStaleResponse
+	if err := json.NewDecoder(resp.Body).Decode(&stale); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if stale.Error != "base_mismatch" || !stale.Server.Deleted {
+		t.Fatalf("409 %+v", stale)
+	}
+}
+
+func TestIdenticalPlaylistBodyWithAStaleBaseIsUnchanged(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	id := "7f1c4b6e-0a43-4e5c-9d99-2b3a4f5e6d7c"
+	body := `{"id":"` + id + `","name":"Favs","lastModifiedAt":1000,"items":[{"position":0,"path":"a.flac"}]}`
+	if resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	again := `{"id":"` + id + `","name":"Favs","lastModifiedAt":1000,"baseLastModifiedAt":1,"items":[{"position":0,"path":"a.flac"}]}`
+	resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, again)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestLegacyFavoritesPutOmitsTheBaseAndKeepsAnOmittedKey(t *testing.T) {
+	token, dt, srv, _, _ := newFavoritesHarness(t)
+	first := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":2000,"tracks":[{"path":"a.flac","favoritedAt":2000},{"path":"b.flac","favoritedAt":2000}],"albums":[]}`)
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first: %d", first.StatusCode)
+	}
+	first.Body.Close()
+	second := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":1000,"tracks":[{"path":"a.flac","favoritedAt":1000}],"albums":[]}`)
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("second: %d", second.StatusCode)
+	}
+	second.Body.Close()
+	got := doReq(t, srv, http.MethodGet, "/v1/favorites", token, dt, "")
+	var doc struct {
+		Tracks []favoriteTrackDTO `json:"tracks"`
+	}
+	if err := json.NewDecoder(got.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	got.Body.Close()
+	have := map[string]bool{}
+	for _, row := range doc.Tracks {
+		have[row.Path] = true
+	}
+	if !have["a.flac"] || !have["b.flac"] {
+		t.Fatalf("tracks %+v", doc.Tracks)
+	}
+}
+
+func TestLegacyFavoritesPutWithAnOlderStampAddsTheNewKey(t *testing.T) {
+	token, dt, srv, _, _ := newFavoritesHarness(t)
+	first := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":5000,"tracks":[{"path":"a.flac","favoritedAt":5000}],"albums":[]}`)
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first: %d", first.StatusCode)
+	}
+	first.Body.Close()
+	second := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt,
+		`{"lastModifiedAt":1000,"tracks":[{"path":"a.flac","favoritedAt":1000},{"path":"b.flac","favoritedAt":1000}],"albums":[]}`)
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("second: %d", second.StatusCode)
+	}
+	second.Body.Close()
+	got := doReq(t, srv, http.MethodGet, "/v1/favorites", token, dt, "")
+	var doc struct {
+		Tracks []favoriteTrackDTO `json:"tracks"`
+	}
+	if err := json.NewDecoder(got.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	got.Body.Close()
+	have := map[string]int64{}
+	for _, row := range doc.Tracks {
+		have[row.Path] = row.FavoritedAt
+	}
+	if have["a.flac"] != 1000 || have["b.flac"] != 1000 {
+		t.Fatalf("tracks %+v", doc.Tracks)
 	}
 }
 
