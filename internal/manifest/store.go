@@ -3292,39 +3292,10 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 
 // ----- tracks -----
 
-// UpsertTrack writes or replaces the row for t.Path. The tags are encoded
-// as JSON so the schema can evolve without column migrations during v0.
-//
-// Holds `s.mu` per the writer contract on Store.
-//
-// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
-// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
-// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
-// mtime-changed-but-clock-stable scan tick) would leave indexed_at
-// unchanged, and a client that synced at the equal timestamp would miss
-// the second mutation under the `WHERE indexed_at > since` delta-sync
-// filter. The `excluded.indexed_at` reference keeps the bind count at 5
-// (the original UPSERT shape) rather than broadening to 7.
-//
-// On success t records the version of the row it wrote (Track.rowVersion),
-// as a read would: this is the single-row writer whose Track a caller keeps,
-// and one that stamps it next (MarkEnriched) needs that version. The batch
-// writer records none; its Tracks are the scanner's, dropped once written.
-func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
-	raw, err := marshalForStorage(t)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	now := s.now().UnixNano()
-	_, err = tx.ExecContext(ctx, `
+// prepareTrackUpsert prepares the one INSERT both track upserts run.
+// first_indexed_at is written only on insert; the conflict arm leaves it.
+func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
+	return tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
@@ -3396,7 +3367,47 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- rides with: a file that reads now clears it.
 			extract_refused = excluded.extract_refused
 			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
-	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
+	`)
+}
+
+// UpsertTrack writes or replaces the row for t.Path. The tags are encoded
+// as JSON so the schema can evolve without column migrations during v0.
+//
+// Holds `s.mu` per the writer contract on Store.
+//
+// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
+// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
+// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
+// mtime-changed-but-clock-stable scan tick) would leave indexed_at
+// unchanged, and a client that synced at the equal timestamp would miss
+// the second mutation under the `WHERE indexed_at > since` delta-sync
+// filter. The `excluded.indexed_at` reference keeps the bind count at 5
+// (the original UPSERT shape) rather than broadening to 7.
+//
+// On success t records the version of the row it wrote (Track.rowVersion),
+// as a read would: this is the single-row writer whose Track a caller keeps,
+// and one that stamps it next (MarkEnriched) needs that version. The batch
+// writer records none; its Tracks are the scanner's, dropped once written.
+func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
+	raw, err := marshalForStorage(t)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.now().UnixNano()
+	stmt, err := prepareTrackUpsert(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
 		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now))
 	if err != nil {
@@ -3509,54 +3520,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// clock) advances to `existing+1`. The batch-level shared `now` is
 	// the right shape — per-track s.now() calls would burn 500 syscalls
 	// per batch on Pi-class hardware and break the deterministic test seam.
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused, first_indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-			size          = excluded.size,
-			mtime_ns      = excluded.mtime_ns,
-			tags_json     = excluded.tags_json,
-			indexed_at    = CASE
-				WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1
-				ELSE excluded.indexed_at
-			END,
-			enriched_at   = 0,
-			-- See UpsertTrack: missing_count reset is unconditional on
-			-- every confirm so a stable library can't accumulate stale
-			-- counter increments across scans.
-			missing_count = 0,
-			-- Clear the premium-cover version when the artworkMBID changes (it
-			-- belonged to the prior MBID); keep it when unchanged. Mirrors
-			-- UpsertTrack — see its docblock. SET RHS reads the pre-update row.
-			artwork_version = CASE
-				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
-				     IS json_extract(tracks.tags_json, '$.artworkMBID')
-				THEN tracks.artwork_version ELSE NULL
-			END,
-			-- v25 format-fact columns — mirrors UpsertTrack.
-			sample_rate     = excluded.sample_rate,
-			bits_per_sample = excluded.bits_per_sample,
-			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec,
-			-- v43 compression accelerator — same discipline as the four above.
-			compression     = excluded.compression,
-			-- extractor_version stamped on every upsert (constant per build).
-			-- The excluded.extractor_version assignment is MANDATORY: without
-			-- it a re-extracted (conflict) row keeps its stale stamp and would
-			-- re-extract on every subsequent scan.
-			-- v31 dupe stamps deliberately untouched — mirrors UpsertTrack.
-			extractor_version = excluded.extractor_version,
-			-- audio_md5 unconditional on a changed row — mirrors UpsertTrack.
-			audio_md5 = excluded.audio_md5,
-			-- v49 folder-art key — mirrors UpsertTrack.
-			folder_art_key = excluded.folder_art_key,
-			-- v50 refusal marker — mirrors UpsertTrack.
-			extract_refused = excluded.extract_refused
-			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
-	`)
+	stmt, err := prepareTrackUpsert(ctx, tx)
 	if err != nil {
 		return err
 	}

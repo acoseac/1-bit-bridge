@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-func setStoreClock(s *Store, at time.Time) {
-	s.now = func() time.Time { return at }
-}
-
 func firstIndexedColumn(t *testing.T, s *Store, path string) (int64, int64) {
 	t.Helper()
 	var first sql.NullInt64
@@ -34,7 +30,7 @@ func TestV53BackfillCopiesTheStoredMtimeAndLeavesTheCursor(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	seed := time.Date(2018, 1, 2, 3, 4, 5, 0, time.UTC)
-	setStoreClock(s, seed)
+	clockAt(s, seed)
 	for _, path := range []string{"past.flac", "zero.flac", "future.flac"} {
 		err := s.UpsertTrack(ctx, &Track{Path: path, Size: 1, ModTime: seed})
 		if err != nil {
@@ -58,7 +54,7 @@ func TestV53BackfillCopiesTheStoredMtimeAndLeavesTheCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	migrated := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
-	setStoreClock(s, migrated)
+	clockAt(s, migrated)
 	if err := s.migrate(); err != nil {
 		t.Fatal(err)
 	}
@@ -81,13 +77,13 @@ func TestAnUpdateOfTheSamePathLeavesTheFirstIndexedDate(t *testing.T) {
 	ctx := context.Background()
 	first := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
 	later := time.Date(2022, 8, 9, 10, 11, 12, 0, time.UTC)
-	setStoreClock(s, first)
+	clockAt(s, first)
 	path := "Artist/Album/song.flac"
 	err := s.UpsertTrack(ctx, &Track{Path: path, Size: 4, ModTime: first})
 	if err != nil {
 		t.Fatal(err)
 	}
-	setStoreClock(s, later)
+	clockAt(s, later)
 	again := &Track{Path: path, Size: 9, ModTime: later, Title: "Retitled"}
 	again.carryFirstIndexedNS = later.UnixNano()
 	if err := s.UpsertTrack(ctx, again); err != nil {
@@ -109,7 +105,7 @@ func TestANewPathCopiesTheDateOnlyWhenTheCallerPassesIt(t *testing.T) {
 	ctx := context.Background()
 	carried := time.Date(2011, 2, 3, 4, 5, 6, 0, time.UTC)
 	now := time.Date(2023, 7, 8, 9, 10, 11, 0, time.UTC)
-	setStoreClock(s, now)
+	clockAt(s, now)
 	with := &Track{Path: "kept.flac", Size: 1, ModTime: now}
 	with.carryFirstIndexedNS = carried.UnixNano()
 	without := &Track{Path: "fresh.flac", Size: 1, ModTime: now}
@@ -133,7 +129,7 @@ func TestTheExtractorStampLeavesTheFirstIndexedDate(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	first := time.Date(2016, 4, 5, 6, 7, 8, 0, time.UTC)
-	setStoreClock(s, first)
+	clockAt(s, first)
 	path := "stamped.flac"
 	err := s.UpsertTrack(ctx, &Track{Path: path, Size: 2, ModTime: first})
 	if err != nil {
@@ -153,7 +149,7 @@ func TestFirstIndexedAtIsOmittedUntilTheRowHasOneAndIsNotStoredInTags(t *testing
 	s := openTestStore(t)
 	ctx := context.Background()
 	when := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
-	setStoreClock(s, when)
+	clockAt(s, when)
 	row := &Track{Path: "a.flac", Size: 1, ModTime: when, Title: "A"}
 	row.FirstIndexedAt = &when
 	if err := s.UpsertTrack(ctx, row); err != nil {
@@ -203,18 +199,18 @@ func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T)
 	ctx := context.Background()
 	rootA := time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
 	rootB := time.Date(2005, 1, 1, 0, 0, 0, 0, time.UTC)
-	setStoreClock(s, rootA)
+	clockAt(s, rootA)
 	err := s.UpsertTrack(ctx, &Track{Path: "RootA/Album/a.flac", Size: 1, ModTime: rootA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	setStoreClock(s, rootB)
+	clockAt(s, rootB)
 	err = s.UpsertTrack(ctx, &Track{Path: "RootB/Album/a.flac", Size: 1, ModTime: rootB})
 	if err != nil {
 		t.Fatal(err)
 	}
 	routedAt := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
-	setStoreClock(s, routedAt)
+	clockAt(s, routedAt)
 	err = s.UpsertTrack(ctx, &Track{Path: "routed/song.flac", Size: 1, ModTime: routedAt})
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +248,7 @@ func TestASecondRecordAfterTheWipeKeepsTheCarry(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	when := time.Date(2012, 2, 2, 0, 0, 0, 0, time.UTC)
-	setStoreClock(s, when)
+	clockAt(s, when)
 	err := s.UpsertTrack(ctx, &Track{Path: "Artist/Album/song.flac", Size: 1, ModTime: when})
 	if err != nil {
 		t.Fatal(err)
@@ -341,28 +337,6 @@ func TestCarryKeyIsTheRootAndThePathWithinIt(t *testing.T) {
 	if _, ok = carryKey("noslash.flac", true, "Music"); ok {
 		t.Fatal("a path outside the survivor was carried")
 	}
-}
-
-func explainPlan(t *testing.T, s *Store, query string, args ...any) string {
-	t.Helper()
-	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+query, args...)
-	if err != nil {
-		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, detail)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return strings.Join(out, " | ")
 }
 
 func TestTheNullDateFillUsesThePartialIndex(t *testing.T) {

@@ -1158,8 +1158,8 @@ lost my library."
   `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`,
   `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`.
 - **`tracks.first_indexed_at` is set once, on insert, and an update of the
- same path never moves it** (2026-10-07, sync phase 3; generation
- 2026-10-08; invariant carry key the same day). Migration v53 adds the
+ same path never moves it** ( 2026-10-07, sync phase 3; generation, the invariant carry key,
+ and review round 3 on 2026-10-08). Migration v53 adds the
  column and `first_indexed_carry`. Every open fills remaining NULLs from
  the stored `mtime_ns` (a zero or future mtime becomes the open's clock)
  without assigning `indexed_at`; v54 adds `generation`, `target_multi`,
@@ -1188,7 +1188,15 @@ lost my library."
  generation it loaded, and only when the library is already in the saved
  form. A subtree scan looks each insert up and does not clear. The
  subtree fold is one `unicode_lower` lookup on
- `idx_tracks_path_unicode_lower`. The null-date fill does not order its
+ `idx_tracks_path_unicode_lower`. The in-memory date map and the
+ case-only rename pairing fold with `pathFold`, the same case-fold-then-NFC
+ `unicode_lower` applies, so a decomposed name and its precomposed
+ spelling take one date on a full scan and a subtree scan. A wipe that
+ fails drops the generation just recorded. A save that fails after the
+ wipe retargets that generation at the form the library still has, and
+ the compensating scan copies the dates and clears them; a cancelled
+ request is that failure. The carry upsert is prepared once for the
+ snapshot. Both track upserts run one statement. The null-date fill does not order its
  rowid select, which is what lets that select use
  `idx_tracks_first_indexed_at_null`. A path with no recorded date uses
  the scan clock. UPnP-routed rows are not in the snapshot. A folder move
@@ -1228,7 +1236,12 @@ lost my library."
  `TestAddingARootKeepsTheOldFilesDateAndDatesTheNewRootAtTheScan`,
  `TestCollapsingSeveralRootsKeepsTheSurvivorsOwnDate`,
  `TestLibraryAddRecordsTheExistingRootsFolderName`,
- `TestLibraryRemoveCollapseKeepsTheSurvivorsDate`.)
+ `TestLibraryRemoveCollapseKeepsTheSurvivorsDate`,
+ `TestADecomposedAlbumTakesThePrecomposedDate`,
+ `TestASaveFailureAfterAddingARootDropsTheSavedDates`,
+ `TestASaveFailureAfterCollapsingRootsDropsTheSavedDates`,
+ `TestACancelledWipeDropsTheSavedDates`,
+ `TestACancelledSaveAfterTheWipeDropsTheSavedDates`.)
 - **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
   the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
   Both terms are load-bearing: the clock term anchors to wall-clock because the

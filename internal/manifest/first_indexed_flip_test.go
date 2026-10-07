@@ -4,35 +4,16 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 )
-
-var (
-	reproT0 = time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
-	reproT1 = time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	reproT2 = time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
-	reproT3 = time.Date(2022, 6, 7, 8, 9, 10, 0, time.UTC)
-)
-
-func clockAt(s *Store, at time.Time) { s.now = func() time.Time { return at } }
 
 // A full scan whose roots snapshot predates the flip finishes after the
 // record and the wipe. It walks the previous form, so it leaves the
 // saved dates for the scan that follows. The post-flip path keeps the
 // date from before the flip.
 func TestAnInFlightScanLeavesTheCarryForThePostFlipScan(t *testing.T) {
-	ctx := context.Background()
-	root, other := t.TempDir(), t.TempDir()
-	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
-	store, sc := newScanFixture(t, root)
-	clockAt(store, reproT1)
-	scanOnce(t, sc, "first")
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	root, store, sc := scanSeededAlbum(t, reproT1)
+	other := t.TempDir()
+	recordAndWipe(t, store, false, filepath.Base(root))
 	clockAt(store, reproT2)
 	scanOnce(t, sc, "in-flight scan over the old roots completes")
 	sc.SetRoots([]string{root, other})
@@ -48,19 +29,10 @@ func TestAnInFlightScanLeavesTheCarryForThePostFlipScan(t *testing.T) {
 // It does not inherit the date of a file at the same relative path in
 // the root that was already there.
 func TestAnAddedRootDoesNotInheritTheOldRootsDate(t *testing.T) {
-	ctx := context.Background()
-	root, other := t.TempDir(), t.TempDir()
-	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
-	store, sc := newScanFixture(t, root)
-	clockAt(store, reproT1)
-	scanOnce(t, sc, "first")
+	root, store, sc := scanSeededAlbum(t, reproT1)
+	other := t.TempDir()
 	seedTrackDirs(t, filepath.Join(other, "Artist", "Album"))
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	recordAndWipe(t, store, false, filepath.Base(root))
 	sc.SetRoots([]string{root, other})
 	clockAt(store, reproT2)
 	scanOnce(t, sc, "post-add scan")
@@ -73,7 +45,6 @@ func TestAnAddedRootDoesNotInheritTheOldRootsDate(t *testing.T) {
 // A collapse keeps the surviving root's own date. A file that lived
 // only under the removed root does not hand its earlier date across.
 func TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots(t *testing.T) {
-	ctx := context.Background()
 	a, b := t.TempDir(), t.TempDir()
 	seedTrackDirs(t, filepath.Join(b, "Artist", "Album"))
 	store, sc := newScanFixture(t, a)
@@ -86,12 +57,7 @@ func TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots(t *testing.T) {
 	if got := firstIndexedTime(t, store, filepath.Base(a)+"/Artist/Album/song.flac"); !got.Equal(reproT1) {
 		t.Fatalf("setup: a dated %s", got)
 	}
-	if _, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(a)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	recordAndWipe(t, store, true, filepath.Base(a))
 	sc.SetRoots([]string{a})
 	clockAt(store, reproT2)
 	scanOnce(t, sc, "collapse scan")

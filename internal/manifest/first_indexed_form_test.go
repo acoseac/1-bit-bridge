@@ -10,35 +10,17 @@ import (
 // the form it started in. The saved dates must still apply, and the scan
 // that restores that form must clear them.
 func TestAFlipBackBeforeAnyRescanKeepsTheDate(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
-	store, sc := newScanFixture(t, root)
-	clockAt(store, reproT1)
-	scanOnce(t, sc, "first")
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	root, store, sc := scanSeededAlbum(t, reproT1)
+	base := filepath.Base(root)
+	recordAndWipe(t, store, false, base)
+	recordAndWipe(t, store, true, base)
 	clockAt(store, reproT3)
 	scanOnce(t, sc, "single-root rescan")
 	got := firstIndexedTime(t, store, "Artist/Album/song.flac")
 	if !got.Equal(reproT1) {
 		t.Fatalf("flip back dated %s, want %s", got, reproT1)
 	}
-	var n int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM first_indexed_carry`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
+	if n := carryCount(t, store); n != 0 {
 		t.Fatalf("the restored scan left %d saved dates", n)
 	}
 }
@@ -56,23 +38,13 @@ func TestACollapseDuringThePostAddRescanKeepsBothAlbums(t *testing.T) {
 	store, sc := newScanFixture(t, root)
 	clockAt(store, reproT1)
 	scanOnce(t, sc, "first")
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, base); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	recordAndWipe(t, store, false, base)
 	sc.SetRoots([]string{root, other})
 	clockAt(store, reproT2)
 	if _, err := sc.ScanSubtree(ctx, filepath.Join(root, "Artist", "X")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordFirstIndexedCarry(ctx, true, base); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	recordAndWipe(t, store, true, base)
 	sc.SetRoots([]string{root})
 	clockAt(store, reproT3)
 	scanOnce(t, sc, "collapse scan")
@@ -86,18 +58,8 @@ func TestACollapseDuringThePostAddRescanKeepsBothAlbums(t *testing.T) {
 // A config save that fails after the wipe runs its compensating scan in
 // the form the library still has. That scan must keep the saved date.
 func TestACompensatingScanAfterAFailedSaveKeepsTheDate(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
-	store, sc := newScanFixture(t, root)
-	clockAt(store, reproT1)
-	scanOnce(t, sc, "first")
-	if _, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		t.Fatal(err)
-	}
+	root, store, sc := scanSeededAlbum(t, reproT1)
+	recordAndWipe(t, store, false, filepath.Base(root))
 	clockAt(store, reproT2)
 	scanOnce(t, sc, "compensating scan")
 	got := firstIndexedTime(t, store, "Artist/Album/song.flac")

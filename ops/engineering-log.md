@@ -37652,3 +37652,24 @@ drains. The round-1 repro tests were renamed to the behaviour they guard
 `TestACompensatingScanAfterAFailedSaveKeepsTheDate`. The plans are
 `TestTheNullDateFillUsesThePartialIndex` and
 `TestFoldedFirstIndexedUsesThePathIndex`.
+
+## 2026-10-08 — sync phase 3 review round 3
+
+A decomposed album name took the old date on a subtree insert and the
+scan clock on a full scan. The subtree lookup folds through
+`unicode_lower`, which lowercases and then composes to NFC. The
+in-memory date map and the case-only rename pairing folded case only.
+`pathFold` is that function, and all three sites use it.
+`TestADecomposedAlbumTakesThePrecomposedDate` walks both spellings
+through a subtree scan and a full scan.
+
+Dates recorded for a root flip that does not finish were never cleared.
+A wipe that fails, including a cancelled request, deletes the generation
+just recorded. A save that fails after the wipe points that generation
+at the form the library still has, so the compensating scan copies the
+dates and clears them. The admin add and remove handlers and
+`bridge library add` / `library remove` do both. The carry upsert is
+prepared once per snapshot. Both track upserts run one statement, so
+the insert-only date is not written twice. The repeated album setup in
+the first-indexed tests lives in one fixture file; every test asserts
+what it asserted before.
