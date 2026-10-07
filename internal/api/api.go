@@ -1804,10 +1804,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 31 covers the current maximum
+	// appends in lex order. Capacity 32 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
-	// favorites + favoritesRevisions + keyTempo + loudness + lyrics +
+	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + loudness + lyrics +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
@@ -1817,7 +1817,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 31)
+	feats := make([]string, 0, 32)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1896,9 +1896,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// a deploy without it advertises honestly and iOS hides the backup
 	// toggle. `favoritesRevisions` advertises the revision compare-and-swap,
 	// the tombstones and the favorites ETag. Alpha-sorted
-	// favorites < favoritesRevisions < keyTempo.
+	// favorites < favoritesRevisions < firstIndexedAt < keyTempo.
 	if s.favoritesStore != nil {
 		feats = append(feats, "favorites", "favoritesRevisions")
+	}
+	// firstIndexedAt is a library fact. It is advertised once every
+	// track row has a date, including on a demo bridge. The count is
+	// cached with the other health counts: ready sticks for the
+	// process, a miss is rechecked, and a timeout is not stored.
+	if s.healthCounts.firstIndexedAtReady(r.Context(), s.manifest) {
+		feats = append(feats, "firstIndexedAt")
 	}
 	if s.analysisActive() {
 		// `keyTempo` advertises that this bridge fills Track.keyRoot /

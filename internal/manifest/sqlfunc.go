@@ -73,20 +73,19 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 	if len(args) != 1 {
 		return nil, fmt.Errorf("unicode_lower: expected 1 argument, got %d", len(args))
 	}
-	caser := cases.Lower(language.Und)
 	switch v := args[0].(type) {
 	case nil:
 		// SQLite NULL → NULL, matching LOWER()'s pass-through.
 		return nil, nil
 	case string:
-		return NFCCompose(caser.String(v)), nil
+		return pathFold(v), nil
 	case []byte:
 		// LOWER() accepts text that arrived as a BLOB and returns
 		// it lowered; mirror that for compat. The folded form is
 		// returned as a string (driver.Value supports both, and
 		// string is the canonical representation for the indexed
 		// expression `unicode_lower(path)` on a TEXT column).
-		return NFCCompose(caser.String(string(v))), nil
+		return pathFold(string(v)), nil
 	default:
 		// Non-text input → nil, matching SQLite LOWER()'s
 		// behaviour on numeric / blob inputs that aren't text-
@@ -95,6 +94,14 @@ func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.
 		// query-time runtime fault.
 		return nil, nil
 	}
+}
+
+// pathFold is the fold unicode_lower applies: a Unicode case fold,
+// then NFC. The scanner's in-memory date map and its case-only
+// rename pairing use it, so they agree with the subtree lookup,
+// which asks the SQL function.
+func pathFold(s string) string {
+	return NFCCompose(cases.Lower(language.Und).String(s))
 }
 
 // NFCCompose NFC-composes a case-folded lookup key. Ill-formed UTF-8

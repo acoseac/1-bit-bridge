@@ -437,6 +437,8 @@ func TestHealthAdvertisesThePhase1Keys(t *testing.T) {
 	if !seen["favoritesRevisions"] {
 		t.Fatalf("features %v", hr.Features)
 	}
+	// firstIndexedAt is a manifest fact. This server has no manifest,
+	// so the key stays absent here.
 	if seen["playlistListRevision"] || seen["syncEvents"] || seen["firstIndexedAt"] {
 		t.Fatalf("favorites-only bridge advertised %v", hr.Features)
 	}
