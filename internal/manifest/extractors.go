@@ -519,7 +519,28 @@ var Ext = map[string]bool{
 // full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
 // other row re-extracts byte-identical and rides the version-stamp leg; SACD
 // ISO virtual rows re-expand as on every bump.
-const ExtractorVersion = 22
+//
+// v23 — explicit content reaches the wire (`Track.Explicit`). Any signal
+// wins: an MP4 `rtng` of 1 or 4 (dhowden's atom map skips it), ITUNESADVISORY
+// or EXPLICIT as an MP4 freeform atom of any mean, a Vorbis comment or an
+// ID3v2 TXXX, or a marker on the raw track title. The text values are "1",
+// "4", "true", "yes", "explicit" and "e" after trim and case-folding. A
+// present `rtng` of 0 or 2 does not cancel another signal. The field name is
+// exact, ignoring case; ITUNES_ADVISORY is not read. Within one field the
+// first value wins: a FLAC comment block is read in order because dhowden's
+// map keeps the last. A title marker is [E], [Explicit] or [Explicit Version]
+// anywhere, or a title that ends with (Explicit) or (Explicit Version). That
+// title is the title tag when one was read, and the filename stem when it
+// was not. Clean forms and the bare word are not explicit, and neither is an
+// album title. A UPnP row stays unset: the client applies the same title
+// markers to the DIDL title. Nothing shipped at 23 before the title markers,
+// the filename stem and the first Vorbis value were included, so the v23
+// re-extract is the backfill. Only those rows change: a row the tags or the
+// title now mark explicit takes the
+// full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
+// other row re-extracts byte-identical and rides the version-stamp leg; SACD
+// ISO virtual rows re-expand as on every bump. ProtocolVersion stays 1.
+const ExtractorVersion = 23
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -750,6 +771,27 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 		} else if genre != "" {
 			t.Genre = genre
 		}
+	}
+	// Freeform ITUNESADVISORY and EXPLICIT, any mean. dhowden keeps a
+	// `----` only for com.apple.iTunes and two other means, so a walk
+	// here is what sees the rest. The first value of each name wins;
+	// a walk that fails leaves the title marker populate already set.
+	if advisory, explicitField, err := extractMP4FreeformAdvisory(f); err != nil {
+		scanLogger.Warn("mp4 freeform-advisory walk failed; the other explicit signals stand",
+			"path", trackLogPath(absPath, t), "err", err)
+	} else if ExplicitVerdict(ExplicitSignals{ItunesAdvisory: advisory, Explicit: explicitField}) {
+		t.Explicit = true
+	}
+	// The iTunes content rating (`rtng`), which dhowden does not read.
+	// 1 or 4 is one more explicit signal (ExplicitVerdict). A present 0
+	// or 2 does not cancel a freeform, an EXPLICIT field or a title
+	// marker. Absence is not an error; a walk that fails leaves the
+	// other signals.
+	if rating, found, err := extractMP4ContentRating(f); err != nil {
+		scanLogger.Warn("mp4 content-rating walk failed; the other explicit signals stand",
+			"path", trackLogPath(absPath, t), "err", err)
+	} else if found && ExplicitVerdict(ExplicitSignals{Rtng: &rating}) {
+		t.Explicit = true
 	}
 	return nil
 }
@@ -986,10 +1028,14 @@ func readDhowdenTags(f io.ReadSeeker, absPath string, t *Track, ec *ExtractConte
 	m, err := tag.ReadFrom(buffered)
 	release()
 	if errors.Is(err, tag.ErrNoTagsFound) {
-		// No embedded tags — but a folder.jpg next to the file is
-		// still possible. Run extractLocalArtwork with m=nil so the
-		// embedded branch is skipped and only the folder-level
-		// fallback fires.
+		// No embedded tags. A marker on the filename stem still counts;
+		// fillFromPath stored that stem before this read.
+		if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
+			t.Explicit = true
+		}
+		// A folder.jpg next to the file is still possible. Run
+		// extractLocalArtwork with m=nil so the embedded branch is
+		// skipped and only the folder-level fallback fires.
 		if ec != nil && ec.ArtworkCacheDir != "" {
 			extractLocalArtwork(absPath, t, nil, ec)
 		}
@@ -1167,6 +1213,29 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 				t.AlbumArtist = "Various Artists"
 			}
 		}
+		// Explicit content: ITUNESADVISORY and EXPLICIT, plus a marker on
+		// the title. Vorbis comments answer through the raw map here
+		// (dhowden keeps the last duplicate; the FLAC comment walk
+		// replaces that with the first value). An ID3v2 TXXX of either
+		// description answers through the named values (neither has a
+		// frame of its own). Each field is looked up on its own, so the
+		// first value of one cannot hide the other. Title is the tag
+		// when one was read, otherwise the filename stem fillFromPath
+		// already stored. An MP4 file's freeform atoms are not read
+		// here: dhowden keeps a
+		// `----` only for a few means, and extractMP4 walks every mean
+		// itself. A present `rtng` of 1 or 4 is OR-ed in there too, and
+		// never clears a signal already set.
+		var advisory, explicitField string
+		if m.Format() != tag.MP4 {
+			advisory, _ = namedValueOf(raw, named, "itunesadvisory")
+			explicitField, _ = namedValueOf(raw, named, "explicit")
+		}
+		t.Explicit = ExplicitVerdict(ExplicitSignals{
+			ItunesAdvisory: advisory,
+			Explicit:       explicitField,
+			Title:          explicitTrackTitle(m.Title(), t.Title),
+		})
 		// Pass BOTH underscore-joined ("musicbrainz_trackid") AND
 		// space-derived ("musicbrainz_track_id") variants — they
 		// normalise differently and both are valid spellings (a Vorbis
@@ -1227,6 +1296,8 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 				t.BPM = &n
 			}
 		}
+	} else if titleMarksExplicit(explicitTrackTitle("", t.Title)) {
+		t.Explicit = true
 	}
 }
 
@@ -1536,8 +1607,16 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 				return
 			}
 			var artists, albumArtists []string
+			var advisory, explicitField, tagTitle string
+			var sawAdvisory, sawExplicit, sawTitle bool
 			for _, tg := range tags {
 				switch strings.ToLower(tg[0]) {
+				case "title":
+					// The first non-empty TITLE. dhowden's map keeps the last.
+					if !sawTitle && strings.TrimSpace(tg[1]) != "" {
+						tagTitle = tg[1]
+						sawTitle = true
+					}
 				case "artist":
 					if v := strings.TrimSpace(tg[1]); v != "" {
 						artists = append(artists, v)
@@ -1564,6 +1643,20 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 						albumArtists = append(albumArtists, v)
 					}
 				}
+				// The first non-empty value of each field. dhowden's map
+				// keeps the last, so ITUNESADVISORY=0 then =1 is not explicit.
+				switch explicitFieldName(tg[0]) {
+				case "advisory":
+					if !sawAdvisory && strings.TrimSpace(tg[1]) != "" {
+						advisory = tg[1]
+						sawAdvisory = true
+					}
+				case "explicit":
+					if !sawExplicit && strings.TrimSpace(tg[1]) != "" {
+						explicitField = tg[1]
+						sawExplicit = true
+					}
+				}
 			}
 			// Override whenever we found at least one non-empty entry
 			// in the raw block. Catches the edge case where dhowden
@@ -1582,6 +1675,15 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			if len(albumArtists) > 0 {
 				t.AlbumArtist = strings.Join(albumArtists, "; ")
 			}
+			// The comment block is the in-order reader. Title is the
+			// block's first TITLE when it has one, otherwise the
+			// path-derived title. A walk that failed above leaves the
+			// verdict populate recorded.
+			t.Explicit = ExplicitVerdict(ExplicitSignals{
+				ItunesAdvisory: advisory,
+				Explicit:       explicitField,
+				Title:          explicitTrackTitle(tagTitle, t.Title),
+			})
 			return
 		}
 		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) — SEEK

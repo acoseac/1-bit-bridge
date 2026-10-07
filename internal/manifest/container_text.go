@@ -68,6 +68,21 @@ func (c containerText) applyUnder(t *Track, id3 tag.Metadata) {
 	}
 	if c.title != "" && tagTitle == "" {
 		t.Title = c.title
+		// The container title replaces the path guess. Recompute so a
+		// marker on the filename does not stay once a title was read,
+		// and a marker on this title does count.
+		var advisory, explicitField string
+		if id3 != nil && id3.Raw() != nil {
+			raw := id3.Raw()
+			named := id3v2NamedValues(raw)
+			advisory, _ = namedValueOf(raw, named, "itunesadvisory")
+			explicitField, _ = namedValueOf(raw, named, "explicit")
+		}
+		t.Explicit = ExplicitVerdict(ExplicitSignals{
+			ItunesAdvisory: advisory,
+			Explicit:       explicitField,
+			Title:          c.title,
+		})
 	}
 	if c.artist != "" && tagArtist == "" {
 		t.Artist = c.artist

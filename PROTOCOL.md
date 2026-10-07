@@ -390,6 +390,23 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - A bridge upgraded to ExtractorVersion 17 re-extracts every file once. Flagged tracks gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
 - An app that predates the field consumes that delta without it. The iOS app therefore reaches back to a fixed date, once per bridge, on its first sync after gaining the field, so the flag arrives whichever side updated first.
 
+#### Explicit content — `explicit` (additive, since ExtractorVersion 23)
+
+```json
+{ "path": "Music/Band/Album/01.m4a", "size": 12345678, "mtime": "…", "artist": "Band", "album": "Album", "explicit": true }
+```
+
+`explicit` is `true` when any of the file's own signals says so. A clean value does not cancel another signal.
+
+- an MP4/M4A/ALAC `rtng` atom whose integer is `1` or `4` (`2` is clean, `0` or a missing atom is none). A present `0` or `2` does not hide another signal in the same file;
+- `ITUNESADVISORY` or `EXPLICIT`, the field name matched exactly, ignoring case, with no separator folding (`ITUNES_ADVISORY` is not that field): the MP4 freeform atom `----:<any mean>:ITUNESADVISORY` or `----:<any mean>:EXPLICIT`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` of that description (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). Within one field the first value wins. A FLAC comment block, and an Ogg FLAC stream's header packets, are read in order, because the tag map keeps the last duplicate. Ogg Vorbis and Opus still take that map's last value. After trim and case-folding the value is explicit when it is exactly `1`, `4`, `true`, `yes`, `explicit` or `e`. `0`, `2`, `false`, `no`, `clean`, an empty value and `01` are not;
+- a marker on the raw track title, before any display cleaning: `[E]`, `[Explicit]` or `[Explicit Version]` anywhere in the title, or a title that ends with `(Explicit)` or `(Explicit Version)`. The match is case-insensitive. The title is the title tag (`©nam`, Vorbis `TITLE`, ID3v2 `TIT2`) when one was read, and the filename stem (the name without its extension) when it was not. `[Clean]`, `(Clean)`, `[Clean Version]`, `(Clean Version)`, the word Explicit with no brackets, and a marker on the album title are not.
+
+`ITUNESRATING` and `rating` are not read. A UPnP/DIDL row has no such tag and omits the field; the client applies the same title markers to the DIDL title. A row from a bridge that predates the field also omits it, and the client applies the markers to the raw wire title: the field being true, or a marker on that title.
+
+- **Only `true` is meaningful.** The field is `omitempty`, so a clean track and a track from a bridge that predates the field look the same. Absence is not a claim about the title; the client still checks the raw title.
+- A bridge at ExtractorVersion 23 re-extracts every file once. Tracks a signal now marks explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`. The widened rule (any signal, the title markers, a marker on the filename stem, and the first Vorbis value) is part of that same version: nothing shipped at 23 before it.
+
 #### DSD specifics
 
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
