@@ -37618,3 +37618,10 @@ that start, so the event moves forward when surviving rows are older
 and still fires when every track is gone. A client whose cursor
 predates the reset still sees `deltaIncomplete`. The sentences above
 that stop the watermark at the two MAXes are that earlier reading.
+
+The favorites tombstone collection reads the new revision after its
+own commit, on the request context. A cancel that lands in the commit
+hook — after the transaction is marked done, before that read — leaves
+the revision at 3 and publishes nothing (`notes` stay `[1 2]`). The
+read uses `context.WithoutCancel`. The save path already holds the
+revision and does not re-read it.

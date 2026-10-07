@@ -2101,6 +2101,9 @@ lost my library."
   suppression). A rolled-back write, a `409`, and a no-op publish
   nothing. Tombstone collection commits before the favorites
   compare-and-swap and publishes its own revision when it removed a row.
+  That revision is read with `context.WithoutCancel`: the request may
+  already be cancelled once the commit has returned, and a cancelled
+  read drops the event while the revision has moved.
   `library.changed` is suppressed while health's
   `scanState.isScanning` is true (`Scanner.AdvertisedScanning`:
   `IsScanning` and not stalled, not `ScanInFlight`: a subtree scan stays
@@ -2128,6 +2131,7 @@ lost my library."
   that holds the hooks.
   (`TestFavoritesRevisionPutPublishesTheNewRevisionAfterCommit`,
   `TestFavoriteTombstoneCollectionPublishesAfterItsCommit`,
+  `TestFavoriteCollectionPublishesAfterItsRequestIsCancelled`,
   `TestPlaylistPutDeleteRestoreAndCoverPublishAfterCommit`,
   `TestAnIdenticalPlaylistBodyAndAMismatchPublishNothing`,
   `TestLibraryChangedIsSuppressedWhileAScanRunsAndEmittedOnceAtTheEnd`,

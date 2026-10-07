@@ -4,11 +4,34 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
+	"modernc.org/sqlite"
 )
+
+// cancelOnNextCommit, when set, is called from the sqlite commit hook and
+// then cleared. The favorites collection reads its revision after commit on
+// the request context; this is how that read is the one the cancel reaches.
+var cancelOnNextCommit atomic.Pointer[context.CancelFunc]
+
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
+		hook, ok := conn.(sqlite.HookRegisterer)
+		if !ok {
+			return nil
+		}
+		hook.RegisterCommitHook(func() int32 {
+			if cancel := cancelOnNextCommit.Swap(nil); cancel != nil {
+				(*cancel)()
+			}
+			return 0
+		})
+		return nil
+	})
+}
 
 func expectLibraryNote(t *testing.T, notes *syncNotes, what string) {
 	t.Helper()
@@ -380,4 +403,56 @@ func TestDeletingEveryTrackPublishesLibraryChanged(t *testing.T) {
 		t.Fatalf("deleting every track published nothing (deltaIncomplete=%v deleted=%d tracks=%d)",
 			m.DeltaIncomplete, len(m.Deleted), len(m.Tracks))
 	}
+}
+
+func seedCollectableTombstone(t *testing.T, s *Store) {
+	t.Helper()
+	now := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	tracks, _ := sampleFavorites()
+	ctx := context.Background()
+	res, err := s.SaveFavorites(ctx, "dev", FavoritesSave{
+		BaseRevision: rev(0), Tracks: tracks[:1],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveFavorites(ctx, "dev", FavoritesSave{
+		BaseRevision: rev(res.Revision),
+		Tombstones:   []FavoriteTombstone{{Path: tracks[0].Path}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(91 * 24 * time.Hour)
+}
+
+func TestFavoriteCollectionPublishesAfterItsRequestIsCancelled(t *testing.T) {
+	s, _, notes := openNotifyingStore(t)
+	seedCollectableTombstone(t, s)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		cancelOnNextCommit.Store(nil)
+	})
+	cancelOnNextCommit.Store(&cancel)
+
+	s.mu.Lock()
+	err := s.collectFavoriteTombstonesLocked(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rev int64
+	if err := s.db.QueryRowContext(context.Background(), `SELECT revision FROM favorites_meta WHERE id = 1`).Scan(&rev); err != nil {
+		t.Fatal(err)
+	}
+	if rev != 3 {
+		t.Fatalf("collection did not commit: revision %d", rev)
+	}
+	for _, n := range notes.fav {
+		if n == 3 {
+			return
+		}
+	}
+	t.Fatalf("collection committed at revision 3 and published nothing: %v", notes.fav)
 }
