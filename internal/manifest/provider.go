@@ -381,3 +381,14 @@ func (p *Provider) SearchAvailable(ctx context.Context) (bool, error) {
 func (p *Provider) SearchServedTracks(ctx context.Context, query string, limit int) ([]TrackHit, error) {
 	return p.store.SearchServedTracks(ctx, query, limit)
 }
+
+// FirstIndexedAtReady reports whether every track row has a first-indexed
+// date, which is when /v1/health may advertise the key. A nil store or a
+// query error answers false.
+func (p *Provider) FirstIndexedAtReady(ctx context.Context) bool {
+	if p == nil || p.store == nil {
+		return false
+	}
+	ok, err := p.store.FirstIndexedAtReady(ctx)
+	return err == nil && ok
+}

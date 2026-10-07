@@ -2313,6 +2313,21 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// v53 records the instant a path was first indexed. The column
+		// stays nullable until Store.migrate fills every row from the
+		// stored mtime; that fill is not in post, which has no store
+		// clock. Neither step assigns the row's change cursor.
+		version: 53,
+		name:    "tracks.first_indexed_at (set-once added date)",
+		sql:     `CREATE TABLE IF NOT EXISTS first_indexed_carry (path_key TEXT PRIMARY KEY, first_indexed_at INTEGER NOT NULL)`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks", tableColumn{
+				name: "first_indexed_at",
+				ddl:  `ALTER TABLE tracks ADD COLUMN first_indexed_at INTEGER`,
+			})
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2582,6 +2597,13 @@ func (s *Store) migrate() error {
 				return fmt.Errorf("migration %d (%s) post-DDL: %w", m.version, m.name, err)
 			}
 		}
+		// The v53 fill uses this store's clock and touches only rows the
+		// column has not reached. A later open does not run it again.
+		if m.version == 53 {
+			if err := s.backfillFirstIndexedAt(ctx); err != nil {
+				return fmt.Errorf("migration %d (%s) backfill: %w", m.version, m.name, err)
+			}
+		}
 		// PRAGMA user_version doesn't accept parameter binding (it's a
 		// directive, not DML), so format the int into the literal SQL.
 		// The version comes from a hardcoded slice — never user input —
@@ -2770,6 +2792,9 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// the booklet_tag column at read time, set only by the booklet
 	// availability loop) — same zero-before-marshal contract.
 	clone.BookletTag = ""
+	// FirstIndexedAt is spliced from tracks.first_indexed_at. A round trip
+	// through tags_json would freeze a column the next read overwrites.
+	clone.FirstIndexedAt = nil
 	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
 	// extracted it — must persist) OR an analysis splice (must NOT
 	// persist, else a round-tripped read Track freezes the analysis value
@@ -3289,8 +3314,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused, first_indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3356,9 +3381,10 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- (Track.extractRefused), unconditional like the version it
 			-- rides with: a file that reads now clears it.
 			extract_refused = excluded.extract_refused
+			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
-		boolToInt(t.extractRefused))
+		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now))
 	if err != nil {
 		return err
 	}
@@ -3425,6 +3451,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		audioMD5    string
 		artKey      string
 		refused     int
+		firstNS     int64
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -3446,6 +3473,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			audioMD5:    t.audioMD5,
 			artKey:      t.folderArtKey,
 			refused:     boolToInt(t.extractRefused),
+			firstNS:     t.carryFirstIndexedNS,
 		}
 	}
 
@@ -3471,8 +3499,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused, first_indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3513,6 +3541,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			folder_art_key = excluded.folder_art_key,
 			-- v50 refusal marker — mirrors UpsertTrack.
 			extract_refused = excluded.extract_refused
+			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
 	`)
 	if err != nil {
 		return err
@@ -3522,7 +3551,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
-			r.refused); err != nil {
+			r.refused, firstIndexedInsertNS(r.firstNS, now)); err != nil {
 			return err
 		}
 	}
@@ -3921,7 +3950,8 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
 	var version int64
-	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version)
+	var firstNS sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at, first_indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version, &firstNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3933,6 +3963,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
+	spliceFirstIndexedAt(&t, firstNS)
 	return &t, nil
 }
 
@@ -4384,7 +4415,7 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 }
 
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -4404,7 +4435,8 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		var firstNS sql.NullInt64
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -4420,6 +4452,7 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
+		spliceFirstIndexedAt(&t, firstNS)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -4461,7 +4494,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
 	where, args := trackReadPredicates(servedOnly, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
@@ -4494,7 +4527,8 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		var firstNS sql.NullInt64
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
 			return err
 		}
 		t = Track{}
@@ -4510,6 +4544,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
+		spliceFirstIndexedAt(&t, firstNS)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -4550,7 +4585,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		limit = 1000
 	}
 	q := `
-		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks
+		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks
 		WHERE path > ?`
 	if servedOnly {
 		q += ` AND dupe_suppressed = 0`
@@ -4579,7 +4614,8 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		var artVer sql.NullString
 		var bkTag sql.NullString
 		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		var firstNS sql.NullInt64
+		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -4595,6 +4631,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
+		spliceFirstIndexedAt(&t, firstNS)
 		out = append(out, t)
 	}
 	return out, rows.Err()

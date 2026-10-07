@@ -37557,3 +37557,45 @@ a 2.1 client ignores the returned stamp, so an identical older stamp
 must stay `409` `stale` and an identical newer stamp must be stored.
 The identical-body early return stays when a base is present or the row
 is deleted.
+
+## 2026-10-07 — sync phase 3, a set-once first-indexed date
+
+`tracks.first_indexed_at` is the added-date for a bridge library. v53
+adds the nullable column and `first_indexed_carry`. The backfill runs
+from `Store.migrate` after the v53 post, only while that version is
+being applied, and copies each NULL row's stored `mtime_ns`. A zero or
+future mtime becomes `s.now()` at migration. `indexed_at` is not the
+source and is not assigned: a since-delta is unpaginated, so moving
+every row would hand one library-sized manifest to every paired device.
+
+Both upserts write the column in the INSERT arm only. The conflict arm
+ignores `carryFirstIndexedNS`. `StampExtractorVersionBatch` does not
+touch the column. The field on `Track` is `firstIndexedAt`, a
+`*time.Time` spliced at the manifest readers and `GetTrack`, and
+`marshalForStorage` clears it so it never lands in `tags_json`.
+
+The scanner copies a previous date onto an insert whose exact path is
+absent. A case-only rename is paired from the before-set fold, because
+the new-case row is inserted during the walk, before `caseOnlyRenames`
+reaps the old spelling. A root flip has no such pair. `RecordFirstIndexedCarry`
+snapshots filesystem rows (routed rows excluded; a collision keeps the
+earliest date) immediately before each `WipeFilesystemTracks` that
+changes the storage form, keyed with the root basename removed. The
+rescan looks that key up with the form it is about to write.
+`ScanSubtree` applies the table and leaves it. A successful full scan
+on a live context clears it. An empty snapshot does not replace a table
+already stored, so a retry after the wipe keeps the dates.
+
+An outside folder move, and a file that returns after the missing-scan
+threshold, are re-adds and receive `s.now()`. That is accepted. So is
+the residual where a case-sensitive volume holds both spellings and the
+new one inherits the old date even though the rename reap does not
+retire the old row.
+
+`/v1/health` advertises `firstIndexedAt` through an optional method on
+whatever manifest is wired, not a new method on `ManifestProvider`, so
+the existing fakes stay valid. The key is present only when the NULL
+count is zero, including an empty library and a demo bridge. A query
+error omits it. `ProtocolVersion` stays 1. `ExtractorVersion` stays 23.
+The assignment sweep skips `first_indexed_at` because the identifier
+contains `indexed_at`.

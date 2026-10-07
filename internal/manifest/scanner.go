@@ -84,6 +84,10 @@ type pathInfo struct {
 type Scanner struct {
 	roots atomic.Pointer[[]string]
 	store *Store
+	// firstIndexed is the dates this scan's inserts may copy. The scan
+	// publishes it before the workers start and does not write it again
+	// until they have joined.
+	firstIndexed *firstIndexedSnap
 
 	// artDir is the on-disk artwork cache directory the scanner writes
 	// locally-extracted artwork (`local-<sha256>-500.jpg`) into. Empty
@@ -539,6 +543,9 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		if !scanOK || ctx.Err() != nil {
 			return
 		}
+		if err := s.store.ClearFirstIndexedCarry(ctx); err != nil {
+			scanLogger.Warn("first-indexed carry", "err", err)
+		}
 		if fn := s.postScanHook.Load(); fn != nil {
 			(*fn)()
 		}
@@ -691,6 +698,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.publishFirstIndexed(ctx, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
@@ -1412,6 +1420,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			continue
 		}
 		for _, tw := range tracksToWrite {
+			s.noteFirstIndexed(tw)
 			select {
 			case writes <- tw:
 			case <-ctx.Done():
@@ -2286,6 +2295,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.publishFirstIndexed(ctx, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {

@@ -1157,6 +1157,46 @@ lost my library."
   `TestEveryDeletionOfAStampedRowIsCounted`,
   `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`,
   `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`.
+- **`tracks.first_indexed_at` is set once, on insert, and an update of the
+ same path never moves it** (2026-10-07, sync phase 3). Migration v53 adds
+ the column and `first_indexed_carry`, then `Store.migrate` fills every
+ NULL from the stored `mtime_ns` (a zero or future mtime becomes the
+ migration clock) without assigning `indexed_at`. Both upserts write the
+ column only in the INSERT arm: the caller passes `carryFirstIndexedNS`
+ when it has a date, otherwise the insert uses `s.now()`. The conflict
+ arm, `StampExtractorVersionBatch`, and a rescan of an existing path leave
+ it. The scanner copies the previous date into the new insert for a
+ case-only rename (the before-set fold, on a full scan and a subtree scan,
+ including a virtual row under a renamed container) and for a library-root
+ flip. The flip has no case-only pair: `RecordFirstIndexedCarry` snapshots
+ filesystem rows, keyed by the library-relative path with the root-basename
+ prefix removed, immediately before each `WipeFilesystemTracks` that
+ changes the storage form (admin add, admin remove that collapses to one
+ root, `bridge library add`, `bridge library remove`). A prefix delete
+ that stays multi-root is a deletion with no successor and records
+ nothing. The rescan looks the key up; a path with no recorded date uses
+ the scan clock. `ScanSubtree` applies the table and does not clear it. A
+ successful full scan on a live context clears it. An empty snapshot does
+ not replace a table already recorded, so a retry after the wipe does not
+ drop the dates. On a key collision the earliest date is kept. UPnP-routed
+ rows are not in the snapshot. A folder move made outside the bridge, and
+ a file that returns after the missing-scan threshold, are re-adds and get
+ a new date. That is the accepted behaviour. A case-sensitive volume that
+ holds both spellings of one path can hand the new spelling the old date
+ even though the rename reap does not retire the old row; that residual is
+ accepted. The wire field is `firstIndexedAt`, a `*time.Time` spliced at
+ read time and stripped by `marshalForStorage`, omitted until the row has
+ a date. `/v1/health` advertises `firstIndexedAt` only while no track row
+ is NULL and the manifest serves the field, including on a demo bridge;
+ a failed count omits it. No `ExtractorVersion` bump and no
+ `ProtocolVersion` bump. The `indexed_at` assignment sweep treats
+ `first_indexed_at` as a different identifier.
+ (`TestV53BackfillCopiesTheStoredMtimeAndLeavesTheCursor`,
+ `TestAnUpdateOfTheSamePathLeavesTheFirstIndexedDate`,
+ `TestANewPathCopiesTheDateOnlyWhenTheCallerPassesIt`,
+ `TestACaseOnlyRenameKeepsTheFirstIndexedDate`,
+ `TestAnOutsideFolderMoveInsertsANewFirstIndexedDate`,
+ `TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt`.)
 - **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
   the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
   Both terms are load-bearing: the clock term anchors to wall-clock because the

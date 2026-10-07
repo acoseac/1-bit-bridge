@@ -525,6 +525,14 @@ type handRolledAssignment struct {
 // the reconciliation writer compare the row's version there (backlog B187).
 func handRolledIndexedAtAssignments(text, shared string) (checked int, handRolled []handRolledAssignment) {
 	for _, loc := range indexedAtAssign.FindAllStringIndex(text, -1) {
+		// first_indexed_at contains the same spelling. A match that
+		// continues an identifier is a different column.
+		if loc[0] > 0 {
+			prev := text[loc[0]-1]
+			if prev == '_' || (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') {
+				continue
+			}
+		}
 		// Skip prose: the docblocks discuss both forms by name.
 		lineStart := strings.LastIndexByte(text[:loc[0]], '\n') + 1
 		if strings.HasPrefix(strings.TrimSpace(text[lineStart:loc[0]]), "//") {
@@ -587,6 +595,7 @@ func TestTheIndexedAtSweepTellsAnAssignmentFromAComparison(t *testing.T) {
 	shared := squashSpace(indexedAtAdvanceSQL)
 	src := "package manifest\n" +
 		"const handRolled = `UPDATE tracks SET indexed_at = ? WHERE path = ?`\n" +
+		"const column = `UPDATE tracks SET first_indexed_at = ? WHERE path = ?`\n" +
 		"const advanced = `UPDATE tracks\n SET indexed_at = " + indexedAtAdvanceSQL + "\n WHERE path = ? AND indexed_at = ?`\n" +
 		"const compared = `SELECT 1 FROM tracks WHERE\n indexed_at = ? OR indexed_at = ?`\n" +
 		"// prose naming indexed_at = something is not read\n"
