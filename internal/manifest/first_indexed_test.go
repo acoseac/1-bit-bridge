@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -242,7 +243,7 @@ func TestRecordFirstIndexedCarryKeepsTheEarliestAndSkipsRoutedRows(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if key != "Album/a.flac" {
+	if key != "RootA/Album/a.flac" {
 		t.Fatalf("carry key %q", key)
 	}
 }
@@ -322,22 +323,80 @@ func TestARowWithoutAFirstIndexedDateIsNotReady(t *testing.T) {
 	}
 }
 
-func TestPostFlipPathIsThePathAfterTheFlip(t *testing.T) {
-	got, ok := postFlipPath("Artist/Album/a.flac", false, "Music")
+func TestCarryKeyIsTheRootAndThePathWithinIt(t *testing.T) {
+	got, ok := carryKey("Artist/Album/a.flac", false, "Music")
 	if !ok || got != "Music/Artist/Album/a.flac" {
 		t.Fatalf("adding a root: %q ok=%v", got, ok)
 	}
-	got, ok = postFlipPath("Music/Artist/Album/a.flac", true, "Music")
-	if !ok || got != "Artist/Album/a.flac" {
+	got, ok = carryKey("Music/Artist/Album/a.flac", true, "Music")
+	if !ok || got != "Music/Artist/Album/a.flac" {
 		t.Fatalf("collapse survivor: %q ok=%v", got, ok)
 	}
-	if _, ok = postFlipPath("Jazz/Artist/Album/a.flac", true, "Music"); ok {
+	if _, ok = carryKey("Jazz/Artist/Album/a.flac", true, "Music"); ok {
 		t.Fatal("a removed root's row was carried onto the survivor")
 	}
-	if _, ok = postFlipPath("Artist/Album/a.flac", false, ""); ok {
+	if _, ok = carryKey("Artist/Album/a.flac", false, ""); ok {
 		t.Fatal("an empty root name was accepted")
 	}
-	if _, ok = postFlipPath("noslash.flac", true, "Music"); ok {
+	if _, ok = carryKey("noslash.flac", true, "Music"); ok {
 		t.Fatal("a path outside the survivor was carried")
+	}
+}
+
+func explainPlan(t *testing.T, s *Store, query string, args ...any) string {
+	t.Helper()
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(out, " | ")
+}
+
+func TestTheNullDateFillUsesThePartialIndex(t *testing.T) {
+	if strings.Contains(firstIndexedBackfillSQL, "ORDER BY") {
+		t.Fatal("ordering the null-date fill makes SQLite skip idx_tracks_first_indexed_at_null")
+	}
+	fill := strings.Join(strings.Fields(firstIndexedBackfillSQL), " ")
+	inner := strings.Join(strings.Fields(firstIndexedNullRowidsSQL), " ")
+	if !strings.Contains(fill, inner) {
+		t.Fatal("the fill no longer selects the statement this test explains")
+	}
+	s := openTestStore(t)
+	ordered := `SELECT rowid FROM tracks WHERE first_indexed_at IS NULL ORDER BY rowid LIMIT ?`
+	if strings.Contains(explainPlan(t, s, ordered, 1), "idx_tracks_first_indexed_at_null") {
+		t.Fatal("the ordered select reaches the partial index, so this fixture cannot show that dropping the order is what selects it")
+	}
+	plan := explainPlan(t, s, firstIndexedNullRowidsSQL, 1)
+	if !strings.Contains(plan, "idx_tracks_first_indexed_at_null") {
+		t.Fatalf("null-date fill plan %q", plan)
+	}
+}
+
+func TestFoldedFirstIndexedUsesThePathIndex(t *testing.T) {
+	s := openTestStore(t)
+	bare := `SELECT MIN(first_indexed_at) FROM tracks
+		WHERE path = ? AND first_indexed_at IS NOT NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM upnp_track_routing WHERE source_path = tracks.path
+		  )`
+	if strings.Contains(explainPlan(t, s, bare, "Artist/Album/a.flac"), "idx_tracks_path_unicode_lower") {
+		t.Fatal("a byte-exact path predicate reaches the folded index, so this fixture cannot tell the two lookups apart")
+	}
+	plan := explainPlan(t, s, foldedFirstIndexedSQL, "Artist/Album/a.flac")
+	if !strings.Contains(plan, "idx_tracks_path_unicode_lower") {
+		t.Fatalf("folded date plan %q", plan)
 	}
 }

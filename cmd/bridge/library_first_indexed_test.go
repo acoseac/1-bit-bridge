@@ -149,7 +149,7 @@ func TestLibraryRemoveCollapseKeepsTheSurvivorsDate(t *testing.T) {
 		t.Fatalf("remove %d\n%s%s", code, out.String(), errOut.String())
 	}
 	key, ns, generation, target := readCarry(t, data)
-	if key != "Artist/Album/song.flac" || ns != survivor.UnixNano() || generation != 1 || target != 0 {
+	if key != "Music/Artist/Album/song.flac" || ns != survivor.UnixNano() || generation != 1 || target != 0 {
 		t.Fatalf("carry key %q date %d generation %d target %d", key, ns, generation, target)
 	}
 }

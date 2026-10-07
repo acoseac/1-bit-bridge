@@ -15,6 +15,23 @@ import (
 // whose dates are still null does not grow the WAL by the whole table.
 const firstIndexedBackfillChunk = 2000
 
+// firstIndexedNullRowidsSQL is the fill's inner select. It is unordered:
+// ORDER BY rowid makes SQLite skip idx_tracks_first_indexed_at_null.
+// Rows that were filled leave the WHERE, so the loop still drains.
+const firstIndexedNullRowidsSQL = `SELECT rowid FROM tracks WHERE first_indexed_at IS NULL LIMIT ?`
+
+// firstIndexedBackfillSQL fills one chunk of rows whose date is still
+// null. Its inner select is firstIndexedNullRowidsSQL.
+const firstIndexedBackfillSQL = `UPDATE tracks SET first_indexed_at = CASE
+		WHEN mtime_ns > 0 AND mtime_ns <= ? THEN mtime_ns
+		ELSE ?
+	END
+	WHERE rowid IN (
+		SELECT rowid FROM tracks
+		WHERE first_indexed_at IS NULL
+		LIMIT ?
+	)`
+
 // firstIndexedInsertNS is the INSERT arm's date. A caller that copied a
 // previous date passes it; every other insert uses the store clock.
 func firstIndexedInsertNS(carry, now int64) int64 {
@@ -45,22 +62,12 @@ func spliceFirstIndexedAt(t *Track, ns sql.NullInt64) {
 // at the end of every open, so a row a rolled-back binary inserted as
 // NULL is filled when this binary opens the database again.
 func (s *Store) backfillFirstIndexedAt(ctx context.Context) error {
-	const stmt = `UPDATE tracks SET first_indexed_at = CASE
-		WHEN mtime_ns > 0 AND mtime_ns <= ? THEN mtime_ns
-		ELSE ?
-	END
-	WHERE rowid IN (
-		SELECT rowid FROM tracks
-		WHERE first_indexed_at IS NULL
-		ORDER BY rowid
-		LIMIT ?
-	)`
 	now := s.now().UnixNano()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res, err := s.db.ExecContext(ctx, stmt, now, now, firstIndexedBackfillChunk)
+		res, err := s.db.ExecContext(ctx, firstIndexedBackfillSQL, now, now, firstIndexedBackfillChunk)
 		if err != nil {
 			return err
 		}
@@ -88,12 +95,12 @@ func (s *Store) FirstIndexedAtReady(ctx context.Context) (bool, error) {
 	return n == 0, nil
 }
 
-// postFlipPath is the path the row will have after the root flip.
-// A single-root library gains the existing root's folder name. A
-// collapse keeps a row only when that name is the surviving root's,
-// and stores the path with the name removed. A name that is empty or
+// carryKey is the root's folder name plus the path within that root.
+// Both storage forms save and look that key up. A collapse keeps a row
+// only when the stored path already begins with the surviving root's
+// folder name, and leaves that path as the key. A name that is empty or
 // contains a slash is refused.
-func postFlipPath(path string, fromMultiRoot bool, rootBase string) (string, bool) {
+func carryKey(path string, fromMultiRoot bool, rootBase string) (string, bool) {
 	if rootBase == "" || strings.Contains(rootBase, "/") || path == "" {
 		return "", false
 	}
@@ -104,17 +111,19 @@ func postFlipPath(path string, fromMultiRoot bool, rootBase string) (string, boo
 	if !strings.HasPrefix(path, prefix) || len(path) == len(prefix) {
 		return "", false
 	}
-	return path[len(prefix):], true
+	return path, true
 }
 
 // RecordFirstIndexedCarry snapshots filesystem rows before a root flip
 // that changes the stored path form. fromMultiRoot is the form the rows
 // have now. rootBase is the existing root's folder name when a second
 // root is added, and the surviving root's folder name when several roots
-// collapse to one. The saved key is the path the row will have after the
-// flip. An empty snapshot writes nothing. A later record merges: it
-// keeps the earlier date for a key and moves every saved row onto the
-// new generation and the form the library will have after this flip.
+// collapse to one. The saved key is that folder name plus the path
+// within the root, in either form. A snapshot with no rows writes
+// nothing when no dates are saved yet. When dates are already saved it
+// moves them onto the new generation and the form this flip is heading
+// toward, and does not delete the keys. A later record merges: it keeps
+// the earlier date for a key.
 func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) error {
 	if rootBase == "" || strings.Contains(rootBase, "/") {
 		return fmt.Errorf("first-indexed carry: root name %q", rootBase)
@@ -136,7 +145,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		if err := rows.Scan(&path, &ns); err != nil {
 			return err
 		}
-		key, ok := postFlipPath(path, fromMultiRoot, rootBase)
+		key, ok := carryKey(path, fromMultiRoot, rootBase)
 		if !ok || ns <= 0 {
 			continue
 		}
@@ -147,15 +156,21 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(best) == 0 {
-		return nil
-	}
 	targetMulti := 0
 	if !fromMultiRoot {
 		targetMulti = 1
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(best) == 0 {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM first_indexed_carry`).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -195,42 +210,26 @@ func (s *Store) ClearFirstIndexedCarryGeneration(ctx context.Context, generation
 	return err
 }
 
+// foldedFirstIndexedSQL is the subtree insert's fold. Both sides go
+// through unicode_lower so the lookup is the expression
+// idx_tracks_path_unicode_lower indexes. MIN of no rows is NULL.
+const foldedFirstIndexedSQL = `SELECT MIN(first_indexed_at) FROM tracks
+	WHERE unicode_lower(path) = unicode_lower(?)
+	  AND first_indexed_at IS NOT NULL
+	  AND NOT EXISTS (
+	      SELECT 1 FROM upnp_track_routing WHERE source_path = tracks.path
+	  )`
+
 // earliestFoldedFirstIndexed is the earliest date among filesystem rows
 // whose path folds to path. A subtree insert asks this once, for that
-// path, instead of folding the library up front.
+// path, through the path index.
 func (s *Store) earliestFoldedFirstIndexed(ctx context.Context, path string) (int64, bool) {
-	want := cases.Lower(language.Und).String(path)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT path, first_indexed_at FROM tracks
-		WHERE first_indexed_at IS NOT NULL
-		  AND NOT EXISTS (
-		      SELECT 1 FROM upnp_track_routing WHERE source_path = tracks.path
-		  )`)
-	if err != nil {
+	var ns sql.NullInt64
+	err := s.db.QueryRowContext(ctx, foldedFirstIndexedSQL, path).Scan(&ns)
+	if err != nil || !ns.Valid || ns.Int64 <= 0 {
 		return 0, false
 	}
-	defer rows.Close()
-	fold := cases.Lower(language.Und)
-	var best int64
-	found := false
-	for rows.Next() {
-		var stored string
-		var ns int64
-		if err := rows.Scan(&stored, &ns); err != nil {
-			return 0, false
-		}
-		if ns <= 0 || fold.String(stored) != want {
-			continue
-		}
-		if !found || ns < best {
-			best = ns
-			found = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, false
-	}
-	return best, found
+	return ns.Int64, true
 }
 
 // firstIndexedSnap is the dates a scan's inserts may copy. A full scan
@@ -339,20 +338,33 @@ func (s *Scanner) releaseFirstIndexed() (clear bool, generation int64) {
 	return true, snap.generation
 }
 
+// savedDateKey is the carry key for a path this scan is about to insert.
+// A multi-root scan already stores the root's folder name. A single-root
+// scan prefixes the folder name of the root the walk started with.
+func (s *Scanner) savedDateKey(path string, multiRoot bool) string {
+	if multiRoot || s.scanSingleRootBase == "" || path == "" {
+		return path
+	}
+	return s.scanSingleRootBase + "/" + path
+}
+
 // noteFirstIndexed copies a previous row's date onto an insert whose
-// exact path is not already stored. A saved post-flip path wins over a
-// case-only fold. An existing path is an update and records nothing.
-// A full scan reads the snapshot it published. A subtree scan, and a
-// full scan whose snapshot failed, looks the one path up in the store.
-func (s *Scanner) noteFirstIndexed(ctx context.Context, t *Track) {
+// exact path is not already stored. A saved date is looked up by the
+// root's folder name plus the path within it, which is the same key in
+// both storage forms. A case-only fold of the stored path is the
+// fallback. An existing path is an update and records nothing. A full
+// scan reads the snapshot it published. A subtree scan, and a full scan
+// whose snapshot failed, looks the one path up in the store.
+func (s *Scanner) noteFirstIndexed(ctx context.Context, t *Track, multiRoot bool) {
 	if t == nil || t.carryFirstIndexedNS > 0 || t.Path == "" {
 		return
 	}
+	key := s.savedDateKey(t.Path, multiRoot)
 	if snap := s.firstIndexed; snap != nil {
 		if _, exists := snap.exact[t.Path]; exists {
 			return
 		}
-		if ns, ok := snap.root[t.Path]; ok && ns > 0 {
+		if ns, ok := snap.root[key]; ok && ns > 0 {
 			t.carryFirstIndexedNS = ns
 			return
 		}
@@ -361,10 +373,10 @@ func (s *Scanner) noteFirstIndexed(ctx context.Context, t *Track) {
 		}
 		return
 	}
-	s.noteFirstIndexedFromStore(ctx, t)
+	s.noteFirstIndexedFromStore(ctx, t, key)
 }
 
-func (s *Scanner) noteFirstIndexedFromStore(ctx context.Context, t *Track) {
+func (s *Scanner) noteFirstIndexedFromStore(ctx context.Context, t *Track, key string) {
 	var one int
 	err := s.store.db.QueryRowContext(ctx, `SELECT 1 FROM tracks WHERE path = ?`, t.Path).Scan(&one)
 	if err == nil {
@@ -374,7 +386,7 @@ func (s *Scanner) noteFirstIndexedFromStore(ctx context.Context, t *Track) {
 		return
 	}
 	var ns sql.NullInt64
-	err = s.store.db.QueryRowContext(ctx, `SELECT first_indexed_at FROM first_indexed_carry WHERE path_key = ?`, t.Path).Scan(&ns)
+	err = s.store.db.QueryRowContext(ctx, `SELECT first_indexed_at FROM first_indexed_carry WHERE path_key = ?`, key).Scan(&ns)
 	if err == nil && ns.Valid && ns.Int64 > 0 {
 		t.carryFirstIndexedNS = ns.Int64
 		return

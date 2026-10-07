@@ -88,6 +88,12 @@ type Scanner struct {
 	// publishes it before the workers start and does not write it again
 	// until they have joined.
 	firstIndexed *firstIndexedSnap
+	// scanSingleRootBase is the folder name of the one root this scan is
+	// walking. A multi-root scan leaves it empty, because the stored path
+	// already begins with that name. The scan writes it before the workers
+	// start and clears it after they join. Workers prefix a single-root
+	// path with it to look up a saved date.
+	scanSingleRootBase string
 
 	// artDir is the on-disk artwork cache directory the scanner writes
 	// locally-extracted artwork (`local-<sha256>-500.jpg`) into. Empty
@@ -490,6 +496,18 @@ func (s *Scanner) ScanProgress() int64 { return s.progress.Load() }
 // "N files unreadable" hint that persists past the latest scan.
 func (s *Scanner) PanickedCount() int64 { return s.panickedCnt.Load() }
 
+// setScanRootBase records the folder name a single-root scan prefixes
+// onto a stored path when it looks a saved date up. A multi-root scan
+// stores that name already, so the field stays empty. The scan writes
+// it before the workers start and clears it after they join.
+func (s *Scanner) setScanRootBase(roots []string, multiRoot bool) {
+	s.scanSingleRootBase = ""
+	if multiRoot || len(roots) == 0 {
+		return
+	}
+	s.scanSingleRootBase = filepath.Base(roots[0])
+}
+
 // Scan runs a full walk of the library roots. Safe to cancel via ctx;
 // any tracks whose batch flushed before cancellation are committed.
 // Returns the count of tracks upserted (= committed by the writer).
@@ -702,6 +720,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.setScanRootBase(roots, multiRoot)
 	s.publishFirstIndexed(ctx, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
@@ -784,6 +803,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// final batch.
 	close(paths)
 	workersWG.Wait()
+	s.scanSingleRootBase = ""
 	close(writes)
 	writerWG.Wait()
 	// The workers have finished reading the snapshot. Clear only the
@@ -1429,7 +1449,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			continue
 		}
 		for _, tw := range tracksToWrite {
-			s.noteFirstIndexed(ctx, tw)
+			s.noteFirstIndexed(ctx, tw, multiRoot)
 			select {
 			case writes <- tw:
 			case <-ctx.Done():
@@ -2304,6 +2324,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.setScanRootBase(roots, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
@@ -2454,6 +2475,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 
 	close(paths)
 	workersWG.Wait()
+	s.scanSingleRootBase = ""
 	close(writes)
 	writerWG.Wait()
 	// A subtree scan looks each insert up on its own. It keeps no

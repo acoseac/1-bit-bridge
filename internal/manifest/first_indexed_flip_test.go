@@ -16,10 +16,11 @@ var (
 
 func clockAt(s *Store, at time.Time) { s.now = func() time.Time { return at } }
 
-// A full scan whose roots snapshot predates the flip (SetRoots does not
-// touch an in-flight walk) finishes after Record+Wipe and clears the carry
-// before the post-add scan has applied it.
-func TestReproInFlightScanClearsTheCarry(t *testing.T) {
+// A full scan whose roots snapshot predates the flip finishes after the
+// record and the wipe. It walks the previous form, so it leaves the
+// saved dates for the scan that follows. The post-flip path keeps the
+// date from before the flip.
+func TestAnInFlightScanLeavesTheCarryForThePostFlipScan(t *testing.T) {
 	ctx := context.Background()
 	root, other := t.TempDir(), t.TempDir()
 	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
@@ -39,13 +40,14 @@ func TestReproInFlightScanClearsTheCarry(t *testing.T) {
 	scanOnce(t, sc, "post-add scan")
 	got := firstIndexedTime(t, store, filepath.Base(root)+"/Artist/Album/song.flac")
 	if !got.Equal(reproT1) {
-		t.Fatalf("REPRO: post-flip row dated %s, want carried %s", got, reproT1)
+		t.Fatalf("post-flip row dated %s, want carried %s", got, reproT1)
 	}
 }
 
-// 1 -> 2: a NEW file in the added root at the same relative path as an
-// old-root file inherits the old-root file's date.
-func TestReproAddedRootInheritsTheOldRootsDate(t *testing.T) {
+// A file that arrives in the root a flip added is dated at that scan.
+// It does not inherit the date of a file at the same relative path in
+// the root that was already there.
+func TestAnAddedRootDoesNotInheritTheOldRootsDate(t *testing.T) {
 	ctx := context.Background()
 	root, other := t.TempDir(), t.TempDir()
 	seedTrackDirs(t, filepath.Join(root, "Artist", "Album"))
@@ -64,12 +66,13 @@ func TestReproAddedRootInheritsTheOldRootsDate(t *testing.T) {
 	scanOnce(t, sc, "post-add scan")
 	got := firstIndexedTime(t, store, filepath.Base(other)+"/Artist/Album/song.flac")
 	if !got.Equal(reproT2) {
-		t.Fatalf("REPRO: new root's file dated %s, want the scan clock %s", got, reproT2)
+		t.Fatalf("new root's file dated %s, want the scan clock %s", got, reproT2)
 	}
 }
 
-// 2 -> 1: the survivor inherits the REMOVED root's earlier date.
-func TestReproCollapseSurvivorInheritsTheRemovedRootsDate(t *testing.T) {
+// A collapse keeps the surviving root's own date. A file that lived
+// only under the removed root does not hand its earlier date across.
+func TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots(t *testing.T) {
 	ctx := context.Background()
 	a, b := t.TempDir(), t.TempDir()
 	seedTrackDirs(t, filepath.Join(b, "Artist", "Album"))
@@ -94,13 +97,13 @@ func TestReproCollapseSurvivorInheritsTheRemovedRootsDate(t *testing.T) {
 	scanOnce(t, sc, "collapse scan")
 	got := firstIndexedTime(t, store, "Artist/Album/song.flac")
 	if !got.Equal(reproT1) {
-		t.Fatalf("REPRO: survivor dated %s, want its own %s (removed root had %s)", got, reproT1, reproT0)
+		t.Fatalf("survivor dated %s, want its own %s (removed root had %s)", got, reproT1, reproT0)
 	}
 }
 
-// A row an older binary inserted (NULL) after v53 is never filled: the
-// fill runs only inside the v53 ladder step.
-func TestReproRollbackRowStaysNull(t *testing.T) {
+// A row an older binary inserted with a null date is filled the next
+// time this binary opens the database.
+func TestARolledBackNullDateIsFilledOnTheNextOpen(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	s, err := OpenStore(filepath.Join(dir, "bridge.db"))
@@ -122,6 +125,6 @@ func TestReproRollbackRowStaysNull(t *testing.T) {
 	defer s2.Close()
 	ok, err := s2.FirstIndexedAtReady(ctx)
 	if err != nil || !ok {
-		t.Fatalf("REPRO: after roll-forward ready=%v err=%v (NULL row never filled)", ok, err)
+		t.Fatalf("after reopening, ready=%v err=%v", ok, err)
 	}
 }

@@ -1158,31 +1158,41 @@ lost my library."
   `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`,
   `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`.
 - **`tracks.first_indexed_at` is set once, on insert, and an update of the
- same path never moves it** (2026-10-07, sync phase 3; generation and
- post-flip key 2026-10-08). Migration v53 adds the column and
- `first_indexed_carry`. Every open fills remaining NULLs from the stored
- `mtime_ns` (a zero or future mtime becomes the open's clock) without
- assigning `indexed_at`; v54 adds `generation`, `target_multi`, and the
- partial index `idx_tracks_first_indexed_at_null`. Both upserts write the
- column only in the INSERT arm: the caller passes `carryFirstIndexedNS`
- when it has a date, otherwise the insert uses `s.now()`. The conflict
- arm, `StampExtractorVersionBatch`, and a rescan of an existing path leave
- it. The scanner copies the previous date into the new insert for a
- case-only rename (the before-set fold, on a full scan and a subtree scan,
- including a virtual row under a renamed container) and for a library-root
- flip. The flip key is the path the row will have afterwards:
- `RecordFirstIndexedCarry` takes the existing root's folder name when a
- root is added and prefixes it, and on a collapse keeps only the surviving
- root's rows with that folder name removed. It runs immediately before
+ same path never moves it** (2026-10-07, sync phase 3; generation
+ 2026-10-08; invariant carry key the same day). Migration v53 adds the
+ column and `first_indexed_carry`. Every open fills remaining NULLs from
+ the stored `mtime_ns` (a zero or future mtime becomes the open's clock)
+ without assigning `indexed_at`; v54 adds `generation`, `target_multi`,
+ and the partial index `idx_tracks_first_indexed_at_null`. Both upserts
+ write the column only in the INSERT arm: the caller passes
+ `carryFirstIndexedNS` when it has a date, otherwise the insert uses
+ `s.now()`. The conflict arm, `StampExtractorVersionBatch`, and a rescan
+ of an existing path leave it. The scanner copies the previous date into
+ the new insert for a case-only rename (the before-set fold, on a full
+ scan and a subtree scan, including a virtual row under a renamed
+ container) and for a library-root flip. The saved key is the root's
+ folder name plus the path within that root, the same string in both
+ storage forms. `RecordFirstIndexedCarry` takes the existing root's
+ folder name when a root is added and prefixes the stored path, and on a
+ collapse keeps only the surviving root's rows, whose stored path already
+ begins with that folder name. A single-root scan looks a date up by
+ prefixing the folder name of the root that scan is walking. A multi-root
+ scan looks the stored path up directly. It runs immediately before
  each `WipeFilesystemTracks` that changes the storage form (admin add,
  admin remove that collapses to one root, `bridge library add`, `bridge
  library remove`). A prefix delete that stays multi-root records nothing.
- A record merges and bumps the generation; an empty snapshot writes
- nothing. A full scan clears only the generation it loaded, and only when
- the library is already in the saved form. A subtree scan looks each
- insert up and does not clear. A path with no recorded date uses the scan
- clock. UPnP-routed rows are not in the snapshot. A folder move made
- outside the bridge, and a file that returns after the missing-scan
+ A record merges and bumps the generation. A snapshot with no rows writes
+ nothing when no dates are saved yet; when dates are already saved it
+ moves them onto the new generation and the form this flip is heading
+ toward, and does not delete the keys. A full scan clears only the
+ generation it loaded, and only when the library is already in the saved
+ form. A subtree scan looks each insert up and does not clear. The
+ subtree fold is one `unicode_lower` lookup on
+ `idx_tracks_path_unicode_lower`. The null-date fill does not order its
+ rowid select, which is what lets that select use
+ `idx_tracks_first_indexed_at_null`. A path with no recorded date uses
+ the scan clock. UPnP-routed rows are not in the snapshot. A folder move
+ made outside the bridge, and a file that returns after the missing-scan
  threshold, are re-adds and get a new date. That is the accepted
  behaviour. A case-sensitive volume that holds both spellings of one path
  can hand the new spelling the old date even though the rename reap does
@@ -1202,11 +1212,16 @@ lost my library."
  `TestASubtreeScanCopiesACaseOnlyRename`,
  `TestAnOutsideFolderMoveInsertsANewFirstIndexedDate`,
  `TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt`,
- `TestPostFlipPathIsThePathAfterTheFlip`,
- `TestReproInFlightScanClearsTheCarry`,
- `TestReproAddedRootInheritsTheOldRootsDate`,
- `TestReproCollapseSurvivorInheritsTheRemovedRootsDate`,
- `TestReproRollbackRowStaysNull`,
+ `TestCarryKeyIsTheRootAndThePathWithinIt`,
+ `TestAnInFlightScanLeavesTheCarryForThePostFlipScan`,
+ `TestAnAddedRootDoesNotInheritTheOldRootsDate`,
+ `TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots`,
+ `TestARolledBackNullDateIsFilledOnTheNextOpen`,
+ `TestAFlipBackBeforeAnyRescanKeepsTheDate`,
+ `TestACollapseDuringThePostAddRescanKeepsBothAlbums`,
+ `TestACompensatingScanAfterAFailedSaveKeepsTheDate`,
+ `TestTheNullDateFillUsesThePartialIndex`,
+ `TestFoldedFirstIndexedUsesThePathIndex`,
  `TestMigrationV52GainsAFirstIndexedDate`,
  `TestManifestServesFirstIndexedAtOnTheFullAndPagedResponses`,
  `TestFirstIndexedAtReadySticksOnceTrueAndRechecksAMiss`,

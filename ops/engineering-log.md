@@ -37618,3 +37618,37 @@ NULL rows a rolled-back binary inserts are filled on every open, through
 `idx_tracks_first_indexed_at_null`. `/v1/health` reads that count through
 the health-count cache. A subtree scan looks each insert up and does not
 preload the library.
+
+## 2026-10-08 — sync phase 3 review round 2, the invariant carry key
+
+The saved key was the path the row would have after the flip. A rescan
+that was still in the previous form looked the stored path up and missed.
+Three sequences do that: a root added and then removed before any rescan,
+the second record finding no rows and leaving the keys in the other form;
+a root removed while the post-add rescan has rewritten only some albums,
+the update moving the generation without a key the remaining rows can
+match; and a config save that fails after the wipe, whose compensating
+scan walks the form the library still has. The key is now the root's
+folder name plus the path within that root in both forms. A collapse does
+not strip the folder name. A single-root scan prefixes the folder name of
+the root that scan is walking, captured before its workers start. A
+record whose snapshot is empty still moves an existing carry onto the new
+generation and target form, and does not delete the keys. A snapshot that
+is empty and a carry that is empty writes nothing.
+
+The subtree fold was a scan of every filesystem row, folded in Go. It is
+one `SELECT MIN` through `unicode_lower` on both sides, which is the
+expression `idx_tracks_path_unicode_lower` indexes. The null-date fill's
+`ORDER BY rowid` made SQLite skip `idx_tracks_first_indexed_at_null`; the
+select is unordered, and a filled row leaves the WHERE so the loop still
+drains. The round-1 repro tests were renamed to the behaviour they guard
+(`TestAnInFlightScanLeavesTheCarryForThePostFlipScan`,
+`TestAnAddedRootDoesNotInheritTheOldRootsDate`,
+`TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots`,
+`TestARolledBackNullDateIsFilledOnTheNextOpen`,
+`TestCarryKeyIsTheRootAndThePathWithinIt`). The three form sequences are
+`TestAFlipBackBeforeAnyRescanKeepsTheDate`,
+`TestACollapseDuringThePostAddRescanKeepsBothAlbums` and
+`TestACompensatingScanAfterAFailedSaveKeepsTheDate`. The plans are
+`TestTheNullDateFillUsesThePartialIndex` and
+`TestFoldedFirstIndexedUsesThePathIndex`.
