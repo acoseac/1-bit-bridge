@@ -193,8 +193,13 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 			first_indexed_at = MIN(first_indexed_carry.first_indexed_at, excluded.first_indexed_at),
 			generation = excluded.generation,
 			target_multi = excluded.target_multi`
+	stmt, err := tx.PrepareContext(ctx, upsert)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
 	for key, ns := range best {
-		if _, err := tx.ExecContext(ctx, upsert, key, ns, next, targetMulti); err != nil {
+		if _, err := stmt.ExecContext(ctx, key, ns, next, targetMulti); err != nil {
 			return 0, err
 		}
 	}
