@@ -1,10 +1,76 @@
 package manifest
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+)
 
-// TestExplicitVerdict is the truth table shared with the iOS
-// ExplicitContent.verdict. A row is one ExplicitSignals value. Any signal
-// that says explicit wins. Title is the raw track title only.
+// TestExplicitVerdictCases loads the truth table shared with the iOS
+// ExplicitContent.verdict. The file is the canonical copy; this test
+// checks every row through the real helper.
+func TestExplicitVerdictCases(t *testing.T) {
+	raw, err := os.ReadFile("testdata/explicit-verdict-cases.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) != 3 {
+			t.Fatalf("row %q has %d fields", line, len(parts))
+		}
+		kind, inputJSON, expected := parts[0], parts[1], parts[2]
+		if kind == "kind" {
+			continue
+		}
+		var input string
+		if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+			t.Fatalf("row %q input: %v", line, err)
+		}
+		rows++
+		var got bool
+		switch kind {
+		case "value":
+			got = explicitAdvisoryText(input)
+		case "rtng":
+			n, err := strconv.ParseUint(input, 10, 64)
+			if err != nil {
+				t.Fatalf("rtng %q: %v", input, err)
+			}
+			got = ExplicitVerdict(ExplicitSignals{Rtng: &n})
+		case "field":
+			got = explicitFieldName(input) != ""
+		case "title":
+			got = ExplicitVerdict(ExplicitSignals{Title: input})
+		default:
+			t.Fatalf("unknown kind %q", kind)
+		}
+		want := expected == "explicit" || expected == "read"
+		if kind == "field" && expected != "read" && expected != "ignored" {
+			t.Fatalf("field row %q expected %q", input, expected)
+		}
+		if (kind == "value" || kind == "rtng" || kind == "title") && expected != "explicit" && expected != "none" {
+			t.Fatalf("%s row %q expected %q", kind, input, expected)
+		}
+		if got != want {
+			t.Errorf("%s %q = %v, want %s", kind, input, got, expected)
+		}
+	}
+	if rows != 55 {
+		t.Fatalf("data rows = %d, want 55", rows)
+	}
+}
+
+// TestExplicitVerdict covers the combination cases the shared file does
+// not: a clean signal beside another. A row is one ExplicitSignals value.
+// Any signal that says explicit wins. Title is the raw track title only.
 func TestExplicitVerdict(t *testing.T) {
 	rtng := func(n uint64) *uint64 {
 		v := n

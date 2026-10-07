@@ -37465,3 +37465,22 @@ Dropping only the title-marker term (`return titleMarksExplicit(s.Title)` replac
 - `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`
 
 Measured 2026-10-07: `go test -count=1 -timeout 180s -run 'TestExplicit|TestScanner_V23_' .` in `internal/manifest` exited 1 in 0.695s. The `--- FAIL` lines were exactly those eleven verdict subtests, the ten title-marker subtests, and the title-marker scanner test, which stopped on the premise that the marker is stored (`Explicit:false`). No other failure. The term was restored before the suites.
+
+## 2026-10-07 — a filename stem counts, and the first Vorbis value wins (still ExtractorVersion 23)
+
+Round 4 of the explicit mark, still inside the unshipped v23 backfill. Three decisions, the same on both sides of the mirror.
+
+A title tag still wins. When none was read, the title is the filename stem `fillFromPath` already stored, and a marker on it counts. `explicitTrackTitle` is that choice. The FLAC comment walk calls it with the block's first TITLE, so a later recompute cannot put the stem back once a title tag was read. A DFF DIIN or WAV LIST/INFO title that replaces the stem recomputes the verdict from that title. A file dhowden reports as having no tags applies the stem there too. An album title still does not count. Ogg Vorbis and Opus still take dhowden's map, which keeps the last duplicate; the in-order read is the FLAC comment walk, which also covers Ogg FLAC.
+
+The field name is exact, ignoring case, with no separator folding. `explicitFieldName` is the one classifier the MP4 `----` walk and the shared table both use. `ITUNES_ADVISORY` is not the field.
+
+Within one Vorbis field the first non-empty value wins. dhowden's map keeps the last, so `ITUNESADVISORY=0` then `=1` was explicit; the comment walk now records the `0`. ExtractorVersion stays 23: nothing has shipped at 23, and this is the same backfill. A row an earlier unshipped build of this branch already stamped at 23 will not re-read the stem or the first value until the file changes.
+
+The shared rows are `testdata/explicit-verdict-cases.tsv`, byte-identical to the iOS file (sha256 `9d86474690827108…`), 55 data rows, loaded by `TestExplicitVerdictCases`. The sixteen `explicit-*.m4a` files are the iOS `ExplicitAdvisoryFixtures`, byte-identical; `TestExplicit_SharedM4AFixtures` runs all of them. `TestExplicit_APathDerivedTitleCounts` and `TestExplicit_VorbisFirstValueWins` pin the two new terms. `Song [E].flac` in `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps` now joins the delta; the plain title still only stamps. `ProtocolVersion` stays 1.
+
+Dropping only the path-derived title (`explicitTrackTitle` returns the tag title and ignores the stem) turns these red. The shared table, the sixteen fixtures (their title tag is `One`), the Vorbis first-value test and every tag-title marker stay green:
+
+- `TestExplicit_APathDerivedTitleCounts`
+- `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`
+
+Measured 2026-10-07: `go test -count=1 -timeout 180s -run 'TestExplicit|TestScanner_V23_' .` in `internal/manifest` exited 1 in 0.490s. The `--- FAIL` lines were exactly those two. The path test stopped on `filename stem should count; explicit false`. The scanner test stopped on the premise that the stem counts (`Explicit:false`, title still `Song [E]`). No other failure. The fallback was restored before the suites.

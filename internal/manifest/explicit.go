@@ -3,8 +3,8 @@ package manifest
 import "strings"
 
 // ExplicitSignals is one track's inputs to ExplicitVerdict. The iOS twin
-// passes the same inputs to ExplicitContent.verdict; TestExplicitVerdict
-// is the shared truth table.
+// passes the same inputs to ExplicitContent.verdict. The shared rows are
+// testdata/explicit-verdict-cases.tsv (TestExplicitVerdictCases).
 //
 // Rtng is set when an MP4 `rtng` integer was read. 1 and 4 are explicit.
 // A present 0 or 2 is not, and it does not cancel another signal. Nil
@@ -13,12 +13,13 @@ import "strings"
 // ItunesAdvisory is the first value of the ITUNESADVISORY field, and
 // Explicit is the first value of the EXPLICIT field. Empty means the
 // field is absent or empty. Within one field the first value wins; the
-// caller has already chosen it.
+// caller has already chosen it. The name is exact, ignoring case:
+// ITUNES_ADVISORY is not this field.
 //
-// Title is the raw track-title tag (MP4 ©nam, Vorbis TITLE, ID3v2 TIT2),
-// after TrimSpace and before any display cleaning that strips bracket
-// markers. An album title is not Title, and neither is a title guessed
-// from the path.
+// Title is the raw track title, after TrimSpace and before any display
+// cleaning that strips bracket markers. That is the title tag (MP4
+// ©nam, Vorbis TITLE, ID3v2 TIT2) when one was read, and the filename
+// stem when it was not. An album title is not Title.
 type ExplicitSignals struct {
 	Rtng           *uint64
 	ItunesAdvisory string
@@ -37,6 +38,32 @@ func ExplicitVerdict(s ExplicitSignals) bool {
 		return true
 	}
 	return titleMarksExplicit(s.Title)
+}
+
+// explicitTrackTitle is the title ExplicitVerdict sees. A title tag wins.
+// When none was read, the path-derived title already on the track
+// (fillFromPath's filename stem) is the title, and a marker on it counts.
+// An album title is never passed here.
+func explicitTrackTitle(tagTitle, pathTitle string) string {
+	if v := strings.TrimSpace(tagTitle); v != "" {
+		return v
+	}
+	return strings.TrimSpace(pathTitle)
+}
+
+// explicitFieldName classifies a field name the way every reader matches
+// it: exactly ITUNESADVISORY or EXPLICIT, ignoring case, with no separator
+// folding. "advisory" and "explicit" are those two fields. "" means the
+// name is not read (ITUNES_ADVISORY, ITUNESRATING, RATING).
+func explicitFieldName(name string) string {
+	switch strings.ToLower(name) {
+	case "itunesadvisory":
+		return "advisory"
+	case "explicit":
+		return "explicit"
+	default:
+		return ""
+	}
 }
 
 // explicitAdvisoryText is the advisory value table, after the trim the

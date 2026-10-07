@@ -231,8 +231,10 @@ type Track struct {
 	// Explicit is the file's own explicit mark: any of an MP4 `rtng` of 1
 	// or 4, ITUNESADVISORY or EXPLICIT (the value table in ExplicitVerdict)
 	// as an MP4 freeform atom, a Vorbis comment or an ID3v2 TXXX, or a
-	// marker on the raw track title. A clean `rtng` does not cancel another
-	// signal. Tag-sourced and persisted in tags_json, like Compilation.
+	// marker on the raw track title. The title is the title tag when one
+	// was read, and the filename stem when it was not. A clean `rtng` does
+	// not cancel another signal. Tag-sourced and persisted in tags_json,
+	// like Compilation.
 	// Only true is meaningful: absence (a clean or untagged file, a UPnP
 	// row, or a bridge from before the field) makes no claim about the
 	// tags. A client still applies the title markers to a raw title when

@@ -13,7 +13,8 @@ import (
 // `rtng` as mutagen writes it (class 21, one value byte), the freeform
 // ITUNESADVISORY and EXPLICIT atoms, a Vorbis comment, an ID3v2 TXXX of
 // either description, and a marker on the raw track title. Any signal
-// wins. The shared truth table is TestExplicitVerdict.
+// wins. The shared rows are testdata/explicit-verdict-cases.tsv;
+// TestExplicitVerdict keeps the combination cases that file does not.
 
 // One built ilst and the explicit verdict it must produce. The MP4 cases
 // share this so each test states its atoms and its want, and the extract
@@ -394,26 +395,46 @@ func TestExplicit_TitleMarker(t *testing.T) {
 }
 
 func TestExplicit_SharedM4AFixtures(t *testing.T) {
-	cases := []struct {
-		name string
-		want bool
-	}{
-		{"explicit-rtng1.m4a", true},
-		{"explicit-rtng2.m4a", false},
-		{"explicit-rtng4.m4a", true},
-		{"explicit-advisory1.m4a", true},
-		{"explicit-rtng2-advisory1.m4a", true},
+	entries, err := os.ReadDir("testdata/m4a")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractFixture(t, tc.name)
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, "explicit-") && strings.HasSuffix(n, ".m4a") {
+			names = append(names, n)
+		}
+	}
+	if len(names) != 16 {
+		t.Fatalf("explicit fixtures = %d, want 16", len(names))
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			got := extractFixture(t, name)
 			if got.Title != "One" || got.Artist != "Performer A" || got.Album != "The Record" {
 				t.Fatalf("fixture tags = title %q artist %q album %q", got.Title, got.Artist, got.Album)
 			}
-			if got.Explicit != tc.want {
-				t.Fatalf("Explicit = %v, want %v", got.Explicit, tc.want)
+			if got.Explicit != sharedM4AWantsExplicit(name) {
+				t.Fatalf("Explicit = %v, want %v", got.Explicit, sharedM4AWantsExplicit(name))
 			}
 		})
+	}
+}
+
+// sharedM4AWantsExplicit is the verdict the fixture's name encodes. A
+// name this does not know is explicit, and the caller requires exactly
+// the sixteen files, so a new clean fixture has to be listed here.
+func sharedM4AWantsExplicit(name string) bool {
+	switch name {
+	case "explicit-rtng2.m4a",
+		"explicit-advisory0.m4a",
+		"explicit-advisory2.m4a",
+		"explicit-advisory-clean.m4a",
+		"explicit-advisory-empty.m4a":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -425,8 +446,8 @@ func TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps(t *testing.
 	writeMinimalFLAC(t, filepath.Join(root, "plain.flac"), 44100, 16, map[string]string{
 		"TITLE": "The Explicit Song", "ARTIST": "Band", "ALBUM": "Album [Explicit]",
 	})
-	// No TITLE tag. fillFromPath names it from the file, and that guess
-	// must not count as a title marker.
+	// No TITLE tag. fillFromPath names it from the file, and a marker
+	// on that stem counts.
 	writeMinimalFLAC(t, filepath.Join(root, "Song [E].flac"), 44100, 16, map[string]string{
 		"ARTIST": "Band", "ALBUM": "Album",
 	})
@@ -443,8 +464,8 @@ func TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps(t *testing.
 		t.Fatalf("premise: a bare word and an album marker are not explicit; got %+v err=%v", plain, err)
 	}
 	guessed, err := store.GetTrack(ctx, "Song [E].flac")
-	if err != nil || guessed == nil || guessed.Title != "Song [E]" || guessed.Explicit {
-		t.Fatalf("premise: a path-derived title is not explicit; got %+v err=%v", guessed, err)
+	if err != nil || guessed == nil || guessed.Title != "Song [E]" || !guessed.Explicit {
+		t.Fatalf("premise: a path-derived title counts; got %+v err=%v", guessed, err)
 	}
 
 	for _, rel := range []string{"marker.flac", "plain.flac", "Song [E].flac"} {
@@ -470,12 +491,74 @@ func TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps(t *testing.
 	if after := trackIndexedAt(t, store, "plain.flac"); after != beforePlain {
 		t.Errorf("plain title's indexed_at moved (%d -> %d)", beforePlain, after)
 	}
-	if after := trackIndexedAt(t, store, "Song [E].flac"); after != beforeGuessed {
-		t.Errorf("path-derived title's indexed_at moved (%d -> %d)", beforeGuessed, after)
+	gotGuessed, err := store.GetTrack(ctx, "Song [E].flac")
+	if err != nil || gotGuessed == nil || !gotGuessed.Explicit {
+		t.Fatalf("path-derived title did not gain Explicit; got %+v err=%v", gotGuessed, err)
+	}
+	if after := trackIndexedAt(t, store, "Song [E].flac"); after <= beforeGuessed {
+		t.Errorf("path-derived title's indexed_at did not advance (%d -> %d)", beforeGuessed, after)
 	}
 	for _, rel := range []string{"marker.flac", "plain.flac", "Song [E].flac"} {
 		if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
 			t.Errorf("%s extractor_version = %d, want %d", rel, v, ExtractorVersion)
 		}
+	}
+}
+
+func TestExplicit_APathDerivedTitleCounts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Song [E].flac")
+	writeMinimalFLAC(t, path, 44100, 16, map[string]string{"ARTIST": "Band", "ALBUM": "Album"})
+	tr := &Track{Title: "Song [E]"}
+	if err := Extract(path, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Title != "Song [E]" || !tr.Explicit {
+		t.Fatalf("filename stem should count; got title %q explicit %v", tr.Title, tr.Explicit)
+	}
+
+	tagged := filepath.Join(dir, "also [E].flac")
+	writeMinimalFLAC(t, tagged, 44100, 16, map[string]string{
+		"TITLE": "Song", "ARTIST": "Band", "ALBUM": "Album",
+	})
+	tr2 := &Track{Title: "also [E]"}
+	if err := Extract(tagged, tr2); err != nil {
+		t.Fatal(err)
+	}
+	if tr2.Title != "Song" || tr2.Explicit {
+		t.Fatalf("a title tag replaces the filename; got title %q explicit %v", tr2.Title, tr2.Explicit)
+	}
+}
+
+func TestExplicit_VorbisFirstValueWins(t *testing.T) {
+	dir := t.TempDir()
+	clean := filepath.Join(dir, "clean.flac")
+	writeMinimalFLACPairs(t, clean, 44100, 16, [][2]string{
+		{"TITLE", "Song"},
+		{"ARTIST", "Band"},
+		{"ITUNESADVISORY", "0"},
+		{"ITUNESADVISORY", "1"},
+	})
+	tr := &Track{}
+	if err := Extract(clean, tr); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Explicit {
+		t.Fatal("the first ITUNESADVISORY is 0; the later 1 must not win")
+	}
+
+	marked := filepath.Join(dir, "marked.flac")
+	writeMinimalFLACPairs(t, marked, 44100, 16, [][2]string{
+		{"TITLE", "Song"},
+		{"ARTIST", "Band"},
+		{"ITUNESADVISORY", "1"},
+		{"ITUNESADVISORY", "0"},
+	})
+	tr2 := &Track{}
+	if err := Extract(marked, tr2); err != nil {
+		t.Fatal(err)
+	}
+	if !tr2.Explicit {
+		t.Fatal("the first ITUNESADVISORY is 1")
 	}
 }

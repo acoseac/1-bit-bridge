@@ -1829,19 +1829,27 @@ lost my library."
   `1`, `4`, `true`, `yes`, `explicit` or `e` after trim and case-folding;
   or a marker on the raw track title (`©nam` / `TITLE` / `TIT2`), before
   display cleaning: `[E]`, `[Explicit]` or `[Explicit Version]` anywhere,
-  or a title that ends in `(Explicit)` or `(Explicit Version)`. A present
-  `rtng` of 0 or 2 does not cancel another signal. Within one field the
-  first value wins; the two fields are asked separately. Clean forms, the
-  bare word, an album title and a path-guessed title are not explicit.
-  `ITUNESRATING` and `rating` are not read. A UPnP row stays unset (the
-  client applies the title markers to the DIDL title, and to a raw wire
-  title when an older bridge omitted the field). `omitempty`, not a
-  pointer. Persisted in `tags_json`, like `Compilation`; not a column, and
-  `marshalForStorage` does not zero it. The verdict is one function,
-  `ExplicitVerdict` (`TestExplicitVerdict`, the table shared with the
-  app's `ExplicitContent.verdict`). Nothing shipped at 23 before the
-  title markers were included, so the v23 re-extract is the backfill: a
-  tagged row and a title-marker row join the delta, a plain row only
+  or a title that ends in `(Explicit)` or `(Explicit Version)`. The field
+  name is exact, ignoring case, with no separator folding
+  (`ITUNES_ADVISORY` is not read). A present `rtng` of 0 or 2 does not
+  cancel another signal. Within one field the first value wins; the two
+  fields are asked separately. A FLAC comment block is read in order,
+  because dhowden's map keeps the last duplicate (Ogg Vorbis and Opus
+  still take that last value). The title is the title tag when one was
+  read, and the filename stem when it was not. Clean forms, the bare
+  word and an album title are not explicit. `ITUNESRATING` and `rating`
+  are not read. A UPnP row stays unset (the client applies the title
+  markers to the DIDL title, and to a raw wire title when an older bridge
+  omitted the field). `omitempty`, not a pointer. Persisted in
+  `tags_json`, like `Compilation`; not a column, and `marshalForStorage`
+  does not zero it. The verdict is one function, `ExplicitVerdict`. The
+  shared rows are `testdata/explicit-verdict-cases.tsv`
+  (`TestExplicitVerdictCases`, the table shared with the app's
+  `ExplicitContent.verdict`); `TestExplicitVerdict` keeps the combination
+  cases that file does not. Nothing shipped at 23 before the title
+  markers, the filename stem and the first Vorbis value were included, so
+  the v23 re-extract is the backfill: a tagged row, a title-marker row and
+  a filename stem that carries a marker join the delta, a plain row only
   stamps (`TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`,
   `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`).
   SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
@@ -1872,8 +1880,9 @@ lost my library."
   4 MiB until v15, costing every moov-after-mdat M4A (ffmpeg's default) its
   codec, rate, bits and duration. The M4A fixtures in `testdata/m4a` are
   byte-identical to the iOS app's `AVTagFixtures`; regenerate both or neither.
-  The five `explicit-*.m4a` files are a separate set, byte-identical to the
-  iOS app's `ExplicitAdvisoryFixtures`; that copy is canonical.
+  The sixteen `explicit-*.m4a` files are a separate set, byte-identical to the
+  iOS app's `ExplicitAdvisoryFixtures`; that copy is canonical, and so is
+  `testdata/explicit-verdict-cases.tsv`.
 - **`skipID3v2` walks a STACK of prepended ID3v2 tags, at most
   `maxStackedID3v2Tags` (8), not only the first** (ExtractorVersion 16, from the
   iOS app's FLAC follow-up to #1935). A tagger that prepends a new tag without

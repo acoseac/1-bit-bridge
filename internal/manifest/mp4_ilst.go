@@ -222,8 +222,8 @@ func extractMP4FreeformAdvisory(r io.ReadSeeker) (advisory, explicit string, err
 				return "", "", err
 			}
 			if ok {
-				switch strings.ToLower(name) {
-				case "itunesadvisory":
+				switch explicitFieldName(name) {
+				case "advisory":
 					if !haveAdvisory {
 						advisory, err = readMP4FreeformFirstValue(r, box)
 						if err != nil {

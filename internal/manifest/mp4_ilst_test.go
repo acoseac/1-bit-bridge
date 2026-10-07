@@ -20,9 +20,10 @@ import (
 // both indexing paths are held to one set of files) and against synthetic
 // box trees for the shapes no tagger in the fixture set writes.
 //
-// The five explicit-*.m4a files are a separate set, byte-identical to the
+// The sixteen explicit-*.m4a files are a separate set, byte-identical to the
 // iOS app's ExplicitAdvisoryFixtures. That copy is canonical; these are
-// not regenerated from the AVTagFixtures recipe.
+// not regenerated from the AVTagFixtures recipe. The shared verdict rows
+// are testdata/explicit-verdict-cases.tsv, the same file.
 
 // extractFixture runs the production Extract over a testdata M4A, copied
 // to a temp dir so the scan-time folder-art lookup sees nothing beside it.
