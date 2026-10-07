@@ -519,7 +519,18 @@ var Ext = map[string]bool{
 // full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
 // other row re-extracts byte-identical and rides the version-stamp leg; SACD
 // ISO virtual rows re-expand as on every bump.
-const ExtractorVersion = 22
+//
+// v23 — the iTunes content advisory reaches the wire (`Track.Explicit`).
+// An MP4 `rtng` of 1 or 4, which dhowden's atom map skips, and
+// ITUNESADVISORY "1" or "4" as an MP4 freeform atom, a Vorbis comment or an
+// ID3v2 TXXX. A present `rtng` wins over the freeform, 0 and 2 included,
+// so a clean atom is not overridden by a freeform "1". Any other value, or
+// no such tag, leaves the field unset. Only those rows change: a row the
+// tags now mark explicit takes the full-upsert leg (its enrichment
+// re-queued once) and is the iOS delta. Every other row re-extracts
+// byte-identical and rides the version-stamp leg; SACD ISO virtual rows
+// re-expand as on every bump.
+const ExtractorVersion = 23
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -751,8 +762,28 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 			t.Genre = genre
 		}
 	}
+	// The iTunes content rating (`rtng`), which dhowden does not read.
+	// A present integer overrides the freeform advisory populate just
+	// stored, 0 and 2 included: the atom is the first value. Absence is
+	// not an error; a walk that fails leaves the freeform answer.
+	if rating, found, err := extractMP4ContentRating(f); err != nil {
+		scanLogger.Warn("mp4 content-rating walk failed; the freeform advisory stands",
+			"path", trackLogPath(absPath, t), "err", err)
+	} else if found {
+		t.Explicit = explicitAdvisoryValue(rating)
+	}
 	return nil
 }
+
+// explicitAdvisory reports whether an advisory value, already trimmed, is
+// the iTunes explicit mark. 1 is explicit, 4 is explicit (the "explicit
+// content" code some writers use); 2 is clean and 0 is none. Equality, not
+// a numeric parse: "01" is not "1".
+func explicitAdvisory(v string) bool { return v == "1" || v == "4" }
+
+// explicitAdvisoryValue is explicitAdvisory for the integer an `rtng` atom
+// holds.
+func explicitAdvisoryValue(v uint64) bool { return v == 1 || v == 4 }
 
 // extractByFormat is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
@@ -1166,6 +1197,14 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 			if t.AlbumArtist == "" {
 				t.AlbumArtist = "Various Artists"
 			}
+		}
+		// iTunes advisory. Vorbis ITUNESADVISORY and the MP4 freeform atom
+		// answer through the raw map; an ID3v2 TXXX of that description
+		// answers through the named values (it has no frame of its own).
+		// Exactly "1" or "4" after the trim stringOf and id3v2TextValue
+		// already did. A present MP4 `rtng` overrides this afterwards.
+		if v, ok := namedValueOf(raw, named, "itunesadvisory"); ok && explicitAdvisory(v) {
+			t.Explicit = true
 		}
 		// Pass BOTH underscore-joined ("musicbrainz_trackid") AND
 		// space-derived ("musicbrainz_track_id") variants — they

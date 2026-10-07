@@ -228,6 +228,14 @@ type Track struct {
 	// ProtocolVersion stays 1.
 	Compilation bool `json:"compilation,omitempty"`
 
+	// Explicit is the file's own iTunes advisory: an MP4 `rtng` of 1 or 4,
+	// or ITUNESADVISORY "1" or "4" as an MP4 freeform atom, a Vorbis comment
+	// or an ID3v2 TXXX. Tag-sourced and persisted in tags_json, like
+	// Compilation. Only true is meaningful: absence (a clean or untagged
+	// file, a UPnP row, or a bridge from before the field) makes no claim.
+	// Additive + omitempty; ProtocolVersion stays 1.
+	Explicit bool `json:"explicit,omitempty"`
+
 	// BPM (beats per minute). Tag-sourced (dhowden picks up TBPM / BPM /
 	// tmpo); when the source has no BPM tag, the offline analyzer's
 	// estimated tempo is spliced in (tag-absent-only, like

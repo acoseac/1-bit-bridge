@@ -186,8 +186,14 @@ func encodeVorbisComment(vc *meta.VorbisComment) []byte {
 // exercise the real parser, not a simplified one.
 func writeMinimalDSF(t *testing.T, path string, sampleRate uint32, frames map[string]string) {
 	t.Helper()
-	id3 := buildID3v2_3(frames)
+	if err := os.WriteFile(path, minimalDSFBytes(sampleRate, buildID3v2_3(frames)), 0o644); err != nil {
+		t.Fatalf("write DSF fixture: %v", err)
+	}
+}
 
+// minimalDSFBytes is writeMinimalDSF's file with id3 already built, so a test
+// can pass a tag buildID3v2_3 cannot express (a TXXX frame).
+func minimalDSFBytes(sampleRate uint32, id3 []byte) []byte {
 	var buf bytes.Buffer
 	// Build fmt and data first so we know offsets.
 	var fmtChunk [52]byte
@@ -223,10 +229,7 @@ func writeMinimalDSF(t *testing.T, path string, sampleRate uint32, frames map[st
 	buf.Write(fmtChunk[:])
 	buf.Write(dataHeader[:])
 	buf.Write(id3)
-
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write DSF fixture: %v", err)
-	}
+	return buf.Bytes()
 }
 
 // buildID3v2_3 builds a minimal ID3v2.3 blob containing TEXT-encoded frames

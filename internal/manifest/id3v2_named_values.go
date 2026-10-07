@@ -38,6 +38,9 @@ import (
 // that frame on both sides, and never from a TXXX: the app pins that neither
 // side reads TXXX:COMPILATION (test_TXXXCompilationAndV22TCP_areNotRead), since
 // a flagged file with no album artist is keyed into "Various Artists" on both.
+// ITUNESADVISORY is the exception that has no frame of its own: the iTunes
+// advisory's ID3 home is a TXXX of that description, and namedValueOf reads
+// it, matching the paired app. TXXX:COMPILATION stays unread.
 
 // id3v2Named is one value an ID3v2 tag files under a name: the name,
 // normalised as a raw tag key is, and the value.

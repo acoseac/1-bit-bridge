@@ -37385,3 +37385,53 @@ held exactly because its reference is the chain's own intermediate.
   `SameVolume` share);
   `TestTheOnDemandPreFlightSaysNothingOfADirectoryNothingHasWrittenYet`
   went red with the warning probe put back.
+
+## 2026-10-07 — the iTunes content advisory reaches the wire as `explicit` (ExtractorVersion 23)
+
+The paired app reads the same mark from a file it scans itself (an MP4 `rtng`
+of 1 or 4, or `ITUNESADVISORY` trimmed to exactly `1` or `4`) and had no way
+to learn it from a bridge row. The field is additive: `omitempty`, only `true`
+is meaningful, `ProtocolVersion` stays 1.
+
+### Where the value lives
+
+dhowden's MP4 atom map has `cpil` and not `rtng`, so a rating atom never
+reached `m.Raw()`. The walk is the `gnre` one's, through one `findMP4Ilst`:
+class 21 or class 0, one to four big-endian bytes. A present integer,
+including 0 and 2, overrides the freeform advisory populate stored from
+`----:com.apple.iTunes:ITUNESADVISORY`. A missing atom, a text atom (class 1)
+or a payload outside that length is absence, and the freeform stands. A walk
+that fails logs and leaves the freeform too.
+
+Vorbis comments and the MP4 freeform land in the raw map under
+`itunesadvisory` (`normaliseRawTagKey`). An ID3v2 file has no frame of its
+own for the advisory: Picard and mutagen write a `TXXX` whose description is
+`ITUNESADVISORY`, which `namedValueOf` already returns first-in-tag-order.
+`TXXX:COMPILATION` stays unread. The comparison is the trimmed string equal
+to `1` or `4`, never a numeric parse (`01` is not `1`). No other spelling
+(`EXPLICIT`, `ITUNESRATING`, `rating`) is read. UPnP/DIDL has no such flag,
+so a routed row leaves the field unset.
+
+The bool is persisted in `tags_json`, the compilation precedent. It is not a
+column, and `marshalForStorage` does not zero it.
+
+### The delta
+
+ExtractorVersion 23 re-extracts every file once. A row whose tags now say
+explicit changes and joins the next delta; an unflagged row marshals as it
+did and is stamped. SACD ISO virtual rows re-expand on the bump, as they do
+on every one. `TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`
+rewinds two FLACs to version 22, strips `$.explicit`, and requires only the
+flagged row's `indexed_at` to move.
+
+### The negative control
+
+Dropping the `rtng` override (the read dhowden does not do) turns these red
+and leaves the freeform, Vorbis, ID3, wire and scanner tests green:
+
+- `TestExplicit_MP4Rtng/1`, `/4`, `/padded`
+- `TestExplicit_MP4RtngWinsOverTheFreeform/clean_beats_freeform` (rtng 2 + freeform `1` becomes true)
+- `TestExplicit_MP4RtngWinsOverTheFreeform/explicit_beats_freeform_clean` (rtng 1 + freeform `2` becomes false)
+- `TestExplicit_MP4RtngWinsOverTheFreeform/zero_beats_freeform` (rtng 0 + freeform `1` becomes true)
+
+`TestExplicit_MP4Rtng/2`, `/0`, `/absent` and `…/text_atom_is_not_a_rating` stay green: those atoms are not a 1 or a 4, or are not an integer the walk keeps.

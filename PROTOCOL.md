@@ -390,6 +390,22 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - A bridge upgraded to ExtractorVersion 17 re-extracts every file once. Flagged tracks gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
 - An app that predates the field consumes that delta without it. The iOS app therefore reaches back to a fixed date, once per bridge, on its first sync after gaining the field, so the flag arrives whichever side updated first.
 
+#### Explicit content — `explicit` (additive, since ExtractorVersion 23)
+
+```json
+{ "path": "Music/Band/Album/01.m4a", "size": 12345678, "mtime": "…", "artist": "Band", "album": "Album", "explicit": true }
+```
+
+`explicit` is `true` when the file's own tags carry the iTunes content advisory as explicit. The mark is the same on every container:
+
+- an MP4/M4A/ALAC `rtng` atom whose integer is `1` or `4` (`2` is clean, `0` or a missing atom is none). A present `rtng` is the file's answer, including `0` and `2`, and it wins over a freeform `ITUNESADVISORY` in the same file;
+- otherwise `ITUNESADVISORY` trimmed to exactly `1` or `4`: the MP4 freeform atom `----:com.apple.iTunes:ITUNESADVISORY`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` whose description is `ITUNESADVISORY` (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). The description match is case-insensitive. The first value wins. `01` is not `1`.
+
+Any other value, or no such tag, leaves the track unflagged. No other spelling (`EXPLICIT`, `ITUNESRATING`, `rating`) is read. A UPnP/DIDL row has no such flag and omits the field.
+
+- **Only `true` is meaningful.** The field is `omitempty`, so a clean track and a track from a bridge that predates the field look the same. A client reads absence as not explicit.
+- A bridge upgraded to ExtractorVersion 23 re-extracts every file once. Tracks the tags now mark explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
+
 #### DSD specifics
 
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.

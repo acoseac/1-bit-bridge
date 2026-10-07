@@ -15,10 +15,15 @@ package manifest
 //     as "\x00\x00\x00\x00<value>": an M4A's MusicBrainz ids reached the
 //     wire NUL-prefixed, and its ReplayGain and ORIGINALDATE / ORIGINALYEAR
 //     failed to parse. stripMP4FreeformLocales removes it once, at the source.
+//   - The content-rating atom `rtng` (ExtractorVersion 23). iTunes writes the
+//     advisory as a class-21 integer: 1 or 4 explicit, 2 clean, 0 none.
+//     dhowden's atom map skips `rtng`. extractMP4ContentRating reads it, and
+//     a present integer overrides the freeform ITUNESADVISORY.
 //
 // The phone's own enrich (`AVTagClassifier`, SMB and on-device sources)
-// reads both through AVFoundation and names a `gnre` value from the same
-// table, so a file shows the same genre whichever path indexed it.
+// reads the genre and the freeform atoms through AVFoundation and names a
+// `gnre` value from the same table, so a file shows the same genre
+// whichever path indexed it.
 
 import (
 	"encoding/binary"
@@ -124,27 +129,7 @@ func findMP4Child(r io.ReadSeeker, name string, from uint64, parent mp4Box) (mp4
 // the contract the codec / rate / duration walks share, so the caller's
 // Warn sees a real read problem and never a structurally absent atom.
 func extractMP4PredefinedGenre(r io.ReadSeeker) (string, error) {
-	moovStart, moovHeader, moovSize, err := findMoov(r)
-	if err != nil {
-		if errors.Is(err, errMP4StructureNotFound) {
-			return "", nil
-		}
-		return "", err
-	}
-	moov := mp4Box{start: moovStart, header: moovHeader, size: moovSize}
-	udta, found, err := findMP4Child(r, "udta", moov.payloadStart(), moov)
-	if err != nil || !found {
-		return "", err
-	}
-	meta, found, err := findMP4Child(r, "meta", udta.payloadStart(), udta)
-	if err != nil || !found {
-		return "", err
-	}
-	childrenStart, err := mp4MetaChildrenStart(r, meta)
-	if err != nil {
-		return "", err
-	}
-	ilst, found, err := findMP4Child(r, "ilst", childrenStart, meta)
+	ilst, found, err := findMP4Ilst(r)
 	if err != nil || !found {
 		return "", err
 	}
@@ -161,6 +146,85 @@ func extractMP4PredefinedGenre(r io.ReadSeeker) (string, error) {
 		return "", err
 	}
 	return id3v1GenreName(value), nil
+}
+
+// findMP4Ilst locates `moov/udta/meta/ilst`. `found` is false — no error —
+// when the chain is absent or malformed. Genuine I/O propagates.
+func findMP4Ilst(r io.ReadSeeker) (mp4Box, bool, error) {
+	moovStart, moovHeader, moovSize, err := findMoov(r)
+	if err != nil {
+		if errors.Is(err, errMP4StructureNotFound) {
+			return mp4Box{}, false, nil
+		}
+		return mp4Box{}, false, err
+	}
+	moov := mp4Box{start: moovStart, header: moovHeader, size: moovSize}
+	udta, found, err := findMP4Child(r, "udta", moov.payloadStart(), moov)
+	if err != nil || !found {
+		return mp4Box{}, false, err
+	}
+	meta, found, err := findMP4Child(r, "meta", udta.payloadStart(), udta)
+	if err != nil || !found {
+		return mp4Box{}, false, err
+	}
+	childrenStart, err := mp4MetaChildrenStart(r, meta)
+	if err != nil {
+		return mp4Box{}, false, err
+	}
+	return findMP4Child(r, "ilst", childrenStart, meta)
+}
+
+// extractMP4ContentRating reads `moov/udta/meta/ilst/rtng` and returns the
+// integer it holds. `found` is false — no error — when there is no rating to
+// read: no moov, no `rtng`, a data atom that is not a 1- to 4-byte integer of
+// class 21 (uint8, what iTunes and mutagen write) or class 0 (implicit). A
+// readable integer, 0 and 2 included, is found, so the caller can prefer it
+// to the freeform advisory. Genuine I/O propagates.
+func extractMP4ContentRating(r io.ReadSeeker) (uint64, bool, error) {
+	ilst, found, err := findMP4Ilst(r)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	rtng, found, err := findMP4Child(r, "rtng", ilst.payloadStart(), ilst)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	data, found, err := findMP4Child(r, "data", rtng.payloadStart(), rtng)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	return readMP4IntegerValue(r, data)
+}
+
+// readMP4IntegerValue reads the integer a rating data atom holds. The payload
+// is a 4-byte type indicator (version + class), a 4-byte locale, then one to
+// four big-endian value bytes. A short payload, a longer one, or any other
+// class (a text atom, class 1) is absent rather than an error.
+func readMP4IntegerValue(r io.ReadSeeker, data mp4Box) (uint64, bool, error) {
+	const valueOffset = 8
+	payload := data.size - data.header
+	if payload < valueOffset+1 || payload > valueOffset+4 {
+		return 0, false, nil
+	}
+	if _, err := r.Seek(int64(data.payloadStart()), io.SeekStart); err != nil {
+		return 0, false, err
+	}
+	buf := make([]byte, int(payload))
+	if _, err := io.ReadFull(r, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	class := binary.BigEndian.Uint32(buf[:4]) & 0x00FFFFFF
+	if class != 21 && class != 0 {
+		return 0, false, nil
+	}
+	var value uint64
+	for _, b := range buf[valueOffset:] {
+		value = value<<8 | uint64(b)
+	}
+	return value, true, nil
 }
 
 // mp4MetaChildrenStart returns where `meta`'s children begin. `meta` is a

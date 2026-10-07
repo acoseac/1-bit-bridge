@@ -1822,6 +1822,18 @@ lost my library."
   the rest (`TestADateDhowdenCannotParseIsReadByItsYearPrefix`,
   `TestAnID3OrMP4DateHoldsNoYearOne`,
   `TestScanner_V22_AnUnparseableDateJoinsTheDelta_AReadableOneOnlyStamps`).
+- **The iTunes content advisory reaches the wire as `explicit`**
+  (ExtractorVersion 23). An MP4 `rtng` of 1 or 4, which dhowden's atom map
+  skips, and `ITUNESADVISORY` trimmed to exactly `1` or `4` as an MP4
+  freeform atom, a Vorbis comment or an ID3v2 TXXX. A present `rtng`
+  wins over the freeform, 0 and 2 included. Any other value, or no such
+  tag, leaves the field unset (`omitempty`; not a pointer). No other
+  spelling is read, and a UPnP row stays unset. Persisted in `tags_json`,
+  like `Compilation`; not a column, and `marshalForStorage` does not zero
+  it. A v23 re-extract puts only the newly explicit rows in the delta
+  (`TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`);
+  SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
+  stays 1.
 - **`normaliseRawTagKey` canonicalizes a LEADING `0xA9` before `ToLower`.**
   dhowden surfaces MP4 ilst atoms under a single-byte `\xa9day` key, which is
   invalid UTF-8, and `ToLower` rewrites it to U+FFFD — so source-literal `©day`
