@@ -37557,3 +37557,145 @@ a 2.1 client ignores the returned stamp, so an identical older stamp
 must stay `409` `stale` and an identical newer stamp must be stored.
 The identical-body early return stays when a base is present or the row
 is deleted.
+
+## 2026-10-07 — sync phase 3, a set-once first-indexed date
+
+`tracks.first_indexed_at` is the added-date for a bridge library. v53
+adds the nullable column and `first_indexed_carry`. Every open fills
+remaining NULL rows from the stored `mtime_ns`, in rowid chunks. A zero
+or future mtime becomes `s.now()` at that open. `indexed_at` is not the
+source and is not assigned: a since-delta is unpaginated, so moving
+every row would hand one library-sized manifest to every paired device.
+
+Both upserts write the column in the INSERT arm only. The conflict arm
+ignores `carryFirstIndexedNS`. `StampExtractorVersionBatch` does not
+touch the column. The field on `Track` is `firstIndexedAt`, a
+`*time.Time` spliced at the manifest readers and `GetTrack`, and
+`marshalForStorage` clears it so it never lands in `tags_json`.
+
+The scanner copies a previous date onto an insert whose exact path is
+absent. A case-only rename is paired from the before-set fold, because
+the new-case row is inserted during the walk, before `caseOnlyRenames`
+reaps the old spelling. A root flip has no such pair. `RecordFirstIndexedCarry`
+snapshots filesystem rows (routed rows excluded) immediately before each
+`WipeFilesystemTracks` that changes the storage form. The key is the path
+the row will have afterwards: adding a root prefixes the existing root's
+folder name, and a collapse keeps only the surviving root's rows with
+that folder name removed. The same path recorded again keeps the earlier
+date. A record merges and moves every saved row onto the new generation
+and the form the library will have after the flip. An empty snapshot
+writes nothing. A full scan clears only the generation it loaded, and
+only when the library is already in that form. A subtree scan looks each
+insert up and does not clear.
+
+An outside folder move, and a file that returns after the missing-scan
+threshold, are re-adds and receive `s.now()`. That is accepted. So is
+the residual where a case-sensitive volume holds both spellings and the
+new one inherits the old date even though the rename reap does not
+retire the old row.
+
+`/v1/health` advertises `firstIndexedAt` through an optional method on
+whatever manifest is wired, not a new method on `ManifestProvider`, so
+the existing fakes stay valid. The key is present only when the NULL
+count is zero, including an empty library and a demo bridge. The count
+rides the health-count cache: ready sticks for the process, a miss is
+rechecked, and a timeout is not stored. A query error omits it.
+`ProtocolVersion` stays 1. `ExtractorVersion` stays 23.
+The assignment sweep skips `first_indexed_at` because the identifier
+contains `indexed_at`.
+
+## 2026-10-08 — sync phase 3 review, generation and the post-flip path
+
+Review of #1158. A scan that was already walking the previous roots
+cleared the saved dates before the post-flip scan read them, and a
+record replaced the table, so a second record after the wipe dropped
+them. v54 stores a generation and the target storage form on each saved
+row. A record merges and bumps that generation. A full scan deletes only
+the generation it loaded, and only when its own form matches. The key is
+the exact path after the flip, so two roots that share a relative path
+no longer share a date, and a collapse keeps the survivor's own date.
+NULL rows a rolled-back binary inserts are filled on every open, through
+`idx_tracks_first_indexed_at_null`. `/v1/health` reads that count through
+the health-count cache. A subtree scan looks each insert up and does not
+preload the library.
+
+## 2026-10-08 — sync phase 3 review round 2, the invariant carry key
+
+The saved key was the path the row would have after the flip. A rescan
+that was still in the previous form looked the stored path up and missed.
+Three sequences do that: a root added and then removed before any rescan,
+the second record finding no rows and leaving the keys in the other form;
+a root removed while the post-add rescan has rewritten only some albums,
+the update moving the generation without a key the remaining rows can
+match; and a config save that fails after the wipe, whose compensating
+scan walks the form the library still has. The key is now the root's
+folder name plus the path within that root in both forms. A collapse does
+not strip the folder name. A single-root scan prefixes the folder name of
+the root that scan is walking, captured before its workers start. A
+record whose snapshot is empty still moves an existing carry onto the new
+generation and target form, and does not delete the keys. A snapshot that
+is empty and a carry that is empty writes nothing.
+
+The subtree fold was a scan of every filesystem row, folded in Go. It is
+one `SELECT MIN` through `unicode_lower` on both sides, which is the
+expression `idx_tracks_path_unicode_lower` indexes. The null-date fill's
+`ORDER BY rowid` made SQLite skip `idx_tracks_first_indexed_at_null`; the
+select is unordered, and a filled row leaves the WHERE so the loop still
+drains. The round-1 repro tests were renamed to the behaviour they guard
+(`TestAnInFlightScanLeavesTheCarryForThePostFlipScan`,
+`TestAnAddedRootDoesNotInheritTheOldRootsDate`,
+`TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots`,
+`TestARolledBackNullDateIsFilledOnTheNextOpen`,
+`TestCarryKeyIsTheRootAndThePathWithinIt`). The three form sequences are
+`TestAFlipBackBeforeAnyRescanKeepsTheDate`,
+`TestACollapseDuringThePostAddRescanKeepsBothAlbums` and
+`TestACompensatingScanAfterAFailedSaveKeepsTheDate`. The plans are
+`TestTheNullDateFillUsesThePartialIndex` and
+`TestFoldedFirstIndexedUsesThePathIndex`.
+
+## 2026-10-08 — sync phase 3 review round 3
+
+A decomposed album name took the old date on a subtree insert and the
+scan clock on a full scan. The subtree lookup folds through
+`unicode_lower`, which lowercases and then composes to NFC. The
+in-memory date map and the case-only rename pairing folded case only.
+`pathFold` is that function, and all three sites use it.
+`TestADecomposedAlbumTakesThePrecomposedDate` walks both spellings
+through a subtree scan and a full scan.
+
+Dates recorded for a root flip that does not finish were never cleared.
+A wipe that fails, including a cancelled request, deletes the generation
+just recorded. A save that fails after the wipe points that generation
+at the form the library still has, so the compensating scan copies the
+dates and clears them. The admin add and remove handlers and
+`bridge library add` / `library remove` do both. The carry upsert is
+prepared once per snapshot. Both track upserts run one statement, so
+the insert-only date is not written twice. The repeated album setup in
+the first-indexed tests lives in one fixture file; every test asserts
+what it asserted before.
+
+## 2026-10-08 — sync phase 3 review round 4
+
+The root-flip date tests repeated the same store, the same extra root
+and the same date check. Each of those now lives in one helper, and
+every scenario still asserts what it asserted. The list, the stream
+and the page read a track row through `scanListedTrack`, so the date
+splice is one scan.
+
+## 2026-10-08 — sync phase 3 review round 5
+
+A root change that does not finish used to delete dates an earlier
+change still had pending. Recording the snapshot moved every saved row
+onto the new generation, and a failed wipe then deleted that whole
+generation. An add whose scan had not loaded yet, followed by a
+collapse whose wipe was cancelled, left the post-add scan with no
+saved date, so the library took the scan clock. The snapshot and the
+wipe now commit in one transaction
+(`RecordFirstIndexedCarryAndWipe`). A failed or cancelled wipe rolls
+both back. Sidecar files are removed only after that commit.
+`TestACancelledCollapseKeepsTheDatesTheAddRecorded` is the case: the
+post-add scan keeps the date the add recorded. A save that fails after
+the wipe has committed still retargets that generation. The case-only
+rename pairing folds accent encoding the same way. The old spelling is
+reaped, and both spellings left in place are not
+(`TestCaseOnlyRenames`).

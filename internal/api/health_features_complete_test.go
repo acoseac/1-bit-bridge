@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,7 @@ var wantAllHealthFeatures = []string{
 	"dsdRender",
 	"favorites",
 	"favoritesRevisions",
+	"firstIndexedAt",
 	"keyTempo",
 	"loudness",
 	"lyrics",
@@ -82,7 +84,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = mstore.Close() })
 
-	srv := New(cfg, authStore, nil, "fp").
+	srv := New(cfg, authStore, &firstIndexedReadyManifest{}, "fp").
 		WithAtlasMeta(true, time.Hour, mstore).
 		WithBooklets(mstore, t.TempDir(), func(string) {}).
 		WithUpscale(func() bool { return true }, newStubVariantStore()).
@@ -141,4 +143,48 @@ func TestHealthFeaturesCompleteSet(t *testing.T) {
 	// comment actually claims ("each conditional appends in lex order"), so a
 	// reordering failure reads as a reordering rather than a set change.
 	assertAlphaSorted(t, got.Features)
+}
+
+// firstIndexedReadyManifest answers the optional readiness query without
+// implementing search, so the complete set gains firstIndexedAt and
+// nothing else.
+type firstIndexedReadyManifest struct{ fakeManifestProvider }
+
+func (firstIndexedReadyManifest) FirstIndexedAtReady(context.Context) bool { return true }
+
+// firstIndexedPendingManifest implements the optional readiness query and
+// answers that the backfill has not finished. Embedding the ordinary fake
+// keeps every other manifest method, so a builder that advertises the key
+// whenever the method exists fails this test.
+type firstIndexedPendingManifest struct{ fakeManifestProvider }
+
+func (firstIndexedPendingManifest) FirstIndexedAtReady(context.Context) bool { return false }
+
+func TestHealthOmitsFirstIndexedAtWhileTheBackfillIsUnfinished(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		LibraryRoots:  []string{dir},
+		ListenAddress: ":7788",
+		LibraryName:   "T",
+	}
+	authStore, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(cfg, authStore, &firstIndexedPendingManifest{}, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	resp := authGet(t, hs, "/v1/health", "")
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+	var got HealthResponse
+	if err := jsonUnmarshalForTest(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, feature := range got.Features {
+		if feature == "firstIndexedAt" {
+			t.Fatalf("advertised firstIndexedAt while the backfill is unfinished: %v", got.Features)
+		}
+	}
 }

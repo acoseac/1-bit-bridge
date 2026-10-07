@@ -412,3 +412,42 @@ func TestManifestPaginatedPlainWhenGzipRefused(t *testing.T) {
 		t.Errorf("version = %v", got["version"])
 	}
 }
+
+func TestManifestServesFirstIndexedAtOnTheFullAndPagedResponses(t *testing.T) {
+	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	track := manifest.Track{Path: "Artist/Album/song.flac", FirstIndexedAt: &when}
+	page := &manifest.Manifest{Version: 1, Tracks: []manifest.Track{track}, Total: pagePtrTo(1)}
+	mp := &fakeManifestProvider{
+		body:     manifest.Manifest{Version: 1, Tracks: []manifest.Track{track}},
+		pageBody: page,
+	}
+	hs, tok := withManifest(t, mp)
+	for _, path := range []string{"/v1/manifest", "/v1/manifest?limit=100"} {
+		req, err := http.NewRequest("GET", hs.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&got)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s status %d", path, resp.StatusCode)
+		}
+		tracks, _ := got["tracks"].([]any)
+		if len(tracks) != 1 {
+			t.Fatalf("%s tracks %#v", path, got["tracks"])
+		}
+		row, _ := tracks[0].(map[string]any)
+		if row["firstIndexedAt"] != "2020-01-02T03:04:05Z" {
+			t.Fatalf("%s firstIndexedAt %v", path, row["firstIndexedAt"])
+		}
+	}
+}

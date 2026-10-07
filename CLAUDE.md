@@ -1157,6 +1157,97 @@ lost my library."
   `TestEveryDeletionOfAStampedRowIsCounted`,
   `TestASubtreeScanRestampsAfterAStampedRowIsDeletedOutsideIt`,
   `TestAFullScanRestampsBeforeItWalksWhenAStampedRowWasDeleted`.
+- **`tracks.first_indexed_at` is set once, on insert, and an update of the
+ same path never moves it** ( 2026-10-07, sync phase 3; generation, the invariant carry key,
+ and review round 3 on 2026-10-08). Migration v53 adds the
+ column and `first_indexed_carry`. Every open fills remaining NULLs from
+ the stored `mtime_ns` (a zero or future mtime becomes the open's clock)
+ without assigning `indexed_at`; v54 adds `generation`, `target_multi`,
+ and the partial index `idx_tracks_first_indexed_at_null`. Both upserts
+ write the column only in the INSERT arm: the caller passes
+ `carryFirstIndexedNS` when it has a date, otherwise the insert uses
+ `s.now()`. The conflict arm, `StampExtractorVersionBatch`, and a rescan
+ of an existing path leave it. The scanner copies the previous date into
+ the new insert for a case-only rename (the before-set fold, on a full
+ scan and a subtree scan, including a virtual row under a renamed
+ container) and for a library-root flip. The saved key is the root's
+ folder name plus the path within that root, the same string in both
+ storage forms. `RecordFirstIndexedCarry` takes the existing root's
+ folder name when a root is added and prefixes the stored path, and on a
+ collapse keeps only the surviving root's rows, whose stored path already
+ begins with that folder name. A single-root scan looks a date up by
+ prefixing the folder name of the root that scan is walking. A multi-root
+ scan looks the stored path up directly. A flip that changes the
+ storage form records and wipes in one transaction
+ (`RecordFirstIndexedCarryAndWipe`: admin add, admin remove that
+ collapses to one root, `bridge library add`, `bridge library remove`).
+ A prefix delete that stays multi-root records nothing.
+ A record merges and bumps the generation. A snapshot with no rows writes
+ nothing when no dates are saved yet; when dates are already saved it
+ moves them onto the new generation and the form this flip is heading
+ toward, and does not delete the keys. A full scan clears only the
+ generation it loaded, and only when the library is already in the saved
+ form. A subtree scan looks each insert up and does not clear. The
+ subtree fold is one `unicode_lower` lookup on
+ `idx_tracks_path_unicode_lower`. The in-memory date map and the
+ case-only rename pairing fold with `pathFold`, the same case-fold-then-NFC
+ `unicode_lower` applies, so a decomposed name and its precomposed
+ spelling take one date on a full scan and a subtree scan. An
+ accent-encoding rename is reaped the same way, and both spellings left
+ in place are not (`TestCaseOnlyRenames`). A failed
+ or cancelled wipe rolls that transaction back, so it does not delete
+ dates an earlier flip still has pending. A save that fails after the
+ wipe commits retargets that generation at the form the library still
+ has, and the compensating scan copies the dates and clears them; a
+ cancelled request is that failure. The carry upsert is prepared once for the
+ snapshot. Both track upserts run one statement. The null-date fill does not order its
+ rowid select, which is what lets that select use
+ `idx_tracks_first_indexed_at_null`. A path with no recorded date uses
+ the scan clock. UPnP-routed rows are not in the snapshot. A folder move
+ made outside the bridge, and a file that returns after the missing-scan
+ threshold, are re-adds and get a new date. That is the accepted
+ behaviour. A case-sensitive volume that holds both spellings of one path
+ can hand the new spelling the old date even though the rename reap does
+ not retire the old row; that residual is accepted. The wire field is
+ `firstIndexedAt`, a `*time.Time` spliced at read time and stripped by
+ `marshalForStorage`, omitted until the row has a date. The list, the
+ stream and the page splice it through one scan, `scanListedTrack`. `/v1/health`
+ advertises `firstIndexedAt` only while no track row is NULL and the
+ manifest serves the field, including on a demo bridge; the count is
+ cached with the other health counts (ready sticks for the process, a miss
+ is rechecked, a timeout is not stored). No `ExtractorVersion` bump and no
+ `ProtocolVersion` bump. The `indexed_at` assignment sweep treats
+ `first_indexed_at` as a different identifier.
+ (`TestV53BackfillCopiesTheStoredMtimeAndLeavesTheCursor`,
+ `TestAnUpdateOfTheSamePathLeavesTheFirstIndexedDate`,
+ `TestANewPathCopiesTheDateOnlyWhenTheCallerPassesIt`,
+ `TestACaseOnlyRenameKeepsTheFirstIndexedDate`,
+ `TestASubtreeScanCopiesACaseOnlyRename`,
+ `TestAnOutsideFolderMoveInsertsANewFirstIndexedDate`,
+ `TestARootFlipCarriesTheFirstIndexedDateAndAFullScanClearsIt`,
+ `TestCarryKeyIsTheRootAndThePathWithinIt`,
+ `TestAnInFlightScanLeavesTheCarryForThePostFlipScan`,
+ `TestAnAddedRootDoesNotInheritTheOldRootsDate`,
+ `TestACollapseKeepsTheSurvivorsDateNotTheRemovedRoots`,
+ `TestARolledBackNullDateIsFilledOnTheNextOpen`,
+ `TestAFlipBackBeforeAnyRescanKeepsTheDate`,
+ `TestACollapseDuringThePostAddRescanKeepsBothAlbums`,
+ `TestACompensatingScanAfterAFailedSaveKeepsTheDate`,
+ `TestTheNullDateFillUsesThePartialIndex`,
+ `TestFoldedFirstIndexedUsesThePathIndex`,
+ `TestMigrationV52GainsAFirstIndexedDate`,
+ `TestManifestServesFirstIndexedAtOnTheFullAndPagedResponses`,
+ `TestFirstIndexedAtReadySticksOnceTrueAndRechecksAMiss`,
+ `TestAddingARootKeepsTheOldFilesDateAndDatesTheNewRootAtTheScan`,
+ `TestCollapsingSeveralRootsKeepsTheSurvivorsOwnDate`,
+ `TestLibraryAddRecordsTheExistingRootsFolderName`,
+ `TestLibraryRemoveCollapseKeepsTheSurvivorsDate`,
+ `TestADecomposedAlbumTakesThePrecomposedDate`,
+ `TestASaveFailureAfterAddingARootDropsTheSavedDates`,
+ `TestASaveFailureAfterCollapsingRootsDropsTheSavedDates`,
+ `TestACancelledWipeDropsTheSavedDates`,
+ `TestACancelledSaveAfterTheWipeDropsTheSavedDates`,
+ `TestACancelledCollapseKeepsTheDatesTheAddRecorded`.)
 - **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
   the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
   Both terms are load-bearing: the clock term anchors to wall-clock because the

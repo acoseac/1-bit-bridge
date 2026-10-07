@@ -20,9 +20,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -84,6 +81,16 @@ type pathInfo struct {
 type Scanner struct {
 	roots atomic.Pointer[[]string]
 	store *Store
+	// firstIndexed is the dates this scan's inserts may copy. The scan
+	// publishes it before the workers start and does not write it again
+	// until they have joined.
+	firstIndexed *firstIndexedSnap
+	// scanSingleRootBase is the folder name of the one root this scan is
+	// walking. A multi-root scan leaves it empty, because the stored path
+	// already begins with that name. The scan writes it before the workers
+	// start and clears it after they join. Workers prefix a single-root
+	// path with it to look up a saved date.
+	scanSingleRootBase string
 
 	// artDir is the on-disk artwork cache directory the scanner writes
 	// locally-extracted artwork (`local-<sha256>-500.jpg`) into. Empty
@@ -486,6 +493,18 @@ func (s *Scanner) ScanProgress() int64 { return s.progress.Load() }
 // "N files unreadable" hint that persists past the latest scan.
 func (s *Scanner) PanickedCount() int64 { return s.panickedCnt.Load() }
 
+// setScanRootBase records the folder name a single-root scan prefixes
+// onto a stored path when it looks a saved date up. A multi-root scan
+// stores that name already, so the field stays empty. The scan writes
+// it before the workers start and clears it after they join.
+func (s *Scanner) setScanRootBase(roots []string, multiRoot bool) {
+	s.scanSingleRootBase = ""
+	if multiRoot || len(roots) == 0 {
+		return
+	}
+	s.scanSingleRootBase = filepath.Base(roots[0])
+}
+
 // Scan runs a full walk of the library roots. Safe to cancel via ctx;
 // any tracks whose batch flushed before cancellation are committed.
 // Returns the count of tracks upserted (= committed by the writer).
@@ -535,9 +554,16 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// shutdown-time completion stays quiet. scanOK is set ONLY
 	// immediately before the successful `return count, nil` sites below.
 	scanOK := false
+	carryClear := false
+	var carryGen int64
 	defer func() {
 		if !scanOK || ctx.Err() != nil {
 			return
+		}
+		if carryClear {
+			if err := s.store.ClearFirstIndexedCarryGeneration(ctx, carryGen); err != nil {
+				scanLogger.Warn("first-indexed carry", "err", err)
+			}
 		}
 		if fn := s.postScanHook.Load(); fn != nil {
 			(*fn)()
@@ -691,6 +717,8 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.setScanRootBase(roots, multiRoot)
+	s.publishFirstIndexed(ctx, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
@@ -772,8 +800,14 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// final batch.
 	close(paths)
 	workersWG.Wait()
+	s.scanSingleRootBase = ""
 	close(writes)
 	writerWG.Wait()
+	// The workers have finished reading the snapshot. Clear only the
+	// generation this scan loaded, and only when the library is already
+	// in the form that record was saving toward. An error return below
+	// leaves scanOK false, so the dates stay for the next scan.
+	carryClear, carryGen = s.releaseFirstIndexed()
 
 	count := int(committed.Load())
 	// A ctx cancel during the workers/writer Wait window (clean walk
@@ -1412,6 +1446,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			continue
 		}
 		for _, tw := range tracksToWrite {
+			s.noteFirstIndexed(ctx, tw, multiRoot)
 			select {
 			case writes <- tw:
 			case <-ctx.Done():
@@ -2286,6 +2321,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	paths := make(chan pathInfo, scanChannelBuffer)
 	writes := make(chan *Track, scanChannelBuffer)
 
+	s.setScanRootBase(roots, multiRoot)
 	nWorkers := runtime.NumCPU()
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
@@ -2436,8 +2472,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 
 	close(paths)
 	workersWG.Wait()
+	s.scanSingleRootBase = ""
 	close(writes)
 	writerWG.Wait()
+	// A subtree scan looks each insert up on its own. It keeps no
+	// snapshot and does not clear saved dates.
+	s.firstIndexed = nil
 
 	// Surface cancellation so a partial subtree update doesn't
 	// look like a clean completion (CodeRabbit Major post-merge
@@ -3046,9 +3086,9 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 // threshold it would shadow the new row in /v1/manifest for up to
 // `threshold` scans, with both rows serving the same physical file.
 //
-// The fold is cases.Lower(language.Und), the same byte-for-byte fold
-// the store's unicode_lower() SQL function applies (sqlfunc.go). A
-// stored path that fold-matches a seen entry refers to a file the
+// The fold is pathFold, the same fold the store's unicode_lower()
+// SQL function applies (sqlfunc.go): a Unicode case fold, then NFC.
+// A stored path that fold-matches a seen entry refers to a file the
 // walker DID enumerate this pass, so reaping it can't confuse a
 // transient partial enumeration with a rename — the threshold's
 // silent-enumeration protection stays intact for genuinely-unseen
@@ -3056,17 +3096,16 @@ func isUnderErroredSubtree(path string, errorSubtrees map[string]struct{}) bool 
 // store_lookup_case_test.go); the fold applies ONLY to this
 // deletion-pass filter.
 func caseOnlyRenames(before, seen map[string]struct{}) map[string]struct{} {
-	fold := cases.Lower(language.Und)
 	seenFolded := make(map[string]struct{}, len(seen))
 	for p := range seen {
-		seenFolded[fold.String(p)] = struct{}{}
+		seenFolded[pathFold(p)] = struct{}{}
 	}
 	renames := make(map[string]struct{})
 	for p := range before {
 		if _, ok := seen[p]; ok {
 			continue
 		}
-		if _, ok := seenFolded[fold.String(p)]; ok {
+		if _, ok := seenFolded[pathFold(p)]; ok {
 			renames[p] = struct{}{}
 		}
 	}

@@ -651,25 +651,7 @@ func TestRecordAnalysisFailureSurfacesADatabaseError(t *testing.T) {
 func TestSuppressedPredicateUsesThePartialIndex(t *testing.T) {
 	st := openAnalysisFailStore(t)
 	plan := func(where string) string {
-		rows, err := st.db.QueryContext(context.Background(),
-			"EXPLAIN QUERY PLAN SELECT path FROM tracks WHERE "+where, int64(0))
-		if err != nil {
-			t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
-		}
-		defer rows.Close()
-		var out []string
-		for rows.Next() {
-			var id, parent, notUsed int
-			var detail string
-			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, detail)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		return strings.Join(out, " | ")
+		return explainPlan(t, st, "SELECT path FROM tracks WHERE "+where, int64(0))
 	}
 
 	// Control FIRST: the sibling predicate already reached the index, so

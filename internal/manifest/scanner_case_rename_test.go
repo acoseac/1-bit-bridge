@@ -11,8 +11,8 @@ import (
 // beforeSet still carries the old one — the old-case row must be
 // reaped immediately rather than shadow the new row in /v1/manifest
 // until missing_count hits the delete threshold. The fold matches the
-// store's unicode_lower() SQL function (cases.Lower(language.Und))
-// byte-for-byte. Unit-level on purpose: a full case-insensitive-FS
+// store's unicode_lower() SQL function (pathFold). Unit-level on
+// purpose: a full case-insensitive-FS
 // integration test isn't portable (Linux CI filesystems are
 // case-sensitive), and GetTrack stays exact-key (pinned by
 // store_lookup_case_test.go).
@@ -46,6 +46,18 @@ func TestCaseOnlyRenames(t *testing.T) {
 			before: []string{"Sigur Rós/Ágætis Byrjun/01.flac"},
 			seen:   []string{"sigur rós/ágætis byrjun/01.flac"},
 			want:   []string{"Sigur Rós/Ágætis Byrjun/01.flac"},
+		},
+		{
+			name:   "accent-encoding rename flagged",
+			before: []string{"Cafe\u0301/01.flac"},
+			seen:   []string{"Caf\u00e9/01.flac"},
+			want:   []string{"Cafe\u0301/01.flac"},
+		},
+		{
+			name:   "both accent encodings live — nothing flagged",
+			before: []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
+			seen:   []string{"Cafe\u0301/01.flac", "Caf\u00e9/01.flac"},
+			want:   nil,
 		},
 		{
 			name:   "both cases live on case-sensitive FS — nothing flagged",

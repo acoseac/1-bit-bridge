@@ -2313,6 +2313,37 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// v53 records the instant a path was first indexed. The column
+		// stays nullable until Store.migrate fills every row from the
+		// stored mtime; that fill is not in post, which has no store
+		// clock. Neither step assigns the row's change cursor.
+		version: 53,
+		name:    "tracks.first_indexed_at (set-once added date)",
+		sql:     `CREATE TABLE IF NOT EXISTS first_indexed_carry (path_key TEXT PRIMARY KEY, first_indexed_at INTEGER NOT NULL)`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks", tableColumn{
+				name: "first_indexed_at",
+				ddl:  `ALTER TABLE tracks ADD COLUMN first_indexed_at INTEGER`,
+			})
+		},
+	},
+	{
+		// v54 lets a scan clear only the saved dates it loaded, and lets
+		// the null-date fill use an index. The columns default so a table
+		// v53 created stays readable. The fill itself runs at the end of
+		// every open, not inside this step.
+		version: 54,
+		name:    "first_indexed_carry generation and null-date index",
+		sql: `CREATE INDEX IF NOT EXISTS idx_tracks_first_indexed_at_null
+			ON tracks(path) WHERE first_indexed_at IS NULL`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "first_indexed_carry",
+				tableColumn{name: "generation", ddl: `ALTER TABLE first_indexed_carry ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`},
+				tableColumn{name: "target_multi", ddl: `ALTER TABLE first_indexed_carry ADD COLUMN target_multi INTEGER NOT NULL DEFAULT 0`},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2590,6 +2621,11 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("set user_version to %d: %w", m.version, err)
 		}
 	}
+	// Every open fills rows a rolled-back binary left null. The fill
+	// touches only those rows and does not assign indexed_at.
+	if err := s.backfillFirstIndexedAt(ctx); err != nil {
+		return fmt.Errorf("first_indexed_at backfill: %w", err)
+	}
 	return nil
 }
 
@@ -2770,6 +2806,9 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// the booklet_tag column at read time, set only by the booklet
 	// availability loop) — same zero-before-marshal contract.
 	clone.BookletTag = ""
+	// FirstIndexedAt is spliced from tracks.first_indexed_at. A round trip
+	// through tags_json would freeze a column the next read overwrites.
+	clone.FirstIndexedAt = nil
 	// ReplayGainTrackDB is DUAL-source: a curated tag (the scanner
 	// extracted it — must persist) OR an analysis splice (must NOT
 	// persist, else a round-tripped read Track freezes the analysis value
@@ -3253,44 +3292,15 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 
 // ----- tracks -----
 
-// UpsertTrack writes or replaces the row for t.Path. The tags are encoded
-// as JSON so the schema can evolve without column migrations during v0.
-//
-// Holds `s.mu` per the writer contract on Store.
-//
-// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
-// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
-// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
-// mtime-changed-but-clock-stable scan tick) would leave indexed_at
-// unchanged, and a client that synced at the equal timestamp would miss
-// the second mutation under the `WHERE indexed_at > since` delta-sync
-// filter. The `excluded.indexed_at` reference keeps the bind count at 5
-// (the original UPSERT shape) rather than broadening to 7.
-//
-// On success t records the version of the row it wrote (Track.rowVersion),
-// as a read would: this is the single-row writer whose Track a caller keeps,
-// and one that stamps it next (MarkEnriched) needs that version. The batch
-// writer records none; its Tracks are the scanner's, dropped once written.
-func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
-	raw, err := marshalForStorage(t)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	now := s.now().UnixNano()
-	_, err = tx.ExecContext(ctx, `
+// prepareTrackUpsert prepares the one INSERT both track upserts run.
+// first_indexed_at is written only on insert; the conflict arm leaves it.
+func prepareTrackUpsert(ctx context.Context, tx *sql.Tx) (*sql.Stmt, error) {
+	return tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   folder_art_key, extract_refused, first_indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -3356,9 +3366,50 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- (Track.extractRefused), unconditional like the version it
 			-- rides with: a file that reads now clears it.
 			extract_refused = excluded.extract_refused
-	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
+			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
+	`)
+}
+
+// UpsertTrack writes or replaces the row for t.Path. The tags are encoded
+// as JSON so the schema can evolve without column migrations during v0.
+//
+// Holds `s.mu` per the writer contract on Store.
+//
+// indexed_at uses the same strict-advance CASE WHEN form as UpsertVariant /
+// MarkEnriched (lines 565 + 2730) — without it, a back-to-back UpsertTrack
+// at the same nanosecond (rapid test seeds, low-resolution wall clocks, an
+// mtime-changed-but-clock-stable scan tick) would leave indexed_at
+// unchanged, and a client that synced at the equal timestamp would miss
+// the second mutation under the `WHERE indexed_at > since` delta-sync
+// filter. The `excluded.indexed_at` reference keeps the bind count at 5
+// (the original UPSERT shape) rather than broadening to 7.
+//
+// On success t records the version of the row it wrote (Track.rowVersion),
+// as a read would: this is the single-row writer whose Track a caller keeps,
+// and one that stamps it next (MarkEnriched) needs that version. The batch
+// writer records none; its Tracks are the scanner's, dropped once written.
+func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
+	raw, err := marshalForStorage(t)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.now().UnixNano()
+	stmt, err := prepareTrackUpsert(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
-		boolToInt(t.extractRefused))
+		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now))
 	if err != nil {
 		return err
 	}
@@ -3425,6 +3476,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		audioMD5    string
 		artKey      string
 		refused     int
+		firstNS     int64
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -3446,6 +3498,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			audioMD5:    t.audioMD5,
 			artKey:      t.folderArtKey,
 			refused:     boolToInt(t.extractRefused),
+			firstNS:     t.carryFirstIndexedNS,
 		}
 	}
 
@@ -3467,53 +3520,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// clock) advances to `existing+1`. The batch-level shared `now` is
 	// the right shape — per-track s.now() calls would burn 500 syscalls
 	// per batch on Pi-class hardware and break the deterministic test seam.
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5, compression,
-		                   folder_art_key, extract_refused)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-			size          = excluded.size,
-			mtime_ns      = excluded.mtime_ns,
-			tags_json     = excluded.tags_json,
-			indexed_at    = CASE
-				WHEN tracks.indexed_at >= excluded.indexed_at THEN tracks.indexed_at + 1
-				ELSE excluded.indexed_at
-			END,
-			enriched_at   = 0,
-			-- See UpsertTrack: missing_count reset is unconditional on
-			-- every confirm so a stable library can't accumulate stale
-			-- counter increments across scans.
-			missing_count = 0,
-			-- Clear the premium-cover version when the artworkMBID changes (it
-			-- belonged to the prior MBID); keep it when unchanged. Mirrors
-			-- UpsertTrack — see its docblock. SET RHS reads the pre-update row.
-			artwork_version = CASE
-				WHEN json_extract(excluded.tags_json, '$.artworkMBID')
-				     IS json_extract(tracks.tags_json, '$.artworkMBID')
-				THEN tracks.artwork_version ELSE NULL
-			END,
-			-- v25 format-fact columns — mirrors UpsertTrack.
-			sample_rate     = excluded.sample_rate,
-			bits_per_sample = excluded.bits_per_sample,
-			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec,
-			-- v43 compression accelerator — same discipline as the four above.
-			compression     = excluded.compression,
-			-- extractor_version stamped on every upsert (constant per build).
-			-- The excluded.extractor_version assignment is MANDATORY: without
-			-- it a re-extracted (conflict) row keeps its stale stamp and would
-			-- re-extract on every subsequent scan.
-			-- v31 dupe stamps deliberately untouched — mirrors UpsertTrack.
-			extractor_version = excluded.extractor_version,
-			-- audio_md5 unconditional on a changed row — mirrors UpsertTrack.
-			audio_md5 = excluded.audio_md5,
-			-- v49 folder-art key — mirrors UpsertTrack.
-			folder_art_key = excluded.folder_art_key,
-			-- v50 refusal marker — mirrors UpsertTrack.
-			extract_refused = excluded.extract_refused
-	`)
+	stmt, err := prepareTrackUpsert(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -3522,7 +3529,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
-			r.refused); err != nil {
+			r.refused, firstIndexedInsertNS(r.firstNS, now)); err != nil {
 			return err
 		}
 	}
@@ -3921,7 +3928,8 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
 	var version int64
-	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version)
+	var firstNS sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT tags_json, indexed_at, first_indexed_at FROM tracks WHERE path = ?`, path).Scan(&raw, &version, &firstNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3933,6 +3941,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
+	spliceFirstIndexedAt(&t, firstNS)
 	return &t, nil
 }
 
@@ -4383,8 +4392,53 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
+// scanListedTrack reads one row of the list, stream and page SELECT
+// (tags_json through first_indexed_at) into t, replacing whatever t held.
+func scanListedTrack(rows *sql.Rows, t *Track) error {
+	var raw []byte
+	var version int64
+	var enrichedAt int64
+	var variantsRaw []byte
+	var wfTag sql.NullString
+	var rg sql.NullFloat64
+	var ktRaw sql.NullString
+	var artVer sql.NullString
+	var bkTag sql.NullString
+	var lyTag sql.NullString
+	var firstNS sql.NullInt64
+	if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag, &firstNS); err != nil {
+		return err
+	}
+	*t = Track{}
+	if err := json.Unmarshal(raw, t); err != nil {
+		return err
+	}
+	t.rowVersion, t.hasRowVersion = version, true
+	scanTrackVariants(t, variantsRaw)
+	t.Enriched = boolPtr(enrichedAt != 0)
+	t.WaveformTag = wfTag.String
+	t.ArtworkVersion = artVer.String
+	t.BookletTag = bkTag.String
+	t.LyricsTag = lyTag.String
+	spliceAnalysisReplayGain(t, rg)
+	spliceAnalysisScalars(t, ktRaw)
+	spliceFirstIndexedAt(t, firstNS)
+	return nil
+}
+
+func collectListedTracks(rows *sql.Rows, out []Track) ([]Track, error) {
+	for rows.Next() {
+		var t Track
+		if err := scanListedTrack(rows, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -4392,37 +4446,7 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Track{}
-	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
-			return nil, err
-		}
-		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return nil, err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		scanTrackVariants(&t, variantsRaw)
-		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return collectListedTracks(rows, []Track{})
 }
 
 // StreamTracks calls fn for every row matching the same predicate as
@@ -4461,7 +4485,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
+	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks`
 	where, args := trackReadPredicates(servedOnly, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
@@ -4479,37 +4503,14 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 	}
 	defer rows.Close()
 	// Hoisted outside the loop: the same Track is reused each
-	// iteration to honour the contract documented above. `t = Track{}`
-	// resets every field (including the spliced Enriched pointer) so
-	// stale data from row N never leaks into row N+1.
+	// iteration to honour the contract documented above.
+	// scanListedTrack replaces it before each callback, so stale
+	// fields from row N never leak into row N+1.
 	var t Track
 	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
+		if err := scanListedTrack(rows, &t); err != nil {
 			return err
 		}
-		t = Track{}
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		t.Enriched = boolPtr(enrichedAt != 0)
-		scanTrackVariants(&t, variantsRaw)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -4550,7 +4551,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		limit = 1000
 	}
 	q := `
-		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks
+		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at FROM tracks
 		WHERE path > ?`
 	if servedOnly {
 		q += ` AND dupe_suppressed = 0`
@@ -4567,37 +4568,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 	// and the sole caller clamps it to <=5001; min(...,8192) caps a
 	// hypothetical future caller passing an unbounded limit straight to the
 	// store, so the prealloc can't blow up memory on a near-empty table.
-	out := make([]Track, 0, min(limit, 8192))
-	for rows.Next() {
-		var raw []byte
-		var version int64
-		var enrichedAt int64
-		var variantsRaw []byte
-		var wfTag sql.NullString
-		var rg sql.NullFloat64
-		var ktRaw sql.NullString
-		var artVer sql.NullString
-		var bkTag sql.NullString
-		var lyTag sql.NullString
-		if err := rows.Scan(&raw, &version, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
-			return nil, err
-		}
-		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return nil, err
-		}
-		t.rowVersion, t.hasRowVersion = version, true
-		scanTrackVariants(&t, variantsRaw)
-		t.Enriched = boolPtr(enrichedAt != 0)
-		t.WaveformTag = wfTag.String
-		t.ArtworkVersion = artVer.String
-		t.BookletTag = bkTag.String
-		t.LyricsTag = lyTag.String
-		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisScalars(&t, ktRaw)
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return collectListedTracks(rows, make([]Track, 0, min(limit, 8192)))
 }
 
 // HasTrackWithArtworkMBID reports whether at least one indexed track
@@ -5536,27 +5507,52 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// UPnP-routed tracks can't be transcoded/analyzed, so every cached
-	// sidecar belongs to a filesystem track being wiped here. Refuse a
-	// truncated enumeration for the same reason WipeAllTracks does.
-	doomedSidecars, err := s.listAllSidecars(ctx)
+	return s.wipeFilesystemTracksLocked(ctx)
+}
+
+// doomedFilesystemSidecars lists every sidecar a filesystem wipe will
+// remove. The caller holds s.mu. Routed tracks have none.
+func (s *Store) doomedFilesystemSidecars(ctx context.Context) ([]string, error) {
+	doomed, err := s.listAllSidecars(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(doomed, s.listWaveformSidecars(ctx, "1=1")...), nil
+}
+
+// wipeFilesystemTracksLocked is WipeFilesystemTracks under s.mu.
+func (s *Store) wipeFilesystemTracksLocked(ctx context.Context) error {
+	doomed, err := s.doomedFilesystemSidecars(ctx)
 	if err != nil {
 		return err
 	}
-	doomedSidecars = append(doomedSidecars, s.listWaveformSidecars(ctx, "1=1")...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	// NOT EXISTS anti-join, keyed on the `upnp_track_routing` PRIMARY KEY
-	// (`source_path`) so it stays index-backed even on a 15k-row upstream.
-	// NOT EXISTS over NOT IN: idiomatic + NULL-safe should a future schema
-	// change ever make source_path nullable (Gemini on PR #404).
-	// Coverage reset — same rationale as WipeAllTracks (the surviving
-	// UPnP-routed rows keep serving; everything filesystem-shaped is
-	// about to change form).
-	if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+	if err := deleteFilesystemRowsTx(ctx, tx, s.now().UnixNano()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	noteRootFlipStage("wipe")
+	removeSidecarFiles(doomed)
+	return nil
+}
+
+// deleteFilesystemRowsTx deletes filesystem tracks and every folder
+// row. Routed tracks stay. The caller holds s.mu and owns tx.
+// NOT EXISTS anti-join, keyed on the upnp_track_routing primary key
+// (source_path) so it stays index-backed even on a 15k-row upstream.
+// NOT EXISTS over NOT IN: idiomatic and NULL-safe should a future
+// schema change ever make source_path nullable (Gemini on PR #404).
+// The coverage reset is WipeAllTracks's: the surviving routed rows
+// keep serving, and everything filesystem-shaped is about to change
+// form.
+func deleteFilesystemRowsTx(ctx context.Context, tx *sql.Tx, nowNs int64) error {
+	if err := resetDeletionJournalCoverageTx(ctx, tx, nowNs); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -5567,14 +5563,8 @@ func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	removeSidecarFiles(doomedSidecars)
-	return nil
+	_, err := tx.ExecContext(ctx, `DELETE FROM folders`)
+	return err
 }
 
 // likeEscape prepares a literal string for LIKE pattern matching. Escapes

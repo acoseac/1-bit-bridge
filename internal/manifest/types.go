@@ -32,19 +32,24 @@ import (
 // number, no year), so user-visible behaviour is unchanged; the wire
 // shape just stops lying about which case the extractor saw.
 type Track struct {
-	Path        string    `json:"path"`
-	Size        int64     `json:"size"`
-	ModTime     time.Time `json:"mtime"`
-	Title       string    `json:"title,omitempty"`
-	Artist      string    `json:"artist,omitempty"`
-	AlbumArtist string    `json:"albumArtist,omitempty"`
-	Album       string    `json:"album,omitempty"`
-	TrackNumber *int      `json:"trackNumber,omitempty"`
-	DiscNumber  *int      `json:"discNumber,omitempty"`
-	Year        *int      `json:"year,omitempty"`
-	Genre       string    `json:"genre,omitempty"`
-	Duration    *float64  `json:"duration,omitempty"`   // seconds
-	SampleRate  *float64  `json:"sampleRate,omitempty"` // Hz (e.g. 96000, 2822400)
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mtime"`
+	// FirstIndexedAt is when this path was first indexed, spliced from
+	// tracks.first_indexed_at. It is set once, on insert, and an update of
+	// the same path leaves it. Omitted until the v53 backfill has filled
+	// the row. Never stored inside tags_json.
+	FirstIndexedAt *time.Time `json:"firstIndexedAt,omitempty"`
+	Title          string     `json:"title,omitempty"`
+	Artist         string     `json:"artist,omitempty"`
+	AlbumArtist    string     `json:"albumArtist,omitempty"`
+	Album          string     `json:"album,omitempty"`
+	TrackNumber    *int       `json:"trackNumber,omitempty"`
+	DiscNumber     *int       `json:"discNumber,omitempty"`
+	Year           *int       `json:"year,omitempty"`
+	Genre          string     `json:"genre,omitempty"`
+	Duration       *float64   `json:"duration,omitempty"`   // seconds
+	SampleRate     *float64   `json:"sampleRate,omitempty"` // Hz (e.g. 96000, 2822400)
 	// BitsPerSample MUST remain nil for lossy formats (AAC / MP3 /
 	// OGG / OPUS / WMA, and the compressed AIFF-C and WAV encodings) —
 	// the value would be the decoder's container width (e.g. 32 for
@@ -450,6 +455,10 @@ type Track struct {
 	// versionStampOnly shape).
 	rowVersion    int64
 	hasRowVersion bool
+	// carryFirstIndexedNS is the first-indexed instant an INSERT should
+	// record, in Unix nanoseconds. Zero means the insert uses the store
+	// clock. An update ignores it. Never marshaled.
+	carryFirstIndexedNS int64
 }
 
 // Variant is one cached alternate rendering of a Track's source. The
