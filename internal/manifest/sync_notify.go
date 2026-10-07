@@ -66,10 +66,11 @@ func (s *Store) notePlaylists(ctx context.Context) {
 }
 
 // noteLibrary runs only after a commit that changed what a delta client
-// sees. The watermark is the later of MAX(indexed_at) and
-// MAX(manifest_deletions.deleted_at). A query error publishes nothing.
-// An empty library publishes nothing from here; ScanEnded publishes the
-// publisher clock when neither watermark exists.
+// sees. The watermark is the later of MAX(indexed_at),
+// MAX(manifest_deletions.deleted_at) and the deletion-journal coverage
+// start. A query error publishes nothing. An empty library with no
+// coverage start publishes nothing from here; ScanEnded publishes the
+// publisher clock when no watermark exists.
 func (s *Store) noteLibrary(ctx context.Context) {
 	if s.syncHooks == nil || s.syncHooks.Library == nil {
 		return
@@ -81,9 +82,10 @@ func (s *Store) noteLibrary(ctx context.Context) {
 	s.syncHooks.Library(ns)
 }
 
-// LibraryWatermark is the later of MAX(indexed_at) and
-// MAX(manifest_deletions.deleted_at). ok is false when both are absent.
-// A query error is returned and is not an empty library.
+// LibraryWatermark is the later of MAX(indexed_at),
+// MAX(manifest_deletions.deleted_at) and the deletion-journal coverage
+// start. ok is false when all three are absent. A query error is
+// returned and is not an empty library.
 func (s *Store) LibraryWatermark(ctx context.Context) (int64, bool, error) {
 	return libraryWatermark(ctx, s.db)
 }
@@ -95,7 +97,9 @@ func libraryWatermark(ctx context.Context, db *sql.DB) (int64, bool, error) {
 			SELECT MAX(indexed_at) AS v FROM tracks
 			UNION ALL
 			SELECT MAX(deleted_at) AS v FROM manifest_deletions
-		)`).Scan(&max)
+			UNION ALL
+			SELECT CAST(v AS INTEGER) AS v FROM scan_state WHERE k = ?
+		)`, deletionJournalCoverageKey).Scan(&max)
 	if err != nil {
 		return 0, false, err
 	}

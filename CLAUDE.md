@@ -2112,11 +2112,13 @@ lost my library."
   trailing 30s debounce, including a journaled deletion or suppression
   outside a full scan; a note during a scan cancels a timer already
   armed, and the scan-end event cancels one that is still pending. The
-  payload watermark is the later of `MAX(indexed_at)` and
-  `MAX(manifest_deletions.deleted_at)`, rendered as millisecond UTC
-  RFC3339, which `GET /v1/manifest?since=` parses. An empty library at
-  scan end publishes the publisher clock when neither watermark exists;
-  a query error publishes nothing. A sidecar lyrics bump on the
+  payload watermark is the later of `MAX(indexed_at)`,
+  `MAX(manifest_deletions.deleted_at)` and the deletion-journal
+  coverage start, rendered as millisecond UTC RFC3339, which
+  `GET /v1/manifest?since=` parses. A mass delete that resets that
+  coverage publishes the new start, including when it deletes every
+  track. An empty library at scan end publishes the publisher clock
+  when no watermark exists; a query error publishes nothing. A sidecar lyrics bump on the
   version-stamp leg notes after its commit; a refusal skips lyrics.
   A smart-mix cover and a cover pruned from an already-tombstoned
   playlist publish no `playlists.changed`. The demo wires none of

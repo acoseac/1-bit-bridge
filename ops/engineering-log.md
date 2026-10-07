@@ -37610,3 +37610,11 @@ error publishes nothing. A sidecar lyrics bump on the version-stamp
 leg notes after that commit. A smart-mix cover does not publish
 `playlists.changed`, and a cover pruned after the playlist is already
 tombstoned does not publish a second time.
+
+2026-10-08, review round 2 of #1159. A mass delete past the journal's
+line wipes `manifest_deletions` and stamps `deletion_journal_coverage_start_ns`.
+The watermark is the later of `MAX(indexed_at)`, `MAX(deleted_at)` and
+that start, so the event moves forward when surviving rows are older
+and still fires when every track is gone. A client whose cursor
+predates the reset still sees `deltaIncomplete`. The sentences above
+that stop the watermark at the two MAXes are that earlier reading.

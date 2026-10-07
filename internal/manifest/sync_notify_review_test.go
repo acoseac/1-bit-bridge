@@ -337,3 +337,47 @@ func TestDeletingAPlaylistWithACoverPublishesOnce(t *testing.T) {
 		t.Fatalf("notes %d, want the tombstone alone", len(notes.pl))
 	}
 }
+
+func TestAMassDeletePublishesAWatermarkThatMovedForward(t *testing.T) {
+	s, _, notes := openNotifyingStore(t)
+	ctx := context.Background()
+	for _, p := range []string{"A/1.flac", "A/2.flac", "A/3.flac"} {
+		upsertParent(t, s, p)
+	}
+	before, ok, err := s.LibraryWatermark(ctx)
+	if err != nil || !ok {
+		t.Fatalf("watermark before: %d ok %v err %v", before, ok, err)
+	}
+	notes.lib = nil
+	if err := s.DeleteTracksBatch(ctx, []string{"A/2.flac", "A/3.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.lib) == 0 {
+		t.Fatal("a mass delete published no library.changed")
+	}
+	if got := notes.lib[len(notes.lib)-1]; got <= before {
+		t.Fatalf("watermark went backwards: before %d, event %d", before, got)
+	}
+}
+
+func TestDeletingEveryTrackPublishesLibraryChanged(t *testing.T) {
+	s, _, notes := openNotifyingStore(t)
+	ctx := context.Background()
+	time.Sleep(3 * time.Millisecond)
+	for _, p := range []string{"A/1.flac", "A/2.flac"} {
+		upsertParent(t, s, p)
+	}
+	cursor := time.Now()
+	notes.lib = nil
+	if err := s.DeleteTracksBatch(ctx, []string{"A/1.flac", "A/2.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := BuildManifest(ctx, s, nil, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.lib) == 0 {
+		t.Fatalf("deleting every track published nothing (deltaIncomplete=%v deleted=%d tracks=%d)",
+			m.DeltaIncomplete, len(m.Deleted), len(m.Tracks))
+	}
+}
