@@ -3928,7 +3928,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// from /v1/health. SetLibraryScanEnded is separate from the single
 	// post-scan hook below.
 	if !cfg.Demo.Enabled {
-		syncPub := api.NewSyncEventPublisher(apiSrv.EventPublisher(), scanner.IsScanning, manifestStore.LibraryWatermark)
+		syncPub := api.NewSyncEventPublisher(apiSrv.EventPublisher(), func() bool { return scanner.AdvertisedScanning(time.Now()) }, manifestStore.LibraryWatermark)
 		manifestStore.SetSyncHooks(syncPub.Hooks())
 		scanner.SetLibraryScanEnded(func() { syncPub.ScanEnded(context.Background()) })
 		apiSrv.EnableSyncEvents()

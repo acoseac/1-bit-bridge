@@ -476,6 +476,19 @@ func (s *Scanner) IsScanStalled(now time.Time) bool {
 	return true
 }
 
+// AdvertisedScan is the scan /v1/health reports as in progress: running,
+// and not stalled. library.changed follows this predicate, so a stalled
+// scan does not keep the topic quiet.
+func AdvertisedScan(scanning, stalled bool) bool {
+	return scanning && !stalled
+}
+
+// AdvertisedScanning reports AdvertisedScan for this scanner at now.
+func (s *Scanner) AdvertisedScanning(now time.Time) bool {
+	scanning := s.IsScanning()
+	return AdvertisedScan(scanning, scanning && s.IsScanStalled(now))
+}
+
 // noteScanProgress records that the scan just got somewhere, clearing
 // any stall latch so a scan that recovers logs again if it stalls
 // twice.

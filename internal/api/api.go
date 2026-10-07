@@ -1706,7 +1706,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// — so the honest answer to "should you wait for me?" is no.
 		scanning := s.manifest.IsScanning()
 		stalled := scanning && s.manifest.IsScanStalled()
-		scanState.IsScanning = scanning && !stalled
+		scanState.IsScanning = manifest.AdvertisedScan(scanning, stalled)
 		scanState.ScanStalled = stalled
 		scanState.LastFullScan = nilIfZeroTime(s.manifest.LastFullScan())
 		// TTL-cached: /v1/health is unauthenticated and can be flooded, so the
