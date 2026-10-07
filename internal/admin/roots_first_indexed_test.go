@@ -230,9 +230,9 @@ func TestASaveFailureAfterCollapsingRootsDropsTheSavedDates(t *testing.T) {
 	}
 }
 
-// A request cancelled after the dates are saved and before the wipe
-// finishes leaves the rows in place. The generation just recorded has
-// to go, or a later re-add copies the old date.
+// A request cancelled once the dates are staged and before the wipe
+// commits leaves the rows in place. The snapshot rolls back with the
+// wipe, so a later re-add does not copy a date that never landed.
 func TestACancelledWipeDropsTheSavedDates(t *testing.T) {
 	srv, dataDir, _, album, _, kept := seedSingleRootTrack(t)
 	extra := emptyExtraRoot(t, dataDir)

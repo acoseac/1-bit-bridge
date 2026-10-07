@@ -5507,27 +5507,52 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// UPnP-routed tracks can't be transcoded/analyzed, so every cached
-	// sidecar belongs to a filesystem track being wiped here. Refuse a
-	// truncated enumeration for the same reason WipeAllTracks does.
-	doomedSidecars, err := s.listAllSidecars(ctx)
+	return s.wipeFilesystemTracksLocked(ctx)
+}
+
+// doomedFilesystemSidecars lists every sidecar a filesystem wipe will
+// remove. The caller holds s.mu. Routed tracks have none.
+func (s *Store) doomedFilesystemSidecars(ctx context.Context) ([]string, error) {
+	doomed, err := s.listAllSidecars(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(doomed, s.listWaveformSidecars(ctx, "1=1")...), nil
+}
+
+// wipeFilesystemTracksLocked is WipeFilesystemTracks under s.mu.
+func (s *Store) wipeFilesystemTracksLocked(ctx context.Context) error {
+	doomed, err := s.doomedFilesystemSidecars(ctx)
 	if err != nil {
 		return err
 	}
-	doomedSidecars = append(doomedSidecars, s.listWaveformSidecars(ctx, "1=1")...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	// NOT EXISTS anti-join, keyed on the `upnp_track_routing` PRIMARY KEY
-	// (`source_path`) so it stays index-backed even on a 15k-row upstream.
-	// NOT EXISTS over NOT IN: idiomatic + NULL-safe should a future schema
-	// change ever make source_path nullable (Gemini on PR #404).
-	// Coverage reset — same rationale as WipeAllTracks (the surviving
-	// UPnP-routed rows keep serving; everything filesystem-shaped is
-	// about to change form).
-	if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+	if err := deleteFilesystemRowsTx(ctx, tx, s.now().UnixNano()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	noteRootFlipStage("wipe")
+	removeSidecarFiles(doomed)
+	return nil
+}
+
+// deleteFilesystemRowsTx deletes filesystem tracks and every folder
+// row. Routed tracks stay. The caller holds s.mu and owns tx.
+// NOT EXISTS anti-join, keyed on the upnp_track_routing primary key
+// (source_path) so it stays index-backed even on a 15k-row upstream.
+// NOT EXISTS over NOT IN: idiomatic and NULL-safe should a future
+// schema change ever make source_path nullable (Gemini on PR #404).
+// The coverage reset is WipeAllTracks's: the surviving routed rows
+// keep serving, and everything filesystem-shaped is about to change
+// form.
+func deleteFilesystemRowsTx(ctx context.Context, tx *sql.Tx, nowNs int64) error {
+	if err := resetDeletionJournalCoverageTx(ctx, tx, nowNs); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -5538,15 +5563,8 @@ func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM folders`); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	noteRootFlipStage("wipe")
-	removeSidecarFiles(doomedSidecars)
-	return nil
+	_, err := tx.ExecContext(ctx, `DELETE FROM folders`)
+	return err
 }
 
 // likeEscape prepares a literal string for LIKE pattern matching. Escapes

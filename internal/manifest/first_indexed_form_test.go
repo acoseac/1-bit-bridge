@@ -55,6 +55,40 @@ func TestACollapseDuringThePostAddRescanKeepsBothAlbums(t *testing.T) {
 	}
 }
 
+// An add whose scan has not loaded the snapshot yet, then a collapse
+// whose wipe is cancelled, must leave the add's dates for that scan.
+func TestACancelledCollapseKeepsTheDatesTheAddRecorded(t *testing.T) {
+	root, store, sc := scanSeededAlbum(t, reproT1)
+	other := t.TempDir()
+	base := filepath.Base(root)
+	ctx := context.Background()
+	if _, err := store.RecordFirstIndexedCarry(ctx, false, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WipeFilesystemTracks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sc.SetRoots([]string{root, other})
+
+	ctx2, cancel := context.WithCancel(ctx)
+	SetRootFlipStageHookForTest(func(stage string) {
+		if stage == "record" {
+			cancel()
+		}
+	})
+	t.Cleanup(func() { SetRootFlipStageHookForTest(nil) })
+	if _, err := store.RecordFirstIndexedCarryAndWipe(ctx2, true, base); err == nil {
+		t.Fatal("cancelled wipe succeeded")
+	}
+
+	clockAt(store, reproT3)
+	scanOnce(t, sc, "post-add")
+	got := firstIndexedTime(t, store, base+"/Artist/Album/song.flac")
+	if !got.Equal(reproT1) {
+		t.Fatalf("post-add scan dated %s, want %s", got, reproT1)
+	}
+}
+
 // A config save that fails after the wipe runs its compensating scan in
 // the form the library still has. That scan must keep the saved date.
 func TestACompensatingScanAfterAFailedSaveKeepsTheDate(t *testing.T) {

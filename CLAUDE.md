@@ -1177,10 +1177,11 @@ lost my library."
  collapse keeps only the surviving root's rows, whose stored path already
  begins with that folder name. A single-root scan looks a date up by
  prefixing the folder name of the root that scan is walking. A multi-root
- scan looks the stored path up directly. It runs immediately before
- each `WipeFilesystemTracks` that changes the storage form (admin add,
- admin remove that collapses to one root, `bridge library add`, `bridge
- library remove`). A prefix delete that stays multi-root records nothing.
+ scan looks the stored path up directly. A flip that changes the
+ storage form records and wipes in one transaction
+ (`RecordFirstIndexedCarryAndWipe`: admin add, admin remove that
+ collapses to one root, `bridge library add`, `bridge library remove`).
+ A prefix delete that stays multi-root records nothing.
  A record merges and bumps the generation. A snapshot with no rows writes
  nothing when no dates are saved yet; when dates are already saved it
  moves them onto the new generation and the form this flip is heading
@@ -1191,11 +1192,12 @@ lost my library."
  `idx_tracks_path_unicode_lower`. The in-memory date map and the
  case-only rename pairing fold with `pathFold`, the same case-fold-then-NFC
  `unicode_lower` applies, so a decomposed name and its precomposed
- spelling take one date on a full scan and a subtree scan. A wipe that
- fails drops the generation just recorded. A save that fails after the
- wipe retargets that generation at the form the library still has, and
- the compensating scan copies the dates and clears them; a cancelled
- request is that failure. The carry upsert is prepared once for the
+ spelling take one date on a full scan and a subtree scan. A failed
+ or cancelled wipe rolls that transaction back, so it does not delete
+ dates an earlier flip still has pending. A save that fails after the
+ wipe commits retargets that generation at the form the library still
+ has, and the compensating scan copies the dates and clears them; a
+ cancelled request is that failure. The carry upsert is prepared once for the
  snapshot. Both track upserts run one statement. The null-date fill does not order its
  rowid select, which is what lets that select use
  `idx_tracks_first_indexed_at_null`. A path with no recorded date uses
@@ -1242,7 +1244,8 @@ lost my library."
  `TestASaveFailureAfterAddingARootDropsTheSavedDates`,
  `TestASaveFailureAfterCollapsingRootsDropsTheSavedDates`,
  `TestACancelledWipeDropsTheSavedDates`,
- `TestACancelledSaveAfterTheWipeDropsTheSavedDates`.)
+ `TestACancelledSaveAfterTheWipeDropsTheSavedDates`,
+ `TestACancelledCollapseKeepsTheDatesTheAddRecorded`.)
 - **Every `indexed_at` bump goes through `indexedAtAdvanceSQL`**, which clears
   the LIBRARY-WIDE max (`MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks),0)+1)`).
   Both terms are load-bearing: the clock term anchors to wall-clock because the

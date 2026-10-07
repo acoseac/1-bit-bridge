@@ -37681,3 +37681,18 @@ and the same date check. Each of those now lives in one helper, and
 every scenario still asserts what it asserted. The list, the stream
 and the page read a track row through `scanListedTrack`, so the date
 splice is one scan.
+
+## 2026-10-08 — sync phase 3 review round 5
+
+A root change that does not finish used to delete dates an earlier
+change still had pending. Recording the snapshot moved every saved row
+onto the new generation, and a failed wipe then deleted that whole
+generation. An add whose scan had not loaded yet, followed by a
+collapse whose wipe was cancelled, left the post-add scan with no
+saved date, so the library took the scan clock. The snapshot and the
+wipe now commit in one transaction
+(`RecordFirstIndexedCarryAndWipe`). A failed or cancelled wipe rolls
+both back. Sidecar files are removed only after that commit.
+`TestACancelledCollapseKeepsTheDatesTheAddRecorded` is the case: the
+post-add scan keeps the date the add recorded. A save that fails after
+the wipe has committed still retargets that generation.

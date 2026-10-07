@@ -1708,17 +1708,12 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	willTransition := len(current) == 1 // 1 → N: storage form flips
 	var carryGen int64
 	if willTransition {
-		gen, err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), false, filepath.Base(current[0]))
+		gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), false, filepath.Base(current[0]))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
 		carryGen = gen
-		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
-			s.deps.Manifest.AbandonFirstIndexedCarry(r.Context(), carryGen)
-			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
-			return
-		}
 	}
 	// Persist via CfgHolder.Update: the clone-from-live → Save → Store
 	// sequence runs under the holder's single write lock, shared with
@@ -1860,17 +1855,12 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// failure window lands in a state the scanner can heal.
 	var carryGen int64
 	if willCollapse {
-		gen, err := s.deps.Manifest.RecordFirstIndexedCarry(r.Context(), true, filepath.Base(newList[0]))
+		gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), true, filepath.Base(newList[0]))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
 			return
 		}
 		carryGen = gen
-		if err := s.deps.Manifest.WipeFilesystemTracks(r.Context()); err != nil {
-			s.deps.Manifest.AbandonFirstIndexedCarry(r.Context(), carryGen)
-			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
-			return
-		}
 	} else {
 		if _, err := s.deps.Manifest.DeleteTracksByPrefix(r.Context(), removedBasename+"/"); err != nil {
 			writeError(w, http.StatusInternalServerError, "delete-tracks", err.Error())

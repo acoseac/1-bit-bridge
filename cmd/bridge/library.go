@@ -169,17 +169,12 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		// Spare UPnP-routed rows: only filesystem tracks change path
 		// form on the multi→single flip; the upstream library's
 		// lifecycle belongs to the ingest reconcile, not this wipe.
-		gen, err := store.RecordFirstIndexedCarry(ctx, true, filepath.Base(newList[0]))
+		gen, err := store.RecordFirstIndexedCarryAndWipe(ctx, true, filepath.Base(newList[0]))
 		if err != nil {
-			fmt.Fprintf(stderr, "library remove: record added dates: %v\n", err)
-			return 1
-		}
-		carryGen = gen
-		if err := store.WipeFilesystemTracks(ctx); err != nil {
-			store.AbandonFirstIndexedCarry(ctx, carryGen)
 			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
 			return 1
 		}
+		carryGen = gen
 	} else {
 		// Multi-root → multi-root: the manifest stores rows under
 		// "<basename>/Artist/Album/Track". `bridgefs.ValidateRoots`
@@ -323,15 +318,7 @@ func wipeManifest(ctx context.Context, cfg *config.Config) (int64, error) {
 	if len(cfg.LibraryRoots) == 0 {
 		return 0, fmt.Errorf("first-indexed carry: no library root")
 	}
-	gen, err := store.RecordFirstIndexedCarry(ctx, false, filepath.Base(cfg.LibraryRoots[0]))
-	if err != nil {
-		return 0, err
-	}
-	if err := store.WipeFilesystemTracks(ctx); err != nil {
-		store.AbandonFirstIndexedCarry(ctx, gen)
-		return 0, err
-	}
-	return gen, nil
+	return store.RecordFirstIndexedCarryAndWipe(ctx, false, filepath.Base(cfg.LibraryRoots[0]))
 }
 
 // retargetAbandonedCarry points a generation at the form the library

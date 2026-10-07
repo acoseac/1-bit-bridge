@@ -112,30 +112,42 @@ func carryKey(path string, fromMultiRoot bool, rootBase string) (string, bool) {
 	return path, true
 }
 
-// RecordFirstIndexedCarry snapshots filesystem rows before a root flip
-// that changes the stored path form. fromMultiRoot is the form the rows
-// have now. rootBase is the existing root's folder name when a second
-// root is added, and the surviving root's folder name when several roots
-// collapse to one. The saved key is that folder name plus the path
-// within the root, in either form. A snapshot with no rows writes
-// nothing when no dates are saved yet, and the returned generation is 0.
-// When dates are already saved it moves them onto the new generation and
-// the form this flip is heading toward, and does not delete the keys. A
-// later record merges: it keeps the earlier date for a key. The returned
-// generation is the one this call wrote, so a wipe that then fails can
-// drop exactly that generation.
-func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
-	if rootBase == "" || strings.Contains(rootBase, "/") {
-		return 0, fmt.Errorf("first-indexed carry: root name %q", rootBase)
-	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT path, first_indexed_at FROM tracks
+// carrySnapshotSQL is the filesystem rows a root flip saves. Routed
+// rows are not in it: no walk sees them, and a flip does not rewrite
+// their paths.
+const carrySnapshotSQL = `SELECT path, first_indexed_at FROM tracks
 		WHERE first_indexed_at IS NOT NULL
 		  AND NOT EXISTS (
 		      SELECT 1 FROM upnp_track_routing WHERE source_path = tracks.path
-		  )`)
+		  )`
+
+// carryUpsertSQL keeps the earlier date for a key and moves that key
+// onto the generation this flip is writing.
+const carryUpsertSQL = `INSERT INTO first_indexed_carry (path_key, first_indexed_at, generation, target_multi)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(path_key) DO UPDATE SET
+			first_indexed_at = MIN(first_indexed_carry.first_indexed_at, excluded.first_indexed_at),
+			generation = excluded.generation,
+			target_multi = excluded.target_multi`
+
+// carryQueryer is *sql.DB or *sql.Tx. The combined flip reads the
+// snapshot on the same transaction as the wipe.
+type carryQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func checkCarryRootBase(rootBase string) error {
+	if rootBase == "" || strings.Contains(rootBase, "/") {
+		return fmt.Errorf("first-indexed carry: root name %q", rootBase)
+	}
+	return nil
+}
+
+func collectCarryBest(ctx context.Context, q carryQueryer, fromMultiRoot bool, rootBase string) (map[string]int64, error) {
+	rows, err := q.QueryContext(ctx, carrySnapshotSQL)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer rows.Close()
 	best := map[string]int64{}
@@ -143,7 +155,7 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		var path string
 		var ns int64
 		if err := rows.Scan(&path, &ns); err != nil {
-			return 0, err
+			return nil, err
 		}
 		key, ok := carryKey(path, fromMultiRoot, rootBase)
 		if !ok || ns <= 0 {
@@ -154,28 +166,36 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	targetMulti := 0
-	if !fromMultiRoot {
-		targetMulti = 1
+	return best, nil
+}
+
+func carryTargetMulti(fromMultiRoot bool) int {
+	if fromMultiRoot {
+		return 0
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return 1
+}
+
+// savedCarryCount is how many dates are already saved. A snapshot
+// with no rows still moves those onto the new generation.
+func savedCarryCount(ctx context.Context, q carryQueryer) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM first_indexed_carry`).Scan(&n)
+	return n, err
+}
+
+// writeCarryGeneration moves every saved row onto a new generation
+// and upserts best. It does not commit. next is 0 when there is
+// nothing to write.
+func writeCarryGeneration(ctx context.Context, tx *sql.Tx, fromMultiRoot bool, best map[string]int64) (int64, error) {
 	if len(best) == 0 {
-		var n int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM first_indexed_carry`).Scan(&n); err != nil {
+		n, err := savedCarryCount(ctx, tx)
+		if err != nil || n == 0 {
 			return 0, err
 		}
-		if n == 0 {
-			return 0, nil
-		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 	var maxGen sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT MAX(generation) FROM first_indexed_carry`).Scan(&maxGen); err != nil {
 		return 0, err
@@ -184,16 +204,11 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 	if maxGen.Valid {
 		next = maxGen.Int64 + 1
 	}
+	targetMulti := carryTargetMulti(fromMultiRoot)
 	if _, err := tx.ExecContext(ctx, `UPDATE first_indexed_carry SET generation = ?, target_multi = ?`, next, targetMulti); err != nil {
 		return 0, err
 	}
-	const upsert = `INSERT INTO first_indexed_carry (path_key, first_indexed_at, generation, target_multi)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path_key) DO UPDATE SET
-			first_indexed_at = MIN(first_indexed_carry.first_indexed_at, excluded.first_indexed_at),
-			generation = excluded.generation,
-			target_multi = excluded.target_multi`
-	stmt, err := tx.PrepareContext(ctx, upsert)
+	stmt, err := tx.PrepareContext(ctx, carryUpsertSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -203,6 +218,47 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 			return 0, err
 		}
 	}
+	return next, nil
+}
+
+// RecordFirstIndexedCarry snapshots filesystem rows before a root flip
+// that changes the stored path form. fromMultiRoot is the form the rows
+// have now. rootBase is the existing root's folder name when a second
+// root is added, and the surviving root's folder name when several roots
+// collapse to one. The saved key is that folder name plus the path
+// within the root, in either form. A snapshot with no rows writes
+// nothing when no dates are saved yet, and the returned generation is 0.
+// When dates are already saved it moves them onto the new generation and
+// the form this flip is heading toward, and does not delete the keys. A
+// later record merges: it keeps the earlier date for a key. A flip that
+// also wipes uses RecordFirstIndexedCarryAndWipe, so this snapshot and
+// that wipe commit together. This call stays for a caller that writes a
+// row between the snapshot and the wipe.
+func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
+	if err := checkCarryRootBase(rootBase); err != nil {
+		return 0, err
+	}
+	best, err := collectCarryBest(ctx, s.db, fromMultiRoot, rootBase)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(best) == 0 {
+		n, err := savedCarryCount(ctx, s.db)
+		if err != nil || n == 0 {
+			return 0, err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	next, err := writeCarryGeneration(ctx, tx, fromMultiRoot, best)
+	if err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -210,14 +266,63 @@ func (s *Store) RecordFirstIndexedCarry(ctx context.Context, fromMultiRoot bool,
 	return next, nil
 }
 
+// RecordFirstIndexedCarryAndWipe snapshots and wipes filesystem rows in
+// one transaction. A failed or cancelled wipe rolls the snapshot back,
+// including dates an earlier flip had already saved and this snapshot
+// had moved onto its generation. The generation is returned only after
+// the commit. Sidecar files are removed after that commit. fromMultiRoot
+// and rootBase are RecordFirstIndexedCarry's.
+func (s *Store) RecordFirstIndexedCarryAndWipe(ctx context.Context, fromMultiRoot bool, rootBase string) (int64, error) {
+	if err := checkCarryRootBase(rootBase); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doomed, err := s.doomedFilesystemSidecars(ctx)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	best, err := collectCarryBest(ctx, tx, fromMultiRoot, rootBase)
+	if err != nil {
+		return 0, err
+	}
+	next, err := writeCarryGeneration(ctx, tx, fromMultiRoot, best)
+	if err != nil {
+		return 0, err
+	}
+	if next > 0 {
+		noteRootFlipStage("record")
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if err := deleteFilesystemRowsTx(ctx, tx, s.now().UnixNano()); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	noteRootFlipStage("wipe")
+	removeSidecarFiles(doomed)
+	return next, nil
+}
+
 // rootFlipStage is a test hook. Production leaves it unset. A test
-// sets it to cancel the request once the carry has committed, or once
-// the wipe has committed, which is the window a client timeout hits.
+// sets it to cancel the request at a named stage. See
+// SetRootFlipStageHookForTest.
 var rootFlipStage atomic.Value // func(string)
 
-// SetRootFlipStageHookForTest installs fn, called with "record" after
-// the carry commits and "wipe" after the filesystem wipe commits. The
-// hook runs under the store lock and must not touch the database.
+// SetRootFlipStageHookForTest installs fn. "record" runs after
+// RecordFirstIndexedCarry commits, and after
+// RecordFirstIndexedCarryAndWipe has staged its snapshot and before
+// that transaction commits, so a cancel there rolls the snapshot back
+// with the wipe. "wipe" runs after the wipe commits. The hook runs
+// under the store lock and must not touch the database.
 func SetRootFlipStageHookForTest(fn func(string)) {
 	if fn == nil {
 		rootFlipStage.Store((func(string))(nil))
@@ -233,24 +338,9 @@ func noteRootFlipStage(stage string) {
 	}
 }
 
-// abandonCarryTimeout bounds the cleanup of a flip the request did not
+// abandonCarryTimeout bounds the retarget of a flip the request did not
 // finish. The request context may already be cancelled.
 const abandonCarryTimeout = 5 * time.Second
-
-// AbandonFirstIndexedCarry deletes the generation a flip recorded when
-// the wipe that was supposed to follow it failed. A later scan then has
-// nothing to copy onto a re-added file. A cleanup error is logged and
-// does not replace the wipe error the caller returns.
-func (s *Store) AbandonFirstIndexedCarry(ctx context.Context, generation int64) {
-	if s == nil || generation <= 0 {
-		return
-	}
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonCarryTimeout)
-	defer cancel()
-	if err := s.ClearFirstIndexedCarryGeneration(cctx, generation); err != nil {
-		logger.Warn("first-indexed carry: could not drop an abandoned flip", "generation", generation, "err", err)
-	}
-}
 
 // RetargetFirstIndexedCarry points a generation at the form the library
 // still has, after the wipe succeeded and the config save did not. The
