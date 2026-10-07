@@ -520,16 +520,22 @@ var Ext = map[string]bool{
 // other row re-extracts byte-identical and rides the version-stamp leg; SACD
 // ISO virtual rows re-expand as on every bump.
 //
-// v23 — the iTunes content advisory reaches the wire (`Track.Explicit`).
-// An MP4 `rtng` of 1 or 4, which dhowden's atom map skips, and
-// ITUNESADVISORY "1" or "4" as an MP4 freeform atom, a Vorbis comment or an
-// ID3v2 TXXX. A present `rtng` wins over the freeform, 0 and 2 included,
-// so a clean atom is not overridden by a freeform "1". Any other value, or
-// no such tag, leaves the field unset. Only those rows change: a row the
-// tags now mark explicit takes the full-upsert leg (its enrichment
-// re-queued once) and is the iOS delta. Every other row re-extracts
-// byte-identical and rides the version-stamp leg; SACD ISO virtual rows
-// re-expand as on every bump.
+// v23 — explicit content reaches the wire (`Track.Explicit`). Any signal
+// wins: an MP4 `rtng` of 1 or 4 (dhowden's atom map skips it), ITUNESADVISORY
+// or EXPLICIT as an MP4 freeform atom of any mean, a Vorbis comment or an
+// ID3v2 TXXX, or a marker on the raw track title. The text values are "1",
+// "4", "true", "yes", "explicit" and "e" after trim and case-folding. A
+// present `rtng` of 0 or 2 does not cancel another signal. A title marker is
+// [E], [Explicit] or [Explicit Version] anywhere, or a title that ends with
+// (Explicit) or (Explicit Version), on the track title tag only. Clean forms
+// and the bare word are not explicit, and neither is an album title or a
+// title guessed from the path. A UPnP row stays unset: the client applies the
+// same title markers to the DIDL title. Nothing shipped at 23 before the
+// title markers were included, so the v23 re-extract is the backfill. Only
+// those rows change: a row the tags or the title now mark explicit takes the
+// full-upsert leg (its enrichment re-queued once) and is the iOS delta. Every
+// other row re-extracts byte-identical and rides the version-stamp leg; SACD
+// ISO virtual rows re-expand as on every bump. ProtocolVersion stays 1.
 const ExtractorVersion = 23
 
 // Extract reads as much metadata as it can from the file at absPath and
@@ -762,28 +768,29 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 			t.Genre = genre
 		}
 	}
-	// The iTunes content rating (`rtng`), which dhowden does not read.
-	// A present integer overrides the freeform advisory populate just
-	// stored, 0 and 2 included: the atom is the first value. Absence is
-	// not an error; a walk that fails leaves the freeform answer.
-	if rating, found, err := extractMP4ContentRating(f); err != nil {
-		scanLogger.Warn("mp4 content-rating walk failed; the freeform advisory stands",
+	// Freeform ITUNESADVISORY and EXPLICIT, any mean. dhowden keeps a
+	// `----` only for com.apple.iTunes and two other means, so a walk
+	// here is what sees the rest. The first value of each name wins;
+	// a walk that fails leaves the title marker populate already set.
+	if advisory, explicitField, err := extractMP4FreeformAdvisory(f); err != nil {
+		scanLogger.Warn("mp4 freeform-advisory walk failed; the other explicit signals stand",
 			"path", trackLogPath(absPath, t), "err", err)
-	} else if found {
-		t.Explicit = explicitAdvisoryValue(rating)
+	} else if ExplicitVerdict(ExplicitSignals{ItunesAdvisory: advisory, Explicit: explicitField}) {
+		t.Explicit = true
+	}
+	// The iTunes content rating (`rtng`), which dhowden does not read.
+	// 1 or 4 is one more explicit signal (ExplicitVerdict). A present 0
+	// or 2 does not cancel a freeform, an EXPLICIT field or a title
+	// marker. Absence is not an error; a walk that fails leaves the
+	// other signals.
+	if rating, found, err := extractMP4ContentRating(f); err != nil {
+		scanLogger.Warn("mp4 content-rating walk failed; the other explicit signals stand",
+			"path", trackLogPath(absPath, t), "err", err)
+	} else if found && ExplicitVerdict(ExplicitSignals{Rtng: &rating}) {
+		t.Explicit = true
 	}
 	return nil
 }
-
-// explicitAdvisory reports whether an advisory value, already trimmed, is
-// the iTunes explicit mark. 1 is explicit, 4 is explicit (the "explicit
-// content" code some writers use); 2 is clean and 0 is none. Equality, not
-// a numeric parse: "01" is not "1".
-func explicitAdvisory(v string) bool { return v == "1" || v == "4" }
-
-// explicitAdvisoryValue is explicitAdvisory for the integer an `rtng` atom
-// holds.
-func explicitAdvisoryValue(v uint64) bool { return v == 1 || v == 4 }
 
 // extractByFormat is the context-aware variant of Extract. When ec
 // is non-nil and ec.ArtworkCacheDir is non-empty, after tag extraction
@@ -1198,14 +1205,26 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 				t.AlbumArtist = "Various Artists"
 			}
 		}
-		// iTunes advisory. Vorbis ITUNESADVISORY and the MP4 freeform atom
-		// answer through the raw map; an ID3v2 TXXX of that description
-		// answers through the named values (it has no frame of its own).
-		// Exactly "1" or "4" after the trim stringOf and id3v2TextValue
-		// already did. A present MP4 `rtng` overrides this afterwards.
-		if v, ok := namedValueOf(raw, named, "itunesadvisory"); ok && explicitAdvisory(v) {
-			t.Explicit = true
+		// Explicit content: ITUNESADVISORY and EXPLICIT, plus a marker on
+		// the raw title tag. Vorbis comments answer through the raw map;
+		// an ID3v2 TXXX of either description answers through the named
+		// values (neither has a frame of its own). Each field is looked
+		// up on its own, so the first value of one cannot hide the other.
+		// Title is m.Title(), the tag, never a path-derived title.
+		// An MP4 file's freeform atoms are not read here: dhowden keeps a
+		// `----` only for a few means, and extractMP4 walks every mean
+		// itself. A present `rtng` of 1 or 4 is OR-ed in there too, and
+		// never clears a signal already set.
+		var advisory, explicitField string
+		if m.Format() != tag.MP4 {
+			advisory, _ = namedValueOf(raw, named, "itunesadvisory")
+			explicitField, _ = namedValueOf(raw, named, "explicit")
 		}
+		t.Explicit = ExplicitVerdict(ExplicitSignals{
+			ItunesAdvisory: advisory,
+			Explicit:       explicitField,
+			Title:          strings.TrimSpace(m.Title()),
+		})
 		// Pass BOTH underscore-joined ("musicbrainz_trackid") AND
 		// space-derived ("musicbrainz_track_id") variants — they
 		// normalise differently and both are valid spellings (a Vorbis

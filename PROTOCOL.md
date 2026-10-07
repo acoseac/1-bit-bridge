@@ -396,15 +396,16 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 { "path": "Music/Band/Album/01.m4a", "size": 12345678, "mtime": "…", "artist": "Band", "album": "Album", "explicit": true }
 ```
 
-`explicit` is `true` when the file's own tags carry the iTunes content advisory as explicit. The mark is the same on every container:
+`explicit` is `true` when any of the file's own signals says so. A clean value does not cancel another signal.
 
-- an MP4/M4A/ALAC `rtng` atom whose integer is `1` or `4` (`2` is clean, `0` or a missing atom is none). A present `rtng` is the file's answer, including `0` and `2`, and it wins over a freeform `ITUNESADVISORY` in the same file;
-- otherwise `ITUNESADVISORY` trimmed to exactly `1` or `4`: the MP4 freeform atom `----:com.apple.iTunes:ITUNESADVISORY`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` whose description is `ITUNESADVISORY` (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). The description match is case-insensitive. The first value wins. `01` is not `1`.
+- an MP4/M4A/ALAC `rtng` atom whose integer is `1` or `4` (`2` is clean, `0` or a missing atom is none). A present `0` or `2` does not hide another signal in the same file;
+- `ITUNESADVISORY` or `EXPLICIT`, the field name matched without regard to case: the MP4 freeform atom `----:<any mean>:ITUNESADVISORY` or `----:<any mean>:EXPLICIT`, a Vorbis comment (FLAC, Ogg Vorbis, Opus, Ogg FLAC), or an ID3v2 `TXXX` of that description (MP3, DSF, and an ID3 chunk in WAV, AIFF or DFF). Within one field the first value wins. After trim and case-folding the value is explicit when it is exactly `1`, `4`, `true`, `yes`, `explicit` or `e`. `0`, `2`, `false`, `no`, `clean`, an empty value and `01` are not;
+- a marker on the raw track title (`©nam`, Vorbis `TITLE`, ID3v2 `TIT2`), before any display cleaning: `[E]`, `[Explicit]` or `[Explicit Version]` anywhere in the title, or a title that ends with `(Explicit)` or `(Explicit Version)`. The match is case-insensitive. `[Clean]`, `(Clean)`, `[Clean Version]`, `(Clean Version)`, the word Explicit with no brackets, and a marker on the album title are not. A title guessed from the path is not the raw title.
 
-Any other value, or no such tag, leaves the track unflagged. No other spelling (`EXPLICIT`, `ITUNESRATING`, `rating`) is read. A UPnP/DIDL row has no such flag and omits the field.
+`ITUNESRATING` and `rating` are not read. A UPnP/DIDL row has no such tag and omits the field; the client applies the same title markers to the DIDL title. A row from a bridge that predates the field also omits it, and the client applies the markers to the raw wire title: the field being true, or a marker on that title.
 
-- **Only `true` is meaningful.** The field is `omitempty`, so a clean track and a track from a bridge that predates the field look the same. A client reads absence as not explicit.
-- A bridge upgraded to ExtractorVersion 23 re-extracts every file once. Tracks the tags now mark explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`.
+- **Only `true` is meaningful.** The field is `omitempty`, so a clean track and a track from a bridge that predates the field look the same. Absence is not a claim about the title; the client still checks the raw title.
+- A bridge at ExtractorVersion 23 re-extracts every file once. Tracks a signal now marks explicit gain the key and advance `indexed_at`, so a delta sync pulls them; every other track re-extracts byte-identical and stays out of the delta, except SACD ISO virtual tracks, which re-expand on every ExtractorVersion bump. `ProtocolVersion` stays `1`. The widened rule (any signal, and the title markers) is part of that same version: nothing shipped at 23 before it.
 
 #### DSD specifics
 

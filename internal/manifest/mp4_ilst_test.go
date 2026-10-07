@@ -19,6 +19,10 @@ import (
 // (testdata/m4a — the same bytes the iOS app embeds in AVTagFixtures, so
 // both indexing paths are held to one set of files) and against synthetic
 // box trees for the shapes no tagger in the fixture set writes.
+//
+// The five explicit-*.m4a files are a separate set, byte-identical to the
+// iOS app's ExplicitAdvisoryFixtures. That copy is canonical; these are
+// not regenerated from the AVTagFixtures recipe.
 
 // extractFixture runs the production Extract over a testdata M4A, copied
 // to a temp dir so the scan-time folder-art lookup sees nothing beside it.

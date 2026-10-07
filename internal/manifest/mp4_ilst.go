@@ -17,8 +17,9 @@ package manifest
 //     failed to parse. stripMP4FreeformLocales removes it once, at the source.
 //   - The content-rating atom `rtng` (ExtractorVersion 23). iTunes writes the
 //     advisory as a class-21 integer: 1 or 4 explicit, 2 clean, 0 none.
-//     dhowden's atom map skips `rtng`. extractMP4ContentRating reads it, and
-//     a present integer overrides the freeform ITUNESADVISORY.
+//     dhowden's atom map skips `rtng`. extractMP4ContentRating reads it. A
+//     present 0 or 2 does not cancel a freeform ITUNESADVISORY, an EXPLICIT
+//     atom or a title marker.
 //
 // The phone's own enrich (`AVTagClassifier`, SMB and on-device sources)
 // reads the genre and the freeform atoms through AVFoundation and names a
@@ -178,8 +179,9 @@ func findMP4Ilst(r io.ReadSeeker) (mp4Box, bool, error) {
 // integer it holds. `found` is false — no error — when there is no rating to
 // read: no moov, no `rtng`, a data atom that is not a 1- to 4-byte integer of
 // class 21 (uint8, what iTunes and mutagen write) or class 0 (implicit). A
-// readable integer, 0 and 2 included, is found, so the caller can prefer it
-// to the freeform advisory. Genuine I/O propagates.
+// readable integer, 0 and 2 included, is found. 1 and 4 are an explicit
+// signal; 0 and 2 are not, and neither cancels another signal. Genuine I/O
+// propagates.
 func extractMP4ContentRating(r io.ReadSeeker) (uint64, bool, error) {
 	ilst, found, err := findMP4Ilst(r)
 	if err != nil || !found {
@@ -194,6 +196,127 @@ func extractMP4ContentRating(r io.ReadSeeker) (uint64, bool, error) {
 		return 0, false, err
 	}
 	return readMP4IntegerValue(r, data)
+}
+
+// extractMP4FreeformAdvisory reads the first value of ITUNESADVISORY and of
+// EXPLICIT from `----` atoms, whatever mean the atom names. dhowden keeps a
+// freeform only when its mean is com.apple.iTunes, com.mixedinkey.mixedinkey
+// or com.serato.dj, so those two names are read here instead. Within one
+// name the first value wins: the first such atom in the ilst, and the first
+// non-empty data value inside it. Absent is "" with no error.
+func extractMP4FreeformAdvisory(r io.ReadSeeker) (advisory, explicit string, err error) {
+	ilst, found, err := findMP4Ilst(r)
+	if err != nil || !found {
+		return "", "", err
+	}
+	var haveAdvisory, haveExplicit bool
+	cursor := ilst.payloadStart()
+	for {
+		box, found, err := findMP4Child(r, "----", cursor, ilst)
+		if err != nil || !found {
+			return advisory, explicit, err
+		}
+		if !haveAdvisory || !haveExplicit {
+			name, ok, err := readMP4FreeformName(r, box)
+			if err != nil {
+				return "", "", err
+			}
+			if ok {
+				switch strings.ToLower(name) {
+				case "itunesadvisory":
+					if !haveAdvisory {
+						advisory, err = readMP4FreeformFirstValue(r, box)
+						if err != nil {
+							return "", "", err
+						}
+						haveAdvisory = true
+					}
+				case "explicit":
+					if !haveExplicit {
+						explicit, err = readMP4FreeformFirstValue(r, box)
+						if err != nil {
+							return "", "", err
+						}
+						haveExplicit = true
+					}
+				}
+			}
+		}
+		if haveAdvisory && haveExplicit {
+			return advisory, explicit, nil
+		}
+		next := box.end()
+		if next <= cursor {
+			return advisory, explicit, nil
+		}
+		cursor = next
+	}
+}
+
+// readMP4FreeformName reads the `name` child of a `----` atom. The payload
+// is a 4-byte version and flags, then the name, as iTunes writes it.
+func readMP4FreeformName(r io.ReadSeeker, box mp4Box) (string, bool, error) {
+	name, found, err := findMP4Child(r, "name", box.payloadStart(), box)
+	if err != nil || !found {
+		return "", false, err
+	}
+	return readMP4FreeformText(r, name, 4)
+}
+
+// readMP4FreeformFirstValue reads the first non-empty data value in a
+// `----` atom. A data payload is a 4-byte type, a 4-byte locale, then the
+// text. An empty value is skipped, the same way stringOf skips one.
+func readMP4FreeformFirstValue(r io.ReadSeeker, box mp4Box) (string, error) {
+	cursor := box.payloadStart()
+	for {
+		data, found, err := findMP4Child(r, "data", cursor, box)
+		if err != nil || !found {
+			return "", err
+		}
+		raw, ok, err := readMP4FreeformText(r, data, 8)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			if v := strings.TrimSpace(raw); v != "" {
+				return v, nil
+			}
+		}
+		next := data.end()
+		if next <= cursor {
+			return "", nil
+		}
+		cursor = next
+	}
+}
+
+// maxMP4FreeformText is how much of a freeform name or value the advisory
+// walk reads. Every accepted advisory token is a few bytes; a longer value
+// cannot be one of them, and the walk does not allocate a declared payload.
+const maxMP4FreeformText = 256
+
+func readMP4FreeformText(r io.ReadSeeker, box mp4Box, skip uint64) (string, bool, error) {
+	payload := box.size - box.header
+	if payload < skip {
+		return "", false, nil
+	}
+	// A value past the cap cannot be an advisory token. Returning a
+	// non-empty stand-in keeps it as the field's first value, so a
+	// later short data atom cannot win in its place.
+	if payload-skip > maxMP4FreeformText {
+		return "\x00", true, nil
+	}
+	if _, err := r.Seek(int64(box.payloadStart()+skip), io.SeekStart); err != nil {
+		return "", false, err
+	}
+	buf := make([]byte, payload-skip)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(string(buf)), true, nil
 }
 
 // readMP4IntegerValue reads the integer a rating data atom holds. The payload

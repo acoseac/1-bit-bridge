@@ -1822,16 +1822,28 @@ lost my library."
   the rest (`TestADateDhowdenCannotParseIsReadByItsYearPrefix`,
   `TestAnID3OrMP4DateHoldsNoYearOne`,
   `TestScanner_V22_AnUnparseableDateJoinsTheDelta_AReadableOneOnlyStamps`).
-- **The iTunes content advisory reaches the wire as `explicit`**
-  (ExtractorVersion 23). An MP4 `rtng` of 1 or 4, which dhowden's atom map
-  skips, and `ITUNESADVISORY` trimmed to exactly `1` or `4` as an MP4
-  freeform atom, a Vorbis comment or an ID3v2 TXXX. A present `rtng`
-  wins over the freeform, 0 and 2 included. Any other value, or no such
-  tag, leaves the field unset (`omitempty`; not a pointer). No other
-  spelling is read, and a UPnP row stays unset. Persisted in `tags_json`,
-  like `Compilation`; not a column, and `marshalForStorage` does not zero
-  it. A v23 re-extract puts only the newly explicit rows in the delta
-  (`TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`);
+- **Explicit content reaches the wire as `explicit`**
+  (ExtractorVersion 23). Any signal wins. An MP4 `rtng` of 1 or 4, which
+  dhowden's atom map skips; `ITUNESADVISORY` or `EXPLICIT` as an MP4
+  freeform atom of any mean, a Vorbis comment or an ID3v2 TXXX, valued
+  `1`, `4`, `true`, `yes`, `explicit` or `e` after trim and case-folding;
+  or a marker on the raw track title (`©nam` / `TITLE` / `TIT2`), before
+  display cleaning: `[E]`, `[Explicit]` or `[Explicit Version]` anywhere,
+  or a title that ends in `(Explicit)` or `(Explicit Version)`. A present
+  `rtng` of 0 or 2 does not cancel another signal. Within one field the
+  first value wins; the two fields are asked separately. Clean forms, the
+  bare word, an album title and a path-guessed title are not explicit.
+  `ITUNESRATING` and `rating` are not read. A UPnP row stays unset (the
+  client applies the title markers to the DIDL title, and to a raw wire
+  title when an older bridge omitted the field). `omitempty`, not a
+  pointer. Persisted in `tags_json`, like `Compilation`; not a column, and
+  `marshalForStorage` does not zero it. The verdict is one function,
+  `ExplicitVerdict` (`TestExplicitVerdict`, the table shared with the
+  app's `ExplicitContent.verdict`). Nothing shipped at 23 before the
+  title markers were included, so the v23 re-extract is the backfill: a
+  tagged row and a title-marker row join the delta, a plain row only
+  stamps (`TestScanner_V23_AnExplicitRowJoinsTheDelta_APlainRowOnlyStamps`,
+  `TestScanner_V23_ATitleMarkerJoinsTheDelta_APlainTitleOnlyStamps`).
   SACD ISO virtual rows re-expand as on every bump. `ProtocolVersion`
   stays 1.
 - **`normaliseRawTagKey` canonicalizes a LEADING `0xA9` before `ToLower`.**
@@ -1860,6 +1872,8 @@ lost my library."
   4 MiB until v15, costing every moov-after-mdat M4A (ffmpeg's default) its
   codec, rate, bits and duration. The M4A fixtures in `testdata/m4a` are
   byte-identical to the iOS app's `AVTagFixtures`; regenerate both or neither.
+  The five `explicit-*.m4a` files are a separate set, byte-identical to the
+  iOS app's `ExplicitAdvisoryFixtures`; that copy is canonical.
 - **`skipID3v2` walks a STACK of prepended ID3v2 tags, at most
   `maxStackedID3v2Tags` (8), not only the first** (ExtractorVersion 16, from the
   iOS app's FLAC follow-up to #1935). A tagger that prepends a new tag without
