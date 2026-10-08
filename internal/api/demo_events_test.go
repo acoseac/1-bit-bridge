@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,12 +76,21 @@ func openEventStream(ctx context.Context, client *http.Client, url, token string
 	return client.Do(req)
 }
 
+// demoEventDialConcurrency is how many of the starvation test's
+// /v1/events dials are in flight at once. The property is the
+// subscriber count after every dial has answered, so the connects
+// need not land together. 256 at once overflows the listen backlog
+// on a loaded Windows runner: a few come back with no status, and
+// the assertion used to discard the error text.
+const demoEventDialConcurrency = 16
+
 // TestADemoTokenHolderCannotStarvePairingEvents opens one /v1/events
 // stream per broker slot with the public demo bearer, then opens a
 // pairing stream. The demo streams must be 404 events_not_supported
 // and must leave the broker empty, so the pairing stream still
 // connects. Holding a 200 would be the slot the pairing stream then
-// cannot get.
+// cannot get. The dial bound is released when the dial returns, so a
+// stream that stays open still occupies its slot.
 func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 	hs, srv, _, stop := demoEventsServer(t)
 	defer stop()
@@ -111,9 +123,18 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 		wg.Wait()
 		<-done
 	})
+	slots := make(chan struct{}, demoEventDialConcurrency)
 	for i := 0; i < maxBrokerSubscribers; i++ {
 		go func(i int) {
 			defer wg.Done()
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				results[i].status = -1
+				results[i].code = ctx.Err().Error()
+				return
+			}
+			defer func() { <-slots }()
 			resp, err := openEventStream(ctx, client, hs.URL+"/v1/events", demoEventsRawToken)
 			if err != nil {
 				results[i].status = -1
@@ -145,10 +166,16 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 	}
 
 	var not404, wrongCode, failed int
+	var transport []string
 	for _, r := range results {
 		switch {
 		case r.status < 0:
 			failed++
+			msg := r.code
+			if msg == "" {
+				msg = "(no error text)"
+			}
+			transport = append(transport, msg)
 		case r.status != http.StatusNotFound:
 			not404++
 		case r.code != "events_not_supported":
@@ -156,8 +183,8 @@ func TestADemoTokenHolderCannotStarvePairingEvents(t *testing.T) {
 		}
 	}
 	if failed != 0 || not404 != 0 || wrongCode != 0 {
-		t.Errorf("demo /v1/events: %d failed, %d not 404, %d not events_not_supported (of %d)",
-			failed, not404, wrongCode, maxBrokerSubscribers)
+		t.Errorf("demo /v1/events: %d failed, %d not 404, %d not events_not_supported (of %d)%s",
+			failed, not404, wrongCode, maxBrokerSubscribers, countedTransportErrors(transport))
 	}
 	if n := brokerSubscribers(srv.eventBroker); n != 0 {
 		t.Errorf("broker held %d subscribers after the demo streams", n)
@@ -223,4 +250,27 @@ func TestAPairedDeviceEventStreamStillSubscribes(t *testing.T) {
 	if n := brokerSubscribers(broker); n != 1 {
 		t.Errorf("broker held %d subscribers, want 1", n)
 	}
+}
+
+// countedTransportErrors renders each distinct dial error with its
+// count, sorted by the text so a rerun prints the same line.
+func countedTransportErrors(msgs []string) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, len(msgs))
+	for _, m := range msgs {
+		counts[m]++
+	}
+	uniq := make([]string, 0, len(counts))
+	for m := range counts {
+		uniq = append(uniq, m)
+	}
+	slices.Sort(uniq)
+	var b strings.Builder
+	b.WriteString("; transport errors:")
+	for _, m := range uniq {
+		fmt.Fprintf(&b, " %d %q", counts[m], m)
+	}
+	return b.String()
 }
