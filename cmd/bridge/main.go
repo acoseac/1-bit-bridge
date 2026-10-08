@@ -4664,6 +4664,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		return apiSrv.Handler()
 	}
 
+	// Event streams select on this context. Ordinary requests do not
+	// inherit it: Shutdown lets those finish inside the grace. The
+	// tailnet servers share this handler, so one call covers both.
+	apiSrv.EndEventStreamsWhen(ctx)
+
 	httpSrv := &http.Server{
 		Addr:      cfg.ListenAddress,
 		Handler:   apiHandler(),
@@ -4689,6 +4694,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// No BaseContext. Shutdown does not cancel a handler, and the
+		// event streams select on the serve context themselves
+		// (EndEventStreamsWhen, set above). Parenting every request
+		// here would cancel a manifest page and a favorites write the
+		// moment a stop begins. A download still occupies the grace:
+		// ServeContent does not read the request context.
 	}
 
 	// Admin console: plain HTTP on a loopback address (default
@@ -5464,6 +5475,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 						srv: &http3.Server{
 							Handler:   apiHandler(), // Crucial: Extract the compiled http.Handler
 							TLSConfig: lanTLSConfig,
+							// No ConnContext. The event streams select on
+							// the serve context (EndEventStreamsWhen). A
+							// connection that closes still ends its
+							// request: quic-go parents each request on
+							// the QUIC connection's own context.
 						},
 						conn:   udpConn,
 						stderr: stderr,

@@ -37946,6 +37946,97 @@ tests red and leaves the event test green, because
 watermark is `indexed_at`. Storing plain `now` again in the coverage
 reset turns the event test red.
 
+## 2026-10-08 — event streams end when serve shuts down (backlog B216)
+
+`GET /v1/events` did not end on a graceful shutdown. `http.Server.Shutdown`
+closes listeners and idle connections and does not cancel a handler that
+is still writing. The handler returns only from `r.Context().Done()` or a
+closed subscriber channel, so an open stream kept the connection in
+`StateActive` for the whole 5 s grace. Since sync phase 2 every foreground
+phone holds one of these streams, so every deploy and restart paid that
+grace and logged `http shutdown: context deadline exceeded`. The pairing
+stream has the same `select`. HTTP/3 is the same shape one layer over:
+quic-go's `Shutdown` sends GOAWAY and stops accepting new streams, and a
+stream already running keeps its request context, which is a child of the
+QUIC connection's, not of the serve context. The drain then logged
+`lan h3 shutdown: context deadline exceeded` and closed the socket, which
+is the path that loses the client's close (the HTTP/3 drain bullet).
+
+The console's `GET /api/events` already ended. `admin.Server.Serve` sets
+`BaseContext` to the parent context that shutdown cancels before
+`Shutdown`, and the handler selects on `r.Context().Done()`. The API
+servers did not. `eventBroker.Stop` runs after `Shutdown` returns, so it
+cannot unblock the drain. `RegisterOnShutdown` starts the protocol
+shutdown and does not cancel a handler either.
+
+`apiBaseContext` is `BaseContext` on the LAN and tailnet `http.Server`.
+`apiConnContext` is `ConnContext` on both `http3.Server`s, which have no
+`BaseContext`. It returns a child of the QUIC connection context that
+also ends when the serve context ends, so a connection that closes still
+ends the request. The stop cancels that context before the drains start.
+The handler returns the 200 it has already flushed. The phone's event
+client treats a clean end of stream as a finished attempt and reconnects.
+A 404 is the demo fallback (`events_not_supported`) and is not returned
+here. A download is unchanged: `ServeContent` does not read the request
+context, so an in-flight file still occupies the grace.
+
+`Connection: keep-alive` was on every event response. HTTP/2 strips that
+hop-by-hop field. HTTP/3 forbids the name (RFC 9114 §4.2), and quic-go
+rejects the response (`invalid header field name: "connection"`), so a
+client dropped the stream at the headers. `setEventStreamHeaders` sets it
+only when `ProtoMajor < 2`.
+
+Measured through `startConsoleBridge` on localhost, holding HTTP/2
+`GET /v1/events`, the pairing stream, and HTTP/3 `GET /v1/events`. Before
+the parent contexts: HTTP/3 handler `duration_ms=5002` while the client
+was still blocked at 8 s, both HTTP/2 streams still open at 8 s (handler
+durations 8005 ms and 8006 ms), `serve` returned 8.003 s after the stop,
+and stderr carried both deadline lines. A scratch probe of the same hang
+measured `Shutdown` at 5.012 s. After: the three streams ended with a nil
+error in the same millisecond the stop ran (handler durations 2 ms, 1 ms
+and 0 ms) and `serve` returned 11 ms later, with neither line. Removing
+`BaseContext` and `ConnContext` from the LAN and tailnet servers makes
+that test red again, the same two lines and the same 8 s holds.
+The structural pin of that wiring
+(…APIServersParentRequestsOnTheServeContext) required each production
+server literal to call the helper, so a tailnet server the loopback boot
+does not start could not lose it quietly. The review below replaced
+that pin with `TestAPIServersLeaveOrdinaryRequestsTheirOwnContext`. The two exits that shut the API
+server down because the admin listener or the tailnet listener failed
+to bind call `Shutdown` while the serve context is still live. Those
+are failed starts. The stop a phone hits cancels first.
+
+## 2026-10-08 — event streams end on shutdown; ordinary requests keep the grace (backlog B216, review of #1162)
+
+The first wiring parented every API request on the serve context
+(`apiBaseContext` on the LAN and tailnet `http.Server`, `apiConnContext`
+on both `http3.Server`s). `Shutdown` then cancelled a manifest page, a
+favorites or playlist write, and an artwork or Atlas read at the moment
+the stop began, which is the grace those requests are given to finish
+in. The streams are the handlers that never go idle.
+
+`GET /v1/events` and `GET /v1/pairing/{id}/events` now select on the
+serve context themselves (`Server.EndEventStreamsWhen`, set once before
+the listeners accept, the same happens-before as `StartEventBroker`).
+A server that was not told when to end gets a nil channel, and a nil
+channel blocks forever in `select`, so the httptest servers stay as
+they were. Ordinary requests keep the context net/http gives them.
+`TestAnOrdinaryRequestInFlightAtShutdownCompletes` holds one across the
+stop and wants 200 with that context still live, inside the grace.
+Putting `BaseContext` back on the LAN server, returning the serve
+context, made that test fail: status 200, `cancelled=true`, 103 ms
+after the stop. `TestAPIServersLeaveOrdinaryRequestsTheirOwnContext`
+refuses `BaseContext` and `ConnContext` on the production API server
+literals, the tailnet pair included. With the parent gone the stream
+test still ends each stream at the stop and prints neither deadline
+line. `serve` then returns in about a second, inside the grace: the
+HTTP/2 GOAWAY wait on a connection the parent used to abort.
+
+The console's `GET /api/events` already ends, because `admin.Server.Serve`
+parents every console request on the serve context. That parent was
+already there, and the console handlers that read `r.Context()` were
+written to stop with it, so it stayed. The phone API does not copy it.
+
 ## 2026-10-08 — backlog B270: the gain guard's temporary file uses the configured temp dir
 
 `JobSpec.soxArgsFrom` put `-G` first and gave sox no `--temp`. To guard,

@@ -234,6 +234,9 @@ func (f *tsnetFront) run(ctx context.Context) {
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          handshakelog.ErrorLog(),
+		// No BaseContext. The event streams on this handler select on
+		// the serve context (EndEventStreamsWhen, the LAN server's
+		// note). Ordinary tailnet requests keep their own context.
 	}
 	if !f.publishHTTPS(srv) {
 		_ = lis.Close()
@@ -339,7 +342,10 @@ func (f *tsnetFront) bindHTTP3(ctx context.Context, ips []netip.Addr, port strin
 			continue
 		}
 		listeners = append(listeners, tsnetH3Listener{
-			srv:  &http3.Server{Handler: f.handler, TLSConfig: f.node.HTTP3TLSConfig()},
+			srv: &http3.Server{
+				Handler:   f.handler,
+				TLSConfig: f.node.HTTP3TLSConfig(),
+			},
 			conn: pconn,
 		})
 	}
