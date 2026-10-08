@@ -2159,6 +2159,15 @@ func (a artworkDirBridge) ArtworkCacheDir() string { return string(a) }
 // forcing the listener closed.
 const shutdownGrace = 5 * time.Second
 
+// backupShutdownWait is how long shutdown waits for the backup ticker after
+// the shared writer grace would have given up. A startup snapshot's VACUUM
+// INTO keeps its output file open until the statement returns, and the last
+// pages of that copy read no interrupt, so a cancel can leave the file open
+// for longer than shutdownGrace. The other writers keep the short grace;
+// this one is the file a serve test's TempDir then cannot delete on Windows
+// (backlog B309).
+const backupShutdownWait = 45 * time.Second
+
 // maybeRollbackOnBoot consults <dataDir>/update-state.json and acts
 // on whatever the previous install attempt's outcome was:
 //
@@ -3282,19 +3291,36 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// runServe's return, which is what the documented shutdown contract
 	// forbids and what produced an intermittent
 	// `TempDir RemoveAll: directory not empty` under data/backups/ in
-	// TestServeStartsAndServesHealth.
+	// TestServeStartsAndServesHealth. The shared grace still gives that
+	// join up after shutdownGrace, and a VACUUM INTO that has not returned
+	// keeps data/backups/<stamp>/bridge.db open. The defer below waits for
+	// this goroutine first (backlog B309).
 	backupRunState := &sweepStatus[struct{}]{}
 	backupRearm := make(chan struct{}, 1)
 	cadenceRearms = append(cadenceRearms, backupRearm)
 	bgWriters.Add(1)
+	backupDone := make(chan struct{})
 	go func() {
 		defer bgWriters.Done()
+		defer close(backupDone)
 		runBackupTicker(scanCtx, backupSources,
 			func() int { return liveCfg().Backup.EffectiveKeep() },
 			liveInterval(func(c *config.Config) time.Duration {
 				return time.Duration(c.Backup.EffectiveIntervalHours()) * time.Hour
 			}),
 			backupRearm, stdout, stderr, backupRunState)
+	}()
+	// Registered after the shared grace wait, so on the way out it runs
+	// before that wait. The ticker is already cancelled (scanCtx's parent);
+	// this waits until its snapshot connection has closed the output file.
+	defer func() {
+		timer := time.NewTimer(backupShutdownWait)
+		defer timer.Stop()
+		select {
+		case <-backupDone:
+		case <-timer.C:
+			fmt.Fprintf(stderr, "shutdown: backup snapshot did not close its files within %s\n", backupShutdownWait)
+		}
 	}()
 
 	// Sessions tracker counts inflight /v1/read + /v1/download
